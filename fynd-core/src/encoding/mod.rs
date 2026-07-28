@@ -6,5 +6,6 @@
 /// the [Fynd encoding guide](https://docs.fynd.xyz/guides/encoding-options) for supported
 /// encoding options and how to configure them.
 pub mod encoder;
+pub mod exclusive_swap;
 pub mod fee_fetcher;
 pub mod router_fees;

@@ -21,7 +21,10 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
-    encoding::router_fees::{FeeRates, RouterFees, SharedRouterFees},
+    encoding::{
+        exclusive_swap::ExclusiveSwapSigner,
+        router_fees::{FeeRates, RouterFees, SharedRouterFees},
+    },
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, SolveError, Transaction,
 };
 
@@ -42,6 +45,8 @@ pub struct Encoder {
     chain: Chain,
     router_address: Option<Bytes>,
     router_fees: SharedRouterFees,
+    /// Signs exclusive legs. `None` disables signing (no controller key configured).
+    exclusive_swap_signer: Option<ExclusiveSwapSigner>,
 }
 
 impl TryFrom<&OrderQuote> for Solution {
@@ -58,12 +63,6 @@ impl TryFrom<&OrderQuote> for Solution {
         let route = quote.route().ok_or_else(|| {
             SolveError::FailedEncoding("successful quote must have a route".to_string())
         })?;
-
-        // TODO(ENG-6134): when a swap in this route is exclusive, read its
-        // `Swap::committed_amount_out` and carry it into the encoded `Solution` so the
-        // on-chain exclusive hook can be parameterised — the user is committed to that
-        // amount while the executed route yields the surplus. Hook calldata/signature
-        // encoding is a separate later extension, out of scope here.
 
         let token_in = route
             .input_token()
@@ -144,7 +143,21 @@ impl Encoder {
                     .build()
             })
             .transpose()?;
-        Ok(Self { tycho_encoder, chain, router_address, router_fees: SharedRouterFees::default() })
+        let exclusive_swap_signer = ExclusiveSwapSigner::from_env(chain.id())?;
+        Ok(Self {
+            tycho_encoder,
+            chain,
+            router_address,
+            router_fees: SharedRouterFees::default(),
+            exclusive_swap_signer,
+        })
+    }
+
+    /// Overrides the exclusive-swap signer, replacing whatever was read from the environment.
+    #[must_use]
+    pub fn with_exclusive_swap_signer(mut self, signer: ExclusiveSwapSigner) -> Self {
+        self.exclusive_swap_signer = Some(signer);
+        self
     }
 
     /// Returns the Tycho Router contract address for this chain, or `None` if encoding is
@@ -196,11 +209,24 @@ impl Encoder {
                 continue;
             }
 
-            to_encode.push((
-                i,
-                Solution::try_from(quote)?
-                    .with_user_transfer_type(encoding_options.transfer_type().clone()),
-            ));
+            let solution = Solution::try_from(quote)?
+                .with_user_transfer_type(encoding_options.transfer_type().clone());
+            let solution = match &self.exclusive_swap_signer {
+                Some(signer) => Self::stamp_exclusive_swaps(solution, quote, signer)?,
+                None => {
+                    // Fail fast rather than emit on-chain-invalid unsigned calldata for an
+                    // exclusive leg: an exclusive route requires a signature.
+                    if has_exclusive_leg(quote) {
+                        return Err(SolveError::FailedEncoding(
+                            "quote routes through an exclusive pool but no signing key is \
+                             configured (set EXCLUSIVE_SWAP_CONTROLLER_KEY)"
+                                .to_string(),
+                        ));
+                    }
+                    solution
+                }
+            };
+            to_encode.push((i, solution));
         }
 
         let solutions: Vec<Solution> = to_encode
@@ -226,6 +252,56 @@ impl Encoder {
         }
 
         Ok(quotes)
+    }
+
+    /// Stamps controller-signed `user_data` onto each exclusive leg of `solution`.
+    ///
+    /// A leg is exclusive when its route swap carries a committed amount. The solution's swaps are
+    /// built 1:1 from the route's swaps, so they are matched by index. Returns `solution` unchanged
+    /// when no leg is exclusive.
+    fn stamp_exclusive_swaps(
+        solution: Solution,
+        quote: &OrderQuote,
+        signer: &ExclusiveSwapSigner,
+    ) -> Result<Solution, SolveError> {
+        let route = quote.route().ok_or_else(|| {
+            SolveError::FailedEncoding("successful quote must have a route".to_string())
+        })?;
+        let route_swaps = route.swaps();
+
+        // Nothing to sign unless a leg carries a committed amount; leave the solution untouched.
+        if !route_swaps
+            .iter()
+            .any(|s| s.committed_amount_out().is_some())
+        {
+            return Ok(solution);
+        }
+
+        // `route_swaps` carry `committed_amount_out` and the pool attributes; `solution.swaps()`
+        // are built 1:1 from them by `Solution::try_from` and are what the router executes.
+        // We read the committed amount from the route swap but stamp `user_data` onto the
+        // matching solution swap, matched by index via the zip below.
+        let swaps = solution
+            .swaps()
+            .iter()
+            .cloned()
+            .zip(route_swaps.iter())
+            // Only the exclusive leg (the route swap carrying a committed amount) gets signed
+            // `user_data`; every other solution swap passes through unchanged.
+            .map(|(solution_swap, route_swap)| {
+                if route_swap
+                    .committed_amount_out()
+                    .is_some()
+                {
+                    let user_data = signer.build_user_data(route_swap)?;
+                    Ok(solution_swap.with_user_data(user_data))
+                } else {
+                    Ok(solution_swap)
+                }
+            })
+            .collect::<Result<Vec<_>, SolveError>>()?;
+
+        Ok(solution.with_swaps(swaps))
     }
 
     /// Encodes a call using one of the router's swap methods.
@@ -499,11 +575,23 @@ impl From<EncodingError> for SolveError {
     }
 }
 
+/// Returns whether the quote routes through an exclusive pool, i.e. any swap in its route carries
+/// a committed amount.
+fn has_exclusive_leg(quote: &OrderQuote) -> bool {
+    quote.route().is_some_and(|route| {
+        route
+            .swaps()
+            .iter()
+            .any(|s| s.committed_amount_out().is_some())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use num_bigint::BigUint;
+    use rstest::rstest;
     use tycho_execution::encoding::{
         errors::EncodingError,
         models::{EncodedSolution, Solution},
@@ -612,6 +700,7 @@ mod tests {
             chain,
             router_address: Some(Bytes::from([0u8; 20].as_ref())),
             router_fees,
+            exclusive_swap_signer: None,
         }
     }
 
@@ -691,6 +780,80 @@ mod tests {
         assert_eq!(*solution.amount_in(), *quote.amount_in());
         assert_eq!(*solution.min_amount_out(), *quote.amount_out());
         assert_eq!(solution.swaps().len(), 1);
+    }
+
+    const CONTROLLER_KEY: &str =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+    fn ekubo_signed_swap(committed: Option<u64>) -> crate::types::Swap {
+        let token_in = make_address(0x11);
+        let token_out = make_address(0x22);
+        let mut comp = component("ekubo-signed-pool", &[]);
+        comp.static_attributes
+            .insert("extension".to_string(), Bytes::from([0x55u8; 20].as_ref()));
+        comp.static_attributes
+            .insert("fee".to_string(), Bytes::from(0u64));
+        comp.static_attributes
+            .insert("pool_type_config".to_string(), Bytes::from(0u32));
+
+        let mut swap = crate::types::Swap::new(
+            "ekubo-signed-pool".to_string(),
+            "ekubo_v3".to_string(),
+            token_in,
+            token_out,
+            BigUint::from(1_000_000u64),
+            BigUint::from(1_000_000u64),
+            BigUint::from(50_000u64),
+            comp,
+            Box::new(MockProtocolSim::default()),
+        );
+        if let Some(committed) = committed {
+            swap.set_committed_amount_out(BigUint::from(committed));
+        }
+        swap
+    }
+
+    fn single_swap_route(swap: crate::types::Swap) -> crate::types::Route {
+        let tokens = HashMap::from([
+            (swap.token_in().clone(), make_token(swap.token_in().clone())),
+            (swap.token_out().clone(), make_token(swap.token_out().clone())),
+        ]);
+        crate::types::Route::new(vec![swap], tokens).expect("non-empty route")
+    }
+
+    #[rstest]
+    #[case::exclusive_leg_signed(Some(990_000), true)]
+    #[case::public_leg_untouched(None, false)]
+    fn test_stamp_exclusive_swaps(#[case] committed: Option<u64>, #[case] signed: bool) {
+        let quote =
+            make_order_quote(990_000).with_route(single_swap_route(ekubo_signed_swap(committed)));
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120);
+
+        let solution =
+            Encoder::stamp_exclusive_swaps(Solution::try_from(&quote).unwrap(), &quote, &signer)
+                .unwrap();
+
+        assert_eq!(
+            solution.swaps()[0]
+                .user_data()
+                .is_some(),
+            signed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_encode_rejects_exclusive_leg_without_signer() {
+        // mock_encoder has no exclusive_swap_signer, so an exclusive leg must fail fast rather than
+        // produce unsigned (on-chain-invalid) calldata.
+        let encoder = mock_encoder(Chain::Ethereum);
+        let quote = make_order_quote(990_000)
+            .with_route(single_swap_route(ekubo_signed_swap(Some(990_000))));
+
+        let result = encoder
+            .encode(vec![quote], EncodingOptions::new(0.01))
+            .await;
+
+        assert!(result.is_err(), "expected fail-fast error for unsigned exclusive leg");
     }
 
     #[test]

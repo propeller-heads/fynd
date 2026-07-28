@@ -35,7 +35,7 @@ typetag.workspace = true
 tycho-execution.workspace = true
 reqwest.workspace = true
 tokio-tungstenite.workspace = true
-alloy = { workspace = true, features = ["sol-types"] }
+alloy = { workspace = true, features = ["sol-types", "signer-local"] }
 
 [features]
 test-utils = []

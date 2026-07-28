@@ -1610,11 +1610,12 @@ pub struct Swap {
     split: f64,
     /// Per-leg committed output for an exclusive swap.
     ///
-    /// Set only on the single exclusive leg of a surplus route. The on-chain hook signs a
-    /// `maxExchangeRate` derived from this value (`committed_amount_out * denom / amount_in`); the
-    /// component then captures `amount_out - committed_amount_out` as surplus, denominated in this
-    /// swap's `token_out`. `None` for ordinary public swaps. In-process only — consumed by the
-    /// encoder; `#[serde(skip)]` so it never enters the wire format.
+    /// Set only on the single exclusive leg of a surplus route. The encoder derives the on-chain
+    /// extension's controller-signed per-swap fee from this value and the leg's `amount_out`
+    /// (`floor((amount_out - committed_amount_out) * 2^32 / amount_out)`); the component then
+    /// captures `amount_out - committed_amount_out` as surplus, denominated in this swap's
+    /// `token_out`. `None` for ordinary public swaps. In-process only — consumed by the encoder;
+    /// `#[serde(skip)]` so it never enters the wire format.
     #[serde(skip)]
     committed_amount_out: Option<BigUint>,
 }
@@ -1656,7 +1657,7 @@ impl Swap {
     /// Sets the per-leg committed output for an exclusive swap.
     ///
     /// The router stamps this onto the single exclusive leg of a surplus route so the encoder
-    /// can derive the hook's `maxExchangeRate`. See [`Swap::committed_amount_out`].
+    /// can derive the extension's signed fee. See [`Swap::committed_amount_out`].
     pub(crate) fn set_committed_amount_out(&mut self, committed_amount_out: BigUint) {
         self.committed_amount_out = Some(committed_amount_out);
     }
@@ -1713,8 +1714,8 @@ impl Swap {
 
     /// Returns the per-leg committed output, if this is the exclusive leg of a surplus route.
     ///
-    /// `None` for ordinary public swaps. When `Some`, the encoder derives the hook's
-    /// `maxExchangeRate` as `committed_amount_out * denom / amount_in`.
+    /// `None` for ordinary public swaps. When `Some`, the encoder derives the extension's signed
+    /// fee from this and the leg's `amount_out`.
     pub fn committed_amount_out(&self) -> Option<&BigUint> {
         self.committed_amount_out.as_ref()
     }
