@@ -227,9 +227,12 @@ pub(crate) fn record_range(
     // One structured line per priced comparison, on the headline basis (top-of-block, gross).
     // Loki ingests pod stdout, so this line feeds the dashboard's top-trades table; keep the
     // message and field names stable — the LogQL query extracts them by regexp. Zero means
-    // "unpriced" (or, for quoted_usd, "the solver declared no quote"). `protocols` is the winning
-    // route's protocol mix, comma-joined; `swaps` counts its legs, so a split route reads higher
-    // than its hop depth. Per-hop pools and amounts stay in the JSONL records.
+    // "unpriced" (or, for quoted_usd, "the solver declared no quote"). Per-hop pools and amounts
+    // stay in the JSONL records.
+    //
+    // `route` is last on purpose: it is the only field whose value contains spaces, so a LogQL
+    // regexp can only bound it by end-of-line. Keep it last, or the dashboard's route column
+    // silently swallows every field after it.
     if let (Some(savings_usd), Outcome::Solved(solved)) = (savings_top, &range.top.outcome) {
         let priced = |amount| {
             prices_top
@@ -245,13 +248,12 @@ pub(crate) fn record_range(
             token_out = %range.token_out,
             verdict = %outcome_label(range.verdict),
             algorithm = %algorithm_label(&range.top.outcome),
-            protocols = %solved.route.protocols.join(","),
-            swaps = solved.route.swaps,
             volume_usd = volume.unwrap_or(0.0),
             settled_usd = priced(range.settled_amount_out),
             fynd_usd = priced(solved.amount_out),
             quoted_usd = range.quote.as_ref().map_or(0.0, |quote| priced(quote.amount_out)),
             savings_usd,
+            route = %solved.route.path,
             "trade comparison"
         );
     }
@@ -512,8 +514,7 @@ mod tests {
             gas_estimate: U256::from(21_000),
             route: RouteSummary {
                 algorithm: algorithm.to_string(),
-                protocols: vec!["uniswap_v3".to_string()],
-                swaps: 1,
+                path: "USDC -[uniswap_v3]-> WETH".to_string(),
             },
             quote_json: None,
         })

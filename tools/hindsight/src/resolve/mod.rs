@@ -20,22 +20,21 @@ use crate::{
     usd::Prices,
 };
 
-/// What Fynd's winning route was made of: the worker-pool algorithm that produced it and the
-/// protocols its swaps traded through. Kept as typed fields (not dug back out of `quote_json`) so
-/// the metrics and the per-trade log line can read them without parsing JSON.
+/// What Fynd's winning route was: the worker-pool algorithm that produced it and the path it took.
+/// Kept as typed fields (not dug back out of `quote_json`) so the metrics and the per-trade log
+/// line can read them without parsing JSON.
 ///
-/// `Default` means "no route detail" — every field empty.
+/// `Default` means "no route detail" — both fields empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct RouteSummary {
     /// Name of the algorithm whose route won the quote: `bellman_ford`, `most_liquid`,
     /// `path_frank_wolfe`, `water_fill`. Empty when the quote declared none.
     pub algorithm: String,
-    /// Protocols across the route's swaps, deduplicated and in first-swap order (`uniswap_v3`,
-    /// `vm:balancer`, …).
-    pub protocols: Vec<String>,
-    /// Number of swaps on the route. A split route counts each leg, so this is the route's width
-    /// plus depth, not its hop count.
-    pub swaps: usize,
+    /// The route as a readable path, tokens and protocols interleaved:
+    /// `USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH`. Split legs carry their share and are
+    /// joined with ` + `. Empty when the quote carried no route. Logged and serialized under the
+    /// name `route`.
+    pub path: String,
 }
 
 /// A Fynd quote for the re-solved order.
@@ -45,7 +44,7 @@ pub(crate) struct SolvedAmount {
     /// Output after Fynd's own estimated gas cost.
     pub amount_out_net_gas: U256,
     pub gas_estimate: U256,
-    /// Which algorithm won and which protocols the route traded through.
+    /// Which algorithm won and the path its route took.
     pub route: RouteSummary,
     /// The complete serialized Fynd quote (route, per-hop pools/amounts, encoded transaction) for
     /// dumping improvements. `None` when not captured (e.g. the HTTP resolve path).
