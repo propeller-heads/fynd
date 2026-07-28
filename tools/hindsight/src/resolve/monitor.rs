@@ -33,7 +33,7 @@ use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
     propamm, provider_from,
-    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver},
+    resolve::{resolve_block_range, Outcome, RangeComparison, SolvedAmount, SteppingSolver},
     telemetry,
     usd::Prices,
 };
@@ -140,11 +140,6 @@ pub(crate) struct MonitorArgs {
     /// actually prices those trades best
     #[arg(long, env = "PROPAMM_PROBE_UNITS", default_value_t = 1.0)]
     pub propamm_probe_units: f64,
-
-    /// Append one JSON line per re-solved order that the mock `PropAMM` won, with the committed
-    /// output, the fee headroom in bps, and both valued in USD
-    #[arg(long, env = "PROPAMM_JSONL")]
-    pub propamm_jsonl: Option<std::path::PathBuf>,
 }
 
 /// The mock-`PropAMM` scaffold attached to one monitor run.
@@ -154,7 +149,6 @@ pub(crate) struct MonitorArgs {
 struct PropAmmHarness {
     injector: tokio::sync::Mutex<propamm::Injector>,
     stats: Arc<propamm::report::Stats>,
-    jsonl: Option<std::path::PathBuf>,
 }
 
 /// Drives the in-process solver, stepping the chain one block per `SteppingSolver::advance`.
@@ -242,14 +236,19 @@ impl StepAdapter<'_> {
             .inject(self.solver, block)
             .await
         {
-            Ok(Some(injected)) => debug!(
-                block,
-                source = injected.source_component,
-                source_price = injected.source_price,
-                mock_price = injected.mock_price,
-                derived_data_ready = injected.derived_data_ready,
-                "mirrored the mock PropAMM pool"
-            ),
+            Ok(Some(injected)) => {
+                harness
+                    .stats
+                    .set_pair_label(&injected.pair_label);
+                debug!(
+                    block,
+                    source = injected.source_component,
+                    source_price = injected.source_price,
+                    mock_price = injected.mock_price,
+                    derived_data_ready = injected.derived_data_ready,
+                    "mirrored the mock PropAMM pool"
+                );
+            }
             Ok(None) => warn!(
                 block,
                 "no source pool for the mirrored pair carries state yet; the mock PropAMM is \
@@ -273,7 +272,7 @@ impl SteppingSolver for StepAdapter<'_> {
         let order = Order::new(
             CoreAddress::from(token_in.into_array()),
             CoreAddress::from(token_out.into_array()),
-            amount.clone(),
+            amount,
             OrderSide::Sell,
             CoreAddress::from([0x11u8; 20]),
         );
@@ -290,18 +289,12 @@ impl SteppingSolver for StepAdapter<'_> {
                     return Outcome::Unsolvable("solver returned no order quote".to_string());
                 };
                 if let Some(harness) = self.propamm {
-                    // Only successful quotes count, so the winrate's denominator is orders the
-                    // PropAMM actually had a chance at.
-                    if order_quote.status() == QuoteStatus::Success {
-                        harness
-                            .stats
-                            .record(propamm::report::Observation::from_quote(
-                                order_quote,
-                                token_in,
-                                token_out,
-                                amount,
-                            ));
-                    }
+                    // Every solve is recorded, successful or not, so the sink stays index-aligned
+                    // with the block's trades; `Observation::solved` is what the winrate's
+                    // denominator counts.
+                    harness
+                        .stats
+                        .record(propamm::report::Observation::from_quote(order_quote, token_out));
                 }
                 order_quote_to_outcome(order_quote)
             }
@@ -602,7 +595,6 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
             .map(|config| PropAmmHarness {
                 injector: tokio::sync::Mutex::new(propamm::Injector::new(&solver, config)),
                 stats: Arc::clone(&propamm_stats),
-                jsonl: cfg.propamm_jsonl.clone(),
             });
         let adapter = StepAdapter {
             solver: &solver,
@@ -705,22 +697,34 @@ fn log_propamm_summary(config: &propamm::MirrorConfig, totals: &propamm::report:
 }
 
 /// Values one block's mock-`PropAMM` observations in USD, folds them into the run totals, logs the
-/// running picture, and appends the wins to JSONL.
+/// running picture, and returns one record per trade for the comparisons JSONL.
 ///
 /// Amounts are valued at top-of-block prices, matching the headline improvement metric. Both halves
 /// are valued: the committed output answers "how much flow the pool captured", the headroom answers
 /// "how much fee it could have charged on that flow", and their ratio is that fee in bps.
+///
+/// `resolve_block_range` solves every trade at top-of-block in order, advances, then solves every
+/// trade again at back-of-block in the same order — so the sink holds `2 * trade_count`
+/// observations and the first half are the top-of-block ones the report keys off. A different count
+/// means that pairing no longer holds, so the records are dropped rather than misattributed; the
+/// totals are unaffected either way.
 fn report_propamm_block(
     harness: &PropAmmHarness,
     block: u64,
     prices: &Prices,
     observations: &[propamm::report::Observation],
-) {
+    trade_count: usize,
+) -> Vec<Option<propamm::report::Record>> {
     let mut headroom_usd = 0.0;
     let mut captured_flow_usd = 0.0;
-    let mut lines = Vec::new();
+    let mut records: Vec<Option<propamm::report::Record>> = Vec::with_capacity(observations.len());
+    let pair_label = harness.stats.pair_label();
 
-    for observed in observations.iter().filter(|o| o.won) {
+    for observed in observations {
+        if !observed.won {
+            records.push(None);
+            continue;
+        }
         let value_usd = |amount: Option<&BigUint>| {
             amount
                 .and_then(biguint_to_u256_opt)
@@ -730,26 +734,12 @@ fn report_propamm_block(
         let committed = value_usd(observed.committed_amount_out.as_ref());
         headroom_usd += headroom.unwrap_or(0.0);
         captured_flow_usd += committed.unwrap_or(0.0);
-
-        if harness.jsonl.is_some() {
-            lines.push(serde_json::json!({
-                "block": block,
-                "token_in": observed.token_in.to_string(),
-                "token_out": observed.token_out.to_string(),
-                "amount_in": observed.amount_in.to_string(),
-                "committed_amount_out": observed
-                    .committed_amount_out
-                    .as_ref()
-                    .map(std::string::ToString::to_string),
-                "fee_headroom": observed
-                    .fee_headroom
-                    .as_ref()
-                    .map(std::string::ToString::to_string),
-                "fee_headroom_bps": observed.fee_headroom_bps(),
-                "committed_usd": committed,
-                "fee_headroom_usd": headroom,
-            }));
-        }
+        records.push(Some(propamm::report::Record::new(
+            observed,
+            pair_label.clone(),
+            committed,
+            headroom,
+        )));
     }
 
     let totals = harness
@@ -761,7 +751,7 @@ fn report_propamm_block(
         .count();
     info!(
         block,
-        block_orders = observations.len(),
+        block_solves = observations.len(),
         block_wins,
         block_fee_headroom_usd = format!("{headroom_usd:.2}"),
         run_winrate_pct = format!("{:.1}", totals.winrate_pct()),
@@ -770,28 +760,20 @@ fn report_propamm_block(
         "mock PropAMM block result"
     );
 
-    if let Some(path) = harness.jsonl.as_ref() {
-        if let Err(e) = append_jsonl(path, &lines) {
-            warn!(path = %path.display(), "failed to append PropAMM JSONL: {e}");
-        }
+    if records.len() == trade_count * 2 {
+        records.truncate(trade_count);
+        return records;
     }
-}
-
-/// Appends one JSON object per line, creating the file if absent.
-fn append_jsonl(path: &std::path::Path, lines: &[serde_json::Value]) -> std::io::Result<()> {
-    use std::io::Write as _;
-
-    if lines.is_empty() {
-        return Ok(());
+    if !observations.is_empty() {
+        warn!(
+            block,
+            solves = observations.len(),
+            trades = trade_count,
+            "PropAMM observations do not pair with the block's trades; omitting them from the \
+             comparisons JSONL"
+        );
     }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    for line in lines {
-        writeln!(file, "{line}")?;
-    }
-    file.flush()
+    vec![None; trade_count]
 }
 
 /// Converts a `BigUint` to `U256`, or `None` when it does not fit — the amount is then left
@@ -804,6 +786,51 @@ fn biguint_to_u256_opt(value: &BigUint) -> Option<U256> {
     let mut buf = [0u8; 32];
     buf[32 - bytes.len()..].copy_from_slice(&bytes);
     Some(U256::from_be_bytes(buf))
+}
+
+/// Record one block's re-solved trades: Prometheus metrics, the mock-`PropAMM` roll-up, and the
+/// comparisons JSONL.
+///
+/// The `PropAMM` outcomes are drained before the comparisons are written, so each range carries its
+/// outcome into the same JSONL record the offline `report` subcommand reads. They are drained
+/// unconditionally when the harness is on, so a block whose trades all failed to solve still clears
+/// the sink rather than carrying observations into the next block.
+#[expect(clippy::too_many_arguments)]
+fn emit_block_results<P: Provider>(
+    cfg: &MonitorArgs,
+    adapter: &StepAdapter<'_>,
+    decoder: &Decoder<P>,
+    comparisons: &mut Option<super::jsonl::RotatingWriter>,
+    block: u64,
+    ranges: &[RangeComparison],
+    prices_top: &Prices,
+    prices_back: &Prices,
+) {
+    for range in ranges {
+        telemetry::record_range(
+            range,
+            &cfg.chain.name,
+            prices_top,
+            prices_back,
+            decoder.registry(),
+        );
+    }
+    let propamm_records = match adapter.propamm {
+        Some(harness) => {
+            let observations = harness.stats.drain();
+            report_propamm_block(harness, block, prices_top, &observations, ranges.len())
+        }
+        None => vec![None; ranges.len()],
+    };
+    if let Some(rotating) = comparisons.as_mut() {
+        super::jsonl::write_comparisons(
+            rotating.writer(),
+            ranges,
+            prices_top,
+            prices_back,
+            &propamm_records,
+        );
+    }
 }
 
 /// Drive one solver session: step blocks and re-solve each block's settled trades until the run
@@ -899,24 +926,16 @@ async fn run_session<P: Provider>(
                 "back-of-block state is not the target block; back comparison may be off"
             );
         }
-        for range in &ranges {
-            telemetry::record_range(
-                range,
-                &cfg.chain.name,
-                &prices_top,
-                &prices_back,
-                decoder.registry(),
-            );
-        }
-        if let Some(rotating) = comparisons.as_mut() {
-            super::jsonl::write_comparisons(rotating.writer(), &ranges, &prices_top, &prices_back);
-        }
-        // Drained unconditionally when the harness is on, so a block whose trades all failed to
-        // solve still clears the sink rather than carrying observations into the next block.
-        if let Some(harness) = adapter.propamm {
-            let observations = harness.stats.drain();
-            report_propamm_block(harness, target, &prices_top, &observations);
-        }
+        emit_block_results(
+            cfg,
+            adapter,
+            decoder,
+            comparisons,
+            target,
+            &ranges,
+            &prices_top,
+            &prices_back,
+        );
         let elapsed_s = start.elapsed().as_secs_f64();
         telemetry::record_block_seconds(elapsed_s);
 
@@ -1067,7 +1086,6 @@ mod tests {
             propamm_pair: None,
             propamm_price_pct: 100.05,
             propamm_probe_units: 1.0,
-            propamm_jsonl: None,
         })
         .await
         .expect("monitor should process one block without error");

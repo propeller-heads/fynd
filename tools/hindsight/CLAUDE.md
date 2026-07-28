@@ -27,13 +27,16 @@ and takes neither.
   back-of-block (state N), and emits `RangeComparison` JSONL records. Exposes a Prometheus
   metrics endpoint (`--metrics-port`). `--max-lag-blocks` (default 100, ~20 min on mainnet)
   bounds how far it may fall behind chain head before rebuilding the solver.
+  `--propamm-pair <IN,OUT>` additionally injects a mock PropAMM pool (see below).
 
 - **`report`** — Offline: read the `comparisons-YYYY-MM-DD.jsonl` files a `monitor` run wrote
   (`--comparisons-dir`) and render a single self-contained HTML file (`-o`, defaults to
   `<dir>/report.html`) with the dashboard's value views — the headline Fynd savings, win rate, and
   median savings bps; the verdict split by trade count and by volume; per-solver/venue breakdowns;
   top-saving trades; and the unsolved token tail. `--venue <name>` (repeatable, case-insensitive)
-  restricts the report to those venues. No chain, Tycho, or network access.
+  restricts the report to those venues. No chain, Tycho, or network access. Records from a
+  `--propamm-pair` run also get a "Mock PropAMM" section (winrate, captured flow, fee headroom, and
+  a per-order-pair breakdown).
 
 ## Environment
 
@@ -43,6 +46,9 @@ and takes neither.
 | `ALLIUM_API_KEY` | Allium API key (`verify` only) |
 | `ALLIUM_QUERY_ID` | Saved Allium query ID (`verify` only) |
 | `HINDSIGHT_REGISTRY` | Override path for the decoder address-book TOML |
+| `PROPAMM_PAIR` | Token pair the mock PropAMM mirrors, comma-separated (`monitor` only) |
+| `PROPAMM_PRICE_PCT` | Mock PropAMM's fee-free price as a percentage of the best real pool's |
+| `PROPAMM_PROBE_UNITS` | Trade size used to pick which real pool the mock mirrors |
 
 ## Architecture
 
@@ -100,6 +106,34 @@ self-contained HTML file.
 | `record.rs` | The subset of the JSONL record the report deserializes; round-trip tested against `jsonl::write_comparisons` |
 | `aggregate.rs` | Pure aggregations over the records (verdicts, coverage, savings, per-group, movers) |
 | `html.rs` | Renders the aggregates to a self-contained HTML file (inline CSS, `<div>` bars, no assets) |
+
+### Mock PropAMM (`src/propamm/`)
+
+Test scaffolding for ENG-6157 — sizes what a dynamic-underbidding PropAMM pool would win before the
+pool exists. Off unless `monitor --propamm-pair` is set.
+
+| File | Purpose |
+|---|---|
+| `mod.rs` | `Injector` — writes a synthetic exclusive component into the running solver's `MarketState` once per block and announces it on the market-event channel |
+| `mirror.rs` | `MirrorPool` — a `ProtocolSim` that delegates to the best real pool for the pair and scales its price by `--propamm-price-pct`, charging no fee |
+| `report.rs` | Per-order outcomes and run totals; `Record` is what lands in the comparisons JSONL |
+
+Two knobs, deliberately separate:
+
+- **Input** — `--propamm-price-pct` is the pool's fee-free price as a percentage of the best real
+  pool's price for the pair. `100` places it exactly at the best price we can see (the control case:
+  the router requires a *strict* beat, so it must never win); `100.05` places it 5 bps better.
+- **Output** — *fee headroom*: the mock charges nothing, so whatever the router finds above the
+  public commitment is the fee the signed extension could have charged and still won the trade.
+  Reported per trade, per order pair, and as a flow-weighted run average.
+
+Fynd's existing exclusive-access routing does the rest: `FyndBuilder::exclusivity_policy` hides the
+mock from every configured worker pool, and each pool is twinned with a `liquidity_scope = "all"`
+copy that sees it. Because the router pins a surplus quote's `amount_out` to the public commitment,
+the mock never changes hindsight's own win/loss verdicts — it only adds this second measurement.
+
+Requires `fynd-core`'s `experimental` feature for `Solver::market_event_sender`. Not for production:
+the mock prices a pool that does not exist on chain, so any calldata it produces is unexecutable.
 
 ### Verdict model
 

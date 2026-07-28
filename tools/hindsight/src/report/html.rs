@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 
 use crate::report::aggregate::{
-    Count, GroupStats, Report, Savings, Summary, TradeRow, VerdictStat,
+    Count, GroupStats, PropAmm, PropAmmPair, Report, Savings, Summary, TradeRow, VerdictStat,
 };
 
 /// Shortest share of a stacked column that gets an inline `12.3%` label. Below it the segment is
@@ -53,6 +53,9 @@ pub(crate) fn render(report: &Report, filter: Option<&str>) -> String {
     let mut html = String::from(HEAD);
     html.push_str(&hero_section(&report.savings, &report.summary, filter));
     html.push_str(&verdict_section(&report.verdicts));
+    if let Some(propamm) = report.propamm.as_ref() {
+        html.push_str(&propamm_section(propamm));
+    }
     html.push_str(&trades_section("Top savings", &report.top_wins));
     html.push_str(&trades_section("Biggest losses", &report.top_losses));
     html.push_str(&group_section("By solver", &report.by_solver));
@@ -268,6 +271,77 @@ fn token_section(tokens: &[Count]) -> String {
     section("Unsolved token tail", &table)
 }
 
+/// The mock-`PropAMM` section: what the exclusive route won, and what fee it could have charged on
+/// top of the flow it took.
+///
+/// Rendered only for a run driven with `monitor --propamm-pair`. The headline winrate is over every
+/// solved order in the run, most of which never touch the mirrored pair — so it reads low by
+/// construction, and the per-pair table below is where the real answer is. Both are shown rather
+/// than only the flattering one.
+fn propamm_section(propamm: &PropAmm) -> String {
+    let pair = propamm
+        .pair
+        .as_deref()
+        .unwrap_or("unknown pair");
+    let stat = |value: &str, label: &str| {
+        format!(
+            "<div class=\"ministat\"><div class=\"mininum\">{value}</div>\
+             <div class=\"minilab\">{label}</div></div>"
+        )
+    };
+    let headline = format!(
+        "<div class=\"herofoot\">{}{}{}{}{}</div>",
+        stat(&pct(propamm.won, propamm.solved), "win rate (all solved orders)"),
+        stat(&fmt_count(propamm.won), "wins"),
+        stat(&fmt_usd(propamm.captured_flow_usd), "flow captured"),
+        stat(&fmt_bps(propamm.median_headroom_bps), "median fee headroom bps"),
+        stat(&fmt_bps(propamm.avg_headroom_bps()), "fee headroom bps (flow-weighted)"),
+    );
+    let body = format!(
+        "<p class=\"note\">Mirrored pool: <strong>{}</strong>, priced fee-free. \
+         <em>Fee headroom</em> is what the signed extension could have charged and still beaten the \
+         public market — measured, not assumed. Quotes from this pool are not executable.</p>\
+         {headline}{}",
+        escape(pair),
+        propamm_pair_table(&propamm.by_pair),
+    );
+    section("Mock PropAMM (exclusive route)", &body)
+}
+
+/// Per-order-direction breakdown. A row's pair can differ from the mirrored pair: the mock serves
+/// any route with a leg it can price, so a `DAI→USDC` order routed through `WETH` shows up here
+/// too.
+fn propamm_pair_table(pairs: &[PropAmmPair]) -> String {
+    if pairs.is_empty() {
+        return "<p class=\"nodata\">no orders</p>".to_string();
+    }
+    let mut table = String::from(
+        "<table><thead><tr><th>order pair</th><th>solved</th><th>wins</th><th>win%</th>\
+         <th>flow captured</th><th>fee headroom</th><th>median headroom bps</th>\
+         </tr></thead><tbody>",
+    );
+    for pair in pairs {
+        let _ = write!(
+            table,
+            "<tr><td class=\"mono\" title=\"{} → {}\">{} → {}</td><td class=\"num\">{}</td>\
+             <td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
+             <td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
+            escape(&pair.token_in),
+            escape(&pair.token_out),
+            escape(&short_hash(&pair.token_in)),
+            escape(&short_hash(&pair.token_out)),
+            pair.solved,
+            pair.won,
+            pct(pair.won, pair.solved),
+            fmt_usd(pair.captured_flow_usd),
+            fmt_usd(pair.fee_headroom_usd),
+            fmt_bps(pair.median_headroom_bps),
+        );
+    }
+    table.push_str("</tbody></table>");
+    table
+}
+
 fn section(title: &str, body: &str) -> String {
     format!("<section><h2>{}</h2>{body}</section>", escape(title))
 }
@@ -400,6 +474,8 @@ section { background: #211a30; border: 1px solid #362b4a; border-radius: 8px;
 .collab { color: #9a8bbf; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em;
   text-align: center; }
 .nodata { color: #9a8bbf; margin: 0; }
+/* A section's framing sentence: what the numbers below mean, before they are read. */
+.note { color: #b9adcf; margin: 0 0 .5rem; max-width: 68ch; line-height: 1.55; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #362b4a; }
 th { color: #9a8bbf; font-weight: 600; font-size: .8rem; text-transform: uppercase; }
@@ -552,5 +628,53 @@ mod tests {
     #[test]
     fn test_escape_replaces_markup() {
         assert_eq!(escape("<a>&\"x\""), "&lt;a&gt;&amp;&quot;x&quot;");
+    }
+
+    /// A report from records carrying mock-`PropAMM` outcomes.
+    fn propamm_report(won: bool) -> Report {
+        let records: Vec<Comparison> = vec![serde_json::json!({
+            "block": 1,
+            "settled_tx": "0xabc0000000000000000000000000000000000000000000000000000000000001",
+            "venue": "relay", "solver": "1inch",
+            "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "top": {"verdict": "win", "net_bps": 20.0, "improvement_usd": 12.0, "settled_value_usd": 1000.0},
+            "propamm": {
+                "pair": "WETH/USDC", "won": won,
+                "fee_headroom_bps": won.then_some(4.0),
+                "committed_usd": won.then_some(1_000.0),
+                "fee_headroom_usd": won.then_some(0.4),
+            },
+        })]
+        .into_iter()
+        .map(|v| serde_json::from_value(v).unwrap())
+        .collect();
+        build(&records)
+    }
+
+    #[test]
+    fn test_propamm_section_omitted_without_the_harness() {
+        // An ordinary run's report must look exactly as it did before the harness existed.
+        assert!(!render(&sample_report(), None).contains("Mock PropAMM"));
+    }
+
+    #[test]
+    fn test_propamm_section_names_the_mirrored_pair_and_its_numbers() {
+        let html = render(&propamm_report(true), None);
+        assert!(html.contains("Mock PropAMM (exclusive route)"));
+        assert!(html.contains("WETH/USDC"), "the section must name the pool it stood in for");
+        assert!(html.contains("median fee headroom bps"));
+        // The order pair is rendered short, with the full addresses in the hover title.
+        assert!(html.contains("0xc02aaa39…756cc2"));
+        assert!(html.contains("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"));
+    }
+
+    #[test]
+    fn test_propamm_section_renders_a_run_the_pool_never_won() {
+        // A zero-win run is a result, not an error: the section still renders, with an em dash
+        // where the median headroom is undefined.
+        let html = render(&propamm_report(false), None);
+        assert!(html.contains("Mock PropAMM (exclusive route)"));
+        assert!(html.contains("0.0%"), "a zero winrate must be stated, not omitted");
     }
 }

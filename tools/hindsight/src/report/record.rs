@@ -19,6 +19,32 @@ pub(crate) struct Comparison {
     pub token_out: String,
     /// Optimistic state (N-1); the report's headline, matching the monitor's headline verdict.
     pub top: State,
+    /// The mock-`PropAMM` outcome, present only for runs the monitor drove with `--propamm-pair`.
+    #[serde(default)]
+    pub propamm: Option<PropAmm>,
+}
+
+/// One trade's mock-`PropAMM` outcome, as written by `monitor --propamm-pair`.
+///
+/// The mock pool quotes at a configured fee-free price and charges nothing, so `fee_headroom` is
+/// the fee the signed extension could have charged on this trade and still beaten the public
+/// market.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PropAmm {
+    /// The mirrored pair as token symbols, e.g. `WETH/USDC`.
+    #[serde(default)]
+    pub pair: Option<String>,
+    /// Whether the winning route ran through the mock pool.
+    pub won: bool,
+    /// That headroom as a fraction of the committed output, in basis points.
+    #[serde(default)]
+    pub fee_headroom_bps: Option<f64>,
+    /// The committed output valued in USD — the flow the pool captured.
+    #[serde(default)]
+    pub committed_usd: Option<f64>,
+    /// The headroom valued in USD.
+    #[serde(default)]
+    pub fee_headroom_usd: Option<f64>,
 }
 
 /// Fynd's result at one block state.
@@ -106,7 +132,7 @@ mod tests {
         let range = build_range(&trade, &prices, top, Outcome::Unsolvable("x".into()));
 
         let mut buf = Vec::new();
-        write_comparisons(&mut buf, std::slice::from_ref(&range), &prices, &prices);
+        write_comparisons(&mut buf, std::slice::from_ref(&range), &prices, &prices, &[]);
         let line = String::from_utf8(buf).unwrap();
 
         let record: Comparison = serde_json::from_str(line.trim()).unwrap();
@@ -118,5 +144,62 @@ mod tests {
         assert!(record.top.net_bps.unwrap() > 0.0);
         assert!((record.top.improvement_usd.unwrap() - 10.0).abs() < 1e-3);
         assert_eq!(record.token_out, format!("{usdc:#x}"));
+    }
+
+    /// The mock-`PropAMM` fields the monitor writes parse back too — the same writer/reader drift
+    /// guard, for the fields the `PropAMM` section keys off.
+    #[test]
+    fn test_parses_the_propamm_fields_from_the_monitor_writer() {
+        use crate::propamm::report::{Observation, Record};
+
+        let usdc: Address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            .parse()
+            .unwrap();
+        let observed = Observation {
+            token_out: usdc,
+            solved: true,
+            won: true,
+            committed_amount_out: Some(1_000_000_000u64.into()),
+            fee_headroom: Some(400_000u64.into()),
+        };
+        let record =
+            Record::new(&observed, Some("WETH/USDC".to_string()), Some(1_000.0), Some(0.4));
+
+        let line = serde_json::to_string(&serde_json::json!({
+            "block": 1,
+            "settled_tx": "0xabc",
+            "venue": "relay",
+            "solver": "1inch",
+            "token_in": "0xaaa",
+            "token_out": "0xbbb",
+            "top": { "verdict": "win" },
+            "propamm": record,
+        }))
+        .unwrap();
+
+        let parsed: Comparison = serde_json::from_str(&line).unwrap();
+        let propamm = parsed
+            .propamm
+            .expect("the propamm field round-trips");
+        assert_eq!(propamm.pair.as_deref(), Some("WETH/USDC"));
+        assert!(propamm.won);
+        // 400_000 / 1_000_000_000 = 4 bps.
+        assert!((propamm.fee_headroom_bps.unwrap() - 4.0).abs() < 1e-9);
+        assert!((propamm.committed_usd.unwrap() - 1_000.0).abs() < 1e-9);
+        assert!((propamm.fee_headroom_usd.unwrap() - 0.4).abs() < 1e-9);
+    }
+
+    /// An ordinary monitor run writes no `propamm` field, and the reader must treat that as absent
+    /// rather than failing to parse the whole record.
+    #[test]
+    fn test_propamm_is_absent_when_the_harness_is_off() {
+        let line = serde_json::json!({
+            "block": 1, "settled_tx": "0xabc", "venue": "relay", "solver": "1inch",
+            "token_in": "0xaaa", "token_out": "0xbbb", "top": { "verdict": "win" },
+            "propamm": serde_json::Value::Null,
+        })
+        .to_string();
+        let parsed: Comparison = serde_json::from_str(&line).unwrap();
+        assert!(parsed.propamm.is_none());
     }
 }

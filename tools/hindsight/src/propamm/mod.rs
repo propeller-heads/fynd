@@ -134,6 +134,8 @@ pub(crate) struct Injected {
     pub mock_price: f64,
     /// Whether the mock's spot price was recomputed before the wait expired.
     pub derived_data_ready: bool,
+    /// The mirrored pair as token symbols, e.g. `WETH/USDC`.
+    pub pair_label: String,
 }
 
 /// Writes the mock pool into a running solver's market state, once per block.
@@ -181,13 +183,11 @@ impl Injector {
             );
         }
 
-        let Some((source_component, source_state, mirrored_price)) =
-            best_source(&market, &self.candidates, &self.config).await
-        else {
+        let Some(source) = best_source(&market, &self.candidates, &self.config).await else {
             return Ok(None);
         };
 
-        let mock = MirrorPool::from_price_pct(source_state, self.config.price_pct);
+        let mock = MirrorPool::from_price_pct(source.state, self.config.price_pct);
         let price_factor = mock.price_factor();
         let mirrored: Box<dyn ProtocolSim> = Box::new(mock);
         let first_injection = !self.announced;
@@ -230,20 +230,21 @@ impl Injector {
             );
         }
 
-        let mock_price = mirrored_price * price_factor;
+        let mock_price = source.price * price_factor;
         debug!(
             block,
-            source_component,
-            source_price = mirrored_price,
+            source_component = source.component_id,
+            source_price = source.price,
             mock_price,
             price_pct = self.config.price_pct,
             "mirrored source pool onto the mock PropAMM component"
         );
         Ok(Some(Injected {
-            source_component,
-            source_price: mirrored_price,
+            source_component: source.component_id,
+            source_price: source.price,
             mock_price,
             derived_data_ready,
+            pair_label: source.pair_label,
         }))
     }
 }
@@ -266,16 +267,29 @@ async fn find_candidates(market: &MarketData, config: &MirrorConfig) -> Vec<Stri
         .collect()
 }
 
-/// The candidate quoting the most `token_b` for the probe amount of `token_a`.
+/// The real pool the mock mirrors for one block.
 ///
-/// Returns its id, a clone of its state, and the price it quoted (`token_b` per whole unit of
-/// `token_a`). Candidates that cannot price the pair — no state yet, or a simulation error — are
-/// skipped rather than failing the block: a single broken pool must not stop the run.
+/// Chosen by realized output at the probe size rather than by TVL, so the mirror tracks the pool
+/// that actually prices the sizes being re-solved best. Candidates that cannot price the pair — no
+/// state yet, or a simulation error — are skipped rather than failing the block: a single broken
+/// pool must not stop the run.
+struct BestSource {
+    /// Component id of the mirrored pool.
+    component_id: String,
+    /// A clone of its live state.
+    state: Box<dyn ProtocolSim>,
+    /// The price it quoted: `token_b` per whole unit of `token_a`.
+    price: f64,
+    /// The pair as token symbols, e.g. `WETH/USDC`.
+    pair_label: String,
+}
+
+/// The candidate pool the mock mirrors this block.
 async fn best_source(
     market: &MarketData,
     candidates: &[String],
     config: &MirrorConfig,
-) -> Option<(String, Box<dyn ProtocolSim>, f64)> {
+) -> Option<BestSource> {
     let state = market.read().await;
     let token_a = state
         .get_token(&config.token_a)?
@@ -301,13 +315,18 @@ async fn best_source(
         }
     }
 
-    let (id, sim, probe_out) = best?;
+    let (component_id, state, probe_out) = best?;
     let price = if config.probe_units > 0.0 {
         to_units(&probe_out, &token_b) / config.probe_units
     } else {
         0.0
     };
-    Some((id, sim, price))
+    Some(BestSource {
+        component_id,
+        state,
+        price,
+        pair_label: format!("{}/{}", token_a.symbol, token_b.symbol),
+    })
 }
 
 /// Blocks until the mock's spot price has been recomputed at `block`, or the wait expires.

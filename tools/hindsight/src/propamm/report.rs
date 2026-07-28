@@ -15,18 +15,21 @@ use std::sync::Mutex;
 use alloy::primitives::Address;
 use fynd_core::OrderQuote;
 use num_bigint::BigUint;
+use serde::Serialize;
 
 use crate::propamm::MOCK_COMPONENT_ID;
 
 /// One re-solved order's mock-`PropAMM` outcome.
 #[derive(Debug, Clone)]
 pub(crate) struct Observation {
-    /// Order input token.
-    pub token_in: Address,
-    /// Order output token.
+    /// Order output token — the token both amounts below are denominated in, and the one their USD
+    /// valuation is taken against. The order's input token and size are not repeated here: the
+    /// comparison record this joins onto already carries them.
     pub token_out: Address,
-    /// Order size, in `token_in` atomic units.
-    pub amount_in: BigUint,
+    /// Whether the solver produced a successful quote at all. Unsuccessful solves are still
+    /// recorded so the sink stays index-aligned with the block's trades, which is how each
+    /// observation is joined back to its comparison record.
+    pub solved: bool,
     /// Whether the winning route ran through the mock `PropAMM` pool.
     pub won: bool,
     /// The public-market output the user is committed to. `None` when the mock pool didn't win.
@@ -41,22 +44,18 @@ impl Observation {
     ///
     /// A win is a winning route that contains the mock component — not merely a non-empty surplus,
     /// which can legitimately round to zero on a marginal beat.
-    pub(crate) fn from_quote(
-        quote: &OrderQuote,
-        token_in: Address,
-        token_out: Address,
-        amount_in: BigUint,
-    ) -> Self {
-        let won = quote.route().is_some_and(|route| {
-            route
-                .swaps()
-                .iter()
-                .any(|swap| swap.component_id() == MOCK_COMPONENT_ID)
-        });
+    pub(crate) fn from_quote(quote: &OrderQuote, token_out: Address) -> Self {
+        let solved = quote.status() == fynd_core::types::QuoteStatus::Success;
+        let won = solved &&
+            quote.route().is_some_and(|route| {
+                route
+                    .swaps()
+                    .iter()
+                    .any(|swap| swap.component_id() == MOCK_COMPONENT_ID)
+            });
         Self {
-            token_in,
             token_out,
-            amount_in,
+            solved,
             won,
             committed_amount_out: quote.committed_amount_out().cloned(),
             fee_headroom: quote.surplus_amount().cloned(),
@@ -120,6 +119,9 @@ impl Totals {
 pub(crate) struct Stats {
     pending: Mutex<Vec<Observation>>,
     totals: Mutex<Totals>,
+    /// The mirrored pair as token symbols, e.g. `WETH/USDC`. Resolved once the feed has loaded the
+    /// tokens, which is why it is set from the injection path rather than from the CLI.
+    pair_label: Mutex<Option<String>>,
 }
 
 impl Stats {
@@ -148,7 +150,10 @@ impl Stats {
         let Ok(mut totals) = self.totals.lock() else {
             return Totals::default();
         };
-        totals.solved += observations.len() as u64;
+        totals.solved += observations
+            .iter()
+            .filter(|o| o.solved)
+            .count() as u64;
         totals.won += observations
             .iter()
             .filter(|o| o.won)
@@ -156,6 +161,23 @@ impl Stats {
         totals.headroom_usd += headroom_usd;
         totals.captured_flow_usd += captured_flow_usd;
         *totals
+    }
+
+    /// Records the mirrored pair's symbol label, so the report can name it.
+    pub(crate) fn set_pair_label(&self, label: &str) {
+        if let Ok(mut pair_label) = self.pair_label.lock() {
+            if pair_label.is_none() {
+                *pair_label = Some(label.to_string());
+            }
+        }
+    }
+
+    /// The mirrored pair's symbol label, once an injection has resolved it.
+    pub(crate) fn pair_label(&self) -> Option<String> {
+        self.pair_label
+            .lock()
+            .ok()
+            .and_then(|label| label.clone())
     }
 
     /// The run totals so far.
@@ -176,15 +198,63 @@ pub(crate) fn biguint_to_f64(value: &BigUint) -> f64 {
         .unwrap_or(f64::INFINITY)
 }
 
+/// The mock-`PropAMM` fields written into a comparison record, so the offline `report` subcommand
+/// reads them alongside everything else it already knows about the trade (venue, solver, pair).
+///
+/// Amounts are decimal strings, like every other amount in the record: they exceed `f64`'s exact
+/// integer range and JSON has no integer type wide enough.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Record {
+    /// The mirrored pair as token symbols, e.g. `WETH/USDC` — which pool the mock stood in for.
+    pub pair: Option<String>,
+    /// Whether the winning route ran through the mock `PropAMM` pool.
+    pub won: bool,
+    /// The public-market output the user is committed to.
+    pub committed_amount_out: Option<String>,
+    /// Output the mock produced above the commitment — the fee it could have charged.
+    pub fee_headroom: Option<String>,
+    /// That headroom as a fraction of the commitment, in basis points.
+    pub fee_headroom_bps: Option<f64>,
+    /// The committed output valued in USD — the flow the pool captured.
+    pub committed_usd: Option<f64>,
+    /// The headroom valued in USD.
+    pub fee_headroom_usd: Option<f64>,
+}
+
+impl Record {
+    /// Projects an observation into its record, given the USD valuations the caller computed.
+    pub(crate) fn new(
+        observed: &Observation,
+        pair: Option<String>,
+        committed_usd: Option<f64>,
+        fee_headroom_usd: Option<f64>,
+    ) -> Self {
+        Self {
+            pair,
+            won: observed.won,
+            committed_amount_out: observed
+                .committed_amount_out
+                .as_ref()
+                .map(std::string::ToString::to_string),
+            fee_headroom: observed
+                .fee_headroom
+                .as_ref()
+                .map(std::string::ToString::to_string),
+            fee_headroom_bps: observed.fee_headroom_bps(),
+            committed_usd,
+            fee_headroom_usd,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn observation(won: bool, committed: u64, headroom: u64) -> Observation {
         Observation {
-            token_in: Address::from([0x11; 20]),
             token_out: Address::from([0x22; 20]),
-            amount_in: BigUint::from(1_000u64),
+            solved: true,
             won,
             committed_amount_out: won.then(|| BigUint::from(committed)),
             fee_headroom: won.then(|| BigUint::from(headroom)),

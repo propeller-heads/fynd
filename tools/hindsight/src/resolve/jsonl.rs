@@ -118,14 +118,21 @@ fn date_from_unix(secs: u64) -> String {
 /// filter to wins for the improvement view or to unsolvables for the coverage worklist (where Fynd
 /// needs to improve). Losses keep their route (what path Fynd took and lost on); unsolvables keep
 /// the reason.
+/// `propamm` carries one optional mock-`PropAMM` outcome per range, in the same order; a shorter
+/// slice simply leaves the trailing records without a `propamm` field.
 pub(crate) fn write_comparisons<W: std::io::Write>(
     writer: &mut W,
     ranges: &[RangeComparison],
     prices_top: &Prices,
     prices_back: &Prices,
+    propamm: &[Option<crate::propamm::report::Record>],
 ) {
-    for range in ranges {
-        let Ok(line) = serde_json::to_string(&comparison_record(range, prices_top, prices_back))
+    for (index, range) in ranges.iter().enumerate() {
+        let propamm = propamm
+            .get(index)
+            .and_then(Option::as_ref);
+        let Ok(line) =
+            serde_json::to_string(&comparison_record(range, prices_top, prices_back, propamm))
         else {
             continue;
         };
@@ -146,6 +153,7 @@ fn comparison_record(
     range: &RangeComparison,
     prices_top: &Prices,
     prices_back: &Prices,
+    propamm: Option<&crate::propamm::report::Record>,
 ) -> serde_json::Value {
     serde_json::json!({
         "block": range.block_number,
@@ -167,6 +175,9 @@ fn comparison_record(
         "sandwich": range.sandwich,
         "top": state_record(&range.top, range, prices_top),
         "back": state_record(&range.back, range, prices_back),
+        // Absent unless the run had `--propamm-pair` set, so an ordinary run's records are
+        // byte-identical to before.
+        "propamm": propamm,
     })
 }
 
@@ -338,7 +349,7 @@ mod tests {
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
         );
-        let rec = comparison_record(&range, &empty_prices(), &empty_prices());
+        let rec = comparison_record(&range, &empty_prices(), &empty_prices(), None);
         assert_eq!(rec.pointer("/tx_index").unwrap(), 3);
         assert_eq!(
             rec.pointer("/quoted_amount_out")
@@ -428,7 +439,7 @@ mod tests {
         });
         let range = build_range(&trade, &prices, top, back);
 
-        let rec = comparison_record(&range, &prices, &prices);
+        let rec = comparison_record(&range, &prices, &prices, None);
         let top_usd = rec
             .pointer("/top/improvement_usd")
             .unwrap()
@@ -494,7 +505,7 @@ mod tests {
             Outcome::Unsolvable("missing token in Tycho".into()),
             Outcome::Unsolvable("missing token in Tycho".into()),
         );
-        let rec = comparison_record(&range, &empty_prices(), &empty_prices());
+        let rec = comparison_record(&range, &empty_prices(), &empty_prices(), None);
         assert_eq!(rec.pointer("/top/verdict").unwrap(), "unsolvable");
         assert_eq!(
             rec.pointer("/top/unsolvable_reason")
@@ -545,7 +556,7 @@ mod tests {
             })
         };
         let range = build_range(&trade, &empty_prices(), solved(1_100), solved(1_050));
-        let rec = comparison_record(&range, &empty_prices(), &empty_prices());
+        let rec = comparison_record(&range, &empty_prices(), &empty_prices(), None);
 
         assert_eq!(rec.pointer("/tx_index").unwrap(), 42);
         assert_eq!(rec.pointer("/top/verdict").unwrap(), "sandwiched");
