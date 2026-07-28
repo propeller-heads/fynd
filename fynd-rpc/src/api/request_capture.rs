@@ -153,6 +153,9 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
 }
 
 /// Recorded outcome of a solved request, for the replay-capture log.
+///
+/// Both variants log one `failure_reasons` entry per order, so a breakdown by
+/// reason counts order slots without branching on the outcome.
 pub(crate) enum RequestOutcome {
     /// Solve returned a quote; per-order status codes in request order.
     Solved {
@@ -165,6 +168,10 @@ pub(crate) enum RequestOutcome {
         failure_reasons: Vec<&'static str>,
     },
     /// Solve failed; carries the [`crate::api::error::solve_error_code`].
+    ///
+    /// The request-level error applies to every order, so the derived
+    /// `http/<code>` reason is repeated `num_orders` times in the log line. No
+    /// `order_statuses` are logged: the solver produced no per-order results.
     Failed {
         /// Stable error code (e.g. `TIMEOUT`, `QUEUE_FULL`).
         code: &'static str,
@@ -191,6 +198,9 @@ impl RequestOutcome {
 /// [`ReplayRequest::to_json`].
 /// Only failed quotes are logged; filter these in Loki with
 /// `event="quote_failure"`.
+///
+/// `failure_reasons` always holds `num_orders` entries, whichever variant is
+/// logged — see [`RequestOutcome`].
 pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome: &RequestOutcome) {
     match outcome {
         RequestOutcome::Solved { solve_time_ms, order_statuses, failure_reasons } => info!(
@@ -204,7 +214,8 @@ pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome
             "quote failure captured"
         ),
         RequestOutcome::Failed { code } => {
-            let failure_reasons = [format!("http/{}", code.to_lowercase())];
+            let reason = format!("http/{}", code.to_lowercase());
+            let failure_reasons = vec![reason.as_str(); num_orders];
             info!(
                 event = "quote_failure",
                 num_orders,
@@ -557,6 +568,17 @@ mod tests {
         });
         assert!(logs.contains("http/timeout"), "logs were: {logs}");
         assert!(logs.contains("TIMEOUT"), "logs were: {logs}");
+    }
+
+    #[test]
+    fn test_logs_failed_outcome_reason_per_order() {
+        let logs = capture_logs(|| {
+            log_request_capture(3, r#"{"orders":[]}"#, &RequestOutcome::Failed { code: "TIMEOUT" });
+        });
+        assert!(
+            logs.contains(r#"["http/timeout", "http/timeout", "http/timeout"]"#),
+            "one reason per order expected; logs were: {logs}"
+        );
     }
 
     #[test]
