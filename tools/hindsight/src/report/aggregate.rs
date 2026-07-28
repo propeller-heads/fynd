@@ -12,8 +12,11 @@ const TOP_TRADES: usize = 10;
 /// Number of tokens listed in the unsolvable-tail table.
 const TOP_UNSOLVABLE_TOKENS: usize = 15;
 
-/// Verdicts in display order; only those present in the data are rendered.
-const VERDICT_ORDER: &[&str] = &["win", "loss", "coverage_miss", "unsolvable", "sandwiched"];
+/// Verdicts in display order — the order of the legend, the stacked columns (top down), and the
+/// table. Win, unsolvable, then loss, so the win green and the loss red are never adjacent
+/// segments: the two are indistinguishable under deuteranopia. Only verdicts present in the data
+/// are rendered.
+const VERDICT_ORDER: &[&str] = &["win", "unsolvable", "loss", "coverage_miss", "sandwiched"];
 
 /// The fully aggregated report, ready to render.
 pub(crate) struct Report {
@@ -39,7 +42,7 @@ pub(crate) struct Count {
 }
 
 /// One verdict, counted two ways: by trade count and by settled USD notional (volume). Both feed a
-/// pie, so the split can be read by number of trades and by dollars — a long tail of tiny
+/// stacked bar, so the split can be read by number of trades and by dollars — a long tail of tiny
 /// unsolvable trades is many trades but little volume.
 pub(crate) struct VerdictStat {
     pub label: String,
@@ -339,7 +342,7 @@ mod tests {
             .iter()
             .map(|c| c.label.as_str())
             .collect();
-        assert_eq!(labels, vec!["win", "loss", "unsolvable"]);
+        assert_eq!(labels, vec!["win", "unsolvable", "loss"]);
         assert_eq!(stats[0].count, 2);
         // Each record's settled_value_usd is 1000; two wins → 2000 volume.
         assert!((stats[0].notional_usd - 2000.0).abs() < 1e-6);

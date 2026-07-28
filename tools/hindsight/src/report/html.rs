@@ -1,7 +1,7 @@
 //! Render an aggregated [`Report`] to a single self-contained HTML file.
 //!
-//! No external assets or network: the verdict pie is a CSS `conic-gradient`, styling is one inline
-//! stylesheet, so the file opens offline. The panels mirror the Grafana dashboard's value views —
+//! No external assets or network: the verdict split is a flexbox stacked column, styling is one
+//! inline stylesheet, so the file opens offline. The panels mirror the dashboard's value views —
 //! the headline Fynd savings (`hindsight_savings_usd`), the verdict split, coverage by notional,
 //! per-solver/venue breakdowns, and the top-saving trades — and skip the block/latency health
 //! panels the JSONL does not carry.
@@ -12,16 +12,39 @@ use crate::report::aggregate::{
     Count, GroupStats, Report, Savings, Summary, TradeRow, VerdictStat,
 };
 
-/// Colours for each verdict, shared by the pie segments and their legend swatches.
+/// Shortest share of a stacked column that gets an inline `12.3%` label. Below it the segment is
+/// not tall enough to hold a line of text with padding above and below, so the value stays in the
+/// hover title and the table.
+const MIN_LABELLED_SHARE: f64 = 8.0;
+
+/// Colours for each verdict, shared by the stacked-column segments and their legend swatches. These
+/// are status colours, not series identity: they carry good → critical in the same hues the Grafana
+/// dashboard uses, so the report reads like the dashboard it mirrors. Green and red are
+/// indistinguishable under deuteranopia, which is why every segment is also named in the legend and
+/// listed in the table.
 fn verdict_color(verdict: &str) -> &'static str {
     match verdict {
         "win" => "#43a047",
         "loss" => "#e53935",
         "unsolvable" => "#fbc02d",
         "coverage_miss" => "#fb8c00",
-        "sandwiched" => "#8e24aa",
+        "sandwiched" => "#ab47bc",
         _ => "#9e9e9e",
     }
+}
+
+/// Ink for a label sitting inside a verdict's fill, picked by the fill's luminance so the text
+/// clears contrast against it.
+fn verdict_ink(verdict: &str) -> &'static str {
+    match verdict {
+        "win" | "loss" | "sandwiched" => "#ffffff",
+        _ => "#17111f",
+    }
+}
+
+/// A verdict's display name: the JSONL's `coverage_miss` reads as `coverage miss`.
+fn verdict_name(verdict: &str) -> String {
+    verdict.replace('_', " ")
 }
 
 /// Render the whole report to an HTML document. `filter` names the active venue filter, if any, so
@@ -75,9 +98,10 @@ fn hero_section(savings: &Savings, summary: &Summary, filter: Option<&str>) -> S
     )
 }
 
-/// The verdict split as two `conic-gradient` pies — one weighted by trade count, one by settled USD
-/// volume — each with a legend, mirroring the dashboard's outcome-by-count and outcome-by-volume
-/// panels.
+/// The verdict split as two 100% stacked columns — one weighted by trade count, one by settled USD
+/// volume — sharing one legend, mirroring the dashboard's outcome-by-count and outcome-by-volume
+/// panels. Both columns are stated again as a table, so every value is readable without reading a
+/// colour.
 fn verdict_section(verdicts: &[VerdictStat]) -> String {
     let by_count: Vec<(&str, f64)> = verdicts
         .iter()
@@ -88,50 +112,97 @@ fn verdict_section(verdicts: &[VerdictStat]) -> String {
         .map(|v| (v.label.as_str(), v.notional_usd))
         .collect();
     let body = format!(
-        "<div class=\"pies\">\
-           <div class=\"piecol\"><h3>by trade count</h3>{}</div>\
-           <div class=\"piecol\"><h3>by volume (settled USD)</h3>{}</div>\
-         </div>",
-        pie(&by_count, |v| format!("{v:.0}")),
-        pie(&by_volume, fmt_usd),
+        "{}<div class=\"cols\">{}{}</div>{}",
+        verdict_legend(verdicts),
+        stacked_column("by trade count", &by_count, |v| format!("{v:.0}")),
+        stacked_column("by volume (USD)", &by_volume, fmt_usd),
+        verdict_table(verdicts),
     );
     section("Verdicts (top-of-block)", &body)
 }
 
-/// A `conic-gradient` pie with a legend, from `(verdict, value)` slices. `fmt_val` formats each
-/// legend value (a count or a USD amount). Colours come from [`verdict_color`].
-fn pie(entries: &[(&str, f64)], fmt_val: impl Fn(f64) -> String) -> String {
-    let total: f64 = entries.iter().map(|(_, v)| v).sum();
-    if total <= 0.0 {
-        return "<p>no data</p>".to_string();
-    }
-    let mut segments = String::new();
-    let mut legend = String::new();
-    let mut acc = 0.0;
-    for &(label, value) in entries {
-        let color = verdict_color(label);
-        let start = acc;
-        acc += value / total * 100.0;
-        if !segments.is_empty() {
-            segments.push(',');
-        }
-        let _ = write!(segments, "{color} {start:.3}% {acc:.3}%");
+/// The legend both columns share: identity never rests on colour alone, so every verdict present in
+/// the data is named beside its swatch.
+fn verdict_legend(verdicts: &[VerdictStat]) -> String {
+    let mut items = String::new();
+    for verdict in verdicts {
         let _ = write!(
-            legend,
-            "<li><span class=\"swatch\" style=\"background:{color}\"></span>\
-             <span class=\"legname\">{}</span>\
-             <span class=\"legval\">{} ({:.1}%)</span></li>",
-            escape(label),
-            fmt_val(value),
-            value / total * 100.0,
+            items,
+            "<li><span class=\"swatch\" style=\"background:{}\"></span>\
+             <span class=\"legname\">{}</span></li>",
+            verdict_color(&verdict.label),
+            escape(&verdict_name(&verdict.label)),
         );
     }
-    format!(
-        "<div class=\"pie-wrap\">\
-           <div class=\"pie\" style=\"background:conic-gradient({segments})\"></div>\
-           <ul class=\"legend\">{legend}</ul>\
-         </div>",
-    )
+    format!("<ul class=\"legend row\">{items}</ul>")
+}
+
+/// One 100% stacked column from `(verdict, value)` segments, captioned underneath. `fmt_val`
+/// formats a segment's value for its hover title. Segments stack top down in the verdict order and
+/// are separated by a 2px gap in the surface colour rather than a border; only a segment at least
+/// [`MIN_LABELLED_SHARE`] tall carries an inline share label, so no label is ever clipped by its
+/// own segment.
+fn stacked_column(title: &str, entries: &[(&str, f64)], fmt_val: impl Fn(f64) -> String) -> String {
+    let total: f64 = entries.iter().map(|(_, v)| v).sum();
+    let group = |body: &str| {
+        let caption = escape(title);
+        format!("<div class=\"colgroup\">{body}<div class=\"collab\">{caption}</div></div>")
+    };
+    if total <= 0.0 {
+        return group("<p class=\"nodata\">no data</p>");
+    }
+    let mut segments = String::new();
+    for &(label, value) in entries {
+        if value <= 0.0 {
+            continue;
+        }
+        let share = value / total * 100.0;
+        let inline = if share >= MIN_LABELLED_SHARE {
+            format!(
+                "<span class=\"seglab\" style=\"color:{}\">{share:.1}%</span>",
+                verdict_ink(label),
+            )
+        } else {
+            String::new()
+        };
+        let _ = write!(
+            segments,
+            "<div class=\"seg\" style=\"flex:{share:.4} 1 0;background:{}\" \
+             title=\"{} · {} ({share:.1}%)\">{inline}</div>",
+            verdict_color(label),
+            escape(&verdict_name(label)),
+            escape(&fmt_val(value)),
+        );
+    }
+    group(&format!("<div class=\"col\">{segments}</div>"))
+}
+
+/// The table view of the same split: every count, volume, and share in text, so the columns are a
+/// summary rather than the only way to read the numbers.
+fn verdict_table(verdicts: &[VerdictStat]) -> String {
+    let total_count: usize = verdicts.iter().map(|v| v.count).sum();
+    let total_volume: f64 = verdicts
+        .iter()
+        .map(|v| v.notional_usd)
+        .sum();
+    let mut table = String::from(
+        "<table><thead><tr><th>verdict</th><th>trades</th><th>share</th><th>volume</th>\
+         <th>share</th></tr></thead><tbody>",
+    );
+    for verdict in verdicts {
+        let _ = write!(
+            table,
+            "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
+             <td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
+            escape(&verdict_name(&verdict.label)),
+            verdict.count,
+            pct(verdict.count, total_count),
+            fmt_usd(verdict.notional_usd),
+            share_pct(verdict.notional_usd, total_volume),
+        );
+    }
+    table.push_str("</tbody></table>");
+    table
 }
 
 fn group_section(title: &str, groups: &[GroupStats]) -> String {
@@ -219,6 +290,14 @@ fn pct(count: usize, whole: usize) -> String {
     format!("{:.1}%", ratio(count, whole) * 100.0)
 }
 
+/// `part` as a percentage of a USD `whole`, one decimal; em dash when there is no volume to divide.
+fn share_pct(part: f64, whole: f64) -> String {
+    if whole <= 0.0 {
+        return "—".to_string();
+    }
+    format!("{:.1}%", part / whole * 100.0)
+}
+
 fn fmt_bps(bps: Option<f64>) -> String {
     bps.map_or_else(|| "—".to_string(), |b| format!("{b:.1}"))
 }
@@ -295,16 +374,26 @@ section { background: #211a30; border: 1px solid #362b4a; border-radius: 8px;
 .heronum.neg { color: #ef5350; }
 .herolab { color: #9a8bbf; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; margin-top: .3rem; }
 .herosub { color: #b9aecf; font-size: .9rem; margin-top: 1.25rem; }
-.pies { display: flex; flex-wrap: wrap; gap: 2.5rem; }
-.piecol { flex: 1 1 0; min-width: 20rem; }
-.pie-wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 1.5rem; }
-.pie { width: 180px; height: 180px; border-radius: 50%; flex: 0 0 auto;
-  box-shadow: inset 0 0 0 1px #362b4a; }
-.legend { list-style: none; margin: 0; padding: 0; min-width: 14rem; }
+.legend { list-style: none; margin: 0; padding: 0; }
 .legend li { display: flex; align-items: center; gap: .6rem; padding: .25rem 0; }
+.legend.row { display: flex; flex-wrap: wrap; gap: 1.25rem; margin-bottom: 1.25rem; }
+.legend.row li { padding: 0; }
 .swatch { width: .85rem; height: .85rem; border-radius: 2px; flex: 0 0 auto; }
-.legname { flex: 1; text-transform: capitalize; }
-.legval { color: #b9aecf; font-variant-numeric: tabular-nums; }
+.legname { text-transform: capitalize; }
+/* The columns are the panel's focus: centred, and wide enough to read at a glance. The table below
+   restates their values. */
+.cols { display: flex; justify-content: center; gap: 2rem; margin: .5rem 0 2rem; }
+.colgroup { display: flex; flex-direction: column; gap: .6rem; flex: 0 1 15rem; }
+/* Segments stack top down in verdict order, so the win green caps the column. A 2px gap in the
+   surface colour separates them — never a border. */
+.col { display: flex; flex-direction: column; gap: 2px; height: 17rem; }
+.seg { min-height: 2px; display: flex; align-items: center; justify-content: center; }
+.seg:first-child { border-radius: 4px 4px 0 0; }
+.seg:last-child { border-radius: 0 0 4px 4px; }
+.seglab { font-size: .8rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.collab { color: #9a8bbf; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em;
+  text-align: center; }
+.nodata { color: #9a8bbf; margin: 0; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #362b4a; }
 th { color: #9a8bbf; font-weight: 600; font-size: .8rem; text-transform: uppercase; }
@@ -354,11 +443,58 @@ mod tests {
         for heading in ["Fynd savings", "Verdicts", "Top savings", "By solver"] {
             assert!(html.contains(heading), "missing content: {heading}");
         }
-        // Verdicts render as two pies — by trade count and by volume — not bars, and not a
-        // separate coverage table.
-        assert!(html.contains("conic-gradient"));
+        // Verdicts render as two stacked columns — by trade count and by volume — not pies, and
+        // not a separate coverage section.
+        assert!(!html.contains("conic-gradient"));
+        assert!(html.contains("class=\"col\""));
         assert!(html.contains("by trade count") && html.contains("by volume"));
         assert!(!html.contains(">Coverage<"));
+    }
+
+    #[test]
+    fn test_stacked_column_labels_only_segments_tall_enough_to_hold_one() {
+        let entries = [("win", 95.0), ("loss", 5.0)];
+        let html = stacked_column("by trade count", &entries, |v| format!("{v:.0}"));
+        // The 95% segment carries its share inline; the 5% one would clip it, so its value lives
+        // in the hover title instead.
+        assert!(html.contains(">95.0%<"), "{html}");
+        assert!(!html.contains(">5.0%<"), "{html}");
+        assert!(html.contains("title=\"loss · 5 (5.0%)\""), "{html}");
+        // Segments grow proportionally and are separated by the surface gap, not a border.
+        assert!(html.contains("flex:95.0000 1 0"), "{html}");
+        assert!(!html.contains("border"), "{html}");
+    }
+
+    #[test]
+    fn test_stacked_column_stacks_the_first_verdict_at_the_top() {
+        let entries = [("win", 50.0), ("loss", 50.0)];
+        let html = stacked_column("by trade count", &entries, |v| format!("{v:.0}"));
+        // Plain `column` renders markup order top down, so the win green caps the column.
+        let win = html
+            .find("title=\"win")
+            .expect("win segment");
+        let loss = html
+            .find("title=\"loss")
+            .expect("loss segment");
+        assert!(win < loss, "{html}");
+    }
+
+    #[test]
+    fn test_stacked_column_without_volume_says_so() {
+        let html = stacked_column("by volume (settled USD)", &[("win", 0.0)], fmt_usd);
+        assert!(html.contains("no data"));
+        assert!(!html.contains("class=\"col\""));
+        // The caption still says which view is empty.
+        assert!(html.contains("by volume (settled USD)"));
+    }
+
+    #[test]
+    fn test_verdict_table_states_every_share() {
+        let html = render(&sample_report(), None);
+        // Two trades, one of each verdict: 50% by count, and the win holds 1000 of 1050 volume.
+        assert!(html.contains("<td>win</td>"), "{html}");
+        assert!(html.contains("95.2%"), "{html}");
+        assert!(html.contains("50.0%"), "{html}");
     }
 
     #[test]
