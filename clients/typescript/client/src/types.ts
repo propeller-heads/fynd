@@ -179,7 +179,7 @@ export interface HealthStatus {
   healthy: boolean;
   /** Milliseconds since the last state update. */
   lastUpdateMs: number;
-  /** Number of liquidity pools tracked by the solver. */
+  /** Number of active solver worker pools. */
   numSolverPools: number;
   gasPriceAgeMs?: number;
 }

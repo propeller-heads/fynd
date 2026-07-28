@@ -9,8 +9,8 @@
 //!
 //! # Overlay design
 //!
-//! Labeled overlay states (used by solver pools to inject per-request pool states) are stored in a
-//! separate `Arc<RwLock<...>>` on `MarketData` rather than inside the main
+//! Labeled overlay states (used by solver components to inject per-request component states) are
+//! stored in a separate `Arc<RwLock<...>>` on `MarketData` rather than inside the main
 //! `MarketState` lock. This decouples overlay writes from base-state reads: a TychoFeed block
 //! update no longer stalls overlay registrations and vice versa.
 
@@ -33,8 +33,8 @@ use crate::types::{BlockInfo, ComponentId};
 
 /// A label identifying an overlay state layer.
 ///
-/// Each labeled overlay is an independent snapshot of pool states that can be layered
-/// on top of the base market state for a specific worker pool or request context.
+/// Each labeled overlay is an independent snapshot of component states that can be layered
+/// on top of the base market state for a specific worker component or request context.
 pub type StateLabel = String;
 
 /// An immutable snapshot of per-component simulation states for one overlay layer.
@@ -42,7 +42,7 @@ pub type OverlayStates = Arc<HashMap<ComponentId, Box<dyn ProtocolSim>>>;
 
 /// A named simulation-state overlay with a block-number expiry.
 pub struct OverlayEntry {
-    /// The overlay pool states (only pools that differ from base state).
+    /// The overlay component states (only components that differ from base state).
     pub states: OverlayStates,
     /// Last block number for which this overlay is valid.
     /// The overlay is automatically evicted before block `valid_until + 1` is applied.
@@ -205,7 +205,7 @@ impl MarketData {
 /// An overlay-aware view of the market data, held for the duration of a read lock.
 ///
 /// Holds a read lock on the base `MarketState` and an optional overlay snapshot.
-/// Use `get_simulation_state` for overlay-aware pool lookups. All other accessors
+/// Use `get_simulation_state` for overlay-aware component lookups. All other accessors
 /// delegate to the base data.
 pub struct MarketDataView<'a> {
     guard: tokio::sync::RwLockReadGuard<'a, MarketState>,
@@ -320,7 +320,7 @@ pub struct MarketState {
     last_updated: Option<BlockInfo>,
     /// Number of components per protocol system, maintained incrementally on
     /// upsert/remove so readers never scan the full component map.
-    pool_counts: HashMap<String, u64>,
+    component_counts: HashMap<String, u64>,
 }
 
 impl MarketState {
@@ -334,7 +334,7 @@ impl MarketState {
             gas_price: None,
             protocol_sync_status: HashMap::new(),
             last_updated: None,
-            pool_counts: HashMap::new(),
+            component_counts: HashMap::new(),
         }
     }
 
@@ -348,7 +348,7 @@ impl MarketState {
         self.last_updated.as_ref()
     }
 
-    /// Number of protocol components (pools) currently tracked.
+    /// Number of protocol components (components) currently tracked.
     pub fn component_count(&self) -> usize {
         self.components.len()
     }
@@ -358,12 +358,12 @@ impl MarketState {
         self.tokens.len()
     }
 
-    /// Number of components (pools) per protocol system.
+    /// Number of components (components) per protocol system.
     ///
-    /// Entries stay present at zero after all of a protocol's pools are
+    /// Entries stay present at zero after all of a protocol's components are
     /// removed so exported gauges reset instead of freezing at the last value.
-    pub fn pool_counts_by_protocol(&self) -> &HashMap<String, u64> {
-        &self.pool_counts
+    pub fn component_counts_by_protocol(&self) -> &HashMap<String, u64> {
+        &self.component_counts
     }
 
     /// Returns the sync status of every protocol system.
@@ -422,7 +422,7 @@ impl MarketState {
                 .insert(component.id.clone(), component);
             if previous.is_none() {
                 *self
-                    .pool_counts
+                    .component_counts
                     .entry(protocol_system)
                     .or_default() += 1;
             }
@@ -453,7 +453,7 @@ impl MarketState {
         for id in ids {
             if let Some(component) = self.components.remove(id) {
                 if let Some(count) = self
-                    .pool_counts
+                    .component_counts
                     .get_mut(&component.protocol_system)
                 {
                     *count = count.saturating_sub(1);
@@ -530,7 +530,7 @@ impl MarketState {
             gas_price: self.gas_price.clone(),
             protocol_sync_status: HashMap::new(), // Not needed for simulation
             last_updated: self.last_updated.clone(),
-            pool_counts: HashMap::new(), // Not needed for simulation
+            component_counts: HashMap::new(), // Not needed for simulation
         }
     }
 }
@@ -546,42 +546,46 @@ mod tests {
     };
 
     #[test]
-    fn pool_counts_by_protocol_tracks_upserts_and_removals() {
+    fn component_counts_by_protocol_tracks_upserts_and_removals() {
         let mut market = MarketState::new();
-        let pool_tokens = [token(0x0A, "A"), token(0x0B, "B")];
+        let component_tokens = [token(0x0A, "A"), token(0x0B, "B")];
 
         market.upsert_components([
-            component_with_protocol("pool_1", "uniswap_v2", &pool_tokens),
-            component_with_protocol("pool_2", "uniswap_v2", &pool_tokens),
-            component_with_protocol("pool_3", "uniswap_v3", &pool_tokens),
+            component_with_protocol("component_1", "uniswap_v2", &component_tokens),
+            component_with_protocol("component_2", "uniswap_v2", &component_tokens),
+            component_with_protocol("component_3", "uniswap_v3", &component_tokens),
         ]);
-        let counts = market.pool_counts_by_protocol();
+        let counts = market.component_counts_by_protocol();
         assert_eq!(counts.get("uniswap_v2"), Some(&2));
         assert_eq!(counts.get("uniswap_v3"), Some(&1));
 
-        // Re-upserting an existing component is an update, not a new pool.
-        market.upsert_components([component_with_protocol("pool_1", "uniswap_v2", &pool_tokens)]);
+        // Re-upserting an existing component is an update, not a new component.
+        market.upsert_components([component_with_protocol(
+            "component_1",
+            "uniswap_v2",
+            &component_tokens,
+        )]);
         assert_eq!(
             market
-                .pool_counts_by_protocol()
+                .component_counts_by_protocol()
                 .get("uniswap_v2"),
             Some(&2)
         );
 
         // Removals decrement; the entry stays at zero so exported gauges reset
         // instead of freezing at the last non-zero value.
-        let removed_ids = ["pool_1".to_string(), "pool_3".to_string()];
+        let removed_ids = ["component_1".to_string(), "component_3".to_string()];
         market.remove_components(removed_ids.iter());
-        let counts = market.pool_counts_by_protocol();
+        let counts = market.component_counts_by_protocol();
         assert_eq!(counts.get("uniswap_v2"), Some(&1));
         assert_eq!(counts.get("uniswap_v3"), Some(&0));
 
         // Removing an unknown id leaves counts untouched.
-        let unknown_ids = ["unknown_pool".to_string()];
+        let unknown_ids = ["unknown_component".to_string()];
         market.remove_components(unknown_ids.iter());
         assert_eq!(
             market
-                .pool_counts_by_protocol()
+                .component_counts_by_protocol()
                 .get("uniswap_v2"),
             Some(&1)
         );
@@ -589,7 +593,7 @@ mod tests {
 
     #[test]
     fn extract_subset_filters_by_component_ids() {
-        // Setup: market with 2 pools (A-B, B-C) and 3 tokens
+        // Setup: market with 2 components (A-B, B-C) and 3 tokens
         let mut market = MarketState::new();
 
         let token_a = token(0x0A, "A");
@@ -597,13 +601,19 @@ mod tests {
         let token_c = token(0x0C, "C");
 
         market.upsert_components([
-            component("pool_ab", &[token_a.clone(), token_b.clone()]),
-            component("pool_bc", &[token_b.clone(), token_c.clone()]),
+            component("component_ab", &[token_a.clone(), token_b.clone()]),
+            component("component_bc", &[token_b.clone(), token_c.clone()]),
         ]);
         market.upsert_tokens([token_a.clone(), token_b.clone(), token_c.clone()]);
         market.update_states([
-            ("pool_ab".to_string(), Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>),
-            ("pool_bc".to_string(), Box::new(MockProtocolSim::new(3.0)) as Box<dyn ProtocolSim>),
+            (
+                "component_ab".to_string(),
+                Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+            ),
+            (
+                "component_bc".to_string(),
+                Box::new(MockProtocolSim::new(3.0)) as Box<dyn ProtocolSim>,
+            ),
         ]);
         market.update_gas_price(BlockGasPrice {
             block_number: 1,
@@ -613,19 +623,19 @@ mod tests {
         });
         market.update_last_updated(BlockInfo::new(12345, "0xabc".to_string(), 0));
 
-        // Extract only pool_ab
-        let ids: HashSet<_> = ["pool_ab".to_string()]
+        // Extract only component_ab
+        let ids: HashSet<_> = ["component_ab".to_string()]
             .into_iter()
             .collect();
         let subset = market.extract_subset(&ids);
 
-        // Components: only pool_ab
+        // Components: only component_ab
         assert_eq!(subset.components.len(), 1);
         assert!(subset
             .components
-            .contains_key("pool_ab"));
+            .contains_key("component_ab"));
 
-        // Tokens: only A and B (referenced by pool_ab), not C
+        // Tokens: only A and B (referenced by component_ab), not C
         assert_eq!(subset.tokens.len(), 2);
         assert!(subset
             .tokens
@@ -637,11 +647,11 @@ mod tests {
             .tokens
             .contains_key(&token_c.address));
 
-        // Simulation states: only pool_ab
+        // Simulation states: only component_ab
         assert_eq!(subset.simulation_states.len(), 1);
         assert!(subset
             .simulation_states
-            .contains_key("pool_ab"));
+            .contains_key("component_ab"));
 
         // Gas price and block info are copied
         assert_eq!(subset.gas_price, market.gas_price);
@@ -665,7 +675,7 @@ mod tests {
         let label = "test_label".to_string();
         let mut states: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
         states.insert(
-            "pool_ab".to_string(),
+            "component_ab".to_string(),
             Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
         );
 
@@ -678,7 +688,7 @@ mod tests {
             .await
             .expect("label was just registered");
         // Base data is empty — overlay provides the state
-        let sim = guard.get_simulation_state("pool_ab");
+        let sim = guard.get_simulation_state("component_ab");
         assert!(sim.is_some());
     }
 
@@ -690,7 +700,7 @@ mod tests {
             .register_labeled_state(
                 "my_label".to_string(),
                 HashMap::from([(
-                    "pool1".to_string(),
+                    "component1".to_string(),
                     Box::new(MockProtocolSim::new(5.0)) as Box<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
@@ -700,7 +710,7 @@ mod tests {
         // A handle with no label must not see the overlay
         let guard = market_ref.read().await;
         assert!(guard
-            .get_simulation_state("pool1")
+            .get_simulation_state("component1")
             .is_none());
     }
 
@@ -713,7 +723,7 @@ mod tests {
             .register_labeled_state(
                 label.clone(),
                 HashMap::from([(
-                    "pool".to_string(),
+                    "component".to_string(),
                     Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
@@ -737,7 +747,7 @@ mod tests {
                 .register_labeled_state(
                     format!("label_{i}"),
                     HashMap::from([(
-                        format!("pool_{i}"),
+                        format!("component_{i}"),
                         Box::new(MockProtocolSim::new(f64::from(i))) as Box<dyn ProtocolSim>,
                     )]),
                     u64::MAX,
@@ -763,7 +773,7 @@ mod tests {
         base.register_labeled_state(
             "shared".to_string(),
             HashMap::from([(
-                "pool_x".to_string(),
+                "component_x".to_string(),
                 Box::new(MockProtocolSim::new(7.0)) as Box<dyn ProtocolSim>,
             )]),
             u64::MAX,
@@ -776,7 +786,7 @@ mod tests {
             .await
             .expect("label was just registered");
         assert!(guard_a
-            .get_simulation_state("pool_x")
+            .get_simulation_state("component_x")
             .is_some());
         drop(guard_a);
 
@@ -785,7 +795,7 @@ mod tests {
             .await
             .expect("label was just registered");
         assert!(guard_b
-            .get_simulation_state("pool_x")
+            .get_simulation_state("component_x")
             .is_some());
     }
 
@@ -800,10 +810,10 @@ mod tests {
 
         {
             let mut data = market_ref.write().await;
-            data.upsert_components([mk_component("pool_ab", &[tok_a.clone(), tok_b.clone()])]);
+            data.upsert_components([mk_component("component_ab", &[tok_a.clone(), tok_b.clone()])]);
             data.upsert_tokens([tok_a.clone(), tok_b.clone()]);
             data.update_states([(
-                "pool_ab".to_string(),
+                "component_ab".to_string(),
                 Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
             )]);
         }
@@ -813,7 +823,7 @@ mod tests {
             .register_labeled_state(
                 label.clone(),
                 HashMap::from([(
-                    "pool_ab".to_string(),
+                    "component_ab".to_string(),
                     Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
@@ -824,13 +834,13 @@ mod tests {
             .read_labeled(&label)
             .await
             .expect("label was just registered");
-        let ids: HashSet<ComponentId> = ["pool_ab".to_string()]
+        let ids: HashSet<ComponentId> = ["component_ab".to_string()]
             .into_iter()
             .collect();
         let subset = guard.extract_subset_with_overlay(&ids);
 
         let sim = subset
-            .get_simulation_state("pool_ab")
+            .get_simulation_state("component_ab")
             .unwrap();
         let mock = sim
             .as_any()
@@ -848,7 +858,7 @@ mod tests {
             .register_labeled_state(
                 "stale".to_string(),
                 HashMap::from([(
-                    "pool_stale".to_string(),
+                    "component_stale".to_string(),
                     Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
                 )]),
                 10,
@@ -858,7 +868,7 @@ mod tests {
             .register_labeled_state(
                 "fresh".to_string(),
                 HashMap::from([(
-                    "pool_fresh".to_string(),
+                    "component_fresh".to_string(),
                     Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
                 )]),
                 20,
@@ -903,7 +913,10 @@ mod tests {
 
         market
             .apply_block_update(1, |data| {
-                data.upsert_components([component("pool_ab", &[tok_a.clone(), tok_b.clone()])]);
+                data.upsert_components([component(
+                    "component_ab",
+                    &[tok_a.clone(), tok_b.clone()],
+                )]);
                 data.upsert_tokens([tok_a.clone(), tok_b.clone()]);
             })
             .await;
@@ -919,7 +932,7 @@ mod tests {
 
         market
             .apply_block_update(2, |data| {
-                data.remove_components(["pool_ab".to_string()].iter());
+                data.remove_components(["component_ab".to_string()].iter());
             })
             .await;
         let data = market.read().await;

@@ -6,21 +6,21 @@
 //!
 //! The four candidates are the best single path plus three ways to split it:
 //!
-//! * **20-chunk disjoint split** — splits across paths that share no pool, in 20 chunks. This is
-//!   the safety net: it is cheap and always finishes, so a tight timeout cannot cut off the split
-//!   while leaving the single path. That is what makes the never-lose guarantee hold under time
-//!   pressure.
-//! * **256-chunk disjoint split** — the same pool-disjoint paths in 256 chunks, in two phases:
+//! * **20-chunk disjoint split** — splits across paths that share no component, in 20 chunks. This
+//!   is the safety net: it is cheap and always finishes, so a tight timeout cannot cut off the
+//!   split while leaving the single path. That is what makes the never-lose guarantee hold under
+//!   time pressure.
+//! * **256-chunk disjoint split** — the same component-disjoint paths in 256 chunks, in two phases:
 //!   first pick which paths to use at coarse (20-chunk) granularity, where each path's share is
 //!   large enough for its gas-activation gate to be meaningful; then allocate across the chosen
 //!   paths at fine (256-chunk) granularity with the gate off, since their gas is already covered.
-//! * **Fill-and-spill** — a split that lets paths share a pool and branch at an intermediate token
-//!   (a tree route), which the pool-disjoint splits cannot express.
+//! * **Fill-and-spill** — a split that lets paths share a component and branch at an intermediate
+//!   token (a tree route), which the component-disjoint splits cannot express.
 //!
 //! Every split fills the order in chunks: for each chunk, it checks how much each path returns for
 //! that chunk and gives the chunk to the best one. Because constant-product / tick AMMs are
 //! path-independent in cumulative input (one swap of `x` equals two back-to-back swaps summing to
-//! `x`), it simulates only the next chunk against the pool state committed so far — O(chunks)
+//! `x`), it simulates only the next chunk against the component state committed so far — O(chunks)
 //! instead of O(chunks^2). That saved work makes the 256-chunk split affordable.
 //!
 //! Candidate discovery (the "Candidate discovery" section below) combines an exhaustive path
@@ -67,7 +67,7 @@ const DEFAULT_MAX_PATHS: usize = 4;
 const COARSE_CHUNKS: usize = 20;
 /// Chunk grid for the fine allocation pass over the fixed active set.
 const FINE_CHUNKS: usize = 256;
-/// Number of top full-amount paths always considered for shared-pool fill-and-spill.
+/// Number of top full-amount paths always considered for shared-component fill-and-spill.
 const SHARED_FULL_PATHS: usize = 8;
 /// Number of full-amount-ranked paths probed with the first chunk for fill-and-spill.
 const SHARED_MARGIN_PROBE_PATHS: usize = 32;
@@ -79,9 +79,9 @@ const SHARED_MAX_CANDIDATES: usize = 12;
 const CANDIDATE_STATES_PER_NODE: usize = 4;
 /// Candidate edge expansions from one path state during discovery.
 const CANDIDATE_EDGES_PER_STATE: usize = 16;
-/// Parallel pools kept for a discovery edge directly into the target token.
+/// Parallel components kept for a discovery edge directly into the target token.
 const CANDIDATE_DIRECT_EDGES_PER_TOKEN: usize = 4;
-/// Parallel pools kept for a discovery edge into an anchor or configured connector token.
+/// Parallel components kept for a discovery edge into an anchor or configured connector token.
 const CANDIDATE_CONNECTOR_EDGES_PER_TOKEN: usize = 2;
 /// Number of highest-connectivity tokens taken as bounded-discovery anchors, derived per solve
 /// from the graph (see `derive_anchor_tokens`).
@@ -116,8 +116,8 @@ impl SplitCandidate {
     }
 }
 
-/// Splits an order across pool-disjoint (and, via fill-and-spill, pool-sharing) paths to reduce
-/// price impact, returning the best net of the single path and several split allocations.
+/// Splits an order across component-disjoint (and, via fill-and-spill, component-sharing) paths to
+/// reduce price impact, returning the best net of the single path and several split allocations.
 pub struct WaterFillAlgorithm {
     min_hops: usize,
     max_hops: usize,
@@ -138,7 +138,8 @@ struct ExchangeMove {
     gain: BigInt,
 }
 
-/// One simulated traversal of a path, with the resulting per-pool states so they can be committed.
+/// One simulated traversal of a path, with the resulting per-component states so they can be
+/// committed.
 struct StepResult {
     amount_out: BigUint,
     gas: BigUint,
@@ -184,9 +185,9 @@ impl WaterFillAlgorithm {
         })
     }
 
-    /// Simulates `amount` through `path`, reading each pool from `overlay` if present else the base
-    /// state. Returns the output, summed gas, and the resulting per-pool states so the caller can
-    /// commit them into an overlay.
+    /// Simulates `amount` through `path`, reading each component from `overlay` if present else the
+    /// base state. Returns the output, summed gas, and the resulting per-component states so
+    /// the caller can commit them into an overlay.
     fn simulate_step(
         path: &Path<DepthAndPrice>,
         market: &MarketState,
@@ -195,10 +196,11 @@ impl WaterFillAlgorithm {
     ) -> Option<StepResult> {
         let mut current = amount;
         let mut total_gas = BigUint::zero();
-        // A pool touched twice in one path must see its own first swap, which needs an intra-path
-        // overlay carried across hops. That reuse is rare, so only pay the per-hop state clone when
-        // the path actually repeats a pool; the common case skips the clone entirely.
-        let path_reuses_pool = {
+        // A component touched twice in one path must see its own first swap, which needs an
+        // intra-path overlay carried across hops. That reuse is rare, so only pay the
+        // per-hop state clone when the path actually repeats a component; the common case
+        // skips the clone entirely.
+        let path_reuses_component = {
             let mut seen: HashSet<&ComponentId> = HashSet::with_capacity(path.len());
             !path
                 .edge_iter()
@@ -226,7 +228,7 @@ impl WaterFillAlgorithm {
                 .get_amount_out_guarded(current.clone(), token_in, token_out)
                 .ok()?;
             total_gas += &result.gas;
-            if path_reuses_pool {
+            if path_reuses_component {
                 intra_path_states.insert(component_id.clone(), result.new_state.clone_box());
             }
             new_states.push((component_id.clone(), result.new_state));
@@ -258,29 +260,29 @@ impl WaterFillAlgorithm {
             .unwrap_or_else(BigInt::zero)
     }
 
-    /// Picks up to `max_paths` paths that share no pool, so their outputs can be summed without
-    /// re-simulating — two paths through the same pool compete for its liquidity, so their separate
-    /// outputs would not add up.
+    /// Picks up to `max_paths` paths that share no component, so their outputs can be summed
+    /// without re-simulating — two paths through the same component compete for its liquidity,
+    /// so their separate outputs would not add up.
     ///
-    /// Walks `ranked` best first and keeps a path only if none of its pools are already used by a
-    /// kept path, skipping it otherwise. Returns the kept paths' indices into `ranked`.
+    /// Walks `ranked` best first and keeps a path only if none of its components are already used
+    /// by a kept path, skipping it otherwise. Returns the kept paths' indices into `ranked`.
     fn select_disjoint(ranked: &[Path<DepthAndPrice>], max_paths: usize) -> Vec<usize> {
-        let mut visited_pools: HashSet<&ComponentId> = HashSet::new();
+        let mut visited_components: HashSet<&ComponentId> = HashSet::new();
         let mut selected = Vec::new();
         for (idx, path) in ranked.iter().enumerate() {
-            let path_pools: Vec<&ComponentId> = path
+            let path_components: Vec<&ComponentId> = path
                 .edge_iter()
                 .iter()
                 .map(|e| &e.component_id)
                 .collect();
-            if path_pools
+            if path_components
                 .iter()
-                .any(|c| visited_pools.contains(*c))
+                .any(|c| visited_components.contains(*c))
             {
                 continue;
             }
-            for c in path_pools {
-                visited_pools.insert(c);
+            for c in path_components {
+                visited_components.insert(c);
             }
             selected.push(idx);
             if selected.len() >= max_paths {
@@ -452,9 +454,9 @@ impl WaterFillAlgorithm {
             }
         }
 
-        // No early exit on a missing single path: a split across thin pools can fill an order that
-        // no single path can, so the caller decides — it only errors when neither a single path nor
-        // a split candidate fills the order.
+        // No early exit on a missing single path: a split across thin components can fill an order
+        // that no single path can, so the caller decides — it only errors when neither a
+        // single path nor a split candidate fills the order.
         full_outputs.sort_by(|(_, a), (_, b)| b.cmp(a));
         let ordered: Vec<Path<DepthAndPrice>> = full_outputs
             .into_iter()
@@ -507,10 +509,10 @@ impl Algorithm for WaterFillAlgorithm {
 
         // Build the split candidates; the best net of them competes with the single path.
         let mut candidates: Vec<SplitCandidate> = Vec::new();
-        // One coarse (20-chunk) water-fill over the pool-disjoint paths feeds both the floor split
-        // and the refined split, so run it once. It is cheap and always finishes, so a tight
-        // timeout cannot cut it off while leaving the single path — a winning split is never lost
-        // to the clock.
+        // One coarse (20-chunk) water-fill over the component-disjoint paths feeds both the floor
+        // split and the refined split, so run it once. It is cheap and always finishes, so
+        // a tight timeout cannot cut it off while leaving the single path — a winning split
+        // is never lost to the clock.
         let disjoint = Self::select_disjoint(ctx.ordered, self.max_paths);
         let coarse = (disjoint.len() >= 2)
             .then(|| self.disjoint_waterfill(&ctx, &disjoint, COARSE_CHUNKS, true))
@@ -526,8 +528,8 @@ impl Algorithm for WaterFillAlgorithm {
                 candidates.push(c);
             }
         }
-        // Fill-and-spill: a split that lets paths share a pool and branch at an intermediate token
-        // (a tree route), which the pool-disjoint splits cannot express.
+        // Fill-and-spill: a split that lets paths share a component and branch at an intermediate
+        // token (a tree route), which the component-disjoint splits cannot express.
         if let Some(c) = self.fillspill_alloc(&ctx, FINE_CHUNKS) {
             candidates.push(c);
         }
@@ -612,10 +614,10 @@ impl WaterFillAlgorithm {
     }
 
     /// Net output (gross output minus gas cost in output-token terms) of `path` simulated in
-    /// isolation at `amount`. Pool-disjoint paths never interfere, so an isolated re-simulation is
-    /// exact. A zero amount means the path is dropped from the route: it yields no output and,
-    /// since it is no longer swapped, no gas — so dropping a donor credits its saved gas
-    /// automatically.
+    /// isolation at `amount`. Component-disjoint paths never interfere, so an isolated
+    /// re-simulation is exact. A zero amount means the path is dropped from the route: it
+    /// yields no output and, since it is no longer swapped, no gas — so dropping a donor
+    /// credits its saved gas automatically.
     fn path_net(
         ctx: &SplitContext,
         path: &Path<DepthAndPrice>,
@@ -634,10 +636,10 @@ impl WaterFillAlgorithm {
     /// Water-fill can never un-commit a chunk, so its split is only accurate to one fine chunk and
     /// can miss the equal-marginal split. This shifts `delta` of input from an over-allocated donor
     /// to an under-allocated recipient whenever the pair's summed net output strictly improves,
-    /// then halves `delta` once no move helps, down to a sub-chunk floor. Paths are pool-disjoint,
-    /// so a trial re-simulates only the two paths it touches (unchanged paths keep their cached
-    /// net). Only strictly-improving moves are accepted, so the result never scores below the split
-    /// it started from.
+    /// then halves `delta` once no move helps, down to a sub-chunk floor. Paths are
+    /// component-disjoint, so a trial re-simulates only the two paths it touches (unchanged
+    /// paths keep their cached net). Only strictly-improving moves are accepted, so the result
+    /// never scores below the split it started from.
     fn disjoint_exchange(
         &self,
         ctx: &SplitContext,
@@ -735,8 +737,8 @@ impl WaterFillAlgorithm {
         cum
     }
 
-    /// Simulates `amount` through `path`, reading and committing pool states via `overrides`, and
-    /// returns the allocation the route assembly consumes.
+    /// Simulates `amount` through `path`, reading and committing component states via `overrides`,
+    /// and returns the allocation the route assembly consumes.
     fn allocation_commit(
         path: &Path<DepthAndPrice>,
         market: &MarketState,
@@ -803,8 +805,8 @@ impl WaterFillAlgorithm {
     }
 
     /// Builds one independent leg per path at its allocated amount. `subset` and `alloc` are
-    /// aligned by index; pool-disjoint paths never interfere, so each leg is a real independent
-    /// simulation.
+    /// aligned by index; component-disjoint paths never interfere, so each leg is a real
+    /// independent simulation.
     fn build_disjoint_legs(
         &self,
         ctx: &SplitContext,
@@ -817,8 +819,8 @@ impl WaterFillAlgorithm {
             if alloc[i].is_zero() {
                 continue;
             }
-            // Fresh overrides per leg: legs are pool-disjoint, but a pool reused within one path
-            // must still see its own first swap.
+            // Fresh overrides per leg: legs are component-disjoint, but a component reused within
+            // one path must still see its own first swap.
             let mut overrides: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
             let allocation = Self::allocation_commit(
                 &ctx.ordered[path_idx],
@@ -835,9 +837,9 @@ impl WaterFillAlgorithm {
         Self::candidate_from_allocations(ctx, &allocations)
     }
 
-    /// Incremental water-fill over a set of pool-disjoint paths. Returns the amount allocated to
-    /// each path in `subset` order. With `gate`, a path only activates when its first chunk covers
-    /// its gas; without it, every path is eligible (used once the active set is fixed).
+    /// Incremental water-fill over a set of component-disjoint paths. Returns the amount allocated
+    /// to each path in `subset` order. With `gate`, a path only activates when its first chunk
+    /// covers its gas; without it, every path is eligible (used once the active set is fixed).
     fn disjoint_waterfill(
         &self,
         ctx: &SplitContext,
@@ -951,7 +953,7 @@ impl WaterFillAlgorithm {
         candidates
     }
 
-    /// Coarse set-selection then fine allocation with shared-pool fill-and-spill.
+    /// Coarse set-selection then fine allocation with shared-component fill-and-spill.
     fn fillspill_alloc(&self, ctx: &SplitContext, fine_chunks: usize) -> Option<SplitCandidate> {
         let candidates = self.select_shared_candidates(ctx);
         if candidates.len() < 2 {
@@ -1313,11 +1315,11 @@ fn score_candidate_edges<'a, W>(
 }
 
 /// Derives bounded discovery's soft anchor set from the live graph: the `DERIVED_ANCHOR_COUNT`
-/// most-connected tokens (highest pool-edge degree) plus the native-ETH sentinel. Degree is the
-/// same connectivity signal `derive-connector-tokens` ranks by, so anchoring stays correct on any
-/// chain without a hardcoded per-chain list. The native-ETH zero address carries near-zero degree
-/// but is load-bearing for `WETH → ETH → token` routes where Tycho models native ETH as `0x0`, so
-/// it is anchored explicitly.
+/// most-connected tokens (highest component-edge degree) plus the native-ETH sentinel. Degree is
+/// the same connectivity signal `derive-connector-tokens` ranks by, so anchoring stays correct on
+/// any chain without a hardcoded per-chain list. The native-ETH zero address carries near-zero
+/// degree but is load-bearing for `WETH → ETH → token` routes where Tycho models native ETH as
+/// `0x0`, so it is anchored explicitly.
 fn derive_anchor_tokens<W>(graph: &StableDiGraph<W>) -> HashSet<Address> {
     let mut by_degree: Vec<(NodeIndex, usize)> = graph
         .node_indices()
@@ -1491,7 +1493,7 @@ mod tests {
     use crate::{
         algorithm::{
             split_test_harness::{
-                evaluate_scenario, optimal_two_pool_output, split_metrics, split_scenarios,
+                evaluate_scenario, optimal_two_component_output, split_metrics, split_scenarios,
                 two_equal_weth_usdc, TWO_EQUAL_USDC_RESERVE, TWO_EQUAL_WETH_RESERVE,
             },
             test_utils::{
@@ -1521,7 +1523,7 @@ mod tests {
         )
     }
 
-    fn v2_pool(reserve_a: u128, reserve_b: u128) -> UniswapV2State {
+    fn v2_component(reserve_a: u128, reserve_b: u128) -> UniswapV2State {
         UniswapV2State::new(
             U256::from(reserve_a) * U256::from(10u64).pow(U256::from(18u64)),
             U256::from(reserve_b) * U256::from(10u64).pow(U256::from(18u64)),
@@ -1549,7 +1551,7 @@ mod tests {
 
             result.assert_passes_lower_bound();
             // water_fill reaches the analytical optimum within 5% on single-hop and shared-prefix
-            // scenarios. DOUBLE_SPLIT re-splits at both hops with mismatched pool sizes; the
+            // scenarios. DOUBLE_SPLIT re-splits at both hops with mismatched component sizes; the
             // token-merged disjoint/fill-and-spill allocation reaches ~90% of that cross-hop
             // optimum -- still well above the single-path floor, just short of PFW's per-hop
             // line search there.
@@ -1576,17 +1578,19 @@ mod tests {
         assert_eq!(result.path_count, 1, "high gas should prevent splitting");
     }
 
-    /// A split fills an order that no single path can. Two parallel constant-product pools each
-    /// revert once the input reaches their reserve, so the full order overruns either pool alone;
-    /// split in half it fits both. The portfolio returns the split even though the single-path
-    /// baseline is absent — instead of the earlier `InsufficientLiquidity` short-circuit.
+    /// A split fills an order that no single path can. Two parallel constant-product components
+    /// each revert once the input reaches their reserve, so the full order overruns either
+    /// component alone; split in half it fits both. The portfolio returns the split even though
+    /// the single-path baseline is absent — instead of the earlier `InsufficientLiquidity`
+    /// short-circuit.
     #[tokio::test]
     async fn test_split_fills_when_no_single_path_can() {
         let a = token_with_decimals(0x01, "A", 18);
         let b = token_with_decimals(0x02, "B", 18);
         // reserve_0 (token A, the input side) = 800; a swap reverts once its input reaches it. The
-        // full order (1000 A) overruns either pool, but ~500 A per pool in a 50/50 split fits.
-        let pool = || {
+        // full order (1000 A) overruns either component, but ~500 A per component in a 50/50 split
+        // fits.
+        let component = || {
             Box::new(ConstantProductSim {
                 reserve_0: BigUint::from(800u64) * BigUint::from(10u64).pow(18),
                 reserve_1: BigUint::from(10_000u64) * BigUint::from(10u64).pow(18),
@@ -1594,8 +1598,8 @@ mod tests {
             }) as Box<dyn ProtocolSim>
         };
         let (market, gm) = setup_market_weighted_boxed(vec![
-            ("pool_x", &a, &b, pool()),
-            ("pool_y", &a, &b, pool()),
+            ("component_x", &a, &b, component()),
+            ("component_y", &a, &b, component()),
         ]);
         let order = Order::new(
             a.address.clone(),
@@ -1612,18 +1616,18 @@ mod tests {
             .await;
         assert!(single.is_err(), "premise: no single path fills the full order");
 
-        // The portfolio still returns a split across both pools.
+        // The portfolio still returns a split across both components.
         let split = WaterFillAlgorithm::with_config(config())
             .unwrap()
             .find_best_route(gm.graph(), market.clone(), None, None, &order)
             .await
             .expect("water_fill returns a split when no single path fills");
-        assert!(split.route().swaps().len() >= 2, "expected a split across both pools");
+        assert!(split.route().swaps().len() >= 2, "expected a split across both components");
     }
 
-    /// A pool whose math panics mid-simulation must be skipped like any failing pool, not
-    /// unwind through the solver worker thread. The panicking pool advertises huge depth so
-    /// discovery ranks it first and the bulk fill loops actually simulate it.
+    /// A component whose math panics mid-simulation must be skipped like any failing component,
+    /// not unwind through the solver worker thread. The panicking component advertises huge depth
+    /// so discovery ranks it first and the bulk fill loops actually simulate it.
     #[tokio::test]
     async fn test_water_fill_contains_simulation_panic() {
         let a = token_with_decimals(0x01, "A", 18);
@@ -1634,8 +1638,8 @@ mod tests {
             gas: 50_000,
         }) as Box<dyn ProtocolSim>;
         let (market, gm) = setup_market_weighted_boxed(vec![
-            ("pool_ok", &a, &b, healthy),
-            ("pool_panics", &a, &b, Box::new(DivByZeroSim::default())),
+            ("component_ok", &a, &b, healthy),
+            ("component_panics", &a, &b, Box::new(DivByZeroSim::default())),
         ]);
         let order = Order::new(
             a.address.clone(),
@@ -1649,23 +1653,23 @@ mod tests {
             .unwrap()
             .find_best_route(gm.graph(), market.clone(), None, None, &order)
             .await
-            .expect("panicking pool is skipped; the healthy pool still fills the order");
+            .expect("panicking component is skipped; the healthy component still fills the order");
 
         assert!(
             result
                 .route()
                 .swaps()
                 .iter()
-                .all(|swap| swap.component_id() == "pool_ok"),
-            "route must only use the healthy pool",
+                .all(|swap| swap.component_id() == "component_ok"),
+            "route must only use the healthy component",
         );
     }
 
-    /// On two equal fee-free pools the split's gross output must come within a tight tolerance of
-    /// the analytical two-pool optimum (a 50/50 split): the fine 256-chunk allocation finds the
-    /// optimal split, not just any splitting one.
+    /// On two equal fee-free components the split's gross output must come within a tight tolerance
+    /// of the analytical two-component optimum (a 50/50 split): the fine 256-chunk allocation
+    /// finds the optimal split, not just any splitting one.
     #[tokio::test]
-    async fn test_water_fill_output_near_two_pool_optimum() {
+    async fn test_water_fill_output_near_two_component_optimum() {
         let m = two_equal_weth_usdc(1);
         let trade = 500u64;
         let order = whole_weth_order(&m.weth, &m.usdc, trade);
@@ -1682,26 +1686,31 @@ mod tests {
             .await
             .expect("split solves");
         let (_, path_count, gross) = split_metrics(&result, &m.weth, &m.usdc);
-        assert_eq!(path_count, 2, "the optimum uses both pools");
+        assert_eq!(path_count, 2, "the optimum uses both components");
 
-        // Fee-free reserves in raw units, so the no-fee two-pool optimum applies directly.
+        // Fee-free reserves in raw units, so the no-fee two-component optimum applies directly.
         let reserve_in = TWO_EQUAL_WETH_RESERVE as f64 * 1e18;
         let reserve_out = TWO_EQUAL_USDC_RESERVE as f64 * 1e6;
         let trade_amount = trade as f64 * 1e18;
-        let (_, optimum) =
-            optimal_two_pool_output(reserve_in, reserve_out, reserve_in, reserve_out, trade_amount);
+        let (_, optimum) = optimal_two_component_output(
+            reserve_in,
+            reserve_out,
+            reserve_in,
+            reserve_out,
+            trade_amount,
+        );
 
         let gross = gross.to_f64().unwrap();
         assert!(
             gross >= optimum * 0.999 && gross <= optimum * 1.0001,
-            "split gross {gross} should be within 0.1% of the two-pool optimum {optimum}",
+            "split gross {gross} should be within 0.1% of the two-component optimum {optimum}",
         );
     }
 
     /// Under a tight timeout the split must never lose to the best single path: the 20-chunk split
     /// does the cheap coarse allocation, so cutting off later refinement cannot drop the result
     /// below the single path. A budget too tight to finish yields no route at all (the router falls
-    /// back to other pools) — a no-answer, not a loss — so the never-lose check runs only for
+    /// back to other components) — a no-answer, not a loss — so the never-lose check runs only for
     /// budgets where water-fill returns a route. The 50ms budget comfortably exceeds this
     /// scenario's few-ms solve, so the comparison is always exercised.
     #[tokio::test]
@@ -1745,11 +1754,11 @@ mod tests {
 
     // ==================== Candidate discovery ====================
 
-    /// Bounded discovery finds both parallel pools as candidate paths and ranks the deeper pool
-    /// first by simulated full-amount output, using live simulation only (no precomputed edge
-    /// weights on the weightless graph).
+    /// Bounded discovery finds both parallel components as candidate paths and ranks the deeper
+    /// component first by simulated full-amount output, using live simulation only (no
+    /// precomputed edge weights on the weightless graph).
     #[tokio::test]
-    async fn test_discovery_finds_and_ranks_parallel_pools() {
+    async fn test_discovery_finds_and_ranks_parallel_components() {
         let link = token_with_decimals(0x01, "LINK", 18);
         let weth = token_with_decimals(0x02, "WETH", 18);
         let (market, graph_manager) = setup_market_unweighted(vec![
@@ -1757,13 +1766,13 @@ mod tests {
                 "a_weak_link_weth",
                 &link,
                 &weth,
-                Box::new(v2_pool(2_000_000, 264)) as Box<dyn ProtocolSim>,
+                Box::new(v2_component(2_000_000, 264)) as Box<dyn ProtocolSim>,
             ),
             (
                 "z_strong_link_weth",
                 &link,
                 &weth,
-                Box::new(v2_pool(2_000_000, 5_700)) as Box<dyn ProtocolSim>,
+                Box::new(v2_component(2_000_000, 5_700)) as Box<dyn ProtocolSim>,
             ),
         ]);
         let order = Order::new(
@@ -1793,8 +1802,8 @@ mod tests {
         )
         .expect("discovery finds candidates");
 
-        assert_eq!(paths.len(), 2, "both parallel pools should be discovered");
-        // Scores are (path index, full-amount gross output), best first: the deeper pool wins.
+        assert_eq!(paths.len(), 2, "both parallel components should be discovered");
+        // Scores are (path index, full-amount gross output), best first: the deeper component wins.
         let best_path = &paths[scores[0].0];
         assert_eq!(
             best_path.edge_iter()[0].component_id,
@@ -1812,7 +1821,7 @@ mod tests {
             "link_weth",
             &link,
             &weth,
-            Box::new(v2_pool(2_000_000, 5_700)) as Box<dyn ProtocolSim>,
+            Box::new(v2_component(2_000_000, 5_700)) as Box<dyn ProtocolSim>,
         )]);
         let order = Order::new(
             link.address.clone(),
@@ -1845,7 +1854,7 @@ mod tests {
         );
     }
 
-    /// Anchors are the most-connected tokens (highest pool-edge degree) plus the native-ETH
+    /// Anchors are the most-connected tokens (highest component-edge degree) plus the native-ETH
     /// sentinel, derived from the graph rather than a hardcoded list.
     #[test]
     fn test_derive_anchor_tokens_ranks_hub_and_includes_native_sentinel() {
@@ -1854,9 +1863,9 @@ mod tests {
         let b = token_with_decimals(0x03, "B", 18);
         let c = token_with_decimals(0x04, "C", 18);
         let (_market, graph_manager) = setup_market_unweighted(vec![
-            ("hub_a", &hub, &a, Box::new(v2_pool(1, 1)) as Box<dyn ProtocolSim>),
-            ("hub_b", &hub, &b, Box::new(v2_pool(1, 1)) as Box<dyn ProtocolSim>),
-            ("hub_c", &hub, &c, Box::new(v2_pool(1, 1)) as Box<dyn ProtocolSim>),
+            ("hub_a", &hub, &a, Box::new(v2_component(1, 1)) as Box<dyn ProtocolSim>),
+            ("hub_b", &hub, &b, Box::new(v2_component(1, 1)) as Box<dyn ProtocolSim>),
+            ("hub_c", &hub, &c, Box::new(v2_component(1, 1)) as Box<dyn ProtocolSim>),
         ]);
 
         let anchors = derive_anchor_tokens(graph_manager.graph());

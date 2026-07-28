@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.93.0"
+    "version": "0.97.7"
   },
   "paths": {
     "/v1/health": {
@@ -757,7 +757,7 @@
       },
       "Route": {
         "type": "object",
-        "description": "A route consisting of one or more sequential swaps.\n\nA route describes the path through liquidity pools to execute a swap.\nFor multi-hop swaps, the output of each swap becomes the input of the next.",
+        "description": "A route consisting of one or more sequential swaps.\n\nA route describes the path through components (liquidity pools) to execute a swap.\nFor multi-hop swaps, the output of each swap becomes the input of the next.",
         "required": [
           "swaps"
         ],
@@ -773,7 +773,7 @@
       },
       "Swap": {
         "type": "object",
-        "description": "A single swap within a route.\n\nRepresents an atomic swap on a specific liquidity pool (component).",
+        "description": "A single swap within a route.\n\nRepresents an atomic swap on a specific component (liquidity pool).",
         "required": [
           "component_id",
           "protocol",
@@ -797,7 +797,7 @@
           },
           "component_id": {
             "type": "string",
-            "description": "Identifier of the liquidity pool component.",
+            "description": "Identifier of the component (liquidity pool).",
             "example": "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc"
           },
           "gas_estimate": {

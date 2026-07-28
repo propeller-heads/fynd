@@ -1,7 +1,7 @@
 //! Derived data computation system.
 //!
 //! This module provides a framework for computing derived market data
-//! (token prices, pool depths, spot prices, etc.) from raw market data.
+//! (token prices, component depths, spot prices, etc.) from raw market data.
 //!
 //! # Architecture
 //!
@@ -22,11 +22,11 @@
 //!                 SpotPriceComputation
 //!                    /           \
 //!                   v             v
-//!    PoolDepthComputation    TokenGasPriceComputation
+//!    ComponentDepthComputation    TokenGasPriceComputation
 //! ```
 //!
-//! - **SpotPriceComputation**: No dependencies, computes spot prices for all pools
-//! - **PoolDepthComputation**: Depends on `spot_prices`
+//! - **SpotPriceComputation**: No dependencies, computes spot prices for all components
+//! - **ComponentDepthComputation**: Depends on `spot_prices`
 //! - **TokenGasPriceComputation**: Depends on `spot_prices` and `gas_price` (from market data)
 //!
 //! # Example

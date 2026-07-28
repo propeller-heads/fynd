@@ -38,7 +38,7 @@ pub const ONE_ETH: u128 = 1_000_000_000_000_000_000;
 ///
 /// Each call to `get_amount_out` returns a new state with an incremented spot_price,
 /// simulating liquidity changes after a swap. This allows testing state override logic
-/// when the same pool is used multiple times in a path.
+/// when the same component is used multiple times in a path.
 // TODO: Consider moving MockProtocolSim to the tycho-common
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MockProtocolSim {
@@ -255,7 +255,7 @@ impl ProtocolSim for MockProtocolSim {
 
 /// ProtocolSim whose `get_amount_out` performs a real U256 division by zero.
 ///
-/// Reproduces pool math panicking inside a simulation call instead of returning a
+/// Reproduces component math panicking inside a simulation call instead of returning a
 /// `SimulationError`, so tests can assert that callers contain the panic. All other
 /// methods delegate to a [`MockProtocolSim`].
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -518,10 +518,10 @@ pub fn order(token_in: &Token, token_out: &Token, amount: u128, side: OrderSide)
 ///
 /// Use `market_read(&market_ref)` to get a `MarketState` reference for other tests.
 pub fn setup_market_weighted(
-    pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
+    components: Vec<(&str, &Token, &Token, MockProtocolSim)>,
 ) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
     setup_market_weighted_boxed(
-        pools
+        components
             .into_iter()
             .map(|(id, a, b, sim)| (id, a, b, Box::new(sim) as Box<dyn ProtocolSim>))
             .collect(),
@@ -529,9 +529,10 @@ pub fn setup_market_weighted(
 }
 
 /// Like [`setup_market_weighted`] but accepts any boxed [`ProtocolSim`], for tests that need a
-/// non-`MockProtocolSim` pool (e.g. a constant-product pool that reverts past its reserves).
+/// non-`MockProtocolSim` component (e.g. a constant-product component that reverts past its
+/// reserves).
 pub fn setup_market_weighted_boxed(
-    pools: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
+    components: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
 ) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
     let mut market = MarketState::new();
     let mut component_weights = HashMap::new();
@@ -545,9 +546,9 @@ pub fn setup_market_weighted_boxed(
     });
     market.update_last_updated(BlockInfo::new(1, "0x00".into(), 0));
 
-    for (pool_id, token_in, token_out, state) in pools {
+    for (component_id, token_in, token_out, state) in components {
         let tokens = vec![token_in.clone(), token_out.clone()];
-        let comp = component(pool_id, &tokens);
+        let comp = component(component_id, &tokens);
         let weight_to =
             DepthAndPrice::from_protocol_sim(state.as_ref(), token_in, token_out).unwrap();
         let weight_from =
@@ -555,19 +556,19 @@ pub fn setup_market_weighted_boxed(
 
         // Insert component, state, and tokens separately using new API
         market.upsert_components(std::iter::once(comp));
-        market.update_states([(pool_id.to_string(), state)]);
+        market.update_states([(component_id.to_string(), state)]);
         market.upsert_tokens(tokens);
 
-        component_weights.insert(pool_id, (token_in, token_out, weight_to, weight_from));
+        component_weights.insert(component_id, (token_in, token_out, weight_to, weight_from));
     }
 
     let mut graph_manager = PetgraphStableDiGraphManager::default();
     graph_manager.initialize_graph(&market.component_topology());
 
-    for (pool_id, (token_in, token_out, weight_to, weight_from)) in component_weights {
+    for (component_id, (token_in, token_out, weight_to, weight_from)) in component_weights {
         graph_manager
             .set_edge_weight(
-                &pool_id.to_string(),
+                &component_id.to_string(),
                 &token_in.address,
                 &token_out.address,
                 weight_to,
@@ -576,7 +577,7 @@ pub fn setup_market_weighted_boxed(
             .unwrap();
         graph_manager
             .set_edge_weight(
-                &pool_id.to_string(),
+                &component_id.to_string(),
                 &token_out.address,
                 &token_in.address,
                 weight_from,
@@ -590,7 +591,7 @@ pub fn setup_market_weighted_boxed(
 
 /// Setup helper for algorithms that do not use pre-computed edge weights
 pub fn setup_market_unweighted(
-    pools: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
+    components: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
 ) -> (MarketData, PetgraphStableDiGraphManager<()>) {
     let mut market = MarketState::new();
 
@@ -602,11 +603,11 @@ pub fn setup_market_unweighted(
     });
     market.update_last_updated(BlockInfo::new(1, "0x00".into(), 0));
 
-    for (pool_id, token_in, token_out, state) in pools {
+    for (component_id, token_in, token_out, state) in components {
         let tokens = vec![token_in.clone(), token_out.clone()];
-        let comp = component(pool_id, &tokens);
+        let comp = component(component_id, &tokens);
         market.upsert_components(std::iter::once(comp));
-        market.update_states([(pool_id.to_string(), state)]);
+        market.update_states([(component_id.to_string(), state)]);
         market.upsert_tokens(tokens);
     }
 
@@ -644,7 +645,7 @@ pub mod fixtures {
         m
     }
 
-    /// 3 parallel pools A<->B, 2 pools B<->C.
+    /// 3 parallel components A<->B, 2 components B<->C.
     pub(crate) fn parallel_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
         let (a, b, c, _) = addrs();
         let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
@@ -1066,7 +1067,7 @@ mod tests {
 
     // ==================== ConstantProductSim Tests ====================
 
-    fn cp_pool(reserve_0: u64, reserve_1: u64) -> ConstantProductSim {
+    fn cp_component(reserve_0: u64, reserve_1: u64) -> ConstantProductSim {
         ConstantProductSim {
             reserve_0: BigUint::from(reserve_0),
             reserve_1: BigUint::from(reserve_1),
@@ -1078,7 +1079,7 @@ mod tests {
     fn test_constant_product_get_amount_out() {
         // reserve_in=1000, reserve_out=2000, amount_in=100
         // amount_out = 100 * 2000 / (1000 + 100) = 200_000 / 1100 = 181
-        let sim = cp_pool(1000, 2000);
+        let sim = cp_component(1000, 2000);
         let t_in = token(0x01, "T0");
         let t_out = token(0x02, "T1");
 
@@ -1098,20 +1099,20 @@ mod tests {
 
     #[test]
     fn test_constant_product_split_beats_single() {
-        // Concavity of xy=k: splitting across two identical pools yields more output.
+        // Concavity of xy=k: splitting across two identical components yields more output.
         // Single: 200 * 2000 / (1000 + 200) = 333
         // Split 100+100: (181) + (181) = 362 > 333
         let t_in = token(0x01, "T0");
         let t_out = token(0x02, "T1");
 
-        let single = cp_pool(1000, 2000)
+        let single = cp_component(1000, 2000)
             .get_amount_out(BigUint::from(200u64), &t_in, &t_out)
             .unwrap();
 
-        let half1 = cp_pool(1000, 2000)
+        let half1 = cp_component(1000, 2000)
             .get_amount_out(BigUint::from(100u64), &t_in, &t_out)
             .unwrap();
-        let half2 = cp_pool(1000, 2000)
+        let half2 = cp_component(1000, 2000)
             .get_amount_out(BigUint::from(100u64), &t_in, &t_out)
             .unwrap();
         let split_total = half1.amount + half2.amount;
@@ -1127,7 +1128,7 @@ mod tests {
     fn test_constant_product_spot_price_direction() {
         // reserve_0=1000 (token 0x01), reserve_1=2000 (token 0x02)
         // forward: 2000/1000 = 2.0; reverse: 1000/2000 = 0.5; product = 1.0
-        let sim = cp_pool(1000, 2000);
+        let sim = cp_component(1000, 2000);
         let token_low = token(0x01, "T0");
         let token_high = token(0x02, "T1");
 
@@ -1146,8 +1147,8 @@ mod tests {
     }
 
     #[test]
-    fn test_constant_product_empties_pool_error() {
-        let sim = cp_pool(1000, 2000);
+    fn test_constant_product_empties_component_error() {
+        let sim = cp_component(1000, 2000);
         let t_in = token(0x01, "T0");
         let t_out = token(0x02, "T1");
 
@@ -1175,12 +1176,12 @@ mod tests {
         };
 
         let (market, _graph) =
-            setup_market_unweighted(vec![("pool1", &t_in, &t_out, Box::new(sim))]);
+            setup_market_unweighted(vec![("component1", &t_in, &t_out, Box::new(sim))]);
 
         let view = market_read(&market);
         let state = view
-            .get_simulation_state("pool1")
-            .expect("pool1 should be in market");
+            .get_simulation_state("component1")
+            .expect("component1 should be in market");
         let result = state
             .get_amount_out(BigUint::from(100u64), &t_in, &t_out)
             .expect("swap should succeed");

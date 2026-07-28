@@ -983,7 +983,7 @@ impl BlockInfo {
 
 /// A route consisting of one or more sequential swaps.
 ///
-/// A route describes the path through liquidity pools to execute a swap.
+/// A route describes the path through components (liquidity pools) to execute a swap.
 /// For multi-hop swaps, the output of each swap becomes the input of the next.
 #[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1012,12 +1012,12 @@ impl Route {
 
 /// A single swap within a route.
 ///
-/// Represents an atomic swap on a specific liquidity pool (component).
+/// Represents an atomic swap on a specific component (liquidity pool).
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Swap {
-    /// Identifier of the liquidity pool component.
+    /// Identifier of the component (liquidity pool).
     #[cfg_attr(
         feature = "openapi",
         schema(example = "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc")
@@ -1084,7 +1084,7 @@ impl Swap {
         }
     }
 
-    /// Liquidity pool component identifier.
+    /// Component (liquidity pool) identifier.
     pub fn component_id(&self) -> &str {
         &self.component_id
     }
@@ -1491,7 +1491,7 @@ mod wire_format_tests {
             "price_impact_bps": 5,
             "block": { "number": 21000000, "hash": "0xdeadbeef", "timestamp": 1700000000 },
             "route": { "swaps": [{
-                "component_id": "pool-1",
+                "component_id": "component-1",
                 "protocol": "uniswap_v3",
                 "token_in":  "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "token_out": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

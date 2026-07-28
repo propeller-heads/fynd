@@ -78,7 +78,7 @@ impl WorkerPoolsConfig {
 /// Blocklist configuration for excluding components from the Tycho stream.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlocklistConfig {
-    /// Component IDs to exclude (e.g., pool addresses with simulation issues).
+    /// Component IDs to exclude (e.g., component addresses with simulation issues).
     #[serde(default)]
     components: HashSet<String>,
 }

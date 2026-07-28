@@ -1,10 +1,10 @@
-//! Panic containment for pool simulation calls.
+//! Panic containment for component simulation calls.
 //!
-//! `ProtocolSim` implementations run third-party pool math that can panic on degenerate
+//! `ProtocolSim` implementations run third-party component math that can panic on degenerate
 //! inputs (e.g. a U256 division by zero when quoting an absurdly large amount). Left
 //! uncaught, such a panic unwinds through the solver worker thread and permanently kills
 //! it. Simulation calls made while solving therefore go through this guard, which turns
-//! a panic into a `SimulationError` so the algorithm skips the pool and keeps solving.
+//! a panic into a `SimulationError` so the algorithm skips the component and keeps solving.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -26,7 +26,7 @@ pub(crate) trait GuardedProtocolSim {
     /// Calls `get_amount_out`, converting a panic into a `SimulationError::FatalError`.
     ///
     /// On a contained panic, logs the input that triggered it (amount and token pair) so
-    /// the offending pool/quote can be tracked down from the logs.
+    /// the offending component/quote can be tracked down from the logs.
     fn get_amount_out_guarded(
         &self,
         amount_in: BigUint,
@@ -64,7 +64,7 @@ impl<T: ProtocolSim + ?Sized> GuardedProtocolSim for T {
                 token_in_symbol = %token_in.symbol,
                 token_out_symbol = %token_out.symbol,
                 panic = message,
-                "pool simulation panicked; skipping pool"
+                "component simulation panicked; skipping component"
             );
             Err(SimulationError::FatalError(format!("get_amount_out panicked: {message}")))
         })

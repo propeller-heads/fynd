@@ -221,7 +221,7 @@ const DEFAULT_PRICES_LIMIT: usize = 1000;
 /// GET /v1/prices - Return derived token prices and optional market data.
 ///
 /// By default returns token gas prices only. Use `include` query parameter
-/// to add spot prices and/or pool depths.
+/// to add spot prices and/or component depths.
 ///
 /// # Query Parameters
 ///
@@ -262,14 +262,14 @@ pub async fn get_prices(
     if want_spot && store.spot_prices_block().is_none() {
         return Err(ApiError::StaleData { age_ms: u64::MAX });
     }
-    if want_depths && store.pool_depths_block().is_none() {
+    if want_depths && store.component_depths_block().is_none() {
         return Err(ApiError::StaleData { age_ms: u64::MAX });
     }
     let spot_prices_block = store.spot_prices_block();
-    let pool_depths_block = store.pool_depths_block();
+    let component_depths_block = store.component_depths_block();
     let token_prices = store.token_prices().cloned();
     let spot_prices_data = if want_spot { store.spot_prices().cloned() } else { None };
-    let pool_depths_data = if want_depths { store.pool_depths().cloned() } else { None };
+    let component_depths_data = if want_depths { store.component_depths().cloned() } else { None };
     drop(store);
 
     // Convert token gas prices
@@ -314,9 +314,9 @@ pub async fn get_prices(
         None
     };
 
-    // Convert pool depths if requested (sorted for deterministic limit)
-    let pool_depths = if want_depths {
-        let mut entries: Vec<PoolDepthEntry> = pool_depths_data
+    // Convert component depths if requested (sorted for deterministic limit)
+    let component_depths = if want_depths {
+        let mut entries: Vec<PoolDepthEntry> = component_depths_data
             .into_iter()
             .flatten()
             .map(|((component_id, token_in, token_out), depth)| PoolDepthEntry {
@@ -345,10 +345,10 @@ pub async fn get_prices(
         blocks: ComputationBlocks {
             token_prices: token_prices_block,
             spot_prices: spot_prices_block,
-            pool_depths: pool_depths_block,
+            pool_depths: component_depths_block,
         },
         spot_prices,
-        pool_depths,
+        pool_depths: component_depths,
     };
 
     info!(

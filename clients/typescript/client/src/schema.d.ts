@@ -474,7 +474,7 @@ export interface components {
         /**
          * @description A route consisting of one or more sequential swaps.
          *
-         *     A route describes the path through liquidity pools to execute a swap.
+         *     A route describes the path through components (liquidity pools) to execute a swap.
          *     For multi-hop swaps, the output of each swap becomes the input of the next.
          */
         Route: {
@@ -484,7 +484,7 @@ export interface components {
         /**
          * @description A single swap within a route.
          *
-         *     Represents an atomic swap on a specific liquidity pool (component).
+         *     Represents an atomic swap on a specific component (liquidity pool).
          */
         Swap: {
             /**
@@ -498,7 +498,7 @@ export interface components {
              */
             amount_out: string;
             /**
-             * @description Identifier of the liquidity pool component.
+             * @description Identifier of the component (liquidity pool).
              * @example 0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc
              */
             component_id: string;

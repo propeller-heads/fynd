@@ -690,7 +690,7 @@ impl TychoFeed {
         trace!("Updating market data");
         let new_block_number = msg.block_number_or_timestamp;
         let update_start = Instant::now();
-        let mut pool_count = 0;
+        let mut latest_component_count = 0;
         let mut token_count = 0;
         self.market_data
             .apply_block_update(new_block_number, |market_data| {
@@ -730,7 +730,7 @@ impl TychoFeed {
                     market_data.update_last_updated(block_info);
                 }
 
-                pool_count = market_data.component_count();
+                latest_component_count = market_data.component_count();
                 token_count = market_data.token_count();
             })
             .instrument(span!(Level::DEBUG, "data_feed_write_lock"))
@@ -738,7 +738,9 @@ impl TychoFeed {
         trace!("Market data updated");
 
         histogram!("market_update_duration_seconds").record(update_start.elapsed().as_secs_f64());
-        gauge!("market_pools").set(pool_count as f64);
+        // Counts components; the legacy "pools" metric name is kept so existing
+        // dashboards and alerts keep working.
+        gauge!("market_pools").set(latest_component_count as f64);
         gauge!("market_tokens").set(token_count as f64);
         if let Some((block_number, block_timestamp)) = latest_block_fields {
             gauge!("market_current_block").set(block_number as f64);

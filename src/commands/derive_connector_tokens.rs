@@ -13,7 +13,7 @@ use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Add
 /// Derives recommended connector tokens from live Tycho market data.
 ///
 /// Connects to Tycho, waits for the initial market snapshot, then ranks every
-/// token by how many pools it appears in. The most-connected tokens are the best
+/// token by how many components it appears in. The most-connected tokens are the best
 /// candidates for intermediate ("connector") hops in multi-hop routes.
 ///
 /// Outputs a ranked list and a ready-to-paste TOML snippet.
@@ -43,7 +43,7 @@ pub struct DeriveConnectorTokensArgs {
     #[arg(short, long, value_delimiter = ',', value_name = "PROTO1,PROTO2")]
     pub protocols: Vec<String>,
 
-    /// Minimum TVL threshold in native token. Pools below this threshold are excluded.
+    /// Minimum TVL threshold in native token. Components below this threshold are excluded.
     /// Defaults to a chain-specific value if not set.
     #[arg(long)]
     pub min_tvl: Option<f64>,
@@ -52,9 +52,9 @@ pub struct DeriveConnectorTokensArgs {
     #[arg(long, default_value_t = 10)]
     pub top_n: usize,
 
-    /// Minimum number of pools a token must appear in to be included.
+    /// Minimum number of components a token must appear in to be included.
     #[arg(long, default_value_t = 2)]
-    pub min_pool_count: usize,
+    pub min_component_count: usize,
 
     /// Output format: "toml", "json", or "text".
     #[arg(long, default_value = "toml")]
@@ -113,7 +113,7 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
     let market_data = solver.market_data();
 
     // We only need component topology and token symbols — market data is sufficient.
-    // wait_until_ready also waits for derived computations (spot prices, pool depths, etc.)
+    // wait_until_ready also waits for derived computations (spot prices, component depths, etc.)
     // which is expensive and unnecessary here.
     info!("Waiting for Tycho initial snapshot (up to {}s)…", args.wait_secs);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(args.wait_secs);
@@ -136,12 +136,12 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
 
     let scores = score_tokens(&market_data).await;
     let mut ranked: Vec<(Address, TokenScore)> = scores.into_iter().collect();
-    ranked.sort_by_key(|(_, s)| std::cmp::Reverse(s.pool_count));
+    ranked.sort_by_key(|(_, s)| std::cmp::Reverse(s.component_count));
     let total = ranked.len();
 
     let mut candidates: Vec<&(Address, TokenScore)> = ranked
         .iter()
-        .filter(|(_, s)| s.pool_count >= args.min_pool_count)
+        .filter(|(_, s)| s.component_count >= args.min_component_count)
         .take(args.top_n)
         .collect();
 
@@ -171,31 +171,31 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
 
 struct TokenScore {
     symbol: String,
-    pool_count: usize,
+    component_count: usize,
 }
 
 async fn score_tokens(market_data: &MarketData) -> HashMap<Address, TokenScore> {
     let guard = market_data.read().await;
     let topology = guard.component_topology();
 
-    // Count pool appearances per token.
-    let mut pool_count: HashMap<Address, usize> = HashMap::new();
+    // Count component appearances per token.
+    let mut component_count: HashMap<Address, usize> = HashMap::new();
     for tokens in topology.values() {
         for addr in tokens {
-            *pool_count
+            *component_count
                 .entry(addr.clone())
                 .or_insert(0) += 1;
         }
     }
 
-    pool_count
+    component_count
         .into_iter()
         .map(|(addr, count)| {
             let symbol = guard
                 .get_token(&addr)
                 .map(|t| t.symbol.clone())
                 .unwrap_or_else(|| "?".to_string());
-            (addr, TokenScore { symbol, pool_count: count })
+            (addr, TokenScore { symbol, component_count: count })
         })
         .collect()
 }
@@ -204,14 +204,14 @@ fn print_toml(candidates: &[&(Address, TokenScore)], chain: &str, total: usize) 
     use chrono::Utc;
     let date = Utc::now().format("%Y-%m-%d");
     println!("# Derived connector tokens for {chain} ({date})");
-    println!("# Score = pool_count. Top {} of {} tokens.", candidates.len(), total);
+    println!("# Score = component_count. Top {} of {} tokens.", candidates.len(), total);
     println!("connector_tokens = [");
     for (addr, score) in candidates {
         println!(
-            "    \"0x{}\",  # {}  — {} pools",
+            "    \"0x{}\",  # {}  — {} components",
             hex::encode(addr.as_ref()),
             score.symbol,
-            score.pool_count,
+            score.component_count,
         );
     }
     println!("]");
@@ -224,7 +224,7 @@ fn print_json(candidates: &[&(Address, TokenScore)], _total: usize) -> Result<()
             serde_json::json!({
                 "address": format!("0x{}", hex::encode(addr.as_ref())),
                 "symbol": score.symbol,
-                "pool_count": score.pool_count,
+                "component_count": score.component_count,
             })
         })
         .collect();
@@ -240,7 +240,7 @@ fn print_text(candidates: &[&(Address, TokenScore)], _total: usize) {
             "{:<5} {:<10} {:>6}  0x{}",
             i + 1,
             score.symbol,
-            score.pool_count,
+            score.component_count,
             hex::encode(addr.as_ref()),
         );
     }

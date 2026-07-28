@@ -77,7 +77,8 @@ pub struct AggregatorQuote {
     /// Encoded on-chain transaction. Present only when calldata was requested and the
     /// aggregator has an encoding endpoint. `None` otherwise.
     pub calldata: Option<AggregatorCalldata>,
-    /// Pool-level route: `[protocol, component_id]` pairs (Fynd only; `None` for aggregators).
+    /// Component-level route: `[protocol, component_id]` pairs (Fynd only; `None` for
+    /// aggregators).
     pub route: Option<Vec<[String; 2]>>,
 }
 

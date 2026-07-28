@@ -67,7 +67,8 @@ pub mod defaults {
     pub const MIN_TOKEN_QUALITY: i32 = 100;
     /// Maximum age (in days) of trading history required for a token to be considered liquid.
     pub const TRADED_N_DAYS_AGO: u64 = 3;
-    /// Multiplier applied to a pool's TVL when estimating available liquidity.
+    /// Multiplier applied to a component's (liquidity pool's) TVL when estimating available
+    /// liquidity.
     pub const TVL_BUFFER_RATIO: f64 = 1.1;
     /// How often the gas price is refreshed from the RPC node.
     pub const GAS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -534,7 +535,7 @@ impl FyndBuilder {
 
     /// Enables partial block (flashblock) updates from the Tycho stream (default: `false`).
     ///
-    /// When enabled, the stream delivers pool state updates mid-block rather than only at
+    /// When enabled, the stream delivers component state updates mid-block rather than only at
     /// finalization, reducing latency. Only supported for on-chain protocols; RFQ streams are
     /// unaffected.
     pub fn partial_blocks(mut self, enabled: bool) -> Self {

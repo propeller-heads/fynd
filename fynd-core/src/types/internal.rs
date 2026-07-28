@@ -89,7 +89,7 @@ pub enum SolveError {
     InsufficientLiquidity {
         /// Amount the user requested.
         required: BigUint,
-        /// Maximum amount available in the pool.
+        /// Maximum amount available in the component.
         available: BigUint,
     },
 

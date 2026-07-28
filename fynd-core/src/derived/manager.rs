@@ -2,7 +2,7 @@
 //!
 //! The ComputationManager:
 //! - Subscribes to MarketEvents from TychoFeed
-//! - Runs derived computations (token prices, spot prices, pool depths)
+//! - Runs derived computations (token prices, spot prices, component depths)
 //! - Updates DerivedDataStore (exclusive write access)
 //! - Provides read access to workers via shared store reference
 
@@ -105,7 +105,7 @@ fn coalesce_market_events(events: &[MarketEvent]) -> Option<ChangedComponents> {
 
 use super::{
     computation::{ComputationId, ComputationRequirements, DerivedComputation},
-    computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
+    computations::{ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
     error::ComputationError,
     events::DerivedDataEvent,
     registry::ErasedComputation,
@@ -126,7 +126,7 @@ pub struct ComputationManagerConfig {
     gas_token: Address,
     /// Max hop count for token gas price computation.
     max_hop: usize,
-    /// Slippage threshold for pool depth computation (0.0 < threshold < 1.0).
+    /// Slippage threshold for component depth computation (0.0 < threshold < 1.0).
     depth_slippage_threshold: f64,
 }
 
@@ -136,7 +136,7 @@ impl ComputationManagerConfig {
         Self::default()
     }
 
-    /// Sets the slippage threshold for pool depth computation.
+    /// Sets the slippage threshold for component depth computation.
     pub fn with_depth_slippage_threshold(mut self, threshold: f64) -> Self {
         self.depth_slippage_threshold = threshold;
         self
@@ -213,7 +213,7 @@ impl ComputationManager {
                 .with_max_hops(config.max_hop)
                 .with_gas_token(config.gas_token),
         )?;
-        manager.register(PoolDepthComputation::new(config.depth_slippage_threshold)?)?;
+        manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
         Ok((manager, event_rx))
     }
 
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn schedule_diamond_places_join_after_both_parents() {
-        // a <- {b, c} <- d; mirrors fynd's spot -> {token, pool} fan-out.
+        // a <- {b, c} <- d; mirrors fynd's spot -> {token, component} fan-out.
         let schedule = build_schedule(&[
             ("a", ComputationRequirements::none()),
             ("b", ComputationRequirements::fresh(["a"])),
@@ -1325,30 +1325,30 @@ mod tests {
     fn market_with_component_no_sim_state() -> MarketData {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
-        let pool = component("pool", &[eth.clone(), usdc.clone()]);
+        let component = component("component", &[eth.clone(), usdc.clone()]);
 
         let mut market = MarketState::new();
         market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
-        market.upsert_components(std::iter::once(pool));
+        market.upsert_components(std::iter::once(component));
         // Note: no update_states() — simulation state is intentionally absent
         market.upsert_tokens([eth, usdc]);
         MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
 
-    /// Creates a market with two pools: one with sim state (pool succeeds) and one without (pool
-    /// fails). Used to trigger partial spot price failure.
+    /// Creates a market with two components: one with sim state (component succeeds) and one
+    /// without (component fails). Used to trigger partial spot price failure.
     fn market_with_mixed_sim_states() -> MarketData {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
         let dai = token(3, "DAI");
 
-        let pool1 = component("eth_usdc", &[eth.clone(), usdc.clone()]);
-        let pool2 = component("eth_dai", &[eth.clone(), dai.clone()]);
+        let component1 = component("eth_usdc", &[eth.clone(), usdc.clone()]);
+        let component2 = component("eth_dai", &[eth.clone(), dai.clone()]);
 
         let mut market = MarketState::new();
         market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
-        market.upsert_components([pool1, pool2]);
-        // Only pool1 has simulation state; pool2 intentionally has none
+        market.upsert_components([component1, component2]);
+        // Only component1 has simulation state; component2 intentionally has none
         market
             .update_states([("eth_usdc".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
         market.upsert_tokens([eth, usdc, dai]);
@@ -1362,13 +1362,16 @@ mod tests {
     fn market_with_sim_state_no_gas_price() -> MarketData {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
-        let pool = component("pool", &[eth.clone(), usdc.clone()]);
+        let component = component("component", &[eth.clone(), usdc.clone()]);
 
         let mut market = MarketState::new();
         // Note: no update_gas_price() — gas price is intentionally absent
         market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
-        market.upsert_components(std::iter::once(pool));
-        market.update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
+        market.upsert_components(std::iter::once(component));
+        market.update_states([(
+            "component".to_string(),
+            Box::new(MockProtocolSim::new(2000.0)) as _,
+        )]);
         market.upsert_tokens([eth, usdc]);
         MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
@@ -1405,7 +1408,7 @@ mod tests {
         // handle_event with added components — spot_price succeeds, token_price fails
         let event = MarketEvent::MarketUpdated {
             added_components: HashMap::from([(
-                "pool".to_string(),
+                "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
             removed_components: vec![],
@@ -1449,7 +1452,7 @@ mod tests {
 
     #[tokio::test]
     async fn partial_spot_price_failure_broadcasts_computation_complete() {
-        // market_with_mixed_sim_states has pool1 (with sim state) and pool2 (without)
+        // market_with_mixed_sim_states has component1 (with sim state) and component2 (without)
         // → spot price computation partially succeeds → ComputationComplete with failed_items
         let market = market_with_mixed_sim_states();
         let config = ComputationManagerConfig::new();
@@ -1460,7 +1463,7 @@ mod tests {
 
         let events = drain_events(&mut event_rx);
 
-        // Should broadcast ComputationComplete (not ComputationFailed) because pool1 succeeds
+        // Should broadcast ComputationComplete (not ComputationFailed) because component1 succeeds
         assert!(
             events.iter().any(|e| matches!(
                 e,
@@ -1476,19 +1479,19 @@ mod tests {
             "should not broadcast ComputationFailed for partial failure"
         );
 
-        // The ComputationComplete event should carry the failed item for pool2
+        // The ComputationComplete event should carry the failed item for component2
         let complete = events.iter().find(|e| {
             matches!(e, DerivedDataEvent::ComputationComplete { computation_id: "spot_prices", .. })
         });
         if let Some(DerivedDataEvent::ComputationComplete { failed_items, .. }) = complete {
             assert!(
                 !failed_items.is_empty(),
-                "ComputationComplete should carry failed_items for pool2"
+                "ComputationComplete should carry failed_items for component2"
             );
         }
 
-        // The store should persist the failure reason for the failed pool.
-        // market_with_mixed_sim_states uses token(1, "ETH") and token(3, "DAI") for pool2.
+        // The store should persist the failure reason for the failed component.
+        // market_with_mixed_sim_states uses token(1, "ETH") and token(3, "DAI") for component2.
         let eth = token(1, "ETH");
         let dai = token(3, "DAI");
         let store = manager.store();

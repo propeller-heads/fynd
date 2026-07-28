@@ -4,8 +4,8 @@
 //! into [`FyndBuilder`] via [`FyndBuilder::with_algorithm`], without modifying
 //! fynd-core itself.
 //!
-//! [`DirectPoolAlgorithm`] is a naive algorithm that finds a single pool containing
-//! both the input and output tokens, simulates the swap, and returns the result.
+//! [`DirectComponentAlgorithm`] is a naive algorithm that finds a single component (liquidity pool)
+//! containing both the input and output tokens, simulates the swap, and returns the result.
 //! It only finds direct (1-hop) routes — no multi-hop routing.
 //!
 //! # Prerequisites
@@ -36,22 +36,22 @@ use tycho_simulation::{evm::tycho_models::Chain, tycho_core::Bytes};
 // =============================================================================
 
 // [doc:start custom-algo-impl]
-/// A naive algorithm that finds a direct pool between two tokens.
+/// A naive algorithm that finds a direct component (liquidity pool) between two tokens.
 ///
 /// This iterates through all edges in the routing graph, finds one that
 /// connects `token_in` to `token_out`, simulates the swap, and returns
 /// the first successful result. It only supports single-hop (direct) routes.
-struct DirectPoolAlgorithm {
+struct DirectComponentAlgorithm {
     timeout: Duration,
 }
 
-impl DirectPoolAlgorithm {
+impl DirectComponentAlgorithm {
     fn new(_config: fynd_core::AlgorithmConfig) -> Self {
         Self { timeout: Duration::from_millis(100) }
     }
 }
 
-impl Algorithm for DirectPoolAlgorithm {
+impl Algorithm for DirectComponentAlgorithm {
     // Reuse the built-in petgraph manager — it handles graph initialization and
     // market event updates automatically. We just need a simple graph with no
     // edge weights (unit `()` type).
@@ -137,9 +137,10 @@ impl Algorithm for DirectPoolAlgorithm {
             // Validate every candidate route before returning it. The solver worker rejects
             // invalid routes (disconnected swaps, repeated tokens, malformed splits) and that
             // failure drops the whole solution for this worker pool. Skipping invalid candidates
-            // here lets a later pool be chosen instead. Any custom algorithm should validate the
-            // routes it might return, and — when it ranks multiple candidates — fall through to
-            // the next-best valid one rather than returning the invalid route.
+            // here lets a later component be chosen instead. Any custom algorithm should validate
+            // the routes it might return, and — when it ranks multiple candidates —
+            // fall through to the next-best valid one rather than returning the invalid
+            // route.
             if let Err(e) = route.validate() {
                 eprintln!("skipping invalid route: {e}");
                 continue;
@@ -151,7 +152,7 @@ impl Algorithm for DirectPoolAlgorithm {
         }
 
         Err(AlgorithmError::Other(format!(
-            "no direct pool from {:?} to {:?}",
+            "no direct component from {:?} to {:?}",
             order.token_in(),
             order.token_out()
         )))
@@ -192,7 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         10.0,
     )
     .tycho_api_key(tycho_api_key)
-    .with_algorithm("direct_pool", DirectPoolAlgorithm::new)
+    .with_algorithm("direct_pool", DirectComponentAlgorithm::new)
     .build()?;
     // [doc:end custom-algo-wire]
 

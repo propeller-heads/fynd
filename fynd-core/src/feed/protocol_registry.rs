@@ -203,7 +203,7 @@ pub(crate) fn register_exchanges(
             }
             "vm:curve" => {
                 // The hybrid CurveState with tycho-simulation's own curve_filter, which drops
-                // the pools CurveState cannot quote correctly (oracle/rate-bearing/rebasing
+                // the components CurveState cannot quote correctly (oracle/rate-bearing/rebasing
                 // coins) — the source of the overestimation that forced the temporary
                 // full-EVM fallback (see #318); fixed upstream in tycho-simulation 0.338.0.
                 builder = builder.exchange::<CurveState>(

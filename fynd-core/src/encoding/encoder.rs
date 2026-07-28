@@ -624,16 +624,16 @@ mod tests {
         let tin = make_token(token_in.clone());
         let tout = make_token(token_out.clone());
         // Component ID must be a valid address for the USV2 swap encoder
-        let pool_addr = "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc";
+        let component_addr = "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc";
         crate::types::Swap::new(
-            pool_addr.to_string(),
+            component_addr.to_string(),
             "uniswap_v2".to_string(),
             token_in,
             token_out,
             BigUint::from(1000u64),
             BigUint::from(990u64),
             BigUint::from(50_000u64),
-            component(pool_addr, &[tin, tout]),
+            component(component_addr, &[tin, tout]),
             Box::new(MockProtocolSim::default()),
         )
     }

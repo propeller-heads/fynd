@@ -22,7 +22,7 @@ pub struct PricesQuery {
 /// Parsed variant of the `include` query parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncludeField {
-    /// Include pool depth data.
+    /// Include component depth data.
     Depths,
     /// Include spot price data.
     SpotPrices,
@@ -71,7 +71,7 @@ pub struct ComputationBlocks {
     /// Block at which spot prices were computed. `None` if not yet available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spot_prices: Option<u64>,
-    /// Block at which pool depths were computed. `None` if not yet available.
+    /// Block at which component depths were computed. `None` if not yet available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_depths: Option<u64>,
 }
@@ -86,10 +86,10 @@ pub struct PricesResponse {
     pub gas_token: Address,
     /// Block numbers at which each computation was last run.
     pub blocks: ComputationBlocks,
-    /// Spot prices per pool direction (only if requested via `include=spot_prices`).
+    /// Spot prices per component direction (only if requested via `include=spot_prices`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spot_prices: Option<Vec<SpotPriceEntry>>,
-    /// Pool depths per pool direction (only if requested via `include=depths`).
+    /// Component depths per component direction (only if requested via `include=depths`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_depths: Option<Vec<PoolDepthEntry>>,
 }
@@ -104,10 +104,10 @@ pub struct TokenPriceEntry {
     pub price: f64,
 }
 
-/// A single directional spot price within a pool.
+/// A single directional spot price within a component (liquidity pool).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SpotPriceEntry {
-    /// Pool / component identifier.
+    /// Component (liquidity pool) identifier.
     pub component_id: ComponentId,
     /// Input token address.
     #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
@@ -119,10 +119,10 @@ pub struct SpotPriceEntry {
     pub price: f64,
 }
 
-/// A single directional pool depth.
+/// A single directional component depth.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PoolDepthEntry {
-    /// Pool / component identifier.
+    /// Component (liquidity pool) identifier.
     pub component_id: ComponentId,
     /// Input token address.
     #[schema(value_type = String, example = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")]

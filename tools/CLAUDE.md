@@ -79,6 +79,6 @@ the integration tests in `fynd-core/tests/integration/`.
 
 Shared fixture types live in the `fynd-test-fixtures` crate. Worker pool configuration comes from
 the production `worker_pools.toml`; its SHA-256 is stored in the recording metadata so tests can
-detect drift. VM-backed protocol states (e.g. `vm:*` pools) cannot be serialized and are skipped.
+detect drift. VM-backed protocol states (e.g. `vm:*` components) cannot be serialized and are skipped.
 
 See [`tools/record-market/README.md`](record-market/README.md) for usage.
