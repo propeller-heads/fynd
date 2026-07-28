@@ -62,6 +62,21 @@ impl Observation {
         }
     }
 
+    /// An observation for a solve that never produced a quote.
+    ///
+    /// Recorded so the sink stays index-aligned with the block's trades — the join back to each
+    /// comparison record is positional, so a skipped solve would shift every later observation onto
+    /// the wrong trade.
+    pub(crate) fn unsolved(token_out: Address) -> Self {
+        Self {
+            token_out,
+            solved: false,
+            won: false,
+            committed_amount_out: None,
+            fee_headroom: None,
+        }
+    }
+
     /// The fee the mock could have charged, as a fraction of the committed output, in basis points.
     ///
     /// This is the headline per-trade number: "the pool could have taken this much fee and the user
@@ -319,5 +334,30 @@ mod tests {
 
         assert_eq!(stats.drain().len(), 2);
         assert!(stats.drain().is_empty(), "a second drain must not repeat observations");
+    }
+
+    #[test]
+    fn test_unsolved_observation_counts_toward_neither_total() {
+        // A solve that never produced a quote is recorded to keep the sink index-aligned, but it is
+        // not an order the pool had a chance at — so it must not enter the winrate's denominator.
+        let stats = Stats::default();
+        let totals = stats.accumulate(
+            &[Observation::unsolved(Address::from([0x22; 20])), observation(true, 100, 1)],
+            0.5,
+            100.0,
+        );
+        assert_eq!(totals.solved, 1);
+        assert_eq!(totals.won, 1);
+    }
+
+    #[test]
+    fn test_pair_label_is_set_once_and_read_back() {
+        let stats = Stats::default();
+        assert!(stats.pair_label().is_none());
+        stats.set_pair_label("WETH/USDC");
+        // The mirrored pool can change block to block; the pair it prices cannot, so the first
+        // label sticks rather than churning.
+        stats.set_pair_label("DAI/USDC");
+        assert_eq!(stats.pair_label().as_deref(), Some("WETH/USDC"));
     }
 }

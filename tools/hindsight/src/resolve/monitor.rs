@@ -259,11 +259,17 @@ impl StepAdapter<'_> {
     }
 }
 
-#[async_trait]
-impl SteppingSolver for StepAdapter<'_> {
-    async fn solve(&self, token_in: Address, token_out: Address, amount_in: U256) -> Outcome {
+impl StepAdapter<'_> {
+    /// Quote one sell order at the solver's current state, returning the outcome and — when a quote
+    /// came back at all — its mock-`PropAMM` observation.
+    async fn quote_order(
+        &self,
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+    ) -> (Outcome, Option<propamm::report::Observation>) {
         let Ok(amount) = amount_in.to_string().parse::<BigUint>() else {
-            return Outcome::Unsolvable("unparseable amount_in".to_string());
+            return (Outcome::Unsolvable("unparseable amount_in".to_string()), None);
         };
         // Placeholder receiver: routing/amounts are receiver-independent; it only fills the encoded
         // calldata's recipient. Encoding is requested so each quote carries its on-chain
@@ -286,20 +292,35 @@ impl SteppingSolver for StepAdapter<'_> {
         match self.solver.quote(request).await {
             Ok(quote) => {
                 let Some(order_quote) = quote.orders().first() else {
-                    return Outcome::Unsolvable("solver returned no order quote".to_string());
+                    return (
+                        Outcome::Unsolvable("solver returned no order quote".to_string()),
+                        None,
+                    );
                 };
-                if let Some(harness) = self.propamm {
-                    // Every solve is recorded, successful or not, so the sink stays index-aligned
-                    // with the block's trades; `Observation::solved` is what the winrate's
-                    // denominator counts.
-                    harness
-                        .stats
-                        .record(propamm::report::Observation::from_quote(order_quote, token_out));
-                }
-                order_quote_to_outcome(order_quote)
+                let observed = propamm::report::Observation::from_quote(order_quote, token_out);
+                (order_quote_to_outcome(order_quote), Some(observed))
             }
-            Err(e) => Outcome::Unsolvable(format!("solve error: {e}")),
+            Err(e) => (Outcome::Unsolvable(format!("solve error: {e}")), None),
         }
+    }
+}
+
+#[async_trait]
+impl SteppingSolver for StepAdapter<'_> {
+    async fn solve(&self, token_in: Address, token_out: Address, amount_in: U256) -> Outcome {
+        let (outcome, observed) = self
+            .quote_order(token_in, token_out, amount_in)
+            .await;
+        // Recorded on every path, including the ones that never produced a quote: the sink is
+        // joined back to the block's trades by position, so a skipped solve would shift
+        // every later observation onto the wrong trade. `Observation::solved` is what the
+        // winrate counts.
+        if let Some(harness) = self.propamm {
+            harness.stats.record(
+                observed.unwrap_or_else(|| propamm::report::Observation::unsolved(token_out)),
+            );
+        }
+        outcome
     }
 
     async fn advance(&self) -> anyhow::Result<()> {

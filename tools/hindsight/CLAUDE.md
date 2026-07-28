@@ -135,6 +135,16 @@ the mock never changes hindsight's own win/loss verdicts — it only adds this s
 Requires `fynd-core`'s `experimental` feature for `Solver::market_event_sender`. Not for production:
 the mock prices a pool that does not exist on chain, so any calldata it produces is unexecutable.
 
+Two things to get right when running it:
+
+- **Set `EXCLUSIVE_SWAP_CONTROLLER_KEY`** (any throwaway key — nothing is executed). The encoder
+  fails fast on an exclusive leg with no signer, which turns every win into a failed quote and
+  silently reports a zero winrate.
+- **Pick a pair that has flow, and check the routes.** The exclusive leg must be terminal in its
+  path and within the pool's hop budget, so a pair absent from the block's settled trades yields
+  zero wins for reasons that have nothing to do with the price. Sanity-check with a deliberately
+  absurd `--propamm-price-pct 105`: the measured `fee_headroom_bps` should come back at ~500.
+
 ### Verdict model
 
 Each re-solved trade produces a `top` (optimistic, state N-1) and `back` (pessimistic, state N)
