@@ -47,7 +47,7 @@ and takes neither.
 | `ALLIUM_QUERY_ID` | Saved Allium query ID (`verify` only) |
 | `HINDSIGHT_REGISTRY` | Override path for the decoder address-book TOML |
 | `PROPAMM_PAIR` | Token pair the mock PropAMM mirrors, comma-separated (`monitor` only) |
-| `PROPAMM_PRICE_PCT` | Mock PropAMM's fee-free price as a percentage of the best real pool's |
+| `PROPAMM_OFFSETS_BPS` | Price offsets in bps off the public best route, e.g. `-5,0,5` |
 | `PROPAMM_PROBE_UNITS` | Trade size used to pick which real pool the mock mirrors |
 
 ## Architecture
@@ -118,14 +118,24 @@ pool exists. Off unless `monitor --propamm-pair` is set.
 | `mirror.rs` | `MirrorPool` — a `ProtocolSim` that delegates to the best real pool for the pair and scales its price by `--propamm-price-pct`, charging no fee |
 | `report.rs` | Per-order outcomes and run totals; `Record` is what lands in the comparisons JSONL |
 
-Two knobs, deliberately separate:
+Each order on the mirrored pair is solved **twice**: once with the mock neutralised (scaled to one
+part per million, so it stays in the graph but loses every comparison), which yields the public best
+route Fynd would otherwise have quoted; then again with the mock rescaled so its output lands
+`--propamm-offsets-bps` off that number. So an offset means "this much better than the route Fynd
+would have quoted", not "this much better than some single pool".
 
-- **Input** — `--propamm-price-pct` is the pool's fee-free price as a percentage of the best real
-  pool's price for the pair. `100` places it exactly at the best price we can see (the control case:
-  the router requires a *strict* beat, so it must never win); `100.05` places it 5 bps better.
-- **Output** — *fee headroom*: the mock charges nothing, so whatever the router finds above the
-  public commitment is the fee the signed extension could have charged and still won the trade.
-  Reported per trade, per order pair, and as a flow-weighted run average.
+That makes every calibrated order an assertion. The report groups them by offset and judges each
+group against the behaviour its price implies:
+
+| offset | expectation |
+|---|---|
+| below market | never selected — the router requires a strict beat |
+| at market | can only win on gas, and then there is no surplus, so the fee must be zero |
+| above market | the fee taken cannot exceed the offset, since the offset is all the surplus there is |
+
+A group with no selections above market is reported as *no data*, not a failure: winning there
+depends on gas as well as price. Orders off the mirrored pair carry no offset and form no group —
+calibration is only exact when the mock serves the whole order in one hop.
 
 Fynd's existing exclusive-access routing does the rest: `FyndBuilder::exclusivity_policy` hides the
 mock from every configured worker pool, and each pool is twinned with a `liquidity_scope = "all"`
@@ -140,10 +150,12 @@ Two things to get right when running it:
 - **Set `EXCLUSIVE_SWAP_CONTROLLER_KEY`** (any throwaway key — nothing is executed). The encoder
   fails fast on an exclusive leg with no signer, which turns every win into a failed quote and
   silently reports a zero winrate.
-- **Pick a pair that has flow, and check the routes.** The exclusive leg must be terminal in its
-  path and within the pool's hop budget, so a pair absent from the block's settled trades yields
-  zero wins for reasons that have nothing to do with the price. Sanity-check with a deliberately
-  absurd `--propamm-price-pct 105`: the measured `fee_headroom_bps` should come back at ~500.
+- **Pick a pair that has flow.** Only orders whose own pair is the mirrored one get calibrated, and
+  those are a small slice of settled flow — 40 mainnet blocks yielded 9 calibrated orders on
+  ETH/USDT. On ethereum, ETH/USDC carries roughly twice ETH/USDT's volume; check a run's per-pair
+  table before committing to a long one. Filling the groups is a matter of blocks, so budget for it.
+- **`--min-tvl 10`** is mandatory against `tycho-fynd-ethereum`, which rejects any other value with
+  `tvl_gt must be == 10`.
 
 ### Verdict model
 
