@@ -115,6 +115,23 @@ savings aggregates; unsolved states keep their coverage verdicts).
   like-for-like. Carries `sandwich` evidence when a bracket pair was found.
 - `RangeComparison` — a trade re-solved at both block states, including gas-netted settled output.
 - `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
+- `RouteSummary` — which algorithm won a solved state and which protocols its route traded
+  through. Carried on `SolvedAmount` as typed fields (not dug out of the serialized quote) so the
+  metrics and the per-trade log line read it directly.
+
+### Route attribution
+
+A solved state records the algorithm whose route won the quote — the worker pool that beat the
+others on that order — and the route's protocol mix. It surfaces three ways:
+
+- **Prometheus**: an `algorithm` label on `hindsight_trades_total`, `hindsight_savings_bps`,
+  `hindsight_savings_usd`, and `hindsight_improvement_usd`. Split any of them by venue to see
+  which algorithm serves that venue's flow best. Unsolved states carry `algorithm="none"`.
+  Protocols are deliberately *not* a label: a route's protocol set is combinatorial and would
+  blow up series cardinality.
+- **Loki**: `algorithm`, `protocols` (comma-joined), and `swaps` on the `trade comparison` line,
+  for the dashboard's top-routes table.
+- **JSONL**: flat `algorithm` / `protocols` / `swaps` per state, next to the nested per-hop route.
 
 ## Adding a venue / solver / decoder / chain
 

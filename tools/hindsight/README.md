@@ -243,6 +243,10 @@ top-of-block: `Win`, `Loss`, `CoverageMiss` (Fynd filled under half the settled 
 aggregates). Watchdogs rebuild the solver when the tycho feed dies or the monitor falls too
 far behind chain head (`--max-lag-blocks`).
 
+Each solved state also records which algorithm won the quote and which protocols its route traded
+through. Run `monitor` with a `--worker-pools-config` that defines a pool per algorithm to turn
+that into a comparison: with one pool configured, every trade is attributed to the same algorithm.
+
 ### The address book (`src/decoder/registry/<chain>.toml`)
 
 All chain- and protocol-specific data — solver routers, venue entry points and fee collectors,

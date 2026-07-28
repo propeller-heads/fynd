@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use fynd_core::{
     types::{
         parse_chain, EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest,
-        QuoteStatus,
+        QuoteStatus, Route, Swap,
     },
     BlockStepController, FyndBuilder, Solver,
 };
@@ -32,7 +32,7 @@ use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
     provider_from,
-    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver},
+    resolve::{resolve_block_range, Outcome, RouteSummary, SolvedAmount, SteppingSolver},
     telemetry,
     usd::Prices,
 };
@@ -227,8 +227,40 @@ fn order_quote_to_outcome(quote: &OrderQuote) -> Outcome {
         amount_out: biguint_to_u256(quote.amount_out()),
         amount_out_net_gas: biguint_to_u256(quote.amount_out_net_gas()),
         gas_estimate: biguint_to_u256(quote.gas_estimate()),
+        route: route_summary(quote),
         quote_json,
     })
+}
+
+/// Which algorithm won the quote and which protocols its route traded through. The winning quote is
+/// the one the `WorkerPoolRouter` ranked first across every configured pool, so its algorithm is
+/// the pool that beat the others on this order.
+fn route_summary(quote: &OrderQuote) -> RouteSummary {
+    let swaps = quote
+        .route()
+        .map(Route::swaps)
+        .unwrap_or_default();
+    RouteSummary {
+        algorithm: quote.algorithm().to_string(),
+        protocols: distinct_protocols(swaps.iter().map(Swap::protocol)),
+        swaps: swaps.len(),
+    }
+}
+
+/// Protocols across a route's swaps, deduplicated and kept in first-swap order. A split or
+/// multi-hop route hits the same protocol on several legs, and what the dashboard shows is the
+/// route's protocol mix, not one entry per leg.
+fn distinct_protocols<'a>(protocols: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut distinct: Vec<String> = Vec::new();
+    for protocol in protocols {
+        if !distinct
+            .iter()
+            .any(|seen| seen == protocol)
+        {
+            distinct.push(protocol.to_string());
+        }
+    }
+    distinct
 }
 
 fn biguint_to_u256(value: &BigUint) -> U256 {
@@ -687,6 +719,21 @@ fn core_to_alloy(address: &CoreAddress) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_distinct_protocols() {
+        // A split route hits the same protocol on several legs; the dashboard wants the mix.
+        assert_eq!(
+            distinct_protocols(["uniswap_v3", "vm:curve", "uniswap_v3"].into_iter()),
+            vec!["uniswap_v3".to_string(), "vm:curve".to_string()]
+        );
+        // First-swap order, so the list reads along the route rather than alphabetically.
+        assert_eq!(
+            distinct_protocols(["vm:curve", "uniswap_v3"].into_iter()),
+            vec!["vm:curve".to_string(), "uniswap_v3".to_string()]
+        );
+        assert!(distinct_protocols(std::iter::empty()).is_empty());
+    }
 
     #[test]
     fn test_default_lag_blocks_scales_with_block_time() {

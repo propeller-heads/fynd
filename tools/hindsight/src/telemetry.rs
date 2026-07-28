@@ -71,11 +71,26 @@ fn solver_label<'a>(solver: &'a str, registry: &Registry) -> &'a str {
     }
 }
 
+/// Label value for a state with no winning route to attribute — Fynd did not solve it, so no
+/// algorithm competed for it. Every series of a metric must carry the same label set, so an
+/// unsolved state cannot simply omit the label.
+const ALGORITHM_NONE: &str = "none";
+
 /// The bounded label set shared by every per-trade metric, computed once per range.
 struct MetricLabels<'a> {
     venue: &'a str,
     solver: &'a str,
     chain: &'a str,
+}
+
+/// Metric label for the algorithm whose route won a state's quote. Unlike venue and solver, this
+/// needs no bounding against the registry: the value comes from Fynd's own worker pools, whose
+/// `algorithm` names must resolve in the algorithm registry for the pool to spawn at all.
+fn algorithm_label(outcome: &Outcome) -> &str {
+    match outcome {
+        Outcome::Solved(solved) if !solved.route.algorithm.is_empty() => &solved.route.algorithm,
+        Outcome::Solved(_) | Outcome::Partial(_) | Outcome::Unsolvable(_) => ALGORITHM_NONE,
+    }
 }
 
 /// Metric label for a trade's headline verdict.
@@ -94,27 +109,30 @@ pub(crate) fn describe() {
     describe_counter!(
         TRADES_TOTAL,
         "Re-solved trades above the dust floor, labeled by venue / solver / chain / outcome / \
-         state (top|back). Sub-$100-notional trades are excluded so the win-rate reflects trades \
-         that matter; total volume stays complete in VOLUME_USD. Per-pair detail lives in the \
-         JSONL comparison output; a token-pair label here is unbounded on mainnet and would \
-         explode Prometheus series cardinality over a long run."
+         algorithm / state (top|back). `algorithm` is the worker pool whose route won the quote, \
+         so a per-venue split answers which algorithm serves that venue's flow best; it is \
+         \"none\" when Fynd did not solve. Sub-$100-notional trades are excluded so the win-rate \
+         reflects trades that matter; total volume stays complete in VOLUME_USD. Per-pair detail \
+         lives in the JSONL comparison output; a token-pair label here is unbounded on mainnet and \
+         would explode Prometheus series cardinality over a long run."
     );
     describe_histogram!(
         SAVINGS_BPS,
         Unit::Count,
         "Gross bps delta of Fynd vs settled (positive = Fynd better), labeled by venue / solver / \
-         chain / outcome / state (top|back). Sub-$100-notional trades are excluded — a few wei of \
-         rounding is thousands of bps on dust and would swamp the quantiles."
+         chain / outcome / algorithm / state (top|back). Sub-$100-notional trades are excluded — a \
+         few wei of rounding is thousands of bps on dust and would swamp the quantiles."
     );
     describe_histogram!(
         SAVINGS_USD,
         "Signed gross USD savings of Fynd vs settled (positive = Fynd better), for Fynd-priced \
-         trades"
+         trades, labeled by the algorithm whose route won"
     );
     describe_histogram!(
         IMPROVEMENT_USD,
         "Gross USD uplift on trades Fynd would improve (losses excluded — a venue routes \
-         elsewhere when Fynd is worse). Sum = value of adding Fynd; count = improving trades"
+         elsewhere when Fynd is worse), labeled by the algorithm whose route won. Sum = value of \
+         adding Fynd; count = improving trades"
     );
     describe_histogram!(
         VOLUME_USD,
@@ -209,7 +227,9 @@ pub(crate) fn record_range(
     // One structured line per priced comparison, on the headline basis (top-of-block, gross).
     // Loki ingests pod stdout, so this line feeds the dashboard's top-trades table; keep the
     // message and field names stable — the LogQL query extracts them by regexp. Zero means
-    // "unpriced" (or, for quoted_usd, "the solver declared no quote").
+    // "unpriced" (or, for quoted_usd, "the solver declared no quote"). `protocols` is the winning
+    // route's protocol mix, comma-joined; `swaps` counts its legs, so a split route reads higher
+    // than its hop depth. Per-hop pools and amounts stay in the JSONL records.
     if let (Some(savings_usd), Outcome::Solved(solved)) = (savings_top, &range.top.outcome) {
         let priced = |amount| {
             prices_top
@@ -224,6 +244,9 @@ pub(crate) fn record_range(
             token_in = %range.token_in,
             token_out = %range.token_out,
             verdict = %outcome_label(range.verdict),
+            algorithm = %algorithm_label(&range.top.outcome),
+            protocols = %solved.route.protocols.join(","),
+            swaps = solved.route.swaps,
             volume_usd = volume.unwrap_or(0.0),
             settled_usd = priced(range.settled_amount_out),
             fynd_usd = priced(solved.amount_out),
@@ -254,6 +277,8 @@ fn record_state(
     prices: &Prices,
     above_floor: bool,
 ) -> Option<f64> {
+    let algorithm = algorithm_label(&state.outcome);
+
     if above_floor {
         counter!(
             TRADES_TOTAL,
@@ -261,6 +286,7 @@ fn record_state(
             "solver" => labels.solver.to_string(),
             "chain" => labels.chain.to_string(),
             "outcome" => outcome_label(state.verdict).to_string(),
+            "algorithm" => algorithm.to_string(),
             "state" => state_label,
         )
         .increment(1);
@@ -276,6 +302,7 @@ fn record_state(
                 "solver" => labels.solver.to_string(),
                 "chain" => labels.chain.to_string(),
                 "outcome" => outcome_label(state.verdict).to_string(),
+                "algorithm" => algorithm.to_string(),
                 "state" => state_label,
             )
             .record(bps);
@@ -312,6 +339,7 @@ fn record_state(
         "venue" => labels.venue.to_string(),
         "solver" => labels.solver.to_string(),
         "chain" => labels.chain.to_string(),
+        "algorithm" => algorithm.to_string(),
         "state" => state_label,
     )
     .record(usd);
@@ -322,6 +350,7 @@ fn record_state(
             "venue" => labels.venue.to_string(),
             "solver" => labels.solver.to_string(),
             "chain" => labels.chain.to_string(),
+            "algorithm" => algorithm.to_string(),
             "state" => state_label,
         )
         .record(usd);
@@ -442,7 +471,7 @@ mod tests {
     use super::*;
     use crate::{
         decoder::{AttributionSource, DecodedTrade, SandwichEvidence},
-        resolve::{build_range, SolvedAmount},
+        resolve::{build_range, RouteSummary, SolvedAmount},
     };
 
     fn empty_prices() -> Prices {
@@ -472,10 +501,20 @@ mod tests {
     }
 
     fn solved(amount_out: u64, net: u64) -> Outcome {
+        solved_by("bellman_ford", amount_out, net)
+    }
+
+    /// A solved outcome attributed to `algorithm`, for the cases that assert on the label.
+    fn solved_by(algorithm: &str, amount_out: u64, net: u64) -> Outcome {
         Outcome::Solved(SolvedAmount {
             amount_out: U256::from(amount_out),
             amount_out_net_gas: U256::from(net),
             gas_estimate: U256::from(21_000),
+            route: RouteSummary {
+                algorithm: algorithm.to_string(),
+                protocols: vec!["uniswap_v3".to_string()],
+                swaps: 1,
+            },
             quote_json: None,
         })
     }
@@ -487,6 +526,83 @@ mod tests {
         assert_eq!(outcome_label(Verdict::CoverageMiss), "coverage_miss");
         assert_eq!(outcome_label(Verdict::Unsolvable), "unsolvable");
         assert_eq!(outcome_label(Verdict::Sandwiched), "sandwiched");
+    }
+
+    #[test]
+    fn test_algorithm_label() {
+        assert_eq!(algorithm_label(&solved_by("water_fill", 1_000, 1_000)), "water_fill");
+        // Nothing solved, nothing to attribute — and a quote that declared no algorithm must not
+        // mint an empty label value.
+        assert_eq!(algorithm_label(&solved_by("", 1_000, 1_000)), ALGORITHM_NONE);
+        assert_eq!(algorithm_label(&Outcome::Unsolvable("x".into())), ALGORITHM_NONE);
+        assert_eq!(algorithm_label(&Outcome::Partial("x".into())), ALGORITHM_NONE);
+    }
+
+    #[test]
+    fn test_algorithm_label_on_the_quality_metrics() {
+        // The competition question — which algorithm serves a venue's flow best — is answered by
+        // splitting the win-rate, bps, and USD-uplift metrics on `algorithm`, so all four carry it.
+        let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        let range = build_range(
+            &trade(usdc, 1_000_000_000),
+            &empty_prices(),
+            solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
+            solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
+        );
+        let mut prices = empty_prices();
+        prices.insert(usdc, 2e-9);
+
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(&range, "ethereum", &prices, &prices, &Registry::ethereum());
+        });
+        let rendered = handle.render();
+
+        for metric in [TRADES_TOTAL, SAVINGS_BPS, SAVINGS_USD, IMPROVEMENT_USD] {
+            assert!(
+                rendered
+                    .lines()
+                    .any(|line| line.starts_with(metric) &&
+                        line.contains("algorithm=\"path_frank_wolfe\"")),
+                "{metric} is missing the algorithm label: {rendered}"
+            );
+        }
+        // Volume is the settled trade's notional, not a Fynd routing property, so it stays
+        // unlabeled — attributing a competitor's trade size to one of our algorithms is wrong.
+        let volume_line = rendered
+            .lines()
+            .find(|line| line.starts_with(VOLUME_USD))
+            .expect("volume histogram rendered");
+        assert!(!volume_line.contains("algorithm="), "volume line: {volume_line}");
+    }
+
+    #[test]
+    fn test_unsolved_state_is_labeled_none() {
+        // An unsolvable state still increments the win-rate counter (it is a coverage miss, not a
+        // missing sample), so it needs a label value — and it must not be blank.
+        let range = build_range(
+            &trade(Address::repeat_byte(0x22), 1_000),
+            &empty_prices(),
+            Outcome::Unsolvable("missing token in Tycho".into()),
+            Outcome::Unsolvable("missing token in Tycho".into()),
+        );
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(
+                &range,
+                "ethereum",
+                &empty_prices(),
+                &empty_prices(),
+                &Registry::ethereum(),
+            );
+        });
+        let rendered = handle.render();
+        assert!(rendered.contains("algorithm=\"none\""), "rendered: {rendered}");
+        assert!(!rendered.contains("algorithm=\"\""), "rendered: {rendered}");
     }
 
     #[test]
