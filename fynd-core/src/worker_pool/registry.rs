@@ -439,6 +439,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
+            exclusivity_policy: None,
         };
 
         let workers =

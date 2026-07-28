@@ -1205,7 +1205,9 @@ mod tests {
             create_mock_pool("public_pool", Ok(make_single_quote(800)), public_delay_ms);
         let exclusive_response = match exclusive_delay_ms {
             Some(_) => Ok(make_exclusive_quote(1100)),
-            None => Err(SolveError::NoRouteFound { order_id: "test-order".to_string() }),
+            None => {
+                Err(SolveError::NoRouteFound { order_id: "test-order".to_string(), reason: None })
+            }
         };
         let (exclusive_pool, exclusive_worker) =
             create_mock_pool("exclusive_pool", exclusive_response, exclusive_delay_ms.unwrap_or(0));
