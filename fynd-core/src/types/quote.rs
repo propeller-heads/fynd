@@ -254,7 +254,7 @@ pub struct FeeBreakdown {
     #[serde_as(as = "DisplayFromStr")]
     min_amount_received: BigUint,
     /// keccak256 of the ABI-encoded swap bytes, present when client fee params were provided.
-    /// Clients use this to compute the 10-field EIP-712 signing hash for the client fee.
+    /// Clients use this to compute the 11-field EIP-712 signing hash for the client fee.
     #[serde(skip)]
     swaps_hash: Option<[u8; 32]>,
 }
@@ -297,7 +297,7 @@ impl FeeBreakdown {
     }
 
     /// keccak256 of the ABI-encoded swap bytes.
-    /// Used by clients to construct the full 10-field EIP-712 `ClientFee` signing hash.
+    /// Used by clients to construct the full 11-field EIP-712 `ClientFee` signing hash.
     pub fn swaps_hash(&self) -> Option<&[u8; 32]> {
         self.swaps_hash.as_ref()
     }

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { clientFeeSigningHash, withClientFee } from './client-fee.js';
+import type { ClientFeeSwapContext } from './client-fee.js';
 import { encodingOptions } from './permit2.js';
 import { FyndError } from './error.js';
 import type { Address, ClientFeeParams, Hex } from './types.js';
@@ -11,53 +12,102 @@ function baseParams(): ClientFeeParams {
   return { bps: 100, receiver: FEE_RECEIVER, maxContribution: 0n, deadline: 1893456000 };
 }
 
+function baseSwap(): ClientFeeSwapContext {
+  return {
+    amountIn: 1000000000000000000n,
+    tokenIn: '0x1111111111111111111111111111111111111111' as Address,
+    tokenOut: '0x2222222222222222222222222222222222222222' as Address,
+    expectedAmountOut: 1010000n,
+    minAmountOut: 1000000n,
+    receiver: '0x7777777777777777777777777777777777777777' as Address,
+    swapsHash: `0x${'11'.repeat(32)}` as Hex,
+  };
+}
+
 describe('clientFeeSigningHash', () => {
   it('returns a 0x-prefixed 66-char hex string', () => {
-    const hash = clientFeeSigningHash(baseParams(), 1, ROUTER);
+    const hash = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
     expect(hash).toMatch(/^0x[0-9a-f]{64}$/);
   });
 
   it('is deterministic for same inputs', () => {
-    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER);
-    const hash2 = clientFeeSigningHash(baseParams(), 1, ROUTER);
+    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
+    const hash2 = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
     expect(hash1).toBe(hash2);
   });
 
   it('differs when chainId changes', () => {
-    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER);
-    const hash137 = clientFeeSigningHash(baseParams(), 137, ROUTER);
+    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
+    const hash137 = clientFeeSigningHash(baseParams(), 137, ROUTER, baseSwap());
     expect(hash1).not.toBe(hash137);
   });
 
   it('differs when bps changes', () => {
-    const hash100 = clientFeeSigningHash(baseParams(), 1, ROUTER);
-    const hash200 = clientFeeSigningHash({ ...baseParams(), bps: 200 }, 1, ROUTER);
+    const hash100 = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
+    const hash200 = clientFeeSigningHash({ ...baseParams(), bps: 200 }, 1, ROUTER, baseSwap());
     expect(hash100).not.toBe(hash200);
   });
 
   it('differs when receiver changes', () => {
     const other = '0x5555555555555555555555555555555555555555' as Address;
-    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER);
-    const hash2 = clientFeeSigningHash({ ...baseParams(), receiver: other }, 1, ROUTER);
+    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
+    const hash2 = clientFeeSigningHash({ ...baseParams(), receiver: other }, 1, ROUTER, baseSwap());
     expect(hash1).not.toBe(hash2);
   });
 
   it('differs when maxContribution changes', () => {
-    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER);
-    const hash2 = clientFeeSigningHash({ ...baseParams(), maxContribution: 1000n }, 1, ROUTER);
+    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
+    const hash2 = clientFeeSigningHash(
+      { ...baseParams(), maxContribution: 1000n },
+      1,
+      ROUTER,
+      baseSwap()
+    );
     expect(hash1).not.toBe(hash2);
   });
 
   it('differs when deadline changes', () => {
-    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER);
-    const hash2 = clientFeeSigningHash({ ...baseParams(), deadline: 9999999999 }, 1, ROUTER);
+    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
+    const hash2 = clientFeeSigningHash(
+      { ...baseParams(), deadline: 9999999999 },
+      1,
+      ROUTER,
+      baseSwap()
+    );
     expect(hash1).not.toBe(hash2);
   });
 
   it('differs when router address changes', () => {
     const other = '0x6666666666666666666666666666666666666666' as Address;
-    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER);
-    const hash2 = clientFeeSigningHash(baseParams(), 1, other);
+    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
+    const hash2 = clientFeeSigningHash(baseParams(), 1, other, baseSwap());
+    expect(hash1).not.toBe(hash2);
+  });
+
+  it('differs when expectedAmountOut changes', () => {
+    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
+    const hash2 = clientFeeSigningHash(baseParams(), 1, ROUTER, {
+      ...baseSwap(),
+      expectedAmountOut: 1020000n,
+    });
+    expect(hash1).not.toBe(hash2);
+  });
+
+  it('differs when minAmountOut changes', () => {
+    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
+    const hash2 = clientFeeSigningHash(baseParams(), 1, ROUTER, {
+      ...baseSwap(),
+      minAmountOut: 999000n,
+    });
+    expect(hash1).not.toBe(hash2);
+  });
+
+  it('differs when swapsHash changes', () => {
+    const hash1 = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
+    const hash2 = clientFeeSigningHash(baseParams(), 1, ROUTER, {
+      ...baseSwap(),
+      swapsHash: `0x${'22'.repeat(32)}` as Hex,
+    });
     expect(hash1).not.toBe(hash2);
   });
 });
