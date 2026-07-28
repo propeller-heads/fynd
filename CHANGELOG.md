@@ -1,4 +1,23 @@
 
+## [0.97.7](https://github.com/propeller-heads/fynd/compare/0.97.6...0.97.7) (2026-07-28)
+
+### Features
+
+* **core:** report AmountTooSmall for dust quotes via input-vs-single-hop-gas ([890b731](https://github.com/propeller-heads/fynd/commit/890b731f42eab803d77ce68992dfaf09d45cbaf2))
+* **core:** add AmountTooSmall no-path reason and aggregate it ([ec57a0c](https://github.com/propeller-heads/fynd/commit/ec57a0cf03f47a92f2f4eda849e140a695e4b268))
+* **rpc:** log amount_too_small no-route reason code ([087de5d](https://github.com/propeller-heads/fynd/commit/087de5d4956cee418701030424a9006e7bb36126))
+
+### Bug Fixes
+
+* log terminal errors so stdout log pipelines show them ([7bea194](https://github.com/propeller-heads/fynd/commit/7bea19483c7dc3736266d0ef7be96b45759e9c46))
+* **core:** make AmountTooSmall docs and Display mode-neutral ([2039b19](https://github.com/propeller-heads/fynd/commit/2039b19d89b6784bbc6d3cbdf1b6292542e41c21))
+* **core:** rank no-route reasons by tier when aggregating pools ([765cd93](https://github.com/propeller-heads/fynd/commit/765cd93d4a30ac477751d641b2eedd8553a608fe))
+
+### Performance Improvements
+
+* **core:** gate input-side dust check on uneconomic edges ([b4b72e5](https://github.com/propeller-heads/fynd/commit/b4b72e5c3a4c79b4936dc81df1df2a9504489408))
+
+
 ## [0.97.6](https://github.com/propeller-heads/fynd/compare/0.97.4...0.97.6) (2026-07-27)
 
 ### Features
