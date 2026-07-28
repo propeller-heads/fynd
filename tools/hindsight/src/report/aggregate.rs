@@ -157,7 +157,8 @@ pub(crate) fn build(records: &[Comparison]) -> Report {
 /// `--propamm-pair`, so the section is omitted rather than rendered empty.
 ///
 /// Only records with a `propamm` field count toward `solved`: a run that enabled the harness
-/// mid-way would otherwise dilute the winrate with trades the mock never saw.
+/// mid-way would otherwise dilute the winrate with trades the mock never saw. The monitor writes
+/// the field for every *solved* order, win or lose, so the field's presence is the denominator.
 fn propamm(records: &[Comparison]) -> Option<PropAmm> {
     let scoped: Vec<&Comparison> = records
         .iter()

@@ -742,7 +742,10 @@ fn report_propamm_block(
     let pair_label = harness.stats.pair_label();
 
     for observed in observations {
-        if !observed.won {
+        // A record is written for every solved order, not only the wins: the report needs the
+        // losses as the winrate's denominator, and a wins-only file makes every run look
+        // like 100%. Unsolved solves stay `None` — the pool never had a chance at those.
+        if !observed.solved {
             records.push(None);
             continue;
         }
