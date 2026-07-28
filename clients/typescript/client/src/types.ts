@@ -122,10 +122,10 @@ export interface BlockInfo {
   timestamp: number;
 }
 
-/** A single pool-level swap within a route. */
+/** A single component-level (liquidity pool) swap within a route. */
 export interface Swap {
-  /** Unique pool identifier (wire name: `component_id`). */
-  poolId: string;
+  /** Unique component identifier (wire name: `component_id`). */
+  componentId: string;
   /** Protocol name (e.g. "uniswap_v3", "balancer_v2"). */
   protocol: string;
   tokenIn: Address;

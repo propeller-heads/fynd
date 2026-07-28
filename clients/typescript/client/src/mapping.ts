@@ -111,7 +111,7 @@ function fromWireRoute(wire: WireRoute): Route {
 
 function fromWireSwap(wire: WireSwap): Swap {
     return {
-        poolId: wire.component_id,
+        componentId: wire.component_id,
         protocol: wire.protocol,
         tokenIn: wire.token_in as Address,
         tokenOut: wire.token_out as Address,

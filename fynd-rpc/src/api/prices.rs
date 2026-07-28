@@ -14,7 +14,7 @@ pub struct PricesQuery {
     /// Valid values: `depths`, `spot_prices`.
     #[param(example = "depths,spot_prices")]
     pub include: Option<String>,
-    /// Maximum number of spot_prices and pool_depths entries (default: 1000).
+    /// Maximum number of spot_prices and component_depths entries (default: 1000).
     #[param(example = 1000)]
     pub limit: Option<usize>,
 }
@@ -73,7 +73,7 @@ pub struct ComputationBlocks {
     pub spot_prices: Option<u64>,
     /// Block at which component depths were computed. `None` if not yet available.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pool_depths: Option<u64>,
+    pub component_depths: Option<u64>,
 }
 
 /// Top-level response for GET /v1/prices.
@@ -91,7 +91,7 @@ pub struct PricesResponse {
     pub spot_prices: Option<Vec<SpotPriceEntry>>,
     /// Component depths per component direction (only if requested via `include=depths`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pool_depths: Option<Vec<PoolDepthEntry>>,
+    pub component_depths: Option<Vec<ComponentDepthEntry>>,
 }
 
 /// A single token's gas price.
@@ -121,7 +121,7 @@ pub struct SpotPriceEntry {
 
 /// A single directional component depth.
 #[derive(Debug, Serialize, ToSchema)]
-pub struct PoolDepthEntry {
+pub struct ComponentDepthEntry {
     /// Component (liquidity pool) identifier.
     pub component_id: ComponentId,
     /// Input token address.

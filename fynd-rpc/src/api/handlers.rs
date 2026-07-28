@@ -8,8 +8,8 @@ use tracing::{info, warn};
 use super::{dto, ApiError, AppState};
 #[cfg(feature = "experimental")]
 use crate::api::prices::{
-    price_to_f64, ComputationBlocks, IncludeField, PoolDepthEntry, PricesQuery, PricesResponse,
-    SpotPriceEntry, TokenPriceEntry,
+    price_to_f64, ComponentDepthEntry, ComputationBlocks, IncludeField, PricesQuery,
+    PricesResponse, SpotPriceEntry, TokenPriceEntry,
 };
 use crate::api::{
     error::{solve_error_code, ErrorResponse},
@@ -214,7 +214,7 @@ pub(crate) async fn info(state: web::Data<AppState>) -> HttpResponse {
 }
 
 #[cfg(feature = "experimental")]
-/// Default limit for spot_prices and pool_depths entries.
+/// Default limit for spot_prices and component_depths entries.
 const DEFAULT_PRICES_LIMIT: usize = 1000;
 
 #[cfg(feature = "experimental")]
@@ -226,7 +226,7 @@ const DEFAULT_PRICES_LIMIT: usize = 1000;
 /// # Query Parameters
 ///
 /// - `include` - Comma-separated list: `depths`, `spot_prices`
-/// - `limit` - Max entries for spot_prices / pool_depths (default: 1000)
+/// - `limit` - Max entries for spot_prices / component_depths (default: 1000)
 #[utoipa::path(
     get,
     path = "/v1/prices",
@@ -316,10 +316,10 @@ pub async fn get_prices(
 
     // Convert component depths if requested (sorted for deterministic limit)
     let component_depths = if want_depths {
-        let mut entries: Vec<PoolDepthEntry> = component_depths_data
+        let mut entries: Vec<ComponentDepthEntry> = component_depths_data
             .into_iter()
             .flatten()
-            .map(|((component_id, token_in, token_out), depth)| PoolDepthEntry {
+            .map(|((component_id, token_in, token_out), depth)| ComponentDepthEntry {
                 component_id,
                 token_in,
                 token_out,
@@ -345,16 +345,16 @@ pub async fn get_prices(
         blocks: ComputationBlocks {
             token_prices: token_prices_block,
             spot_prices: spot_prices_block,
-            pool_depths: component_depths_block,
+            component_depths: component_depths_block,
         },
         spot_prices,
-        pool_depths: component_depths,
+        component_depths,
     };
 
     info!(
         num_tokens = response.prices.len(),
         has_spot = response.spot_prices.is_some(),
-        has_depths = response.pool_depths.is_some(),
+        has_depths = response.component_depths.is_some(),
         "prices response"
     );
 
