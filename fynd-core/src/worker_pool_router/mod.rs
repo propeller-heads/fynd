@@ -538,9 +538,9 @@ impl WorkerPoolRouter {
 
         // No valid quote found - return a NoRouteFound response
         // Try to get any response to extract block info, or create a placeholder
-        let mut fallback = if let Some((_, any_q)) = responses.quotes.first() {
+        let fallback = if let Some((_, any_q)) = responses.quotes.first() {
             counter!("worker_router_orders_total", "status" => "no_route").increment(1);
-            OrderQuote::new(
+            let mut fallback = OrderQuote::new(
                 responses.order_id.clone(),
                 QuoteStatus::NoRouteFound,
                 any_q.amount_in().clone(),
@@ -552,7 +552,17 @@ impl WorkerPoolRouter {
                 any_q.sender().clone(),
                 any_q.receiver().clone(),
                 any_q.solved_against().clone(),
-            )
+            );
+            // Only label the cause when a quote is actually over the request's
+            // max_gas, so a future filter or non-Success status cannot silently
+            // get attributed to the gas cap.
+            let over_max_gas = responses.quotes.iter().any(|(_, q)| {
+                options
+                    .max_gas()
+                    .is_some_and(|max| q.gas_estimate() > max)
+            });
+            fallback.set_no_route_cause(over_max_gas.then_some(SolveError::MaxGasExceeded));
+            fallback
         } else {
             // No responses at all - determine status from failure types
             let status = if responses.failed_solvers.is_empty() {
@@ -591,7 +601,7 @@ impl WorkerPoolRouter {
                 .state_label()
                 .cloned()
                 .unwrap_or_else(|| "0".to_string());
-            OrderQuote::new(
+            let mut fallback = OrderQuote::new(
                 responses.order_id.clone(),
                 status,
                 BigUint::ZERO,
@@ -603,11 +613,10 @@ impl WorkerPoolRouter {
                 Bytes::default(),
                 Bytes::default(),
                 label,
-            )
+            );
+            fallback.set_no_route_cause(aggregate_no_route_cause(&responses.failed_solvers));
+            fallback
         };
-        if fallback.status() == QuoteStatus::NoRouteFound {
-            fallback.set_no_route_reason(aggregate_no_route_reason(&responses.failed_solvers));
-        }
         vec![fallback]
     }
 
@@ -617,35 +626,6 @@ impl WorkerPoolRouter {
             .timeout_ms()
             .map(Duration::from_millis)
             .unwrap_or(self.config.default_timeout())
-    }
-}
-
-/// Picks the most informative no-route reason across the failed pools.
-///
-/// Reasons are ranked into tiers so the result does not depend on pool
-/// completion order: token-not-in-graph reasons are shared-graph facts and
-/// rank highest, then `AmountTooSmall`, `NoScorablePaths`, `NoGraphPath`.
-fn aggregate_no_route_reason(
-    failed_solvers: &[(String, SolveError)],
-) -> Option<crate::algorithm::NoPathReason> {
-    let mut best = None;
-    for (_, error) in failed_solvers {
-        if let SolveError::NoRouteFound { reason: Some(reason), .. } = error {
-            if best.is_none_or(|b| reason_tier(b) < reason_tier(*reason)) {
-                best = Some(*reason);
-            }
-        }
-    }
-    best
-}
-
-fn reason_tier(reason: crate::algorithm::NoPathReason) -> u8 {
-    use crate::algorithm::NoPathReason;
-    match reason {
-        NoPathReason::SourceTokenNotInGraph | NoPathReason::DestinationTokenNotInGraph => 3,
-        NoPathReason::AmountTooSmall => 2,
-        NoPathReason::NoScorablePaths => 1,
-        NoPathReason::NoGraphPath => 0,
     }
 }
 
@@ -878,6 +858,44 @@ fn has_valid_exclusive_route(quote: &OrderQuote, policy: &ExclusivityPolicy) -> 
     }
 
     exclusive_count == 1
+}
+
+/// Shared-graph facts beat path-specific reasons (most specific first:
+/// amount-too-small, no-scorable-paths, no-graph-path), which beat liquidity,
+/// data, algorithm, and infrastructure errors; the first error wins within a
+/// tier.
+fn aggregate_no_route_cause(failed_solvers: &[(String, SolveError)]) -> Option<SolveError> {
+    failed_solvers
+        .iter()
+        .map(|(_, error)| error)
+        .min_by_key(|error| cause_tier(error))
+        .cloned()
+}
+
+fn cause_tier(error: &SolveError) -> u8 {
+    use crate::algorithm::NoPathReason;
+    match error {
+        SolveError::NoRouteFound { reason: Some(reason), .. } => match reason {
+            NoPathReason::SourceTokenNotInGraph | NoPathReason::DestinationTokenNotInGraph => 0,
+            NoPathReason::AmountTooSmall => 1,
+            NoPathReason::NoScorablePaths => 2,
+            NoPathReason::NoGraphPath => 3,
+        },
+        SolveError::InsufficientLiquidity { .. } | SolveError::MaxGasExceeded => 2,
+        SolveError::MissingData(_) |
+        SolveError::MarketDataStale { .. } |
+        SolveError::ComputationFailed(_) |
+        SolveError::NotReady(_) => 3,
+        SolveError::SimulationFailed(_) | SolveError::AlgorithmError(_) => 4,
+        SolveError::Timeout { .. } |
+        SolveError::QueueFull |
+        SolveError::Internal(_) |
+        SolveError::InvalidOrder(_) |
+        SolveError::FailedEncoding(_) |
+        SolveError::EncodingUnavailable(_) |
+        SolveError::PriceCheckFailed { .. } => 5,
+        SolveError::NoRouteFound { reason: None, .. } => 6,
+    }
 }
 
 fn refine_gas_estimates(
@@ -1407,28 +1425,35 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_no_route_reason_surfaces_amount_too_small() {
+    fn test_aggregate_cause_surfaces_amount_too_small() {
         use crate::algorithm::NoPathReason;
         let failed = vec![(
             "bf".to_string(),
             SolveError::no_route_found_with_reason("o1", NoPathReason::AmountTooSmall),
         )];
-        assert_eq!(aggregate_no_route_reason(&failed), Some(NoPathReason::AmountTooSmall));
+        assert!(matches!(
+            aggregate_no_route_cause(&failed),
+            Some(SolveError::NoRouteFound { reason: Some(NoPathReason::AmountTooSmall), .. })
+        ));
     }
 
     #[test]
-    fn test_aggregate_no_route_reason_independent_of_pool_order() {
+    fn test_aggregate_no_route_cause_independent_of_pool_order() {
         use crate::algorithm::NoPathReason;
         let dust = || SolveError::no_route_found_with_reason("o1", NoPathReason::AmountTooSmall);
         let no_path = || SolveError::no_route_found_with_reason("o1", NoPathReason::NoGraphPath);
         let forward = vec![("bf1".to_string(), no_path()), ("bf3".to_string(), dust())];
         let reversed = vec![("bf3".to_string(), dust()), ("bf1".to_string(), no_path())];
-        assert_eq!(aggregate_no_route_reason(&forward), Some(NoPathReason::AmountTooSmall));
-        assert_eq!(aggregate_no_route_reason(&reversed), Some(NoPathReason::AmountTooSmall));
+        for failed in [forward, reversed] {
+            assert!(matches!(
+                aggregate_no_route_cause(&failed),
+                Some(SolveError::NoRouteFound { reason: Some(NoPathReason::AmountTooSmall), .. })
+            ));
+        }
     }
 
     #[test]
-    fn aggregate_token_not_in_graph_wins_over_amount_too_small() {
+    fn test_aggregate_token_not_in_graph_wins_over_amount_too_small() {
         use crate::algorithm::NoPathReason;
         let failed = vec![
             (
@@ -1443,10 +1468,103 @@ mod tests {
                 ),
             ),
         ];
-        assert_eq!(
-            aggregate_no_route_reason(&failed),
-            Some(NoPathReason::DestinationTokenNotInGraph)
+        assert!(matches!(
+            aggregate_no_route_cause(&failed),
+            Some(SolveError::NoRouteFound {
+                reason: Some(NoPathReason::DestinationTokenNotInGraph),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_aggregate_prefers_liquidity_over_infra() {
+        let failed = vec![
+            ("a".to_string(), SolveError::QueueFull),
+            ("b".to_string(), SolveError::insufficient_liquidity(1u32.into(), 0u32.into())),
+        ];
+        assert!(matches!(
+            aggregate_no_route_cause(&failed),
+            Some(SolveError::InsufficientLiquidity { .. })
+        ));
+    }
+
+    #[test]
+    fn test_rank_quotes_max_gas_filtered_sets_max_gas_exceeded() {
+        let responses = OrderResponses {
+            order_id: "o1".to_string(),
+            quotes: vec![(
+                "pool".to_string(),
+                OrderQuote::new(
+                    "o1".to_string(),
+                    QuoteStatus::Success,
+                    BigUint::from(1_000u64),
+                    BigUint::from(990u64),
+                    BigUint::from(100_000u64),
+                    BigUint::from(990u64),
+                    BlockInfo::new(1, "0xabc".to_string(), 0),
+                    "test".to_string(),
+                    Bytes::default(),
+                    Bytes::default(),
+                    "1".to_string(),
+                ),
+            )],
+            failed_solvers: vec![],
+        };
+        let options = QuoteOptions::default().with_max_gas(BigUint::from(1u64));
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let result = worker_router.rank_quotes(&responses, &options);
+        assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
+        assert!(matches!(result[0].no_route_cause(), Some(SolveError::MaxGasExceeded)));
+    }
+
+    #[test]
+    fn test_rank_quotes_no_cause_when_gas_within_max() {
+        let responses = OrderResponses {
+            order_id: "o1".to_string(),
+            quotes: vec![(
+                "pool".to_string(),
+                OrderQuote::new(
+                    "o1".to_string(),
+                    QuoteStatus::NoRouteFound,
+                    BigUint::from(1_000u64),
+                    BigUint::from(990u64),
+                    BigUint::from(100u64),
+                    BigUint::from(990u64),
+                    BlockInfo::new(1, "0xabc".to_string(), 0),
+                    "test".to_string(),
+                    Bytes::default(),
+                    Bytes::default(),
+                    "1".to_string(),
+                ),
+            )],
+            failed_solvers: vec![],
+        };
+        let options = QuoteOptions::default().with_max_gas(BigUint::from(1_000u64));
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let result = worker_router.rank_quotes(&responses, &options);
+        assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
+        assert!(
+            result[0].no_route_cause().is_none(),
+            "gas within max_gas must not be labelled MaxGasExceeded: {:?}",
+            result[0].no_route_cause()
         );
+    }
+
+    #[test]
+    fn test_all_timeout_fallback_carries_timeout_cause() {
+        let responses = OrderResponses {
+            order_id: "o1".to_string(),
+            quotes: vec![],
+            failed_solvers: vec![("pool".to_string(), SolveError::Timeout { elapsed_ms: 9 })],
+        };
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
+        assert_eq!(result[0].status(), QuoteStatus::Timeout);
+        assert!(matches!(result[0].no_route_cause(), Some(SolveError::Timeout { .. })));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::api::prices::{
 use crate::api::{
     error::{solve_error_code, ErrorResponse},
     request_capture::{
-        self, log_request_capture, log_slow_solve, no_route_reason_code, quote_status_code,
+        self, failure_reason_slug, log_request_capture, log_slow_solve, quote_status_code,
         RequestOutcome,
     },
 };
@@ -95,10 +95,12 @@ pub(crate) async fn quote(
                 .iter()
                 .map(|order_quote| quote_status_code(order_quote.status()))
                 .collect(),
-            no_route_reasons: core_quote
+            failure_reasons: core_quote
                 .orders()
                 .iter()
-                .map(|order_quote| no_route_reason_code(order_quote.no_route_reason()))
+                .map(|order_quote| {
+                    failure_reason_slug(order_quote.status(), order_quote.no_route_cause())
+                })
                 .collect(),
         },
         Err(error) => RequestOutcome::Failed { code: solve_error_code(error) },

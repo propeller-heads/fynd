@@ -28,7 +28,7 @@ use tycho_simulation::tycho_common::{
 };
 use uuid::Uuid;
 
-use super::primitives::ComponentId;
+use super::{internal::SolveError, primitives::ComponentId};
 use crate::{
     algorithm::NoPathReason, feed::market_data::StateLabel, price_guard::config::PriceGuardConfig,
     AlgorithmError,
@@ -791,9 +791,10 @@ pub struct OrderQuote {
     /// The state overlay this quote was computed against.
     /// When no overlay was requested this is the block number of the base state at solve time.
     solved_against: StateLabel,
-    /// Why no route was found (internal use only; only set for `NoRouteFound`).
+    /// Why this order failed (internal use only; set by the router fallback,
+    /// skipped during serialization).
     #[serde(skip)]
-    no_route_reason: Option<NoPathReason>,
+    no_route_cause: Option<SolveError>,
     /// Order-level surplus summary, populated when this quote executes through an exclusive
     /// pool.
     ///
@@ -836,7 +837,7 @@ impl OrderQuote {
             sender,
             receiver,
             solved_against,
-            no_route_reason: None,
+            no_route_cause: None,
             surplus: None,
         }
     }
@@ -1004,14 +1005,23 @@ impl OrderQuote {
         &self.solved_against
     }
 
-    /// Records why no route was found. Internal; skipped during serialization.
-    pub(crate) fn set_no_route_reason(&mut self, reason: Option<NoPathReason>) {
-        self.no_route_reason = reason;
+    /// Records why this order failed. Internal; skipped during serialization.
+    pub(crate) fn set_no_route_cause(&mut self, cause: Option<SolveError>) {
+        self.no_route_cause = cause;
     }
 
-    /// Returns the recorded no-route reason, if any.
+    /// Returns the recorded failure cause, if any.
+    pub fn no_route_cause(&self) -> Option<&SolveError> {
+        self.no_route_cause.as_ref()
+    }
+
+    /// Returns the no-route path reason, when the failure cause was a
+    /// route-finding failure that reported one.
     pub fn no_route_reason(&self) -> Option<NoPathReason> {
-        self.no_route_reason
+        match self.no_route_cause.as_ref() {
+            Some(SolveError::NoRouteFound { reason, .. }) => *reason,
+            _ => None,
+        }
     }
 }
 
@@ -1790,6 +1800,34 @@ mod tests {
 
     use super::*;
     use crate::algorithm::test_utils::{component, token, MockProtocolSim};
+
+    #[test]
+    fn test_no_route_reason_shim_extracts_nested_path_reason() {
+        let mut quote = OrderQuote::new(
+            "o1".to_string(),
+            QuoteStatus::NoRouteFound,
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BlockInfo::new(0, String::new(), 0),
+            String::new(),
+            Bytes::default(),
+            Bytes::default(),
+            "0".to_string(),
+        );
+        assert_eq!(quote.no_route_reason(), None);
+
+        quote.set_no_route_cause(Some(SolveError::no_route_found_with_reason(
+            "o1",
+            NoPathReason::NoGraphPath,
+        )));
+        assert_eq!(quote.no_route_reason(), Some(NoPathReason::NoGraphPath));
+
+        quote.set_no_route_cause(Some(SolveError::QueueFull));
+        assert_eq!(quote.no_route_reason(), None);
+        assert!(matches!(quote.no_route_cause(), Some(SolveError::QueueFull)));
+    }
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])

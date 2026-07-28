@@ -151,6 +151,18 @@ pub enum SolveError {
         /// Identifier of the order that failed the price check.
         order_id: String,
     },
+
+    /// Routes were found but every quote exceeded the request's `max_gas`.
+    #[error("all routes exceed the requested max_gas")]
+    MaxGasExceeded,
+
+    /// Data required for solving was not available (e.g. gas price, token prices).
+    #[error("required data missing: {0}")]
+    MissingData(String),
+
+    /// Pool simulation failed while evaluating a route.
+    #[error("simulation failed: {0}")]
+    SimulationFailed(String),
 }
 
 impl SolveError {
@@ -185,5 +197,26 @@ impl SolveError {
     /// Creates a [`SolveError::MarketDataStale`] with the data age in milliseconds.
     pub fn market_data_stale(age_ms: u64) -> Self {
         Self::MarketDataStale { age_ms }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_solve_error_variants_display() {
+        assert_eq!(
+            SolveError::MaxGasExceeded.to_string(),
+            "all routes exceed the requested max_gas"
+        );
+        assert_eq!(
+            SolveError::MissingData("gas price".to_string()).to_string(),
+            "required data missing: gas price"
+        );
+        assert_eq!(
+            SolveError::SimulationFailed("pool-1: revert".to_string()).to_string(),
+            "simulation failed: pool-1: revert"
+        );
     }
 }

@@ -341,33 +341,7 @@ where
                 quote
             }
             Err(err) => {
-                let solve_error = match err {
-                    crate::AlgorithmError::NoPath { reason, .. } => {
-                        debug!(
-                            order_id = %order.id(),
-                            error = %err,
-                            "no route found"
-                        );
-                        SolveError::no_route_found_with_reason(order.id(), reason)
-                    }
-                    crate::AlgorithmError::Timeout { elapsed_ms } => {
-                        warn!(
-                            order_id = %order.id(),
-                            elapsed_ms,
-                            "solve timeout"
-                        );
-                        SolveError::Timeout { elapsed_ms }
-                    }
-                    _ => {
-                        error!(
-                            order_id = %order.id(),
-                            error = %err,
-                            "algorithm error"
-                        );
-                        SolveError::AlgorithmError(err.to_string())
-                    }
-                };
-                return Err(solve_error);
+                return Err(solve_error_from_algorithm_error(order.id(), order.amount(), err))
             }
         };
 
@@ -599,6 +573,49 @@ where
                     }
                 }
             }
+        }
+    }
+}
+
+/// Maps an [`AlgorithmError`](crate::AlgorithmError) to the [`SolveError`] class
+/// reported upstream, logging at a severity matching the failure class.
+///
+/// `amount_in` seeds `InsufficientLiquidity::required`; the algorithm variant
+/// carries no amounts, so `available` is reported as zero (= not reported).
+fn solve_error_from_algorithm_error(
+    order_id: &str,
+    amount_in: &BigUint,
+    err: crate::AlgorithmError,
+) -> SolveError {
+    match err {
+        crate::AlgorithmError::NoPath { reason, .. } => {
+            debug!(order_id = %order_id, error = %err, "no route found");
+            SolveError::no_route_found_with_reason(order_id, reason)
+        }
+        crate::AlgorithmError::Timeout { elapsed_ms } => {
+            warn!(order_id = %order_id, elapsed_ms, "solve timeout");
+            SolveError::Timeout { elapsed_ms }
+        }
+        crate::AlgorithmError::InsufficientLiquidity => {
+            debug!(order_id = %order_id, "insufficient liquidity on all paths");
+            SolveError::insufficient_liquidity(amount_in.clone(), BigUint::ZERO)
+        }
+        crate::AlgorithmError::DataNotFound { kind, id } => {
+            warn!(order_id = %order_id, kind, id = ?id, "required data not found");
+            SolveError::MissingData(match id {
+                Some(id) => format!("{kind}: {id}"),
+                None => kind.to_string(),
+            })
+        }
+        crate::AlgorithmError::SimulationFailed { component_id, error } => {
+            warn!(order_id = %order_id, %component_id, %error, "simulation failed");
+            SolveError::SimulationFailed(format!("{component_id}: {error}"))
+        }
+        crate::AlgorithmError::InvalidConfiguration { .. } |
+        crate::AlgorithmError::ExactOutNotSupported |
+        crate::AlgorithmError::Other(_) => {
+            error!(order_id = %order_id, error = %err, "algorithm error");
+            SolveError::AlgorithmError(err.to_string())
         }
     }
 }
@@ -1220,5 +1237,43 @@ mod tests {
         }
         assert!(wait_seen, "queue wait histogram not recorded");
         assert!(depth_seen, "queue depth gauge not recorded");
+    }
+
+    #[test]
+    fn test_algorithm_error_maps_data_not_found_to_missing_data() {
+        let err = crate::AlgorithmError::DataNotFound { kind: "gas price", id: None };
+        let mapped = solve_error_from_algorithm_error("o1", &num_bigint::BigUint::from(5u64), err);
+        assert!(matches!(mapped, SolveError::MissingData(_)), "got {mapped:?}");
+    }
+
+    #[test]
+    fn test_algorithm_error_maps_simulation_failed() {
+        let err = crate::AlgorithmError::SimulationFailed {
+            component_id: "pool-1".to_string(),
+            error: "revert".to_string(),
+        };
+        let mapped = solve_error_from_algorithm_error("o1", &num_bigint::BigUint::from(5u64), err);
+        assert!(matches!(mapped, SolveError::SimulationFailed(_)), "got {mapped:?}");
+    }
+
+    #[test]
+    fn test_algorithm_error_maps_insufficient_liquidity() {
+        let err = crate::AlgorithmError::InsufficientLiquidity;
+        let mapped = solve_error_from_algorithm_error("o1", &num_bigint::BigUint::from(5u64), err);
+        assert!(matches!(mapped, SolveError::InsufficientLiquidity { .. }), "got {mapped:?}");
+    }
+
+    #[test]
+    fn test_algorithm_error_other_stays_algorithm_error() {
+        let err = crate::AlgorithmError::Other("boom".to_string());
+        let mapped = solve_error_from_algorithm_error("o1", &num_bigint::BigUint::from(5u64), err);
+        assert!(matches!(mapped, SolveError::AlgorithmError(_)), "got {mapped:?}");
+    }
+
+    #[test]
+    fn test_algorithm_error_timeout_stays_timeout() {
+        let err = crate::AlgorithmError::Timeout { elapsed_ms: 7 };
+        let mapped = solve_error_from_algorithm_error("o1", &num_bigint::BigUint::from(5u64), err);
+        assert!(matches!(mapped, SolveError::Timeout { elapsed_ms: 7 }), "got {mapped:?}");
     }
 }
