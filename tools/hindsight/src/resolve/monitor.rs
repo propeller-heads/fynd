@@ -323,6 +323,7 @@ async fn build_solver(
 fn default_lag_blocks(chain: &str) -> u64 {
     let block_secs = match chain.to_lowercase().as_str() {
         "base" => 2,
+        "robinhood" => 1,
         _ => 12,
     };
     (20 * 60 / block_secs).max(1)

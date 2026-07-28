@@ -181,6 +181,7 @@ pub mod defaults {
             "bsc" => Ok("https://bsc-dataseed.bnbchain.org"),
             "arbitrum" => Ok("https://arbitrum.drpc.org"),
             "polygon" => Ok("https://polygon.drpc.org"),
+            "robinhood" => Ok("https://rpc.mainnet.chain.robinhood.com"),
             other => Err(format!(
                 "no default RPC URL for chain '{}'. Please provide --rpc-url explicitly.",
                 other
@@ -205,6 +206,7 @@ pub mod defaults {
             "bsc" => Ok("tycho-bsc-beta.propellerheads.xyz"),
             "arbitrum" => Ok("tycho-arbitrum-beta.propellerheads.xyz"),
             "polygon" => Ok("tycho-polygon-beta.propellerheads.xyz"),
+            "robinhood" => Ok("tycho-robinhood-beta.propellerheads.xyz"),
             other => Err(format!(
                 "no default Tycho URL for chain '{}'. Please provide --tycho-url explicitly.",
                 other

@@ -1,0 +1,20 @@
+# Custom chain registry for Robinhood Chain.
+#
+# Fynd / tycho-common use this to register "robinhood" as a custom chain until
+# Chain::Robinhood ships as a first-class variant in the upstream tycho-common crate.
+# Pass via `--chains-config chains.yaml` or `TYCHO_CHAINS_CONFIG=chains.yaml`.
+chains:
+  - name: robinhood
+    chain_id: 4663
+    block_time_secs: 1
+    native:
+      address: "0x0000000000000000000000000000000000000000"
+      symbol: "ETH"
+      decimals: 18
+    wrapped_native:
+      address: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+      symbol: "WETH"
+      decimals: 18
+    default_tvl_thresholds:
+      low: 10
+      medium: 100

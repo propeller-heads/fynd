@@ -1,0 +1,31 @@
+# Worker-pools config for running Fynd on Robinhood Chain (chain-id 4663) — pass with
+# `--worker-pools-config robinhood_pools.toml` (e.g. `hindsight monitor --chain robinhood`).
+#
+# Two pools run concurrently; the router keeps the best result by amount_out_net_gas.
+# most_liquid is the cheap single-path baseline; path_frank_wolfe adds split routing that
+# helps larger trades. Both restrict intermediate hops to Robinhood Chain's most-connected
+# tokens. Robinhood Chain uses USDG as its stablecoin (no USDC/USDT/DAI/WBTC).
+
+[pools.most_liquid_robinhood]
+algorithm           = "most_liquid"
+num_workers         = 3
+task_queue_capacity = 1000
+max_hops            = 3
+timeout_ms          = 500
+connector_tokens = [
+    "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", # WETH
+    "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", # USDG
+    "0x0000000000000000000000000000000000000000", # ETH (native gas)
+]
+
+[pools.path_frank_wolfe_robinhood]
+algorithm           = "path_frank_wolfe"
+num_workers         = 3
+task_queue_capacity = 1000
+max_hops            = 3
+timeout_ms          = 1000
+connector_tokens = [
+    "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", # WETH
+    "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", # USDG
+    "0x0000000000000000000000000000000000000000", # ETH (native gas)
+]
