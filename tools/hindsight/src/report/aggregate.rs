@@ -50,20 +50,16 @@ pub(crate) struct VerdictStat {
     pub notional_usd: f64,
 }
 
-/// Routing-quality view over scored (win/loss) trades. USD figures are signed gross Fynd-vs-settled
-/// deltas (the `hindsight_savings_usd` metric): `net` is the headline, `won`/`lost` its two sides.
+/// Routing-quality view over scored (win/loss) trades. The losses are not summarised here — the
+/// report lists each one instead, so a single bad-liquidity snapshot cannot pass for a trend.
 pub(crate) struct Savings {
     pub scored: usize,
     pub wins: usize,
-    pub losses: usize,
     /// Median net bps over winning trades — the typical savings when Fynd wins.
     pub median_win_bps: Option<f64>,
-    /// Net USD savings across scored trades — wins minus losses.
-    pub net_usd: f64,
-    /// USD gained on winning trades (positive).
+    /// USD gained on winning trades, the signed gross Fynd-vs-settled delta on wins (the
+    /// `hindsight_savings_usd` metric).
     pub won_usd: f64,
-    /// USD given up on losing trades (negative).
-    pub lost_usd: f64,
 }
 
 /// Per-solver or per-venue breakdown row.
@@ -149,29 +145,18 @@ fn savings(records: &[Comparison]) -> Savings {
         .filter(|r| r.top.verdict == "win")
         .filter_map(|r| r.top.net_bps)
         .collect();
-    let savings_usd = |verdict: &str| -> f64 {
-        scored
-            .iter()
-            .filter(|r| r.top.verdict == verdict)
-            .filter_map(|r| r.top.improvement_usd)
-            .sum()
-    };
-    let won_usd = savings_usd("win");
-    let lost_usd = savings_usd("loss");
     Savings {
         scored: scored.len(),
         wins: scored
             .iter()
             .filter(|r| r.top.verdict == "win")
             .count(),
-        losses: scored
-            .iter()
-            .filter(|r| r.top.verdict == "loss")
-            .count(),
         median_win_bps: median(&mut win_bps),
-        net_usd: won_usd + lost_usd,
-        won_usd,
-        lost_usd,
+        won_usd: scored
+            .iter()
+            .filter(|r| r.top.verdict == "win")
+            .filter_map(|r| r.top.improvement_usd)
+            .sum(),
     }
 }
 
@@ -356,15 +341,13 @@ mod tests {
             record(3, "relay", "1inch", "sandwiched", Some(500.0)),
         ];
         let savings = savings(&records);
+        // The loss is scored, the sandwiched trade is not.
         assert_eq!(savings.scored, 2);
         assert_eq!(savings.wins, 1);
-        assert_eq!(savings.losses, 1);
         // Median over wins only: [20]; the loss and sandwiched are excluded.
         assert!((savings.median_win_bps.unwrap() - 20.0).abs() < 1e-6);
-        // Won +2.0, lost -1.0, net +1.0; sandwiched excluded.
+        // Won +2.0 on the one win; the loss and the sandwiched 500 bps do not enter it.
         assert!((savings.won_usd - 2.0).abs() < 1e-6);
-        assert!((savings.lost_usd + 1.0).abs() < 1e-6);
-        assert!((savings.net_usd - 1.0).abs() < 1e-6);
     }
 
     #[test]

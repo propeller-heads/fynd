@@ -62,10 +62,9 @@ pub(crate) fn render(report: &Report, filter: Option<&str>) -> String {
     html
 }
 
-/// The headline: Fynd's savings as the uplift on trades it wins (`hindsight_improvement_usd`), one
-/// number, no charts. The loss drag and net are on the sub-line for context — kept off the headline
-/// because a single bad-liquidity snapshot can dominate the signed net — and each loss is listed in
-/// the biggest-losses table.
+/// The headline: Fynd's savings as the uplift on trades it wins (`hindsight_improvement_usd`), its
+/// win rate, and its median savings when it wins. Underneath, the size of the run as plain counts.
+/// The losses are not summarised here — each one is listed in the biggest-losses table.
 fn hero_section(savings: &Savings, summary: &Summary, filter: Option<&str>) -> String {
     let scope = filter.map_or_else(
         || "<span class=\"chip\">all venues</span>".to_string(),
@@ -77,24 +76,24 @@ fn hero_section(savings: &Savings, summary: &Summary, filter: Option<&str>) -> S
              <div class=\"herolab\">{label}</div></div>"
         )
     };
+    let mini = |value: &str, label: &str| {
+        format!(
+            "<div class=\"ministat\"><div class=\"mininum\">{value}</div>\
+             <div class=\"minilab\">{label}</div></div>"
+        )
+    };
     format!(
         "<section class=\"hero\">\
            <div class=\"heroscope\">hindsight report {scope}</div>\
            <div class=\"herostats\">{}{}{}</div>\
-           <div class=\"herosub\">Fynd savings is the uplift on trades Fynd wins \
-             (hindsight_improvement_usd). Across {} wins · {} given up on {} losses · \
-             net {} · {} scored · {} comparisons / {} blocks</div>\
+           <div class=\"herofoot\">{}{}{}</div>\
          </section>",
         big(&fmt_usd(savings.won_usd), "Fynd savings (wins uplift)", "pos big"),
         big(&pct(savings.wins, savings.scored), "win rate", "pos"),
         big(&fmt_bps_signed(savings.median_win_bps), "median savings bps (wins)", "pos"),
-        savings.wins,
-        fmt_usd(savings.lost_usd),
-        savings.losses,
-        fmt_usd(savings.net_usd),
-        savings.scored,
-        summary.total,
-        summary.distinct_blocks,
+        mini(&fmt_count(summary.distinct_blocks), "blocks"),
+        mini(&fmt_count(summary.total), "comparisons"),
+        mini(&fmt_count(savings.scored), "scored"),
     )
 }
 
@@ -322,6 +321,11 @@ fn fmt_usd(value: f64) -> String {
     format!("{sign}{}{frac}", group_thousands(int_part))
 }
 
+/// A count with thousands separators, e.g. `4,433`.
+fn fmt_count(count: usize) -> String {
+    group_thousands(&count.to_string())
+}
+
 fn group_thousands(digits: &str) -> String {
     let len = digits.len();
     let mut out = String::with_capacity(len + len / 3);
@@ -368,12 +372,14 @@ section { background: #211a30; border: 1px solid #362b4a; border-radius: 8px;
 .chip.on { color: #c9b6ef; border-color: #5a4680; }
 .herostats { display: flex; flex-wrap: wrap; gap: 1.5rem; }
 .herostat { flex: 1 1 0; min-width: 11rem; }
-.heronum { font-size: 3.5rem; font-weight: 700; line-height: 1.05; letter-spacing: -0.02em; }
-.heronum.big { font-size: 4.25rem; }
+.heronum { font-size: 4.5rem; font-weight: 700; line-height: 1.05; letter-spacing: -0.02em; }
+.heronum.big { font-size: 5.5rem; }
 .heronum.pos { color: #66bb6a; }
 .heronum.neg { color: #ef5350; }
 .herolab { color: #9a8bbf; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; margin-top: .3rem; }
-.herosub { color: #b9aecf; font-size: .9rem; margin-top: 1.25rem; }
+.herofoot { display: flex; flex-wrap: wrap; gap: 2.5rem; margin-top: 1.75rem; }
+.mininum { font-size: 1.4rem; font-weight: 600; line-height: 1.2; }
+.minilab { color: #9a8bbf; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
 .legend { list-style: none; margin: 0; padding: 0; }
 .legend li { display: flex; align-items: center; gap: .6rem; padding: .25rem 0; }
 .legend.row { display: flex; flex-wrap: wrap; gap: 1.25rem; margin-bottom: 1.25rem; }
@@ -504,6 +510,21 @@ mod tests {
         assert!(html.contains("$12.00"));
         assert!(html.contains("0xabc00000…000001")); // shortened hash
         assert!(html.contains("all venues"));
+    }
+
+    #[test]
+    fn test_render_states_the_run_size_as_counts() {
+        let html = render(&sample_report(), None);
+        // Two records over two blocks, one of them scored — plain counts, no sentence.
+        for (value, label) in [("2", "blocks"), ("2", "comparisons"), ("1", "scored")] {
+            assert!(
+                html.contains(&format!(">{value}</div><div class=\"minilab\">{label}<")),
+                "{label}"
+            );
+        }
+        // The prose summary of the loss drag and net is gone.
+        assert!(!html.contains("given up on"), "{html}");
+        assert!(!html.contains("herosub"), "{html}");
     }
 
     #[test]
