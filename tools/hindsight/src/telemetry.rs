@@ -3,6 +3,8 @@
 //! Mirrors the exporter pattern used by the `fynd` binary: install a global Prometheus recorder
 //! and serve its rendered output on a dedicated port via Actix.
 
+use std::time::Duration;
+
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use metrics::{counter, describe_counter, describe_histogram, histogram, Unit};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -20,8 +22,11 @@ const SAVINGS_USD: &str = "hindsight_savings_usd";
 const IMPROVEMENT_USD: &str = "hindsight_improvement_usd";
 const VOLUME_USD: &str = "hindsight_volume_usd";
 const BLOCK_SECONDS: &str = "hindsight_block_processing_seconds";
+const HEAD_LAG_BLOCKS: &str = "hindsight_chain_head_lag_blocks";
+const RPC_INDEX_WAIT: &str = "hindsight_rpc_index_wait_seconds";
 const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
 const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
+const UNTRACED_TRANSACTIONS: &str = "hindsight_untraced_transactions_total";
 
 /// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
@@ -117,16 +122,43 @@ pub(crate) fn describe() {
          verdict). Valued from the output leg, falling back to the input leg when the output \
          token is unpriced"
     );
-    describe_histogram!(BLOCK_SECONDS, Unit::Seconds, "Wall-clock time to process one block");
+    describe_histogram!(
+        BLOCK_SECONDS,
+        Unit::Seconds,
+        "Wall-clock time to re-solve one block, measured from the decoded trades. Excludes fetching \
+         and decoding the block itself, so it does not measure how far behind chain head the \
+         monitor is — HEAD_LAG_BLOCKS does"
+    );
+    describe_histogram!(
+        HEAD_LAG_BLOCKS,
+        Unit::Count,
+        "How far the block being re-solved trails chain head, in blocks. The monitor is one block \
+         behind by construction (it solves block N against state N-1); beyond that this is the \
+         cost of fetching and decoding the block. Sampled once per block from the head check that \
+         guards --max-lag-blocks"
+    );
+    describe_histogram!(
+        RPC_INDEX_WAIT,
+        Unit::Seconds,
+        "Time spent waiting for the receipts RPC to index the target block before decoding it, \
+         including the head check itself. The receipts RPC trails the tycho stream that picks the \
+         target, so this is a floor on the lag that no amount of solving speed removes"
+    );
     describe_counter!(
         SKIPPED_BLOCKS,
         "Blocks skipped because the RPC could not provide receipts (e.g. it lagged the tycho \
-         stream past the retry budget, or the block genuinely failed to decode)"
+         stream past its lag budget, or the block genuinely failed to decode)"
     );
     describe_counter!(
         FEED_REBUILDS,
         "Times the monitor declared its session unhealthy (feed died, or the monitor fell too \
          far behind chain head) and rebuilt the solver to resubscribe"
+    );
+    describe_counter!(
+        UNTRACED_TRANSACTIONS,
+        "Matched solver transactions dropped because the RPC could not trace them. Their block \
+         still contributes its other trades, so this counts trades missing from the aggregates \
+         rather than blocks"
     );
 }
 
@@ -301,8 +333,23 @@ pub(crate) fn record_block_seconds(seconds: f64) {
     histogram!(BLOCK_SECONDS).record(seconds);
 }
 
+pub(crate) fn record_head_lag_blocks(blocks: u64) {
+    // Via u32 to keep the conversion lossless. The clamp cannot bind in practice: a lag past
+    // `--max-lag-blocks` (hundreds) ends the session long before it could approach u32.
+    let blocks = u32::try_from(blocks).unwrap_or(u32::MAX);
+    histogram!(HEAD_LAG_BLOCKS).record(f64::from(blocks));
+}
+
+pub(crate) fn record_rpc_index_wait(wait: Duration) {
+    histogram!(RPC_INDEX_WAIT).record(wait.as_secs_f64());
+}
+
 pub(crate) fn record_skipped_block() {
     counter!(SKIPPED_BLOCKS).increment(1);
+}
+
+pub(crate) fn record_untraced_transaction() {
+    counter!(UNTRACED_TRANSACTIONS).increment(1);
 }
 
 pub(crate) fn record_feed_rebuild() {
@@ -328,6 +375,12 @@ const SAVINGS_BPS_BUCKETS: &[f64] =
 const SAVINGS_USD_BUCKETS: &[f64] = &[-3000.0, -300.0, -30.0, -3.0, 0.0, 3.0, 30.0, 300.0, 3000.0];
 const VOLUME_USD_BUCKETS: &[f64] = &[10.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0];
 const BLOCK_SECONDS_BUCKETS: &[f64] = &[0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+/// One block is the floor (the monitor solves block N against state N-1), so the low edges are
+/// spaced tightly enough to tell "at the floor" from "a block or two of fetch cost".
+const HEAD_LAG_BLOCKS_BUCKETS: &[f64] = &[1.0, 2.0, 3.0, 5.0, 10.0, 30.0, 100.0, 600.0];
+/// Sub-block edges: on a 2-second chain the interesting question is what fraction of a block time
+/// goes on waiting for the RPC.
+const RPC_INDEX_WAIT_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0];
 
 /// Install the global Prometheus recorder and serve `/metrics` on `port`.
 ///
@@ -376,7 +429,9 @@ fn configure_buckets(
         .set_buckets_for_metric(Matcher::Full(SAVINGS_USD.into()), SAVINGS_USD_BUCKETS)?
         .set_buckets_for_metric(Matcher::Full(IMPROVEMENT_USD.into()), SAVINGS_USD_BUCKETS)?
         .set_buckets_for_metric(Matcher::Full(VOLUME_USD.into()), VOLUME_USD_BUCKETS)?
-        .set_buckets_for_metric(Matcher::Full(BLOCK_SECONDS.into()), BLOCK_SECONDS_BUCKETS)
+        .set_buckets_for_metric(Matcher::Full(BLOCK_SECONDS.into()), BLOCK_SECONDS_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(HEAD_LAG_BLOCKS.into()), HEAD_LAG_BLOCKS_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(RPC_INDEX_WAIT.into()), RPC_INDEX_WAIT_BUCKETS)
 }
 
 #[cfg(test)]
@@ -441,6 +496,27 @@ mod tests {
         assert!(!is_usd_outlier(-(USD_OUTLIER_THRESHOLD - 1.0)));
         assert!(is_usd_outlier(USD_OUTLIER_THRESHOLD));
         assert!(is_usd_outlier(-(USD_OUTLIER_THRESHOLD * 100.0)));
+    }
+
+    #[test]
+    fn test_lag_metrics_render_as_histograms() {
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_head_lag_blocks(3);
+            record_rpc_index_wait(Duration::from_millis(1_500));
+        });
+        let rendered = handle.render();
+
+        // True histograms (le-labeled _bucket series), not summaries: the lag panels read them
+        // with histogram_quantile(..., *_bucket), which cannot see summary quantiles.
+        assert!(rendered.contains("hindsight_chain_head_lag_blocks_bucket"), "{rendered}");
+        assert!(rendered.contains("hindsight_rpc_index_wait_seconds_bucket"), "{rendered}");
+        // A 1.5s wait falls above the 1s edge and within the 2s one.
+        assert!(rendered.contains("hindsight_rpc_index_wait_seconds_bucket{le=\"1\"} 0"));
+        assert!(rendered.contains("hindsight_rpc_index_wait_seconds_bucket{le=\"2\"} 1"));
     }
 
     #[test]
