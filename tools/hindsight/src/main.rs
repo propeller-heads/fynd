@@ -9,7 +9,7 @@ use std::time::Instant;
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
@@ -129,11 +129,19 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
-    match Cli::parse().command {
+    let result = match Cli::parse().command {
         Command::Decode(args) => run_decode(args).await,
         Command::Verify(args) => run_verify(args).await,
         Command::Monitor(args) => resolve::monitor::run(args).await,
+    };
+
+    // Log the failure before returning it: the fmt subscriber above writes to stdout, whereas a
+    // `main` that returns `Err` prints only to stderr, so log pipelines that follow stdout show a
+    // run that stops mid-startup with no reason. Returning the error too keeps the exit code.
+    if let Err(error) = &result {
+        error!(error = format!("{error:#}"), "hindsight exited with an error");
     }
+    result
 }
 
 #[expect(clippy::print_stdout)]

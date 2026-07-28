@@ -73,7 +73,14 @@ fn main() -> Result<(), anyhow::Error> {
             Ok(())
         }
         Commands::Serve(serve_args) => {
-            run_solver(*serve_args).map_err(|e| anyhow!("{}", e))?;
+            // Log the failure before returning it: the fmt layer writes to stdout, whereas a
+            // `main` that returns `Err` prints only to stderr, so log pipelines that follow stdout
+            // show a run that stops mid-startup with no reason. Returning the error too keeps the
+            // exit code.
+            run_solver(*serve_args).map_err(|e| {
+                error!(error = %e, "Fynd exited with an error");
+                anyhow!("{}", e)
+            })?;
             Ok(())
         }
         Commands::DeriveConnectorTokens(args) => tokio::runtime::Runtime::new()
