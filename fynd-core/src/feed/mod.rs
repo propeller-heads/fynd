@@ -4,6 +4,8 @@ use tycho_simulation::tycho_common::models::Chain;
 
 /// Market events broadcast by the Tycho feed on every block update.
 pub mod events;
+/// Exclusive-component classification and per-worker graph filtering.
+pub mod exclusivity;
 pub(crate) mod gas;
 /// Shared market data store (`MarketState`, `MarketData`).
 pub mod market_data;

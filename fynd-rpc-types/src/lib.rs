@@ -1783,6 +1783,10 @@ mod conversions {
     }
 
     impl From<fynd_core::OrderQuote> for OrderQuote {
+        // NOTE: `surplus_amount` and `committed_amount_out` (exclusive-component surplus) are
+        // intentionally NOT mapped onto this public response DTO — they are internal (the per-leg
+        // committed amount reaches the encoder; the order-level surplus is for observability).
+        // Exposing them would leak the captured surplus to clients.
         fn from(core: fynd_core::OrderQuote) -> Self {
             let order_id = core.order_id().to_string();
             let status = core.status().into();

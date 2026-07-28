@@ -704,6 +704,42 @@ impl SingleOrderQuote {
     }
 }
 
+/// Order-level surplus summary for a quote routed through an exclusive component:
+/// `surplus_amount` is what the protocol captures (realized output minus the committed output
+/// the user is quoted), in the order's `token_out`.
+///
+/// The committed output is `max(public_amount_out, public_net + exclusive_gas)` — never below
+/// the public market's displayed amount, and high enough that the user still nets the public
+/// route's value after paying the exclusive route's gas.
+///
+/// Informational only (observability). The value the encoder acts on is the per-leg
+/// [`Swap::committed_amount_out`], since the on-chain hook captures surplus per component.
+#[derive(Debug, Clone)]
+pub struct SurplusInfo {
+    /// Surplus captured by the protocol: realized surplus-route output minus the committed
+    /// output.
+    surplus_amount: BigUint,
+    /// The output the user is committed to (the quoted `amount_out`).
+    committed_amount_out: BigUint,
+}
+
+impl SurplusInfo {
+    /// Creates surplus info from the captured surplus and the committed output.
+    pub fn new(surplus_amount: BigUint, committed_amount_out: BigUint) -> Self {
+        Self { surplus_amount, committed_amount_out }
+    }
+
+    /// Returns the surplus amount captured by the protocol.
+    pub fn surplus_amount(&self) -> &BigUint {
+        &self.surplus_amount
+    }
+
+    /// Returns the committed output the user is quoted.
+    pub fn committed_amount_out(&self) -> &BigUint {
+        &self.committed_amount_out
+    }
+}
+
 /// Quote for a single [`Order`].
 ///
 /// Contains the route to execute (if found), along with expected amounts,
@@ -758,6 +794,14 @@ pub struct OrderQuote {
     /// Why no route was found (internal use only; only set for `NoRouteFound`).
     #[serde(skip)]
     no_route_reason: Option<NoPathReason>,
+    /// Order-level surplus summary, populated when this quote executes through an exclusive
+    /// pool.
+    ///
+    /// Informational only (observability); the value the encoder acts on is the per-leg
+    /// [`Swap::committed_amount_out`]. `None` for pure public quotes. `#[serde(skip)]` — internal
+    /// reporting data, not part of the wire format.
+    #[serde(skip)]
+    surplus: Option<SurplusInfo>,
 }
 
 impl OrderQuote {
@@ -793,7 +837,32 @@ impl OrderQuote {
             receiver,
             solved_against,
             no_route_reason: None,
+            surplus: None,
         }
+    }
+
+    /// Attaches the order-level surplus summary (committed output + captured surplus).
+    ///
+    /// Set by the router when a surplus route is selected, for observability. The per-leg
+    /// [`Swap::committed_amount_out`] (not this) is what the encoder acts on.
+    pub(crate) fn with_surplus(mut self, surplus: SurplusInfo) -> Self {
+        self.surplus = Some(surplus);
+        self
+    }
+
+    /// Returns the captured surplus amount, if this quote routes through an exclusive component.
+    pub fn surplus_amount(&self) -> Option<&BigUint> {
+        self.surplus
+            .as_ref()
+            .map(SurplusInfo::surplus_amount)
+    }
+
+    /// Returns the committed public-market output, if this quote routes through an exclusive
+    /// component.
+    pub fn committed_amount_out(&self) -> Option<&BigUint> {
+        self.surplus
+            .as_ref()
+            .map(SurplusInfo::committed_amount_out)
     }
 
     /// Sets the status of this quote.
@@ -829,6 +898,13 @@ impl OrderQuote {
         self.gas_estimate = gas_estimate;
     }
 
+    /// Overrides the output amount (used by `combine_with_surplus` to pin to the committed
+    /// reference).
+    pub(crate) fn set_amount_out(&mut self, value: BigUint) {
+        self.amount_out = value;
+    }
+
+    /// Overrides the gas-adjusted net output (used by gas refinement and surplus overlay).
     pub(crate) fn set_amount_out_net_gas(&mut self, value: BigUint) {
         self.amount_out_net_gas = value;
     }
@@ -846,6 +922,11 @@ impl OrderQuote {
     /// Returns the route, if a valid route was found.
     pub fn route(&self) -> Option<&Route> {
         self.route.as_ref()
+    }
+
+    /// Returns a mutable reference to the route.
+    pub(crate) fn route_mut(&mut self) -> Option<&mut Route> {
+        self.route.as_mut()
     }
 
     /// Consumes this solution and returns the route.
@@ -1045,6 +1126,11 @@ impl Route {
     /// Returns the swaps in this route.
     pub fn swaps(&self) -> &[Swap] {
         &self.swaps
+    }
+
+    /// Returns a mutable reference to the swaps in this route.
+    pub(crate) fn swaps_mut(&mut self) -> &mut [Swap] {
+        &mut self.swaps
     }
 
     /// Consumes the route and returns its swaps.
@@ -1522,6 +1608,15 @@ pub struct Swap {
     /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
     #[serde_as(as = "DisplayFromStr")]
     split: f64,
+    /// Per-leg committed output for an exclusive swap.
+    ///
+    /// Set only on the single exclusive leg of a surplus route. The on-chain hook signs a
+    /// `maxExchangeRate` derived from this value (`committed_amount_out * denom / amount_in`); the
+    /// component then captures `amount_out - committed_amount_out` as surplus, denominated in this
+    /// swap's `token_out`. `None` for ordinary public swaps. In-process only — consumed by the
+    /// encoder; `#[serde(skip)]` so it never enters the wire format.
+    #[serde(skip)]
+    committed_amount_out: Option<BigUint>,
 }
 
 impl Swap {
@@ -1549,12 +1644,21 @@ impl Swap {
             protocol_component,
             protocol_state,
             split: 0.0,
+            committed_amount_out: None,
         }
     }
     /// Sets the split fraction for this swap (e.g. 0.5 means 50% of a split route).
     pub fn with_split(mut self, split: f64) -> Self {
         self.split = split;
         self
+    }
+
+    /// Sets the per-leg committed output for an exclusive swap.
+    ///
+    /// The router stamps this onto the single exclusive leg of a surplus route so the encoder
+    /// can derive the hook's `maxExchangeRate`. See [`Swap::committed_amount_out`].
+    pub(crate) fn set_committed_amount_out(&mut self, committed_amount_out: BigUint) {
+        self.committed_amount_out = Some(committed_amount_out);
     }
 
     /// Returns the component ID of the liquidity pool.
@@ -1605,6 +1709,14 @@ impl Swap {
     /// Returns the split of this swap.
     pub fn split(&self) -> &f64 {
         &self.split
+    }
+
+    /// Returns the per-leg committed output, if this is the exclusive leg of a surplus route.
+    ///
+    /// `None` for ordinary public swaps. When `Some`, the encoder derives the hook's
+    /// `maxExchangeRate` as `committed_amount_out * denom / amount_in`.
+    pub fn committed_amount_out(&self) -> Option<&BigUint> {
+        self.committed_amount_out.as_ref()
     }
 }
 
@@ -1760,6 +1872,40 @@ mod tests {
         let id = generate_order_id();
         assert!(!id.is_empty());
         assert!(id.contains('-')); // UUIDs contain dashes
+    }
+
+    fn make_quote(amount_out: u64) -> OrderQuote {
+        OrderQuote::new(
+            "order-1".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1_000u64),
+            BigUint::from(amount_out),
+            BigUint::from(100_000u64),
+            BigUint::from(amount_out),
+            BlockInfo::new(1, "0x1".to_string(), 1),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_surplus_round_trips_through_getters() {
+        let committed = BigUint::from(990u64);
+        let surplus = BigUint::from(15u64);
+        let quote =
+            make_quote(990).with_surplus(SurplusInfo::new(surplus.clone(), committed.clone()));
+
+        assert_eq!(quote.surplus_amount(), Some(&surplus));
+        assert_eq!(quote.committed_amount_out(), Some(&committed));
+    }
+
+    #[test]
+    fn public_quote_has_no_surplus() {
+        let quote = make_quote(990);
+        assert_eq!(quote.surplus_amount(), None);
+        assert_eq!(quote.committed_amount_out(), None);
     }
 
     // -------------------------------------------------------------------------

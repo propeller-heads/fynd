@@ -78,11 +78,13 @@ pub use types::{
     BlockInfo, ClientFeeParams, ComponentId, EncodingOptions, FeeBreakdown, Order, OrderQuote,
     OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions,
     QuoteRequest, QuoteStatus, Route, RouteValidationError, SingleOrderQuote, SolveError,
-    SolveParams, SolveResult, Swap, TaskId, Transaction, UserTransferType,
+    SolveParams, SolveResult, SurplusInfo, Swap, TaskId, Transaction, UserTransferType,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},
     registry::UnknownAlgorithmError,
     TaskQueueHandle,
 };
-pub use worker_pool_router::{config::WorkerPoolRouterConfig, SolverPoolHandle, WorkerPoolRouter};
+pub use worker_pool_router::{
+    config::WorkerPoolRouterConfig, LiquidityScope, SolverPoolHandle, WorkerPoolRouter,
+};

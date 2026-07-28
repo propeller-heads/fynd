@@ -12,6 +12,17 @@ task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 500
 
+# Example: an exclusive-access pool. `liquidity_scope = "all"` lets this pool route through
+# exclusive components (in addition to all public liquidity) to capture surplus above the best
+# public rate. Public pools (liquidity_scope omitted; defaults to "public_only") never see exclusive
+# components.
+# [pools.exclusive_access]
+# algorithm = "bellman_ford"
+# num_workers = 3
+# max_hops = 2
+# timeout_ms = 500
+# liquidity_scope = "all"
+
 # Example: connector_tokens restricts intermediate hops to trusted, liquid tokens,
 # reducing on-chain reversion risk. Absent = all tokens reachable (default behaviour).
 # Run `fynd derive-connector-tokens --top-n 10` to generate a fresh list for your chain.

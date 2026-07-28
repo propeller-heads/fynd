@@ -18,6 +18,7 @@ use crate::{
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{
         events::{MarketEvent, MarketEventHandler},
+        exclusivity::ExclusivityPolicy,
         market_data::MarketData,
     },
     graph::EdgeWeightUpdaterWithDerived,
@@ -45,6 +46,15 @@ pub struct WorkerPoolConfig {
     algorithm_config: AlgorithmConfig,
     /// Task queue capacity (maximum number of pending tasks).
     task_queue_capacity: usize,
+    /// When set, exclusive components are filtered out of this pool's workers' graphs
+    /// (default: `None`, no filtering).
+    ///
+    /// `All` is safe as the default because it only applies when no `ExclusivityPolicy` is
+    /// configured — meaning no exclusive components exist to exclude. When a policy is set,
+    /// `FyndBuilder::assemble_components` always constructs
+    /// `Some(policy)` for `Public`-scoped pools, so this default is never relied on in
+    /// that path.
+    exclusivity_policy: Option<ExclusivityPolicy>,
 }
 
 impl WorkerPoolConfig {
@@ -62,6 +72,7 @@ impl Default for WorkerPoolConfig {
             num_workers: num_cpus::get(),
             algorithm_config: AlgorithmConfig::default(),
             task_queue_capacity: 1000,
+            exclusivity_policy: None,
         }
     }
 }
@@ -112,6 +123,7 @@ impl WorkerPool {
             .to_string();
 
         // Spawn workers
+        let exclusivity_policy = config.exclusivity_policy.clone();
         let params = SpawnWorkersParams {
             algorithm: algorithm.clone(),
             pool_name: name.clone(),
@@ -123,6 +135,7 @@ impl WorkerPool {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
+            exclusivity_policy,
         };
         let workers = config.spawner.spawn(params)?;
 
@@ -251,6 +264,15 @@ impl WorkerPoolBuilder {
     /// Sets the task queue capacity.
     pub fn task_queue_capacity(mut self, capacity: usize) -> Self {
         self.config.task_queue_capacity = capacity;
+        self
+    }
+
+    /// Sets the policy that filters exclusive components out of each worker's graph.
+    ///
+    /// Public pools receive `Some(policy)`; exclusive-access pools (and pools of solvers with
+    /// no exclusive components configured) receive `None` and keep every component.
+    pub fn exclusivity_policy(mut self, policy: Option<ExclusivityPolicy>) -> Self {
+        self.config.exclusivity_policy = policy;
         self
     }
 
