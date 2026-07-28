@@ -553,9 +553,15 @@ impl WorkerPoolRouter {
                 any_q.receiver().clone(),
                 any_q.solved_against().clone(),
             );
-            // Workers only return Success quotes, so responses here mean every
-            // quote was filtered out by the request's max_gas.
-            fallback.set_no_route_cause(Some(SolveError::MaxGasExceeded));
+            // Only label the cause when a quote is actually over the request's
+            // max_gas, so a future filter or non-Success status cannot silently
+            // get attributed to the gas cap.
+            let over_max_gas = responses.quotes.iter().any(|(_, q)| {
+                options
+                    .max_gas()
+                    .is_some_and(|max| q.gas_estimate() > max)
+            });
+            fallback.set_no_route_cause(over_max_gas.then_some(SolveError::MaxGasExceeded));
             fallback
         } else {
             // No responses at all - determine status from failure types
@@ -1511,6 +1517,40 @@ mod tests {
         let result = worker_router.rank_quotes(&responses, &options);
         assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
         assert!(matches!(result[0].no_route_cause(), Some(SolveError::MaxGasExceeded)));
+    }
+
+    #[test]
+    fn test_rank_quotes_no_cause_when_gas_within_max() {
+        let responses = OrderResponses {
+            order_id: "o1".to_string(),
+            quotes: vec![(
+                "pool".to_string(),
+                OrderQuote::new(
+                    "o1".to_string(),
+                    QuoteStatus::NoRouteFound,
+                    BigUint::from(1_000u64),
+                    BigUint::from(990u64),
+                    BigUint::from(100u64),
+                    BigUint::from(990u64),
+                    BlockInfo::new(1, "0xabc".to_string(), 0),
+                    "test".to_string(),
+                    Bytes::default(),
+                    Bytes::default(),
+                    "1".to_string(),
+                ),
+            )],
+            failed_solvers: vec![],
+        };
+        let options = QuoteOptions::default().with_max_gas(BigUint::from(1_000u64));
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let result = worker_router.rank_quotes(&responses, &options);
+        assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
+        assert!(
+            result[0].no_route_cause().is_none(),
+            "gas within max_gas must not be labelled MaxGasExceeded: {:?}",
+            result[0].no_route_cause()
+        );
     }
 
     #[test]
