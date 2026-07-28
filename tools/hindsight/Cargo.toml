@@ -50,10 +50,15 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# Timestamps on the mock PropAMM component
+chrono = { workspace = true }
+
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+# Registers the mock PropAMM pool state as a `Box<dyn ProtocolSim>` implementation
+typetag = { workspace = true }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

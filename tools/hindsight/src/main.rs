@@ -1,4 +1,5 @@
 mod decoder;
+mod propamm;
 mod report;
 mod resolve;
 mod telemetry;

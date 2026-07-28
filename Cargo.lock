@@ -3835,6 +3835,7 @@ dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
+ "chrono",
  "clap",
  "futures 0.3.32",
  "fynd-client",
@@ -3852,6 +3853,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.23",
  "tycho-simulation",
+ "typetag",
 ]
 
 [[package]]
