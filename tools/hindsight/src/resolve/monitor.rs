@@ -56,6 +56,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DECODE_RPC_LAG_RETRIES: usize = 5;
 const DECODE_RPC_LAG_BACKOFF: Duration = Duration::from_millis(1500);
 
+/// Wall-clock budget behind chain head that `default_lag_blocks` converts into a block count.
+const LAG_BUDGET_SECS: u64 = 20 * 60;
+
 /// Inputs for the live monitor — the `monitor` subcommand's CLI arguments, used directly as its
 /// configuration.
 #[derive(clap::Args)]
@@ -319,14 +322,14 @@ async fn build_solver(
 
 /// The default `--max-lag-blocks`: a ~20-minute wall-clock budget for how far behind chain head the
 /// monitor may fall before rebuilding, expressed as a block count at the chain's block time so the
-/// budget stays about the same wall-clock length on every chain. `Chain` carries no block time, so
-/// the per-chain seconds live here; an unlisted chain uses the 12-second-block default.
+/// budget stays about the same wall-clock length on every chain. A custom chain with no registered
+/// block time falls back to 12-second blocks.
 fn default_lag_blocks(chain: Chain) -> u64 {
-    let block_secs = match chain {
-        Chain::Base => 2,
-        _ => 12,
-    };
-    (20 * 60 / block_secs).max(1)
+    let block_secs = chain
+        .try_block_time_secs()
+        .unwrap_or(12)
+        .max(1);
+    (LAG_BUDGET_SECS / block_secs).max(1)
 }
 
 /// Resolves when the process receives Ctrl-C (SIGINT), the signal the monitor treats as "stop".
@@ -645,7 +648,7 @@ mod tests {
     fn test_default_lag_blocks_scales_with_block_time() {
         assert_eq!(default_lag_blocks(Chain::Ethereum), 100); // 12s blocks
         assert_eq!(default_lag_blocks(Chain::Base), 600); // 2s blocks
-        assert_eq!(default_lag_blocks(Chain::Unichain), 100); // unlisted → 12s default
+        assert_eq!(default_lag_blocks(Chain::Unichain), 1200); // 1s blocks
     }
 
     /// End-to-end smoke test of the live two-state monitor against a real solver.
