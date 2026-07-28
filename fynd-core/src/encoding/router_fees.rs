@@ -13,11 +13,10 @@ use std::{
 
 use tycho_simulation::tycho_common::Bytes;
 
-/// Legacy basis-points denominator: client fees on the wire use 10,000 = 100%.
+/// Legacy basis-points denominator: client fees on Fynd's API use 10,000 = 100%.
 ///
-/// This is the calldata convention between Fynd and the router (`clientFeeBps`), independent
-/// of the FeeCalculator's internal precision. The contract scales `clientFeeBps` into its own
-/// fee units by `max_fee_units / LEGACY_BPS_DENOMINATOR`.
+/// The router takes `clientFeeBps` in the FeeCalculator's own fee units, so the encoder scales
+/// the API value by `max_fee_units / LEGACY_BPS_DENOMINATOR` before putting it in calldata.
 pub const LEGACY_BPS_DENOMINATOR: u64 = 10_000;
 
 /// Fee-unit precision for the [`RouterFees::fallback`] configuration: 100% = 100,000,000 fee
@@ -53,7 +52,7 @@ impl FeeRates {
         self.on_client_fee
     }
 
-    /// Fee units representing 100% (the contract's `MAX_FEE_BPS`).
+    /// Fee units representing 100% (the contract's `MAX_BPS`).
     pub fn max_fee_units(&self) -> u64 {
         self.max_fee_units
     }
@@ -62,6 +61,12 @@ impl FeeRates {
     /// (`max_fee_units / LEGACY_BPS_DENOMINATOR`).
     pub fn fee_units_per_bps(&self) -> u64 {
         self.max_fee_units / LEGACY_BPS_DENOMINATOR
+    }
+
+    /// Converts a client fee given in legacy basis points into the fee units the router
+    /// expects in `ClientFeeParams.clientFeeBps`.
+    pub fn client_fee_units(&self, bps: u16) -> u64 {
+        bps as u64 * self.fee_units_per_bps()
     }
 
     /// Combined denominator when two fee-unit rates are multiplied (`max_fee_units`²).
@@ -104,7 +109,7 @@ impl RouterFees {
         Self::new(FALLBACK_MAX_FEE_UNITS, FALLBACK_FEE_ON_OUTPUT, 0, HashMap::new())
     }
 
-    /// Fee units representing 100% (the contract's `MAX_FEE_BPS`).
+    /// Fee units representing 100% (the contract's `MAX_BPS`).
     pub fn max_fee_units(&self) -> u64 {
         self.max_fee_units
     }

@@ -31,6 +31,13 @@ use crate::{
 /// Canonical Permit2 contract address — identical on all EVM chains.
 pub const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 
+/// Mirror of `TychoRouter.MAX_SLIPPAGE_TOLERANCE_BPS`: the router rejects calldata whose
+/// `minAmountOut` is more than this many basis points below `expectedAmountOut`.
+const MAX_SLIPPAGE_TOLERANCE_BPS: u64 = 2_000;
+
+/// Basis-point denominator used by the router's slippage guardrail.
+const BPS_DENOMINATOR: u64 = 10_000;
+
 /// Encodes solution into tycho compatible transactions.
 ///
 /// # Fields
@@ -49,6 +56,9 @@ pub struct Encoder {
     exclusive_swap_signer: Option<ExclusiveSwapSigner>,
 }
 
+/// Maps a successful quote onto an encodable solution. Slippage and the user transfer type are
+/// not part of the quote — callers apply them from their `EncodingOptions` via
+/// `with_slippage` / `with_user_transfer_type`.
 impl TryFrom<&OrderQuote> for Solution {
     type Error = SolveError;
 
@@ -108,6 +118,7 @@ impl TryFrom<&OrderQuote> for Solution {
             Bytes::from(token_out.as_ref()),
             quote.amount_in().clone(),
             quote.amount_out().clone(),
+            0.0,
             swaps,
         ))
     }
@@ -210,6 +221,7 @@ impl Encoder {
             }
 
             let solution = Solution::try_from(quote)?
+                .with_slippage(slippage)
                 .with_user_transfer_type(encoding_options.transfer_type().clone());
             let solution = match &self.exclusive_swap_signer {
                 Some(signer) => Self::stamp_exclusive_swaps(solution, quote, signer)?,
@@ -321,22 +333,29 @@ impl Encoder {
         router_fees: &RouterFees,
     ) -> Result<(Transaction, FeeBreakdown), EncodingError> {
         let amount_in = biguint_to_u256(solution.amount_in());
-        let swap_output = solution.min_amount_out();
+        // The quoted output is the router's `expectedAmountOut`: the reference it measures
+        // positive and negative slippage against. On-chain the FeeCalculator charges fees on
+        // the amount actually received, less any surplus the router captured, so the breakdown
+        // below is the projection for a fill at exactly the quoted amount.
+        let swap_output = solution.amount_out();
+        let expected_amount_out = biguint_to_u256(swap_output);
         // Mirror FeeCalculator._resolveClient: custom router fees are looked up by the client
         // fee receiver; without client fee params the contract falls back to tx.origin, for
         // which the order sender is our best available proxy.
         let fee_client = encoding_options
             .client_fee_params()
             .map_or_else(|| solution.sender(), |f| f.receiver());
+        let fee_rates = router_fees.fees_for(fee_client);
         let fee_breakdown = Self::calculate_fee_breakdown(
             swap_output,
             encoding_options
                 .client_fee_params()
                 .map_or(0, |f| f.bps()),
             encoding_options.slippage(),
-            router_fees.fees_for(fee_client),
+            fee_rates,
         )?;
         let min_amount_out = biguint_to_u256(fee_breakdown.min_amount_received());
+        Self::check_slippage_guardrail(expected_amount_out, min_amount_out)?;
         let native_address = &self.chain.native_token().address;
         let router_eth = Address::from_slice(ROUTER_ETH_ADDRESS.as_ref());
         let to_router_address = |raw: Address| {
@@ -375,8 +394,18 @@ impl Encoder {
         };
 
         let client_fee_params = if let Some(fee) = encoding_options.client_fee_params() {
+            // The router takes the client fee in the FeeCalculator's fee units, while Fynd's
+            // API expresses it in legacy basis points.
+            let fee_units = fee_rates.client_fee_units(fee.bps());
+            let fee_units = u32::try_from(fee_units).map_err(|_| {
+                EncodingError::FatalError(format!(
+                    "client fee ({} bps) scales to {fee_units} fee units, which overflows the \
+                     router's uint32 clientFeeBps",
+                    fee.bps()
+                ))
+            })?;
             (
-                fee.bps(),
+                fee_units,
                 bytes_to_address(fee.receiver())?,
                 biguint_to_u256(fee.max_contribution()),
                 U256::from(fee.deadline()),
@@ -389,7 +418,7 @@ impl Encoder {
                 },
             )
         } else {
-            (0u16, Address::ZERO, U256::ZERO, U256::MAX, vec![])
+            (0u32, Address::ZERO, U256::ZERO, U256::MAX, vec![])
         };
 
         let fn_sig = encoded_solution.function_signature();
@@ -412,6 +441,7 @@ impl Encoder {
                     amount_in,
                     token_in,
                     token_out,
+                    expected_amount_out,
                     min_amount_out,
                     U256::from(encoded_solution.n_tokens()),
                     receiver,
@@ -426,6 +456,7 @@ impl Encoder {
                     amount_in,
                     token_in,
                     token_out,
+                    expected_amount_out,
                     min_amount_out,
                     receiver,
                     client_fee_params,
@@ -440,6 +471,7 @@ impl Encoder {
                 amount_in,
                 token_in,
                 token_out,
+                expected_amount_out,
                 min_amount_out,
                 U256::from(encoded_solution.n_tokens()),
                 receiver,
@@ -448,7 +480,16 @@ impl Encoder {
             )
                 .abi_encode()
         } else if fn_sig.contains("singleSwap") || fn_sig.contains("sequentialSwap") {
-            (amount_in, token_in, token_out, min_amount_out, receiver, client_fee_params, swaps)
+            (
+                amount_in,
+                token_in,
+                token_out,
+                expected_amount_out,
+                min_amount_out,
+                receiver,
+                client_fee_params,
+                swaps,
+            )
                 .abi_encode()
         } else {
             return Err(EncodingError::FatalError(format!(
@@ -476,6 +517,27 @@ impl Encoder {
             transaction = transaction.with_client_fee_signature_offset(offset);
         }
         Ok((transaction, fee_breakdown))
+    }
+
+    /// Rejects calldata the router would revert on.
+    ///
+    /// `TychoRouter` reverts with `TychoRouter__InvalidMinAmountOut` when `minAmountOut` is above
+    /// `expectedAmountOut` or more than `MAX_SLIPPAGE_TOLERANCE_BPS` below it, so fees plus
+    /// slippage may not eat more than 20% of the quoted output.
+    fn check_slippage_guardrail(
+        expected_amount_out: U256,
+        min_amount_out: U256,
+    ) -> Result<(), EncodingError> {
+        let floor = expected_amount_out * U256::from(BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS) /
+            U256::from(BPS_DENOMINATOR);
+        if min_amount_out > expected_amount_out || min_amount_out < floor {
+            return Err(EncodingError::FatalError(format!(
+                "minimum amount out {min_amount_out} is outside the router's accepted range \
+                 [{floor}, {expected_amount_out}] for the quoted output; reduce slippage or the \
+                 client fee"
+            )));
+        }
+        Ok(())
     }
 
     /// Prepends the 4-byte Keccak selector for `selector` to the ABI-encoded args.
@@ -517,9 +579,9 @@ impl Encoder {
         fee_rates: FeeRates,
     ) -> Result<FeeBreakdown, EncodingError> {
         let max_fee_units = fee_rates.max_fee_units();
-        // Scale the client fee from legacy bps (10_000 = 100%) to fee units so both fee
-        // types share the same denominator, exactly as the contract does.
-        let scaled_client_fee = client_fee_bps as u64 * fee_rates.fee_units_per_bps();
+        // Scale the client fee from legacy bps (10_000 = 100%) to the fee units the router
+        // takes in calldata, so both fee types share the same denominator.
+        let scaled_client_fee = fee_rates.client_fee_units(client_fee_bps);
         let fee_on_output = fee_rates.on_output() as u64;
         let fee_on_client_fee = fee_rates.on_client_fee() as u64;
 
@@ -591,6 +653,7 @@ fn has_exclusive_leg(quote: &OrderQuote) -> bool {
 mod tests {
     use std::collections::HashMap;
 
+    use alloy::primitives::{Address as EvmAddress, Bytes as EvmBytes};
     use num_bigint::BigUint;
     use rstest::rstest;
     use tycho_execution::encoding::{
@@ -779,7 +842,7 @@ mod tests {
         assert_eq!(*solution.token_in(), Bytes::from(make_address(0x01).as_ref()));
         assert_eq!(*solution.token_out(), Bytes::from(make_address(0x02).as_ref()));
         assert_eq!(*solution.amount_in(), *quote.amount_in());
-        assert_eq!(*solution.min_amount_out(), *quote.amount_out());
+        assert_eq!(*solution.amount_out(), *quote.amount_out());
         assert_eq!(solution.swaps().len(), 1);
     }
 
@@ -928,6 +991,66 @@ mod tests {
         assert!(!tx.data().is_empty());
         // Data starts with a 4-byte function selector
         assert!(tx.data().len() > 4);
+    }
+
+    /// Argument layout of `singleSwap(uint256,address,address,uint256,uint256,address,
+    /// (uint32,address,uint256,uint256,bytes),bytes)`.
+    type SingleSwapCalldata = (
+        U256,
+        EvmAddress,
+        EvmAddress,
+        U256,
+        U256,
+        EvmAddress,
+        (u32, EvmAddress, U256, U256, EvmBytes),
+        EvmBytes,
+    );
+
+    #[tokio::test]
+    async fn test_encode_calldata_amounts_and_client_fee_units() {
+        let encoder = real_encoder();
+        let quote = make_order_quote(1_000_000_000)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+        let amount_in = quote.amount_in().clone();
+        let amount_out = quote.amount_out().clone();
+        let opts = EncodingOptions::new(0.01).with_client_fee_params(make_client_fee(100));
+
+        let result = encoder
+            .encode(vec![quote], opts)
+            .await
+            .unwrap();
+
+        let tx = result[0].transaction().unwrap();
+        let breakdown = result[0].fee_breakdown().unwrap();
+        let (encoded_amount_in, _, _, expected_amount_out, min_amount_out, _, client_fee, _) =
+            <SingleSwapCalldata as SolValue>::abi_decode_params(&tx.data()[4..]).unwrap();
+
+        assert_eq!(encoded_amount_in, biguint_to_u256(&amount_in));
+        // The quoted output is the router's positive-slippage baseline.
+        assert_eq!(expected_amount_out, biguint_to_u256(&amount_out));
+        assert_eq!(min_amount_out, biguint_to_u256(breakdown.min_amount_received()));
+        assert!(min_amount_out < expected_amount_out);
+        // 100 bps, scaled into the FeeCalculator's 1e8 fee units.
+        assert_eq!(client_fee.0, 1_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_encode_rejects_slippage_beyond_router_guardrail() {
+        let encoder = real_encoder();
+        let quote = make_order_quote(1_000_000_000)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+
+        // The router accepts a minAmountOut at most 20% below the quoted output.
+        let err = encoder
+            .encode(vec![quote], EncodingOptions::new(0.25))
+            .await
+            .expect_err("25% slippage must be rejected before it reaches the router");
+
+        assert!(
+            err.to_string()
+                .contains("outside the router's accepted range"),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]

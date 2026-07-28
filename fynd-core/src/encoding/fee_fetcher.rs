@@ -2,7 +2,7 @@
 //! [`SharedRouterFees`].
 //!
 //! On start-up and on every refresh tick the fetcher resolves the FeeCalculator address
-//! from the Tycho Router (`getFeeCalculator`), then reads its precision scale (`MAX_FEE_BPS`),
+//! from the Tycho Router (`getFeeCalculator`), then reads its precision scale (`MAX_BPS`),
 //! the default router fees, and all per-client overrides. Failed fetches keep the previously
 //! stored values, so the encoder always has a usable fee configuration.
 
@@ -36,7 +36,7 @@ sol! {
     }
 
     interface IFeeCalculator {
-        function MAX_FEE_BPS() external view returns (uint32);
+        function MAX_BPS() external view returns (uint32);
         function getRouterFeeOnOutput() external view returns (uint32);
         function getRouterFeeOnClientFee() external view returns (uint32);
         function getAllClientFees(uint256 start, uint256 count)
@@ -149,15 +149,15 @@ impl RouterFeeFetcher {
             .await?;
 
         let max_fee_units = self
-            .eth_call::<IFeeCalculator::MAX_FEE_BPSCall>(
+            .eth_call::<IFeeCalculator::MAX_BPSCall>(
                 fee_calculator,
-                "MAX_FEE_BPS",
-                IFeeCalculator::MAX_FEE_BPSCall {}.abi_encode(),
+                "MAX_BPS",
+                IFeeCalculator::MAX_BPSCall {}.abi_encode(),
             )
             .await?;
         if max_fee_units == 0 {
             return Err(RouterFeeFetchError::Call {
-                method: "MAX_FEE_BPS",
+                method: "MAX_BPS",
                 contract: fee_calculator,
                 reason: "fee precision scale is zero".to_string(),
             });
@@ -278,7 +278,7 @@ mod tests {
 
     fn push_defaults(asserter: &Asserter, fee_on_output: u32, fee_on_client_fee: u32) {
         push_return::<ITychoRouter::getFeeCalculatorCall>(asserter, &CALCULATOR);
-        push_return::<IFeeCalculator::MAX_FEE_BPSCall>(asserter, &MAX_FEE_UNITS);
+        push_return::<IFeeCalculator::MAX_BPSCall>(asserter, &MAX_FEE_UNITS);
         push_return::<IFeeCalculator::getRouterFeeOnOutputCall>(asserter, &fee_on_output);
         push_return::<IFeeCalculator::getRouterFeeOnClientFeeCall>(asserter, &fee_on_client_fee);
     }
@@ -327,14 +327,14 @@ mod tests {
     async fn test_fetch_fees_rejects_zero_precision_scale() {
         let asserter = Asserter::new();
         push_return::<ITychoRouter::getFeeCalculatorCall>(&asserter, &CALCULATOR);
-        push_return::<IFeeCalculator::MAX_FEE_BPSCall>(&asserter, &0u32);
+        push_return::<IFeeCalculator::MAX_BPSCall>(&asserter, &0u32);
 
         let err = fetcher_with(&asserter)
             .fetch_fees()
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("MAX_FEE_BPS"));
+        assert!(err.to_string().contains("MAX_BPS"));
     }
 
     #[tokio::test]
