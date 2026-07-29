@@ -52,11 +52,13 @@ fn verdict_name(verdict: &str) -> String {
 /// the report says which slice of trades it covers.
 pub(crate) fn render(report: &Report, filter: Option<&str>) -> String {
     let mut html = String::from(HEAD);
-    html.push_str(&hero_section(&report.savings, &report.summary, filter));
-    html.push_str(&verdict_section(&report.verdicts));
+    // The PropAMM verdict leads when there is one: a calibrated run exists to answer that question,
+    // and everything below it is context.
     if let Some(propamm) = report.propamm.as_ref() {
         html.push_str(&propamm_section(propamm));
     }
+    html.push_str(&hero_section(&report.savings, &report.summary, filter));
+    html.push_str(&verdict_section(&report.verdicts));
     html.push_str(&trades_section("Top savings", &report.top_wins));
     html.push_str(&trades_section("Biggest losses", &report.top_losses));
     html.push_str(&group_section("By solver", &report.by_solver));
@@ -272,49 +274,158 @@ fn token_section(tokens: &[Count]) -> String {
     section("Unsolved token tail", &table)
 }
 
-/// The mock-`PropAMM` section: what the exclusive route won, and what fee it could have charged on
-/// top of the flow it took.
+/// The mock-`PropAMM` section: did the pool behave the way its price says it should?
 ///
-/// Rendered only for a run driven with `monitor --propamm-pair`. The headline winrate is over every
-/// solved order in the run, most of which never touch the mirrored pair — so it reads low by
-/// construction, and the per-pair table below is where the real answer is. Both are shown rather
-/// than only the flattering one.
+/// Leads with one giant verdict, because a calibrated run has a right answer and the reader should
+/// not have to derive it. Each group then gives its own number at a glance, coloured by outcome and
+/// labelled in words — colour is never the only carrier. The narrative sits at the bottom for
+/// anyone who needs to know what "fee headroom" means.
 fn propamm_section(propamm: &PropAmm) -> String {
     let pair = propamm
         .pair
         .as_deref()
         .unwrap_or("unknown pair");
-    let stat = |value: &str, label: &str| {
-        format!(
-            "<div class=\"ministat\"><div class=\"mininum\">{value}</div>\
-             <div class=\"minilab\">{label}</div></div>"
-        )
+    let (decided, total) = propamm.conclusive();
+    let (headline, cls, sub) = match propamm.verdict() {
+        GroupVerdict::Pass => (
+            "PASS".to_string(),
+            "pos big",
+            format!("{decided} of {total} price groups conclusive, none violated"),
+        ),
+        GroupVerdict::Fail(reason) => ("FAIL".to_string(), "neg big", reason),
+        GroupVerdict::NoData => (
+            "NO DATA".to_string(),
+            "idlenum big",
+            "no price group reached a conclusion — the run needs more orders on this pair"
+                .to_string(),
+        ),
     };
-    let headline = format!(
-        "<div class=\"herofoot\">{}{}{}{}{}</div>",
-        stat(&pct(propamm.won, propamm.solved), "win rate (all solved orders)"),
-        stat(&fmt_count(propamm.won), "wins"),
-        stat(&fmt_usd(propamm.captured_flow_usd), "flow captured"),
-        stat(&fmt_bps(propamm.median_headroom_bps), "median fee headroom bps"),
-        stat(&fmt_bps(propamm.avg_headroom_bps()), "fee headroom bps (flow-weighted)"),
-    );
     let body = format!(
-        "<p class=\"note\">Mirrored pool: <strong>{}</strong>, priced fee-free against the public \
-         best route for each order. <em>Fee headroom</em> is what the signed extension could have \
-         charged and still beaten that route — measured, not assumed. Quotes from this pool are not \
-         executable.</p>{}{headline}{}",
+        "<div class=\"propammhead\">\
+           <div class=\"herostat\"><div class=\"heronum {cls}\">{headline}</div>\
+             <div class=\"herolab\">mock PropAMM on {}</div></div>\
+           <div class=\"propammsub\">{}</div>\
+         </div>{}{}{}{}\
+         <p class=\"note\">Every order on this pair is priced against the route Fynd would otherwise \
+          have quoted, so each one is a test rather than a measurement. <em>Fee headroom</em> is the \
+          fee the signed extension could have charged and still beaten that route. Quotes from this \
+          pool are not executable.</p>",
         escape(pair),
+        escape(&sub),
+        propamm_uplift(propamm),
+        propamm_totals(propamm),
         propamm_groups(&propamm.groups),
         propamm_pair_table(&propamm.by_pair),
     );
     section("Mock PropAMM (exclusive route)", &body)
 }
 
+/// The controlled A/B: the same orders solved with the mock available and with it neutralised.
+///
+/// The two `with` figures are the ones to read, and the deltas beside them are what the pool
+/// bought. Green means the mock helped; a negative delta would mean it cost us, which the colour
+/// has to be able to say as plainly as the win.
+fn propamm_uplift(propamm: &PropAmm) -> String {
+    let uplift = &propamm.uplift;
+    if uplift.orders == 0 {
+        return "<p class=\"nodata\">No order was scored in both worlds, so there is nothing to \
+                compare yet.</p>"
+            .to_string();
+    }
+    // Takes the sign as an ordering, so a count and a float both colour the same way without either
+    // being cast to the other.
+    let delta = |sign: std::cmp::Ordering, formatted: &str| {
+        let cls = match sign {
+            std::cmp::Ordering::Greater => "pos",
+            std::cmp::Ordering::Less => "neg",
+            std::cmp::Ordering::Equal => "idlenum",
+        };
+        format!("<span class=\"delta {cls}\">{}</span>", escape(formatted))
+    };
+    let sign_of = |value: f64| {
+        value
+            .partial_cmp(&0.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    };
+    let extra_wins = uplift.extra_wins();
+    let extra_profit = uplift.extra_profit_usd();
+    let profit_pct = uplift
+        .profit_uplift_pct()
+        .map_or_else(|| "—".to_string(), |pct| format!("{pct:+.0}%"));
+
+    let winrate_without = format!("{:.1}%", uplift.winrate_without_pct());
+    let winrate_with = format!("{:.1}%", uplift.winrate_with_pct());
+    let winrate_delta =
+        format!("{:+.1} pts", uplift.winrate_with_pct() - uplift.winrate_without_pct());
+    let wins_delta = format!("{extra_wins:+}");
+    let profit_delta =
+        format!("{}{}", if extra_profit >= 0.0 { "+" } else { "-" }, fmt_usd(extra_profit.abs()));
+
+    format!(
+        "<table class=\"ab\"><thead><tr><th></th><th>without PropAMM</th>\
+           <th>with PropAMM</th><th>difference</th></tr></thead><tbody>\
+         <tr><td>win rate</td>\
+           <td class=\"num\">{}</td><td class=\"num strong\">{}</td><td class=\"num\">{}</td></tr>\
+         <tr><td>orders won</td>\
+           <td class=\"num\">{}</td><td class=\"num strong\">{}</td><td class=\"num\">{}</td></tr>\
+         <tr><td>quoted output vs settled</td>\
+           <td class=\"num\">{}</td><td class=\"num strong\">{}</td><td class=\"num\">{} ({})</td></tr>\
+         <tr class=\"abfee\"><td>fee captured for LPs</td>\
+           <td class=\"num\">{}</td><td class=\"num strong\">{}</td><td class=\"num\">{}</td></tr>\
+         </tbody></table>\
+         <p class=\"abnote\">Same {} orders, same block states — the mock's presence is the only \
+          difference. The first three rows are the taker's side and barely move by design: the router \
+          pins a surplus quote's output to the public reference, so the underbid is not passed on. \
+          It lands in the last row instead, on {} of flow the pool took.</p>",
+        winrate_without,
+        winrate_with,
+        delta(
+            sign_of(uplift.winrate_with_pct() - uplift.winrate_without_pct()),
+            &winrate_delta,
+        ),
+        uplift.wins_without,
+        uplift.wins_with,
+        delta(extra_wins.cmp(&0), &wins_delta),
+        fmt_usd(uplift.profit_without_usd),
+        fmt_usd(uplift.profit_with_usd),
+        delta(sign_of(extra_profit), &profit_delta),
+        escape(&profit_pct),
+        fmt_usd(0.0),
+        fmt_usd(propamm.fee_headroom_usd),
+        delta(
+            sign_of(propamm.fee_headroom_usd),
+            &format!("+{}", fmt_usd(propamm.fee_headroom_usd)),
+        ),
+        uplift.orders,
+        fmt_usd(propamm.captured_flow_usd),
+    )
+}
+
+/// The run's totals under the verdict: how much flow the pool took and what fee it took on it.
+///
+/// Kept small and beneath the verdict — these are the size of the result, not the result.
+fn propamm_totals(propamm: &PropAmm) -> String {
+    let stat = |value: &str, label: &str| {
+        format!(
+            "<div class=\"ministat\"><div class=\"mininum\">{value}</div>\
+             <div class=\"minilab\">{label}</div></div>"
+        )
+    };
+    format!(
+        "<div class=\"herofoot\">{}{}{}{}{}</div>",
+        stat(&fmt_count(propamm.won), "orders won"),
+        stat(&pct(propamm.won, propamm.solved), "of orders solved"),
+        stat(&fmt_usd(propamm.captured_flow_usd), "flow captured"),
+        stat(&fmt_bps(propamm.median_headroom_bps), "median fee headroom"),
+        stat(&fmt_bps(propamm.avg_headroom_bps()), "fee headroom, flow-weighted"),
+    )
+}
+
 /// The offset groups, one card each, ascending by price.
 ///
-/// Each card leads with its verdict rather than its numbers: the whole point of calibrating every
-/// order is that the expected behaviour is known up front, so the reader should not have to work
-/// out whether 5.2% is good. The numbers are underneath for when it fails.
+/// Each card's big number is the count the group's expectation is about: for a below-market group
+/// that is how many times it was wrongly selected (so zero is the good answer), and above market it
+/// is how many times it won. The number is coloured by outcome and always sits beside a word.
 fn propamm_groups(groups: &[PropAmmGroup]) -> String {
     if groups.is_empty() {
         return "<p class=\"nodata\">No calibrated orders — no settled trade in this run was on \
@@ -323,10 +434,10 @@ fn propamm_groups(groups: &[PropAmmGroup]) -> String {
     }
     let mut cards = String::new();
     for group in groups {
-        let (chip, cls) = match &group.verdict {
-            GroupVerdict::Pass => ("pass".to_string(), "ok"),
-            GroupVerdict::Fail(_) => ("FAIL".to_string(), "bad"),
-            GroupVerdict::NoData => ("no data".to_string(), "idle"),
+        let (word, cls) = match &group.verdict {
+            GroupVerdict::Pass => ("pass", "pos"),
+            GroupVerdict::Fail(_) => ("FAIL", "neg"),
+            GroupVerdict::NoData => ("no data", "idlenum"),
         };
         let detail = match &group.verdict {
             GroupVerdict::Fail(reason) => {
@@ -337,26 +448,34 @@ fn propamm_groups(groups: &[PropAmmGroup]) -> String {
         let _ = write!(
             cards,
             "<div class=\"group\">\
-               <div class=\"grouphead\"><span class=\"groupoff\">{}</span>\
-                 <span class=\"chip {cls}\">{chip}</span></div>\
-               <div class=\"groupexp\">{}</div>\
-               <table class=\"groupnums\"><tbody>\
-                 <tr><td>orders</td><td class=\"num\">{}</td></tr>\
-                 <tr><td>selected</td><td class=\"num\">{} ({})</td></tr>\
-                 <tr><td>fee taken (median)</td><td class=\"num\">{}</td></tr>\
-                 <tr><td>fee taken (max)</td><td class=\"num\">{}</td></tr>\
-               </tbody></table>{detail}\
+               <div class=\"grouphead\"><span class=\"groupoff\">{}</span></div>\
+               <div class=\"groupverdict {cls}\">{word}</div>\
+               <div class=\"groupbig {cls}\">{}</div>\
+               <div class=\"groupcap\">{} ({})</div>\
+               <div class=\"groupfee\">fee taken <strong>{}</strong> median, {} max, \
+                 of at most {}</div>\
+               <div class=\"groupexp\">{}</div>{detail}\
              </div>",
             escape(&fmt_offset(group.offset_bps)),
-            escape(group.expectation()),
-            group.orders,
             group.selected,
-            share_pct_of(group.selected_pct()),
-            fmt_bps(group.median_fee_bps),
-            fmt_bps(group.max_fee_bps),
+            escape(&format!("selected of {} orders", group.orders)),
+            escape(&share_pct_of(group.selected_pct())),
+            escape(&fmt_bps(group.median_fee_bps)),
+            escape(&fmt_bps(group.max_fee_bps)),
+            escape(&fmt_offset_ceiling(group.offset_bps)),
+            escape(group.expectation()),
         );
     }
     format!("<div class=\"groups\">{cards}</div>")
+}
+
+/// The fee ceiling a group's price implies, for the "of at most" caption.
+fn fmt_offset_ceiling(offset_bps: i32) -> String {
+    if offset_bps <= 0 {
+        "0.0 bps".to_string()
+    } else {
+        format!("{offset_bps}.0 bps")
+    }
 }
 
 /// An offset as a signed bps label, so a column header reads as a price and not a bare number.
@@ -541,19 +660,35 @@ section { background: #211a30; border: 1px solid #362b4a; border-radius: 8px;
 .nodata { color: #9a8bbf; margin: 0; }
 /* A section's framing sentence: what the numbers below mean, before they are read. */
 .note { color: #b9adcf; margin: 0 0 .5rem; max-width: 68ch; line-height: 1.55; }
+/* The run's verdict, sized like the report's headline savings figure. */
+.propammhead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2rem; }
+.propammsub { color: #b9adcf; font-size: .9rem; max-width: 52ch; line-height: 1.5; }
+.idlenum { color: #9a8bbf; }
 /* One card per offset group. They wrap rather than scroll, so a wider ladder stays readable. */
-.groups { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1.25rem 0; }
+.groups { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1.5rem 0; }
 .group { flex: 1 1 15rem; border: 1px solid #2f2540; border-radius: 6px; padding: .9rem 1rem; }
 .grouphead { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
-.groupoff { font-weight: 600; }
-.groupexp { color: #9a8bbf; font-size: .75rem; margin-top: .2rem; min-height: 2.2em; }
-.groupnums { margin-top: .6rem; width: 100%; }
-.groupnums td { padding: .15rem 0; border: 0; }
+.groupoff { font-weight: 600; font-size: .9rem; }
+/* The number the group's expectation is about, big enough to read across a room. */
+.groupbig { font-size: 2.6rem; font-weight: 700; line-height: 1.05; margin-top: .5rem; }
+.groupcap { color: #9a8bbf; font-size: .78rem; }
+.groupfee { color: #b9adcf; font-size: .82rem; margin-top: .6rem; }
+.groupexp { color: #6f6390; font-size: .72rem; margin-top: .5rem; }
 /* The verdict never rests on colour alone: each chip is also labelled pass / FAIL / no data. */
-.chip.ok { background: #1b3a1f; color: #a5d6a7; }
-.chip.bad { background: #4a1c1c; color: #ef9a9a; }
-.chip.idle { background: #2f2540; color: #9a8bbf; }
-.groupfail { color: #ef9a9a; font-size: .78rem; margin: .5rem 0 0; line-height: 1.45; }
+.chip.poschip { background: #1b3a1f; color: #a5d6a7; }
+.chip.negchip { background: #4a1c1c; color: #ef9a9a; }
+.chip.idlenumchip { background: #2f2540; color: #9a8bbf; }
+.groupfail { color: #ef9a9a; font-size: .78rem; margin: .6rem 0 0; line-height: 1.45; }
+/* Each sub-test carries its own verdict word, sized so the three read at a glance together. */
+.groupverdict { font-size: 1.5rem; font-weight: 700; letter-spacing: .04em; margin-top: .45rem; }
+/* The with/without table: the "with" column is the answer, so it carries the weight. */
+.ab { margin: 1.5rem 0 .25rem; }
+.ab th { color: #9a8bbf; font-weight: 500; }
+.ab td.strong { font-weight: 700; font-size: 1.05rem; }
+.delta { font-weight: 600; }
+.abnote { color: #6f6390; font-size: .76rem; margin: 0 0 .5rem; max-width: 74ch; line-height: 1.5; }
+/* Where the underbid actually lands, set apart from the taker-side rows above it. */
+.ab tr.abfee td { border-top: 1px solid #2f2540; padding-top: .55rem; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #362b4a; }
 th { color: #9a8bbf; font-weight: 600; font-size: .8rem; text-transform: uppercase; }
@@ -741,7 +876,7 @@ mod tests {
         let html = render(&propamm_report(true), None);
         assert!(html.contains("Mock PropAMM (exclusive route)"));
         assert!(html.contains("WETH/USDC"), "the section must name the pool it stood in for");
-        assert!(html.contains("median fee headroom bps"));
+        assert!(html.contains("median fee headroom"));
         // The order pair is rendered short, with the full addresses in the hover title.
         assert!(html.contains("0xc02aaa39…756cc2"));
         assert!(html.contains("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"));
@@ -771,6 +906,9 @@ mod tests {
                     "fee_headroom_bps": won.then_some(fee),
                     "committed_usd": won.then_some(1_000.0),
                     "fee_headroom_usd": won.then_some(fee / 10.0),
+                    "without_won": false, "with_won": won,
+                    "without_improvement_usd": -1.0,
+                    "with_improvement_usd": if won { 4.0 } else { -1.0 },
                 },
             })
         };
@@ -783,6 +921,26 @@ mod tests {
         .map(|v| serde_json::from_value(v).unwrap())
         .collect();
         build(&records)
+    }
+
+    #[test]
+    fn test_propamm_section_leads_the_document() {
+        // A calibrated run exists to answer one question, so its verdict comes before the savings
+        // headline rather than three sections down.
+        let html = render(&group_report(5.0), None);
+        let propamm = html
+            .find("Mock PropAMM")
+            .expect("section present");
+        let savings = html
+            .find("Fynd savings")
+            .expect("hero present");
+        assert!(propamm < savings, "the PropAMM verdict must precede the savings headline");
+    }
+
+    #[test]
+    fn test_overall_verdict_is_a_single_word() {
+        assert!(render(&group_report(5.0), None).contains(">PASS<"));
+        assert!(render(&group_report(20.0), None).contains(">FAIL<"));
     }
 
     #[test]
@@ -813,5 +971,33 @@ mod tests {
         // rather than render three blank cards.
         let html = render(&propamm_report(true), None);
         assert!(html.contains("No calibrated orders"));
+    }
+
+    #[test]
+    fn test_uplift_table_shows_both_worlds_and_the_difference() {
+        let html = render(&group_report(5.0), None);
+        assert!(html.contains("without PropAMM"));
+        assert!(html.contains("with PropAMM"));
+        assert!(html.contains("win rate"));
+        assert!(html.contains("quoted output vs settled"));
+        assert!(html.contains("fee captured for LPs"));
+        // The difference must be signed, so a regression reads as one.
+        assert!(html.contains("delta"), "each row carries a signed difference");
+    }
+
+    #[test]
+    fn test_each_group_carries_its_own_verdict_word() {
+        // Three sub-tests, three verdicts — the overall PASS must not be the only one visible.
+        let html = render(&group_report(5.0), None);
+        let verdicts = html
+            .matches("class=\"groupverdict")
+            .count();
+        assert_eq!(verdicts, 3, "one verdict per offset group");
+    }
+
+    #[test]
+    fn test_uplift_table_says_so_when_nothing_was_scored_in_both_worlds() {
+        let html = render(&propamm_report(true), None);
+        assert!(html.contains("nothing to"), "an empty A/B must explain itself");
     }
 }

@@ -50,6 +50,18 @@ pub(crate) struct PropAmm {
     /// The headroom valued in USD.
     #[serde(default)]
     pub fee_headroom_usd: Option<f64>,
+    /// Whether Fynd beat the settled trade **without** the mock — public liquidity only.
+    #[serde(default)]
+    pub without_won: Option<bool>,
+    /// Whether Fynd beat the settled trade **with** the mock available.
+    #[serde(default)]
+    pub with_won: Option<bool>,
+    /// USD Fynd gained over the settled trade without the mock. Negative on a loss.
+    #[serde(default)]
+    pub without_improvement_usd: Option<f64>,
+    /// USD Fynd gained over the settled trade with the mock available.
+    #[serde(default)]
+    pub with_improvement_usd: Option<f64>,
 }
 
 /// Fynd's result at one block state.
@@ -168,9 +180,23 @@ mod tests {
             fee_headroom: Some(400_000u64.into()),
             offset_bps: Some(5),
             public_best_out: Some(1_000_000_000u64.into()),
+            without: Some(crate::propamm::report::PublicOnly {
+                amount_out: 1_000_000_000u64.into(),
+                amount_out_net_gas: 999_000_000u64.into(),
+            }),
         };
-        let record =
-            Record::new(&observed, Some("WETH/USDC".to_string()), Some(1_000.0), Some(0.4));
+        let record = Record::new(
+            &observed,
+            Some("WETH/USDC".to_string()),
+            Some(1_000.0),
+            Some(0.4),
+            crate::propamm::report::AbResult {
+                without_won: Some(false),
+                with_won: Some(true),
+                without_improvement_usd: Some(-1.0),
+                with_improvement_usd: Some(3.0),
+            },
+        );
 
         let line = serde_json::to_string(&serde_json::json!({
             "block": 1,

@@ -46,6 +46,21 @@ pub(crate) struct Observation {
     pub offset_bps: Option<i32>,
     /// The public best route's output this order's offset was measured against.
     pub public_best_out: Option<BigUint>,
+    /// The same order's result with the mock neutralised — the "without `PropAMM`" world.
+    ///
+    /// The two-pass calibration already solves that world to find the reference price, so keeping
+    /// its amounts turns every calibrated order into a controlled A/B: same block, same state,
+    /// same order, the mock's presence the only difference.
+    pub without: Option<PublicOnly>,
+}
+
+/// One order's result with the mock neutralised.
+#[derive(Debug, Clone)]
+pub(crate) struct PublicOnly {
+    /// Output of the best public-only route.
+    pub amount_out: BigUint,
+    /// That output net of the route's gas.
+    pub amount_out_net_gas: BigUint,
 }
 
 impl Observation {
@@ -70,13 +85,20 @@ impl Observation {
             fee_headroom: quote.surplus_amount().cloned(),
             offset_bps: None,
             public_best_out: None,
+            without: None,
         }
     }
 
-    /// Labels this observation with the calibration the mock was priced under.
-    pub(crate) fn with_calibration(mut self, calibration: &crate::propamm::Calibration) -> Self {
+    /// Labels this observation with the calibration the mock was priced under, and with the
+    /// public-only result the offset was measured against.
+    pub(crate) fn with_calibration(
+        mut self,
+        calibration: &crate::propamm::Calibration,
+        without: PublicOnly,
+    ) -> Self {
         self.offset_bps = Some(calibration.offset_bps);
         self.public_best_out = Some(calibration.public_best_out.clone());
+        self.without = Some(without);
         self
     }
 
@@ -94,6 +116,7 @@ impl Observation {
             fee_headroom: None,
             offset_bps: None,
             public_best_out: None,
+            without: None,
         }
     }
 
@@ -234,6 +257,18 @@ impl Stats {
     }
 }
 
+/// One order scored in both worlds, as the caller computed it against the settled trade.
+///
+/// Every field is optional because a world can be unscoreable independently: the order may have
+/// been uncalibrated (no "without" pass at all), or its output token unpriced (amounts but no USD).
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct AbResult {
+    pub without_won: Option<bool>,
+    pub with_won: Option<bool>,
+    pub without_improvement_usd: Option<f64>,
+    pub with_improvement_usd: Option<f64>,
+}
+
 /// Converts a `BigUint` to `f64` for ratio reporting. Saturates to infinity beyond `f64` range,
 /// which the callers guard against by dividing only by positive finite values.
 pub(crate) fn biguint_to_f64(value: &BigUint) -> f64 {
@@ -267,6 +302,14 @@ pub(crate) struct Record {
     pub committed_usd: Option<f64>,
     /// The headroom valued in USD.
     pub fee_headroom_usd: Option<f64>,
+    /// Whether Fynd beat the settled trade **without** the mock — public liquidity only.
+    pub without_won: Option<bool>,
+    /// Whether Fynd beat the settled trade **with** the mock available.
+    pub with_won: Option<bool>,
+    /// USD Fynd gained over the settled trade without the mock. Negative on a loss.
+    pub without_improvement_usd: Option<f64>,
+    /// USD Fynd gained over the settled trade with the mock available.
+    pub with_improvement_usd: Option<f64>,
 }
 
 impl Record {
@@ -276,11 +319,16 @@ impl Record {
         pair: Option<String>,
         committed_usd: Option<f64>,
         fee_headroom_usd: Option<f64>,
+        ab: AbResult,
     ) -> Self {
         Self {
             pair,
             offset_bps: observed.offset_bps,
             won: observed.won,
+            without_won: ab.without_won,
+            with_won: ab.with_won,
+            without_improvement_usd: ab.without_improvement_usd,
+            with_improvement_usd: ab.with_improvement_usd,
             committed_amount_out: observed
                 .committed_amount_out
                 .as_ref()
@@ -309,6 +357,7 @@ mod tests {
             fee_headroom: won.then(|| BigUint::from(headroom)),
             offset_bps: None,
             public_best_out: None,
+            without: None,
         }
     }
 

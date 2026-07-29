@@ -66,6 +66,106 @@ pub(crate) struct PropAmm {
     pub by_pair: Vec<PropAmmPair>,
     /// Per-offset groups, ascending. Empty for a run with no calibrated orders.
     pub groups: Vec<PropAmmGroup>,
+    /// The same orders scored with and without the mock — what the pool actually bought us.
+    pub uplift: Uplift,
+}
+
+/// The controlled A/B: the same orders, at the same block states, solved with the mock available
+/// and with it neutralised.
+///
+/// This is the only place the report answers "did the `PropAMM` help", because it is the only
+/// comparison where nothing else varies. It covers calibrated orders alone — an off-pair order has
+/// no "without" pass, since the mock could never have served it.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Uplift {
+    /// Orders scored in both worlds.
+    pub orders: usize,
+    /// Of those, how many Fynd won without the mock.
+    pub wins_without: usize,
+    /// Of those, how many Fynd won with the mock.
+    pub wins_with: usize,
+    /// USD gained over the settled trades without the mock, summed over winning orders.
+    pub profit_without_usd: f64,
+    /// USD gained over the settled trades with the mock, summed over winning orders.
+    pub profit_with_usd: f64,
+}
+
+impl Uplift {
+    /// Win rate without the mock, as a percentage. Zero when nothing was scored.
+    // Precision loss is irrelevant: these are order counts, far below f64's exact-integer range.
+    #[expect(clippy::cast_precision_loss)]
+    pub(crate) fn winrate_without_pct(&self) -> f64 {
+        if self.orders == 0 {
+            return 0.0;
+        }
+        self.wins_without as f64 / self.orders as f64 * 100.0
+    }
+
+    /// Win rate with the mock, as a percentage. Zero when nothing was scored.
+    // Precision loss is irrelevant: these are order counts, far below f64's exact-integer range.
+    #[expect(clippy::cast_precision_loss)]
+    pub(crate) fn winrate_with_pct(&self) -> f64 {
+        if self.orders == 0 {
+            return 0.0;
+        }
+        self.wins_with as f64 / self.orders as f64 * 100.0
+    }
+
+    /// Extra orders won because the mock was there.
+    pub(crate) fn extra_wins(&self) -> i64 {
+        i64::try_from(self.wins_with).unwrap_or(i64::MAX) -
+            i64::try_from(self.wins_without).unwrap_or(i64::MAX)
+    }
+
+    /// Extra USD earned because the mock was there.
+    pub(crate) fn extra_profit_usd(&self) -> f64 {
+        self.profit_with_usd - self.profit_without_usd
+    }
+
+    /// Extra profit as a percentage of what the public market alone earned. `None` when the public
+    /// side earned nothing, where the ratio has no meaning.
+    pub(crate) fn profit_uplift_pct(&self) -> Option<f64> {
+        (self.profit_without_usd.abs() > f64::EPSILON)
+            .then(|| self.extra_profit_usd() / self.profit_without_usd.abs() * 100.0)
+    }
+}
+
+impl PropAmm {
+    /// The run's overall verdict: the worst of its groups.
+    ///
+    /// One failing group fails the run — a violation at any price is a violation, and averaging it
+    /// against the groups that passed would bury it.
+    pub(crate) fn verdict(&self) -> GroupVerdict {
+        if let Some(failure) = self
+            .groups
+            .iter()
+            .find_map(|group| match &group.verdict {
+                GroupVerdict::Fail(reason) => Some(reason.clone()),
+                GroupVerdict::Pass | GroupVerdict::NoData => None,
+            })
+        {
+            return GroupVerdict::Fail(failure);
+        }
+        if self
+            .groups
+            .iter()
+            .any(|group| group.verdict == GroupVerdict::Pass)
+        {
+            GroupVerdict::Pass
+        } else {
+            GroupVerdict::NoData
+        }
+    }
+
+    /// Groups that reached a conclusion, over groups that have orders — "4 of 5 checks conclusive".
+    pub(crate) fn conclusive(&self) -> (usize, usize) {
+        let decided = self
+            .groups
+            .iter()
+            .filter(|group| group.verdict != GroupVerdict::NoData)
+            .count();
+        (decided, self.groups.len())
+    }
 }
 
 /// Whether an offset group behaved as its price implies.
@@ -265,7 +365,46 @@ fn propamm(records: &[Comparison]) -> Option<PropAmm> {
         median_headroom_bps: median(&mut headroom_bps),
         by_pair: propamm_by_pair(&scoped),
         groups: propamm_groups(&scoped),
+        uplift: uplift(&scoped),
     })
+}
+
+/// Sums the with/without A/B over the orders that carry both sides.
+///
+/// Wins and profits are counted independently: an order can be scored for its verdict but have an
+/// unpriced output token, so it contributes to the win counts and not to the USD.
+fn uplift(scoped: &[&Comparison]) -> Uplift {
+    let mut uplift = Uplift::default();
+    for propamm in scoped
+        .iter()
+        .filter_map(|r| r.propamm.as_ref())
+    {
+        let (Some(without_won), Some(with_won)) = (propamm.without_won, propamm.with_won) else {
+            continue;
+        };
+        uplift.orders += 1;
+        uplift.wins_without += usize::from(without_won);
+        uplift.wins_with += usize::from(with_won);
+        // Only winning orders contribute profit: a loss is not negative revenue, it is a trade Fynd
+        // would not have served, which is what the win counts already say.
+        if without_won {
+            if let Some(usd) = propamm
+                .without_improvement_usd
+                .filter(|usd| usd.is_finite())
+            {
+                uplift.profit_without_usd += usd;
+            }
+        }
+        if with_won {
+            if let Some(usd) = propamm
+                .with_improvement_usd
+                .filter(|usd| usd.is_finite())
+            {
+                uplift.profit_with_usd += usd;
+            }
+        }
+    }
+    uplift
 }
 
 /// Groups the calibrated orders by offset and judges each group against its price.
@@ -946,5 +1085,110 @@ mod tests {
             verdict: GroupVerdict::NoData,
         };
         assert!(group.selected_pct().abs() < f64::EPSILON);
+    }
+
+    /// A calibrated record carrying the with/without A/B.
+    fn ab_record(
+        block: u64,
+        without_won: bool,
+        with_won: bool,
+        without_usd: f64,
+        with_usd: f64,
+    ) -> Comparison {
+        serde_json::from_value(serde_json::json!({
+            "block": block,
+            "settled_tx": format!("0x{block:064x}"),
+            "venue": "relay", "solver": "1inch",
+            "token_in": "0xeth", "token_out": "0xusdc",
+            "top": { "verdict": "win", "net_bps": 5.0, "settled_value_usd": 1000.0 },
+            "propamm": {
+                "pair": "ETH/USDC", "offset_bps": 5, "won": with_won && !without_won,
+                "without_won": without_won, "with_won": with_won,
+                "without_improvement_usd": without_usd, "with_improvement_usd": with_usd,
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_uplift_counts_wins_in_both_worlds() {
+        let records = vec![
+            ab_record(1, false, true, -2.0, 3.0), // the mock turned a loss into a win
+            ab_record(2, true, true, 4.0, 6.0),   // already won; the mock made it worth more
+            ab_record(3, false, false, -1.0, -1.0), // the mock could not help
+        ];
+        let uplift = propamm(&records).unwrap().uplift;
+
+        assert_eq!(uplift.orders, 3);
+        assert_eq!(uplift.wins_without, 1);
+        assert_eq!(uplift.wins_with, 2);
+        assert_eq!(uplift.extra_wins(), 1);
+    }
+
+    #[test]
+    fn test_uplift_profit_counts_winning_orders_only() {
+        // A loss is not negative revenue — it is a trade Fynd would not have served, which the win
+        // counts already express. Summing losing orders' USD would understate both columns.
+        let records =
+            vec![ab_record(1, false, true, -2.0, 3.0), ab_record(2, true, true, 4.0, 6.0)];
+        let uplift = propamm(&records).unwrap().uplift;
+
+        assert!(
+            (uplift.profit_without_usd - 4.0).abs() < 1e-9,
+            "the lost order contributes nothing"
+        );
+        assert!((uplift.profit_with_usd - 9.0).abs() < 1e-9);
+        assert!((uplift.extra_profit_usd() - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_uplift_winrates_are_over_the_same_orders() {
+        let records = vec![
+            ab_record(1, false, true, 0.0, 1.0),
+            ab_record(2, false, true, 0.0, 1.0),
+            ab_record(3, false, false, 0.0, 0.0),
+            ab_record(4, false, false, 0.0, 0.0),
+        ];
+        let uplift = propamm(&records).unwrap().uplift;
+        assert!(uplift.winrate_without_pct().abs() < f64::EPSILON);
+        assert!((uplift.winrate_with_pct() - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_uplift_skips_orders_scored_in_only_one_world() {
+        // An off-pair order has no "without" pass; including it would inflate the denominator with
+        // orders the mock could never have served.
+        let records = vec![
+            propamm_record(1, "0xdai", "0xusdc", false, 0.0, 0.0),
+            ab_record(2, false, true, 0.0, 2.0),
+        ];
+        let uplift = propamm(&records).unwrap().uplift;
+        assert_eq!(uplift.orders, 1);
+    }
+
+    #[test]
+    fn test_uplift_pct_is_undefined_when_the_public_side_earned_nothing() {
+        // Dividing by a zero baseline has no meaning; the absolute delta still does.
+        let records = vec![ab_record(1, false, true, 0.0, 5.0)];
+        let uplift = propamm(&records).unwrap().uplift;
+        assert!(uplift.profit_uplift_pct().is_none());
+        assert!((uplift.extra_profit_usd() - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_uplift_reports_a_regression_as_negative() {
+        // If the mock ever made things worse, the numbers must say so rather than clamp at zero.
+        let records = vec![ab_record(1, true, false, 5.0, 0.0)];
+        let uplift = propamm(&records).unwrap().uplift;
+        assert_eq!(uplift.extra_wins(), -1);
+        assert!(uplift.extra_profit_usd() < 0.0);
+    }
+
+    #[test]
+    fn test_empty_uplift_reports_zero_rather_than_nan() {
+        let uplift = Uplift::default();
+        assert!(uplift.winrate_without_pct().abs() < f64::EPSILON);
+        assert!(uplift.winrate_with_pct().abs() < f64::EPSILON);
+        assert_eq!(uplift.extra_wins(), 0);
     }
 }

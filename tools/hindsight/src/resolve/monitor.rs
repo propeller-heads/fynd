@@ -148,6 +148,14 @@ pub(crate) struct MonitorArgs {
     )]
     pub propamm_offsets_bps: Vec<i32>,
 
+    /// Re-solve only the settled trades whose own pair is the mirrored one — the only orders the
+    /// harness can calibrate. Off-pair trades are the large majority, so skipping them fills the
+    /// offset groups far faster per block. The trade-off: that run's comparisons cover the
+    /// mirrored pair alone, so its savings and coverage numbers are not a picture of Fynd
+    /// overall
+    #[arg(long, env = "PROPAMM_ONLY_PAIR", default_value_t = false)]
+    pub propamm_only_pair: bool,
+
     /// Trade size, in whole units of the pair's first token, used each block to pick which real
     /// pool to mirror. Set it near the sizes being re-solved so the mirror tracks the pool that
     /// actually prices those trades best
@@ -375,7 +383,7 @@ impl StepAdapter<'_> {
             .calibrate(
                 &market,
                 &core_token_in,
-                &amount_in_biguint(amount_in),
+                &u256_to_biguint(amount_in),
                 &public_best_out,
                 offset_bps,
             )
@@ -406,7 +414,11 @@ impl StepAdapter<'_> {
         let (outcome, observed) = self
             .quote_order(token_in, token_out, amount_in)
             .await;
-        let observed = observed.map(|o| o.with_calibration(&calibration));
+        let without = propamm::report::PublicOnly {
+            amount_out: public_best_out.clone(),
+            amount_out_net_gas: u256_to_biguint(public.amount_out_net_gas),
+        };
+        let observed = observed.map(|o| o.with_calibration(&calibration, without));
         (outcome, observed)
     }
 }
@@ -858,8 +870,9 @@ fn report_propamm_block(
     block: u64,
     prices: &Prices,
     observations: &[propamm::report::Observation],
-    trade_count: usize,
+    ranges: &[RangeComparison],
 ) -> Vec<Option<propamm::report::Record>> {
+    let trade_count = ranges.len();
     let mut headroom_usd = 0.0;
     let mut captured_flow_usd = 0.0;
     let mut records: Vec<Option<propamm::report::Record>> = Vec::with_capacity(observations.len());
@@ -882,11 +895,20 @@ fn report_propamm_block(
         let committed = value_usd(observed.committed_amount_out.as_ref());
         headroom_usd += headroom.unwrap_or(0.0);
         captured_flow_usd += committed.unwrap_or(0.0);
+        // The A/B is only defined for calibrated orders, and only against the range this
+        // observation pairs with — the first `trade_count` observations are the
+        // top-of-block ones.
+        let ab = ranges
+            .get(records.len())
+            .map_or_else(propamm::report::AbResult::default, |range| {
+                score_both_worlds(observed, range, prices)
+            });
         records.push(Some(propamm::report::Record::new(
             observed,
             pair_label.clone(),
             committed,
             headroom,
+            ab,
         )));
     }
 
@@ -924,14 +946,85 @@ fn report_propamm_block(
     vec![None; trade_count]
 }
 
+/// Narrows a block's trades to the mirrored pair when `--propamm-only-pair` is set.
+///
+/// The count is logged rather than dropped quietly: a run that silently skipped most of a block
+/// would read as a block with little flow.
+fn scope_trades(
+    trades: Vec<DecodedTrade>,
+    adapter: &StepAdapter<'_>,
+    only_pair: bool,
+    block: u64,
+) -> Vec<DecodedTrade> {
+    let Some(harness) = adapter.propamm.filter(|_| only_pair) else {
+        return trades;
+    };
+    let total = trades.len();
+    let kept = retain_mirrored_pair(trades, harness.config());
+    debug!(
+        block,
+        kept = kept.len(),
+        skipped = total - kept.len(),
+        "--propamm-only-pair: re-solving the mirrored pair's trades only"
+    );
+    kept
+}
+
+/// Scores one order in both worlds against what actually settled.
+///
+/// "Without" is the pass the calibration already ran with the mock neutralised; "with" is the
+/// range's own top-of-block result. Both are compared to the settled trade the same way the
+/// headline verdict is — output net of gas — so the pair is directly comparable and the difference
+/// is the mock's entire contribution.
+fn score_both_worlds(
+    observed: &propamm::report::Observation,
+    range: &RangeComparison,
+    prices: &Prices,
+) -> propamm::report::AbResult {
+    let Some(without) = observed.without.as_ref() else {
+        return propamm::report::AbResult::default();
+    };
+    let settled_net_gas = u256_to_biguint(range.settled_amount_out_net_gas);
+    let with = match &range.top.outcome {
+        Outcome::Solved(solved) => Some(solved),
+        Outcome::Partial(_) | Outcome::Unsolvable(_) => None,
+    };
+    let improvement = |amount_out: &BigUint| {
+        biguint_to_u256_opt(amount_out)
+            .and_then(|out| prices.savings_usd(range.token_out, out, range.settled_amount_out))
+    };
+    propamm::report::AbResult {
+        without_won: Some(without.amount_out_net_gas > settled_net_gas),
+        with_won: with.map(|s| u256_to_biguint(s.amount_out_net_gas) > settled_net_gas),
+        without_improvement_usd: improvement(&without.amount_out),
+        with_improvement_usd: with.and_then(|s| improvement(&u256_to_biguint(s.amount_out))),
+    }
+}
+
+/// Keeps only the trades whose own token pair is the mirrored one, in either direction.
+fn retain_mirrored_pair(
+    trades: Vec<DecodedTrade>,
+    config: &propamm::MirrorConfig,
+) -> Vec<DecodedTrade> {
+    trades
+        .into_iter()
+        .filter(|trade| {
+            config.serves(
+                &CoreAddress::from(trade.token_in.into_array()),
+                &CoreAddress::from(trade.token_out.into_array()),
+            )
+        })
+        .collect()
+}
+
 /// The solver's market-data handle, which the injector writes the mock's state through.
 fn harness_market(solver: &Solver) -> fynd_core::feed::market_data::MarketData {
     solver.market_data()
 }
 
-/// Converts a `U256` order size to `BigUint`, which is what the mock's calibration math uses.
-fn amount_in_biguint(amount_in: U256) -> BigUint {
-    BigUint::from_bytes_be(&amount_in.to_be_bytes::<32>())
+/// Converts a `U256` amount to `BigUint`, which is what the mock's calibration math uses.
+fn u256_to_biguint(amount: U256) -> BigUint {
+    BigUint::from_bytes_be(&amount.to_be_bytes::<32>())
 }
 
 /// Converts a `BigUint` to `U256`, or `None` when it does not fit — the amount is then left
@@ -976,7 +1069,7 @@ fn emit_block_results<P: Provider>(
     let propamm_records = match adapter.propamm {
         Some(harness) => {
             let observations = harness.stats.drain();
-            report_propamm_block(harness, block, prices_top, &observations, ranges.len())
+            report_propamm_block(harness, block, prices_top, &observations, ranges)
         }
         None => vec![None; ranges.len()],
     };
@@ -1060,6 +1153,8 @@ async fn run_session<P: Provider>(
                 continue;
             }
         };
+
+        let trades = scope_trades(trades, adapter, cfg.propamm_only_pair, target);
 
         let start = Instant::now();
         // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
@@ -1243,9 +1338,54 @@ mod tests {
             comparisons_dir: None,
             propamm_pair: None,
             propamm_offsets_bps: vec![-5, 0, 5],
+            propamm_only_pair: false,
             propamm_probe_units: 1.0,
         })
         .await
         .expect("monitor should process one block without error");
+    }
+
+    #[test]
+    fn test_retain_mirrored_pair_keeps_both_directions_only() {
+        let eth = Address::ZERO;
+        let usdc = Address::repeat_byte(0xaa);
+        let dai = Address::repeat_byte(0xbb);
+        let config = propamm::MirrorConfig {
+            token_a: CoreAddress::from(eth.into_array()),
+            token_b: CoreAddress::from(usdc.into_array()),
+            offsets_bps: vec![-5, 0, 5],
+            probe_units: 1.0,
+            chain: Chain::Ethereum,
+        };
+        let trade = |token_in: Address, token_out: Address| DecodedTrade {
+            tx_hash: alloy::primitives::TxHash::default(),
+            block_number: 1,
+            tx_index: 0,
+            venue: "relay".into(),
+            solver: "tycho".into(),
+            solver_source: crate::decoder::AttributionSource::TraceMatch,
+            decoder: "sender-netting",
+            sender: Address::ZERO,
+            token_in,
+            token_out,
+            amount_in: U256::from(1u64),
+            amount_out: U256::from(1u64),
+            venue_fee_in: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            quote: None,
+            sandwich: None,
+        };
+
+        let kept = retain_mirrored_pair(
+            vec![
+                trade(eth, usdc), // mirrored, forward
+                trade(usdc, eth), // mirrored, reverse
+                trade(dai, usdc), // off-pair
+                trade(eth, dai),  // shares one token only
+            ],
+            &config,
+        );
+        assert_eq!(kept.len(), 2, "only the mirrored pair survives, in either direction");
     }
 }

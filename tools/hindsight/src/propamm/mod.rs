@@ -475,7 +475,7 @@ async fn best_source(
         component_id,
         state,
         price,
-        pair_label: format!("{}/{}", token_a.symbol, token_b.symbol),
+        pair_label: format!("{}/{}", token_symbol(&token_a), token_symbol(&token_b)),
         token_a,
         token_b,
     })
@@ -540,6 +540,22 @@ fn mock_component(config: &MirrorConfig) -> ProtocolComponent {
 /// [`ExclusivityPolicy`](fynd_core) is built from.
 pub(crate) fn is_mock_component(component: &ProtocolComponent) -> bool {
     component.id == MOCK_COMPONENT_ID
+}
+
+/// A token's display symbol.
+///
+/// The zero address is native ETH by the convention this codebase already uses for it (the
+/// decoder's `native_wrapper` hops, the `wrapped_native` registry entry). It carries no symbol of
+/// its own in the token registry, where it would otherwise render as forty hex characters.
+fn token_symbol(token: &Token) -> String {
+    if token
+        .address
+        .iter()
+        .all(|byte| *byte == 0)
+    {
+        return "ETH".to_string();
+    }
+    token.symbol.clone()
 }
 
 /// Formats a token amount in whole units, for logging.
