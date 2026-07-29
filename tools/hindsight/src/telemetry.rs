@@ -21,6 +21,7 @@ const SAVINGS_BPS: &str = "hindsight_savings_bps";
 const SAVINGS_USD: &str = "hindsight_savings_usd";
 const IMPROVEMENT_USD: &str = "hindsight_improvement_usd";
 const SLIPPAGE_BPS: &str = "hindsight_slippage_bps";
+const SLIPPAGE_USD: &str = "hindsight_slippage_usd";
 const POSITIVE_SLIPPAGE_USD: &str = "hindsight_positive_slippage_usd";
 const VOLUME_USD: &str = "hindsight_volume_usd";
 const BLOCK_SECONDS: &str = "hindsight_block_processing_seconds";
@@ -140,7 +141,14 @@ pub(crate) fn describe() {
         SLIPPAGE_BPS,
         Unit::Count,
         "Signed bps move of the top-of-block route re-executed at back-of-block (positive = the \
-         route produced more than quoted), labeled by venue / solver / chain"
+         route produced more than quoted), labeled by venue / solver / chain / outcome (headline \
+         verdict)"
+    );
+    describe_histogram!(
+        SLIPPAGE_USD,
+        "Signed per-trade slippage USD (positive = the route produced more than quoted), labeled \
+         by venue / solver / chain / outcome (headline verdict). The positive-only revenue \
+         aggregate stays in POSITIVE_SLIPPAGE_USD"
     );
     describe_histogram!(
         POSITIVE_SLIPPAGE_USD,
@@ -376,20 +384,23 @@ fn record_state(
 }
 
 /// Record the top route's slippage between quote time (N-1) and re-execution (N): the signed bps
-/// move always, and the USD surplus only when positive — its histogram sum is the running
-/// "revenue if we charged positive slippage" aggregate, mirroring how [`IMPROVEMENT_USD`] sums
-/// uplift. Valued at `prices_back`, the state the surplus is realized at. Sandwiched trades are
-/// not skipped: the comparison is Fynd-quote vs Fynd-re-execution, so the settled trade's MEV
-/// does not enter it, and block N's pool moves are real either way.
+/// move and the signed USD value always (both labeled with the range's headline verdict), and
+/// additionally the USD surplus alone when positive — its histogram sum is the running "revenue
+/// if we charged positive slippage" aggregate, mirroring how [`IMPROVEMENT_USD`] sums uplift.
+/// Valued at `prices_back`, the state the surplus is realized at. Sandwiched trades are not
+/// skipped: the comparison is Fynd-quote vs Fynd-re-execution, so the settled trade's MEV does
+/// not enter it, and block N's pool moves are real either way.
 fn record_slippage(range: &RangeComparison, labels: &MetricLabels<'_>, prices: &Prices) {
     let Some(slippage) = range.slippage else {
         return;
     };
+    let outcome = outcome_label(range.verdict).to_string();
     histogram!(
         SLIPPAGE_BPS,
         "venue" => labels.venue.to_string(),
         "solver" => labels.solver.to_string(),
         "chain" => labels.chain.to_string(),
+        "outcome" => outcome.clone(),
     )
     .record(slippage.bps);
 
@@ -400,6 +411,15 @@ fn record_slippage(range: &RangeComparison, labels: &MetricLabels<'_>, prices: &
     ) else {
         return;
     };
+    histogram!(
+        SLIPPAGE_USD,
+        "venue" => labels.venue.to_string(),
+        "solver" => labels.solver.to_string(),
+        "chain" => labels.chain.to_string(),
+        "outcome" => outcome,
+    )
+    .record(usd);
+
     if usd <= 0.0 {
         return;
     }
@@ -530,6 +550,7 @@ fn configure_buckets(
         .set_buckets_for_metric(Matcher::Full(SAVINGS_USD.into()), SAVINGS_USD_BUCKETS)?
         .set_buckets_for_metric(Matcher::Full(IMPROVEMENT_USD.into()), SAVINGS_USD_BUCKETS)?
         .set_buckets_for_metric(Matcher::Full(SLIPPAGE_BPS.into()), SAVINGS_BPS_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(SLIPPAGE_USD.into()), SAVINGS_USD_BUCKETS)?
         .set_buckets_for_metric(
             Matcher::Full(POSITIVE_SLIPPAGE_USD.into()),
             POSITIVE_SLIPPAGE_USD_BUCKETS,
@@ -792,7 +813,12 @@ mod tests {
         });
         let rendered = handle.render();
 
-        assert!(rendered.contains("hindsight_slippage_bps_bucket"), "rendered: {rendered}");
+        let slippage_bps_line = rendered
+            .lines()
+            .find(|line| line.starts_with("hindsight_slippage_bps_bucket"))
+            .expect("slippage bps histogram rendered");
+        assert!(slippage_bps_line.contains("outcome="), "rendered: {slippage_bps_line}");
+        assert!(rendered.contains("hindsight_slippage_usd_bucket"), "rendered: {rendered}");
         let surplus_sum = rendered
             .lines()
             .find(|line| line.starts_with("hindsight_positive_slippage_usd_sum"))
@@ -831,6 +857,17 @@ mod tests {
         let rendered = handle.render();
 
         assert!(rendered.contains("hindsight_slippage_bps_bucket"), "rendered: {rendered}");
+        let slippage_usd_sum = rendered
+            .lines()
+            .find(|line| line.starts_with("hindsight_slippage_usd_sum"))
+            .expect("signed slippage USD recorded regardless of sign");
+        let value: f64 = slippage_usd_sum
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(value < 0.0, "expected a negative signed slippage USD, got {slippage_usd_sum}");
         assert!(
             !rendered.contains("hindsight_positive_slippage_usd"),
             "negative slippage must not count as chargeable surplus: {rendered}"
@@ -861,6 +898,7 @@ mod tests {
         let rendered = handle.render();
 
         assert!(!rendered.contains("hindsight_slippage_bps"), "rendered: {rendered}");
+        assert!(!rendered.contains("hindsight_slippage_usd"), "rendered: {rendered}");
         assert!(!rendered.contains("hindsight_positive_slippage_usd"));
     }
 

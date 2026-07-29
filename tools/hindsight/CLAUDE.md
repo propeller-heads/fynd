@@ -118,9 +118,11 @@ unsolved states keep their coverage verdicts).
 `Slippage` measures how the top route's output moved between quote time (N-1) and execution time
 (N): re-executed output vs quoted output, signed, in bps (JSONL also carries USD valued at the
 back-of-block price snapshot). Positive slippage is the surplus we would keep if we charged it —
-Prometheus records the signed bps distribution (`hindsight_slippage_bps`) and a positive-only
-USD histogram (`hindsight_positive_slippage_usd`) whose sum is the running hypothetical revenue.
-Absent when the top was unsolved or the re-execution failed (e.g. a pool vanished at N).
+Prometheus records the signed bps distribution (`hindsight_slippage_bps`) and the signed USD
+value (`hindsight_slippage_usd`), both labeled by the trade's headline verdict, plus a
+positive-only USD histogram (`hindsight_positive_slippage_usd`) whose sum is the running
+hypothetical revenue. Absent when the top was unsolved or the re-execution failed (e.g. a pool
+vanished at N).
 
 ### Key types
 
