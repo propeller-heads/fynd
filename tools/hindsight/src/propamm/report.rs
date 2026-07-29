@@ -267,6 +267,8 @@ pub(crate) struct AbResult {
     pub with_won: Option<bool>,
     pub without_improvement_usd: Option<f64>,
     pub with_improvement_usd: Option<f64>,
+    pub without_net_bps: Option<f64>,
+    pub with_net_bps: Option<f64>,
 }
 
 /// Converts a `BigUint` to `f64` for ratio reporting. Saturates to infinity beyond `f64` range,
@@ -310,6 +312,10 @@ pub(crate) struct Record {
     pub without_improvement_usd: Option<f64>,
     /// USD Fynd gained over the settled trade with the mock available.
     pub with_improvement_usd: Option<f64>,
+    /// Net-of-gas bps over the settled trade without the mock.
+    pub without_net_bps: Option<f64>,
+    /// Net-of-gas bps over the settled trade with the mock available.
+    pub with_net_bps: Option<f64>,
 }
 
 impl Record {
@@ -329,6 +335,8 @@ impl Record {
             with_won: ab.with_won,
             without_improvement_usd: ab.without_improvement_usd,
             with_improvement_usd: ab.with_improvement_usd,
+            without_net_bps: ab.without_net_bps,
+            with_net_bps: ab.with_net_bps,
             committed_amount_out: observed
                 .committed_amount_out
                 .as_ref()

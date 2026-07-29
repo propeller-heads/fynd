@@ -7,9 +7,6 @@ use std::collections::HashMap;
 
 use crate::report::record::Comparison;
 
-/// Number of order pairs listed in the mock-`PropAMM` breakdown table.
-const TOP_PROPAMM_PAIRS: usize = 10;
-
 /// Slack allowed when checking a group's fee against its offset, in basis points.
 ///
 /// The calibration divides integer amounts and the source pool rounds its own output, so a fee
@@ -42,28 +39,15 @@ pub(crate) struct Report {
     pub propamm: Option<PropAmm>,
 }
 
-/// The mock-`PropAMM` view: how often the exclusive route beat the public one, and what fee it
-/// could have charged on the flow it took.
-///
-/// The run-wide winrate is over every solved order, most of which never touch the mirrored pair —
-/// so `by_pair` is where the answer actually lives. Each row is one order direction, and the mock
-/// can serve an order whose own pair differs from the mirrored one (a `DAI→USDC` order routed
-/// `DAI→WETH→USDC` uses a `WETH/USDC` leg), which is exactly what the breakdown shows.
+/// The mock-`PropAMM` view: what the pool captured, whether each price group behaved, and the
+/// with/without comparison.
 pub(crate) struct PropAmm {
     /// The mirrored pair as token symbols, e.g. `WETH/USDC`.
     pub pair: Option<String>,
-    /// Orders with a scored quote — the winrate's denominator.
-    pub solved: usize,
-    /// Of those, how many routed through the mock pool.
-    pub won: usize,
     /// Committed output on wins, valued in USD — the flow the pool captured.
     pub captured_flow_usd: f64,
     /// Fee headroom on wins, valued in USD.
     pub fee_headroom_usd: f64,
-    /// Median fee headroom in bps over wins — the typical fee the pool could charge.
-    pub median_headroom_bps: Option<f64>,
-    /// Per-order-pair breakdown, most wins first.
-    pub by_pair: Vec<PropAmmPair>,
     /// Per-offset groups, ascending. Empty for a run with no calibrated orders.
     pub groups: Vec<PropAmmGroup>,
     /// The same orders scored with and without the mock — what the pool actually bought us.
@@ -88,6 +72,10 @@ pub(crate) struct Uplift {
     pub profit_without_usd: f64,
     /// USD gained over the settled trades with the mock, summed over winning orders.
     pub profit_with_usd: f64,
+    /// Median net-of-gas bps over winning orders without the mock.
+    pub median_bps_without: Option<f64>,
+    /// Median net-of-gas bps over winning orders with the mock.
+    pub median_bps_with: Option<f64>,
 }
 
 impl Uplift {
@@ -121,13 +109,6 @@ impl Uplift {
     pub(crate) fn extra_profit_usd(&self) -> f64 {
         self.profit_with_usd - self.profit_without_usd
     }
-
-    /// Extra profit as a percentage of what the public market alone earned. `None` when the public
-    /// side earned nothing, where the ratio has no meaning.
-    pub(crate) fn profit_uplift_pct(&self) -> Option<f64> {
-        (self.profit_without_usd.abs() > f64::EPSILON)
-            .then(|| self.extra_profit_usd() / self.profit_without_usd.abs() * 100.0)
-    }
 }
 
 impl PropAmm {
@@ -155,16 +136,6 @@ impl PropAmm {
         } else {
             GroupVerdict::NoData
         }
-    }
-
-    /// Groups that reached a conclusion, over groups that have orders — "4 of 5 checks conclusive".
-    pub(crate) fn conclusive(&self) -> (usize, usize) {
-        let decided = self
-            .groups
-            .iter()
-            .filter(|group| group.verdict != GroupVerdict::NoData)
-            .count();
-        (decided, self.groups.len())
     }
 }
 
@@ -234,24 +205,6 @@ impl PropAmm {
         (self.captured_flow_usd > 0.0)
             .then(|| self.fee_headroom_usd / self.captured_flow_usd * 10_000.0)
     }
-}
-
-/// One order direction in the mock-`PropAMM` breakdown.
-pub(crate) struct PropAmmPair {
-    /// `token_in` address.
-    pub token_in: String,
-    /// `token_out` address.
-    pub token_out: String,
-    /// Solved orders in this direction.
-    pub solved: usize,
-    /// Of those, how many the mock pool won.
-    pub won: usize,
-    /// Committed output on those wins, valued in USD.
-    pub captured_flow_usd: f64,
-    /// Fee headroom on those wins, valued in USD.
-    pub fee_headroom_usd: f64,
-    /// Median fee headroom in bps over those wins.
-    pub median_headroom_bps: Option<f64>,
 }
 
 pub(crate) struct Summary {
@@ -344,26 +297,14 @@ fn propamm(records: &[Comparison]) -> Option<PropAmm> {
                 .is_some_and(|p| p.won)
         })
         .collect();
-    let mut headroom_bps: Vec<f64> = wins
-        .iter()
-        .filter_map(|r| {
-            r.propamm
-                .as_ref()
-                .and_then(|p| p.fee_headroom_bps)
-        })
-        .collect();
     Some(PropAmm {
         pair: scoped.iter().find_map(|r| {
             r.propamm
                 .as_ref()
                 .and_then(|p| p.pair.clone())
         }),
-        solved: scoped.len(),
-        won: wins.len(),
         captured_flow_usd: sum_propamm(&wins, |p| p.committed_usd),
         fee_headroom_usd: sum_propamm(&wins, |p| p.fee_headroom_usd),
-        median_headroom_bps: median(&mut headroom_bps),
-        by_pair: propamm_by_pair(&scoped),
         groups: propamm_groups(&scoped),
         uplift: uplift(&scoped),
     })
@@ -375,6 +316,8 @@ fn propamm(records: &[Comparison]) -> Option<PropAmm> {
 /// unpriced output token, so it contributes to the win counts and not to the USD.
 fn uplift(scoped: &[&Comparison]) -> Uplift {
     let mut uplift = Uplift::default();
+    let mut bps_without: Vec<f64> = Vec::new();
+    let mut bps_with: Vec<f64> = Vec::new();
     for propamm in scoped
         .iter()
         .filter_map(|r| r.propamm.as_ref())
@@ -403,7 +346,17 @@ fn uplift(scoped: &[&Comparison]) -> Uplift {
                 uplift.profit_with_usd += usd;
             }
         }
+        // The bps headline is over wins only, matching the report's own median: how much better
+        // Fynd was when it won, not diluted by the trades it lost.
+        if without_won {
+            bps_without.extend(propamm.without_net_bps);
+        }
+        if with_won {
+            bps_with.extend(propamm.with_net_bps);
+        }
     }
+    uplift.median_bps_without = median(&mut bps_without);
+    uplift.median_bps_with = median(&mut bps_with);
     uplift
 }
 
@@ -513,58 +466,6 @@ fn sum_propamm(
         .filter_map(|r| r.propamm.as_ref().and_then(&field))
         .filter(|value| value.is_finite())
         .sum()
-}
-
-/// Groups the mock-`PropAMM` outcomes by order direction, ranked by wins then by solved count, so
-/// the pairs the exclusive route actually served come first.
-fn propamm_by_pair(scoped: &[&Comparison]) -> Vec<PropAmmPair> {
-    let mut grouped: HashMap<(&str, &str), Vec<&Comparison>> = HashMap::new();
-    for record in scoped {
-        grouped
-            .entry((record.token_in.as_str(), record.token_out.as_str()))
-            .or_default()
-            .push(record);
-    }
-
-    let mut rows: Vec<PropAmmPair> = grouped
-        .into_iter()
-        .map(|((token_in, token_out), records)| {
-            let wins: Vec<&Comparison> = records
-                .iter()
-                .copied()
-                .filter(|r| {
-                    r.propamm
-                        .as_ref()
-                        .is_some_and(|p| p.won)
-                })
-                .collect();
-            let mut headroom_bps: Vec<f64> = wins
-                .iter()
-                .filter_map(|r| {
-                    r.propamm
-                        .as_ref()
-                        .and_then(|p| p.fee_headroom_bps)
-                })
-                .collect();
-            PropAmmPair {
-                token_in: token_in.to_string(),
-                token_out: token_out.to_string(),
-                solved: records.len(),
-                won: wins.len(),
-                captured_flow_usd: sum_propamm(&wins, |p| p.committed_usd),
-                fee_headroom_usd: sum_propamm(&wins, |p| p.fee_headroom_usd),
-                median_headroom_bps: median(&mut headroom_bps),
-            }
-        })
-        .collect();
-    rows.sort_by(|a, b| {
-        b.won
-            .cmp(&a.won)
-            .then_with(|| b.solved.cmp(&a.solved))
-            .then_with(|| a.token_in.cmp(&b.token_in))
-    });
-    rows.truncate(TOP_PROPAMM_PAIRS);
-    rows
 }
 
 fn summary(records: &[Comparison]) -> Summary {
@@ -904,9 +805,9 @@ mod tests {
             propamm_record(3, "0xweth", "0xusdc", false, 0.0, 0.0),
         ];
         let propamm = propamm(&records).expect("some records carry an outcome");
-        assert_eq!(propamm.solved, 2);
-        assert_eq!(propamm.won, 1);
         assert_eq!(propamm.pair.as_deref(), Some("WETH/USDC"));
+        // Both records carry an outcome, so both are in scope; only one is a win.
+        assert!((propamm.captured_flow_usd - 1_000.0).abs() < 1e-6);
     }
 
     #[test]
@@ -921,7 +822,6 @@ mod tests {
         assert!((propamm.captured_flow_usd - 4_000.0).abs() < 1e-6);
         // 1000 @ 4 bps = 0.40, 3000 @ 8 bps = 2.40.
         assert!((propamm.fee_headroom_usd - 2.8).abs() < 1e-6);
-        assert!((propamm.median_headroom_bps.unwrap() - 6.0).abs() < 1e-6);
         // Flow-weighted, not the mean of the two bps values: 2.8 / 4000 = 7 bps.
         assert!((propamm.avg_headroom_bps().unwrap() - 7.0).abs() < 1e-6);
     }
@@ -932,28 +832,6 @@ mod tests {
         let records = vec![propamm_record(1, "0xweth", "0xusdc", false, 0.0, 0.0)];
         let propamm = propamm(&records).expect("outcomes present");
         assert!(propamm.avg_headroom_bps().is_none());
-    }
-
-    #[test]
-    fn test_propamm_by_pair_ranks_the_served_pairs_first() {
-        // The mirrored pair is WETH/USDC, but the mock also serves a DAI→USDC order routed through
-        // WETH. The pair with wins must outrank an equally-sized pair without any.
-        let records = vec![
-            propamm_record(1, "0xdai", "0xusdc", false, 0.0, 0.0),
-            propamm_record(2, "0xdai", "0xusdc", false, 0.0, 0.0),
-            propamm_record(3, "0xweth", "0xusdc", true, 4.0, 1_000.0),
-            propamm_record(4, "0xweth", "0xusdc", false, 0.0, 0.0),
-        ];
-        let propamm = propamm(&records).expect("outcomes present");
-        let rows = &propamm.by_pair;
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].token_in, "0xweth");
-        assert_eq!(rows[0].solved, 2);
-        assert_eq!(rows[0].won, 1);
-        assert_eq!(rows[1].token_in, "0xdai");
-        assert_eq!(rows[1].won, 0);
-        assert!(rows[1].median_headroom_bps.is_none());
     }
 
     /// A calibrated record: priced `offset_bps` off the public best route, selected or not.
@@ -1070,8 +948,6 @@ mod tests {
         let propamm = propamm(&records).expect("outcomes present");
         assert_eq!(propamm.groups.len(), 1);
         assert_eq!(propamm.groups[0].orders, 1);
-        // Both still count toward the run's solved total.
-        assert_eq!(propamm.solved, 2);
     }
 
     #[test]
@@ -1167,11 +1043,10 @@ mod tests {
     }
 
     #[test]
-    fn test_uplift_pct_is_undefined_when_the_public_side_earned_nothing() {
-        // Dividing by a zero baseline has no meaning; the absolute delta still does.
+    fn test_uplift_reports_an_absolute_gain_over_a_zero_baseline() {
+        // The public side earning nothing is not a divide-by-zero problem; the delta still stands.
         let records = vec![ab_record(1, false, true, 0.0, 5.0)];
         let uplift = propamm(&records).unwrap().uplift;
-        assert!(uplift.profit_uplift_pct().is_none());
         assert!((uplift.extra_profit_usd() - 5.0).abs() < 1e-9);
     }
 

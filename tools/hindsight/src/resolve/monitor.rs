@@ -993,11 +993,22 @@ fn score_both_worlds(
         biguint_to_u256_opt(amount_out)
             .and_then(|out| prices.savings_usd(range.token_out, out, range.settled_amount_out))
     };
+    // A win is gross output strictly above the settled gross output — the basis `compare::verdict`
+    // uses, so these figures drop straight into the report's headline. The settled route's gas is
+    // often unattributable, which makes gross-vs-gross the only always-like-for-like comparison.
+    let settled_out = u256_to_biguint(range.settled_amount_out);
+    let with_won = range.top.verdict == super::compare::Verdict::Win;
     propamm::report::AbResult {
-        without_won: Some(without.amount_out_net_gas > settled_net_gas),
-        with_won: with.map(|s| u256_to_biguint(s.amount_out_net_gas) > settled_net_gas),
+        without_won: Some(without.amount_out > settled_out),
+        with_won: with.map(|_| with_won),
         without_improvement_usd: improvement(&without.amount_out),
         with_improvement_usd: with.and_then(|s| improvement(&u256_to_biguint(s.amount_out))),
+        // Net of each side's own gas, matching the headline's median savings figure.
+        without_net_bps: fynd_tools_common::bps::raw_bps_diff(
+            &without.amount_out_net_gas,
+            &settled_net_gas,
+        ),
+        with_net_bps: range.top.deltas.net_bps,
     }
 }
 

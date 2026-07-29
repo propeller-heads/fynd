@@ -62,6 +62,12 @@ pub(crate) struct PropAmm {
     /// USD Fynd gained over the settled trade with the mock available.
     #[serde(default)]
     pub with_improvement_usd: Option<f64>,
+    /// Net-of-gas bps over the settled trade without the mock.
+    #[serde(default)]
+    pub without_net_bps: Option<f64>,
+    /// Net-of-gas bps over the settled trade with the mock available.
+    #[serde(default)]
+    pub with_net_bps: Option<f64>,
 }
 
 /// Fynd's result at one block state.
@@ -195,6 +201,8 @@ mod tests {
                 with_won: Some(true),
                 without_improvement_usd: Some(-1.0),
                 with_improvement_usd: Some(3.0),
+                without_net_bps: Some(-8.0),
+                with_net_bps: Some(24.0),
             },
         );
 
