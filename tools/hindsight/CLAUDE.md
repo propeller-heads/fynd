@@ -115,6 +115,44 @@ savings aggregates; unsolved states keep their coverage verdicts).
   like-for-like. Carries `sandwich` evidence when a bracket pair was found.
 - `RangeComparison` — a trade re-solved at both block states, including gas-netted settled output.
 - `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
+- `RouteSummary` — which algorithm won a solved state and the path its route took. Carried on
+  `SolvedAmount` as typed fields (not dug out of the serialized quote) so the metrics and the
+  per-trade log line read it directly.
+
+### Route attribution
+
+A solved state records the algorithm whose route won the quote — the worker pool that beat the
+others on that order — and that route rendered as a readable path:
+
+```
+USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH
+```
+
+Protocol ids are Tycho's own, so a newly integrated DEX reads correctly with no lookup table here.
+A token the solver has no entry for falls back to a shortened address (`0xababab…`).
+
+A **split** fans several legs out of one token, so its legs cannot share a single arrow chain. Each
+becomes its own path, joined by ` + `, and every leg carries its share of the input. `Route`'s split
+convention declares an explicit fraction on each leg but the last, which declares `0.0` meaning
+"all the remaining balance"; `split_shares` reconstructs that remainder so both legs read as a
+percentage. A split that reconverges still chains its continuation onto the leg it belongs to:
+
+```
+USDC -[uniswap_v3 60%]-> WETH + USDC -[vm:curve 40%]-> WETH
+USDT -[uniswap_v3 25%]-> WETH + USDT -[vm:curve 75%]-> DAI -[uniswap_v2]-> USDC
+```
+
+It surfaces three ways:
+
+- **Prometheus**: an `algorithm` label on `hindsight_trades_total`, `hindsight_savings_bps`,
+  `hindsight_savings_usd`, and `hindsight_improvement_usd`. Split any of them by venue to see
+  which algorithm serves that venue's flow best. Unsolved states carry `algorithm="none"`. The
+  path is deliberately *not* a label — it is per-trade and would explode series cardinality.
+- **Loki**: `algorithm` and `route` on the `trade comparison` line. `route` is the **last** field
+  on purpose: its value contains spaces, so a LogQL regexp can only bound it by end-of-line. Move
+  it and the dashboard's route column silently swallows every field after it.
+- **JSONL**: flat `algorithm` and `route` per state, next to the nested per-hop route (which keeps
+  the pools and amounts the string leaves out).
 
 ## Adding a venue / solver / decoder / chain
 
