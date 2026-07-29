@@ -347,6 +347,12 @@ fn propamm(records: &[Comparison]) -> Option<PropAmm> {
 
 /// Sums the with/without A/B over the orders that carry both sides.
 ///
+/// Restricted to **scored** trades — win or loss — which is the same basis the report's own savings
+/// headline uses. A sandwiched trade is excluded there because MEV moved the settled output it is
+/// measured against, and including it here would compare a sandwich-aware verdict on one side
+/// against a plain amount comparison on the other, so one order can appear to flip when both worlds
+/// in fact produced the same result.
+///
 /// Wins and profits are counted independently: an order can be scored for its verdict but have an
 /// unpriced output token, so it contributes to the win counts and not to the USD.
 fn uplift(scoped: &[&Comparison]) -> Uplift {
@@ -355,6 +361,7 @@ fn uplift(scoped: &[&Comparison]) -> Uplift {
     let mut bps_with: Vec<f64> = Vec::new();
     for propamm in scoped
         .iter()
+        .filter(|r| r.top.is_scored())
         .filter_map(|r| r.propamm.as_ref())
     {
         let (Some(without_won), Some(with_won)) = (propamm.without_won, propamm.with_won) else {
