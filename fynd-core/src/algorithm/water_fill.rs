@@ -44,6 +44,7 @@ use tycho_simulation::{
 
 use super::{
     most_liquid::DepthAndPrice,
+    sim_guard::GuardedProtocolSim,
     split_primitives::{build_split_route, HopDescriptor, PathAllocation, SimulatedHop},
     Algorithm, AlgorithmConfig, MostLiquidAlgorithm, NoPathReason,
 };
@@ -222,7 +223,7 @@ impl WaterFillAlgorithm {
                 })
                 .or_else(|| market.get_simulation_state(component_id))?;
             let result = state
-                .get_amount_out(current.clone(), token_in, token_out)
+                .get_amount_out_guarded(current.clone(), token_in, token_out)
                 .ok()?;
             total_gas += &result.gas;
             if path_reuses_pool {
@@ -756,7 +757,7 @@ impl WaterFillAlgorithm {
                 .map(Box::as_ref)
                 .or_else(|| market.get_simulation_state(component_id))?;
             let result = state
-                .get_amount_out(current.clone(), token_in, token_out)
+                .get_amount_out_guarded(current.clone(), token_in, token_out)
                 .ok()?;
             hops.push(SimulatedHop {
                 descriptor: HopDescriptor::new(
@@ -1393,7 +1394,7 @@ fn simulate_edge<W>(
     let token_out = market.get_token(token_out_addr)?;
     let state = market.get_simulation_state(&edge.component_id)?;
     state
-        .get_amount_out(amount.clone(), token_in, token_out)
+        .get_amount_out_guarded(amount.clone(), token_in, token_out)
         .ok()
         .map(|result| result.amount)
 }
@@ -1495,7 +1496,7 @@ mod tests {
             },
             test_utils::{
                 addr, setup_market_unweighted, setup_market_weighted_boxed, token_with_decimals,
-                ConstantProductSim,
+                ConstantProductSim, DivByZeroSim,
             },
         },
         graph::GraphManager,
@@ -1618,6 +1619,46 @@ mod tests {
             .await
             .expect("water_fill returns a split when no single path fills");
         assert!(split.route().swaps().len() >= 2, "expected a split across both pools");
+    }
+
+    /// A pool whose math panics mid-simulation must be skipped like any failing pool, not
+    /// unwind through the solver worker thread. The panicking pool advertises huge depth so
+    /// discovery ranks it first and the bulk fill loops actually simulate it.
+    #[tokio::test]
+    async fn test_water_fill_contains_simulation_panic() {
+        let a = token_with_decimals(0x01, "A", 18);
+        let b = token_with_decimals(0x02, "B", 18);
+        let healthy = Box::new(ConstantProductSim {
+            reserve_0: BigUint::from(10_000u64) * BigUint::from(10u64).pow(18),
+            reserve_1: BigUint::from(10_000u64) * BigUint::from(10u64).pow(18),
+            gas: 50_000,
+        }) as Box<dyn ProtocolSim>;
+        let (market, gm) = setup_market_weighted_boxed(vec![
+            ("pool_ok", &a, &b, healthy),
+            ("pool_panics", &a, &b, Box::new(DivByZeroSim::default())),
+        ]);
+        let order = Order::new(
+            a.address.clone(),
+            b.address.clone(),
+            BigUint::from(100u64) * BigUint::from(10u64).pow(18),
+            OrderSide::Sell,
+            addr(0xFF),
+        );
+
+        let result = WaterFillAlgorithm::with_config(config())
+            .unwrap()
+            .find_best_route(gm.graph(), market.clone(), None, None, &order)
+            .await
+            .expect("panicking pool is skipped; the healthy pool still fills the order");
+
+        assert!(
+            result
+                .route()
+                .swaps()
+                .iter()
+                .all(|swap| swap.component_id() == "pool_ok"),
+            "route must only use the healthy pool",
+        );
     }
 
     /// On two equal fee-free pools the split's gross output must come within a tight tolerance of
