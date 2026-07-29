@@ -6,20 +6,7 @@ icon: swap-arrows
 
 This document explains how Fynd's Bellman-Ford routing algorithm finds the best swap route through a network of decentralized exchange pools.
 
-## Table of Contents
-
-1. [The Algorithm](bellman-ford.md#1-the-algorithm)
-2. [Forbid Revisits](bellman-ford.md#2-forbid-revisits)
-3. [Subgraph Extraction](bellman-ford.md#3-subgraph-extraction)
-4. [The Complete Algorithm](bellman-ford.md#4-the-complete-algorithm)
-5. [A Worked Example](bellman-ford.md#5-a-worked-example)
-6. [Design Tradeoffs](bellman-ford.md#6-design-tradeoffs)
-7. [FAQ](bellman-ford.md#7-faq)
-8. [Suggested Configuration](bellman-ford.md#8-suggested-configuration)
-
-***
-
-## 1. The Algorithm
+## The algorithm
 
 The algorithm maintains one number per token: the best amount of that token reachable from the source via any path found so far. It improves these numbers by repeatedly simulating swaps through pools, keeping only improvements. This process is called **relaxation**.
 
@@ -103,9 +90,7 @@ if net_candidate > net_existing: update
 
 This is configurable via the `gas_aware` setting in the algorithm config (defaults to true).
 
-***
-
-## 2. Forbid Revisits
+## Forbid revisits
 
 The algorithm above has a problem. Consider this graph:
 
@@ -143,9 +128,7 @@ Each check walks the predecessor chain, which has at most `max_hops` entries (ty
 
 With these constraints, every path the algorithm considers visits each token at most once and uses each pool at most once. The route is a simple chain through distinct pools, which is exactly what we want for execution.
 
-***
-
-## 3. Subgraph Extraction
+## Subgraph extraction
 
 Before relaxation even starts, we prune the graph.
 
@@ -157,9 +140,7 @@ The result is a subgraph of a few hundred edges, down from 10,000. All subsequen
 
 This complements the active set. BFS removes structurally unreachable nodes before relaxation. The active set skips nodes that are structurally reachable but haven't received tokens yet. Together, they keep the number of simulation calls affordable.
 
-***
-
-## 4. The Complete Algorithm
+## The complete algorithm
 
 Here is the full sequence, end to end. Each step maps to a specific section of `fynd-core/src/algorithm/bellman_ford.rs`.
 
@@ -207,9 +188,7 @@ Return the route and net amount.
 
 > **Note:** `route.total_gas()` is a fast, approximate estimate used for ranking paths *within* this algorithm. When multiple worker pools compete, the `WorkerPoolRouter` applies a more accurate gas estimate (`estimate_gas_usage` from tycho-execution, which accounts for token transfers and router overhead) before the final cross-pool ranking.
 
-***
-
-## 5. A Worked Example
+## A worked example
 
 Let's trace the algorithm on a small graph.
 
@@ -304,9 +283,7 @@ Final output: **20,000 units of D**.
 
 Note that the algorithm also explored A -> B -> D (6,000) and A -> C -> B -> D (7,500) but found A -> C -> D (20,000) to be the best.
 
-***
-
-## 6. Design Tradeoffs
+## Design tradeoffs
 
 ### Gas-aware vs. gross relaxation
 
@@ -320,9 +297,7 @@ The improvement is most visible on routes where a cheap 2-hop path beats an expe
 
 Subgraph extraction uses forward BFS from the source, not bidirectional BFS (forward from source, backward from destination). Bidirectional BFS produces a tighter subgraph (edges must lie on a viable source-to-destination path), but forward-only is simpler and the active set mechanism already avoids processing nodes that don't lead anywhere useful.
 
-***
-
-## 7. FAQ
+## FAQ
 
 ### Why not Dijkstra or A\*?
 
@@ -334,9 +309,7 @@ Three properties of DEX pools break the assumptions these algorithms rely on:
 
 Our algorithm handles all three by simulating the actual swap at each step instead of operating on precomputed weights.
 
-***
-
-## 8. Suggested Configuration
+## Suggested configuration
 
 ```toml
 [pools.bellman_ford_3_hops]
@@ -355,21 +328,19 @@ timeout_ms = 500
   its best-so-far result on timeout, so a tighter budget degrades quality rather than failing.
 * `gas_aware` (default `true`) is only reachable through the builder API, not `worker_pools.toml`.
 
-> **Set connector tokens.** With `connector_tokens` unset, routes can pass through illiquid long-tail
-> intermediates, which raises reversion risk. Restrict intermediate hops to a small trusted set —
-> generate one for your chain with `fynd derive-connector-tokens --chain Ethereum --top-n 10 --output
-> toml` and paste it into the pool. See
-> [Connector tokens](../guides/server-configuration.md#connector-tokens).
-
-***
+{% hint style="warning" %}
+**Set connector tokens.** With `connector_tokens` unset, routes can pass through illiquid long-tail
+intermediates, which raises reversion risk. Restrict intermediate hops to a small trusted set —
+generate one for your chain with `fynd derive-connector-tokens --chain Ethereum --top-n 10 --output
+toml` and paste it into the pool. See
+[Connector tokens](../guides/server-configuration.md#connector-tokens).
+{% endhint %}
 
 ## Acknowledgements
 
 The Bellman-Ford routing approach in Fynd was inspired by the work of [János Tapolcai](http://lendulet.tmit.bme.hu/tapolcai) ([@jtapolcai](https://twitter.com/jtapolcai)), Full Professor at the Department of Telecommunications and Artificial Intelligence, Budapest University of Technology and Economics (BME). His [tycho-searcher](https://github.com/jtapolcai/tycho-searcher) project demonstrates a modified Bellman-Ford algorithm for DEX arbitrage detection built on Tycho.
 
----
-
-## Source Reference
+## Source reference
 
 | File                                      | Purpose                                         |
 | ----------------------------------------- | ----------------------------------------------- |

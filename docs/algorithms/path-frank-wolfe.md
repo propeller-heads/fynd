@@ -101,6 +101,26 @@ Both paths use pool P1. On-chain, P1 is called once with the combined WETH input
 
 Gas for shared pools is counted once, not once per path.
 
+## Design tradeoffs
+
+### Versus Bellman-Ford
+
+Bellman-Ford finds the best **single path**. PathFrankWolfe wraps BF and adds a split optimization layer on top. For trades with negligible price impact, PFW produces the same result as BF. For large trades with meaningful impact, PFW can produce better net output by spreading flow across multiple pools.
+
+The cost is additional simulation work: each Frank-Wolfe iteration runs one BF solve plus `line_search_evals` evaluations of the total-output function. With `max_paths = 4` and `line_search_evals = 12`, the worst case is roughly 3 BF solves and ~36 path simulations on top of the initial BF run.
+
+### Single-path fallback
+
+The algorithm always compares the split result against the single-path baseline before returning. If the split route doesn't beat the single path net of gas (this can happen when the gas overhead of extra swaps outweighs the reduced impact), the single-path result wins. Errors during the split search degrade to the single-path result the same way, so split optimization can only add output, never cost coverage.
+
+### Sequential evaluation versus independent evaluation
+
+An earlier version of the evaluator simulated every path from the original pool states. For pool-disjoint splits the two are identical, but for splits that reuse a pool, independent simulation counts the same liquidity twice and overstates output — the route then under-delivers when executed. Sequential evaluation prices each path on the state the previous paths left behind, which matches how the merged route executes on-chain (a shared hop becomes one combined swap). The optimizer's objective, the recorded per-hop amounts, and the reported net all use the sequential semantics.
+
+### Timeout safety
+
+The Frank-Wolfe loop checks elapsed time at the start of each iteration. If the timeout is exceeded, the loop stops and the algorithm proceeds with however many paths it has found. The result is always valid — just potentially less optimal than a full-budget run.
+
 ## Suggested configuration
 
 ```toml
@@ -122,11 +142,13 @@ timeout_ms = 1000
   request, and the WorkerPoolRouter returns whichever pool answers best within the timeout, so the
   cheap pool still covers requests where PFW is slow on VM-heavy routes.
 
-> **Set connector tokens.** With `connector_tokens` unset, routes can pass through illiquid long-tail
-> intermediates, which raises reversion risk — and a split route multiplies that exposure across
-> every path it activates. Restrict intermediate hops to a small trusted set — generate one for your
-> chain with `fynd derive-connector-tokens --chain Ethereum --top-n 10 --output toml` and paste it
-> into the pool. See [Connector tokens](../guides/server-configuration.md#connector-tokens).
+{% hint style="warning" %}
+**Set connector tokens.** With `connector_tokens` unset, routes can pass through illiquid long-tail
+intermediates, which raises reversion risk — and a split route multiplies that exposure across
+every path it activates. Restrict intermediate hops to a small trusted set — generate one for your
+chain with `fynd derive-connector-tokens --chain Ethereum --top-n 10 --output toml` and paste it
+into the pool. See [Connector tokens](../guides/server-configuration.md#connector-tokens).
+{% endhint %}
 
 The PFW-specific tuning parameters are not currently exposed in `worker_pools.toml`; they use defaults:
 
@@ -136,26 +158,6 @@ The PFW-specific tuning parameters are not currently exposed in `worker_pools.to
 | `max_probe` | 25% | Probe amount cap as a fraction of total input |
 | `min_split` | 5% | Minimum flow fraction for any path; smaller shares are dropped |
 | `line_search_evals` | 12 | Golden-section evaluations per step size search |
-
-## Design tradeoffs
-
-### Versus Bellman-Ford
-
-Bellman-Ford finds the best **single path**. PathFrankWolfe wraps BF and adds a split optimization layer on top. For trades with negligible price impact, PFW produces the same result as BF. For large trades with meaningful impact, PFW can produce better net output by spreading flow across multiple pools.
-
-The cost is additional simulation work: each Frank-Wolfe iteration runs one BF solve plus `line_search_evals` evaluations of the total-output function. With `max_paths = 4` and `line_search_evals = 12`, the worst case is roughly 3 BF solves and ~36 path simulations on top of the initial BF run.
-
-### Single-path fallback
-
-The algorithm always compares the split result against the single-path baseline before returning. If the split route doesn't beat the single path net of gas (this can happen when the gas overhead of extra swaps outweighs the reduced impact), the single-path result wins. Errors during the split search degrade to the single-path result the same way, so split optimization can only add output, never cost coverage.
-
-### Sequential evaluation versus independent evaluation
-
-An earlier version of the evaluator simulated every path from the original pool states. For pool-disjoint splits the two are identical, but for splits that reuse a pool, independent simulation counts the same liquidity twice and overstates output — the route then under-delivers when executed. Sequential evaluation prices each path on the state the previous paths left behind, which matches how the merged route executes on-chain (a shared hop becomes one combined swap). The optimizer's objective, the recorded per-hop amounts, and the reported net all use the sequential semantics.
-
-### Timeout safety
-
-The Frank-Wolfe loop checks elapsed time at the start of each iteration. If the timeout is exceeded, the loop stops and the algorithm proceeds with however many paths it has found. The result is always valid — just potentially less optimal than a full-budget run.
 
 ## Source reference
 

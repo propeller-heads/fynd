@@ -137,15 +137,17 @@ max_routes = 1024
   the single-route finders, so pair it with a Bellman-Ford pool if you serve latency-sensitive
   traffic.
 
-> **Set connector tokens.** With `connector_tokens` unset, routes can pass through illiquid long-tail
-> intermediates, which raises reversion risk — and a split route multiplies that exposure across
-> every path it activates. Restrict intermediate hops to a small trusted set (a hard filter) —
-> generate one for your chain with `fynd derive-connector-tokens --chain Ethereum --top-n 10 --output
-> toml` and paste it into the pool. See
-> [Connector tokens](../guides/server-configuration.md#connector-tokens). The soft anchor preference
-> used when no allowlist is set is derived automatically from the graph and needs no configuration.
+{% hint style="warning" %}
+**Set connector tokens.** With `connector_tokens` unset, routes can pass through illiquid long-tail
+intermediates, which raises reversion risk — and a split route multiplies that exposure across
+every path it activates. Restrict intermediate hops to a small trusted set (a hard filter) —
+generate one for your chain with `fynd derive-connector-tokens --chain Ethereum --top-n 10 --output
+toml` and paste it into the pool. See
+[Connector tokens](../guides/server-configuration.md#connector-tokens). The soft anchor preference
+used when no allowlist is set is derived automatically from the graph and needs no configuration.
+{% endhint %}
 
-## Source Reference
+## Source reference
 
 | File | Purpose |
 | --- | --- |
