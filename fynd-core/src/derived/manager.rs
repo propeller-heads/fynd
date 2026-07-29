@@ -38,18 +38,6 @@ pub struct ChangedComponents {
 }
 
 impl ChangedComponents {
-    /// Creates a marker for full recompute where all components are considered changed.
-    ///
-    /// Used for startup and lag recovery scenarios.
-    pub fn all(market: MarketDataView) -> Self {
-        Self {
-            added: market.component_topology().clone(),
-            removed: vec![],
-            updated: vec![],
-            is_full_recompute: true,
-        }
-    }
-
     /// Returns true if this update changes the graph topology (adds or removes components).
     pub fn is_topology_change(&self) -> bool {
         !self.added.is_empty() || !self.removed.is_empty()
@@ -73,8 +61,6 @@ impl ChangedComponents {
 /// Returns `None` when the batch carries no net changes. The result always has
 /// `is_full_recompute: false` — this is the bounded lag-recovery path, never a
 /// whole-topology recompute.
-// Not yet called: wired up by the lag-recovery path added in a follow-up task.
-#[allow(dead_code)]
 fn coalesce_market_events(events: &[MarketEvent]) -> Option<ChangedComponents> {
     let mut added: HashMap<ComponentId, Vec<Address>> = HashMap::new();
     let mut removed: HashSet<ComponentId> = HashSet::new();
@@ -127,7 +113,7 @@ use super::{
 };
 use crate::feed::{
     events::{EventError, MarketEvent, MarketEventHandler},
-    market_data::{MarketData, MarketDataView},
+    market_data::MarketData,
 };
 
 /// Thread-safe handle to shared derived data store.
@@ -317,12 +303,13 @@ impl ComputationManager {
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(
                                 skipped,
-                                "computation manager lagged, skipped {} events. Recomputing from current state.",
-                                skipped
+                                "computation manager lagged; draining buffered events and \
+                                 recomputing changed components incrementally"
                             );
-                            let market = self.market_data.read().await;
-                            let changed = ChangedComponents::all(market);
-                            self.compute_all(&changed).await;
+                            counter!("derived_manager_lag_recoveries_total").increment(1);
+                            counter!("derived_manager_lagged_events_total")
+                                .increment(skipped);
+                            self.recover_from_lag(&mut event_rx).await;
                         }
                     }
                 }
@@ -483,6 +470,31 @@ impl ComputationManager {
             total_ms = total_start.elapsed().as_millis(),
             "all derived computations complete"
         );
+    }
+
+    /// Recovers from a broadcast lag without a full-topology recompute.
+    ///
+    /// Drains every event still buffered in `event_rx` (returning the receiver to
+    /// the live tail so it cannot immediately re-lag), coalesces them into one
+    /// incremental `ChangedComponents`, and recomputes just that union.
+    ///
+    /// Trade-off: components carried only by the *dropped* (skipped) events are not
+    /// refreshed here — they update on their next `MarketUpdated`. This keeps
+    /// recovery O(recent changes) instead of O(all pools), which is what let fast
+    /// chains spiral into back-to-back full recomputes.
+    async fn recover_from_lag(&self, event_rx: &mut broadcast::Receiver<MarketEvent>) {
+        let mut drained = Vec::new();
+        loop {
+            match event_rx.try_recv() {
+                Ok(event) => drained.push(event),
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+        if let Some(changed) = coalesce_market_events(&drained) {
+            self.compute_all(&changed).await;
+        }
     }
 }
 
@@ -682,6 +694,47 @@ mod tests {
         assert!(!c.added.contains_key("eth_usdc"));
         assert!(c.removed.contains(&"eth_usdc".to_string()));
         assert!(!c.updated.contains(&"eth_usdc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn lag_recovery_recomputes_incrementally_and_drains_to_tail() {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let (market, _) = setup_market_weighted(vec![(
+            "eth_usdc",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(2000.0).with_gas(0),
+        )]);
+        let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
+        let (manager, _out_rx) = ComputationManager::new(config, market).unwrap();
+
+        // Capacity-2 input channel; send 5 without reading to force Lagged on recv.
+        let (tx, mut rx) = broadcast::channel::<MarketEvent>(2);
+        for _ in 0..5 {
+            tx.send(MarketEvent::MarketUpdated {
+                added_components: HashMap::from([(
+                    "eth_usdc".to_string(),
+                    vec![eth.address.clone(), usdc.address.clone()],
+                )]),
+                removed_components: vec![],
+                updated_components: vec![],
+            })
+            .unwrap();
+        }
+        let err = rx.recv().await.expect_err("receiver must have lagged");
+        assert!(matches!(err, broadcast::error::RecvError::Lagged(_)));
+
+        manager.recover_from_lag(&mut rx).await;
+
+        // Recovery recomputed the coalesced change incrementally...
+        let store = manager.store();
+        let guard = store.read().await;
+        assert!(guard.spot_prices().is_some());
+        assert!(guard.token_prices().is_some());
+        drop(guard);
+        // ...and the receiver is back at the live tail (buffer drained).
+        assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
     }
 
     // --- build_schedule: dependency staging (pure) --------------------------------
