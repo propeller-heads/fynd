@@ -63,8 +63,8 @@ Four subcommands via `cargo run -p hindsight --release --`:
 - **`verify`** — Diff decoded trades against Allium's `aggregator_trades` ground truth. Requires 
   `ALLIUM_API_KEY` and `ALLIUM_QUERY_ID`.
 - **`monitor`** — Live mode: drives an in-process `fynd-core` solver block-by-block, solving
-  each settled trade at top-of-block (N-1) and re-executing that route at back-of-block (N) to
-  measure slippage. Emits JSONL and exposes Prometheus metrics.
+  each settled trade at top-of-block (N-1) and again at back-of-block (N), where the top route
+  is also re-executed to measure slippage. Emits JSONL and exposes Prometheus metrics.
 - **`report`** — Offline: render a self-contained HTML report from a `monitor` run's comparison
   JSONL (`--comparisons-dir`). No chain or network access.
 

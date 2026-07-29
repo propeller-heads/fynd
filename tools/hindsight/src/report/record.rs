@@ -103,9 +103,15 @@ mod tests {
             gas_estimate: U256::from(21_000u64),
             route: RouteSummary::default(),
             quote_json: None,
-            route: None,
+            solved_route: None,
         });
-        let range = build_range(&trade, &prices, top, Outcome::Unsolvable("x".into()));
+        let range = build_range(
+            &trade,
+            &prices,
+            top,
+            Outcome::Unsolvable("x".into()),
+            &Outcome::Unsolvable("x".into()),
+        );
 
         let mut buf = Vec::new();
         write_comparisons(&mut buf, std::slice::from_ref(&range), &prices, &prices);

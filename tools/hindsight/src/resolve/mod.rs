@@ -4,8 +4,9 @@
 //! The `SteppingSolver` trait abstracts the solver so the two-state comparison pipeline is
 //! testable without a live Fynd instance. The production implementation (`monitor`) drives an
 //! in-process `fynd-core` solver one block at a time: each trade is solved at top-of-block (N-1),
-//! then that same route is re-executed at back-of-block (N) to measure the slippage between
-//! quote time and execution time.
+//! then measured twice at back-of-block (N) — the top route is re-executed to isolate the
+//! slippage between quote time and execution time, and the trade is solved fresh to show what
+//! routing at the block's end state would deliver.
 
 mod compare;
 pub(crate) mod jsonl;
@@ -57,7 +58,7 @@ pub(crate) struct SolvedAmount {
     /// projection in `quote_json` covers the JSONL) and excluded from equality (a route carries
     /// unserializable, incomparable protocol states).
     #[serde(skip)]
-    pub route: Option<Route>,
+    pub solved_route: Option<Route>,
 }
 
 impl PartialEq for SolvedAmount {
@@ -130,8 +131,8 @@ pub(crate) struct RangeComparison {
     pub sandwich: Option<SandwichEvidence>,
     /// Optimistic: solved at state N-1, before the block's swaps moved the pools.
     pub top: StateResult,
-    /// Pessimistic: the top-of-block route re-executed at state N, after the block's swaps moved
-    /// the pools.
+    /// Pessimistic: solved fresh at state N, after the block's swaps moved the pools — what
+    /// routing at the block's end state would deliver.
     pub back: StateResult,
     /// Headline verdict — top-of-block (the optimistic default).
     pub verdict: Verdict,
@@ -155,7 +156,9 @@ pub(crate) trait SteppingSolver {
     async fn reexecute(&self, top: &SolvedAmount) -> Outcome;
 }
 
-/// Build a `RangeComparison` from the two per-state outcomes of a trade.
+/// Build a `RangeComparison` from a trade's three outcomes: the top-of-block solve, the fresh
+/// back-of-block solve, and the top route's re-execution at back-of-block (which feeds only the
+/// `slippage` field).
 ///
 /// When the decoder isolated the gas the trader paid for the settled route, its cost is converted
 /// into `token_out` units at the `prices` snapshot (top-of-block — a fine approximation for a gas
@@ -173,6 +176,7 @@ pub(crate) fn build_range(
     prices: &Prices,
     top: Outcome,
     back: Outcome,
+    reexecuted: &Outcome,
 ) -> RangeComparison {
     let settled_net_gas = trade
         .settled_gas
@@ -180,7 +184,7 @@ pub(crate) fn build_range(
         .map_or(trade.amount_out, |gas_out| trade.amount_out.saturating_sub(gas_out));
     // Computed from the raw outcomes: the coverage-miss reclassification below discards the
     // solved amounts the slippage is measured from.
-    let slippage = compare::slippage(&top, &back);
+    let slippage = compare::slippage(&top, reexecuted);
     let mut top = StateResult::new(top, trade.amount_out, settled_net_gas);
     let mut back = StateResult::new(back, trade.amount_out, settled_net_gas);
     if trade.sandwich.is_some() {
@@ -214,10 +218,11 @@ pub(crate) fn build_range(
     }
 }
 
-/// Re-solve every trade in a held block at top-of-block, advance to back-of-block, then
-/// re-execute each top route against the pools as the block left them, and pair the results.
-/// Solving all trades at one state before advancing keeps each state's reads consistent and
-/// steps the chain only once per block.
+/// Re-solve every trade in a held block at top-of-block, advance to back-of-block, then measure
+/// each trade twice at the new state: re-execute its top route against the pools as the block
+/// left them (for the slippage), and solve it fresh (for the `back` comparison). Solving all
+/// trades at one state before advancing keeps each state's reads consistent and steps the chain
+/// only once per block.
 pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
     solver: &S,
     trades: &[DecodedTrade],
@@ -236,13 +241,16 @@ pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
 
     let mut ranges = Vec::with_capacity(trades.len());
     for (trade, top) in trades.iter().zip(tops) {
-        let back = match &top {
+        let reexecuted = match &top {
             Outcome::Solved(solved) => solver.reexecute(solved).await,
             Outcome::Partial(_) | Outcome::Unsolvable(_) => {
                 Outcome::Unsolvable("no top-of-block route to re-execute".to_string())
             }
         };
-        ranges.push(build_range(trade, prices, top, back));
+        let back = solver
+            .solve(trade.token_in, trade.token_out, trade.amount_in)
+            .await;
+        ranges.push(build_range(trade, prices, top, back, &reexecuted));
     }
     Ok(ranges)
 }
@@ -287,21 +295,30 @@ mod tests {
             gas_estimate: U256::from(21_000),
             route: RouteSummary::default(),
             quote_json: None,
-            route: None,
+            solved_route: None,
         })
     }
 
-    /// Stepping mock: `solve` returns `top`; `reexecute` returns `back` (the re-executed route).
+    /// Stepping mock: `solve` returns `top` before `advance()` and `back` after; `reexecute`
+    /// returns `reexecuted` (the top route replayed at the new state).
     struct MockStepping {
         advanced: std::sync::atomic::AtomicBool,
         top: Outcome,
         back: Outcome,
+        reexecuted: Outcome,
     }
 
     #[async_trait]
     impl SteppingSolver for MockStepping {
         async fn solve(&self, _: Address, _: Address, _: U256) -> Outcome {
-            self.top.clone()
+            if self
+                .advanced
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                self.back.clone()
+            } else {
+                self.top.clone()
+            }
         }
 
         async fn advance(&self) -> anyhow::Result<()> {
@@ -316,7 +333,7 @@ mod tests {
                     .load(std::sync::atomic::Ordering::Relaxed),
                 "reexecute must only run after advance()"
             );
-            self.back.clone()
+            self.reexecuted.clone()
         }
     }
 
@@ -327,6 +344,7 @@ mod tests {
             &empty_prices(),
             solved(10_200, 10_100),
             solved(10_010, 9_990),
+            &solved(10_010, 9_990),
         );
         assert_eq!(range.verdict, Verdict::Win); // top is the headline
         assert!(range.top.deltas.raw_bps.unwrap() > range.back.deltas.raw_bps.unwrap());
@@ -335,8 +353,13 @@ mod tests {
     #[test]
     fn test_build_range_partial_fill() {
         // Fynd fills only 10% of a 10_000 settled trade → reclassified as a coverage miss.
-        let range =
-            build_range(&trade(10_000), &empty_prices(), solved(1_000, 990), solved(1_000, 990));
+        let range = build_range(
+            &trade(10_000),
+            &empty_prices(),
+            solved(1_000, 990),
+            solved(1_000, 990),
+            &solved(1_000, 990),
+        );
         assert_eq!(range.verdict, Verdict::CoverageMiss);
         assert_eq!(range.top.deltas, Deltas { raw_bps: None, net_bps: None });
         assert!(matches!(range.top.outcome, Outcome::Partial(_)));
@@ -351,8 +374,13 @@ mod tests {
             attacker: Address::repeat_byte(0xcc),
             pools: vec![Address::repeat_byte(0xdd)],
         });
-        let range =
-            build_range(&sandwiched, &empty_prices(), solved(10_200, 10_100), solved(9_800, 9_700));
+        let range = build_range(
+            &sandwiched,
+            &empty_prices(),
+            solved(10_200, 10_100),
+            solved(9_800, 9_700),
+            &solved(9_800, 9_700),
+        );
 
         assert_eq!(range.verdict, Verdict::Sandwiched);
         assert_eq!(range.top.verdict, Verdict::Sandwiched);
@@ -378,6 +406,7 @@ mod tests {
             &empty_prices(),
             solved(10_200, 10_100),
             Outcome::Unsolvable("missing token in Tycho".into()),
+            &Outcome::Unsolvable("re-execution failed".into()),
         );
 
         assert_eq!(range.top.verdict, Verdict::Sandwiched);
@@ -394,7 +423,13 @@ mod tests {
         let mut prices = empty_prices();
         prices.insert(with_gas.token_out, 2.0);
 
-        let range = build_range(&with_gas, &prices, solved(10_050, 9_990), solved(10_050, 9_990));
+        let range = build_range(
+            &with_gas,
+            &prices,
+            solved(10_050, 9_990),
+            solved(10_050, 9_990),
+            &solved(10_050, 9_990),
+        );
         assert_eq!(range.settled_amount_out_net_gas, U256::from(9_800u64));
         assert_eq!(range.settled_amount_out, U256::from(10_000u64));
         assert_eq!(range.verdict, Verdict::Win);
@@ -407,20 +442,26 @@ mod tests {
         let mut with_gas = trade(10_000);
         with_gas.settled_gas = Some(U256::from(100u64));
 
-        let range =
-            build_range(&with_gas, &empty_prices(), solved(10_050, 9_990), solved(10_050, 9_990));
+        let range = build_range(
+            &with_gas,
+            &empty_prices(),
+            solved(10_050, 9_990),
+            solved(10_050, 9_990),
+            &solved(10_050, 9_990),
+        );
         assert_eq!(range.settled_amount_out_net_gas, U256::from(10_000u64));
         assert_eq!(range.verdict, Verdict::Win);
     }
 
     #[tokio::test]
-    async fn resolve_block_range_pairs_top_and_reexecution() {
-        // Two trades. The top solve wins; its route re-executed at back-of-block produces less
-        // than settled (a loss vs settled) and less than quoted (negative slippage).
+    async fn resolve_block_range_pairs_top_back_and_reexecution() {
+        // Two trades. The top solve wins; the fresh back solve loses vs settled; the top route
+        // re-executed at back-of-block produces less than quoted (negative slippage).
         let solver = MockStepping {
             advanced: std::sync::atomic::AtomicBool::new(false),
             top: solved(10_200, 10_100),
-            back: solved(9_900, 9_800),
+            back: solved(9_950, 9_850),
+            reexecuted: solved(9_900, 9_800),
         };
         let trades = [trade(10_000), trade(10_000)];
         let ranges = resolve_block_range(&solver, &trades, &empty_prices())
@@ -440,36 +481,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_block_range_skips_reexecution_without_top_route() {
-        // An unsolved top has no route to re-execute: the mock's reexecute is never reached
-        // (it would return a solved back), and the back state records why.
+    async fn resolve_block_range_back_solve_without_top_route() {
+        // An unsolved top has no route to re-execute, so there is no slippage — but the fresh
+        // back-of-block solve does not need a top route: back still carries a real comparison.
         let solver = MockStepping {
             advanced: std::sync::atomic::AtomicBool::new(false),
             top: Outcome::Unsolvable("missing token in Tycho".into()),
             back: solved(10_100, 10_000),
+            reexecuted: solved(10_100, 10_000),
         };
         let trades = [trade(10_000)];
         let ranges = resolve_block_range(&solver, &trades, &empty_prices())
             .await
             .unwrap();
 
-        assert_eq!(ranges[0].back.verdict, Verdict::Unsolvable);
-        assert!(matches!(
-            &ranges[0].back.outcome,
-            Outcome::Unsolvable(reason) if reason == "no top-of-block route to re-execute"
-        ));
+        assert_eq!(ranges[0].top.verdict, Verdict::Unsolvable);
+        assert_eq!(ranges[0].back.verdict, Verdict::Win);
         assert_eq!(ranges[0].slippage, None);
     }
 
     #[test]
     fn build_range_positive_slippage_from_raw_outcomes() {
-        // The route re-executed to more than quoted: the surplus we could charge.
+        // The route re-executed to more than quoted: the surplus we could charge. The fresh
+        // back solve is a different route and plays no part in the slippage.
         let range = build_range(
             &trade(10_000),
             &empty_prices(),
             solved(10_000, 9_900),
-            solved(10_050, 9_950),
+            solved(10_500, 10_400),
+            &solved(10_050, 9_950),
         );
+        let slippage = range.slippage.unwrap();
+        assert!((slippage.bps - 50.0).abs() < 0.01, "expected +50 bps, got {}", slippage.bps);
+    }
+
+    #[test]
+    fn build_range_slippage_survives_unsolved_back() {
+        // The fresh back solve failed (e.g. the pair lost its route at state N), but the top
+        // route still re-executed: the slippage must survive independently of `back`.
+        let range = build_range(
+            &trade(10_000),
+            &empty_prices(),
+            solved(10_000, 9_900),
+            Outcome::Unsolvable("no route at back-of-block".into()),
+            &solved(10_050, 9_950),
+        );
+        assert_eq!(range.back.verdict, Verdict::Unsolvable);
         let slippage = range.slippage.unwrap();
         assert!((slippage.bps - 50.0).abs() < 0.01, "expected +50 bps, got {}", slippage.bps);
     }
@@ -477,10 +534,15 @@ mod tests {
     #[test]
     fn build_range_slippage_survives_coverage_miss_reclassification() {
         // Both states cover only 10% of the settled size and are reclassified as coverage
-        // misses (losing their solved amounts) — the slippage between them must still be
-        // measured from the raw outcomes.
-        let range =
-            build_range(&trade(10_000), &empty_prices(), solved(1_000, 990), solved(1_010, 1_000));
+        // misses (losing their solved amounts) — the slippage between the top quote and its
+        // re-execution must still be measured from the raw outcomes.
+        let range = build_range(
+            &trade(10_000),
+            &empty_prices(),
+            solved(1_000, 990),
+            solved(1_010, 1_000),
+            &solved(1_010, 1_000),
+        );
         assert_eq!(range.verdict, Verdict::CoverageMiss);
         let slippage = range.slippage.unwrap();
         assert!((slippage.bps - 100.0).abs() < 0.01, "expected +100 bps, got {}", slippage.bps);

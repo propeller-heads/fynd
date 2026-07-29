@@ -153,7 +153,7 @@ mod tests {
             gas_estimate: U256::from(21_000),
             route: RouteSummary::default(),
             quote_json: None,
-            route: None,
+            solved_route: None,
         })
     }
 

@@ -355,6 +355,7 @@ mod tests {
             &empty_prices(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
+            &Outcome::Unsolvable("x".into()),
         );
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
         assert_eq!(rec.pointer("/tx_index").unwrap(), 3);
@@ -435,14 +436,15 @@ mod tests {
             algorithm: "bellman_ford".to_string(),
             path: "WETH -[uniswap_v3]-> DAI -[vm:curve]-> USDC".to_string(),
         };
-        // Top: gross 1010 USDC → +$10. Back: gross 1002 USDC → +$2. Both win.
+        // Top: gross 1010 USDC → +$10. Back: gross 1002 USDC → +$2. Both win. The top route's
+        // re-execution matches the fresh back solve, so the slippage numbers read off `back`.
         let top = Outcome::Solved(SolvedAmount {
             amount_out: U256::from(1_010_000_000u64),
             amount_out_net_gas: U256::from(1_005_000_000u64),
             gas_estimate: U256::from(21_000u64),
             route: route.clone(),
             quote_json: quote.clone(),
-            route: None,
+            solved_route: None,
         });
         let back = Outcome::Solved(SolvedAmount {
             amount_out: U256::from(1_002_000_000u64),
@@ -450,9 +452,9 @@ mod tests {
             gas_estimate: U256::from(21_000u64),
             route,
             quote_json: quote,
-            route: None,
+            solved_route: None,
         });
-        let range = build_range(&trade, &prices, top, back);
+        let range = build_range(&trade, &prices, top, back.clone(), &back);
 
         let rec = comparison_record(&range, &prices, &prices);
         let top_usd = rec
@@ -540,6 +542,7 @@ mod tests {
             &empty_prices(),
             Outcome::Unsolvable("missing token in Tycho".into()),
             Outcome::Unsolvable("missing token in Tycho".into()),
+            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
         );
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
         assert_eq!(rec.pointer("/top/verdict").unwrap(), "unsolvable");
@@ -605,10 +608,11 @@ mod tests {
                 gas_estimate: U256::from(21_000u64),
                 route: RouteSummary::default(),
                 quote_json: None,
-                route: None,
+                solved_route: None,
             })
         };
-        let range = build_range(&trade, &empty_prices(), solved(1_100), solved(1_050));
+        let range =
+            build_range(&trade, &empty_prices(), solved(1_100), solved(1_050), &solved(1_050));
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
 
         assert_eq!(rec.pointer("/tx_index").unwrap(), 42);

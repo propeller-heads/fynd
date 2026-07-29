@@ -592,7 +592,7 @@ mod tests {
                 path: "USDC -[uniswap_v3]-> WETH".to_string(),
             },
             quote_json: None,
-            route: None,
+            solved_route: None,
         })
     }
 
@@ -625,6 +625,7 @@ mod tests {
             &empty_prices(),
             solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
             solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
+            &Outcome::Unsolvable("x".into()),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -665,6 +666,7 @@ mod tests {
             &empty_prices(),
             Outcome::Unsolvable("missing token in Tycho".into()),
             Outcome::Unsolvable("missing token in Tycho".into()),
+            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
         );
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -721,6 +723,7 @@ mod tests {
             &empty_prices(),
             solved(1_010_000_000, 1_005_000_000),
             solved(998_000_000, 995_000_000),
+            &solved(998_000_000, 995_000_000),
         );
         // USDC priced at 2e-9 native-units per ETH-wei (ETH = $2000) anchors ETH→USD.
         let mut prices = empty_prices();
@@ -775,6 +778,7 @@ mod tests {
             &empty_prices(),
             solved(1_000_000_000, 995_000_000),
             solved(1_005_000_000, 1_000_000_000),
+            &solved(1_005_000_000, 1_000_000_000),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -812,6 +816,7 @@ mod tests {
             &empty_prices(),
             solved(1_000_000_000, 995_000_000),
             solved(995_000_000, 990_000_000),
+            &solved(995_000_000, 990_000_000),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -835,11 +840,13 @@ mod tests {
     #[test]
     fn failed_reexecution_emits_no_slippage_metrics() {
         let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        // The fresh back solve succeeded — slippage must come from the re-execution alone.
         let range = build_range(
             &trade(usdc, 1_000_000_000),
             &empty_prices(),
             solved(1_000_000_000, 995_000_000),
-            Outcome::Unsolvable("re-execution failed: no simulation state".into()),
+            solved(1_002_000_000, 997_000_000),
+            &Outcome::Unsolvable("re-execution failed: no simulation state".into()),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -884,7 +891,13 @@ mod tests {
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
         t.venue = "0xD720183DdA64a8CDb424B5c13aF73baf713521f8".to_string();
         t.solver = "0xB6F54cAed61C318027c022c47B94BAF139a99Dab".to_string();
-        let range = build_range(&t, &empty_prices(), solved(1_100, 1_050), solved(1_100, 1_050));
+        let range = build_range(
+            &t,
+            &empty_prices(),
+            solved(1_100, 1_050),
+            solved(1_100, 1_050),
+            &solved(1_100, 1_050),
+        );
 
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -911,7 +924,13 @@ mod tests {
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
         t.solver = "relay".to_string();
         t.solver_source = AttributionSource::Fallback;
-        let range = build_range(&t, &empty_prices(), solved(1_100, 1_050), solved(1_100, 1_050));
+        let range = build_range(
+            &t,
+            &empty_prices(),
+            solved(1_100, 1_050),
+            solved(1_100, 1_050),
+            &solved(1_100, 1_050),
+        );
 
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -943,6 +962,7 @@ mod tests {
             &empty_prices(),
             Outcome::Unsolvable("no route".into()),
             Outcome::Unsolvable("no route".into()),
+            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -969,6 +989,7 @@ mod tests {
             &empty_prices(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
+            &Outcome::Unsolvable("x".into()),
         );
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -1005,6 +1026,7 @@ mod tests {
             &prices,
             solved(1_100_000_000, 1_090_000_000),
             solved(1_100_000_000, 1_090_000_000),
+            &solved(1_100_000_000, 1_090_000_000),
         );
         assert_eq!(range.verdict, Verdict::Sandwiched);
 
@@ -1036,6 +1058,7 @@ mod tests {
             &empty_prices(),
             solved(1_005_000, 1_005_000),
             solved(1_005_000, 1_005_000),
+            &solved(1_005_000, 1_005_000),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -1066,6 +1089,7 @@ mod tests {
             &empty_prices(),
             solved(1_100, 1_050),
             solved(1_100, 1_050),
+            &solved(1_100, 1_050),
         );
         let recorder = configure_buckets(PrometheusBuilder::new())
             .unwrap()

@@ -1,6 +1,7 @@
 //! Live two-state monitor: drive an in-process `fynd-core` solver one block at a time, solving
-//! each block's settled trades at top-of-block (N-1) and re-executing each top route at
-//! back-of-block (N) to measure slippage between quote time and execution time.
+//! each block's settled trades at top-of-block (N-1) and measuring twice at back-of-block (N) —
+//! each top route is re-executed to isolate slippage between quote time and execution time, and
+//! each trade is solved fresh to show what routing at the block's end state would deliver.
 //!
 //! The block barrier is deterministic: after releasing a block via
 //! `BlockStepController::trigger_next_block`, we wait until the solver's `MarketData` reports the
@@ -194,7 +195,7 @@ impl SteppingSolver for StepAdapter<'_> {
     }
 
     async fn reexecute(&self, top: &SolvedAmount) -> Outcome {
-        let Some(route) = top.route.as_ref() else {
+        let Some(route) = top.solved_route.as_ref() else {
             return Outcome::Unsolvable("top-of-block quote carried no route".to_string());
         };
         let market = self.solver.market_data();
@@ -212,8 +213,10 @@ impl SteppingSolver for StepAdapter<'_> {
                     amount_out,
                     amount_out_net_gas: amount_out.saturating_sub(gas_deduction),
                     gas_estimate: top.gas_estimate,
+                    // Same route re-executed: attribution carries over from the top quote.
+                    route: top.route.clone(),
                     quote_json: top.quote_json.clone(),
-                    route: None,
+                    solved_route: None,
                 })
             }
             Err(e) => Outcome::Unsolvable(format!("re-execution failed: {e}")),
@@ -280,7 +283,7 @@ fn order_quote_to_outcome(quote: &OrderQuote, symbols: &HashMap<CoreAddress, Str
         route: route_summary(quote, symbols),
         quote_json,
         // Kept in memory so the route can be re-executed at back-of-block.
-        route: quote.route().cloned(),
+        solved_route: quote.route().cloned(),
     })
 }
 
