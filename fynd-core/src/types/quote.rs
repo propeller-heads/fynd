@@ -713,7 +713,7 @@ impl SingleOrderQuote {
 /// route's value after paying the exclusive route's gas.
 ///
 /// Informational only (observability). The value the encoder acts on is the per-leg
-/// [`Swap::committed_amount_out`], since the on-chain hook captures surplus per component.
+/// [`Swap::committed_amount_out`], since surplus is captured per component on-chain.
 #[derive(Debug, Clone)]
 pub struct SurplusInfo {
     /// Surplus captured by the protocol: realized surplus-route output minus the committed
@@ -1620,12 +1620,11 @@ pub struct Swap {
     split: f64,
     /// Per-leg committed output for an exclusive swap.
     ///
-    /// Set only on the single exclusive leg of a surplus route. The encoder derives the on-chain
-    /// extension's controller-signed per-swap fee from this value and the leg's `amount_out`
-    /// (`floor((amount_out - committed_amount_out) * 2^32 / amount_out)`); the component then
-    /// captures `amount_out - committed_amount_out` as surplus, denominated in this swap's
-    /// `token_out`. `None` for ordinary public swaps. In-process only — consumed by the encoder;
-    /// `#[serde(skip)]` so it never enters the wire format.
+    /// Set only on the single exclusive leg of a surplus route. The encoding layer turns it into
+    /// the protocol's exclusive-swap payload, which limits the taker's output to the committed
+    /// amount; the component then captures `amount_out - committed_amount_out` as surplus,
+    /// denominated in this swap's `token_out`. `None` for ordinary public swaps. In-process only —
+    /// consumed by the encoder; `#[serde(skip)]` so it never enters the wire format.
     #[serde(skip)]
     committed_amount_out: Option<BigUint>,
 }
@@ -1666,8 +1665,8 @@ impl Swap {
 
     /// Sets the per-leg committed output for an exclusive swap.
     ///
-    /// The router stamps this onto the single exclusive leg of a surplus route so the encoder
-    /// can derive the extension's signed fee. See [`Swap::committed_amount_out`].
+    /// The router stamps this onto the single exclusive leg of a surplus route so the encoding
+    /// layer can build the leg's exclusive-swap payload. See [`Swap::committed_amount_out`].
     pub(crate) fn set_committed_amount_out(&mut self, committed_amount_out: BigUint) {
         self.committed_amount_out = Some(committed_amount_out);
     }
@@ -1724,8 +1723,8 @@ impl Swap {
 
     /// Returns the per-leg committed output, if this is the exclusive leg of a surplus route.
     ///
-    /// `None` for ordinary public swaps. When `Some`, the encoder derives the extension's signed
-    /// fee from this and the leg's `amount_out`.
+    /// `None` for ordinary public swaps. When `Some`, the encoding layer derives the leg's
+    /// exclusive-swap payload from this and the leg's `amount_out`.
     pub fn committed_amount_out(&self) -> Option<&BigUint> {
         self.committed_amount_out.as_ref()
     }
