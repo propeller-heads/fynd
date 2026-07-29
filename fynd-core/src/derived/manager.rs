@@ -677,9 +677,13 @@ mod tests {
         assert!(!c.is_full_recompute);
         // eth_usdc was added, so it stays in `added` (not double-counted in `updated`)
         assert!(c.added.contains_key("eth_usdc"));
-        assert!(!c.updated.contains(&"eth_usdc".to_string()));
+        assert!(!c
+            .updated
+            .contains(&"eth_usdc".to_string()));
         // dai_usdc only ever appeared as updated
-        assert!(c.updated.contains(&"dai_usdc".to_string()));
+        assert!(c
+            .updated
+            .contains(&"dai_usdc".to_string()));
     }
 
     #[test]
@@ -701,8 +705,12 @@ mod tests {
         };
         let c = coalesce_market_events(&[add, remove]).expect("net removal present");
         assert!(!c.added.contains_key("eth_usdc"));
-        assert!(c.removed.contains(&"eth_usdc".to_string()));
-        assert!(!c.updated.contains(&"eth_usdc".to_string()));
+        assert!(c
+            .removed
+            .contains(&"eth_usdc".to_string()));
+        assert!(!c
+            .updated
+            .contains(&"eth_usdc".to_string()));
     }
 
     #[tokio::test]
@@ -731,7 +739,10 @@ mod tests {
             })
             .unwrap();
         }
-        let err = rx.recv().await.expect_err("receiver must have lagged");
+        let err = rx
+            .recv()
+            .await
+            .expect_err("receiver must have lagged");
         assert!(matches!(err, broadcast::error::RecvError::Lagged(_)));
 
         manager.recover_from_lag(&mut rx).await;
