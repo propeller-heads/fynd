@@ -92,8 +92,13 @@ pub(crate) struct MonitorArgs {
     #[arg(long, env = "WORKER_POOLS_CONFIG", default_value = "worker_pools.toml")]
     pub worker_pools_config: std::path::PathBuf,
 
-    /// Per-quote timeout in milliseconds
-    #[arg(long, default_value_t = 10_000)]
+    /// Per-quote timeout in milliseconds. Defaults to the budget `fynd serve` gives a real quote,
+    /// because the comparison only means "what would Fynd have returned" if Fynd is given the same
+    /// time it would have had in production. A request-level timeout overrides the router's
+    /// default outright (see `WorkerPoolRouter::effective_timeout`), so a generous value here
+    /// silently hands the re-solve more time than any production quote gets — overstating
+    /// savings — and, on a sub-second chain, lets one solve outlast several blocks.
+    #[arg(long, default_value_t = fynd_rpc::config::defaults::WORKER_ROUTER_TIMEOUT_MS)]
     pub timeout_ms: u64,
 
     /// Serve Prometheus metrics on this port
@@ -812,7 +817,7 @@ mod tests {
             min_tvl: 10_000.0,
             tycho_api_key: api_key,
             worker_pools_config: std::path::PathBuf::from("worker_pools.toml"),
-            timeout_ms: 10_000,
+            timeout_ms: fynd_rpc::config::defaults::WORKER_ROUTER_TIMEOUT_MS,
             metrics_port: None,
             max_blocks: Some(1),
             max_lag_blocks: Some(100),
