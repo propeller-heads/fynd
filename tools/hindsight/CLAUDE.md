@@ -13,6 +13,9 @@ Four subcommands via `cargo run -p hindsight --release --`. The on-chain ones (`
 and `--registry <path>` / `HINDSIGHT_REGISTRY` to load a custom address book. `report` is offline
 and takes neither.
 
+Built-in address books: `ethereum`, `base`, `unichain`, `arbitrum`, `bsc`, `polygon`. Any other
+name needs `--registry`.
+
 - **`decode`** — Fetch block receipts, match solver transactions, trace each one, and emit decoded
   trades (token in/out, amounts, venue, solver, gas, sandwich evidence). Accepts `--block N`,
   `--range START-END` (max 1000 blocks), or defaults to the latest block. Use `--json` for
@@ -76,8 +79,11 @@ trade), **liquidity venues** (pools inside traces — not modeled here).
 
 ### The address book (`registry/<chain>.toml`)
 
-All chain- and protocol-specific data lives in a per-chain TOML, embedded for ethereum and
-loadable via `--registry`. Sections: `wrapped_native`, `infrastructure` (Permit2 etc. —
+All chain- and protocol-specific data lives in a per-chain TOML, embedded for the six chains listed
+above (`registry::BUILTIN_CHAINS`) and loadable via `--registry`. A book carries only the tiers its
+chain has — Unichain has no batch settlers because CoW does not settle there, and no LiFi or
+integrator tier because the Diamond is not deployed; each book's header says what was checked.
+Sections: `wrapped_native`, `infrastructure` (Permit2 etc. —
 addresses attribution and sandwich detection skip), `usd_stablecoins` (USD anchors for
 reporting), `batch_settlers`, `[solvers]` (router address → name), `[labels]` (display-only
 names), and `[venues.<name>]` (entry points, fee collectors, and — for venues that declare
@@ -189,9 +195,11 @@ It surfaces three ways:
   its extraction toolkit in `netting_decoders`/`calldata`, listed in the mapping for the entities that use
   it. Netting is one shared engine; calldata is per-router, so a calldata decoder is a standalone
   parser.
-- **Chain**: a new `registry/<chain>.toml` (all sections required) wired into `Registry::load`,
-  or passed via `--registry`. Check the monitor's pacing flags (`--max-lag-blocks`) against the
-  chain's block time. The `verify` subcommand's saved Allium query is per-chain.
+- **Chain**: a new `registry/<chain>.toml` plus its entry in `registry::BUILTIN_CHAINS`, or passed
+  via `--registry`. Verify each venue's fee collector on that chain before adding it — a missing
+  collector leaves the fee inside the amounts, which is a wrong record rather than a miss. Check
+  the monitor's pacing flags (`--max-lag-blocks`) against the chain's block time. The `verify`
+  subcommand's saved Allium query is per-chain.
 
 ## Running
 

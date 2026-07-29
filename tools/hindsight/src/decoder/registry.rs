@@ -16,10 +16,24 @@ use alloy::primitives::{Address, B256};
 use anyhow::Context;
 use serde::Deserialize;
 
-/// The built-in Ethereum address book, embedded at compile time (validated by tests, so it
-/// cannot fail to parse at runtime).
+/// The built-in address books, embedded at compile time (validated by tests, so they cannot fail
+/// to parse at runtime).
 const ETHEREUM_TOML: &str = include_str!("registry/ethereum.toml");
 const BASE_TOML: &str = include_str!("registry/base.toml");
+const UNICHAIN_TOML: &str = include_str!("registry/unichain.toml");
+const ARBITRUM_TOML: &str = include_str!("registry/arbitrum.toml");
+const BSC_TOML: &str = include_str!("registry/bsc.toml");
+const POLYGON_TOML: &str = include_str!("registry/polygon.toml");
+
+/// The chains with a built-in address book, in the order `Registry::load` reports them.
+const BUILTIN_CHAINS: [(&str, &str); 6] = [
+    ("ethereum", ETHEREUM_TOML),
+    ("base", BASE_TOML),
+    ("unichain", UNICHAIN_TOML),
+    ("arbitrum", ARBITRUM_TOML),
+    ("bsc", BSC_TOML),
+    ("polygon", POLYGON_TOML),
+];
 
 /// On-disk shape of a chain's address book. Field meanings are documented in
 /// `registry/ethereum.toml`.
@@ -138,24 +152,27 @@ impl Registry {
             return Self::from_toml(&text)
                 .with_context(|| format!("invalid registry file {}", path.display()));
         }
-        match chain.to_lowercase().as_str() {
-            "ethereum" => Ok(Self::ethereum()),
-            "base" => Ok(Self::base()),
-            other => anyhow::bail!(
-                "no built-in decoder address registry for chain '{other}' (only ethereum, base); \
+        let name = chain.to_lowercase();
+        let Some((_, text)) = BUILTIN_CHAINS
+            .iter()
+            .find(|(builtin, _)| *builtin == name)
+        else {
+            let known = BUILTIN_CHAINS
+                .map(|(builtin, _)| builtin)
+                .join(", ");
+            anyhow::bail!(
+                "no built-in decoder address registry for chain '{chain}' (only {known}); \
                  pass --registry with that chain's address book"
-            ),
-        }
+            );
+        };
+        Self::from_toml(text).with_context(|| format!("invalid built-in {name} address book"))
     }
 
-    /// The built-in Ethereum address book.
+    /// The built-in Ethereum address book — the fixture the tests decode against. Production code
+    /// goes through `load`, which resolves the book from the `--chain` name.
+    #[cfg(test)]
     pub(crate) fn ethereum() -> Self {
         Self::from_toml(ETHEREUM_TOML).expect("embedded ethereum registry must parse")
-    }
-
-    /// The built-in Base address book.
-    pub(crate) fn base() -> Self {
-        Self::from_toml(BASE_TOML).expect("embedded base registry must parse")
     }
 
     fn from_toml(text: &str) -> anyhow::Result<Self> {
@@ -323,34 +340,57 @@ mod tests {
     use crate::decoder::test_utils::addr;
 
     #[test]
-    fn test_embedded_ethereum_book() {
-        let registry = Registry::ethereum();
-        assert!(!registry.solvers.is_empty());
-        assert!(!registry
-            .venue("relay")
-            .unwrap()
-            .entry_points
-            .is_empty());
+    fn test_every_embedded_book_parses() {
+        // Every book is embedded and loaded by name, so a malformed one is a runtime panic in
+        // `load`. Parse them all here, and require the parts every chain must have: a wrapped
+        // native token, a USD anchor, solvers, and Relay (the one venue present on all of them).
+        for (chain, _) in BUILTIN_CHAINS {
+            // `load` names the chain in its error context, so unwrapping reports which book broke.
+            let registry = Registry::load(chain, None).unwrap();
+            assert!(!registry.wrapped_native.is_zero(), "{chain} has no wrapped native token");
+            assert!(!registry.usd_stablecoins.is_empty(), "{chain} has no USD anchor");
+            assert!(!registry.solvers.is_empty(), "{chain} has no solvers");
+            assert!(
+                !registry
+                    .venue("relay")
+                    .unwrap()
+                    .entry_points
+                    .is_empty(),
+                "{chain} has no relay entry points"
+            );
+        }
     }
 
     #[test]
-    fn test_embedded_base_book() {
-        let registry = Registry::base();
-        assert!(!registry.solvers.is_empty());
-        assert!(!registry
-            .venue("relay")
-            .unwrap()
-            .entry_points
-            .is_empty());
-    }
-
-    #[test]
-    fn test_load_builtin_chains() {
-        assert!(Registry::load("ethereum", None).is_ok());
+    fn test_load_chain_names_are_case_insensitive() {
         assert!(Registry::load("Ethereum", None).is_ok());
-        assert!(Registry::load("base", None).is_ok());
         assert!(Registry::load("BASE", None).is_ok());
-        assert!(Registry::load("arbitrum", None).is_err());
+        assert!(Registry::load("Polygon", None).is_ok());
+    }
+
+    #[test]
+    fn test_load_unknown_chain_lists_the_builtin_ones() {
+        let error = Registry::load("plasma", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no built-in decoder address registry"), "{error}");
+        assert!(error.contains("polygon"), "the error must list the built-in chains: {error}");
+    }
+
+    #[test]
+    fn test_tycho_router_is_a_solver_on_every_chain() {
+        // Hindsight compares Fynd against what settled, so the chain's own Tycho router must be
+        // recognised — otherwise Fynd's own settled trades never match.
+        for (chain, _) in BUILTIN_CHAINS {
+            let registry = Registry::load(chain, None).unwrap();
+            assert!(
+                registry
+                    .solvers
+                    .values()
+                    .any(|name| name == "tycho"),
+                "{chain} has no tycho router"
+            );
+        }
     }
 
     #[test]

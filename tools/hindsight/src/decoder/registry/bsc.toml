@@ -1,0 +1,175 @@
+# BNB Smart Chain (chain-id 56) address book for trade decoding. Same structure as ethereum.toml —
+# see it and registry.rs for what each section drives. Addresses gathered 2026-07-29.
+#
+# Accuracy note: a wrong or missing *solver* address only costs coverage (the swap fails to
+# match), but a wrong *venue fee collector* produces wrong records (the fee stays inside the
+# amounts). Every contract below was checked to be deployed on BSC, and every venue was confirmed
+# live by its own on-chain fingerprint (2026-07-29): MetaMask by a decoded swap paying
+# 0xe3478b0b…, Rabby and Relay and Robinhood by fee legs from settlement contracts, Rainbow by the
+# router's own token transfers.
+#
+# Coinbase has no `[venues.coinbase]` section, and does not need one: both swap proxies from the
+# Ethereum book have no code on BSC and its fee wallet received nothing, matching how those proxies
+# proxies went quiet on mainnet in late 2025. Its flow is attributable anyway: Coinbase's Base App
+# (the renamed Coinbase Wallet) is recognised by its fee wallet in `[venue_fees]`, and by the
+# `base-app` LiFi integrator tag — the fee wallet is the wider of the two, because it also catches
+# the 0x-routed half of its flow, which carries no LiFi event.
+
+# Wrapped-native token: WBNB.
+wrapped_native = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
+
+# Permit2 — same deterministic address on every chain.
+infrastructure = ["0x000000000022d473030f116ddee9f6b43ac78ba3"] # Permit2
+
+# CoW Protocol Settlement — same address on every chain. Live on BSC (918 Trade events in a
+# 20k-block sample, 2026-07-29 — the busiest CoW deployment of the chains added here).
+batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
+
+# Stablecoin anchoring the native token to USD (address = decimals). BSC's stablecoins are
+# 18-decimal, unlike the 6-decimal USDC/USDT of most chains.
+#
+# USDT is deliberately absent, even though it is BSC's most traded stablecoin. At the `--min-tvl 10`
+# the monitor runs with, the solver's derived spot price for it comes out 12191x too low: a tiny
+# WBNB-USDT pool is inside that TVL floor and the spot-price computation prices USDT off it. Raising
+# the floor to 2000 removes that pool and USDT prices correctly, which is what identifies the pool
+# rather than the token as the cause.
+#
+# Anchoring on a mispriced token puts every USD figure on the chain that far out, because
+# `Prices::usd_per_native_wei` averages the anchors — one bad price drags the mean rather than being
+# outvoted. Measured over a live monitor session (2026-07-29) by logging each anchor's implied
+# native-token price: USDT implied BNB at $0.046 while USDC and BUSD independently agreed on $565.21
+# and $565.27. Two unrelated tokens agreeing to 0.01% is what makes USDT the identifiable outlier.
+#
+# This fixes the anchor only. `value_usd` divides by the traded token's own price, so USDT-denominated
+# trades here are still mis-valued by that factor until the spot price is fixed upstream. Basis-point
+# figures are unaffected — they are ratios, so the error cancels.
+[usd_stablecoins]
+"0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d" = 18 # USDC (Binance-Peg)
+"0xe9e7cea3dedca5984780bafc599bd69add087d56" = 18 # BUSD
+
+# Solver routers — the venue that actually settles a swap.
+[solvers]
+# 1inch v6 and v5 Aggregation Routers (same deterministic addresses as mainnet)
+"0x111111125421ca6dc452d289314280a0f8842a65" = "1inch"
+"0x1111111254eeb25477b68fb85ed929f73a960582" = "1inch"
+# 0x Settler AllowanceHolder — the stable entry, same address on every Cancun chain
+"0x0000000000001ff3684f28c67538d4d072c22734" = "0x"
+# 0x Settler itself. 0x redeploys Settler and tells integrators not to hardcode it, but order flow
+# enters through Settler directly as well as through AllowanceHolder, so without it those swaps
+# never match. Re-derive from 0x's registry (0x00000000000004533Fe15556B1E086BB1A72cEae,
+# `ownerOf(2)`) when coverage drops.
+"0x011af51cc6614fec1de0e0ff6dc315a150f3851c" = "0x"
+# CoW Protocol Settlement
+"0x9008d19f58aabd9ed0d60971565aa8510560ab41" = "cow"
+# ParaSwap Augustus v6.2 (same address as mainnet)
+"0x6a000f20005980200259b80c5102003040001068" = "paraswap"
+# KyberSwap MetaAggregationRouter v2 (same address as mainnet)
+"0x6131b5fae19ea4f9d964eac0408e4408b66337b5" = "kyberswap"
+# LiFi Diamond (same address as mainnet)
+"0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae" = "lifi"
+# Uniswap Universal Router (v4-era), the older Universal Router, SwapRouter02, and V2 Router02
+"0x1906c1d672b88cd1b9ac7593301ca990f94eae07" = "uniswap"
+"0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad" = "uniswap"
+"0xb971ef87ede563556b2ed4b1c0b0019111dd85d2" = "uniswap"
+"0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24" = "uniswap"
+# OKX DEX routers (okxlabs/DEX-Router-EVM-V1 deployments plus OKX's own docs). Several versions
+# run concurrently; each was confirmed OKX by the BSC TokenApproveProxy and WNativeRelayer
+# addresses embedded in its bytecode.
+"0x3156020dff8d99af1ddc523ebdfb1ad2018554a0" = "okx"
+"0x5cb43bae4f36e2f9f858232b4dce0dbe27bb85e3" = "okx"
+"0x6015126d7d23648c2e4466693b8deab005ffaba8" = "okx"
+"0x62ccef0b4545166f721caa9fee13c1d3767e27dc" = "okx"
+"0x76d43a252300955e6bd17a6992201fc02f0e5c10" = "okx"
+"0x9b9efa5efa731ea9bbb0369e91fa17abf249cfd4" = "okx"
+# Tycho (PropellerHeads) router V3 on BSC (tycho-execution config/router_addresses.json)
+"0x99748cbd931cb367dad265c5b2b4bd306d448e99" = "tycho"
+# Fly (formerly Magpie) DexAggregator — same address on most chains
+# (docs.fly.trade/developers/deployments)
+"0x20f6ee51340adeed01a59b0e65cb3703f3dc860c" = "fly"
+# PancakeSwap, BSC's largest native DEX: Smart Router, both Universal Routers, and the v2 router.
+# Its own frontend enters here, so without them BSC's chain-native retail flow is invisible.
+# Universal Router 2 is the live one — it took 4% of all BSC swaps in a 400-block sample, more than
+# any other entry point the book had missed.
+"0x13f4ea83d0bd40e75c8222255bc855a974568dd4" = "pancakeswap"
+"0xd9c500dff816a1da21a48a732d3498bf09dc9aeb" = "pancakeswap"
+"0x1a0a18ac4becddbd6389559687d1a73d8927e416" = "pancakeswap"
+"0x10ed43c718714eb63d5aa57b78b54704e256024e" = "pancakeswap"
+
+# Venues. Relay's BSC contracts and fee collector are the same addresses as mainnet; its routers
+# are the Cancun-EVM deployment. Verified live: 666 fee legs to 0xf70da978… in a 20k-block sample,
+# and a decoded Relay fill showed the same address funding the swap as on mainnet.
+[venues.relay]
+entry_points = [
+    "0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222",
+    "0x3ec130b627944cad9b2750300ecb0a695da522b6",
+    "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f",
+    "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
+    "0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7",
+]
+fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
+
+# MetaMask Swap Router on BSC — the same proxy Base and Arbitrum use (0xdb9b1e94…). Verified
+# on-chain: a decoded swap through it paid its fee to 0xe3478b0b… (mainnet fee wallet 1); mainnet
+# wallet 2 took nothing in a 20k-block sample. The older mainnet router 0x881d4023… is deployed on
+# BSC but took no traffic in the sampled window, so it is not an entry point here.
+[venues.metamask]
+entry_points = ["0xdb9b1e94b5b69df7e401ddbede43491141047db3"]
+fee_collectors = ["0xe3478b0bb1a5084567c319096437924948be1964"]
+
+[venues.metamask.solver_aliases]
+oneinch = "1inch"
+zeroex = "0x"
+uniswap = "uniswap"
+okx = "okx"
+kyber = "kyberswap"
+paraswap = "paraswap"
+airswap = "airswap"
+openocean = "openocean"
+hashflow = "hashflow"
+
+# Rabby SwapProxy — same address as mainnet. Verified on-chain: 218 fee legs paid to 0xcd6b9800…
+# (mainnet fee wallet 1) in a 20k-block sample; the historical wallet 0x39041f… is unused on BSC.
+# As on mainnet, only the proxy is an entry point — shared-router Rabby swaps are recognised by the
+# fee leg (see rabby.rs), not by tx.to.
+[venues.rabby]
+entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
+fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
+
+# Rainbow's own router — same address as mainnet. Verified live by its own token transfers.
+# Input-side fee read from calldata; no fee collector (see rainbow.rs).
+[venues.rainbow]
+entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
+fee_collectors = []
+
+# Venues identified by the fee they take on a shared router. Verified on-chain: 277 fee legs to
+# Robinhood's wallet in a 20k-block sample, paid by the 0x Settler contract (so the dust-spray
+# gotcha does not apply). Phantom is not live on BSC — its wallets took nothing in the same
+# sample — so it is absent here.
+[venue_fees]
+# Coinbase's Base App: a 0.95% fee skimmed off the SELL token before routing (LiFi takes a
+# further 0.05%), so it is backed out of the input rather than added to the output. Verified
+# on-chain 2026-07-29: every LiFi-routed swap paying this wallet carried the `base-app`
+# integrator tag, and it collects on 0x-routed swaps too — which the tag cannot see, so this
+# wallet is the wider fingerprint of the two.
+"0x5aafc1f252d544f744d17a4e734afd6efc47ede4" = "coinbase"
+"0xad01c20d5886137e056775af56915de824c8fce5" = "robinhood"
+
+# LiFi frontends identified by the integrator tag in the LiFi swap event. Keys are lowercase.
+# Every tag below was read off decoded LiFi events on BSC (20k-block sample, 2026-07-29) rather
+# than assumed; counts are that sample's. Binance Wallet dominates LiFi flow here (1043 swaps),
+# more than any other client this book adds.
+[venue_integrators]
+"_binancewallet" = "binancewallet" # Binance Wallet — 1043
+"jumper.exchange" = "jumper"       # Jumper Exchange, LiFi's own frontend — 42
+"base-app" = "coinbase"            # Coinbase's Base App (the renamed Coinbase Wallet) — 53
+"infinex" = "infinex"
+"robinhood" = "robinhood"
+
+# Venues identified by the appData hash a CoW order carries (appCode names the frontend). CoW
+# settles on BSC, and the hash is the same across chains.
+[venue_appdata]
+# LlamaSwap (DefiLlama): appCode "DefiLlama".
+"0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422" = "llamaswap"
+
+# No BSC-specific label data yet (display-only tier).
+[labels]

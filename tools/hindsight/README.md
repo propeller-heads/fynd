@@ -221,7 +221,7 @@ collectors are re-verified on every chain a venue is added on.
 | Attribute a new venue (owner / appData tag / fee wallet / integrator tag) | The matching address-book map (`[venue_owners]` / `[venue_appdata]` / `[venue_fees]` / `[venue_integrators]`); a provider's integrator tag also needs `SolverKnowledge::integrator` | The venue's trades are attributed to the underlying router or settler, not the venue |
 | Add a new decode method | A `TradeDecoder` (a `netting`/`calldata` toolkit function behind it), listed for the entities that use it | Transactions the existing decoders cannot read stay undecoded |
 | Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |
-| Support a new chain | A `registry/<chain>.toml` address book (all sections required), plus decoders for its venues and `SolverKnowledge` for its solvers that have none yet | The chain has no built-in book and must be passed via `--registry` |
+| Support a new chain | A `registry/<chain>.toml` address book, an entry in `registry::BUILTIN_CHAINS`, plus decoders for its venues and `SolverKnowledge` for its solvers that have none yet | The chain has no built-in book and must be passed via `--registry` |
 
 ### Re-solve monitor (`src/resolve/`)
 
@@ -253,8 +253,14 @@ algorithm.
 
 All chain- and protocol-specific data — solver routers, venue entry points and fee collectors,
 batch settlers, infrastructure contracts, USD-anchor stablecoins, display labels — lives in a
-per-chain TOML loaded by `Registry`. The Ethereum book is embedded at compile time; pass
-`--registry <path>` to extend or replace it without recompiling.
+per-chain TOML loaded by `Registry`. One book is embedded at compile time per chain — ethereum,
+base, unichain, arbitrum, bsc, polygon — and `--chain <name>` picks one. Pass `--registry <path>`
+to extend or replace a book without recompiling.
+
+The books are not uniform, because the chains are not: CoW does not settle on Unichain and LiFi is
+not deployed there, so that book has no batch settlers, no LiFi solver, and no CoW-appData or
+integrator venue tier. Each book's header records what was checked and what was found absent, so
+an omission reads as a finding rather than an oversight.
 
 ## Running
 
