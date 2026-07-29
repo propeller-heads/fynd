@@ -38,7 +38,7 @@ use crate::types::{BlockInfo, ComponentId};
 pub type StateLabel = String;
 
 /// An immutable snapshot of per-component simulation states for one overlay layer.
-pub type OverlayStates = Arc<HashMap<ComponentId, Box<dyn ProtocolSim>>>;
+pub type OverlayStates = Arc<HashMap<ComponentId, Arc<dyn ProtocolSim>>>;
 
 /// A named simulation-state overlay with a block-number expiry.
 pub struct OverlayEntry {
@@ -152,6 +152,10 @@ impl MarketData {
         states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
         valid_until: u64,
     ) {
+        let states: HashMap<ComponentId, Arc<dyn ProtocolSim>> = states
+            .into_iter()
+            .map(|(id, state)| (id, Arc::from(state)))
+            .collect();
         self.overlays
             .write()
             .await
@@ -244,7 +248,7 @@ impl<'a> MarketDataView<'a> {
                 {
                     subset
                         .simulation_states
-                        .insert(id.clone(), state.clone_box());
+                        .insert(id.clone(), Arc::clone(state));
                 }
             }
             subset.label = label.clone();
@@ -308,7 +312,11 @@ pub struct MarketState {
     /// All components indexed by their ID.
     components: HashMap<ComponentId, ProtocolComponent>,
     /// All states indexed by their component ID.
-    simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
+    ///
+    /// States are `Arc`-shared, never mutated in place: block updates replace whole
+    /// entries via [`MarketState::update_states`], so `extract_subset` can hand out
+    /// cheap shared references instead of deep-copying every pool state.
+    simulation_states: HashMap<ComponentId, Arc<dyn ProtocolSim>>,
     /// All tokens indexed by their address.
     tokens: HashMap<Address, Token>,
     /// Current gas price. None if not fetched yet.
@@ -469,7 +477,8 @@ impl MarketState {
         states: impl IntoIterator<Item = (ComponentId, Box<dyn ProtocolSim>)>,
     ) {
         for (id, state) in states {
-            self.simulation_states.insert(id, state);
+            self.simulation_states
+                .insert(id, Arc::from(state));
         }
     }
 
@@ -488,7 +497,7 @@ impl MarketState {
     /// This is used to create a local snapshot of market data that can be used for
     /// simulation without holding the main lock. The subset includes:
     /// - Components matching the provided IDs
-    /// - Simulation states for those components (cloned via `clone_box`)
+    /// - Simulation states for those components (`Arc`-shared with the base state)
     /// - Tokens referenced by those components
     /// - Gas price and block info
     pub fn extract_subset(&self, component_ids: &HashSet<ComponentId>) -> MarketState {
@@ -514,12 +523,11 @@ impl MarketState {
             .map(|(addr, token)| (addr.clone(), token.clone()))
             .collect();
 
-        // Clone simulation states using clone_box
-        let simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>> = self
+        let simulation_states: HashMap<ComponentId, Arc<dyn ProtocolSim>> = self
             .simulation_states
             .iter()
             .filter(|(id, _)| component_ids.contains(*id))
-            .map(|(id, state)| (id.clone(), state.clone_box()))
+            .map(|(id, state)| (id.clone(), Arc::clone(state)))
             .collect();
 
         MarketState {
@@ -654,6 +662,59 @@ mod tests {
         assert!(empty_subset
             .simulation_states
             .is_empty());
+    }
+
+    /// The subset must share simulation states with the base state, not copy them:
+    /// the perf property this module provides rests entirely on this.
+    #[test]
+    fn extract_subset_shares_simulation_states() {
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([component("pool_ab", &[token_a.clone(), token_b.clone()])]);
+        market.upsert_tokens([token_a, token_b]);
+        market.update_states([(
+            "pool_ab".to_string(),
+            Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+        )]);
+
+        let subset = market.extract_subset(&HashSet::from(["pool_ab".to_string()]));
+
+        assert!(Arc::ptr_eq(
+            &market.simulation_states["pool_ab"],
+            &subset.simulation_states["pool_ab"],
+        ));
+    }
+
+    /// A subset extracted before a block update must keep the state it was
+    /// extracted with: `update_states` replaces whole entries and must never
+    /// mutate a shared state in place.
+    #[test]
+    fn extracted_subset_is_isolated_from_later_updates() {
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([component("pool_ab", &[token_a.clone(), token_b.clone()])]);
+        market.upsert_tokens([token_a, token_b]);
+        market.update_states([(
+            "pool_ab".to_string(),
+            Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+        )]);
+
+        let subset = market.extract_subset(&HashSet::from(["pool_ab".to_string()]));
+        market.update_states([(
+            "pool_ab".to_string(),
+            Box::new(MockProtocolSim::new(9.0)) as Box<dyn ProtocolSim>,
+        )]);
+
+        let old_state = subset
+            .get_simulation_state("pool_ab")
+            .expect("subset keeps its entry");
+        let sim = old_state
+            .as_any()
+            .downcast_ref::<MockProtocolSim>()
+            .expect("mock state");
+        assert_eq!(sim.spot_price, 2.0, "subset must keep the pre-update state");
     }
 
     // ==================== MarketData overlay tests ====================
