@@ -78,6 +78,31 @@ The path with the highest `net_output` wins.
 * **High hop counts** (4+): the number of candidate paths grows exponentially. Even with `max_routes` capping simulation, the heuristic may not surface the best path.
 * **Exotic pairs**: tokens with thin liquidity often have non-obvious routes where the spot price heuristic misjudges the actual output. The Bellman-Ford algorithm, which simulates every edge without a heuristic filter, handles these better.
 
+## Suggested configuration
+
+```toml
+[pools.most_liquid_3_hops]
+algorithm = "most_liquid"
+num_workers = 3
+task_queue_capacity = 1000
+max_hops = 3
+timeout_ms = 500
+max_routes = 50
+```
+
+* `max_hops = 3` keeps enumeration tractable. At 4+ hops the candidate path count explodes and the
+  heuristic filter starts dropping good routes.
+* `max_routes = 50` caps the simulation phase. Without it every enumerated path is simulated, which
+  is what makes high hop counts expensive.
+* `timeout_ms = 500` leaves headroom for the simulation phase on VM-simulated protocols. Lower it if
+  you run this pool purely as a latency-sensitive baseline.
+
+> **Set connector tokens.** With `connector_tokens` unset, routes can pass through illiquid long-tail
+> intermediates, which raises reversion risk. Restrict intermediate hops to a small trusted set —
+> generate one for your chain with `fynd derive-connector-tokens --chain Ethereum --top-n 10 --output
+> toml` and paste it into the pool. See
+> [Connector tokens](../guides/server-configuration.md#connector-tokens).
+
 ## Source reference
 
 | File                                     | Purpose                                        |

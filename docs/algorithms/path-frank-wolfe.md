@@ -101,15 +101,32 @@ Both paths use pool P1. On-chain, P1 is called once with the combined WETH input
 
 Gas for shared pools is counted once, not once per path.
 
-## Configuration
+## Suggested configuration
 
 ```toml
 [pools.path_frank_wolfe_3_hops]
 algorithm = "path_frank_wolfe"
-num_workers = 4
+num_workers = 3
+task_queue_capacity = 1000
 max_hops = 3
-timeout_ms = 500
+timeout_ms = 1000
 ```
+
+* `timeout_ms = 1000` is roughly double a single-path pool's budget, because each Frank-Wolfe
+  iteration runs a full Bellman-Ford solve plus a line search on top of the initial solve. On timeout
+  the loop stops and the algorithm returns the paths it has, so a tight budget silently reduces the
+  number of splits it can find.
+* `max_hops = 3` bounds the inner Bellman-Ford solve, which runs once per iteration — hop cost is
+  multiplied here, not paid once.
+* Run this pool **alongside** a Bellman-Ford or Most Liquid pool. PFW does more simulation work per
+  request, and the WorkerPoolRouter returns whichever pool answers best within the timeout, so the
+  cheap pool still covers requests where PFW is slow on VM-heavy routes.
+
+> **Set connector tokens.** With `connector_tokens` unset, routes can pass through illiquid long-tail
+> intermediates, which raises reversion risk — and a split route multiplies that exposure across
+> every path it activates. Restrict intermediate hops to a small trusted set — generate one for your
+> chain with `fynd derive-connector-tokens --chain Ethereum --top-n 10 --output toml` and paste it
+> into the pool. See [Connector tokens](../guides/server-configuration.md#connector-tokens).
 
 The PFW-specific tuning parameters are not currently exposed in `worker_pools.toml`; they use defaults:
 

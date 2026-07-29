@@ -15,6 +15,7 @@ This document explains how Fynd's Bellman-Ford routing algorithm finds the best 
 5. [A Worked Example](bellman-ford.md#5-a-worked-example)
 6. [Design Tradeoffs](bellman-ford.md#6-design-tradeoffs)
 7. [FAQ](bellman-ford.md#7-faq)
+8. [Suggested Configuration](bellman-ford.md#8-suggested-configuration)
 
 ***
 
@@ -332,6 +333,33 @@ Three properties of DEX pools break the assumptions these algorithms rely on:
 3. **The best route depends on trade size.** A pool with deep liquidity wins for big trades; a shallow pool wins for small ones. No single "best route" exists independently of the amount.
 
 Our algorithm handles all three by simulating the actual swap at each step instead of operating on precomputed weights.
+
+***
+
+## 8. Suggested Configuration
+
+```toml
+[pools.bellman_ford_3_hops]
+algorithm = "bellman_ford"
+num_workers = 3
+task_queue_capacity = 1000
+max_hops = 3
+timeout_ms = 500
+```
+
+* `max_hops = 3` is the sweet spot. The subgraph and active set keep the simulation count affordable
+  at 3 hops; beyond that the round count grows the active set faster than the pruning shrinks it.
+  The shipped default in `worker_pools.toml` is 2 hops — raise it to 3 once you have connector tokens
+  set, since the allowlist bounds the extra breadth.
+* `timeout_ms = 500` gives relaxation room to finish on VM-simulated protocols. The algorithm returns
+  its best-so-far result on timeout, so a tighter budget degrades quality rather than failing.
+* `gas_aware` (default `true`) is only reachable through the builder API, not `worker_pools.toml`.
+
+> **Set connector tokens.** With `connector_tokens` unset, routes can pass through illiquid long-tail
+> intermediates, which raises reversion risk. Restrict intermediate hops to a small trusted set —
+> generate one for your chain with `fynd derive-connector-tokens --chain Ethereum --top-n 10 --output
+> toml` and paste it into the pool. See
+> [Connector tokens](../guides/server-configuration.md#connector-tokens).
 
 ***
 
