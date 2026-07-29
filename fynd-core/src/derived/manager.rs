@@ -478,17 +478,26 @@ impl ComputationManager {
     /// the live tail so it cannot immediately re-lag), coalesces them into one
     /// incremental `ChangedComponents`, and recomputes just that union.
     ///
-    /// Trade-off: components carried only by the *dropped* (skipped) events are not
-    /// refreshed here — they update on their next `MarketUpdated`. This keeps
-    /// recovery O(recent changes) instead of O(all pools), which is what let fast
-    /// chains spiral into back-to-back full recomputes.
+    /// Trade-off: this only recomputes components named in the *drained* events, not
+    /// the ones lost in the *dropped* (skipped) window. Added/updated components missed
+    /// there self-correct on their next `MarketUpdated`. Components REMOVED only in the
+    /// dropped window are different: they are already gone from market topology, so they
+    /// never reappear in a future event, and this path never prunes them either — their
+    /// stale `spot_prices`/`pool_depths` entries persist for the life of the process
+    /// (production runs no full recompute anymore). This is bounded and does not affect
+    /// routing correctness (the routing graph is gated separately and self-resyncs), but
+    /// it is a known limitation; a topology-reconciliation follow-up is tracked to prune
+    /// these entries without resorting to a full recompute.
     async fn recover_from_lag(&self, event_rx: &mut broadcast::Receiver<MarketEvent>) {
         let mut drained = Vec::new();
         loop {
             match event_rx.try_recv() {
                 Ok(event) => drained.push(event),
                 Err(broadcast::error::TryRecvError::Empty) => break,
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    counter!("derived_manager_lagged_events_total").increment(n);
+                    continue;
+                }
                 Err(broadcast::error::TryRecvError::Closed) => break,
             }
         }
