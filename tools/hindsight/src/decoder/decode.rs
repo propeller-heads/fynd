@@ -188,6 +188,20 @@ impl TraderFlow {
         self.venue_fee_out = Some(fee);
         self.swap.amount_out = self.swap.amount_out.saturating_add(fee);
     }
+
+    /// Record `fee` as an input-token venue fee and net it out of `swap.amount_in`, so the settled
+    /// input is what actually reached the pools rather than the user's gross spend. A no-op when an
+    /// input fee was already accounted (a venue decoder ran first and knows better).
+    ///
+    /// Without this, a venue skimming its fee off the input makes the settled trade look bigger
+    /// than it was, and Fynd — re-solved on that inflated size — appears to beat it.
+    pub(crate) fn net_input_fee(&mut self, fee: U256) {
+        if self.venue_fee_in.is_some() {
+            return;
+        }
+        self.venue_fee_in = Some(fee);
+        self.swap.amount_in = self.swap.amount_in.saturating_sub(fee);
+    }
 }
 
 #[cfg(test)]
