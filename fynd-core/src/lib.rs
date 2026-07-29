@@ -86,5 +86,6 @@ pub use worker_pool::{
     TaskQueueHandle,
 };
 pub use worker_pool_router::{
-    config::WorkerPoolRouterConfig, LiquidityScope, SolverPoolHandle, WorkerPoolRouter,
+    config::WorkerPoolRouterConfig, ExclusiveAccess, LiquidityScope, SolverPoolHandle,
+    WorkerPoolRouter,
 };

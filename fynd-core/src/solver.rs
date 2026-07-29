@@ -50,7 +50,8 @@ use crate::{
         registry::UnknownAlgorithmError,
     },
     worker_pool_router::{
-        config::WorkerPoolRouterConfig, LiquidityScope, SolverPoolHandle, WorkerPoolRouter,
+        config::WorkerPoolRouterConfig, ExclusiveAccess, LiquidityScope, SolverPoolHandle,
+        WorkerPoolRouter,
     },
     Algorithm, Quote, QuoteRequest, SolveError,
 };
@@ -1169,11 +1170,17 @@ impl Solver {
 
     /// Submits a [`QuoteRequest`] to the worker pools and returns the best [`Quote`].
     ///
+    /// Grants [`ExclusiveAccess::Granted`]: a library embedder configures its own pools and
+    /// exclusivity policy, so there is no untrusted caller to gate here. Entitlement is enforced
+    /// at the HTTP boundary, where requests do come from untrusted callers.
+    ///
     /// # Errors
     ///
     /// Returns [`SolveError`] if all pools fail or the router timeout elapses.
     pub async fn quote(&self, request: QuoteRequest) -> Result<Quote, SolveError> {
-        self.router.quote(request).await
+        self.router
+            .quote(request, ExclusiveAccess::Granted)
+            .await
     }
 
     /// Waits until the solver is ready to answer quotes.

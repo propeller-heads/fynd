@@ -71,6 +71,24 @@ pub enum LiquidityScope {
     All,
 }
 
+/// Whether a single request may route through exclusive liquidity.
+///
+/// Exclusive liquidity is reserved for selected clients, so the entitlement is decided at the
+/// request boundary by the operator — the RPC layer reads it from a header set by the
+/// authenticating proxy — and never from anything a caller can put in a [`QuoteRequest`].
+///
+/// `Denied` is not an error: the request is quoted from public liquidity alone, which is the same
+/// answer a deployment without exclusive pools would give. That keeps the gate fail-closed, since
+/// a missing entitlement costs price rather than breaking the request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ExclusiveAccess {
+    /// Route through public liquidity only. Default: entitlement must be granted explicitly.
+    #[default]
+    Denied,
+    /// Route through exclusive components too, capturing surplus above the public reference.
+    Granted,
+}
+
 /// Handle to a solver pool for dispatching orders.
 #[derive(Clone)]
 pub struct SolverPoolHandle {
@@ -200,7 +218,15 @@ impl WorkerPoolRouter {
     /// 3. Selects the best quote based on `amount_out_net_gas`
     /// 4. If `encoding_options` are set on the request, encodes winning solutions into on-chain
     ///    transactions
-    pub async fn quote(&self, request: QuoteRequest) -> Result<Quote, SolveError> {
+    ///
+    /// `access` decides whether exclusive-access candidates may win. With
+    /// [`ExclusiveAccess::Denied`] the quote is built from public-scoped pools alone, whatever
+    /// pools are configured.
+    pub async fn quote(
+        &self,
+        request: QuoteRequest,
+        access: ExclusiveAccess,
+    ) -> Result<Quote, SolveError> {
         let start = Instant::now();
         let deadline = start + self.effective_timeout(request.options());
         let min_responses = request
@@ -221,7 +247,9 @@ impl WorkerPoolRouter {
         let order_futures: Vec<_> = request
             .orders()
             .iter()
-            .map(|order| self.solve_order(order.clone(), params.clone(), deadline, min_responses))
+            .map(|order| {
+                self.solve_order(order.clone(), params.clone(), deadline, min_responses, access)
+            })
             .collect();
 
         let mut order_responses = futures::future::join_all(order_futures).await;
@@ -239,22 +267,24 @@ impl WorkerPoolRouter {
             .iter()
             .map(|p| (p.name().to_string(), p.liquidity_scope()))
             .collect();
-        let has_exclusive_access_pool = pool_scopes
-            .values()
-            .any(|r| *r == LiquidityScope::All);
+        // Exclusive-access candidates are only eligible for an entitled request. Unentitled
+        // requests are ranked as if no exclusive-access pool existed.
+        let overlay_surplus = access == ExclusiveAccess::Granted &&
+            pool_scopes
+                .values()
+                .any(|r| *r == LiquidityScope::All);
 
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
         // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
-        // fallback chain. When an `ExclusiveAccess`-scoped pool is configured, the winning
-        // exclusive-access candidate is overlaid
-        // onto that ranked list (prepended) by `combine_with_surplus`, so the fallbacks are
-        // preserved.
+        // fallback chain. When the request may use an `ExclusiveAccess`-scoped pool, the winning
+        // exclusive-access candidate is overlaid onto that ranked list (prepended) by
+        // `combine_with_surplus`, so the fallbacks are preserved.
         let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
             .into_iter()
             .map(|responses| {
-                if has_exclusive_access_pool {
-                    let public_ranked =
-                        self.rank_quotes(&responses.public_only(&pool_scopes), request.options());
+                let public_ranked =
+                    self.rank_quotes(&responses.public_only(&pool_scopes), request.options());
+                if overlay_surplus {
                     combine_with_surplus(
                         &responses,
                         &pool_scopes,
@@ -263,7 +293,7 @@ impl WorkerPoolRouter {
                         self.exclusivity_policy.as_ref(),
                     )
                 } else {
-                    self.rank_quotes(&responses, request.options())
+                    public_ranked
                 }
             })
             .collect();
@@ -329,6 +359,7 @@ impl WorkerPoolRouter {
         params: SolveParams,
         deadline: Instant,
         min_responses: usize,
+        access: ExclusiveAccess,
     ) -> OrderResponses {
         let start_time = Instant::now();
         let order_id = order.id().to_string();
@@ -362,7 +393,10 @@ impl WorkerPoolRouter {
             .filter(|p| p.liquidity_scope() == LiquidityScope::All)
             .map(|p| p.name().to_string())
             .collect();
-        let has_exclusive_access_pool = !exclusive_access_pool_names.is_empty();
+        // An unentitled request discards exclusive-access candidates, so waiting for them would
+        // only add latency.
+        let awaits_exclusive_access =
+            access == ExclusiveAccess::Granted && !exclusive_access_pool_names.is_empty();
 
         let mut quotes = Vec::new();
         let mut failed_solvers: Vec<(String, SolveError)> = Vec::new();
@@ -412,12 +446,11 @@ impl WorkerPoolRouter {
                             // Extract the OrderQuote from SingleOrderQuote
                             quotes.push((pool_name.clone(), single_quote.order().clone()));
 
-                            // Scope-aware early return: when an exclusive-access pool is
-                            // configured, only fire once we have ≥1 public AND the
+                            // Scope-aware early return: when the request may use an
+                            // exclusive-access pool, only fire once we have ≥1 public AND the
                             // exclusive-access pool (so the surplus overlay has both inputs).
-                            // Without an exclusive-access pool, use pure
-                            // count-based gating (original behaviour).
-                            let scope_ready = if has_exclusive_access_pool {
+                            // Otherwise use pure count-based gating (original behaviour).
+                            let scope_ready = if awaits_exclusive_access {
                                 has_public_response && has_exclusive_access_response
                             } else {
                                 true
@@ -1084,7 +1117,9 @@ mod tests {
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
-        let result = worker_router.quote(request).await;
+        let result = worker_router
+            .quote(request, ExclusiveAccess::Denied)
+            .await;
         assert!(matches!(result, Err(SolveError::Internal(_))));
     }
 
@@ -1097,7 +1132,9 @@ mod tests {
         let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
         let request = QuoteRequest::new(vec![make_order()], options);
 
-        let result = worker_router.quote(request).await;
+        let result = worker_router
+            .quote(request, ExclusiveAccess::Denied)
+            .await;
         assert!(result.is_ok());
 
         let quote = result.unwrap();
@@ -1128,7 +1165,9 @@ mod tests {
         let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
         let request = QuoteRequest::new(vec![make_order()], options);
 
-        let result = worker_router.quote(request).await;
+        let result = worker_router
+            .quote(request, ExclusiveAccess::Denied)
+            .await;
         assert!(result.is_ok());
 
         let quote = result.unwrap();
@@ -1155,7 +1194,9 @@ mod tests {
         let worker_router = WorkerPoolRouter::new(vec![pool], config, default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
-        let result = worker_router.quote(request).await;
+        let result = worker_router
+            .quote(request, ExclusiveAccess::Denied)
+            .await;
         assert!(result.is_ok());
 
         let quote = result.unwrap();
@@ -1186,7 +1227,9 @@ mod tests {
         let options = QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01));
         let request = QuoteRequest::new(vec![make_order()], options);
 
-        let result = worker_router.quote(request).await;
+        let result = worker_router
+            .quote(request, ExclusiveAccess::Denied)
+            .await;
         let elapsed = start.elapsed();
 
         assert!(result.is_ok());
@@ -1241,7 +1284,7 @@ mod tests {
 
         let start = Instant::now();
         let result = worker_router
-            .quote(request)
+            .quote(request, ExclusiveAccess::Granted)
             .await
             .expect("quote should succeed");
         let elapsed = start.elapsed();
@@ -1252,6 +1295,61 @@ mod tests {
         assert_eq!(order.status(), QuoteStatus::Success);
         assert_eq!(*order.amount_out(), BigUint::from(990u64));
         assert_eq!(order.surplus_amount().is_some(), expect_surplus);
+
+        drop(worker_router);
+        public_worker.abort();
+        exclusive_worker.abort();
+    }
+
+    /// The exclusive pool offers a strictly better route (net 1100 vs 800), so it wins whenever it
+    /// is eligible. An unentitled request must still be routed through the public leg alone.
+    #[rstest]
+    #[case::denied(ExclusiveAccess::Denied, false)]
+    #[case::granted(ExclusiveAccess::Granted, true)]
+    #[tokio::test]
+    async fn test_router_exclusive_access_entitlement(
+        #[case] access: ExclusiveAccess,
+        #[case] expect_exclusive_leg: bool,
+    ) {
+        let (public_pool, public_worker) =
+            create_mock_pool("public_pool", Ok(make_single_quote(800)), 0);
+        let (exclusive_pool, exclusive_worker) =
+            create_mock_pool("exclusive_pool", Ok(make_exclusive_quote(1100)), 0);
+        let exclusive_pool = exclusive_pool.with_liquidity_scope(LiquidityScope::All);
+
+        // Require both responses so the denied case really does have an exclusive candidate in
+        // hand to discard, rather than passing because the router early-returned without it.
+        let policy = exclusive_policy();
+        let worker_router = WorkerPoolRouter::new(
+            vec![public_pool, exclusive_pool],
+            WorkerPoolRouterConfig::default()
+                .with_timeout(Duration::from_millis(2000))
+                .with_min_responses(2),
+            default_encoder(),
+        )
+        .with_exclusivity_policy(policy.clone());
+        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
+
+        let result = worker_router
+            .quote(request, access)
+            .await
+            .expect("quote should succeed");
+
+        let order = &result.orders()[0];
+        assert_eq!(order.status(), QuoteStatus::Success);
+
+        let routes_through_exclusive = order
+            .route()
+            .expect("successful quote has a route")
+            .swaps()
+            .iter()
+            .any(|swap| policy.is_exclusive(swap.protocol_component()));
+        assert_eq!(routes_through_exclusive, expect_exclusive_leg);
+        assert_eq!(order.surplus_amount().is_some(), expect_exclusive_leg);
+
+        // Either way the quoted output is the public reference, so a denied entitlement costs the
+        // caller nothing they were promised.
+        assert_eq!(*order.amount_out(), BigUint::from(990u64));
 
         drop(worker_router);
         public_worker.abort();
@@ -1315,7 +1413,9 @@ mod tests {
             WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
-        let result = worker_router.quote(request).await;
+        let result = worker_router
+            .quote(request, ExclusiveAccess::Denied)
+            .await;
         assert!(result.is_ok());
 
         let quote = result.unwrap();
