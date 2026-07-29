@@ -114,24 +114,40 @@ A split router that returned nothing when it declined to split would need a sing
 it to answer those orders.
 
 
-## Configuration
+## Suggested configuration
 
 ```toml
-[pools.water_fill_4_hops]
+[pools.water_fill_3_hops]
 algorithm = "water_fill"
-num_workers = 1
+num_workers = 3
 task_queue_capacity = 1000
-min_hops = 1
-max_hops = 4
-timeout_ms = 60000
+max_hops = 3
+timeout_ms = 5000
 max_routes = 1024
 ```
 
-Set `connector_tokens` to restrict intermediate hops to a trusted allowlist (a hard filter); see
-[Server Configuration](../guides/server-configuration.md). The soft anchor preference used when no
-allowlist is set is derived automatically from the graph and needs no configuration.
+* `max_hops = 3` keeps discovery bounded. Water-fill simulates every candidate on every order, so
+  each extra hop widens both the enumerated set and the per-candidate simulation cost.
+* `max_routes = 1024` caps the heuristic-ranked candidate set. The bounded amount-aware search is
+  placed ahead of it, so connector and anchor routes survive the cutoff.
+* `timeout_ms = 5000` is generous because the exchange-refinement pass and the 256-chunk split use
+  whatever budget remains. Cutting it short is safe — the cheap 20-chunk split always finishes on the
+  same clock, so the [never-lose floor](#never-lose-floor) still holds.
+* Water-fill answers every order, so it can run as the only pool on a chain. It is still slower than
+  the single-route finders, so pair it with a Bellman-Ford pool if you serve latency-sensitive
+  traffic.
 
-## Source Reference
+{% hint style="warning" %}
+**Set connector tokens.** With `connector_tokens` unset, routes can pass through illiquid long-tail
+intermediates, which raises reversion risk — and a split route multiplies that exposure across
+every path it activates. Restrict intermediate hops to a small trusted set (a hard filter) —
+generate one for your chain with `fynd derive-connector-tokens --chain Ethereum --top-n 10 --output
+toml` and paste it into the pool. See
+[Connector tokens](../guides/server-configuration.md#connector-tokens). The soft anchor preference
+used when no allowlist is set is derived automatically from the graph and needs no configuration.
+{% endhint %}
+
+## Source reference
 
 | File | Purpose |
 | --- | --- |
