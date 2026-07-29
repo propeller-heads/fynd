@@ -65,7 +65,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
    `WaterFillAlgorithm`
 5. **MarketState** (`fynd-core/src/feed/market_data.rs`) — `Arc<RwLock<>>` of all component/token/gas state; accessed via `MarketData` handle
 6. **TychoFeed** (`fynd-core/src/feed/tycho_feed.rs`) — Background task: Tycho WebSocket → MarketState → broadcast events
-7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, component depths, token gas prices
+7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, component (pool) depths, token gas prices
 8. **Encoding** (`fynd-core/src/encoding/`) — Encodes solved routes into on-chain transactions via `TychoEncoder`
 9. **Graph** (`fynd-core/src/graph/`) — `GraphManager` trait + `PetgraphStableDiGraphManager` implementation
 
@@ -76,7 +76,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 2. Writes new component/token/state data into `MarketState` (write lock)
 3. Broadcasts `MarketEvent` → each `SolverWorker` updates its local graph via `GraphManager`
 4. `GasPriceFetcher` runs independently on a timer → fetches gas price from RPC node → writes to `MarketState`
-5. Triggers `ComputationManager` → runs spot prices → component depths → token gas prices (in dependency order) → broadcasts `DerivedDataEvent` → workers update edge weights
+5. Triggers `ComputationManager` → runs spot prices → component (pool) depths → token gas prices (in dependency order) → broadcasts `DerivedDataEvent` → workers update edge weights
 
 **Quote request path** (`POST /v1/quote`):
 1. `RouterApi` validates the request

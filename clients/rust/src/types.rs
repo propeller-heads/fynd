@@ -613,7 +613,7 @@ pub enum BackendKind {
 pub enum QuoteStatus {
     /// A valid route was found and `route`, `amount_out`, and `gas_estimate` are populated.
     Success,
-    /// No swap path exists between the requested token pair on any available component.
+    /// No swap path exists between the requested token pair on available swap components (pools).
     NoRouteFound,
     /// A path exists but available liquidity is too low for the requested amount.
     InsufficientLiquidity,

@@ -19,9 +19,9 @@
 //! `DerivedComputation::requirements`, and the manager runs them in dependency order:
 //!
 //! ```text
-//!                 SpotPriceComputation
-//!                    /           \
-//!                   v             v
+//!                     SpotPriceComputation
+//!                   /                       \
+//!                  v                         v
 //!    ComponentDepthComputation    TokenGasPriceComputation
 //! ```
 //!
