@@ -137,6 +137,16 @@ impl PropAmm {
             GroupVerdict::NoData
         }
     }
+
+    /// Groups that reached a conclusion, over the groups that were run.
+    pub(crate) fn conclusive(&self) -> (usize, usize) {
+        let decided = self
+            .groups
+            .iter()
+            .filter(|group| group.verdict != GroupVerdict::NoData)
+            .count();
+        (decided, self.groups.len())
+    }
 }
 
 /// Whether an offset group behaved as its price implies.
@@ -178,23 +188,48 @@ pub(crate) struct PropAmmGroup {
 }
 
 impl PropAmmGroup {
-    /// The expectation this group's price implies, as a short phrase for the report.
-    pub(crate) fn expectation(&self) -> &'static str {
+    /// What this group is testing, in terms of the pool's price against the best public route.
+    ///
+    /// Named by the relationship rather than the raw offset: "worse than the best route" is the
+    /// thing being asserted, and the basis-point figure is only how it was arranged.
+    pub(crate) fn title(&self) -> &'static str {
         match self.offset_bps.cmp(&0) {
-            std::cmp::Ordering::Less => "never selected",
-            std::cmp::Ordering::Equal => "selected only on gas, zero fee",
-            std::cmp::Ordering::Greater => "selected, fee at most the offset",
+            std::cmp::Ordering::Less => "Priced worse than the best route",
+            std::cmp::Ordering::Equal => "Priced equal to the best route",
+            std::cmp::Ordering::Greater => "Priced better than the best route",
         }
     }
 
-    /// Share of the group's orders the mock was selected for, as a percentage.
-    // Precision loss is irrelevant: these are order counts, far below f64's exact-integer range.
-    #[expect(clippy::cast_precision_loss)]
-    pub(crate) fn selected_pct(&self) -> f64 {
-        if self.orders == 0 {
-            return 0.0;
+    /// The expectation this group's price implies, as one plain sentence.
+    pub(crate) fn expectation(&self) -> String {
+        match self.offset_bps.cmp(&0) {
+            std::cmp::Ordering::Less => "Must never be chosen.".to_string(),
+            std::cmp::Ordering::Equal => {
+                "Can only be chosen for its cheaper gas, and then charges no fee.".to_string()
+            }
+            std::cmp::Ordering::Greater => format!(
+                "Should be chosen, and cannot charge more than the {} bps gap.",
+                self.offset_bps
+            ),
         }
-        self.selected as f64 / self.orders as f64 * 100.0
+    }
+
+    /// What actually happened, as one plain sentence to sit beside the expectation.
+    pub(crate) fn outcome(&self) -> String {
+        if self.orders == 0 {
+            return "No orders landed in this group.".to_string();
+        }
+        if self.selected == 0 {
+            return format!("Never chosen, across {} orders.", self.orders);
+        }
+        match (self.median_fee_bps, self.max_fee_bps) {
+            (Some(median), Some(max)) => format!(
+                "Chosen for {} of {} orders, charging {median:.2} bps typically and {max:.2} bps at \
+                 most.",
+                self.selected, self.orders
+            ),
+            _ => format!("Chosen for {} of {} orders.", self.selected, self.orders),
+        }
     }
 }
 
@@ -951,7 +986,8 @@ mod tests {
     }
 
     #[test]
-    fn test_selected_pct_is_zero_rather_than_nan_when_empty() {
+    fn test_empty_group_says_so_rather_than_claiming_it_was_never_chosen() {
+        // "Never chosen" and "no orders" are different findings; the card must not conflate them.
         let group = PropAmmGroup {
             offset_bps: 0,
             orders: 0,
@@ -960,7 +996,36 @@ mod tests {
             median_fee_bps: None,
             verdict: GroupVerdict::NoData,
         };
-        assert!(group.selected_pct().abs() < f64::EPSILON);
+        assert!(group.outcome().contains("No orders"));
+    }
+
+    #[test]
+    fn test_each_group_states_its_rule_in_terms_of_the_best_route() {
+        // The card's job is to say what is being tested without the reader translating basis
+        // points.
+        let group = |offset_bps: i32| PropAmmGroup {
+            offset_bps,
+            orders: 4,
+            selected: 0,
+            max_fee_bps: None,
+            median_fee_bps: None,
+            verdict: GroupVerdict::Pass,
+        };
+        assert_eq!(group(-5).title(), "Priced worse than the best route");
+        assert_eq!(group(0).title(), "Priced equal to the best route");
+        assert_eq!(group(5).title(), "Priced better than the best route");
+        assert!(group(-5)
+            .expectation()
+            .contains("never be chosen"));
+        assert!(group(0)
+            .expectation()
+            .contains("no fee"));
+        assert!(group(5)
+            .expectation()
+            .contains("5 bps gap"));
+        assert!(group(-5)
+            .outcome()
+            .contains("Never chosen, across 4 orders"));
     }
 
     /// A calibrated record carrying the with/without A/B.

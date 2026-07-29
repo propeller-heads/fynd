@@ -306,11 +306,13 @@ fn propamm_hero(propamm: &PropAmm, summary: &Summary, filter: Option<&str>) -> S
            <div class=\"heroscope\">hindsight report {scope}\
              <span class=\"chip {verdict_cls}chip\">mock PropAMM {verdict}</span>\
              <span class=\"chip\">{}</span></div>\
+           {}\
            <div class=\"worlds\">{}{}</div>\
            <div class=\"lprow\">{}</div>\
            <div class=\"herofoot\">{}{}{}{}{}</div>\
-         </section>{}",
+         </section>",
         escape(pair),
+        propamm_tests(propamm),
         world_column(
             "without PropAMM",
             "",
@@ -336,6 +338,26 @@ fn propamm_hero(propamm: &PropAmm, summary: &Summary, filter: Option<&str>) -> S
         mini(&format!("{:+}", uplift.extra_wins()), "extra orders won"),
         mini(&fmt_count(summary.total), "comparisons"),
         mini(&fmt_usd(propamm.captured_flow_usd), "flow through the pool"),
+    )
+}
+
+/// The three price tests: one banner verdict, then one card per test.
+///
+/// Each card leads with what it is testing — the pool's price against the best public route — then
+/// states the rule and what happened, so a reader never has to translate a basis-point offset into
+/// an expectation themselves.
+fn propamm_tests(propamm: &PropAmm) -> String {
+    let (decided, total) = propamm.conclusive();
+    let (banner, cls) = match propamm.verdict() {
+        GroupVerdict::Pass => ("TESTS PASSED", "pos"),
+        GroupVerdict::Fail(_) => ("TESTS FAILED", "neg"),
+        GroupVerdict::NoData => ("NO CONCLUSION YET", "idlenum"),
+    };
+    format!(
+        "<div class=\"testsbanner\">\
+           <div class=\"heronum {cls} big\">{banner}</div>\
+           <div class=\"herolab\">{decided} of {total} price tests conclusive</div>\
+         </div>{}",
         propamm_groups(&propamm.groups),
     )
 }
@@ -403,23 +425,22 @@ fn fmt_usd_signed(value: f64) -> String {
     format!("{}{}", if value < 0.0 { "-" } else { "+" }, fmt_usd(value.abs()))
 }
 
-/// The offset groups, one card each, ascending by price.
+/// One card per price test, ascending by price.
 ///
-/// Each card's big number is the count the group's expectation is about: for a below-market group
-/// that is how many times it was wrongly selected (so zero is the good answer), and above market it
-/// is how many times it won. The number is coloured by outcome and always sits beside a word.
+/// The verdict word is the largest thing on the card, because that is the answer. Under it the rule
+/// and the observation sit as two plain sentences, so "pass" is always accompanied by what passed.
 fn propamm_groups(groups: &[PropAmmGroup]) -> String {
     if groups.is_empty() {
-        return "<p class=\"nodata\">No calibrated orders — no settled trade in this run was on \
-                the mirrored pair.</p>"
+        return "<p class=\"nodata\">No calibrated orders yet — no settled trade so far was on the \
+                mirrored pair.</p>"
             .to_string();
     }
     let mut cards = String::new();
-    for group in groups {
+    for (index, group) in groups.iter().enumerate() {
         let (word, cls) = match &group.verdict {
-            GroupVerdict::Pass => ("pass", "pos"),
+            GroupVerdict::Pass => ("PASS", "pos"),
             GroupVerdict::Fail(_) => ("FAIL", "neg"),
-            GroupVerdict::NoData => ("no data", "idlenum"),
+            GroupVerdict::NoData => ("NO DATA", "idlenum"),
         };
         let detail = match &group.verdict {
             GroupVerdict::Fail(reason) => {
@@ -429,49 +450,30 @@ fn propamm_groups(groups: &[PropAmmGroup]) -> String {
         };
         let _ = write!(
             cards,
-            "<div class=\"group\">\
-               <div class=\"grouphead\"><span class=\"groupoff\">{}</span></div>\
+            "<div class=\"group {cls}card\">\
+               <div class=\"grouphead\">{}. {}</div>\
+               <div class=\"groupoff\">{}</div>\
                <div class=\"groupverdict {cls}\">{word}</div>\
-               <div class=\"groupbig {cls}\">{}</div>\
-               <div class=\"groupcap\">{} ({})</div>\
-               <div class=\"groupfee\">fee taken <strong>{}</strong> median, {} max, \
-                 of at most {}</div>\
-               <div class=\"groupexp\">{}</div>{detail}\
+               <div class=\"grouprule\">{}</div>\
+               <div class=\"groupsaw\">{}</div>{detail}\
              </div>",
+            index + 1,
+            escape(group.title()),
             escape(&fmt_offset(group.offset_bps)),
-            group.selected,
-            escape(&format!("selected of {} orders", group.orders)),
-            escape(&share_pct_of(group.selected_pct())),
-            escape(&fmt_bps(group.median_fee_bps)),
-            escape(&fmt_bps(group.max_fee_bps)),
-            escape(&fmt_offset_ceiling(group.offset_bps)),
-            escape(group.expectation()),
+            escape(&group.expectation()),
+            escape(&group.outcome()),
         );
     }
     format!("<div class=\"groups\">{cards}</div>")
 }
 
-/// The fee ceiling a group's price implies, for the "of at most" caption.
-fn fmt_offset_ceiling(offset_bps: i32) -> String {
-    if offset_bps <= 0 {
-        "0.0 bps".to_string()
-    } else {
-        format!("{offset_bps}.0 bps")
-    }
-}
-
 /// An offset as a signed bps label, so a column header reads as a price and not a bare number.
 fn fmt_offset(offset_bps: i32) -> String {
     match offset_bps.cmp(&0) {
-        std::cmp::Ordering::Less => format!("{offset_bps} bps (below market)"),
-        std::cmp::Ordering::Equal => "at market".to_string(),
-        std::cmp::Ordering::Greater => format!("+{offset_bps} bps (above market)"),
+        std::cmp::Ordering::Less => format!("set {} bps below it", -offset_bps),
+        std::cmp::Ordering::Equal => "set exactly on it".to_string(),
+        std::cmp::Ordering::Greater => format!("set {offset_bps} bps above it"),
     }
-}
-
-/// A percentage that is already computed, rendered like the report's other shares.
-fn share_pct_of(pct: f64) -> String {
-    format!("{pct:.0}%")
 }
 
 fn section(title: &str, body: &str) -> String {
@@ -623,8 +625,15 @@ section { background: #211a30; border: 1px solid #362b4a; border-radius: 8px;
 /* One card per offset group. They wrap rather than scroll, so a wider ladder stays readable. */
 .groups { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1.5rem 0; }
 .group { flex: 1 1 15rem; border: 1px solid #2f2540; border-radius: 6px; padding: .9rem 1rem; }
-.grouphead { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
-.groupoff { font-weight: 600; font-size: .9rem; }
+.grouphead { font-weight: 600; font-size: .95rem; }
+.groupoff { color: #9a8bbf; font-size: .78rem; margin-top: .15rem; }
+.grouprule { color: #b9adcf; font-size: .82rem; line-height: 1.45; }
+.groupsaw { color: #e9e2f5; font-size: .82rem; line-height: 1.45; margin-top: .35rem; font-weight: 600; }
+/* A card's border echoes its verdict, but the verdict word above it is what carries the meaning. */
+.group.poscard { border-color: #43a047; background: #16241a; }
+.group.negcard { border-color: #e53935; background: #241616; }
+/* The tests banner: the single answer, above the three cards that justify it. */
+.testsbanner { margin-top: 1.75rem; }
 /* The number the group's expectation is about, big enough to read across a room. */
 .groupbig { font-size: 2.6rem; font-weight: 700; line-height: 1.05; margin-top: .5rem; }
 .groupcap { color: #9a8bbf; font-size: .78rem; }
@@ -636,7 +645,7 @@ section { background: #211a30; border: 1px solid #362b4a; border-radius: 8px;
 .chip.idlenumchip { background: #2f2540; color: #9a8bbf; }
 .groupfail { color: #ef9a9a; font-size: .78rem; margin: .6rem 0 0; line-height: 1.45; }
 /* Each sub-test carries its own verdict word, sized so the three read at a glance together. */
-.groupverdict { font-size: 1.5rem; font-weight: 700; letter-spacing: .04em; margin-top: .45rem; }
+.groupverdict { font-size: 2.4rem; font-weight: 800; letter-spacing: .04em; margin: .5rem 0 .6rem; }
 /* The with/without table: the "with" column is the answer, so it carries the weight. */
 .ab { margin: 1.5rem 0 .25rem; }
 .ab th { color: #9a8bbf; font-weight: 500; }
@@ -916,13 +925,24 @@ mod tests {
     }
 
     #[test]
-    fn test_group_cards_name_each_price_and_its_expectation() {
+    fn test_group_cards_name_each_test_in_terms_of_the_best_route() {
+        // A reader should not have to turn a basis-point offset into an expectation themselves.
         let html = render(&group_report(5.0), None);
-        assert!(html.contains("-5 bps (below market)"));
-        assert!(html.contains("at market"));
-        assert!(html.contains("+5 bps (above market)"));
-        assert!(html.contains("never selected"));
-        assert!(html.contains("selected only on gas, zero fee"));
+        assert!(html.contains("Priced worse than the best route"));
+        assert!(html.contains("Priced equal to the best route"));
+        assert!(html.contains("Priced better than the best route"));
+        assert!(html.contains("Must never be chosen."));
+        assert!(html.contains("charges no fee"));
+        assert!(html.contains("cannot charge more than the 5 bps gap"));
+        // And each card says what actually happened next to what should have.
+        assert!(html.contains("Never chosen, across"));
+    }
+
+    #[test]
+    fn test_tests_banner_states_one_answer_for_the_three_cards() {
+        assert!(render(&group_report(5.0), None).contains("TESTS PASSED"));
+        assert!(render(&group_report(20.0), None).contains("TESTS FAILED"));
+        assert!(render(&group_report(5.0), None).contains("price tests conclusive"));
     }
 
     #[test]
