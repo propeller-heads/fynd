@@ -65,6 +65,58 @@ impl ChangedComponents {
     }
 }
 
+/// Coalesces a drained batch of [`MarketEvent`]s into a single incremental
+/// [`ChangedComponents`], applying net semantics: a component that is added
+/// then removed within the batch nets to removed; an add supersedes a prior
+/// update; a remove supersedes a prior add/update.
+///
+/// Returns `None` when the batch carries no net changes. The result always has
+/// `is_full_recompute: false` — this is the bounded lag-recovery path, never a
+/// whole-topology recompute.
+// Not yet called: wired up by the lag-recovery path added in a follow-up task.
+#[allow(dead_code)]
+fn coalesce_market_events(events: &[MarketEvent]) -> Option<ChangedComponents> {
+    let mut added: HashMap<ComponentId, Vec<Address>> = HashMap::new();
+    let mut removed: HashSet<ComponentId> = HashSet::new();
+    let mut updated: HashSet<ComponentId> = HashSet::new();
+
+    for event in events {
+        match event {
+            MarketEvent::MarketUpdated {
+                added_components,
+                removed_components,
+                updated_components,
+            } => {
+                for (id, tokens) in added_components {
+                    removed.remove(id);
+                    updated.remove(id);
+                    added.insert(id.clone(), tokens.clone());
+                }
+                for id in removed_components {
+                    added.remove(id);
+                    updated.remove(id);
+                    removed.insert(id.clone());
+                }
+                for id in updated_components {
+                    if !added.contains_key(id) && !removed.contains(id) {
+                        updated.insert(id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if added.is_empty() && removed.is_empty() && updated.is_empty() {
+        return None;
+    }
+    Some(ChangedComponents {
+        added,
+        removed: removed.into_iter().collect(),
+        updated: updated.into_iter().collect(),
+        is_full_recompute: false,
+    })
+}
+
 use super::{
     computation::{ComputationId, ComputationRequirements, DerivedComputation},
     computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
@@ -574,6 +626,62 @@ mod tests {
             }
         }
         events
+    }
+
+    // --- coalesce_market_events: net semantics over a drained batch (pure) ---------
+
+    #[test]
+    fn coalesce_empty_batch_returns_none() {
+        assert!(coalesce_market_events(&[]).is_none());
+    }
+
+    #[test]
+    fn coalesce_unions_added_and_updated_across_events() {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let e1 = MarketEvent::MarketUpdated {
+            added_components: HashMap::from([(
+                "eth_usdc".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed_components: vec![],
+            updated_components: vec![],
+        };
+        let e2 = MarketEvent::MarketUpdated {
+            added_components: HashMap::new(),
+            removed_components: vec![],
+            updated_components: vec!["eth_usdc".to_string(), "dai_usdc".to_string()],
+        };
+        let c = coalesce_market_events(&[e1, e2]).expect("net changes present");
+        assert!(!c.is_full_recompute);
+        // eth_usdc was added, so it stays in `added` (not double-counted in `updated`)
+        assert!(c.added.contains_key("eth_usdc"));
+        assert!(!c.updated.contains(&"eth_usdc".to_string()));
+        // dai_usdc only ever appeared as updated
+        assert!(c.updated.contains(&"dai_usdc".to_string()));
+    }
+
+    #[test]
+    fn coalesce_add_then_remove_nets_to_removed() {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let add = MarketEvent::MarketUpdated {
+            added_components: HashMap::from([(
+                "eth_usdc".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed_components: vec![],
+            updated_components: vec![],
+        };
+        let remove = MarketEvent::MarketUpdated {
+            added_components: HashMap::new(),
+            removed_components: vec!["eth_usdc".to_string()],
+            updated_components: vec![],
+        };
+        let c = coalesce_market_events(&[add, remove]).expect("net removal present");
+        assert!(!c.added.contains_key("eth_usdc"));
+        assert!(c.removed.contains(&"eth_usdc".to_string()));
+        assert!(!c.updated.contains(&"eth_usdc".to_string()));
     }
 
     // --- build_schedule: dependency staging (pure) --------------------------------
