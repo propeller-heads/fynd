@@ -1,4 +1,17 @@
 
+## [0.97.11](https://github.com/propeller-heads/fynd/compare/0.97.10...0.97.11) (2026-07-30)
+
+### Features
+
+* **fynd-core:** derive route summaries from the solved route ([3f8c10c](https://github.com/propeller-heads/fynd/commit/3f8c10c6230fa15141838cf988769036b3f85d01))
+* **hindsight:** solve fresh at back-of-block alongside route replay ([3ae070d](https://github.com/propeller-heads/fynd/commit/3ae070dca867ecda1eccc03a869ebf1288213ee3))
+* **hindsight:** re-execute top routes to measure positive slippage ([a3a4946](https://github.com/propeller-heads/fynd/commit/a3a4946c7f103afac4c33da9b8e574935c618bb8))
+
+### Bug Fixes
+
+* **fynd-core:** guard replayed pool sims against panics ([73e289a](https://github.com/propeller-heads/fynd/commit/73e289ae13e8374bbc673a0493085daed4207a64))
+
+
 
 
 ## [0.97.8](https://github.com/propeller-heads/fynd/compare/0.97.7...0.97.8) (2026-07-29)
