@@ -10,6 +10,7 @@
 use std::{
     future::Future,
     pin::Pin,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -23,7 +24,7 @@ use fynd_core::{
         parse_chain, EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest,
         QuoteStatus,
     },
-    BlockStepController, FyndBuilder, Solver,
+    BlockStepController, FyndBuilder, LiquidityScope, Solver,
 };
 use num_bigint::BigUint;
 use tracing::{debug, info, warn};
@@ -31,8 +32,8 @@ use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
-    provider_from,
-    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver},
+    propamm, provider_from,
+    resolve::{resolve_block_range, Outcome, RangeComparison, SolvedAmount, SteppingSolver},
     telemetry,
     usd::Prices,
 };
@@ -116,6 +117,69 @@ pub(crate) struct MonitorArgs {
     /// reason; filter downstream for the improvement or coverage view
     #[arg(long)]
     pub comparisons_dir: Option<std::path::PathBuf>,
+
+    /// Mirror a mock `PropAMM` pool onto this token pair, as two comma-separated addresses
+    /// (`--propamm-pair 0xWETH,0xUSDC`). The mock carries the best real pool's live curve at the
+    /// price set by `--propamm-price-pct` and charges no fee. It is hidden from the public worker
+    /// pools and visible to a parallel exclusive-access twin of each configured pool, so each
+    /// re-solved order reports whether the `PropAMM` route won and how much fee it could have
+    /// charged on top and still won. Off when omitted, and never usable against a real chain — the
+    /// mock has no pool behind it
+    #[arg(long, env = "PROPAMM_PAIR", value_delimiter = ',')]
+    pub propamm_pair: Option<Vec<String>>,
+
+    /// Price offsets, in basis points relative to **the public best route's output for the order
+    /// being solved**. Orders on the mirrored pair cycle through this list, so one run fills every
+    /// group and each order becomes an assertion rather than a data point:
+    ///
+    /// - a negative offset prices the mock below the public market and must never be selected;
+    /// - `0` matches it exactly, so any selection is on gas alone and must carry a zero fee;
+    /// - a positive offset is the underbid, and the fee taken must not exceed it.
+    ///
+    /// The mock's fee-free price is set per order, so "5 bps better" means 5 bps better than the
+    /// route Fynd would otherwise have quoted — not 5 bps better than some single pool
+    // `allow_hyphen_values` so a negative offset reads as a value, not as a short flag.
+    #[arg(
+        long,
+        env = "PROPAMM_OFFSETS_BPS",
+        value_delimiter = ',',
+        allow_hyphen_values = true,
+        default_values_t = [-5, 0, 5]
+    )]
+    pub propamm_offsets_bps: Vec<i32>,
+
+    /// Re-solve only the settled trades whose own pair is the mirrored one — the only orders the
+    /// harness can calibrate. Off-pair trades are the large majority, so skipping them fills the
+    /// offset groups far faster per block. The trade-off: that run's comparisons cover the
+    /// mirrored pair alone, so its savings and coverage numbers are not a picture of Fynd
+    /// overall
+    #[arg(long, env = "PROPAMM_ONLY_PAIR", default_value_t = false)]
+    pub propamm_only_pair: bool,
+
+    /// Trade size, in whole units of the pair's first token, used each block to pick which real
+    /// pool to mirror. Set it near the sizes being re-solved so the mirror tracks the pool that
+    /// actually prices those trades best
+    #[arg(long, env = "PROPAMM_PROBE_UNITS", default_value_t = 1.0)]
+    pub propamm_probe_units: f64,
+}
+
+/// The mock-`PropAMM` scaffold attached to one monitor run.
+///
+/// `stats` is created once per run so the totals span solver rebuilds; `injector` is rebuilt with
+/// each solver, because it publishes on that solver's market-event channel.
+struct PropAmmHarness {
+    injector: tokio::sync::Mutex<propamm::Injector>,
+    stats: Arc<propamm::report::Stats>,
+    /// The pair and offset ladder, kept outside the injector's mutex so the solve path can decide
+    /// whether an order is calibratable without taking that lock.
+    config: propamm::MirrorConfig,
+}
+
+impl PropAmmHarness {
+    /// The mirrored pair and offset ladder.
+    fn config(&self) -> &propamm::MirrorConfig {
+        &self.config
+    }
 }
 
 /// Drives the in-process solver, stepping the chain one block per `SteppingSolver::advance`.
@@ -123,6 +187,8 @@ struct StepAdapter<'a> {
     solver: &'a Solver,
     controller: &'a BlockStepController,
     timeout_ms: u64,
+    /// Present when `--propamm-pair` is set; drives mock-pool injection and collects its outcomes.
+    propamm: Option<&'a PropAmmHarness>,
 }
 
 impl StepAdapter<'_> {
@@ -135,51 +201,20 @@ impl StepAdapter<'_> {
             .last_updated()
             .map(fynd_core::BlockInfo::number)
     }
-}
 
-#[async_trait]
-impl SteppingSolver for StepAdapter<'_> {
-    async fn solve(&self, token_in: Address, token_out: Address, amount_in: U256) -> Outcome {
-        let Ok(amount) = amount_in.to_string().parse::<BigUint>() else {
-            return Outcome::Unsolvable("unparseable amount_in".to_string());
-        };
-        // Placeholder receiver: routing/amounts are receiver-independent; it only fills the encoded
-        // calldata's recipient. Encoding is requested so each quote carries its on-chain
-        // transaction (note: this refines gas estimates and a failed encode yields
-        // Unsolvable).
-        let order = Order::new(
-            CoreAddress::from(token_in.into_array()),
-            CoreAddress::from(token_out.into_array()),
-            amount,
-            OrderSide::Sell,
-            CoreAddress::from([0x11u8; 20]),
-        );
-        let request = QuoteRequest::new(
-            vec![order],
-            QuoteOptions::default()
-                .with_timeout_ms(self.timeout_ms)
-                .with_encoding_options(EncodingOptions::new(0.005)),
-        );
-
-        match self.solver.quote(request).await {
-            Ok(quote) => quote.orders().first().map_or_else(
-                || Outcome::Unsolvable("solver returned no order quote".to_string()),
-                order_quote_to_outcome,
-            ),
-            Err(e) => Outcome::Unsolvable(format!("solve error: {e}")),
-        }
-    }
-
-    async fn advance(&self) -> anyhow::Result<()> {
+    /// Releases the next block and waits until the solver applies it.
+    ///
+    /// An error means the feed died — either its stream ended (peek returns None once the gating
+    /// task exits) or it jammed without ending (no block within `FEED_DEAD_TIMEOUT`). The caller
+    /// rebuilds the solver on any error.
+    async fn step_block(&self) -> anyhow::Result<()> {
         let before = self.current_block().await;
         self.controller
             .trigger_next_block()
             .map_err(|_| anyhow::anyhow!("tycho stream ended (trigger channel closed)"))?;
 
         // Deterministic barrier: wait until the solver applies a block strictly newer than
-        // `before`. An error here means the feed died — either its stream ended (peek returns
-        // None once the gating task exits) or it jammed without ending (no block within
-        // FEED_DEAD_TIMEOUT). The caller rebuilds the solver on any error.
+        // `before`.
         let stall_started = Instant::now();
         let mut next_warn = stall_started + STALL_WARN_INTERVAL;
         loop {
@@ -211,6 +246,222 @@ impl SteppingSolver for StepAdapter<'_> {
                 }
             }
         }
+    }
+
+    /// Re-mirrors the mock `PropAMM` pool onto the freshly applied block's state.
+    ///
+    /// A failure here leaves the mock holding the previous block's state, which skews its quotes
+    /// but does not invalidate the block's public comparison — so it warns and continues rather
+    /// than ending the session.
+    async fn mirror_propamm_pool(&self) {
+        let Some(harness) = self.propamm else {
+            return;
+        };
+        let Some(block) = self.current_block().await else {
+            return;
+        };
+        match harness
+            .injector
+            .lock()
+            .await
+            .inject(self.solver, block)
+            .await
+        {
+            Ok(Some(injected)) => {
+                harness
+                    .stats
+                    .set_pair_label(&injected.pair_label);
+                debug!(
+                    block,
+                    source = injected.source_component,
+                    source_price = injected.source_price,
+                    derived_data_ready = injected.derived_data_ready,
+                    "mirrored the mock PropAMM pool"
+                );
+            }
+            Ok(None) => warn!(
+                block,
+                "no source pool for the mirrored pair carries state yet; the mock PropAMM is \
+                 inactive this block"
+            ),
+            Err(e) => warn!(block, "failed to mirror the mock PropAMM pool: {e}"),
+        }
+    }
+}
+
+impl StepAdapter<'_> {
+    /// Quote one sell order at the solver's current state, returning the outcome and — when a quote
+    /// came back at all — its mock-`PropAMM` observation.
+    async fn quote_order(
+        &self,
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+    ) -> (Outcome, Option<propamm::report::Observation>) {
+        let Ok(amount) = amount_in.to_string().parse::<BigUint>() else {
+            return (Outcome::Unsolvable("unparseable amount_in".to_string()), None);
+        };
+        // Placeholder receiver: routing/amounts are receiver-independent; it only fills the encoded
+        // calldata's recipient. Encoding is requested so each quote carries its on-chain
+        // transaction (note: this refines gas estimates and a failed encode yields
+        // Unsolvable).
+        let order = Order::new(
+            CoreAddress::from(token_in.into_array()),
+            CoreAddress::from(token_out.into_array()),
+            amount,
+            OrderSide::Sell,
+            CoreAddress::from([0x11u8; 20]),
+        );
+        let request = QuoteRequest::new(
+            vec![order],
+            QuoteOptions::default()
+                .with_timeout_ms(self.timeout_ms)
+                .with_encoding_options(EncodingOptions::new(0.005)),
+        );
+
+        match self.solver.quote(request).await {
+            Ok(quote) => {
+                let Some(order_quote) = quote.orders().first() else {
+                    return (
+                        Outcome::Unsolvable("solver returned no order quote".to_string()),
+                        None,
+                    );
+                };
+                let observed = propamm::report::Observation::from_quote(order_quote, token_out);
+                (order_quote_to_outcome(order_quote), Some(observed))
+            }
+            Err(e) => (Outcome::Unsolvable(format!("solve error: {e}")), None),
+        }
+    }
+}
+
+impl StepAdapter<'_> {
+    /// Solve an order twice so the mock is priced against what Fynd would otherwise have quoted.
+    ///
+    /// Pass one neutralises the mock, so the quote is the public best route. Pass two rescales the
+    /// mock to land `offset_bps` off that output and re-quotes, and its result is the one returned
+    /// — the order's real answer, with a known-by-construction competitive situation.
+    ///
+    /// Falls back to the pass-one result whenever calibration is impossible (no source cached yet,
+    /// or the source cannot price the order). The order then carries no offset and is reported
+    /// as an ordinary comparison rather than as a group member.
+    async fn solve_calibrated(
+        &self,
+        harness: &PropAmmHarness,
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+        offset_bps: i32,
+    ) -> (Outcome, Option<propamm::report::Observation>) {
+        let market = harness_market(self.solver);
+        let injector = harness.injector.lock().await;
+
+        if !injector.neutralize(&market).await {
+            return self
+                .quote_order(token_in, token_out, amount_in)
+                .await;
+        }
+        let (public_outcome, public_observed) = self
+            .quote_order(token_in, token_out, amount_in)
+            .await;
+        let Outcome::Solved(public) = &public_outcome else {
+            // Fynd cannot serve this order publicly, so there is no reference to underbid. Report
+            // the unsolvable outcome as-is rather than inventing a price for the mock
+            // to beat.
+            return (public_outcome, public_observed);
+        };
+        let Ok(public_best_out) = public
+            .amount_out
+            .to_string()
+            .parse::<BigUint>()
+        else {
+            return (public_outcome, public_observed);
+        };
+
+        let core_token_in = CoreAddress::from(token_in.into_array());
+        let Some(calibration) = injector
+            .calibrate(
+                &market,
+                &core_token_in,
+                &u256_to_biguint(amount_in),
+                &public_best_out,
+                offset_bps,
+            )
+            .await
+        else {
+            return (public_outcome, public_observed);
+        };
+        drop(injector);
+
+        // The calibration's own error check: integer division and the source pool's rounding mean
+        // the target lands a fraction of a bps off the requested offset. A large gap means
+        // the source could not hold the target, which would make the group's expectation
+        // untestable.
+        let realized_bps = calibration.realized_offset_bps();
+        if (realized_bps - f64::from(offset_bps)).abs() > 0.5 {
+            warn!(
+                offset_bps,
+                realized_bps,
+                "mock PropAMM calibration missed its target offset; this order's group result is \
+                 not trustworthy"
+            );
+        }
+        debug!(
+            offset_bps,
+            realized_bps, "calibrated the mock PropAMM against the public best route"
+        );
+
+        let (outcome, observed) = self
+            .quote_order(token_in, token_out, amount_in)
+            .await;
+        let without = propamm::report::PublicOnly {
+            amount_out: public_best_out.clone(),
+            amount_out_net_gas: u256_to_biguint(public.amount_out_net_gas),
+        };
+        let observed = observed.map(|o| o.with_calibration(&calibration, without));
+        (outcome, observed)
+    }
+}
+
+#[async_trait]
+impl SteppingSolver for StepAdapter<'_> {
+    async fn solve(&self, token_in: Address, token_out: Address, amount_in: U256) -> Outcome {
+        let calibrated_offset = self.propamm.and_then(|harness| {
+            let config = harness.config();
+            let core_in = CoreAddress::from(token_in.into_array());
+            let core_out = CoreAddress::from(token_out.into_array());
+            config
+                .serves(&core_in, &core_out)
+                .then(|| config.offset_for(harness.stats.next_order_index()))
+                .flatten()
+        });
+
+        let (outcome, observed) = match (self.propamm, calibrated_offset) {
+            (Some(harness), Some(offset_bps)) => {
+                self.solve_calibrated(harness, token_in, token_out, amount_in, offset_bps)
+                    .await
+            }
+            _ => {
+                self.quote_order(token_in, token_out, amount_in)
+                    .await
+            }
+        };
+        // Recorded on every path, including the ones that never produced a quote: the sink is
+        // joined back to the block's trades by position, so a skipped solve would shift
+        // every later observation onto the wrong trade. `Observation::solved` is what the
+        // winrate counts.
+        if let Some(harness) = self.propamm {
+            harness.stats.record(
+                observed.unwrap_or_else(|| propamm::report::Observation::unsolved(token_out)),
+            );
+        }
+        outcome
+    }
+
+    async fn advance(&self) -> anyhow::Result<()> {
+        self.step_block().await?;
+        self.mirror_propamm_pool().await;
+        Ok(())
     }
 }
 
@@ -332,6 +583,23 @@ async fn build_solver(
             .add_pool(name, pool)
             .map_err(|e| anyhow::anyhow!("failed to add worker pool {name}: {e}"))?;
     }
+    if cfg.propamm_pair.is_some() {
+        // Twin every configured pool with an exclusive-access copy: same algorithm and hop limits,
+        // so the two scopes differ only in whether they can see the mock pool. Anything less would
+        // confound the PropAMM's advantage with an algorithm difference. The unscoped originals
+        // stay public — `FyndBuilder` hands the exclusivity policy to every pool that does not
+        // opt into `LiquidityScope::All`.
+        builder = builder.exclusivity_policy(propamm::is_mock_component);
+        for (name, pool) in pools_config.pools() {
+            let twin = pool
+                .clone()
+                .with_liquidity_scope(LiquidityScope::All);
+            let twin_name = format!("{name}__propamm");
+            builder = builder
+                .add_pool(&twin_name, &twin)
+                .map_err(|e| anyhow::anyhow!("failed to add worker pool {twin_name}: {e}"))?;
+        }
+    }
     builder
         .build_with_step_controller()
         .await
@@ -429,23 +697,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("failed to resolve protocols: {e}"))?;
 
-    // Load worker pools like `fynd serve`: the default path falls back to the built-in default
-    // pools when absent; custom paths that don't exist fail fast.
-    let default_path = std::path::Path::new("worker_pools.toml");
-    let pools_config =
-        if cfg.worker_pools_config.as_path() == default_path && !default_path.exists() {
-            info!("worker_pools.toml not found; using Fynd's built-in default pools");
-            fynd_rpc::config::WorkerPoolsConfig::builtin_default()
-        } else {
-            fynd_rpc::config::WorkerPoolsConfig::load_from_file(&cfg.worker_pools_config).map_err(
-                |e| {
-                    anyhow::anyhow!(
-                        "failed to load worker pools config {}: {e}",
-                        cfg.worker_pools_config.display()
-                    )
-                },
-            )?
-        };
+    let pools_config = load_pools_config(&cfg.worker_pools_config)?;
 
     let mut decoder = Decoder::new(
         provider_from(&cfg.chain.rpc_url)?,
@@ -465,6 +717,10 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         }
         None => None,
     };
+
+    // Parsed before the first (multi-minute) solver build, so a typo in the pair fails immediately.
+    let propamm_config = propamm_config(&cfg, chain)?;
+    let propamm_stats = Arc::new(propamm::report::Stats::default());
 
     let mut totals = Totals::default();
     let pacing = Pacing::for_chain(chain, cfg.max_lag_blocks);
@@ -488,8 +744,21 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         built = build_solver(&cfg, chain, &protocols, &pools_config) => built?,
     };
     loop {
-        let adapter =
-            StepAdapter { solver: &solver, controller: &controller, timeout_ms: cfg.timeout_ms };
+        // Rebuilt with each solver: the injector publishes on that solver's market-event channel.
+        // `propamm_stats` is shared, so the totals span rebuilds.
+        let propamm = propamm_config
+            .clone()
+            .map(|config| PropAmmHarness {
+                injector: tokio::sync::Mutex::new(propamm::Injector::new(&solver, config.clone())),
+                stats: Arc::clone(&propamm_stats),
+                config,
+            });
+        let adapter = StepAdapter {
+            solver: &solver,
+            controller: &controller,
+            timeout_ms: cfg.timeout_ms,
+            propamm: propamm.as_ref(),
+        };
         let reason = tokio::select! {
             biased;
             () = &mut shutdown => {
@@ -521,7 +790,309 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         (solver, controller) = built;
     }
     solver.shutdown();
+    if let Some(config) = propamm_config.as_ref() {
+        log_propamm_summary(config, &propamm_stats.totals());
+    }
     Ok(())
+}
+
+/// Loads the worker pools like `fynd serve` does.
+///
+/// The default path falls back to the built-in default pools when absent; a custom path that does
+/// not exist fails fast, because an operator who named a file meant that file.
+fn load_pools_config(
+    path: &std::path::Path,
+) -> anyhow::Result<fynd_rpc::config::WorkerPoolsConfig> {
+    let default_path = std::path::Path::new("worker_pools.toml");
+    if path == default_path && !default_path.exists() {
+        info!("worker_pools.toml not found; using Fynd's built-in default pools");
+        return Ok(fynd_rpc::config::WorkerPoolsConfig::builtin_default());
+    }
+    fynd_rpc::config::WorkerPoolsConfig::load_from_file(path)
+        .map_err(|e| anyhow::anyhow!("failed to load worker pools config {}: {e}", path.display()))
+}
+
+/// Builds the mock-`PropAMM` config from the CLI, or `None` when `--propamm-pair` is absent.
+fn propamm_config(
+    cfg: &MonitorArgs,
+    chain: Chain,
+) -> anyhow::Result<Option<propamm::MirrorConfig>> {
+    let Some(pair) = cfg.propamm_pair.as_deref() else {
+        return Ok(None);
+    };
+    let (token_a, token_b) = propamm::MirrorConfig::parse_pair(pair)?;
+    let config = propamm::MirrorConfig {
+        token_a,
+        token_b,
+        offsets_bps: cfg.propamm_offsets_bps.clone(),
+        probe_units: cfg.propamm_probe_units,
+        chain,
+    };
+    info!(
+        token_a = %config.token_a,
+        token_b = %config.token_b,
+        offsets_bps = ?config.offsets_bps,
+        probe_units = config.probe_units,
+        "mock PropAMM enabled; its quotes are not executable"
+    );
+    Ok(Some(config))
+}
+
+/// Logs the whole run's mock-`PropAMM` result: the assumption that went in, and the winrate and fee
+/// headroom that came out.
+fn log_propamm_summary(config: &propamm::MirrorConfig, totals: &propamm::report::Totals) {
+    info!(
+        offsets_bps = ?config.offsets_bps,
+        solved_orders = totals.solved,
+        propamm_wins = totals.won,
+        winrate_pct = format!("{:.1}", totals.winrate_pct()),
+        captured_flow_usd = format!("{:.0}", totals.captured_flow_usd),
+        fee_headroom_usd = format!("{:.2}", totals.headroom_usd),
+        fee_headroom_bps = format!("{:.2}", totals.avg_fee_headroom_bps()),
+        "mock PropAMM run summary"
+    );
+}
+
+/// Values one block's mock-`PropAMM` observations in USD, folds them into the run totals, logs the
+/// running picture, and returns one record per trade for the comparisons JSONL.
+///
+/// Amounts are valued at top-of-block prices, matching the headline improvement metric. Both halves
+/// are valued: the committed output answers "how much flow the pool captured", the headroom answers
+/// "how much fee it could have charged on that flow", and their ratio is that fee in bps.
+///
+/// `resolve_block_range` solves every trade at top-of-block in order, advances, then solves every
+/// trade again at back-of-block in the same order — so the sink holds `2 * trade_count`
+/// observations and the first half are the top-of-block ones the report keys off. A different count
+/// means that pairing no longer holds, so the records are dropped rather than misattributed; the
+/// totals are unaffected either way.
+fn report_propamm_block(
+    harness: &PropAmmHarness,
+    block: u64,
+    prices: &Prices,
+    observations: &[propamm::report::Observation],
+    ranges: &[RangeComparison],
+) -> Vec<Option<propamm::report::Record>> {
+    let trade_count = ranges.len();
+    let mut headroom_usd = 0.0;
+    let mut captured_flow_usd = 0.0;
+    let mut records: Vec<Option<propamm::report::Record>> = Vec::with_capacity(observations.len());
+    let pair_label = harness.stats.pair_label();
+
+    for observed in observations {
+        // A record is written for every solved order, not only the wins: the report needs the
+        // losses as the winrate's denominator, and a wins-only file makes every run look
+        // like 100%. Unsolved solves stay `None` — the pool never had a chance at those.
+        if !observed.solved {
+            records.push(None);
+            continue;
+        }
+        let value_usd = |amount: Option<&BigUint>| {
+            amount
+                .and_then(biguint_to_u256_opt)
+                .and_then(|amount| prices.value_usd(observed.token_out, amount))
+        };
+        let headroom = value_usd(observed.fee_headroom.as_ref());
+        let committed = value_usd(observed.committed_amount_out.as_ref());
+        headroom_usd += headroom.unwrap_or(0.0);
+        captured_flow_usd += committed.unwrap_or(0.0);
+        // The A/B is only defined for calibrated orders, and only against the range this
+        // observation pairs with — the first `trade_count` observations are the
+        // top-of-block ones.
+        let ab = ranges
+            .get(records.len())
+            .map_or_else(propamm::report::AbResult::default, |range| {
+                score_both_worlds(observed, range, prices)
+            });
+        records.push(Some(propamm::report::Record::new(
+            observed,
+            pair_label.clone(),
+            committed,
+            headroom,
+            ab,
+        )));
+    }
+
+    let totals = harness
+        .stats
+        .accumulate(observations, headroom_usd, captured_flow_usd);
+    let block_wins = observations
+        .iter()
+        .filter(|o| o.won)
+        .count();
+    info!(
+        block,
+        block_solves = observations.len(),
+        block_wins,
+        block_fee_headroom_usd = format!("{headroom_usd:.2}"),
+        run_winrate_pct = format!("{:.1}", totals.winrate_pct()),
+        run_fee_headroom_usd = format!("{:.2}", totals.headroom_usd),
+        run_fee_headroom_bps = format!("{:.2}", totals.avg_fee_headroom_bps()),
+        "mock PropAMM block result"
+    );
+
+    if records.len() == trade_count * 2 {
+        records.truncate(trade_count);
+        return records;
+    }
+    if !observations.is_empty() {
+        warn!(
+            block,
+            solves = observations.len(),
+            trades = trade_count,
+            "PropAMM observations do not pair with the block's trades; omitting them from the \
+             comparisons JSONL"
+        );
+    }
+    vec![None; trade_count]
+}
+
+/// Narrows a block's trades to the mirrored pair when `--propamm-only-pair` is set.
+///
+/// The count is logged rather than dropped quietly: a run that silently skipped most of a block
+/// would read as a block with little flow.
+fn scope_trades(
+    trades: Vec<DecodedTrade>,
+    adapter: &StepAdapter<'_>,
+    only_pair: bool,
+    block: u64,
+) -> Vec<DecodedTrade> {
+    let Some(harness) = adapter.propamm.filter(|_| only_pair) else {
+        return trades;
+    };
+    let total = trades.len();
+    let kept = retain_mirrored_pair(trades, harness.config());
+    debug!(
+        block,
+        kept = kept.len(),
+        skipped = total - kept.len(),
+        "--propamm-only-pair: re-solving the mirrored pair's trades only"
+    );
+    kept
+}
+
+/// Scores one order in both worlds against what actually settled.
+///
+/// "Without" is the pass the calibration already ran with the mock neutralised; "with" is the
+/// range's own top-of-block result. Both are compared to the settled trade the same way the
+/// headline verdict is — output net of gas — so the pair is directly comparable and the difference
+/// is the mock's entire contribution.
+fn score_both_worlds(
+    observed: &propamm::report::Observation,
+    range: &RangeComparison,
+    prices: &Prices,
+) -> propamm::report::AbResult {
+    let Some(without) = observed.without.as_ref() else {
+        return propamm::report::AbResult::default();
+    };
+    let settled_net_gas = u256_to_biguint(range.settled_amount_out_net_gas);
+    let with = match &range.top.outcome {
+        Outcome::Solved(solved) => Some(solved),
+        Outcome::Partial(_) | Outcome::Unsolvable(_) => None,
+    };
+    let improvement = |amount_out: &BigUint| {
+        biguint_to_u256_opt(amount_out)
+            .and_then(|out| prices.savings_usd(range.token_out, out, range.settled_amount_out))
+    };
+    // A win is gross output strictly above the settled gross output — the basis `compare::verdict`
+    // uses, so these figures drop straight into the report's headline. The settled route's gas is
+    // often unattributable, which makes gross-vs-gross the only always-like-for-like comparison.
+    let settled_out = u256_to_biguint(range.settled_amount_out);
+    let with_won = range.top.verdict == super::compare::Verdict::Win;
+    propamm::report::AbResult {
+        without_won: Some(without.amount_out > settled_out),
+        with_won: with.map(|_| with_won),
+        without_improvement_usd: improvement(&without.amount_out),
+        with_improvement_usd: with.and_then(|s| improvement(&u256_to_biguint(s.amount_out))),
+        // Net of each side's own gas, matching the headline's median savings figure.
+        without_net_bps: fynd_tools_common::bps::raw_bps_diff(
+            &without.amount_out_net_gas,
+            &settled_net_gas,
+        ),
+        with_net_bps: range.top.deltas.net_bps,
+    }
+}
+
+/// Keeps only the trades whose own token pair is the mirrored one, in either direction.
+fn retain_mirrored_pair(
+    trades: Vec<DecodedTrade>,
+    config: &propamm::MirrorConfig,
+) -> Vec<DecodedTrade> {
+    trades
+        .into_iter()
+        .filter(|trade| {
+            config.serves(
+                &CoreAddress::from(trade.token_in.into_array()),
+                &CoreAddress::from(trade.token_out.into_array()),
+            )
+        })
+        .collect()
+}
+
+/// The solver's market-data handle, which the injector writes the mock's state through.
+fn harness_market(solver: &Solver) -> fynd_core::feed::market_data::MarketData {
+    solver.market_data()
+}
+
+/// Converts a `U256` amount to `BigUint`, which is what the mock's calibration math uses.
+fn u256_to_biguint(amount: U256) -> BigUint {
+    BigUint::from_bytes_be(&amount.to_be_bytes::<32>())
+}
+
+/// Converts a `BigUint` to `U256`, or `None` when it does not fit — the amount is then left
+/// unvalued rather than silently reported as zero.
+fn biguint_to_u256_opt(value: &BigUint) -> Option<U256> {
+    let bytes = value.to_bytes_be();
+    if bytes.len() > 32 {
+        return None;
+    }
+    let mut buf = [0u8; 32];
+    buf[32 - bytes.len()..].copy_from_slice(&bytes);
+    Some(U256::from_be_bytes(buf))
+}
+
+/// Record one block's re-solved trades: Prometheus metrics, the mock-`PropAMM` roll-up, and the
+/// comparisons JSONL.
+///
+/// The `PropAMM` outcomes are drained before the comparisons are written, so each range carries its
+/// outcome into the same JSONL record the offline `report` subcommand reads. They are drained
+/// unconditionally when the harness is on, so a block whose trades all failed to solve still clears
+/// the sink rather than carrying observations into the next block.
+#[expect(clippy::too_many_arguments)]
+fn emit_block_results<P: Provider>(
+    cfg: &MonitorArgs,
+    adapter: &StepAdapter<'_>,
+    decoder: &Decoder<P>,
+    comparisons: &mut Option<super::jsonl::RotatingWriter>,
+    block: u64,
+    ranges: &[RangeComparison],
+    prices_top: &Prices,
+    prices_back: &Prices,
+) {
+    for range in ranges {
+        telemetry::record_range(
+            range,
+            &cfg.chain.name,
+            prices_top,
+            prices_back,
+            decoder.registry(),
+        );
+    }
+    let propamm_records = match adapter.propamm {
+        Some(harness) => {
+            let observations = harness.stats.drain();
+            report_propamm_block(harness, block, prices_top, &observations, ranges)
+        }
+        None => vec![None; ranges.len()],
+    };
+    if let Some(rotating) = comparisons.as_mut() {
+        super::jsonl::write_comparisons(
+            rotating.writer(),
+            ranges,
+            prices_top,
+            prices_back,
+            &propamm_records,
+        );
+    }
 }
 
 /// Drive one solver session: step blocks and re-solve each block's settled trades until the run
@@ -594,6 +1165,8 @@ async fn run_session<P: Provider>(
             }
         };
 
+        let trades = scope_trades(trades, adapter, cfg.propamm_only_pair, target);
+
         let start = Instant::now();
         // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
         // USD valuation.
@@ -617,18 +1190,16 @@ async fn run_session<P: Provider>(
                 "back-of-block state is not the target block; back comparison may be off"
             );
         }
-        for range in &ranges {
-            telemetry::record_range(
-                range,
-                &cfg.chain.name,
-                &prices_top,
-                &prices_back,
-                decoder.registry(),
-            );
-        }
-        if let Some(rotating) = comparisons.as_mut() {
-            super::jsonl::write_comparisons(rotating.writer(), &ranges, &prices_top, &prices_back);
-        }
+        emit_block_results(
+            cfg,
+            adapter,
+            decoder,
+            comparisons,
+            target,
+            &ranges,
+            &prices_top,
+            &prices_back,
+        );
         let elapsed_s = start.elapsed().as_secs_f64();
         telemetry::record_block_seconds(elapsed_s);
 
@@ -776,8 +1347,56 @@ mod tests {
             max_blocks: Some(1),
             max_lag_blocks: Some(100),
             comparisons_dir: None,
+            propamm_pair: None,
+            propamm_offsets_bps: vec![-5, 0, 5],
+            propamm_only_pair: false,
+            propamm_probe_units: 1.0,
         })
         .await
         .expect("monitor should process one block without error");
+    }
+
+    #[test]
+    fn test_retain_mirrored_pair_keeps_both_directions_only() {
+        let eth = Address::ZERO;
+        let usdc = Address::repeat_byte(0xaa);
+        let dai = Address::repeat_byte(0xbb);
+        let config = propamm::MirrorConfig {
+            token_a: CoreAddress::from(eth.into_array()),
+            token_b: CoreAddress::from(usdc.into_array()),
+            offsets_bps: vec![-5, 0, 5],
+            probe_units: 1.0,
+            chain: Chain::Ethereum,
+        };
+        let trade = |token_in: Address, token_out: Address| DecodedTrade {
+            tx_hash: alloy::primitives::TxHash::default(),
+            block_number: 1,
+            tx_index: 0,
+            venue: "relay".into(),
+            solver: "tycho".into(),
+            solver_source: crate::decoder::AttributionSource::TraceMatch,
+            decoder: "sender-netting",
+            sender: Address::ZERO,
+            token_in,
+            token_out,
+            amount_in: U256::from(1u64),
+            amount_out: U256::from(1u64),
+            venue_fee_in: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            quote: None,
+            sandwich: None,
+        };
+
+        let kept = retain_mirrored_pair(
+            vec![
+                trade(eth, usdc), // mirrored, forward
+                trade(usdc, eth), // mirrored, reverse
+                trade(dai, usdc), // off-pair
+                trade(eth, dai),  // shares one token only
+            ],
+            &config,
+        );
+        assert_eq!(kept.len(), 2, "only the mirrored pair survives, in either direction");
     }
 }

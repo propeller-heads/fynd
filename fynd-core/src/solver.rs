@@ -1167,6 +1167,16 @@ impl Solver {
         self.market_event_tx.subscribe()
     }
 
+    /// Returns a clone of the [`MarketEvent`] broadcast sender.
+    ///
+    /// A harness that writes synthetic components into [`MarketData`] must also announce them, or
+    /// workers never add the edge to their local graph. This is the same channel the Tycho feed
+    /// publishes real block updates on, so an injected event is indistinguishable from a real one.
+    #[cfg(feature = "experimental")]
+    pub fn market_event_sender(&self) -> broadcast::Sender<MarketEvent> {
+        self.market_event_tx.clone()
+    }
+
     /// Submits a [`QuoteRequest`] to the worker pools and returns the best [`Quote`].
     ///
     /// # Errors

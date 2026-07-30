@@ -27,13 +27,16 @@ and takes neither.
   back-of-block (state N), and emits `RangeComparison` JSONL records. Exposes a Prometheus
   metrics endpoint (`--metrics-port`). `--max-lag-blocks` (default 100, ~20 min on mainnet)
   bounds how far it may fall behind chain head before rebuilding the solver.
+  `--propamm-pair <IN,OUT>` additionally injects a mock PropAMM pool (see below).
 
 - **`report`** — Offline: read the `comparisons-YYYY-MM-DD.jsonl` files a `monitor` run wrote
   (`--comparisons-dir`) and render a single self-contained HTML file (`-o`, defaults to
   `<dir>/report.html`) with the dashboard's value views — the headline Fynd savings, win rate, and
   median savings bps; the verdict split by trade count and by volume; per-solver/venue breakdowns;
   top-saving trades; and the unsolved token tail. `--venue <name>` (repeatable, case-insensitive)
-  restricts the report to those venues. No chain, Tycho, or network access.
+  restricts the report to those venues. No chain, Tycho, or network access. Records from a
+  `--propamm-pair` run also get a "Mock PropAMM" section (winrate, captured flow, fee headroom, and
+  a per-order-pair breakdown).
 
 ## Environment
 
@@ -43,6 +46,9 @@ and takes neither.
 | `ALLIUM_API_KEY` | Allium API key (`verify` only) |
 | `ALLIUM_QUERY_ID` | Saved Allium query ID (`verify` only) |
 | `HINDSIGHT_REGISTRY` | Override path for the decoder address-book TOML |
+| `PROPAMM_PAIR` | Token pair the mock PropAMM mirrors, comma-separated (`monitor` only) |
+| `PROPAMM_OFFSETS_BPS` | Price offsets in bps off the public best route, e.g. `-5,0,5` |
+| `PROPAMM_PROBE_UNITS` | Trade size used to pick which real pool the mock mirrors |
 
 ## Architecture
 
@@ -100,6 +106,56 @@ self-contained HTML file.
 | `record.rs` | The subset of the JSONL record the report deserializes; round-trip tested against `jsonl::write_comparisons` |
 | `aggregate.rs` | Pure aggregations over the records (verdicts, coverage, savings, per-group, movers) |
 | `html.rs` | Renders the aggregates to a self-contained HTML file (inline CSS, `<div>` bars, no assets) |
+
+### Mock PropAMM (`src/propamm/`)
+
+Test scaffolding for ENG-6157 — sizes what a dynamic-underbidding PropAMM pool would win before the
+pool exists. Off unless `monitor --propamm-pair` is set.
+
+| File | Purpose |
+|---|---|
+| `mod.rs` | `Injector` — writes a synthetic exclusive component into the running solver's `MarketState` once per block and announces it on the market-event channel |
+| `mirror.rs` | `MirrorPool` — a `ProtocolSim` that delegates to the best real pool for the pair and scales its price by `--propamm-price-pct`, charging no fee |
+| `report.rs` | Per-order outcomes and run totals; `Record` is what lands in the comparisons JSONL |
+
+Each order on the mirrored pair is solved **twice**: once with the mock neutralised (scaled to one
+part per million, so it stays in the graph but loses every comparison), which yields the public best
+route Fynd would otherwise have quoted; then again with the mock rescaled so its output lands
+`--propamm-offsets-bps` off that number. So an offset means "this much better than the route Fynd
+would have quoted", not "this much better than some single pool".
+
+That makes every calibrated order an assertion. The report groups them by offset and judges each
+group against the behaviour its price implies:
+
+| offset | expectation |
+|---|---|
+| below market | never selected — the router requires a strict beat |
+| at market | can only win on gas, and then there is no surplus, so the fee must be zero |
+| above market | the fee taken cannot exceed the offset, since the offset is all the surplus there is |
+
+A group with no selections above market is reported as *no data*, not a failure: winning there
+depends on gas as well as price. Orders off the mirrored pair carry no offset and form no group —
+calibration is only exact when the mock serves the whole order in one hop.
+
+Fynd's existing exclusive-access routing does the rest: `FyndBuilder::exclusivity_policy` hides the
+mock from every configured worker pool, and each pool is twinned with a `liquidity_scope = "all"`
+copy that sees it. Because the router pins a surplus quote's `amount_out` to the public commitment,
+the mock never changes hindsight's own win/loss verdicts — it only adds this second measurement.
+
+Requires `fynd-core`'s `experimental` feature for `Solver::market_event_sender`. Not for production:
+the mock prices a pool that does not exist on chain, so any calldata it produces is unexecutable.
+
+Two things to get right when running it:
+
+- **Set `EXCLUSIVE_SWAP_CONTROLLER_KEY`** (any throwaway key — nothing is executed). The encoder
+  fails fast on an exclusive leg with no signer, which turns every win into a failed quote and
+  silently reports a zero winrate.
+- **Pick a pair that has flow.** Only orders whose own pair is the mirrored one get calibrated, and
+  those are a small slice of settled flow — 40 mainnet blocks yielded 9 calibrated orders on
+  ETH/USDT. On ethereum, ETH/USDC carries roughly twice ETH/USDT's volume; check a run's per-pair
+  table before committing to a long one. Filling the groups is a matter of blocks, so budget for it.
+- **`--min-tvl 10`** is mandatory against `tycho-fynd-ethereum`, which rejects any other value with
+  `tvl_gt must be == 10`.
 
 ### Verdict model
 
