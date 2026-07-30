@@ -25,6 +25,7 @@ pub mod config;
 
 use std::{
     collections::{HashMap, HashSet},
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 
@@ -47,13 +48,58 @@ use crate::{
     SolveParams, SurplusInfo,
 };
 
-/// Minimum improvement over the public route, in basis points of the public route's output net of
-/// gas, that an exclusive-access route must deliver before it is quoted.
+/// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
+/// first quote that overlays an exclusive-access candidate.
+const ENV_USER_IMPROVEMENT_SHARE_BPS: &str = "EXCLUSIVE_ROUTE_USER_SHARE_BPS";
+
+/// Share of an exclusive route's improvement over the public market that is handed to the user,
+/// in basis points of that improvement: `1_000` gives the user a tenth of it.
+const DEFAULT_USER_IMPROVEMENT_SHARE_BPS: u32 = 1_000;
+
+/// Basis-point denominator: `10_000` bps is the whole improvement.
+const BPS_DENOMINATOR: u32 = 10_000;
+
+/// The configured user share, parsed from [`ENV_USER_IMPROVEMENT_SHARE_BPS`].
+static USER_IMPROVEMENT_SHARE_BPS: LazyLock<u32> = LazyLock::new(user_improvement_share_bps_env);
+
+/// Reads the user share from the environment, falling back to
+/// [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`] when the variable is unset or unusable.
+fn user_improvement_share_bps_env() -> u32 {
+    let Ok(raw) = std::env::var(ENV_USER_IMPROVEMENT_SHARE_BPS) else {
+        return DEFAULT_USER_IMPROVEMENT_SHARE_BPS;
+    };
+    match parse_user_improvement_share_bps(&raw) {
+        Some(bps) => bps,
+        None => {
+            warn!(
+                value = %raw,
+                default_bps = DEFAULT_USER_IMPROVEMENT_SHARE_BPS,
+                "{ENV_USER_IMPROVEMENT_SHARE_BPS} must be an integer from 0 to \
+                 {BPS_DENOMINATOR} basis points; using the default",
+            );
+            DEFAULT_USER_IMPROVEMENT_SHARE_BPS
+        }
+    }
+}
+
+/// Parses a user share in basis points, rejecting anything above the whole improvement — a share
+/// over `10_000` bps would commit more output than the route produces.
+fn parse_user_improvement_share_bps(raw: &str) -> Option<u32> {
+    raw.trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|bps| *bps <= BPS_DENOMINATOR)
+}
+
+/// Returns the part of `improvement` handed to the user, `user_share_bps` of it.
 ///
-/// The margin goes to the user: the commitment is raised by it, so the protocol only captures what
-/// the route produces on top. A candidate that beats the public route by exactly this margin is
-/// still quoted, with zero surplus.
-const EXCLUSIVE_ROUTE_IMPROVEMENT_BPS: u64 = 1;
+/// Rounded up, so a share that would otherwise round away still moves the price in the user's
+/// favour. Never exceeds `improvement`, so the commitment it feeds stays within what the route
+/// produces.
+fn user_margin(improvement: &BigUint, user_share_bps: u32) -> BigUint {
+    let denominator = BigUint::from(BPS_DENOMINATOR);
+    (improvement * BigUint::from(user_share_bps) + (&denominator - 1u32)) / denominator
+}
 
 /// Which liquidity a solver pool (a group of workers) routes through, and therefore what its
 /// candidates mean in a quote.
@@ -269,6 +315,7 @@ impl WorkerPoolRouter {
                         request.options(),
                         public_ranked,
                         self.exclusivity_policy.as_ref(),
+                        *USER_IMPROVEMENT_SHARE_BPS,
                     )
                 } else {
                     self.rank_quotes(&responses, request.options())
@@ -645,10 +692,12 @@ impl WorkerPoolRouter {
 /// holds the candidates from `ExclusiveAccess`-scoped pools (routes that may use exclusive
 /// components).
 ///
-/// The user's net target is `required_net = public_net + margin`, where the margin is
-/// `EXCLUSIVE_ROUTE_IMPROVEMENT_BPS` of `public_net`. A candidate whose net output falls below
-/// `required_net` is skipped, so quoting an exclusive route always leaves the user better off than
-/// the public market by at least that margin.
+/// A candidate must at least match the public reference net of gas; what it produces on top,
+/// `improvement = exclusive_net − public_net`, is then split. The user's net target is
+/// `required_net = public_net + margin`, where `margin` is `user_share_bps` of `improvement` — so
+/// the mark-up is only as large as the route can afford, and a route with more to give quotes a
+/// better user price. Splitting the improvement rather than marking up the trade also puts the
+/// mark-up below a basis point of the trade whenever the improvement is small.
 ///
 /// The committed amount is the larger of two lower bounds:
 /// `max(public_amount_out, required_net + exclusive_gas)`. The first guarantees the quoted
@@ -665,7 +714,7 @@ impl WorkerPoolRouter {
 ///   more, but it is below `public_amount_out` — quoting less than the public market is ruled out,
 ///   so the gas difference stays with the user.
 ///
-/// If the best exclusive-access candidate clears `required_net` and produces at
+/// If the best exclusive-access candidate reaches `public_net` and produces at
 /// least the committed amount, this returns a new list whose head is the pinned surplus quote,
 /// followed by every public candidate as price-guard fallbacks. The pinned quote is the winning
 /// candidate with:
@@ -674,8 +723,9 @@ impl WorkerPoolRouter {
 /// - an order-level [`SurplusInfo`] attached (observability).
 ///
 /// Otherwise `public_ranked` is returned unchanged. Either way the user is never worse off than
-/// the public market — neither in quoted `amount_out` nor net of gas. A candidate that clears
-/// `required_net` exactly is quoted with zero surplus: the whole improvement goes to the user.
+/// the public market — neither in quoted `amount_out` nor net of gas. A candidate that ties the
+/// public reference is quoted, with zero surplus; the trade then executes on exclusive liquidity
+/// at the public price.
 ///
 /// Per-leg attribution: the route's excess over the committed amount (`realized − committed`)
 /// is deducted from the exclusive legs — each leg absorbs what it can, capped at its own output,
@@ -693,6 +743,7 @@ fn combine_with_surplus(
     options: &QuoteOptions,
     public_ranked: Vec<OrderQuote>,
     exclusivity_policy: Option<&ExclusivityPolicy>,
+    user_share_bps: u32,
 ) -> Vec<OrderQuote> {
     let Some(policy) = exclusivity_policy else {
         return public_ranked;
@@ -726,11 +777,14 @@ fn combine_with_surplus(
         return public_ranked;
     };
 
-    // The candidate route must beat the public reference net-of-gas by the improvement margin.
-    let required_net_amount_out = with_improvement_margin(committed.amount_out_net_gas());
-    if exclusive_candidate.amount_out_net_gas() < &required_net_amount_out {
+    // The candidate route must match the public reference net-of-gas; anything it produces on
+    // top is the improvement, of which the user keeps a share (the margin).
+    let public_net_amount_out = committed.amount_out_net_gas();
+    if exclusive_candidate.amount_out_net_gas() < public_net_amount_out {
         return public_ranked;
     }
+    let improvement = exclusive_candidate.amount_out_net_gas() - public_net_amount_out;
+    let required_net_amount_out = public_net_amount_out + user_margin(&improvement, user_share_bps);
 
     // Exact-in assumption: everything below compares and commits output amounts. For exact-out
     // orders this comparison would have to run on amount_in instead (see function docs).
@@ -749,9 +803,9 @@ fn combine_with_surplus(
 
     // The commitment is the larger of two lower bounds: the quoted amount_out is never below
     // the public market's, and the user — who pays the exclusive route's gas — never nets less
-    // than the public route would leave them plus the improvement margin (required_net + gas).
-    // Together with the net check above, these gates guarantee the route covers the committed
-    // amount.
+    // than the public route would leave them plus their share of the improvement (required_net +
+    // gas). The margin never exceeds the improvement, so together with the gates above the route
+    // always covers the committed amount.
     let committed_amount_out =
         (&required_net_amount_out + &exclusive_gas_cost).max(public_amount_out.clone());
 
@@ -832,17 +886,6 @@ fn combine_with_surplus(
     result.push(surplus_quote);
     result.extend(public_ranked);
     result
-}
-
-/// Returns `amount` raised by `EXCLUSIVE_ROUTE_IMPROVEMENT_BPS`.
-///
-/// The margin is rounded up and is at least one atomic unit, so it never rounds away on small
-/// amounts: an exclusive route that clears it always leaves the user strictly better off.
-fn with_improvement_margin(amount: &BigUint) -> BigUint {
-    let denominator = BigUint::from(10_000u64);
-    let margin = (amount * BigUint::from(EXCLUSIVE_ROUTE_IMPROVEMENT_BPS) + (&denominator - 1u64)) /
-        &denominator;
-    amount + margin.max(BigUint::from(1u64))
 }
 
 /// Returns `true` only for routes carrying exactly one exclusive leg, positioned as the terminal
@@ -1859,37 +1902,37 @@ mod tests {
         ])
     }
 
-    /// Head selection across the gate case matrix. Each route is given as `(gross, net)`;
-    /// expected is `(head amount_out, captured surplus)`. A surplus win prepends the pinned
-    /// quote to the public fallbacks; otherwise the public ranking is returned unchanged.
-    ///
-    /// The improvement margin on these amounts is 1 (the one-atomic-unit floor) except in the
-    /// 1_000_000 cases, where 1 bps is 100.
+    /// Head selection across the gate case matrix. Each route is given as `(gross, net)`, followed
+    /// by the user's share of the improvement in bps; expected is
+    /// `(head amount_out, head net, captured surplus)`. A surplus win prepends the pinned quote to
+    /// the public fallbacks; otherwise the public ranking is returned unchanged.
     #[rstest]
-    #[case::exclusive_beats_public((900, 900), (950, 950), (901, 901, Some(49)))]
-    #[case::exclusive_below_public((950, 950), (900, 900), (950, 950, None))]
-    #[case::exclusive_ties_public_net((900, 900), (900, 900), (900, 900, None))]
-    #[case::exclusive_marginally_better((999, 999), (1000, 1000), (1000, 1000, Some(0)))]
-    #[case::exclusive_cannot_cover_public_gross((1000, 950), (990, 980), (1000, 950, None))]
+    // A tenth of the 50 improvement goes to the user, the rest is captured.
+    #[case::exclusive_beats_public((900, 900), (950, 950), 1_000, (905, 905, Some(45)))]
+    #[case::exclusive_below_public((950, 950), (900, 900), 1_000, (950, 950, None))]
+    // A tie is quoted at the public price, with nothing to capture.
+    #[case::exclusive_ties_public_net((900, 900), (900, 900), 1_000, (900, 900, Some(0)))]
+    // An improvement of 1 rounds the user's tenth up to the whole unit, leaving zero surplus.
+    #[case::exclusive_marginally_better((999, 999), (1000, 1000), 1_000, (1000, 1000, Some(0)))]
+    #[case::exclusive_cannot_cover_public_gross((1000, 950), (990, 980), 1_000, (1000, 950, None))]
     // Gas-heavier exclusive route: the committed amount rises to max(1000, 951 + 140) = 1091 so
-    // the user nets the public 950 plus the margin; the protocol captures 1100 - 1091 = 9.
-    #[case::exclusive_with_higher_gas((1000, 950), (1100, 960), (1091, 951, Some(9)))]
-    // Gas-cheaper exclusive route: the public amount is the larger bound (committed = 1000);
-    // the user keeps the
-    // gas saving (nets 960) and the protocol captures 100.
-    #[case::exclusive_with_lower_gas((1000, 950), (1100, 1060), (1000, 960, Some(100)))]
-    // 1 bps of 1_000_000 is 100: a candidate only 50 better than the public route is rejected.
-    #[case::exclusive_below_margin((1_000_000, 1_000_000), (1_000_050, 1_000_050),
-        (1_000_000, 1_000_000, None))]
-    // Exactly at the margin: the route is quoted and the whole 100 goes to the user, surplus 0.
-    #[case::exclusive_at_margin((1_000_000, 1_000_000), (1_000_100, 1_000_100),
-        (1_000_100, 1_000_100, Some(0)))]
-    // Above the margin: the user gets the 100, the protocol captures the remaining 400.
-    #[case::exclusive_above_margin((1_000_000, 1_000_000), (1_000_500, 1_000_500),
-        (1_000_100, 1_000_100, Some(400)))]
+    // the user nets the public 950 plus a tenth of the 10 improvement; the protocol captures 9.
+    #[case::exclusive_with_higher_gas((1000, 950), (1100, 960), 1_000, (1091, 951, Some(9)))]
+    // Gas-cheaper exclusive route: the improvement (110) includes the gas saving, so the user
+    // nets 950 + 11 = 961 and the protocol captures 1100 - (961 + 40) = 99.
+    #[case::exclusive_with_lower_gas((1000, 950), (1100, 1060), 1_000, (1001, 961, Some(99)))]
+    // A 50 improvement on a 1_000_000 trade: the user's 5 is 0.05 bps of the trade, below what a
+    // mark-up on the trade itself could express.
+    #[case::sub_bps_markup((1_000_000, 1_000_000), (1_000_050, 1_000_050), 1_000,
+        (1_000_005, 1_000_005, Some(45)))]
+    // Zero share: the user is left at the public net and the protocol captures the improvement.
+    #[case::zero_share((900, 900), (950, 950), 0, (900, 900, Some(50)))]
+    // Full share: the whole improvement goes to the user and there is nothing left to capture.
+    #[case::full_share((900, 900), (950, 950), 10_000, (950, 950, Some(0)))]
     fn test_combine_head_selection(
         #[case] public: (u64, u64),
         #[case] exclusive: (u64, u64),
+        #[case] user_share_bps: u32,
         #[case] expected: (u64, u64, Option<u64>),
     ) {
         let (public_out, public_net) = public;
@@ -1907,6 +1950,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),
+            user_share_bps,
         );
 
         let expected_surplus = expected_surplus.map(BigUint::from);
@@ -1962,6 +2006,7 @@ mod tests {
             &options,
             public_ranked,
             Some(&policy),
+            1_000,
         );
 
         assert_eq!(combined.len(), 1);
@@ -1982,6 +2027,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),
+            1_000,
         );
 
         let surplus_quote = &combined[0];
@@ -1995,14 +2041,14 @@ mod tests {
             .expect("should have an exclusive swap");
 
         // committed_leg = leg.amount_out * committed_route_out / realized_route_out
-        // = 1000 * 901 / 1000 = 901
-        assert_eq!(perm_swap.committed_amount_out(), Some(&BigUint::from(901u64)),);
+        // = 1000 * 910 / 1000 = 910
+        assert_eq!(perm_swap.committed_amount_out(), Some(&BigUint::from(910u64)),);
     }
 
     #[test]
     fn test_combine_committed_leg_deduction() {
-        // leg = 995, committed = 901, realized = 1000: the route's excess (99) is deducted from
-        // the exclusive leg in full — committed_leg = 995 − 99 = 896, exactly, no rounding.
+        // leg = 995, committed = 910, realized = 1000: the route's excess (90) is deducted from
+        // the exclusive leg in full — committed_leg = 995 − 90 = 905, exactly, no rounding.
         let responses = OrderResponses {
             order_id: "test-order".to_string(),
             quotes: vec![
@@ -2031,6 +2077,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),
+            1_000,
         );
 
         let route = combined[0]
@@ -2041,7 +2088,19 @@ mod tests {
             .iter()
             .find(|s| policy.is_exclusive(s.protocol_component()))
             .expect("should have an exclusive swap");
-        assert_eq!(perm_swap.committed_amount_out(), Some(&BigUint::from(896u64)));
+        assert_eq!(perm_swap.committed_amount_out(), Some(&BigUint::from(905u64)));
+    }
+
+    #[rstest]
+    #[case::zero("0", Some(0))]
+    #[case::whole_improvement("10000", Some(10_000))]
+    #[case::padded(" 2500 ", Some(2_500))]
+    #[case::above_whole_improvement("10001", None)]
+    #[case::negative("-1", None)]
+    #[case::fractional("0.5", None)]
+    #[case::empty("", None)]
+    fn test_parse_user_improvement_share_bps(#[case] raw: &str, #[case] expected: Option<u32>) {
+        assert_eq!(parse_user_improvement_share_bps(raw), expected);
     }
 
     #[test]
@@ -2056,6 +2115,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked.clone(),
             None,
+            1_000,
         );
 
         assert_eq!(combined.len(), 1);
@@ -2064,9 +2124,9 @@ mod tests {
 
     #[test]
     fn test_combine_split_route_attribution() {
-        // Split route: public branch 600 + exclusive branch 500 = 1100 realized vs 1001
-        // committed (zero gas, 1 unit improvement margin). Only the exclusive leg is stamped;
-        // the public branch flows to the user untouched.
+        // Split route: public branch 600 + exclusive branch 500 = 1100 realized vs 1010
+        // committed (zero gas, a tenth of the 100 improvement to the user). Only the exclusive
+        // leg is stamped; the public branch flows to the user untouched.
         let responses = OrderResponses {
             order_id: "test-order".to_string(),
             quotes: vec![
@@ -2095,9 +2155,10 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             Some(&policy),
+            1_000,
         );
 
-        assert_eq!(*combined[0].amount_out(), BigUint::from(1001u64));
+        assert_eq!(*combined[0].amount_out(), BigUint::from(1010u64));
         let route = combined[0]
             .route()
             .expect("surplus quote should have a route");
@@ -2109,15 +2170,15 @@ mod tests {
         assert_eq!(public_leg.committed_amount_out(), None);
 
         // The public branch (600) pays out in full, so the entire excess
-        // (1100 − 1001 = 99) is deducted from the exclusive leg: committed_leg = 500 − 99 =
-        // 401. The user receives 600 + 401 = 1001 (exactly the committed amount) and the
-        // exclusive component captures all 99.
+        // (1100 − 1010 = 90) is deducted from the exclusive leg: committed_leg = 500 − 90 =
+        // 410. The user receives 600 + 410 = 1010 (exactly the committed amount) and the
+        // exclusive component captures all 90.
         let exclusive_leg = route
             .swaps()
             .iter()
             .find(|s| policy.is_exclusive(s.protocol_component()))
             .expect("should have an exclusive swap");
-        assert_eq!(exclusive_leg.committed_amount_out(), Some(&BigUint::from(401u64)));
+        assert_eq!(exclusive_leg.committed_amount_out(), Some(&BigUint::from(410u64)));
     }
 
     /// Builds an `OrderResponses` where both quotes carry explicit `amount_out_net_gas`.
