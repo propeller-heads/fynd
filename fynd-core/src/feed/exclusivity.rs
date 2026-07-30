@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use tycho_simulation::{
+    evm::protocol::ekubo_v3::EXCLUSIVE_EXTENSIONS,
     tycho_common::models::{protocol::ProtocolComponent, Address},
-    EXCLUSIVE_EXTENSIONS,
 };
 
 use crate::{
