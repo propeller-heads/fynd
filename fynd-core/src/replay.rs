@@ -13,7 +13,7 @@ use num_bigint::BigUint;
 use tycho_simulation::tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim};
 
 use crate::{
-    algorithm::split_primitives::split_amount,
+    algorithm::{sim_guard::GuardedProtocolSim, split_primitives::split_amount},
     feed::market_data::MarketState,
     types::{ComponentId, Route, Swap},
 };
@@ -122,7 +122,7 @@ pub fn replay_route(route: &Route, market: &MarketState) -> Result<RouteReplay, 
             .or_else(|| market.get_simulation_state(swap.component_id()))
             .ok_or_else(|| ReplayError::MissingState(swap.component_id().to_string()))?;
         let result = sim
-            .get_amount_out(amount_in, token_in, token_out)
+            .get_amount_out_guarded(amount_in, token_in, token_out)
             .map_err(|e| ReplayError::Simulation {
                 component_id: swap.component_id().to_string(),
                 error: e.to_string(),
