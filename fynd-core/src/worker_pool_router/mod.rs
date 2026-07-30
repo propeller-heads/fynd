@@ -237,6 +237,18 @@ impl WorkerPoolRouter {
         self.solver_pools.len()
     }
 
+    /// Returns `true` when surplus routing is active: it needs both scopes configured — a
+    /// [`LiquidityScope::PublicOnly`] pool for the committed reference and a
+    /// [`LiquidityScope::All`] pool that may beat it.
+    fn surplus_routing_active(&self) -> bool {
+        self.solver_pools
+            .iter()
+            .any(|p| p.liquidity_scope() == LiquidityScope::All) &&
+            self.solver_pools
+                .iter()
+                .any(|p| p.liquidity_scope() == LiquidityScope::PublicOnly)
+    }
+
     /// Returns a quote by fanning out to all solver pools.
     ///
     /// For each order in the request:
@@ -284,14 +296,7 @@ impl WorkerPoolRouter {
             .iter()
             .map(|p| (p.name().to_string(), p.liquidity_scope()))
             .collect();
-        // Surplus routing needs both scopes: a `public_only` pool for the committed reference
-        // and an `all` pool that may beat it.
-        let surplus_routing_active = pool_scopes
-            .values()
-            .any(|r| *r == LiquidityScope::All) &&
-            pool_scopes
-                .values()
-                .any(|r| *r == LiquidityScope::PublicOnly);
+        let surplus_routing_active = self.surplus_routing_active();
 
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
         // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
@@ -404,17 +409,16 @@ impl WorkerPoolRouter {
             .collect();
 
         // Pre-compute which worker pool names have the exclusive-access (`All`) scope, for
-        // scope-aware early return gating. The gating only applies when both scopes are
-        // configured — the surplus overlay then needs one response from each; with a single
-        // scope (e.g. every worker pool on the `All` default), plain count-based gating applies.
+        // scope-aware early return gating. The gating only applies when surplus routing is
+        // active — the surplus overlay then needs one response from each scope; otherwise plain
+        // count-based gating applies.
         let exclusive_access_pool_names: HashSet<String> = self
             .solver_pools
             .iter()
             .filter(|p| p.liquidity_scope() == LiquidityScope::All)
             .map(|p| p.name().to_string())
             .collect();
-        let surplus_routing_active = !exclusive_access_pool_names.is_empty() &&
-            exclusive_access_pool_names.len() < self.solver_pools.len();
+        let surplus_routing_active = self.surplus_routing_active();
 
         let mut quotes = Vec::new();
         let mut failed_solvers: Vec<(String, SolveError)> = Vec::new();
