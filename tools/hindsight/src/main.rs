@@ -10,8 +10,10 @@ use std::time::Instant;
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
+use fynd_core::types::parse_chain;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+use tycho_simulation::tycho_common::models::Chain;
 
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
@@ -55,6 +57,26 @@ pub(crate) struct ChainArgs {
     /// Decoder address-book TOML (defaults to the chain's built-in book)
     #[arg(long, env = "HINDSIGHT_REGISTRY")]
     pub registry: Option<std::path::PathBuf>,
+}
+
+impl ChainArgs {
+    /// The decoder address book for this run: `--registry`'s file when given, otherwise the book
+    /// built in for `--chain`.
+    ///
+    /// The file wins, and is read without parsing the chain name at all, so a chain with no
+    /// built-in book — or one Tycho does not know — is still decodable by supplying its book.
+    pub(crate) fn load_registry(&self) -> anyhow::Result<Registry> {
+        match self.registry.as_deref() {
+            Some(path) => Registry::from_file(path),
+            None => Registry::builtin(self.chain()?),
+        }
+    }
+
+    /// The parsed `--chain`, so a chain name is turned into a `Chain` once, by `fynd_core`'s
+    /// parser, rather than being matched on as a string wherever it is needed.
+    pub(crate) fn chain(&self) -> anyhow::Result<Chain> {
+        parse_chain(&self.name).map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", self.name))
+    }
 }
 
 /// Block selection shared by the decode and verify subcommands.
@@ -153,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.chain.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
-    let registry = Registry::load(&args.chain.name, args.chain.registry.as_deref())?;
+    let registry = args.chain.load_registry()?;
     let mut decoder = Decoder::new(provider, registry);
 
     let mut all_trades = Vec::new();
@@ -193,7 +215,7 @@ async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.chain.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
     let allium = AlliumClient::new(args.allium_key, args.allium_query_id);
-    let registry = Registry::load(&args.chain.name, args.chain.registry.as_deref())?;
+    let registry = args.chain.load_registry()?;
     let mut decoder = Decoder::new(provider, registry);
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");

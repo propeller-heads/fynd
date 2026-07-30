@@ -22,8 +22,7 @@ use alloy::{
 use async_trait::async_trait;
 use fynd_core::{
     types::{
-        parse_chain, EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest,
-        QuoteStatus,
+        EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, QuoteStatus,
     },
     BlockStepController, FyndBuilder, Solver,
 };
@@ -92,8 +91,13 @@ pub(crate) struct MonitorArgs {
     #[arg(long, env = "WORKER_POOLS_CONFIG", default_value = "worker_pools.toml")]
     pub worker_pools_config: std::path::PathBuf,
 
-    /// Per-quote timeout in milliseconds
-    #[arg(long, default_value_t = 10_000)]
+    /// Per-quote timeout in milliseconds. Defaults to the budget `fynd serve` gives a real quote,
+    /// because the comparison only means "what would Fynd have returned" if Fynd is given the same
+    /// time it would have had in production. A request-level timeout overrides the router's
+    /// default outright (see `WorkerPoolRouter::effective_timeout`), so a generous value here
+    /// silently hands the re-solve more time than any production quote gets — overstating
+    /// savings — and, on a sub-second chain, lets one solve outlast several blocks.
+    #[arg(long, default_value_t = fynd_rpc::config::defaults::WORKER_ROUTER_TIMEOUT_MS)]
     pub timeout_ms: u64,
 
     /// Serve Prometheus metrics on this port
@@ -456,8 +460,7 @@ async fn rebuild_after_feed_death<S: Future<Output = ()>>(
 /// Ctrl-C stops the run cleanly at any await point, tearing the current solver down before
 /// returning.
 pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
-    let chain = parse_chain(&cfg.chain.name)
-        .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.chain.name))?;
+    let chain = cfg.chain.chain()?;
 
     // Expand protocol tokens (e.g. `native_onchain`/`all_onchain`) against Tycho, like serve/scale.
     let protocols = fynd_rpc::protocols::resolve_protocols(
@@ -488,10 +491,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
             )?
         };
 
-    let mut decoder = Decoder::new(
-        provider_from(&cfg.chain.rpc_url)?,
-        Registry::load(&cfg.chain.name, cfg.chain.registry.as_deref())?,
-    );
+    let mut decoder = Decoder::new(provider_from(&cfg.chain.rpc_url)?, cfg.chain.load_registry()?);
 
     if let Some(port) = cfg.metrics_port {
         telemetry::install_exporter(port)?;
@@ -812,7 +812,7 @@ mod tests {
             min_tvl: 10_000.0,
             tycho_api_key: api_key,
             worker_pools_config: std::path::PathBuf::from("worker_pools.toml"),
-            timeout_ms: 10_000,
+            timeout_ms: fynd_rpc::config::defaults::WORKER_ROUTER_TIMEOUT_MS,
             metrics_port: None,
             max_blocks: Some(1),
             max_lag_blocks: Some(100),

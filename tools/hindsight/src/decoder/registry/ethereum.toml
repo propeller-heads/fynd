@@ -33,6 +33,11 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 # 0x Exchange Proxy (legacy) and AllowanceHolder (Settler)
 "0xdef1c0ded9bec7f1a1670819833240f027b25eff" = "0x"
 "0x0000000000001ff3684f28c67538d4d072c22734" = "0x"
+# 0x Settler itself. 0x redeploys Settler and tells integrators not to hardcode it, but order flow
+# enters through Settler directly as well as through AllowanceHolder — 380 of Coinbase's fee legs in
+# an 8k-block sample came from it — so without it those swaps never match. Re-derive from 0x's
+# registry (0x00000000000004533Fe15556B1E086BB1A72cEae, `ownerOf(2)`) when coverage drops.
+"0x0889e9327b98d7d1be3c301a4585ff3330502c9a" = "0x"
 # CoW Protocol Settlement
 "0x9008d19f58aabd9ed0d60971565aa8510560ab41" = "cow"
 # ParaSwap Augustus v6.2
@@ -174,6 +179,11 @@ fee_collectors = []
 # Robinhood Wallet: fee wallet confirmed 2026-07-17 (swaps are ERC-4337; identify by the fee leg,
 # never the bundler sender).
 "0xad01c20d5886137e056775af56915de824c8fce5" = "robinhood"
+# Coinbase's Base App (the renamed Coinbase Wallet), whose current flow the venue section above no
+# longer catches: 943 fee legs in an 8k-block sample, 516 paid by the LiFi Diamond and 380 by the 0x
+# Settler. Unlike Phantom's and Robinhood's, this 0.95% cut is skimmed off the SELL token before
+# routing, so it is netted out of the input rather than added to the output.
+"0x5aafc1f252d544f744d17a4e734afd6efc47ede4" = "coinbase"
 
 # Venues identified by the integrator tag a provider records in its swap event. LiFi frontends
 # route through the shared LiFi Diamond, so the integrator string in LiFiGenericSwapCompleted /
@@ -181,6 +191,9 @@ fee_collectors = []
 [venue_integrators]
 "infinex" = "infinex"
 "robinhood" = "robinhood"
+# Coinbase's Base App, kept alongside its fee wallet above so its LiFi leg still attributes if the
+# fee is ever waived.
+"base-app" = "coinbase"
 
 # Venues identified by the appData hash a CoW order carries: appCode names the frontend that
 # built the order. CoW commits this hash into each order; it appears in the settle calldata, not

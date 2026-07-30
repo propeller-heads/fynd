@@ -28,6 +28,11 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x1111111254eeb25477b68fb85ed929f73a960582" = "1inch"
 # 0x Settler AllowanceHolder (same address as mainnet)
 "0x0000000000001ff3684f28c67538d4d072c22734" = "0x"
+# 0x Settler itself. 0x redeploys Settler and tells integrators not to hardcode it, but Base order
+# flow enters through Settler directly as well as through AllowanceHolder — 628 of Coinbase's fee
+# legs in an 8k-block sample came from it — so without it those swaps never match. Re-derive from
+# 0x's registry (0x00000000000004533Fe15556B1E086BB1A72cEae, `ownerOf(2)`) when coverage drops.
+"0x7747f8d2a76bd6345cc29622a946a929647f2359" = "0x"
 # CoW Protocol Settlement
 "0x9008d19f58aabd9ed0d60971565aa8510560ab41" = "cow"
 # ParaSwap Augustus v6.2 (same address as mainnet)
@@ -95,10 +100,21 @@ fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
 fee_collectors = []
 
+# Venues identified by the fee they take on a shared router. Coinbase's Base App is the heaviest
+# such venue on Base by a wide margin — 2942 fee legs in an 8k-block sample, 2292 paid by the LiFi
+# Diamond and 628 by the 0x Settler. Its 0.95% cut is skimmed off the SELL token before routing, so
+# it is netted out of the input rather than added to the output; before this entry those swaps
+# decoded as plain `lifi`/`0x` trades with the fee still inside the amount in, which overstated
+# Fynd's savings on that flow.
+[venue_fees]
+"0x5aafc1f252d544f744d17a4e734afd6efc47ede4" = "coinbase"
+
 # LiFi frontends identified by the integrator tag in the LiFi swap event (Infinex's volume is
-# heavier on Base than on mainnet). Keys are lowercase.
+# heavier on Base than on mainnet). Keys are lowercase. `base-app` is Coinbase's Base App, kept
+# alongside its fee wallet above so its LiFi leg still attributes if the fee is ever waived.
 [venue_integrators]
 "infinex" = "infinex"
+"base-app" = "coinbase"
 
 # Venues identified by the appData hash a CoW order carries (appCode names the frontend). CoW
 # settles on Base too, and the hash is the same across chains. Keyed by the 32-byte appData hash.

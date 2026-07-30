@@ -1,0 +1,96 @@
+# Unichain (chain-id 130) address book for trade decoding. Same structure as ethereum.toml — see it
+# and registry.rs for what each section drives. Addresses gathered 2026-07-29.
+#
+# Accuracy note: a wrong or missing *solver* address only costs coverage (the swap fails to
+# match), but a wrong *venue fee collector* produces wrong records (the fee stays inside the
+# amounts). Every contract below was checked to be deployed on Unichain mainnet.
+#
+# Unichain is the thinnest of the chains Hindsight covers, and several things live elsewhere are
+# absent here, each checked rather than assumed (2026-07-29):
+#   - CoW Protocol: the settlement contract is deployed but emitted no Trade event in a 20k-block
+#     sample, so there are no batch settlers and no CoW-appData venue tier.
+#   - LiFi: the Diamond has no code on Unichain, so no LiFi solver and no integrator-tagged venues
+#     (Infinex, Robinhood's LiFi leg).
+#   - MetaMask: its router is deployed but took no traffic and its fee wallets received nothing.
+#   - Rainbow: its router is deployed but sent no tokens in a 40k-block sample.
+#   - OKX: the Unichain row in OKX's published deployments is the chain-id 1301 testnet, and
+#     neither published address embeds OKX's proxies on Unichain mainnet, so no OKX router is
+#     recorded until one is verified.
+#   - 1inch v5: not deployed (v6 is).
+#   - Coinbase Wallet: both swap proxies from the Ethereum book have no code here, and its fee
+#     wallet received nothing. Coinbase's own mainnet proxies went quiet in late 2025 (its current
+#     flow needs re-deriving there too), so there is no known entry point to key on — a section
+#     with mainnet addresses would decode nothing.
+
+# Wrapped-native token: WETH on Unichain (canonical OP-stack predeploy).
+wrapped_native = "0x4200000000000000000000000000000000000006"
+
+# Permit2 — same deterministic address on every chain.
+infrastructure = ["0x000000000022d473030f116ddee9f6b43ac78ba3"] # Permit2
+
+# No batch settlers: CoW does not settle on Unichain (see the header note).
+batch_settlers = []
+
+# Stablecoins anchoring the native token to USD (address = decimals).
+[usd_stablecoins]
+"0x078d782b760474a361dda0af3839290b0ef57ad6" = 6  # USDC (native, Circle)
+"0x9151434b16b9763660705744891fa906f660ecc5" = 6  # USD₮0 (Tether)
+"0x20cab320a855b39f724131c69424240519573f81" = 18 # DAI
+
+# Solver routers — the venue that actually settles a swap.
+[solvers]
+# 1inch v6 Aggregation Router (same deterministic address as mainnet)
+"0x111111125421ca6dc452d289314280a0f8842a65" = "1inch"
+# 0x Settler AllowanceHolder — the stable entry, same address on every Cancun chain
+"0x0000000000001ff3684f28c67538d4d072c22734" = "0x"
+# 0x Settler itself, the contract AllowanceHolder hands off to. 0x redeploys Settler and tells
+# integrators not to hardcode it; this is the deployment observed settling a Robinhood swap.
+# Re-derive from 0x's registry (0x00000000000004533Fe15556B1E086BB1A72cEae, `ownerOf(2)`) when
+# coverage drops.
+"0x972655facb8df3cdf40395e4262f874f81674d46" = "0x"
+# ParaSwap Augustus v6.2 (same address as mainnet)
+"0x6a000f20005980200259b80c5102003040001068" = "paraswap"
+# KyberSwap MetaAggregationRouter v2 (same address as mainnet)
+"0x6131b5fae19ea4f9d964eac0408e4408b66337b5" = "kyberswap"
+# Uniswap Universal Router (v4-era) and SwapRouter02. Unichain is Uniswap's own chain, so this is
+# where most of its swap flow settles.
+"0xef740bf23acae26f6492b10de645d6b98dc8eaf3" = "uniswap"
+"0x73855d06de49d0fe4a9c42636ba96c62da12ff9c" = "uniswap"
+# Tycho (PropellerHeads) routers on Unichain: V3 and the V2 deployment still in use
+# (tycho-execution config/router_addresses.json and the contract-addresses docs)
+"0x764bc67b1036b00bc91221e988261f971a1c7ce4" = "tycho"
+"0xffa5ec2e444e4285108e4a17b82da495c178427b" = "tycho"
+# Fly (formerly Magpie) DexAggregator — same address on most chains
+# (docs.fly.trade/developers/deployments)
+"0x20f6ee51340adeed01a59b0e65cb3703f3dc860c" = "fly"
+
+# Venues. Relay's Unichain contracts and fee collector are the same addresses as mainnet; its
+# routers are the Cancun-EVM deployment. Traffic is thin (5 fee legs to 0xf70da978… in a 20k-block
+# sample) but real.
+[venues.relay]
+entry_points = [
+    "0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222",
+    "0x3ec130b627944cad9b2750300ecb0a695da522b6",
+    "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f",
+    "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
+    "0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7",
+]
+fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
+
+# Rabby SwapProxy — same address as mainnet. Verified on-chain: a decoded Uniswap-v4-routed swap
+# through the proxy paid its 0.25% fee to 0xcd6b9800… (mainnet fee wallet 1); the historical wallet
+# 0x39041f… is unused on Unichain. As on mainnet, only the proxy is an entry point — shared-router
+# Rabby swaps are recognised by the fee leg (see rabby.rs), not by tx.to.
+[venues.rabby]
+entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
+fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
+
+# Venues identified by the fee they take on a shared router. Verified on-chain: a decoded swap
+# entered through 0x's AllowanceHolder and paid Robinhood's wallet, so the leg is a real fee and
+# not a dust spray. Phantom is not live on Unichain — its wallets took nothing in a 20k-block
+# sample — so it is absent here.
+[venue_fees]
+"0xad01c20d5886137e056775af56915de824c8fce5" = "robinhood"
+
+# No Unichain-specific label data yet (display-only tier).
+[labels]
