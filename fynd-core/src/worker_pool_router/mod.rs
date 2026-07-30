@@ -739,7 +739,7 @@ fn combine_with_surplus(
     let committed_amount_out =
         (committed.amount_out_net_gas() + &exclusive_gas_cost).max(public_amount_out.clone());
 
-    // What the hooks capture: everything the route produces above the commitment.
+    // What the exclusive components capture: everything the route produces above the commitment.
     let surplus_amount = exclusive_route_amount_out - &committed_amount_out;
 
     // Pin the winning candidate: stamp per-leg committed amounts, pin amount_out to committed,
@@ -2071,8 +2071,8 @@ mod tests {
 
         // The public branch (600) pays out in full, so the entire excess
         // (1100 − 1000 = 100) is deducted from the exclusive leg: committed_leg = 500 − 100 =
-        // 400. The user receives 600 + 400 = 1000 (exactly the committed amount) and the hook
-        // captures all 100.
+        // 400. The user receives 600 + 400 = 1000 (exactly the committed amount) and the
+        // exclusive component captures all 100.
         let exclusive_leg = route
             .swaps()
             .iter()
