@@ -283,7 +283,7 @@ fn order_quote_to_outcome(quote: &OrderQuote, symbols: &HashMap<CoreAddress, Str
         route: route_summary(quote, symbols),
         quote_json,
         // Kept in memory so the route can be re-executed at back-of-block.
-        solved_route: quote.route().cloned(),
+        solved_route: quote.route().cloned().map(Box::new),
     })
 }
 

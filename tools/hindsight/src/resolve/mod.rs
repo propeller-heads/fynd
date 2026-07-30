@@ -56,9 +56,10 @@ pub(crate) struct SolvedAmount {
     /// The solved route, kept in memory so [`SteppingSolver::reexecute`] can replay it at
     /// back-of-block. `None` for re-executed results and mocks. Not serialized (the slim
     /// projection in `quote_json` covers the JSONL) and excluded from equality (a route carries
-    /// unserializable, incomparable protocol states).
+    /// unserializable, incomparable protocol states). Boxed so a route-carrying `SolvedAmount`
+    /// doesn't blow up `Outcome`'s size relative to its other variants.
     #[serde(skip)]
-    pub solved_route: Option<Route>,
+    pub solved_route: Option<Box<Route>>,
 }
 
 impl PartialEq for SolvedAmount {

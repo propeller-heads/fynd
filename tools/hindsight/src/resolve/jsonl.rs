@@ -392,8 +392,9 @@ mod tests {
             .starts_with("0x"));
     }
 
-    #[test]
-    fn test_improvement_record_top_and_back() {
+    /// Shared fixture for the top/back improvement and route-attribution tests: a win at both
+    /// states, with the top route re-executing to the same output the fresh back solve finds.
+    fn improvement_record_top_and_back() -> serde_json::Value {
         let usdc: Address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
             .parse()
             .unwrap();
@@ -456,7 +457,12 @@ mod tests {
         });
         let range = build_range(&trade, &prices, top, back.clone(), &back);
 
-        let rec = comparison_record(&range, &prices, &prices);
+        comparison_record(&range, &prices, &prices)
+    }
+
+    #[test]
+    fn test_improvement_record_top_and_back() {
+        let rec = improvement_record_top_and_back();
         let top_usd = rec
             .pointer("/top/improvement_usd")
             .unwrap()
@@ -506,6 +512,11 @@ mod tests {
                 .unwrap(),
             "uniswap_v3"
         );
+    }
+
+    #[test]
+    fn test_improvement_record_attributes_the_winning_route() {
+        let rec = improvement_record_top_and_back();
         // Route attribution is flat on the state, so grouping by algorithm or protocol does not
         // have to walk the nested per-hop route.
         assert_eq!(rec.pointer("/top/algorithm").unwrap(), "bellman_ford");
