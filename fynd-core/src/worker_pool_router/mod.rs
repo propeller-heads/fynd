@@ -42,10 +42,9 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
-    encoding::encoder::Encoder, feed::exclusivity::ExclusivityPolicy,
-    price_guard::guard::PriceGuard, worker_pool::task_queue::TaskQueueHandle, BlockInfo,
-    EncodingOptions, Order, OrderQuote, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError,
-    SolveParams, SurplusInfo,
+    encoding::encoder::Encoder, feed::exclusivity::is_exclusive, price_guard::guard::PriceGuard,
+    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote, Quote,
+    QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams, SurplusInfo,
 };
 
 /// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
@@ -104,11 +103,13 @@ fn user_margin(improvement: &BigUint, user_share_bps: u32) -> BigUint {
 /// Which liquidity a solver pool (a group of workers) routes through, and therefore what its
 /// candidates mean in a quote.
 ///
-/// A public worker pool routes only through public liquidity and provides the committed (quoted)
-/// reference output; its workers are given the [`ExclusivityPolicy`] so exclusive components
-/// never enter their graphs. An exclusive-access worker pool routes through all liquidity, public
-/// and exclusive components alike, and may beat that reference — in which case the protocol
-/// captures the surplus.
+/// A `PublicOnly` worker pool routes only through public liquidity and provides the committed
+/// (quoted) reference output; its workers filter exclusive components out of their graphs. An
+/// `All` worker pool applies no filtering — its workers ingest whatever the deployment's stream
+/// delivers. In a deployment opted into exclusive components at the stream filter, an `All`
+/// worker pool may beat the public reference — in which case the protocol captures the surplus.
+/// Without that opt-in, no exclusive components ever arrive and the two scopes behave
+/// identically.
 ///
 /// Serialized in snake_case (`"public_only"` / `"all"`) in `worker_pools.toml` via
 /// [`PoolConfig`].
@@ -117,11 +118,12 @@ fn user_margin(improvement: &BigUint, user_share_bps: u32) -> BigUint {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiquidityScope {
-    /// Routes through public liquidity only. Establishes the committed reference output. Default.
-    #[default]
+    /// Routes through public liquidity only, establishing the committed reference output.
     PublicOnly,
-    /// Routes through all liquidity, public and exclusive components alike; candidates from
-    /// this scope may capture surplus above the public reference.
+    /// No filtering: routes through whatever the stream delivers, exclusive components
+    /// included if the deployment opted into them. Candidates from this scope may capture
+    /// surplus above the public reference.
+    #[default]
     All,
 }
 
@@ -137,13 +139,13 @@ pub struct SolverPoolHandle {
 }
 
 impl SolverPoolHandle {
-    /// Creates a new solver pool handle with the default [`LiquidityScope::PublicOnly`] scope.
+    /// Creates a new solver pool handle with the default [`LiquidityScope::All`] scope.
     pub fn new(name: impl Into<String>, queue: TaskQueueHandle) -> Self {
-        Self { name: name.into(), queue, liquidity_scope: LiquidityScope::PublicOnly }
+        Self { name: name.into(), queue, liquidity_scope: LiquidityScope::default() }
     }
 
-    /// Sets the worker pool's liquidity scope (e.g. [`LiquidityScope::All`] for a worker pool
-    /// that routes through exclusive liquidity as well).
+    /// Sets the worker pool's liquidity scope (e.g. [`LiquidityScope::PublicOnly`] for a worker
+    /// pool that establishes the committed public reference).
     pub fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = scope;
         self
@@ -210,9 +212,6 @@ pub struct WorkerPoolRouter {
     /// Validates solution outputs against external price sources.
     /// Present when the server has price guard enabled; `None` when disabled.
     price_guard: Option<PriceGuard>,
-    /// Predicate identifying the exclusive legs in exclusive-access routes. `None` when no
-    /// exclusive components are configured.
-    exclusivity_policy: Option<ExclusivityPolicy>,
 }
 
 impl WorkerPoolRouter {
@@ -222,13 +221,7 @@ impl WorkerPoolRouter {
         config: WorkerPoolRouterConfig,
         encoder: Encoder,
     ) -> Self {
-        Self { solver_pools, config, encoder, price_guard: None, exclusivity_policy: None }
-    }
-
-    /// Attaches the policy used to identify exclusive legs in exclusive-access routes.
-    pub fn with_exclusivity_policy(mut self, policy: ExclusivityPolicy) -> Self {
-        self.exclusivity_policy = Some(policy);
-        self
+        Self { solver_pools, config, encoder, price_guard: None }
     }
 
     /// Makes price guard validation available for this router.
@@ -292,20 +285,24 @@ impl WorkerPoolRouter {
             .iter()
             .map(|p| (p.name().to_string(), p.liquidity_scope()))
             .collect();
-        let has_exclusive_access_pool = pool_scopes
+        // Surplus routing needs both scopes: a `public_only` pool for the committed reference
+        // and an `all` pool that may beat it.
+        let surplus_routing_active = pool_scopes
             .values()
-            .any(|r| *r == LiquidityScope::All);
+            .any(|r| *r == LiquidityScope::All) &&
+            pool_scopes
+                .values()
+                .any(|r| *r == LiquidityScope::PublicOnly);
 
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
         // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
-        // fallback chain. When an `ExclusiveAccess`-scoped worker pool is configured, the winning
-        // exclusive-access candidate is overlaid
-        // onto that ranked list (prepended) by `combine_with_surplus`, so the fallbacks are
-        // preserved.
+        // fallback chain. When both scopes are configured, the winning exclusive-access
+        // candidate is overlaid onto that ranked list (prepended) by `combine_with_surplus`, so
+        // the fallbacks are preserved.
         let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
             .into_iter()
             .map(|responses| {
-                if has_exclusive_access_pool {
+                if surplus_routing_active {
                     let public_ranked =
                         self.rank_quotes(&responses.public_only(&pool_scopes), request.options());
                     combine_with_surplus(
@@ -313,7 +310,6 @@ impl WorkerPoolRouter {
                         &pool_scopes,
                         request.options(),
                         public_ranked,
-                        self.exclusivity_policy.as_ref(),
                         *USER_IMPROVEMENT_SHARE_BPS,
                     )
                 } else {
@@ -408,15 +404,18 @@ impl WorkerPoolRouter {
             })
             .collect();
 
-        // Pre-compute which worker pool names have the ExclusiveAccess scope, for scope-aware
-        // early return gating.
+        // Pre-compute which worker pool names have the exclusive-access (`All`) scope, for
+        // scope-aware early return gating. The gating only applies when both scopes are
+        // configured — the surplus overlay then needs one response from each; with a single
+        // scope (e.g. every worker pool on the `All` default), plain count-based gating applies.
         let exclusive_access_pool_names: HashSet<String> = self
             .solver_pools
             .iter()
             .filter(|p| p.liquidity_scope() == LiquidityScope::All)
             .map(|p| p.name().to_string())
             .collect();
-        let has_exclusive_access_pool = !exclusive_access_pool_names.is_empty();
+        let surplus_routing_active = !exclusive_access_pool_names.is_empty() &&
+            exclusive_access_pool_names.len() < self.solver_pools.len();
 
         let mut quotes = Vec::new();
         let mut failed_solvers: Vec<(String, SolveError)> = Vec::new();
@@ -466,12 +465,11 @@ impl WorkerPoolRouter {
                             // Extract the OrderQuote from SingleOrderQuote
                             quotes.push((pool_name.clone(), single_quote.order().clone()));
 
-                            // Scope-aware early return: when an exclusive-access worker pool is
-                            // configured, only fire once we have ≥1 public response AND the
-                            // exclusive-access worker pool's response (so the surplus overlay has
-                            // both inputs). Without an exclusive-access worker pool, use pure
+                            // Scope-aware early return: when surplus routing is active, only
+                            // fire once we have ≥1 public AND ≥1 exclusive-access response (so
+                            // the surplus overlay has both inputs). Otherwise, use pure
                             // count-based gating (original behaviour).
-                            let scope_ready = if has_exclusive_access_pool {
+                            let scope_ready = if surplus_routing_active {
                                 has_public_response && has_exclusive_access_response
                             } else {
                                 true
@@ -741,13 +739,8 @@ fn combine_with_surplus(
     pool_scopes: &HashMap<String, LiquidityScope>,
     options: &QuoteOptions,
     public_ranked: Vec<OrderQuote>,
-    exclusivity_policy: Option<&ExclusivityPolicy>,
     user_share_bps: u32,
 ) -> Vec<OrderQuote> {
-    let Some(policy) = exclusivity_policy else {
-        return public_ranked;
-    };
-
     let committed = match public_ranked.first() {
         Some(q) if q.status() == QuoteStatus::Success => q,
         _ => return public_ranked,
@@ -765,7 +758,7 @@ fn combine_with_surplus(
                 .map(|max| q.gas_estimate() <= max)
                 .unwrap_or(true)
         })
-        .filter(|(_, q)| has_valid_exclusive_route(q, policy))
+        .filter(|(_, q)| has_valid_exclusive_route(q))
         .max_by(|(_, a), (_, b)| {
             a.amount_out_net_gas()
                 .cmp(b.amount_out_net_gas())
@@ -841,7 +834,7 @@ fn combine_with_surplus(
         // Each leg absorbs up to its path's capacity; any remainder is left with the user.
         let mut surplus = exclusive_route_amount_out - &committed_amount_out;
         for (i, swap) in route.swaps_mut().iter_mut().enumerate() {
-            if policy.is_exclusive(swap.protocol_component()) {
+            if is_exclusive(swap.protocol_component()) {
                 let Some(path_final_out) = path_final_outs.get(i) else {
                     continue;
                 };
@@ -898,7 +891,7 @@ fn combine_with_surplus(
 /// token, and multiple exclusive legs make the per-component attribution non-unique. Both are
 /// deferred to a future version. Terminal is defined as producing the route's overall output
 /// token (`Route::output_token`).
-fn has_valid_exclusive_route(quote: &OrderQuote, policy: &ExclusivityPolicy) -> bool {
+fn has_valid_exclusive_route(quote: &OrderQuote) -> bool {
     let Some(route) = quote.route() else {
         return false;
     };
@@ -915,7 +908,7 @@ fn has_valid_exclusive_route(quote: &OrderQuote, policy: &ExclusivityPolicy) -> 
     let mut exclusive_count = 0;
 
     for swap in swaps {
-        if !policy.is_exclusive(swap.protocol_component()) {
+        if !is_exclusive(swap.protocol_component()) {
             continue;
         }
 
@@ -1024,6 +1017,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
+        feed::exclusivity::mark_exclusive,
         types::internal::SolveTask,
         EncodingOptions, OrderSide, Route, SingleOrderQuote, Swap,
     };
@@ -1295,6 +1289,7 @@ mod tests {
                 Err(SolveError::NoRouteFound { order_id: "test-order".to_string(), reason: None })
             }
         };
+        let public_pool = public_pool.with_liquidity_scope(LiquidityScope::PublicOnly);
         let (exclusive_pool, exclusive_worker) =
             create_mock_pool("exclusive_pool", exclusive_response, exclusive_delay_ms.unwrap_or(0));
         let exclusive_pool = exclusive_pool.with_liquidity_scope(LiquidityScope::All);
@@ -1303,8 +1298,7 @@ mod tests {
             .with_timeout(Duration::from_millis(2000))
             .with_min_responses(1);
         let worker_router =
-            WorkerPoolRouter::new(vec![public_pool, exclusive_pool], config, default_encoder())
-                .with_exclusivity_policy(exclusive_policy());
+            WorkerPoolRouter::new(vec![public_pool, exclusive_pool], config, default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let start = Instant::now();
@@ -1685,10 +1679,6 @@ mod tests {
         assert_eq!(*result[1].amount_out_net_gas(), BigUint::from(800u64));
     }
 
-    fn exclusive_policy() -> ExclusivityPolicy {
-        ExclusivityPolicy::new(|c| c.protocol_system == "vm:exclusive")
-    }
-
     /// Like `make_single_quote` but the swap uses an exclusive protocol component. The swap's own
     /// output is `leg_amount_out`, letting tests exercise per-leg attribution where the leg
     /// differs from the route total
@@ -1714,7 +1704,7 @@ mod tests {
             "0x0000000000000000000000000000000000000002",
             &[tin_token.clone(), tout_token.clone()],
         );
-        comp.protocol_system = "vm:exclusive".to_string();
+        mark_exclusive(&mut comp);
         let swap = Swap::new(
             "pool-perm".to_string(),
             "vm:exclusive".to_string(),
@@ -1785,7 +1775,7 @@ mod tests {
             "0x0000000000000000000000000000000000000002",
             &[tin_token.clone(), tout_token.clone()],
         );
-        exclusive_comp.protocol_system = "vm:exclusive".to_string();
+        mark_exclusive(&mut exclusive_comp);
         let exclusive_swap = Swap::new(
             "pool-perm".to_string(),
             "vm:exclusive".to_string(),
@@ -1941,13 +1931,11 @@ mod tests {
         let public_ranked = vec![make_public_quote_with_net(public_out, public_net)
             .order()
             .clone()];
-        let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
             &exclusive_access_pool_scopes(),
             &QuoteOptions::default(),
             public_ranked,
-            Some(&policy),
             user_share_bps,
         );
 
@@ -1997,13 +1985,11 @@ mod tests {
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
             .clone()];
-        let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
             &exclusive_access_pool_scopes(),
             &options,
             public_ranked,
-            Some(&policy),
             1_000,
         );
 
@@ -2018,13 +2004,11 @@ mod tests {
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
             .clone()];
-        let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
             &exclusive_access_pool_scopes(),
             &QuoteOptions::default(),
             public_ranked,
-            Some(&policy),
             1_000,
         );
 
@@ -2035,7 +2019,7 @@ mod tests {
         let perm_swap = route
             .swaps()
             .iter()
-            .find(|s| policy.is_exclusive(s.protocol_component()))
+            .find(|s| exclusivity::is_exclusive(s.protocol_component()))
             .expect("should have an exclusive swap");
 
         // committed_leg = leg.amount_out * committed_route_out / realized_route_out
@@ -2068,13 +2052,11 @@ mod tests {
         let public_ranked = vec![make_public_quote_zero_gas(900)
             .order()
             .clone()];
-        let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
             &exclusive_access_pool_scopes(),
             &QuoteOptions::default(),
             public_ranked,
-            Some(&policy),
             1_000,
         );
 
@@ -2084,7 +2066,7 @@ mod tests {
         let perm_swap = route
             .swaps()
             .iter()
-            .find(|s| policy.is_exclusive(s.protocol_component()))
+            .find(|s| exclusivity::is_exclusive(s.protocol_component()))
             .expect("should have an exclusive swap");
         assert_eq!(perm_swap.committed_amount_out(), Some(&BigUint::from(905u64)));
     }
@@ -2099,25 +2081,6 @@ mod tests {
     #[case::empty("", None)]
     fn test_parse_user_improvement_share_bps(#[case] raw: &str, #[case] expected: Option<u32>) {
         assert_eq!(parse_user_improvement_share_bps(raw), expected);
-    }
-
-    #[test]
-    fn test_combine_without_exclusivity_policy() {
-        let responses = exclusive_access_responses(900, 950);
-        let public_ranked = vec![make_public_quote_zero_gas(900)
-            .order()
-            .clone()];
-        let combined = combine_with_surplus(
-            &responses,
-            &exclusive_access_pool_scopes(),
-            &QuoteOptions::default(),
-            public_ranked.clone(),
-            None,
-            1_000,
-        );
-
-        assert_eq!(combined.len(), 1);
-        assert_eq!(combined[0].surplus_amount(), None);
     }
 
     #[test]
@@ -2146,13 +2109,11 @@ mod tests {
         let public_ranked = vec![make_public_quote_zero_gas(1000)
             .order()
             .clone()];
-        let policy = exclusive_policy();
         let combined = combine_with_surplus(
             &responses,
             &exclusive_access_pool_scopes(),
             &QuoteOptions::default(),
             public_ranked,
-            Some(&policy),
             1_000,
         );
 
@@ -2163,7 +2124,7 @@ mod tests {
         let public_leg = route
             .swaps()
             .iter()
-            .find(|s| !policy.is_exclusive(s.protocol_component()))
+            .find(|s| !is_exclusive(s.protocol_component()))
             .expect("should have a public swap");
         assert_eq!(public_leg.committed_amount_out(), None);
 
@@ -2174,7 +2135,7 @@ mod tests {
         let exclusive_leg = route
             .swaps()
             .iter()
-            .find(|s| policy.is_exclusive(s.protocol_component()))
+            .find(|s| is_exclusive(s.protocol_component()))
             .expect("should have an exclusive swap");
         assert_eq!(exclusive_leg.committed_amount_out(), Some(&BigUint::from(410u64)));
     }
@@ -2230,6 +2191,9 @@ mod tests {
                 &[tin_token.clone(), tout_token.clone()],
             );
             comp.protocol_system = protocol_system.to_string();
+            if *protocol_system == "vm:exclusive" {
+                mark_exclusive(&mut comp);
+            }
             swaps.push(Swap::new(
                 format!("pool-{tin_byte}-{tout_byte}"),
                 protocol_system.to_string(),
@@ -2313,6 +2277,6 @@ mod tests {
         true)]
     fn test_exclusive_route_validation(#[case] legs: &[(&str, u8, u8)], #[case] expected: bool) {
         let quote = make_route_quote(legs);
-        assert_eq!(has_valid_exclusive_route(&quote, &exclusive_policy()), expected);
+        assert_eq!(has_valid_exclusive_route(&quote), expected);
     }
 }

@@ -24,15 +24,16 @@ task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 500
 
-# Example: an exclusive-access worker pool that also routes through exclusive liquidity (see
-# repo-root worker_pools.toml). Public worker pools (liquidity_scope omitted; defaults to
-# "public_only") never see exclusive components.
-# [pools.exclusive_access]
+# Example: a public-only worker pool whose workers drop exclusive components, establishing the
+# committed public reference for surplus routing (see repo-root worker_pools.toml). Worker pools
+# with the key omitted default to "all" and route through everything, exclusive components
+# included.
+# [pools.public_baseline]
 # algorithm = "bellman_ford"
 # num_workers = 3
 # max_hops = 2
 # timeout_ms = 500
-# liquidity_scope = "all"
+# liquidity_scope = "public_only"
 "#;
 
 /// Worker pools configuration loaded from TOML file.
