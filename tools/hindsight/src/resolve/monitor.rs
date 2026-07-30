@@ -91,6 +91,12 @@ pub(crate) struct MonitorArgs {
     #[arg(long, env = "WORKER_POOLS_CONFIG", default_value = "worker_pools.toml")]
     pub worker_pools_config: std::path::PathBuf,
 
+    /// Blocklist TOML of component IDs to exclude from the Tycho stream, same semantics as
+    /// `fynd serve --blocklist-config`. Falls back to tycho-simulation's embedded default
+    /// blocklist when unset
+    #[arg(long, env = "BLOCKLIST_CONFIG")]
+    pub blocklist_config: Option<std::path::PathBuf>,
+
     /// Per-quote timeout in milliseconds
     #[arg(long, default_value_t = 10_000)]
     pub timeout_ms: u64,
@@ -466,6 +472,13 @@ async fn build_solver(
     if let Some(key) = cfg.tycho_api_key.as_deref() {
         builder = builder.tycho_api_key(key);
     }
+    let blocklist = match &cfg.blocklist_config {
+        Some(path) => fynd_rpc::config::BlocklistConfig::load_from_file(path)
+            .map_err(|e| anyhow::anyhow!("failed to load blocklist config: {e}"))?
+            .into_components(),
+        None => tycho_simulation::utils::default_blocklist(),
+    };
+    builder = builder.blocklisted_components(blocklist);
     for (name, pool) in pools_config.pools() {
         builder = builder
             .add_pool(name, pool)
@@ -999,6 +1012,7 @@ mod tests {
             min_tvl: 10_000.0,
             tycho_api_key: api_key,
             worker_pools_config: std::path::PathBuf::from("worker_pools.toml"),
+            blocklist_config: None,
             timeout_ms: 10_000,
             metrics_port: None,
             max_blocks: Some(1),
