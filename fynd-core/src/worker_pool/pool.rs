@@ -34,7 +34,7 @@ use crate::{
 
 /// Configuration for the worker pool.
 #[derive(Debug)]
-pub struct WorkerPoolConfig {
+pub struct WorkerPoolSpawnConfig {
     /// Human-readable name for this worker pool (used in logging/metrics).
     /// Can differ from algorithm to distinguish worker pools with same algorithm but different
     /// configs.
@@ -58,14 +58,14 @@ pub struct WorkerPoolConfig {
     exclusivity_policy: Option<ExclusivityPolicy>,
 }
 
-impl WorkerPoolConfig {
+impl WorkerPoolSpawnConfig {
     /// Returns the algorithm name for this worker pool.
     pub fn algorithm_name(&self) -> &str {
         self.spawner.algorithm_name()
     }
 }
 
-impl Default for WorkerPoolConfig {
+impl Default for WorkerPoolSpawnConfig {
     fn default() -> Self {
         Self {
             name: DEFAULT_ALGORITHM.to_string(),
@@ -109,7 +109,7 @@ impl WorkerPool {
     ///
     /// Returns an error if the algorithm name in config is not registered.
     pub fn spawn(
-        config: WorkerPoolConfig,
+        config: WorkerPoolSpawnConfig,
         task_rx: async_channel::Receiver<SolveTask>,
         market_data: MarketData,
         derived_data: SharedDerivedDataRef,
@@ -202,13 +202,13 @@ impl WorkerPool {
 /// registry entirely. See the `custom_algorithm` example for a full walkthrough.
 #[must_use = "a builder does nothing until .build() is called"]
 pub struct WorkerPoolBuilder {
-    config: WorkerPoolConfig,
+    config: WorkerPoolSpawnConfig,
 }
 
 impl WorkerPoolBuilder {
     /// Create a builder with default configuration values.
     pub fn new() -> Self {
-        Self { config: WorkerPoolConfig::default() }
+        Self { config: WorkerPoolSpawnConfig::default() }
     }
 
     /// Sets the worker pool name.

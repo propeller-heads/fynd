@@ -111,9 +111,9 @@ fn user_margin(improvement: &BigUint, user_share_bps: u32) -> BigUint {
 /// captures the surplus.
 ///
 /// Serialized in snake_case (`"public_only"` / `"all"`) in `worker_pools.toml` via
-/// [`PoolConfig`].
+/// [`WorkerPoolConfig`].
 ///
-/// [`PoolConfig`]: crate::PoolConfig
+/// [`WorkerPoolConfig`]: crate::WorkerPoolConfig
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiquidityScope {

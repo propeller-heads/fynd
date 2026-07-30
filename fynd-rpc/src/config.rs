@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-pub use fynd_core::PoolConfig;
+pub use fynd_core::WorkerPoolConfig;
 use serde::{Deserialize, Serialize};
 
 /// The default worker pools configuration embedded at compile time.
@@ -39,22 +39,22 @@ timeout_ms = 500
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerPoolsConfig {
     /// Worker pool configurations (at least one worker pool must be specified)
-    pools: HashMap<String, PoolConfig>,
+    pools: HashMap<String, WorkerPoolConfig>,
 }
 
 impl WorkerPoolsConfig {
     /// Creates a new config from a map of worker pool configs.
-    pub fn new(pools: HashMap<String, PoolConfig>) -> Self {
+    pub fn new(pools: HashMap<String, WorkerPoolConfig>) -> Self {
         Self { pools }
     }
 
     /// Returns the worker pool configurations.
-    pub fn pools(&self) -> &HashMap<String, PoolConfig> {
+    pub fn pools(&self) -> &HashMap<String, WorkerPoolConfig> {
         &self.pools
     }
 
     /// Consumes the config and returns the map of worker pool configs.
-    pub fn into_pools(self) -> HashMap<String, PoolConfig> {
+    pub fn into_pools(self) -> HashMap<String, WorkerPoolConfig> {
         self.pools
     }
 
@@ -135,10 +135,10 @@ mod tests {
         assert_eq!(pool.algorithm(), "most_liquid");
         assert_eq!(pool.num_workers(), num_cpus::get());
         use fynd_core::solver::defaults as core_defaults;
-        assert_eq!(pool.task_queue_capacity(), core_defaults::POOL_TASK_QUEUE_CAPACITY);
-        assert_eq!(pool.min_hops(), core_defaults::POOL_MIN_HOPS);
-        assert_eq!(pool.max_hops(), core_defaults::POOL_MAX_HOPS);
-        assert_eq!(pool.timeout_ms(), core_defaults::POOL_TIMEOUT_MS);
+        assert_eq!(pool.task_queue_capacity(), core_defaults::WORKER_POOL_TASK_QUEUE_CAPACITY);
+        assert_eq!(pool.min_hops(), core_defaults::WORKER_POOL_MIN_HOPS);
+        assert_eq!(pool.max_hops(), core_defaults::WORKER_POOL_MAX_HOPS);
+        assert_eq!(pool.timeout_ms(), core_defaults::WORKER_POOL_TIMEOUT_MS);
         assert_eq!(pool.max_routes(), None);
     }
 

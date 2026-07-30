@@ -17,10 +17,10 @@ pub use scenarios::{load_test_scenarios, TestScenario};
 /// Parse a `worker_pools.toml` string into a pool name → config map.
 pub fn parse_pools_toml(
     toml_content: &str,
-) -> anyhow::Result<std::collections::HashMap<String, fynd_core::PoolConfig>> {
+) -> anyhow::Result<std::collections::HashMap<String, fynd_core::WorkerPoolConfig>> {
     #[derive(serde::Deserialize)]
     struct PoolsFile {
-        pools: std::collections::HashMap<String, fynd_core::PoolConfig>,
+        pools: std::collections::HashMap<String, fynd_core::WorkerPoolConfig>,
     }
     let config: PoolsFile = toml::from_str(toml_content)?;
     Ok(config.pools)

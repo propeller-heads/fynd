@@ -15,7 +15,7 @@ use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Cha
 
 use crate::{
     api::{configure_app, AppState, HealthTracker},
-    config::{defaults, PoolConfig},
+    config::{defaults, WorkerPoolConfig},
 };
 
 /// Builder that assembles Fynd and returns a running server handle.
@@ -45,7 +45,7 @@ impl FyndRPCBuilder {
     /// hex address.
     pub fn new(
         chain: Chain,
-        pools: HashMap<String, PoolConfig>,
+        pools: HashMap<String, WorkerPoolConfig>,
         tycho_url: String,
         rpc_url: String,
         protocols: Vec<String>,
@@ -62,7 +62,7 @@ impl FyndRPCBuilder {
                     protocols,
                     chain.default_tvl_threshold(TvlThresholdTier::Low),
                 ),
-                |sb, (name, cfg)| sb.add_pool(name, cfg),
+                |sb, (name, cfg)| sb.add_worker_pool(name, cfg),
             )?
             .worker_router_timeout(Duration::from_millis(defaults::WORKER_ROUTER_TIMEOUT_MS));
         Ok(Self {

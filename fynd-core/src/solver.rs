@@ -55,7 +55,7 @@ use crate::{
     Algorithm, Quote, QuoteRequest, SolveError,
 };
 
-/// Default values for [`FyndBuilder`] configuration and [`PoolConfig`] deserialization.
+/// Default values for [`FyndBuilder`] configuration and [`WorkerPoolConfig`] deserialization.
 ///
 /// These are the single source of truth for all tunable defaults. Downstream
 /// crates (e.g. `fynd-rpc`) should re-export or reference these rather than
@@ -82,13 +82,13 @@ pub mod defaults {
     /// all).
     pub const ROUTER_MIN_RESPONSES: usize = 0;
     /// Capacity of the task queue for each worker pool.
-    pub const POOL_TASK_QUEUE_CAPACITY: usize = 1000;
+    pub const WORKER_POOL_TASK_QUEUE_CAPACITY: usize = 1000;
     /// Minimum number of hops allowed in a route.
-    pub const POOL_MIN_HOPS: usize = 1;
+    pub const WORKER_POOL_MIN_HOPS: usize = 1;
     /// Maximum number of hops allowed in a route.
-    pub const POOL_MAX_HOPS: usize = 3;
+    pub const WORKER_POOL_MAX_HOPS: usize = 3;
     /// Per-worker-pool solve timeout in milliseconds.
-    pub const POOL_TIMEOUT_MS: u64 = 100;
+    pub const WORKER_POOL_TIMEOUT_MS: u64 = 100;
 }
 
 // Internal-only defaults not shared with downstream crates.
@@ -101,19 +101,19 @@ const DEFAULT_ROUTER_TIMEOUT: Duration = Duration::from_secs(10);
 // serde requires free functions for `#[serde(default = "...")]` — these delegate to the
 // defaults module so both deserialization and the builder stay in sync.
 fn default_task_queue_capacity() -> usize {
-    defaults::POOL_TASK_QUEUE_CAPACITY
+    defaults::WORKER_POOL_TASK_QUEUE_CAPACITY
 }
 
 fn default_min_hops() -> usize {
-    defaults::POOL_MIN_HOPS
+    defaults::WORKER_POOL_MIN_HOPS
 }
 
 fn default_max_hops() -> usize {
-    defaults::POOL_MAX_HOPS
+    defaults::WORKER_POOL_MAX_HOPS
 }
 
 fn default_algo_timeout_ms() -> u64 {
-    defaults::POOL_TIMEOUT_MS
+    defaults::WORKER_POOL_TIMEOUT_MS
 }
 
 fn parse_connector_tokens(
@@ -132,10 +132,10 @@ fn parse_connector_tokens(
     Ok(Some(set))
 }
 
-/// Configuration for one worker pool, used by [`FyndBuilder::add_pool`].
+/// Configuration for one worker pool, used by [`FyndBuilder::add_worker_pool`].
 #[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolConfig {
+pub struct WorkerPoolConfig {
     /// Algorithm name for this worker pool (e.g., `"most_liquid"`).
     algorithm: String,
     /// Number of worker threads for this worker pool.
@@ -167,17 +167,17 @@ pub struct PoolConfig {
     liquidity_scope: Option<LiquidityScope>,
 }
 
-impl PoolConfig {
+impl WorkerPoolConfig {
     /// Creates a new worker pool config with the given algorithm name and defaults for all other
     /// fields.
     pub fn new(algorithm: impl Into<String>) -> Self {
         Self {
             algorithm: algorithm.into(),
             num_workers: num_cpus::get(),
-            task_queue_capacity: defaults::POOL_TASK_QUEUE_CAPACITY,
-            min_hops: defaults::POOL_MIN_HOPS,
-            max_hops: defaults::POOL_MAX_HOPS,
-            timeout_ms: defaults::POOL_TIMEOUT_MS,
+            task_queue_capacity: defaults::WORKER_POOL_TASK_QUEUE_CAPACITY,
+            min_hops: defaults::WORKER_POOL_MIN_HOPS,
+            max_hops: defaults::WORKER_POOL_MAX_HOPS,
+            timeout_ms: defaults::WORKER_POOL_TIMEOUT_MS,
             max_routes: None,
             connector_tokens: None,
             liquidity_scope: None,
@@ -313,7 +313,7 @@ pub enum SolverBuildError {
     GasToken,
     /// [`FyndBuilder::build`] was called without configuring any worker pools.
     #[error("no worker pools configured")]
-    NoPools,
+    NoWorkerPools,
     /// A worker pool sets `liquidity_scope` but no exclusivity policy is configured. The
     /// policy is what public worker pools filter by and what the router identifies exclusive legs
     /// with — without it, nothing distinguishes exclusive protocol components from public ones.
@@ -344,7 +344,7 @@ pub enum SolverBuildError {
 }
 
 /// Internal worker pool entry — either a built-in algorithm (by name) or a custom one.
-enum PoolEntry {
+enum WorkerPoolEntry {
     BuiltIn {
         name: String,
         algorithm: String,
@@ -357,21 +357,21 @@ enum PoolEntry {
         connector_tokens: Option<HashSet<Address>>,
         liquidity_scope: Option<LiquidityScope>,
     },
-    Custom(CustomPoolEntry),
+    Custom(CustomWorkerPoolEntry),
 }
 
-impl PoolEntry {
+impl WorkerPoolEntry {
     /// Returns the configured liquidity scope for this worker pool.
     fn liquidity_scope(&self) -> Option<LiquidityScope> {
         match self {
-            PoolEntry::BuiltIn { liquidity_scope, .. } => *liquidity_scope,
-            PoolEntry::Custom(custom) => custom.liquidity_scope,
+            WorkerPoolEntry::BuiltIn { liquidity_scope, .. } => *liquidity_scope,
+            WorkerPoolEntry::Custom(custom) => custom.liquidity_scope,
         }
     }
 }
 
 /// Worker pool entry backed by a custom [`Algorithm`] implementation.
-struct CustomPoolEntry {
+struct CustomWorkerPoolEntry {
     name: String,
     num_workers: usize,
     task_queue_capacity: usize,
@@ -429,7 +429,7 @@ pub struct FyndBuilder {
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
-    pools: Vec<PoolEntry>,
+    pools: Vec<WorkerPoolEntry>,
     price_guard_enabled: bool,
     price_providers: Vec<Box<dyn PriceProvider>>,
     pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
@@ -564,18 +564,19 @@ impl FyndBuilder {
 
     /// Shorthand: adds a single worker pool named `"default"` using a built-in algorithm by name.
     pub fn algorithm(mut self, algorithm: impl Into<String>) -> Self {
-        self.pools.push(PoolEntry::BuiltIn {
-            name: "default".to_string(),
-            algorithm: algorithm.into(),
-            num_workers: num_cpus::get(),
-            task_queue_capacity: defaults::POOL_TASK_QUEUE_CAPACITY,
-            min_hops: defaults::POOL_MIN_HOPS,
-            max_hops: defaults::POOL_MAX_HOPS,
-            timeout_ms: defaults::POOL_TIMEOUT_MS,
-            max_routes: None,
-            connector_tokens: None,
-            liquidity_scope: None,
-        });
+        self.pools
+            .push(WorkerPoolEntry::BuiltIn {
+                name: "default".to_string(),
+                algorithm: algorithm.into(),
+                num_workers: num_cpus::get(),
+                task_queue_capacity: defaults::WORKER_POOL_TASK_QUEUE_CAPACITY,
+                min_hops: defaults::WORKER_POOL_MIN_HOPS,
+                max_hops: defaults::WORKER_POOL_MAX_HOPS,
+                timeout_ms: defaults::WORKER_POOL_TIMEOUT_MS,
+                max_routes: None,
+                connector_tokens: None,
+                liquidity_scope: None,
+            });
         self
     }
 
@@ -593,13 +594,13 @@ impl FyndBuilder {
         let configure =
             Box::new(move |builder: WorkerPoolBuilder| builder.with_algorithm(algo_name, factory));
         self.pools
-            .push(PoolEntry::Custom(CustomPoolEntry {
+            .push(WorkerPoolEntry::Custom(CustomWorkerPoolEntry {
                 name,
                 num_workers: num_cpus::get(),
-                task_queue_capacity: defaults::POOL_TASK_QUEUE_CAPACITY,
-                min_hops: defaults::POOL_MIN_HOPS,
-                max_hops: defaults::POOL_MAX_HOPS,
-                timeout_ms: defaults::POOL_TIMEOUT_MS,
+                task_queue_capacity: defaults::WORKER_POOL_TASK_QUEUE_CAPACITY,
+                min_hops: defaults::WORKER_POOL_MIN_HOPS,
+                max_hops: defaults::WORKER_POOL_MAX_HOPS,
+                timeout_ms: defaults::WORKER_POOL_TIMEOUT_MS,
                 max_routes: None,
                 liquidity_scope: None,
                 configure,
@@ -672,30 +673,31 @@ impl FyndBuilder {
         self
     }
 
-    /// Adds a named worker pool using the given [`PoolConfig`].
+    /// Adds a named worker pool using the given [`WorkerPoolConfig`].
     ///
     /// # Errors
     ///
     /// Returns [`SolverBuildError::AlgorithmConfig`] if any address in `connector_tokens` is not
     /// valid hex.
-    pub fn add_pool(
+    pub fn add_worker_pool(
         mut self,
         name: impl Into<String>,
-        config: &PoolConfig,
+        config: &WorkerPoolConfig,
     ) -> Result<Self, SolverBuildError> {
         let connector_tokens = parse_connector_tokens(config.connector_tokens())?;
-        self.pools.push(PoolEntry::BuiltIn {
-            name: name.into(),
-            algorithm: config.algorithm().to_string(),
-            num_workers: config.num_workers(),
-            task_queue_capacity: config.task_queue_capacity(),
-            min_hops: config.min_hops(),
-            max_hops: config.max_hops(),
-            timeout_ms: config.timeout_ms(),
-            max_routes: config.max_routes(),
-            connector_tokens,
-            liquidity_scope: config.liquidity_scope(),
-        });
+        self.pools
+            .push(WorkerPoolEntry::BuiltIn {
+                name: name.into(),
+                algorithm: config.algorithm().to_string(),
+                num_workers: config.num_workers(),
+                task_queue_capacity: config.task_queue_capacity(),
+                min_hops: config.min_hops(),
+                max_hops: config.max_hops(),
+                timeout_ms: config.timeout_ms(),
+                max_routes: config.max_routes(),
+                connector_tokens,
+                liquidity_scope: config.liquidity_scope(),
+            });
         Ok(self)
     }
 
@@ -703,7 +705,7 @@ impl FyndBuilder {
     /// [`build_with_pending`](Self::build_with_pending).
     fn assemble_components(mut self) -> Result<BuiltComponents, SolverBuildError> {
         if self.pools.is_empty() {
-            return Err(SolverBuildError::NoPools);
+            return Err(SolverBuildError::NoWorkerPools);
         }
 
         // Setting `liquidity_scope` on any worker pool (either value) declares exclusive routing
@@ -793,7 +795,7 @@ impl FyndBuilder {
             };
 
             let (worker_pool, task_handle) = match pool_entry {
-                PoolEntry::BuiltIn {
+                WorkerPoolEntry::BuiltIn {
                     name,
                     algorithm,
                     num_workers,
@@ -828,7 +830,7 @@ impl FyndBuilder {
                         derived_rx,
                     )?
                 }
-                PoolEntry::Custom(custom) => {
+                WorkerPoolEntry::Custom(custom) => {
                     let algo_cfg = AlgorithmConfig::new(
                         custom.min_hops,
                         custom.max_hops,
@@ -1242,11 +1244,11 @@ impl Solver {
     pub async fn from_recording(
         chain: Chain,
         updates: Vec<tycho_simulation::protocol::models::Update>,
-        pools: std::collections::HashMap<String, PoolConfig>,
+        pools: std::collections::HashMap<String, WorkerPoolConfig>,
         gas_price_wei: Option<num_bigint::BigUint>,
     ) -> Result<Self, SolverBuildError> {
         if pools.is_empty() {
-            return Err(SolverBuildError::NoPools);
+            return Err(SolverBuildError::NoWorkerPools);
         }
 
         let market_data = MarketData::new_shared();
@@ -1442,7 +1444,7 @@ impl Solver {
 pub struct SolverParts {
     /// Routes quote requests across worker pools.
     router: WorkerPoolRouter,
-    /// One [`WorkerPool`] per entry configured via [`FyndBuilder::add_pool`].
+    /// One [`WorkerPool`] per entry configured via [`FyndBuilder::add_worker_pool`].
     worker_pools: Vec<WorkerPool>,
     /// Live market snapshot shared across all components.
     market_data: MarketData,
@@ -1544,7 +1546,7 @@ mod tests {
     #[case::all(LiquidityScope::All)]
     #[case::public_only(LiquidityScope::PublicOnly)]
     fn test_build_rejects_scoped_pool_without_policy(#[case] scope: LiquidityScope) {
-        let config = PoolConfig::new("most_liquid").with_liquidity_scope(scope);
+        let config = WorkerPoolConfig::new("most_liquid").with_liquidity_scope(scope);
         let result = FyndBuilder::new(
             Chain::Ethereum,
             "wss://example.invalid",
@@ -1552,8 +1554,8 @@ mod tests {
             vec!["uniswap_v2".to_string()],
             100.0,
         )
-        .add_pool("surplus", &config)
-        .expect("add_pool should accept the config")
+        .add_worker_pool("surplus", &config)
+        .expect("add_worker_pool should accept the config")
         .build();
 
         assert!(matches!(result, Err(SolverBuildError::LiquidityScopeWithoutPolicy)));

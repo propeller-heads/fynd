@@ -61,7 +61,9 @@ pub use price_guard::{
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
 pub use replay::{replay_route, ReplayError, RouteReplay};
-pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
+pub use solver::{
+    FyndBuilder, Solver, SolverBuildError, SolverParts, WaitReadyError, WorkerPoolConfig,
+};
 /// Processes ephemeral pending bundles against live Tycho market state. Obtained by calling
 /// [`FyndBuilder::build_with_pending`](solver::FyndBuilder::build_with_pending).
 pub use tycho_simulation::evm::pending::PendingBlockProcessor;
@@ -84,7 +86,7 @@ pub use types::{
     SolveParams, SolveResult, SurplusInfo, Swap, TaskId, Transaction, UserTransferType,
 };
 pub use worker_pool::{
-    pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},
+    pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolSpawnConfig},
     registry::UnknownAlgorithmError,
     TaskQueueHandle,
 };

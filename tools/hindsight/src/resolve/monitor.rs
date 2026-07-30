@@ -374,7 +374,7 @@ async fn build_solver(
     }
     for (name, pool) in pools_config.pools() {
         builder = builder
-            .add_pool(name, pool)
+            .add_worker_pool(name, pool)
             .map_err(|e| anyhow::anyhow!("failed to add worker pool {name}: {e}"))?;
     }
     builder
