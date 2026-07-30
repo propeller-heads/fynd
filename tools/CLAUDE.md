@@ -15,13 +15,14 @@ Developer and operational tooling for the Fynd solver.
 
 See [`tools/benchmark/CLAUDE.md`](benchmark/CLAUDE.md) for the full module overview.
 
-Five subcommands via `cargo run -p fynd-benchmark --release --`:
+Six subcommands via `cargo run -p fynd-benchmark --release --`:
 
 - **`load`** — Load-test a single solver (latency, throughput, histograms)
 - **`compare`** — Compare output quality between two solver instances (amount out diff in bps)
 - **`scale`** — Measure how solver throughput scales with worker thread count (in-process, no external solver needed)
 - **`download-trades`** — Download the full 10k aggregator trade dataset from GitHub Releases
 - **`audit`** — Compare Fynd quote quality against external aggregators (Nordstern, KyberSwap, 0x); writes a JSON report
+- **`generate-requests`** — Generate a synthetic per-chain request dataset (weighted by Tycho pool counts) for capacity testing on non-Ethereum chains
 
 ---
 
