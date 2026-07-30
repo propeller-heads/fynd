@@ -1,4 +1,16 @@
 
+## [0.97.12](https://github.com/propeller-heads/fynd/compare/0.97.11...0.97.12) (2026-07-30)
+
+### Features
+
+* **derived:** add coalesce_market_events for lag recovery ([5b655a2](https://github.com/propeller-heads/fynd/commit/5b655a2455b71e8cbeba8813c3063525f86353e8))
+
+### Bug Fixes
+
+* **derived:** correct lag-recovery doc comment and count drain-time lag skips ([2f35f07](https://github.com/propeller-heads/fynd/commit/2f35f07cced995c1f2ef5e90c78d000c213b92af))
+* **derived:** recover from broadcast lag incrementally, not via full recompute ([42fcf69](https://github.com/propeller-heads/fynd/commit/42fcf69d111842fb6c7cd414da5efc7d9d2540b9))
+
+
 ## [0.97.11](https://github.com/propeller-heads/fynd/compare/0.97.10...0.97.11) (2026-07-30)
 
 ### Features
