@@ -22,8 +22,7 @@ use alloy::{
 use async_trait::async_trait;
 use fynd_core::{
     types::{
-        parse_chain, EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest,
-        QuoteStatus,
+        EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, QuoteStatus,
     },
     BlockStepController, FyndBuilder, Solver,
 };
@@ -461,8 +460,7 @@ async fn rebuild_after_feed_death<S: Future<Output = ()>>(
 /// Ctrl-C stops the run cleanly at any await point, tearing the current solver down before
 /// returning.
 pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
-    let chain = parse_chain(&cfg.chain.name)
-        .map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", cfg.chain.name))?;
+    let chain = cfg.chain.chain()?;
 
     // Expand protocol tokens (e.g. `native_onchain`/`all_onchain`) against Tycho, like serve/scale.
     let protocols = fynd_rpc::protocols::resolve_protocols(
@@ -493,10 +491,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
             )?
         };
 
-    let mut decoder = Decoder::new(
-        provider_from(&cfg.chain.rpc_url)?,
-        Registry::load(&cfg.chain.name, cfg.chain.registry.as_deref())?,
-    );
+    let mut decoder = Decoder::new(provider_from(&cfg.chain.rpc_url)?, cfg.chain.load_registry()?);
 
     if let Some(port) = cfg.metrics_port {
         telemetry::install_exporter(port)?;

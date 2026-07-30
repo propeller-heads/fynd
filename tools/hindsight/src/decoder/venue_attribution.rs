@@ -97,6 +97,7 @@ fn fee_venue(
 #[cfg(test)]
 mod tests {
     use alloy::primitives::{address, b256};
+    use tycho_simulation::tycho_common::models::Chain;
 
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
@@ -179,7 +180,7 @@ mod tests {
         // A LiFi-routed Coinbase Base App swap: the 0.95% cut is skimmed off the sell token before
         // routing, so only the remainder reached the pools. Leaving it in makes the settled trade
         // look bigger than it was and Fynd, re-solved on that inflated size, appear to win.
-        let registry = Registry::load("bsc", None).unwrap();
+        let registry = Registry::builtin(Chain::Bsc).unwrap();
         let coinbase = address!("0x5aafc1f252d544f744d17a4e734afd6efc47ede4");
         let user = addr(1);
         let pool = addr(50);
