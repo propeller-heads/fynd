@@ -55,10 +55,16 @@ impl<P: Provider> TradeDecoder<P> for RelayNetting {
 /// no net flow (so sender netting finds nothing) and the swap moves Relay's own liquidity.
 ///
 /// Anchors on the fee collector, which always funds the input: `token_in` is the single token it
-/// net-sends. The output is one of two shapes — the token that comes back to the collector (an
-/// internal inventory rebalance), or the asset received by the single external recipient that
-/// only receives and never sends (a cross-chain order fill; see
-/// `TransferLedger::sink_receipts`).
+/// net-sends. The output is one of two shapes — the asset received by the single external recipient
+/// that only receives and never sends (a cross-chain order fill; see
+/// `TransferLedger::sink_receipts`), or, when there is no such recipient, the token that comes back
+/// to the collector (an internal inventory rebalance).
+///
+/// The external recipient is checked first because the collector also receives Relay's fee on a
+/// user fill, and a fee is not a rebalance output. Reading it as one values the trade at the fee
+/// instead of the payout: on tx `0x65286b53…` the user received 0.0255 ETH for 50.148 `USDe` while
+/// the collector took 0.000536 ETH, and anchoring on the collector reported a 468,826 bps win
+/// against a trade that actually beat Fynd by 45 bps.
 ///
 /// Declines (returns `None`) when the shape is ambiguous: not exactly one input token, a
 /// same-token "swap", more than one token back to the collector, or more than one external
@@ -77,19 +83,6 @@ fn decode_rebalance(
         return None;
     }
     let (token_in, amount_in) = net_in[0];
-
-    // C2 internal rebalance: the collector net-receives exactly one (different) token.
-    let net_recv: Vec<(Address, U256)> = transfer_ledger
-        .group_net_received(fee_collectors)
-        .into_iter()
-        .collect();
-    if !net_recv.is_empty() {
-        if net_recv.len() != 1 || net_recv[0].0 == token_in {
-            return None;
-        }
-        let (token_out, amount_out) = net_recv[0];
-        return Some(NetSwap { token_in, amount_in, token_out, amount_out });
-    }
 
     // C1 external fill: the single pure-sink recipient, excluding infrastructure (routers,
     // collector, the wrapped-native token, the zero address) and the input token.
@@ -112,10 +105,24 @@ fn decode_rebalance(
         }
         outputs.push((token, amount));
     }
-    if outputs.len() != 1 {
+    if !outputs.is_empty() {
+        if outputs.len() != 1 {
+            return None;
+        }
+        let (token_out, amount_out) = outputs[0];
+        return Some(NetSwap { token_in, amount_in, token_out, amount_out });
+    }
+
+    // C2 internal rebalance: nobody outside Relay was paid, so the token coming back to the
+    // collector is the output rather than a fee.
+    let net_recv: Vec<(Address, U256)> = transfer_ledger
+        .group_net_received(fee_collectors)
+        .into_iter()
+        .collect();
+    if net_recv.len() != 1 || net_recv[0].0 == token_in {
         return None;
     }
-    let (token_out, amount_out) = outputs[0];
+    let (token_out, amount_out) = net_recv[0];
     Some(NetSwap { token_in, amount_in, token_out, amount_out })
 }
 
@@ -222,6 +229,25 @@ mod tests {
         let got = decode_rebalance(&transfer_ledger(&logs, &[]), &collectors, &routers, addr(200))
             .unwrap();
         assert_eq!(got, swap(token_in, 1000, token_out, 1001));
+    }
+
+    #[test]
+    fn test_rebalance_prefers_the_payee_over_the_collector_fee() {
+        // The shape of tx 0x65286b53…: the collector funds the input and also takes its fee in the
+        // output token, while the user is paid the rest. The trade is the user's payout; reading
+        // the collector's fee as the output valued a 0.0255 ETH fill at 0.000536 ETH.
+        let fee = addr(99);
+        let pool = addr(50);
+        let user = addr(7);
+        let token_in = addr(10);
+        let collectors = HashSet::from([fee]);
+        let routers = HashSet::from([addr(2)]);
+        let logs = vec![make_transfer_log(token_in, fee, pool, U256::from(1000))];
+        let native = vec![(pool, user, U256::from(2000)), (pool, fee, U256::from(42))];
+        let got =
+            decode_rebalance(&transfer_ledger(&logs, &native), &collectors, &routers, addr(200))
+                .unwrap();
+        assert_eq!(got, swap(token_in, 1000, Address::ZERO, 2000));
     }
 
     #[test]
