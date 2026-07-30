@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     decoder::Registry,
-    resolve::{Outcome, RangeComparison, StateResult, Verdict},
+    resolve::{render_route, Outcome, RangeComparison, StateResult, Verdict},
     usd::Prices,
 };
 
@@ -20,6 +20,9 @@ const TRADES_TOTAL: &str = "hindsight_trades_total";
 const SAVINGS_BPS: &str = "hindsight_savings_bps";
 const SAVINGS_USD: &str = "hindsight_savings_usd";
 const IMPROVEMENT_USD: &str = "hindsight_improvement_usd";
+const SLIPPAGE_BPS: &str = "hindsight_slippage_bps";
+const SLIPPAGE_USD: &str = "hindsight_slippage_usd";
+const POSITIVE_SLIPPAGE_USD: &str = "hindsight_positive_slippage_usd";
 const VOLUME_USD: &str = "hindsight_volume_usd";
 const BLOCK_SECONDS: &str = "hindsight_block_processing_seconds";
 const HEAD_LAG_BLOCKS: &str = "hindsight_chain_head_lag_blocks";
@@ -88,7 +91,7 @@ struct MetricLabels<'a> {
 /// `algorithm` names must resolve in the algorithm registry for the pool to spawn at all.
 fn algorithm_label(outcome: &Outcome) -> &str {
     match outcome {
-        Outcome::Solved(solved) if !solved.route.algorithm.is_empty() => &solved.route.algorithm,
+        Outcome::Solved(solved) if !solved.algorithm.is_empty() => &solved.algorithm,
         Outcome::Solved(_) | Outcome::Partial(_) | Outcome::Unsolvable(_) => ALGORITHM_NONE,
     }
 }
@@ -133,6 +136,25 @@ pub(crate) fn describe() {
         "Gross USD uplift on trades Fynd would improve (losses excluded — a venue routes \
          elsewhere when Fynd is worse), labeled by the algorithm whose route won. Sum = value of \
          adding Fynd; count = improving trades"
+    );
+    describe_histogram!(
+        SLIPPAGE_BPS,
+        Unit::Count,
+        "Signed bps move of the top-of-block route re-executed at back-of-block (positive = the \
+         route produced more than quoted), labeled by venue / solver / chain / outcome (headline \
+         verdict)"
+    );
+    describe_histogram!(
+        SLIPPAGE_USD,
+        "Signed per-trade slippage USD (positive = the route produced more than quoted), labeled \
+         by venue / solver / chain / outcome (headline verdict). The positive-only revenue \
+         aggregate stays in POSITIVE_SLIPPAGE_USD"
+    );
+    describe_histogram!(
+        POSITIVE_SLIPPAGE_USD,
+        "USD surplus of the re-executed route over its top-of-block quote, recorded only when \
+         positive. Sum = hypothetical revenue if positive slippage were charged; count = trades \
+         with a surplus. Signed per-trade values stay in the JSONL records"
     );
     describe_histogram!(
         VOLUME_USD,
@@ -223,6 +245,7 @@ pub(crate) fn record_range(
 
     let savings_top = record_state(range, &range.top, "top", &labels, prices_top, above_floor);
     record_state(range, &range.back, "back", &labels, prices_back, above_floor);
+    record_slippage(range, &labels, prices_back);
 
     // One structured line per priced comparison, on the headline basis (top-of-block, gross).
     // Loki ingests pod stdout, so this line feeds the dashboard's top-trades table; keep the
@@ -253,7 +276,7 @@ pub(crate) fn record_range(
             fynd_usd = priced(solved.amount_out),
             quoted_usd = range.quote.as_ref().map_or(0.0, |quote| priced(quote.amount_out)),
             savings_usd,
-            route = %solved.route.path,
+            route = %solved.solved_route.as_deref().map(render_route).unwrap_or_default(),
             "trade comparison"
         );
     }
@@ -360,6 +383,69 @@ fn record_state(
     Some(usd)
 }
 
+/// Record the top route's slippage between quote time (N-1) and re-execution (N): the signed bps
+/// move and the signed USD value always (both labeled with the range's headline verdict), and
+/// additionally the USD surplus alone when positive — its histogram sum is the running "revenue
+/// if we charged positive slippage" aggregate, mirroring how [`IMPROVEMENT_USD`] sums uplift.
+/// Valued at `prices_back`, the state the surplus is realized at. Sandwiched trades are not
+/// skipped: the comparison is Fynd-quote vs Fynd-re-execution, so the settled trade's MEV does
+/// not enter it, and block N's pool moves are real either way.
+fn record_slippage(range: &RangeComparison, labels: &MetricLabels<'_>, prices: &Prices) {
+    let Some(slippage) = range.slippage else {
+        return;
+    };
+    let outcome = outcome_label(range.verdict).to_string();
+    histogram!(
+        SLIPPAGE_BPS,
+        "venue" => labels.venue.to_string(),
+        "solver" => labels.solver.to_string(),
+        "chain" => labels.chain.to_string(),
+        "outcome" => outcome.clone(),
+    )
+    .record(slippage.bps);
+
+    let Some(usd) = prices.savings_usd(
+        range.token_out,
+        slippage.reexecuted_amount_out,
+        slippage.quoted_amount_out,
+    ) else {
+        return;
+    };
+    histogram!(
+        SLIPPAGE_USD,
+        "venue" => labels.venue.to_string(),
+        "solver" => labels.solver.to_string(),
+        "chain" => labels.chain.to_string(),
+        "outcome" => outcome,
+    )
+    .record(usd);
+
+    if usd <= 0.0 {
+        return;
+    }
+    if is_usd_outlier(usd) {
+        warn!(
+            tx = %range.tx_hash,
+            block = range.block_number,
+            venue = %range.venue,
+            solver = %range.solver,
+            token_out = %range.token_out,
+            quoted_out = %slippage.quoted_amount_out,
+            reexecuted_out = %slippage.reexecuted_amount_out,
+            token_out_price = ?prices.get(range.token_out),
+            usd,
+            "positive slippage USD outlier — inspect for token mispricing vs a genuine pool move"
+        );
+    }
+    histogram!(
+        POSITIVE_SLIPPAGE_USD,
+        "venue" => labels.venue.to_string(),
+        "solver" => labels.solver.to_string(),
+        "chain" => labels.chain.to_string(),
+    )
+    .record(usd);
+}
+
 pub(crate) fn record_block_seconds(seconds: f64) {
     histogram!(BLOCK_SECONDS).record(seconds);
 }
@@ -404,6 +490,10 @@ async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
 const SAVINGS_BPS_BUCKETS: &[f64] =
     &[-1000.0, -300.0, -100.0, -30.0, -10.0, -3.0, 0.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0];
 const SAVINGS_USD_BUCKETS: &[f64] = &[-3000.0, -300.0, -30.0, -3.0, 0.0, 3.0, 30.0, 300.0, 3000.0];
+/// Positive-only by construction, so the edges start near zero; most per-trade surpluses are
+/// well under a dollar.
+const POSITIVE_SLIPPAGE_USD_BUCKETS: &[f64] =
+    &[0.01, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 3000.0];
 const VOLUME_USD_BUCKETS: &[f64] = &[10.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0];
 const BLOCK_SECONDS_BUCKETS: &[f64] = &[0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
 /// One block is the floor (the monitor solves block N against state N-1), so the low edges are
@@ -459,6 +549,12 @@ fn configure_buckets(
         .set_buckets_for_metric(Matcher::Full(SAVINGS_BPS.into()), SAVINGS_BPS_BUCKETS)?
         .set_buckets_for_metric(Matcher::Full(SAVINGS_USD.into()), SAVINGS_USD_BUCKETS)?
         .set_buckets_for_metric(Matcher::Full(IMPROVEMENT_USD.into()), SAVINGS_USD_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(SLIPPAGE_BPS.into()), SAVINGS_BPS_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(SLIPPAGE_USD.into()), SAVINGS_USD_BUCKETS)?
+        .set_buckets_for_metric(
+            Matcher::Full(POSITIVE_SLIPPAGE_USD.into()),
+            POSITIVE_SLIPPAGE_USD_BUCKETS,
+        )?
         .set_buckets_for_metric(Matcher::Full(VOLUME_USD.into()), VOLUME_USD_BUCKETS)?
         .set_buckets_for_metric(Matcher::Full(BLOCK_SECONDS.into()), BLOCK_SECONDS_BUCKETS)?
         .set_buckets_for_metric(Matcher::Full(HEAD_LAG_BLOCKS.into()), HEAD_LAG_BLOCKS_BUCKETS)?
@@ -473,7 +569,7 @@ mod tests {
     use super::*;
     use crate::{
         decoder::{AttributionSource, DecodedTrade, SandwichEvidence},
-        resolve::{build_range, RouteSummary, SolvedAmount},
+        resolve::{build_range, SolvedAmount},
     };
 
     fn empty_prices() -> Prices {
@@ -512,11 +608,9 @@ mod tests {
             amount_out: U256::from(amount_out),
             amount_out_net_gas: U256::from(net),
             gas_estimate: U256::from(21_000),
-            route: RouteSummary {
-                algorithm: algorithm.to_string(),
-                path: "USDC -[uniswap_v3]-> WETH".to_string(),
-            },
+            algorithm: algorithm.to_string(),
             quote_json: None,
+            solved_route: None,
         })
     }
 
@@ -549,6 +643,7 @@ mod tests {
             &empty_prices(),
             solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
             solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
+            &Outcome::Unsolvable("x".into()),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -589,6 +684,7 @@ mod tests {
             &empty_prices(),
             Outcome::Unsolvable("missing token in Tycho".into()),
             Outcome::Unsolvable("missing token in Tycho".into()),
+            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
         );
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -645,6 +741,7 @@ mod tests {
             &empty_prices(),
             solved(1_010_000_000, 1_005_000_000),
             solved(998_000_000, 995_000_000),
+            &solved(998_000_000, 995_000_000),
         );
         // USDC priced at 2e-9 native-units per ETH-wei (ETH = $2000) anchors ETH→USD.
         let mut prices = empty_prices();
@@ -691,6 +788,118 @@ mod tests {
     }
 
     #[test]
+    fn record_range_emits_slippage_metrics() {
+        let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        // Quoted 1000 USDC at top, re-executed to 1005 USDC at back → +50 bps, +$5 surplus.
+        let range = build_range(
+            &trade(usdc, 1_000_000_000),
+            &empty_prices(),
+            solved(1_000_000_000, 995_000_000),
+            solved(1_005_000_000, 1_000_000_000),
+            &solved(1_005_000_000, 1_000_000_000),
+        );
+        let mut prices = empty_prices();
+        prices.insert(usdc, 2e-9);
+
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(&range, "ethereum", &prices, &prices, &Registry::ethereum());
+        });
+        let rendered = handle.render();
+
+        let slippage_bps_line = rendered
+            .lines()
+            .find(|line| line.starts_with("hindsight_slippage_bps_bucket"))
+            .expect("slippage bps histogram rendered");
+        assert!(slippage_bps_line.contains("outcome="), "rendered: {slippage_bps_line}");
+        assert!(rendered.contains("hindsight_slippage_usd_bucket"), "rendered: {rendered}");
+        let surplus_sum = rendered
+            .lines()
+            .find(|line| line.starts_with("hindsight_positive_slippage_usd_sum"))
+            .expect("positive slippage surplus recorded");
+        let value: f64 = surplus_sum
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((value - 5.0).abs() < 1e-3, "expected ~$5 surplus, got {surplus_sum}");
+    }
+
+    #[test]
+    fn negative_slippage_records_bps_but_no_positive_usd() {
+        let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        // Re-execution underperforms the quote: the signed bps histogram still records, the
+        // positive-only USD surplus does not.
+        let range = build_range(
+            &trade(usdc, 1_000_000_000),
+            &empty_prices(),
+            solved(1_000_000_000, 995_000_000),
+            solved(995_000_000, 990_000_000),
+            &solved(995_000_000, 990_000_000),
+        );
+        let mut prices = empty_prices();
+        prices.insert(usdc, 2e-9);
+
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(&range, "ethereum", &prices, &prices, &Registry::ethereum());
+        });
+        let rendered = handle.render();
+
+        assert!(rendered.contains("hindsight_slippage_bps_bucket"), "rendered: {rendered}");
+        let slippage_usd_sum = rendered
+            .lines()
+            .find(|line| line.starts_with("hindsight_slippage_usd_sum"))
+            .expect("signed slippage USD recorded regardless of sign");
+        let value: f64 = slippage_usd_sum
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(value < 0.0, "expected a negative signed slippage USD, got {slippage_usd_sum}");
+        assert!(
+            !rendered.contains("hindsight_positive_slippage_usd"),
+            "negative slippage must not count as chargeable surplus: {rendered}"
+        );
+    }
+
+    #[test]
+    fn failed_reexecution_emits_no_slippage_metrics() {
+        let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        // The fresh back solve succeeded — slippage must come from the re-execution alone.
+        let range = build_range(
+            &trade(usdc, 1_000_000_000),
+            &empty_prices(),
+            solved(1_000_000_000, 995_000_000),
+            solved(1_002_000_000, 997_000_000),
+            &Outcome::Unsolvable("re-execution failed: no simulation state".into()),
+        );
+        let mut prices = empty_prices();
+        prices.insert(usdc, 2e-9);
+
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(&range, "ethereum", &prices, &prices, &Registry::ethereum());
+        });
+        let rendered = handle.render();
+
+        assert!(!rendered.contains("hindsight_slippage_bps"), "rendered: {rendered}");
+        assert!(!rendered.contains("hindsight_slippage_usd"), "rendered: {rendered}");
+        assert!(!rendered.contains("hindsight_positive_slippage_usd"));
+    }
+
+    #[test]
     fn test_label_values_against_the_registry() {
         // Every metric label value must come from the registry: registered venue and
         // solver names pass through; raw addresses, unregistered names, and calldata-declared
@@ -717,7 +926,13 @@ mod tests {
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
         t.venue = "0xD720183DdA64a8CDb424B5c13aF73baf713521f8".to_string();
         t.solver = "0xB6F54cAed61C318027c022c47B94BAF139a99Dab".to_string();
-        let range = build_range(&t, &empty_prices(), solved(1_100, 1_050), solved(1_100, 1_050));
+        let range = build_range(
+            &t,
+            &empty_prices(),
+            solved(1_100, 1_050),
+            solved(1_100, 1_050),
+            &solved(1_100, 1_050),
+        );
 
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -744,7 +959,13 @@ mod tests {
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
         t.solver = "relay".to_string();
         t.solver_source = AttributionSource::Fallback;
-        let range = build_range(&t, &empty_prices(), solved(1_100, 1_050), solved(1_100, 1_050));
+        let range = build_range(
+            &t,
+            &empty_prices(),
+            solved(1_100, 1_050),
+            solved(1_100, 1_050),
+            &solved(1_100, 1_050),
+        );
 
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -776,6 +997,7 @@ mod tests {
             &empty_prices(),
             Outcome::Unsolvable("no route".into()),
             Outcome::Unsolvable("no route".into()),
+            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -802,6 +1024,7 @@ mod tests {
             &empty_prices(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
+            &Outcome::Unsolvable("x".into()),
         );
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -838,6 +1061,7 @@ mod tests {
             &prices,
             solved(1_100_000_000, 1_090_000_000),
             solved(1_100_000_000, 1_090_000_000),
+            &solved(1_100_000_000, 1_090_000_000),
         );
         assert_eq!(range.verdict, Verdict::Sandwiched);
 
@@ -869,6 +1093,7 @@ mod tests {
             &empty_prices(),
             solved(1_005_000, 1_005_000),
             solved(1_005_000, 1_005_000),
+            &solved(1_005_000, 1_005_000),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -899,6 +1124,7 @@ mod tests {
             &empty_prices(),
             solved(1_100, 1_050),
             solved(1_100, 1_050),
+            &solved(1_100, 1_050),
         );
         let recorder = configure_buckets(PrometheusBuilder::new())
             .unwrap()

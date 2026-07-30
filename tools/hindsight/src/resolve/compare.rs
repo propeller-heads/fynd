@@ -30,6 +30,34 @@ impl Deltas {
     const NONE: Self = Self { raw_bps: None, net_bps: None };
 }
 
+/// Slippage of the top-of-block route re-executed at back-of-block: how the route's output moved
+/// between quote time (N-1) and execution time (N). Positive = the route produced more than
+/// quoted — the surplus we would keep if we charged positive slippage.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub(crate) struct Slippage {
+    /// Re-executed output vs the quoted output, in bps (positive = surplus).
+    pub bps: f64,
+    /// The top-of-block quoted output the slippage is measured against.
+    pub quoted_amount_out: U256,
+    /// The same route's re-executed output at back-of-block.
+    pub reexecuted_amount_out: U256,
+}
+
+/// Slippage between the top-of-block quote and its re-execution at back-of-block. `None` when
+/// either side is unsolved (no route quoted, or the re-execution failed) or the quoted output
+/// is zero.
+pub(crate) fn slippage(top: &Outcome, back: &Outcome) -> Option<Slippage> {
+    let (Outcome::Solved(top), Outcome::Solved(back)) = (top, back) else {
+        return None;
+    };
+    let bps = raw_bps_diff(&to_biguint(back.amount_out), &to_biguint(top.amount_out))?;
+    Some(Slippage {
+        bps,
+        quoted_amount_out: top.amount_out,
+        reexecuted_amount_out: back.amount_out,
+    })
+}
+
 /// Win/loss classification for a single trade, judged at one block state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,15 +144,16 @@ pub(crate) fn verdict(outcome: &Outcome, deltas: &Deltas) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolve::{RouteSummary, SolvedAmount};
+    use crate::resolve::SolvedAmount;
 
     fn solved(amount_out: u64, net: u64) -> Outcome {
         Outcome::Solved(SolvedAmount {
             amount_out: U256::from(amount_out),
             amount_out_net_gas: U256::from(net),
             gas_estimate: U256::from(21_000),
-            route: RouteSummary::default(),
+            algorithm: String::new(),
             quote_json: None,
+            solved_route: None,
         })
     }
 
@@ -229,5 +258,32 @@ mod tests {
             Outcome::Unsolvable(_)
         ));
         assert!(matches!(served(solved(1, 1), U256::ZERO), Outcome::Solved(_)));
+    }
+
+    #[test]
+    fn slippage_positive_when_reexecution_beats_the_quote() {
+        // Quoted 10_000 at top, re-executed to 10_050 at back → +50 bps surplus.
+        let s = slippage(&solved(10_000, 9_900), &solved(10_050, 9_950)).unwrap();
+        assert!((s.bps - 50.0).abs() < 0.01, "expected +50 bps, got {}", s.bps);
+        assert_eq!(s.quoted_amount_out, U256::from(10_000u64));
+        assert_eq!(s.reexecuted_amount_out, U256::from(10_050u64));
+    }
+
+    #[test]
+    fn slippage_negative_when_reexecution_underperforms() {
+        let s = slippage(&solved(10_000, 9_900), &solved(9_900, 9_800)).unwrap();
+        assert!((s.bps + 100.0).abs() < 0.01, "expected -100 bps, got {}", s.bps);
+    }
+
+    #[test]
+    fn slippage_none_when_either_side_unsolved() {
+        let failed = Outcome::Unsolvable("re-execution failed".into());
+        assert_eq!(slippage(&failed, &solved(10_000, 9_900)), None);
+        assert_eq!(slippage(&solved(10_000, 9_900), &failed), None);
+    }
+
+    #[test]
+    fn slippage_none_for_zero_quoted_output() {
+        assert_eq!(slippage(&solved(0, 0), &solved(10, 10)), None);
     }
 }

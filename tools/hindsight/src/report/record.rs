@@ -59,7 +59,7 @@ mod tests {
     use super::*;
     use crate::{
         decoder::{AttributionSource, DecodedTrade, Registry},
-        resolve::{build_range, jsonl::write_comparisons, Outcome, RouteSummary, SolvedAmount},
+        resolve::{build_range, jsonl::write_comparisons, Outcome, SolvedAmount},
         usd::Prices,
     };
 
@@ -101,10 +101,17 @@ mod tests {
             amount_out: U256::from(1_010_000_000u64),
             amount_out_net_gas: U256::from(1_010_000_000u64),
             gas_estimate: U256::from(21_000u64),
-            route: RouteSummary::default(),
+            algorithm: String::new(),
             quote_json: None,
+            solved_route: None,
         });
-        let range = build_range(&trade, &prices, top, Outcome::Unsolvable("x".into()));
+        let range = build_range(
+            &trade,
+            &prices,
+            top,
+            Outcome::Unsolvable("x".into()),
+            &Outcome::Unsolvable("x".into()),
+        );
 
         let mut buf = Vec::new();
         write_comparisons(&mut buf, std::slice::from_ref(&range), &prices, &prices);

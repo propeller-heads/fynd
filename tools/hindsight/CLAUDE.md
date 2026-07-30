@@ -23,10 +23,13 @@ and takes neither.
   `ALLIUM_API_KEY` and `ALLIUM_QUERY_ID`.
 
 - **`monitor`** — Live mode: drives an in-process `fynd-core` solver block-by-block. For each
-  block it decodes settled trades, re-solves each order at top-of-block (state N-1) then
-  back-of-block (state N), and emits `RangeComparison` JSONL records. Exposes a Prometheus
-  metrics endpoint (`--metrics-port`). `--max-lag-blocks` (default 100, ~20 min on mainnet)
-  bounds how far it may fall behind chain head before rebuilding the solver.
+  block it decodes settled trades, solves each order at top-of-block (state N-1), then measures
+  twice at back-of-block (state N): the top route is re-executed via `fynd_core::replay_route`
+  to measure slippage between quote time and execution time, and the order is solved fresh to
+  show what routing at the block's end state would deliver. Emits `RangeComparison` JSONL
+  records. Exposes a Prometheus metrics endpoint (`--metrics-port`). `--max-lag-blocks` (default
+  100, ~20 min on mainnet) bounds how far it may fall behind chain head before rebuilding the
+  solver.
 
 - **`report`** — Offline: read the `comparisons-YYYY-MM-DD.jsonl` files a `monitor` run wrote
   (`--comparisons-dir`) and render a single self-contained HTML file (`-o`, defaults to
@@ -84,8 +87,8 @@ their solver in calldata — `solver_aliases`).
 
 | File | Purpose |
 |---|---|
-| `mod.rs` | `SteppingSolver` trait; `resolve_block_range` — solve all trades at top, advance, solve again at back |
-| `compare.rs` | `Verdict` / `Deltas` — bps diff, win/loss/coverage-miss classification |
+| `mod.rs` | `SteppingSolver` trait; `resolve_block_range` — solve all trades at top, advance, then re-execute each top route and solve each trade fresh at back |
+| `compare.rs` | `Verdict` / `Deltas` / `Slippage` — bps diff, win/loss/coverage-miss classification, quote-vs-re-execution slippage |
 | `monitor.rs` | Production `monitor` subcommand: in-process solver, block subscription, JSONL emission |
 | `jsonl.rs` | Append-only JSONL writer used by `monitor` |
 
@@ -103,26 +106,42 @@ self-contained HTML file.
 
 ### Verdict model
 
-Each re-solved trade produces a `top` (optimistic, state N-1) and `back` (pessimistic, state N)
-result. The headline `verdict` is top-of-block. Possible verdicts: `Win`, `Loss`,
-`CoverageMiss` (Fynd filled <50% of the settled size — `MIN_FILL_RATIO = 0.5`), `Unsolvable`,
-and `Sandwiched` (a solved comparison whose settled output was moved by MEV — excluded from the
-savings aggregates; unsolved states keep their coverage verdicts).
+Each trade produces a `top` result (optimistic, solved fresh at state N-1) and a `back` result
+(pessimistic: solved fresh at state N, after the block's swaps moved the pools). The headline
+`verdict` is top-of-block. Possible verdicts: `Win`, `Loss`, `CoverageMiss` (Fynd
+filled <50% of the settled size — `MIN_FILL_RATIO = 0.5`), `Unsolvable`, and `Sandwiched` (a
+solved comparison whose settled output was moved by MEV — excluded from the savings aggregates;
+unsolved states keep their coverage verdicts).
+
+### Slippage model
+
+`Slippage` measures how the top route's output moved between quote time (N-1) and execution time
+(N): re-executed output vs quoted output, signed, in bps (JSONL also carries USD valued at the
+back-of-block price snapshot). Positive slippage is the surplus we would keep if we charged it —
+Prometheus records the signed bps distribution (`hindsight_slippage_bps`) and the signed USD
+value (`hindsight_slippage_usd`), both labeled by the trade's headline verdict, plus a
+positive-only USD histogram (`hindsight_positive_slippage_usd`) whose sum is the running
+hypothetical revenue. Absent when the top was unsolved or the re-execution failed (e.g. a pool
+vanished at N).
 
 ### Key types
 
 - `DecodedTrade` — decoded on-chain trade; amounts are venue-fee-adjusted so re-solve compares
   like-for-like. Carries `sandwich` evidence when a bracket pair was found.
-- `RangeComparison` — a trade re-solved at both block states, including gas-netted settled output.
+- `RangeComparison` — a trade solved at top and back, including gas-netted settled output and
+  the top route's `Slippage` between the two states (from its re-execution at back).
 - `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
-- `RouteSummary` — which algorithm won a solved state and the path its route took. Carried on
-  `SolvedAmount` as typed fields (not dug out of the serialized quote) so the metrics and the
-  per-trade log line read it directly.
+- `SolvedAmount` — a solved state's amounts plus `algorithm` (which worker pool won the quote) and
+  `solved_route` (the full `fynd_core::types::Route`, kept in memory to replay at back-of-block).
+  The readable path is not stored: `resolve::render_route` derives it from `solved_route` at
+  serialization/log time, reading token symbols off the route's own token map via
+  `Route::token_symbol`.
 
 ### Route attribution
 
 A solved state records the algorithm whose route won the quote — the worker pool that beat the
-others on that order — and that route rendered as a readable path:
+others on that order — and, derived from its route at serialization time, that route rendered as
+a readable path:
 
 ```
 USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH

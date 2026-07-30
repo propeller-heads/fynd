@@ -1,5 +1,7 @@
-//! Live two-state monitor: drive an in-process `fynd-core` solver one block at a time, re-solving
-//! each block's settled trades at top-of-block (N-1) and back-of-block (N).
+//! Live two-state monitor: drive an in-process `fynd-core` solver one block at a time, solving
+//! each block's settled trades at top-of-block (N-1) and measuring twice at back-of-block (N) —
+//! each top route is re-executed to isolate slippage between quote time and execution time, and
+//! each trade is solved fresh to show what routing at the block's end state would deliver.
 //!
 //! The block barrier is deterministic: after releasing a block via
 //! `BlockStepController::trigger_next_block`, we wait until the solver's `MarketData` reports the
@@ -8,7 +10,6 @@
 //! integration test in `tests/` (requires `TYCHO_URL` + `RPC_URL`).
 
 use std::{
-    collections::HashMap,
     future::Future,
     pin::Pin,
     time::{Duration, Instant},
@@ -22,7 +23,7 @@ use async_trait::async_trait;
 use fynd_core::{
     types::{
         parse_chain, EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest,
-        QuoteStatus, Route, Swap,
+        QuoteStatus,
     },
     BlockStepController, FyndBuilder, Solver,
 };
@@ -33,7 +34,7 @@ use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
     provider_from,
-    resolve::{resolve_block_range, Outcome, RouteSummary, SolvedAmount, SteppingSolver},
+    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver},
     telemetry,
     usd::Prices,
 };
@@ -136,25 +137,6 @@ impl StepAdapter<'_> {
             .last_updated()
             .map(fynd_core::BlockInfo::number)
     }
-
-    /// Symbols for every token on `quote`'s route, read under one market-data lock. A `Swap`
-    /// carries only addresses, so without this the rendered route would be a chain of hex.
-    async fn route_symbols(&self, quote: &OrderQuote) -> HashMap<CoreAddress, String> {
-        let mut symbols = HashMap::new();
-        let Some(route) = quote.route() else {
-            return symbols;
-        };
-        let market_data = self.solver.market_data();
-        let market = market_data.read().await;
-        for swap in Route::swaps(route) {
-            for token in [swap.token_in(), swap.token_out()] {
-                if let Some(found) = market.get_token(token) {
-                    symbols.insert(token.clone(), found.symbol.clone());
-                }
-            }
-        }
-        symbols
-    }
 }
 
 #[async_trait]
@@ -188,8 +170,38 @@ impl SteppingSolver for StepAdapter<'_> {
         let Some(order) = quote.orders().first() else {
             return Outcome::Unsolvable("solver returned no order quote".to_string());
         };
-        let symbols = self.route_symbols(order).await;
-        order_quote_to_outcome(order, &symbols)
+        order_quote_to_outcome(order)
+    }
+
+    async fn reexecute(&self, top: &SolvedAmount) -> Outcome {
+        let Some(route) = top.solved_route.as_ref() else {
+            return Outcome::Unsolvable("top-of-block quote carried no route".to_string());
+        };
+        let market = self.solver.market_data();
+        let view = market.read().await;
+        match fynd_core::replay_route(route, view.base_market_state()) {
+            Ok(replay) => {
+                let amount_out = biguint_to_u256(&replay.amount_out);
+                // Same route ⇒ same gas: reuse the top quote's gas deduction (in token_out
+                // units) and its encoding-refined gas estimate instead of re-deriving gas
+                // prices at the new block state.
+                let gas_deduction = top
+                    .amount_out
+                    .saturating_sub(top.amount_out_net_gas);
+                Outcome::Solved(SolvedAmount {
+                    amount_out,
+                    amount_out_net_gas: amount_out.saturating_sub(gas_deduction),
+                    gas_estimate: top.gas_estimate,
+                    // Same route re-executed: attribution carries over from the top quote. The
+                    // route itself does not — nothing serializes a re-executed outcome's route
+                    // (it only feeds the slippage numbers via its amounts).
+                    algorithm: top.algorithm.clone(),
+                    quote_json: top.quote_json.clone(),
+                    solved_route: None,
+                })
+            }
+            Err(e) => Outcome::Unsolvable(format!("re-execution failed: {e}")),
+        }
     }
 
     async fn advance(&self) -> anyhow::Result<()> {
@@ -236,7 +248,7 @@ impl SteppingSolver for StepAdapter<'_> {
     }
 }
 
-fn order_quote_to_outcome(quote: &OrderQuote, symbols: &HashMap<CoreAddress, String>) -> Outcome {
+fn order_quote_to_outcome(quote: &OrderQuote) -> Outcome {
     if quote.status() != QuoteStatus::Success {
         return Outcome::Unsolvable(format!("{:?}", quote.status()));
     }
@@ -249,125 +261,15 @@ fn order_quote_to_outcome(quote: &OrderQuote, symbols: &HashMap<CoreAddress, Str
         amount_out: biguint_to_u256(quote.amount_out()),
         amount_out_net_gas: biguint_to_u256(quote.amount_out_net_gas()),
         gas_estimate: biguint_to_u256(quote.gas_estimate()),
-        route: route_summary(quote, symbols),
+        // Which algorithm won the quote — the winning quote is the one the `WorkerPoolRouter`
+        // ranked first across every configured pool, so this is the pool that beat the others on
+        // this order. The readable path is derived from `solved_route` at serialization time
+        // (see `resolve::render_route`), not stored here.
+        algorithm: quote.algorithm().to_string(),
         quote_json,
+        // Kept in memory so the route can be re-executed at back-of-block.
+        solved_route: quote.route().cloned().map(Box::new),
     })
-}
-
-/// Which algorithm won the quote and the path its route took. The winning quote is the one the
-/// `WorkerPoolRouter` ranked first across every configured pool, so its algorithm is the pool that
-/// beat the others on this order.
-fn route_summary(quote: &OrderQuote, symbols: &HashMap<CoreAddress, String>) -> RouteSummary {
-    let legs: Vec<Leg<'_>> = quote
-        .route()
-        .map(|route| {
-            Route::swaps(route)
-                .iter()
-                .map(Leg::from_swap)
-                .collect()
-        })
-        .unwrap_or_default();
-    RouteSummary { algorithm: quote.algorithm().to_string(), path: render_route(&legs, symbols) }
-}
-
-/// One route leg, reduced to what rendering needs. A `Swap` also carries a `ProtocolComponent` and
-/// a boxed `ProtocolSim` that a route string has no use for and that cannot be built outside
-/// `fynd-core`, so the rendering below works on this instead and stays unit-testable.
-struct Leg<'a> {
-    token_in: &'a CoreAddress,
-    token_out: &'a CoreAddress,
-    protocol: &'a str,
-    /// The leg's declared share of `token_in`. `0.0` means "all the remaining balance".
-    split: f64,
-}
-
-impl<'a> Leg<'a> {
-    fn from_swap(swap: &'a Swap) -> Self {
-        Self {
-            token_in: swap.token_in(),
-            token_out: swap.token_out(),
-            protocol: swap.protocol(),
-            split: *swap.split(),
-        }
-    }
-}
-
-/// Render a route as a readable path: `USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH`.
-///
-/// Swaps that connect — one's output token is the next's input — chain into a single arrow path.
-/// A split fans several legs out of the same token, so its legs cannot share one chain: each
-/// becomes its own path carrying its share of the input, and the paths are joined with ` + `.
-/// Protocol ids are Tycho's own, so a newly integrated DEX reads correctly without a lookup table
-/// here.
-fn render_route(legs: &[Leg<'_>], symbols: &HashMap<CoreAddress, String>) -> String {
-    let mut paths: Vec<String> = Vec::new();
-    let mut open = String::new();
-    let mut tip: Option<&CoreAddress> = None;
-    for (leg, share) in legs.iter().zip(split_shares(legs)) {
-        if tip != Some(leg.token_in) {
-            if !open.is_empty() {
-                paths.push(std::mem::take(&mut open));
-            }
-            open = token_label(leg.token_in, symbols);
-        }
-        open.push_str(&arrow(leg.protocol, share));
-        open.push_str(&token_label(leg.token_out, symbols));
-        tip = Some(leg.token_out);
-    }
-    if !open.is_empty() {
-        paths.push(open);
-    }
-    paths.join(" + ")
-}
-
-/// The arrow between two tokens: ` -[uniswap_v2]-> `, or ` -[vm:curve 40%]-> ` for one leg of a
-/// split, where the share tells you how much of the input took this leg.
-fn arrow(protocol: &str, share: Option<f64>) -> String {
-    match share {
-        Some(share) => format!(" -[{protocol} {:.0}%]-> ", share * 100.0),
-        None => format!(" -[{protocol}]-> "),
-    }
-}
-
-/// Each leg's share of its input token, or `None` when it is the only leg consuming that token.
-///
-/// A split's legs all consume the same token, and by `Route`'s split convention every leg but one
-/// declares an explicit fraction while the last declares `0.0`, meaning "all the remaining
-/// balance". Reconstruct that remainder so every leg of a split reads as a percentage.
-fn split_shares(legs: &[Leg<'_>]) -> Vec<Option<f64>> {
-    let mut consumers: HashMap<&CoreAddress, (usize, f64)> = HashMap::new();
-    for leg in legs {
-        let entry = consumers
-            .entry(leg.token_in)
-            .or_insert((0, 0.0));
-        entry.0 += 1;
-        entry.1 += leg.split;
-    }
-    legs.iter()
-        .map(|leg| {
-            let (count, declared) = consumers
-                .get(leg.token_in)
-                .copied()
-                .unwrap_or((1, 0.0));
-            if count < 2 {
-                return None;
-            }
-            Some(if leg.split == 0.0 { 1.0 - declared } else { leg.split })
-        })
-        .collect()
-}
-
-/// A token's symbol, or a shortened address when the solver has no token entry for it — an
-/// unknown token still has to read as a distinct hop rather than vanish from the path.
-fn token_label(token: &CoreAddress, symbols: &HashMap<CoreAddress, String>) -> String {
-    if let Some(symbol) = symbols.get(token) {
-        return symbol.clone();
-    }
-    let hex = token.to_string();
-    match hex.get(..8) {
-        Some(prefix) => format!("{prefix}…"),
-        None => hex,
-    }
 }
 
 fn biguint_to_u256(value: &BigUint) -> U256 {
@@ -826,95 +728,6 @@ fn core_to_alloy(address: &CoreAddress) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A token address keyed by its symbol's last byte — distinct across the symbols used below,
-    /// where the first byte is not (USDT and USDC share it) — so `symbols()` can name it back.
-    fn token(symbol: &str) -> CoreAddress {
-        let tag = symbol
-            .as_bytes()
-            .last()
-            .copied()
-            .unwrap_or(0);
-        CoreAddress::from(vec![tag; 20])
-    }
-
-    /// The solver's token table for the symbols used below.
-    fn symbols() -> HashMap<CoreAddress, String> {
-        ["USDT", "DAI", "WETH", "USDC"]
-            .into_iter()
-            .map(|symbol| (token(symbol), symbol.to_string()))
-            .collect()
-    }
-
-    /// One route leg. `split` follows `Route`'s convention: an explicit fraction, or 0.0 for the
-    /// leg that takes whatever is left.
-    fn leg<'a>(
-        token_in: &'a CoreAddress,
-        token_out: &'a CoreAddress,
-        protocol: &'a str,
-        split: f64,
-    ) -> Leg<'a> {
-        Leg { token_in, token_out, protocol, split }
-    }
-
-    #[test]
-    fn test_render_route_multi_hop() {
-        // Connecting legs chain into one arrow path; no percentages, since nothing is split.
-        let (usdt, dai, weth) = (token("USDT"), token("DAI"), token("WETH"));
-        let route = render_route(
-            &[leg(&usdt, &dai, "uniswap_v2", 0.0), leg(&dai, &weth, "vm:balancer", 0.0)],
-            &symbols(),
-        );
-        assert_eq!(route, "USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH");
-    }
-
-    #[test]
-    fn test_render_route_split() {
-        // Two legs out of USDC: the 0.6 leg is explicit, the 0.0 leg takes the remainder. They fan
-        // out of the same token so they cannot share one chain — each becomes its own path, joined
-        // by " + ", and both carry their share.
-        let (usdc, weth) = (token("USDC"), token("WETH"));
-        let route = render_route(
-            &[leg(&usdc, &weth, "uniswap_v3", 0.6), leg(&usdc, &weth, "vm:curve", 0.0)],
-            &symbols(),
-        );
-        assert_eq!(route, "USDC -[uniswap_v3 60%]-> WETH + USDC -[vm:curve 40%]-> WETH");
-    }
-
-    #[test]
-    fn test_render_route_split_then_common_hop() {
-        // A split that reconverges: both legs land on WETH, then one leg carries on to USDC. The
-        // continuation chains onto the path that ended at WETH rather than starting a third path.
-        let (usdt, dai, weth, usdc) = (token("USDT"), token("DAI"), token("WETH"), token("USDC"));
-        let route = render_route(
-            &[
-                leg(&usdt, &weth, "uniswap_v3", 0.25),
-                leg(&usdt, &dai, "vm:curve", 0.0),
-                leg(&dai, &usdc, "uniswap_v2", 0.0),
-            ],
-            &symbols(),
-        );
-        assert_eq!(
-            route,
-            "USDT -[uniswap_v3 25%]-> WETH + USDT -[vm:curve 75%]-> DAI -[uniswap_v2]-> USDC"
-        );
-    }
-
-    #[test]
-    fn test_render_route_unknown_token() {
-        // A long-tail token with no entry in the solver's token table still has to read as a
-        // distinct hop, so it falls back to a shortened address rather than an empty string.
-        let (usdt, unknown) = (token("USDT"), CoreAddress::from(vec![0xab; 20]));
-        assert_eq!(
-            render_route(&[leg(&usdt, &unknown, "uniswap_v2", 0.0)], &symbols()),
-            "USDT -[uniswap_v2]-> 0xababab…"
-        );
-    }
-
-    #[test]
-    fn test_render_route_empty() {
-        assert_eq!(render_route(&[], &symbols()), "");
-    }
 
     #[test]
     fn test_default_lag_blocks_scales_with_block_time() {

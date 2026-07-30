@@ -16,7 +16,7 @@ use fynd_core::types::{OrderQuote, Swap, Transaction};
 use tracing::{info, warn};
 
 use crate::{
-    resolve::{Outcome, RangeComparison, StateResult},
+    resolve::{render_route, Outcome, RangeComparison, StateResult},
     usd::Prices,
 };
 
@@ -139,14 +139,27 @@ pub(crate) fn write_comparisons<W: std::io::Write>(
     }
 }
 
-/// Build the JSON record for one re-solved trade: block, settled tx, decoded amounts, and a `top`
+/// Build the JSON record for one re-solved trade: block, settled tx, decoded amounts, a `top`
 /// and `back` state (each with its verdict, bps, USD delta, and slim route/calldata or unsolvable
-/// reason). Top is valued at N-1 prices, back at N prices, matching the state each was solved at.
+/// reason), and the top route's slippage between the two states. Top is valued at N-1 prices,
+/// back (and the slippage) at N prices, matching the state each was produced at.
 fn comparison_record(
     range: &RangeComparison,
     prices_top: &Prices,
     prices_back: &Prices,
 ) -> serde_json::Value {
+    // Signed in both directions; the positive records are the "revenue if we charged positive
+    // slippage" view, filtered downstream.
+    let slippage = range.slippage.map(|slippage| {
+        serde_json::json!({
+            "bps": slippage.bps,
+            "usd": prices_back.savings_usd(
+                range.token_out,
+                slippage.reexecuted_amount_out,
+                slippage.quoted_amount_out,
+            ),
+        })
+    });
     serde_json::json!({
         "block": range.block_number,
         "tx_index": range.tx_index,
@@ -165,6 +178,7 @@ fn comparison_record(
         "quote_source": range.quote.as_ref().and_then(|q| q.source.clone()),
         "quote_timestamp": range.quote.as_ref().and_then(|q| q.timestamp),
         "sandwich": range.sandwich,
+        "slippage": slippage,
         "top": state_record(&range.top, range, prices_top),
         "back": state_record(&range.back, range, prices_back),
     })
@@ -202,8 +216,8 @@ fn state_record(
         "gas_estimate": solved.map(|s| s.gas_estimate.to_string()),
         // Flat route attribution, so a jq pass can group by algorithm or read the path at a glance
         // without walking the nested per-hop route below.
-        "algorithm": solved.map(|s| s.route.algorithm.as_str()),
-        "route": solved.map(|s| s.route.path.as_str()),
+        "algorithm": solved.map(|s| s.algorithm.as_str()),
+        "route": solved.map(|s| s.solved_route.as_deref().map(render_route).unwrap_or_default()),
         "improvement_usd": improvement_usd,
         "fynd_value_usd": fynd_value_usd,
         "settled_value_usd": prices.value_usd(token_out, range.settled_amount_out),
@@ -268,7 +282,7 @@ mod tests {
     use super::*;
     use crate::{
         decoder::{AttributionSource, DecodedTrade, Registry, SandwichEvidence, SolverQuote},
-        resolve::{build_range, RouteSummary, SolvedAmount},
+        resolve::{build_range, test_support, SolvedAmount},
     };
 
     fn empty_prices() -> Prices {
@@ -341,6 +355,7 @@ mod tests {
             &empty_prices(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
+            &Outcome::Unsolvable("x".into()),
         );
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
         assert_eq!(rec.pointer("/tx_index").unwrap(), 3);
@@ -377,8 +392,9 @@ mod tests {
             .starts_with("0x"));
     }
 
-    #[test]
-    fn test_improvement_record_top_and_back() {
+    /// Shared fixture for the top/back improvement and route-attribution tests: a win at both
+    /// states, with the top route re-executing to the same output the fresh back solve finds.
+    fn improvement_record_top_and_back() -> serde_json::Value {
         let usdc: Address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
             .parse()
             .unwrap();
@@ -417,28 +433,36 @@ mod tests {
                 "gas_estimate":"0","split":1.0}]}"#
                 .to_string(),
         );
-        let route = RouteSummary {
-            algorithm: "bellman_ford".to_string(),
-            path: "WETH -[uniswap_v3]-> DAI -[vm:curve]-> USDC".to_string(),
-        };
-        // Top: gross 1010 USDC → +$10. Back: gross 1002 USDC → +$2. Both win.
+        let solved_route = Box::new(test_support::route(&[
+            ("uniswap_v3", "WETH", "DAI"),
+            ("vm:curve", "DAI", "USDC"),
+        ]));
+        // Top: gross 1010 USDC → +$10. Back: gross 1002 USDC → +$2. Both win. The top route's
+        // re-execution matches the fresh back solve, so the slippage numbers read off `back`.
         let top = Outcome::Solved(SolvedAmount {
             amount_out: U256::from(1_010_000_000u64),
             amount_out_net_gas: U256::from(1_005_000_000u64),
             gas_estimate: U256::from(21_000u64),
-            route: route.clone(),
+            algorithm: "bellman_ford".to_string(),
             quote_json: quote.clone(),
+            solved_route: Some(solved_route.clone()),
         });
         let back = Outcome::Solved(SolvedAmount {
             amount_out: U256::from(1_002_000_000u64),
             amount_out_net_gas: U256::from(1_001_000_000u64),
             gas_estimate: U256::from(21_000u64),
-            route,
+            algorithm: "bellman_ford".to_string(),
             quote_json: quote,
+            solved_route: Some(solved_route),
         });
-        let range = build_range(&trade, &prices, top, back);
+        let range = build_range(&trade, &prices, top, back.clone(), &back);
 
-        let rec = comparison_record(&range, &prices, &prices);
+        comparison_record(&range, &prices, &prices)
+    }
+
+    #[test]
+    fn test_improvement_record_top_and_back() {
+        let rec = improvement_record_top_and_back();
         let top_usd = rec
             .pointer("/top/improvement_usd")
             .unwrap()
@@ -451,6 +475,20 @@ mod tests {
             .unwrap();
         assert!((top_usd - 10.0).abs() < 1e-3, "top_usd={top_usd}");
         assert!((back_usd - 2.0).abs() < 1e-3, "back_usd={back_usd}");
+        // Slippage: the top route re-executed at back produced 1002 vs 1010 quoted → −8 USDC,
+        // ≈ −79.2 bps and −$8 (signed; positive records are the chargeable-surplus view).
+        let slippage_bps = rec
+            .pointer("/slippage/bps")
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert!((slippage_bps + 79.2).abs() < 0.1, "slippage_bps={slippage_bps}");
+        let slippage_usd = rec
+            .pointer("/slippage/usd")
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert!((slippage_usd + 8.0).abs() < 1e-3, "slippage_usd={slippage_usd}");
         assert!(
             rec.pointer("/back/net_bps")
                 .unwrap()
@@ -474,6 +512,11 @@ mod tests {
                 .unwrap(),
             "uniswap_v3"
         );
+    }
+
+    #[test]
+    fn test_improvement_record_attributes_the_winning_route() {
+        let rec = improvement_record_top_and_back();
         // Route attribution is flat on the state, so grouping by algorithm or protocol does not
         // have to walk the nested per-hop route.
         assert_eq!(rec.pointer("/top/algorithm").unwrap(), "bellman_ford");
@@ -510,6 +553,7 @@ mod tests {
             &empty_prices(),
             Outcome::Unsolvable("missing token in Tycho".into()),
             Outcome::Unsolvable("missing token in Tycho".into()),
+            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
         );
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
         assert_eq!(rec.pointer("/top/verdict").unwrap(), "unsolvable");
@@ -532,6 +576,11 @@ mod tests {
                 "{field} should be null on an unsolvable state"
             );
         }
+        // No top route means nothing was re-executed: slippage is null, not zero.
+        assert!(rec
+            .pointer("/slippage")
+            .unwrap()
+            .is_null());
     }
 
     #[test]
@@ -568,11 +617,13 @@ mod tests {
                 amount_out: U256::from(amount),
                 amount_out_net_gas: U256::from(amount),
                 gas_estimate: U256::from(21_000u64),
-                route: RouteSummary::default(),
+                algorithm: String::new(),
                 quote_json: None,
+                solved_route: None,
             })
         };
-        let range = build_range(&trade, &empty_prices(), solved(1_100), solved(1_050));
+        let range =
+            build_range(&trade, &empty_prices(), solved(1_100), solved(1_050), &solved(1_050));
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
 
         assert_eq!(rec.pointer("/tx_index").unwrap(), 42);

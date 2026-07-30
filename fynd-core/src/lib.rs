@@ -35,6 +35,8 @@ pub mod feed;
 pub mod graph;
 /// External price validation for quotes.
 pub mod price_guard;
+/// Re-execute an already-built route against a (possibly newer) market state.
+pub mod replay;
 /// [`FyndBuilder`](solver::FyndBuilder) assembles the full pipeline and returns a
 /// [`Solver`](solver::Solver).
 pub mod solver;
@@ -58,6 +60,7 @@ pub use price_guard::{
     config::PriceGuardConfig,
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
+pub use replay::{replay_route, ReplayError, RouteReplay};
 pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
 /// Processes ephemeral pending bundles against live Tycho market state. Obtained by calling
 /// [`FyndBuilder::build_with_pending`](solver::FyndBuilder::build_with_pending).
