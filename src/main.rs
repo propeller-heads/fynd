@@ -17,6 +17,10 @@
 //! # Or specify protocols explicitly:
 //! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
 //!            --protocols uniswap_v2,uniswap_v3
+//!
+//! # Opt a protocol into streaming its exclusive pools:
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
+//!            --protocols all_onchain,exclusive:ekubo_v3
 //! ```
 //!
 //! `--rpc-url` defaults to a chain-specific public endpoint. For production, provide a dedicated

@@ -67,6 +67,8 @@ pub struct ServeArgs {
     /// If omitted, all on-chain protocols are fetched from Tycho RPC.
     /// Use "all_onchain" to fetch all on-chain protocols and combine with explicit entries,
     /// e.g., --protocols all_onchain,rfq:bebop.
+    /// Prefix a protocol with "exclusive:" to also stream its exclusive pools,
+    /// e.g., --protocols all_onchain,exclusive:ekubo_v3.
     #[arg(short, long, value_delimiter = ',', value_name = "PROTO1,PROTO2")]
     pub protocols: Vec<String>,
 

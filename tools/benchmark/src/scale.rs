@@ -47,7 +47,8 @@ pub struct Args {
     pub worker_counts: String,
 
     /// Comma-separated protocols for the solver. Supports the `all_onchain` and `native_onchain`
-    /// expansion tokens (the latter drops VM-simulated `vm:*` protocols).
+    /// expansion tokens (the latter drops VM-simulated `vm:*` protocols), and the `exclusive:`
+    /// prefix for streaming a protocol's exclusive pools.
     #[arg(long)]
     pub protocols: String,
 
