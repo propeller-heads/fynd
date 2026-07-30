@@ -159,10 +159,7 @@ pub struct PoolConfig {
     /// Absent = no restriction. Typically 3–10 entries (e.g. WETH, USDC, USDT, DAI).
     #[serde(default)]
     connector_tokens: Option<Vec<String>>,
-    /// Worker pool liquidity scope: `all` (default — no filtering; workers ingest whatever the
-    /// deployment's stream delivers, which includes exclusive components only if the deployment
-    /// opted into them) or `public_only` (workers drop exclusive components, establishing the
-    /// public reference output for surplus routing). Absent = `all`.
+    /// The worker pool's liquidity scope; see [`LiquidityScope`].
     #[serde(default)]
     liquidity_scope: Option<LiquidityScope>,
 }
@@ -194,7 +191,7 @@ impl PoolConfig {
         self.liquidity_scope
     }
 
-    /// Sets the worker pool's liquidity scope (public or exclusive-access).
+    /// Sets the worker pool's liquidity scope.
     pub fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = Some(scope);
         self
@@ -371,7 +368,6 @@ struct CustomPoolEntry {
     max_hops: usize,
     timeout_ms: u64,
     max_routes: Option<usize>,
-    /// Worker pool liquidity scope: public (default) or exclusive-access.
     liquidity_scope: Option<LiquidityScope>,
     /// Applies the custom algorithm to a `WorkerPoolBuilder`.
     configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
@@ -736,8 +732,6 @@ impl FyndBuilder {
             let pool_event_rx = tycho_feed.subscribe();
             let derived_rx = derived_event_tx.subscribe();
 
-            // `public_only` worker pools filter exclusive components out of their workers'
-            // graphs; unscoped worker pools default to `all` and ingest everything.
             let pool_scope = pool_entry
                 .liquidity_scope()
                 .unwrap_or_default();

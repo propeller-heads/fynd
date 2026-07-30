@@ -47,8 +47,7 @@ pub struct WorkerPoolConfig {
     algorithm_config: AlgorithmConfig,
     /// Task queue capacity (maximum number of pending tasks).
     task_queue_capacity: usize,
-    /// Which liquidity this worker pool's workers ingest: `PublicOnly` filters exclusive
-    /// components out of each worker's graph; `All` (the default) applies no filtering.
+    /// Which liquidity this worker pool's workers ingest; see [`LiquidityScope`].
     liquidity_scope: LiquidityScope,
 }
 
@@ -262,10 +261,7 @@ impl WorkerPoolBuilder {
         self
     }
 
-    /// Sets which liquidity this pool's workers ingest.
-    ///
-    /// `PublicOnly` filters exclusive components out of each worker's graph; `All` (the
-    /// default) applies no filtering.
+    /// Sets which liquidity this pool's workers ingest; see [`LiquidityScope`].
     pub fn liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.config.liquidity_scope = scope;
         self

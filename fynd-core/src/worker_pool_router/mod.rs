@@ -134,7 +134,7 @@ pub struct SolverPoolHandle {
     name: String,
     /// Queue handle for this worker pool.
     queue: TaskQueueHandle,
-    /// Whether this worker pool routes public-only or all liquidity.
+    /// Which liquidity this worker pool routes through; see [`LiquidityScope`].
     liquidity_scope: LiquidityScope,
 }
 
@@ -144,8 +144,7 @@ impl SolverPoolHandle {
         Self { name: name.into(), queue, liquidity_scope: LiquidityScope::default() }
     }
 
-    /// Sets the worker pool's liquidity scope (e.g. [`LiquidityScope::PublicOnly`] for a worker
-    /// pool that establishes the committed public reference).
+    /// Sets the worker pool's liquidity scope.
     pub fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = scope;
         self

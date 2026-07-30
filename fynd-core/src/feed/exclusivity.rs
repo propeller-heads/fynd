@@ -9,9 +9,8 @@
 //! shared `MarketState` is never duplicated. Workers of `All`-scoped worker pools ingest
 //! everything.
 //!
-//! A component is classified from its own data, whatever its protocol: its `extension` static
-//! attribute is matched against tycho-simulation's exported `EXCLUSIVE_EXTENSIONS` — the same
-//! knowledge the stream filters use, applied generically to every ingested component.
+//! A component is classified from its own data via `is_exclusive`, applied generically to every
+//! ingested component.
 
 use std::collections::HashMap;
 
@@ -25,8 +24,8 @@ use crate::{
     types::ComponentId,
 };
 
-/// Returns `true` when the component's `extension` static attribute names a known exclusive
-/// extension contract.
+/// Returns `true` when the component offers exclusive liquidity, i.e. is swappable only with
+/// off-chain authorization.
 pub(crate) fn is_exclusive(component: &ProtocolComponent) -> bool {
     component
         .static_attributes

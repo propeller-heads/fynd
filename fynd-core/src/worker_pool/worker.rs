@@ -70,8 +70,7 @@ where
     worker_id: usize,
     /// Worker pool name (used as the `pool` metric label).
     pool_name: String,
-    /// Which liquidity this worker ingests: `PublicOnly` filters exclusive components out of
-    /// the local graph; `All` (the default) applies no filtering.
+    /// Which liquidity this worker ingests; see [`LiquidityScope`].
     liquidity_scope: LiquidityScope,
 }
 
@@ -114,8 +113,7 @@ where
         }
     }
 
-    /// Sets which liquidity this worker ingests. `PublicOnly` workers filter exclusive
-    /// components out of their graphs; `All` workers apply no filtering.
+    /// Sets which liquidity this worker ingests; see [`LiquidityScope`].
     pub(crate) fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = scope;
         self
