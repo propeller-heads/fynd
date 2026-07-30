@@ -2019,7 +2019,7 @@ mod tests {
         let perm_swap = route
             .swaps()
             .iter()
-            .find(|s| exclusivity::is_exclusive(s.protocol_component()))
+            .find(|s| is_exclusive(s.protocol_component()))
             .expect("should have an exclusive swap");
 
         // committed_leg = leg.amount_out * committed_route_out / realized_route_out
@@ -2066,7 +2066,7 @@ mod tests {
         let perm_swap = route
             .swaps()
             .iter()
-            .find(|s| exclusivity::is_exclusive(s.protocol_component()))
+            .find(|s| is_exclusive(s.protocol_component()))
             .expect("should have an exclusive swap");
         assert_eq!(perm_swap.committed_amount_out(), Some(&BigUint::from(905u64)));
     }
