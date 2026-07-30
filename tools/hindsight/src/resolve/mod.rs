@@ -20,6 +20,23 @@ use crate::{
     usd::Prices,
 };
 
+/// What Fynd's winning route was: the worker-pool algorithm that produced it and the path it took.
+/// Kept as typed fields (not dug back out of `quote_json`) so the metrics and the per-trade log
+/// line can read them without parsing JSON.
+///
+/// `Default` means "no route detail" — both fields empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct RouteSummary {
+    /// Name of the algorithm whose route won the quote: `bellman_ford`, `most_liquid`,
+    /// `path_frank_wolfe`, `water_fill`. Empty when the quote declared none.
+    pub algorithm: String,
+    /// The route as a readable path, tokens and protocols interleaved:
+    /// `USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH`. Split legs carry their share and are
+    /// joined with ` + `. Empty when the quote carried no route. Logged and serialized under the
+    /// name `route`.
+    pub path: String,
+}
+
 /// A Fynd quote for the re-solved order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct SolvedAmount {
@@ -27,6 +44,8 @@ pub(crate) struct SolvedAmount {
     /// Output after Fynd's own estimated gas cost.
     pub amount_out_net_gas: U256,
     pub gas_estimate: U256,
+    /// Which algorithm won and the path its route took.
+    pub route: RouteSummary,
     /// The complete serialized Fynd quote (route, per-hop pools/amounts, encoded transaction) for
     /// dumping improvements. `None` when not captured (e.g. the HTTP resolve path).
     #[serde(default)]
@@ -232,6 +251,7 @@ mod tests {
             amount_out: U256::from(amount_out),
             amount_out_net_gas: U256::from(net),
             gas_estimate: U256::from(21_000),
+            route: RouteSummary::default(),
             quote_json: None,
         })
     }

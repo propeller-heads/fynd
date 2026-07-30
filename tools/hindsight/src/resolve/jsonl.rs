@@ -172,8 +172,8 @@ fn comparison_record(
 
 /// JSON for one block-state of an improvement: verdict, bps, Fynd amounts, the USD improvement
 /// (gross Fynd output minus the gross settled output, valued at `prices` — the same basis as the
-/// headline verdict), and the slim quote. `settled_value_usd` stays gross — it is the trade's
-/// notional, not a comparison.
+/// headline verdict), the winning route's algorithm and rendered path, and the slim quote.
+/// `settled_value_usd` stays gross — it is the trade's notional, not a comparison.
 fn state_record(
     state: &StateResult,
     range: &RangeComparison,
@@ -200,6 +200,10 @@ fn state_record(
         "fynd_amount_out": solved.map(|s| s.amount_out.to_string()),
         "fynd_amount_out_net_gas": solved.map(|s| s.amount_out_net_gas.to_string()),
         "gas_estimate": solved.map(|s| s.gas_estimate.to_string()),
+        // Flat route attribution, so a jq pass can group by algorithm or read the path at a glance
+        // without walking the nested per-hop route below.
+        "algorithm": solved.map(|s| s.route.algorithm.as_str()),
+        "route": solved.map(|s| s.route.path.as_str()),
         "improvement_usd": improvement_usd,
         "fynd_value_usd": fynd_value_usd,
         "settled_value_usd": prices.value_usd(token_out, range.settled_amount_out),
@@ -264,7 +268,7 @@ mod tests {
     use super::*;
     use crate::{
         decoder::{AttributionSource, DecodedTrade, Registry, SandwichEvidence, SolverQuote},
-        resolve::{build_range, SolvedAmount},
+        resolve::{build_range, RouteSummary, SolvedAmount},
     };
 
     fn empty_prices() -> Prices {
@@ -413,17 +417,23 @@ mod tests {
                 "gas_estimate":"0","split":1.0}]}"#
                 .to_string(),
         );
+        let route = RouteSummary {
+            algorithm: "bellman_ford".to_string(),
+            path: "WETH -[uniswap_v3]-> DAI -[vm:curve]-> USDC".to_string(),
+        };
         // Top: gross 1010 USDC → +$10. Back: gross 1002 USDC → +$2. Both win.
         let top = Outcome::Solved(SolvedAmount {
             amount_out: U256::from(1_010_000_000u64),
             amount_out_net_gas: U256::from(1_005_000_000u64),
             gas_estimate: U256::from(21_000u64),
+            route: route.clone(),
             quote_json: quote.clone(),
         });
         let back = Outcome::Solved(SolvedAmount {
             amount_out: U256::from(1_002_000_000u64),
             amount_out_net_gas: U256::from(1_001_000_000u64),
             gas_estimate: U256::from(21_000u64),
+            route,
             quote_json: quote,
         });
         let range = build_range(&trade, &prices, top, back);
@@ -463,6 +473,13 @@ mod tests {
             rec.pointer("/back/quote/route/0/protocol")
                 .unwrap(),
             "uniswap_v3"
+        );
+        // Route attribution is flat on the state, so grouping by algorithm or protocol does not
+        // have to walk the nested per-hop route.
+        assert_eq!(rec.pointer("/top/algorithm").unwrap(), "bellman_ford");
+        assert_eq!(
+            rec.pointer("/top/route").unwrap(),
+            "WETH -[uniswap_v3]-> DAI -[vm:curve]-> USDC"
         );
     }
 
@@ -505,6 +522,16 @@ mod tests {
             .pointer("/top/quote")
             .unwrap()
             .is_null());
+        // No route means nothing to attribute: the fields are null, not an empty algorithm or an
+        // empty path string that would read as a real but unrendered route.
+        for field in ["algorithm", "route"] {
+            assert!(
+                rec.pointer(&format!("/top/{field}"))
+                    .unwrap()
+                    .is_null(),
+                "{field} should be null on an unsolvable state"
+            );
+        }
     }
 
     #[test]
@@ -541,6 +568,7 @@ mod tests {
                 amount_out: U256::from(amount),
                 amount_out_net_gas: U256::from(amount),
                 gas_estimate: U256::from(21_000u64),
+                route: RouteSummary::default(),
                 quote_json: None,
             })
         };

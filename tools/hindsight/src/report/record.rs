@@ -59,7 +59,7 @@ mod tests {
     use super::*;
     use crate::{
         decoder::{AttributionSource, DecodedTrade, Registry},
-        resolve::{build_range, jsonl::write_comparisons, Outcome, SolvedAmount},
+        resolve::{build_range, jsonl::write_comparisons, Outcome, RouteSummary, SolvedAmount},
         usd::Prices,
     };
 
@@ -101,6 +101,7 @@ mod tests {
             amount_out: U256::from(1_010_000_000u64),
             amount_out_net_gas: U256::from(1_010_000_000u64),
             gas_estimate: U256::from(21_000u64),
+            route: RouteSummary::default(),
             quote_json: None,
         });
         let range = build_range(&trade, &prices, top, Outcome::Unsolvable("x".into()));

@@ -1,4 +1,40 @@
 
+## [0.97.8](https://github.com/propeller-heads/fynd/compare/0.97.7...0.97.8) (2026-07-29)
+
+### Features
+
+* **hindsight:** add offline HTML report subcommand ([7193561](https://github.com/propeller-heads/fynd/commit/7193561ab82947f1344aac90f5f14e531410165e))
+* consolidate permission and pool-role types ([7c4e723](https://github.com/propeller-heads/fynd/commit/7c4e7235ba38c875ca4df86a82a2656d23f25782))
+* scaffold permissioned surplus pools ([7fb9dbc](https://github.com/propeller-heads/fynd/commit/7fb9dbc6882fe699af64f549b0a8e263cc96ae61))
+* **core:** carry the failing SolveError on OrderQuote and aggregate it ([9079077](https://github.com/propeller-heads/fynd/commit/9079077c5d0de72aef631d0ae5fbf6e6221c56da))
+* **core:** classify algorithm errors into specific solve errors ([a2788d6](https://github.com/propeller-heads/fynd/commit/a2788d6dcf95120993656949af9385645256bb28))
+* **core:** add MaxGasExceeded, MissingData, SimulationFailed solve errors ([6f98e3b](https://github.com/propeller-heads/fynd/commit/6f98e3ba4d9c6231a274e6b814b551709d509c34))
+* **encoding:** rename to exclusive-swap and add taker buffer ([3d5db72](https://github.com/propeller-heads/fynd/commit/3d5db72a71c0273a5a4032de4d9f0073e68ee46d))
+* **encoding:** sign exclusive-swap quotes into Ekubo user_data ([0477847](https://github.com/propeller-heads/fynd/commit/04778473fc9bbacb451812e2d23619df6c9e6cf9))
+* require an exclusivity policy when liquidity_scope is set ([1b61ddf](https://github.com/propeller-heads/fynd/commit/1b61ddf98f812b983f1fbf88e46ecbf277cba765))
+* cover exclusive candidate filters in combine_with_surplus ([44ba437](https://github.com/propeller-heads/fynd/commit/44ba437edba97f1a519cd9fc2c42c40db3fcb43a))
+* add tests for early return cases ([e3398db](https://github.com/propeller-heads/fynd/commit/e3398db8c1c36fea65b921dc13c826993e73d700))
+* implement permissioned surplus routing logic ([c2b31e2](https://github.com/propeller-heads/fynd/commit/c2b31e2c81ef70bddfd502667a510fdc38301207))
+* **rpc:** log namespaced failure_reasons on the quote capture line ([fd375ce](https://github.com/propeller-heads/fynd/commit/fd375ce3802e6523a1407811b16656da96e1ab33))
+
+### Bug Fixes
+
+* **water-fill:** route simulation calls through the panic guard ([08b54b9](https://github.com/propeller-heads/fynd/commit/08b54b95fc82ff75301397ee7197efd3e6bf418b))
+* **core:** derive max-gas cause from quote gas, not elimination ([4ad42c6](https://github.com/propeller-heads/fynd/commit/4ad42c685d952e73784894d0c64c6ff611ad7ff5))
+* repair merge fallout from PR #340 rename ([e7c4640](https://github.com/propeller-heads/fynd/commit/e7c4640f9981303a2e7c47f624f5bd05f5704462))
+* add struct fields introduced on main to rebased tests ([ec57451](https://github.com/propeller-heads/fynd/commit/ec57451e86253d07a249da93655e1fbe4bdafcaf))
+* gas compensate the committed amount on surplus quotes ([853e8dc](https://github.com/propeller-heads/fynd/commit/853e8dc26f991c41a130d7944d6bb17f419b8d97))
+* capture the full surplus on split routes ([bafedcb](https://github.com/propeller-heads/fynd/commit/bafedcb81e0df2474444ab6c7cc77175052b1b61))
+* rename tests ([3e522df](https://github.com/propeller-heads/fynd/commit/3e522df82927b0524be9db1d90b2c3fedcd87088))
+* ceil commited_leg for protocol to not overcapture ([193aa07](https://github.com/propeller-heads/fynd/commit/193aa07164ed7277d58e56ac12df02afa89eeba6))
+* not consider gas in quote ([18ff332](https://github.com/propeller-heads/fynd/commit/18ff332414978f75f47e2c4348d80237ee124dd6))
+* gas compensate the committed amount on exclusive quotes ([12ca21b](https://github.com/propeller-heads/fynd/commit/12ca21ba9218a3319e32b95d3bc20cae8d412806))
+* use exclusive routes that tie the public gross output ([8d0f5c2](https://github.com/propeller-heads/fynd/commit/8d0f5c2c17e436e34ff395c4eb98c259c374d800))
+* update docs link ([702a163](https://github.com/propeller-heads/fynd/commit/702a1635a77fd831d88fe2437ecd1dd8106d1ace))
+* set permission field in path_frank_wolfe registry test ([fe47f65](https://github.com/propeller-heads/fynd/commit/fe47f657a2ade5973f78192dbe15e34ce173344c))
+* **rpc:** repeat request-level failure reason per order ([c6b28c1](https://github.com/propeller-heads/fynd/commit/c6b28c12472ed6c1cf068709c43dcb93debe7752))
+
+
 ## [0.97.7](https://github.com/propeller-heads/fynd/compare/0.97.6...0.97.7) (2026-07-28)
 
 ### Features
