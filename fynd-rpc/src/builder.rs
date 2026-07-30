@@ -41,8 +41,8 @@ impl FyndRPCBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`SolverBuildError`] if any pool's `connector_tokens` contains a malformed hex
-    /// address.
+    /// Returns [`SolverBuildError`] if any worker pool's `connector_tokens` contains a malformed
+    /// hex address.
     pub fn new(
         chain: Chain,
         pools: HashMap<String, PoolConfig>,

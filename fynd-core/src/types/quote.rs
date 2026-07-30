@@ -796,7 +796,7 @@ pub struct OrderQuote {
     #[serde(skip)]
     no_route_cause: Option<SolveError>,
     /// Order-level surplus summary, populated when this quote executes through an exclusive
-    /// pool.
+    /// component.
     ///
     /// Informational only (observability); the value the encoder acts on is the per-leg
     /// [`Swap::committed_amount_out`]. `None` for pure public quotes. `#[serde(skip)]` — internal

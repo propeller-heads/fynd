@@ -19,7 +19,7 @@
 pub mod api;
 /// Server builder and runner.
 pub mod builder;
-/// TOML-based pool configuration and server defaults.
+/// TOML-based worker pool configuration and server defaults.
 pub mod config;
 /// Protocol discovery via the Tycho RPC.
 pub mod protocols;

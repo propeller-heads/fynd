@@ -1,11 +1,11 @@
 //! Worker pool for processing solve tasks.
 //!
 //! The worker pool manages multiple dedicated OS threads for CPU-bound route finding.
-//! Each pool owns multiple SolverWorker instances that compete for tasks from the queue.
-//! A pool is configured with a specific algorithm (by name), allowing multiple pools
-//! with different algorithms to compete via the WorkerPoolRouter.
+//! Each worker pool owns multiple SolverWorker instances that compete for tasks from the queue.
+//! A worker pool is configured with a specific algorithm (by name), allowing multiple worker
+//! pools with different algorithms to compete via the WorkerPoolRouter.
 //!
-//! Pools can use either a built-in algorithm (by name via [`WorkerPoolBuilder::algorithm`])
+//! Worker pools can use either a built-in algorithm (by name via [`WorkerPoolBuilder::algorithm`])
 //! or a custom [`Algorithm`](crate::algorithm::Algorithm) implementation (via
 //! [`WorkerPoolBuilder::with_algorithm`]).
 use std::thread::JoinHandle;
@@ -35,8 +35,9 @@ use crate::{
 /// Configuration for the worker pool.
 #[derive(Debug)]
 pub struct WorkerPoolConfig {
-    /// Human-readable name for this pool (used in logging/metrics).
-    /// Can differ from algorithm to distinguish pools with same algorithm but different configs.
+    /// Human-readable name for this worker pool (used in logging/metrics).
+    /// Can differ from algorithm to distinguish worker pools with same algorithm but different
+    /// configs.
     name: String,
     /// How to spawn workers — either a built-in registry lookup or a custom factory.
     spawner: AlgorithmSpawner,
@@ -46,19 +47,19 @@ pub struct WorkerPoolConfig {
     algorithm_config: AlgorithmConfig,
     /// Task queue capacity (maximum number of pending tasks).
     task_queue_capacity: usize,
-    /// When set, exclusive components are filtered out of this pool's workers' graphs
+    /// When set, exclusive components are filtered out of this worker pool's workers' graphs
     /// (default: `None`, no filtering).
     ///
     /// `All` is safe as the default because it only applies when no `ExclusivityPolicy` is
     /// configured — meaning no exclusive components exist to exclude. When a policy is set,
     /// `FyndBuilder::assemble_components` always constructs
-    /// `Some(policy)` for `Public`-scoped pools, so this default is never relied on in
+    /// `Some(policy)` for `Public`-scoped worker pools, so this default is never relied on in
     /// that path.
     exclusivity_policy: Option<ExclusivityPolicy>,
 }
 
 impl WorkerPoolConfig {
-    /// Returns the algorithm name for this pool.
+    /// Returns the algorithm name for this worker pool.
     pub fn algorithm_name(&self) -> &str {
         self.spawner.algorithm_name()
     }
@@ -79,12 +80,12 @@ impl Default for WorkerPoolConfig {
 
 /// A pool of worker threads for processing solve tasks.
 ///
-/// Each pool is dedicated to a specific algorithm. Workers in the pool
+/// Each worker pool is dedicated to a specific algorithm. Workers in the pool
 /// compete for tasks from the shared queue.
 pub struct WorkerPool {
-    /// Human-readable name for this pool.
+    /// Human-readable name for this worker pool.
     name: String,
-    /// Algorithm name for this pool.
+    /// Algorithm name for this worker pool.
     algorithm: String,
     /// Handles to worker threads.
     workers: Vec<JoinHandle<()>>,
@@ -100,7 +101,7 @@ impl WorkerPool {
     /// * `config` - Worker pool configuration
     /// * `task_rx` - Receiver for tasks from the queue
     /// * `market_data` - Shared market data reference
-    /// * `derived_data` - Shared derived data reference (pool depths, token prices)
+    /// * `derived_data` - Shared derived data reference (component depths, token prices)
     /// * `event_rx` - Broadcast receiver for market events (workers subscribe to this)
     /// * `derived_event_rx` - Broadcast receiver for derived data events (resubscribed per worker)
     ///
@@ -149,12 +150,12 @@ impl WorkerPool {
         Ok(Self { name, algorithm, workers, shutdown_tx })
     }
 
-    /// Returns the pool name.
+    /// Returns the worker pool name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Returns the algorithm name for this pool.
+    /// Returns the algorithm name for this worker pool.
     pub fn algorithm(&self) -> &str {
         &self.algorithm
     }
@@ -210,7 +211,7 @@ impl WorkerPoolBuilder {
         Self { config: WorkerPoolConfig::default() }
     }
 
-    /// Sets the pool name.
+    /// Sets the worker pool name.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.config.name = name.into();
         self
@@ -269,8 +270,8 @@ impl WorkerPoolBuilder {
 
     /// Sets the policy that filters exclusive components out of each worker's graph.
     ///
-    /// Public pools receive `Some(policy)`; exclusive-access pools (and pools of solvers with
-    /// no exclusive components configured) receive `None` and keep every component.
+    /// Public worker pools receive `Some(policy)`; exclusive-access worker pools (and deployments
+    /// with no exclusive components configured) receive `None` and keep every component.
     pub fn exclusivity_policy(mut self, policy: Option<ExclusivityPolicy>) -> Self {
         self.config.exclusivity_policy = policy;
         self

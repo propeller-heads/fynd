@@ -33,7 +33,7 @@ use crate::{
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
 
-/// Records per-pool queue metrics at task pickup: how long the task waited in the
+/// Records per-worker-pool queue metrics at task pickup: how long the task waited in the
 /// queue and the depth left behind it. Queue wait growing while solve time stays
 /// flat is the leading indicator of worker saturation.
 fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth: usize) {
@@ -55,7 +55,7 @@ where
     graph_manager: A::GraphManager,
     /// Reference to shared market data.
     market_data: MarketData,
-    /// Reference to shared derived data (pool depths, token prices).
+    /// Reference to shared derived data (component depths, token prices).
     derived_data: SharedDerivedDataRef,
     /// Algorithm's computation requirements (which derived data to react to).
     requirements: ComputationRequirements,
@@ -67,10 +67,10 @@ where
     initialized: bool,
     /// Worker identifier (for logging).
     worker_id: usize,
-    /// Pool name (used as the `pool` metric label).
+    /// Worker pool name (used as the `pool` metric label).
     pool_name: String,
     /// When set, exclusive components are filtered out of this worker's local graph
-    /// (public-pool workers). `None` means the worker ingests everything.
+    /// (workers of public worker pools). `None` means the worker ingests everything.
     ///
     /// `All` (the default) preserves the original non-filtered behaviour. A public worker
     /// is configured with `PublicOnly(policy)` so exclusive components never enter its graph; an
@@ -90,10 +90,10 @@ where
     /// # Arguments
     ///
     /// * `market_data` - Shared reference to market data
-    /// * `derived_data` - Shared reference to derived data (pool depths, token prices)
+    /// * `derived_data` - Shared reference to derived data (component depths, token prices)
     /// * `algorithm` - The algorithm to use for route finding
     /// * `worker_id` - Identifier for this worker (for logging)
-    /// * `pool_name` - Pool name (used as the `pool` metric label)
+    /// * `pool_name` - Worker pool name (used as the `pool` metric label)
     pub fn new(
         market_data: MarketData,
         derived_data: SharedDerivedDataRef,
@@ -428,7 +428,7 @@ where
     /// # Arguments
     ///
     /// * `event_rx` - Receiver for market events
-    /// * `derived_event_rx` - Receiver for derived data events (pool depths, etc.)
+    /// * `derived_event_rx` - Receiver for derived data events (component depths, etc.)
     /// * `task_rx` - Shared receiver for solve tasks
     /// * `shutdown_rx` - Receiver for shutdown signals
     pub async fn run(
@@ -480,7 +480,7 @@ where
                     }
                 }
 
-                // Process derived data events (pool depths, token prices)
+                // Process derived data events (component depths, token prices)
                 derived_result = derived_event_rx.recv(), if !derived_closed => {
                     match derived_result {
                         Ok(event) => {

@@ -277,7 +277,8 @@ impl Encoder {
             return Ok(solution);
         }
 
-        // `route_swaps` carry `committed_amount_out` and the pool attributes; `solution.swaps()`
+        // `route_swaps` carry `committed_amount_out` and the component attributes;
+        // `solution.swaps()`
         // are built 1:1 from them by `Solution::try_from` and are what the router executes.
         // We read the committed amount from the route swap but stamp `user_data` onto the
         // matching solution swap, matched by index via the zip below.
@@ -575,8 +576,8 @@ impl From<EncodingError> for SolveError {
     }
 }
 
-/// Returns whether the quote routes through an exclusive pool, i.e. any swap in its route carries
-/// a committed amount.
+/// Returns whether the quote routes through an exclusive component, i.e. any swap in its route
+/// carries a committed amount.
 fn has_exclusive_leg(quote: &OrderQuote) -> bool {
     quote.route().is_some_and(|route| {
         route
