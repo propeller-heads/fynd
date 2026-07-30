@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     decoder::Registry,
-    resolve::{Outcome, RangeComparison, StateResult, Verdict},
+    resolve::{render_route, Outcome, RangeComparison, StateResult, Verdict},
     usd::Prices,
 };
 
@@ -91,7 +91,7 @@ struct MetricLabels<'a> {
 /// `algorithm` names must resolve in the algorithm registry for the pool to spawn at all.
 fn algorithm_label(outcome: &Outcome) -> &str {
     match outcome {
-        Outcome::Solved(solved) if !solved.route.algorithm.is_empty() => &solved.route.algorithm,
+        Outcome::Solved(solved) if !solved.algorithm.is_empty() => &solved.algorithm,
         Outcome::Solved(_) | Outcome::Partial(_) | Outcome::Unsolvable(_) => ALGORITHM_NONE,
     }
 }
@@ -276,7 +276,7 @@ pub(crate) fn record_range(
             fynd_usd = priced(solved.amount_out),
             quoted_usd = range.quote.as_ref().map_or(0.0, |quote| priced(quote.amount_out)),
             savings_usd,
-            route = %solved.route.path,
+            route = %solved.solved_route.as_deref().map(render_route).unwrap_or_default(),
             "trade comparison"
         );
     }
@@ -569,7 +569,7 @@ mod tests {
     use super::*;
     use crate::{
         decoder::{AttributionSource, DecodedTrade, SandwichEvidence},
-        resolve::{build_range, RouteSummary, SolvedAmount},
+        resolve::{build_range, SolvedAmount},
     };
 
     fn empty_prices() -> Prices {
@@ -608,10 +608,7 @@ mod tests {
             amount_out: U256::from(amount_out),
             amount_out_net_gas: U256::from(net),
             gas_estimate: U256::from(21_000),
-            route: RouteSummary {
-                algorithm: algorithm.to_string(),
-                path: "USDC -[uniswap_v3]-> WETH".to_string(),
-            },
+            algorithm: algorithm.to_string(),
             quote_json: None,
             solved_route: None,
         })

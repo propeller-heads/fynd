@@ -12,32 +12,145 @@ mod compare;
 pub(crate) mod jsonl;
 pub(crate) mod monitor;
 
+use std::collections::HashMap;
+
 use alloy::primitives::{Address, TxHash, U256};
 use async_trait::async_trait;
 pub(crate) use compare::{Deltas, Slippage, Verdict};
-use fynd_core::types::Route;
+use fynd_core::types::{Route, Swap};
 use serde::Serialize;
+use tycho_simulation::tycho_common::models::Address as CoreAddress;
 
 use crate::{
     decoder::{AttributionSource, DecodedTrade, SandwichEvidence, SolverQuote},
     usd::Prices,
 };
 
-/// What Fynd's winning route was: the worker-pool algorithm that produced it and the path it took.
-/// Kept as typed fields (not dug back out of `quote_json`) so the metrics and the per-trade log
-/// line can read them without parsing JSON.
+/// One route leg, reduced to what rendering needs. A `Swap` also carries a `ProtocolComponent`
+/// and a boxed `ProtocolSim` that a route string has no use for and that cannot be built outside
+/// `fynd-core`, so the rendering below works on this instead and stays unit-testable.
+struct Leg<'a> {
+    token_in: &'a CoreAddress,
+    token_out: &'a CoreAddress,
+    protocol: &'a str,
+    /// The leg's declared share of `token_in`. `0.0` means "all the remaining balance".
+    split: f64,
+}
+
+impl<'a> Leg<'a> {
+    fn from_swap(swap: &'a Swap) -> Self {
+        Self {
+            token_in: swap.token_in(),
+            token_out: swap.token_out(),
+            protocol: swap.protocol(),
+            split: *swap.split(),
+        }
+    }
+}
+
+/// Render a solved route as a readable path: `USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH`.
+/// Token symbols are resolved from the route's own token map (populated by the algorithm that
+/// built it, via [`fynd_core::types::Route::token_symbol`]); a token missing from that map falls
+/// back to a shortened address.
+pub(crate) fn render_route(route: &Route) -> String {
+    let legs: Vec<Leg<'_>> = Route::swaps(route)
+        .iter()
+        .map(Leg::from_swap)
+        .collect();
+    render_legs(&legs, &route_symbols(route))
+}
+
+/// Symbols for every token in `route`, resolved from the route's own token map.
+fn route_symbols(route: &Route) -> HashMap<CoreAddress, String> {
+    let mut symbols = HashMap::new();
+    for swap in Route::swaps(route) {
+        for token in [swap.token_in(), swap.token_out()] {
+            if let Some(symbol) = route.token_symbol(token) {
+                symbols.insert(token.clone(), symbol.to_string());
+            }
+        }
+    }
+    symbols
+}
+
+/// Render a route's legs as a readable path, given each token's symbol. Kept apart from
+/// [`render_route`] so the algorithm is unit-testable against plain `Leg`s and a symbol map,
+/// without building a real `Route`/`Swap`.
 ///
-/// `Default` means "no route detail" — both fields empty.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub(crate) struct RouteSummary {
-    /// Name of the algorithm whose route won the quote: `bellman_ford`, `most_liquid`,
-    /// `path_frank_wolfe`, `water_fill`. Empty when the quote declared none.
-    pub algorithm: String,
-    /// The route as a readable path, tokens and protocols interleaved:
-    /// `USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH`. Split legs carry their share and are
-    /// joined with ` + `. Empty when the quote carried no route. Logged and serialized under the
-    /// name `route`.
-    pub path: String,
+/// Swaps that connect — one's output token is the next's input — chain into a single arrow path.
+/// A split fans several legs out of the same token, so its legs cannot share one chain: each
+/// becomes its own path carrying its share of the input, and the paths are joined with ` + `.
+/// Protocol ids are Tycho's own, so a newly integrated DEX reads correctly without a lookup table
+/// here.
+fn render_legs(legs: &[Leg<'_>], symbols: &HashMap<CoreAddress, String>) -> String {
+    let mut paths: Vec<String> = Vec::new();
+    let mut open = String::new();
+    let mut tip: Option<&CoreAddress> = None;
+    for (leg, share) in legs.iter().zip(split_shares(legs)) {
+        if tip != Some(leg.token_in) {
+            if !open.is_empty() {
+                paths.push(std::mem::take(&mut open));
+            }
+            open = token_label(leg.token_in, symbols);
+        }
+        open.push_str(&arrow(leg.protocol, share));
+        open.push_str(&token_label(leg.token_out, symbols));
+        tip = Some(leg.token_out);
+    }
+    if !open.is_empty() {
+        paths.push(open);
+    }
+    paths.join(" + ")
+}
+
+/// The arrow between two tokens: ` -[uniswap_v2]-> `, or ` -[vm:curve 40%]-> ` for one leg of a
+/// split, where the share tells you how much of the input took this leg.
+fn arrow(protocol: &str, share: Option<f64>) -> String {
+    match share {
+        Some(share) => format!(" -[{protocol} {:.0}%]-> ", share * 100.0),
+        None => format!(" -[{protocol}]-> "),
+    }
+}
+
+/// Each leg's share of its input token, or `None` when it is the only leg consuming that token.
+///
+/// A split's legs all consume the same token, and by `Route`'s split convention every leg but one
+/// declares an explicit fraction while the last declares `0.0`, meaning "all the remaining
+/// balance". Reconstruct that remainder so every leg of a split reads as a percentage.
+fn split_shares(legs: &[Leg<'_>]) -> Vec<Option<f64>> {
+    let mut consumers: HashMap<&CoreAddress, (usize, f64)> = HashMap::new();
+    for leg in legs {
+        let entry = consumers
+            .entry(leg.token_in)
+            .or_insert((0, 0.0));
+        entry.0 += 1;
+        entry.1 += leg.split;
+    }
+    legs.iter()
+        .map(|leg| {
+            let (count, declared) = consumers
+                .get(leg.token_in)
+                .copied()
+                .unwrap_or((1, 0.0));
+            if count < 2 {
+                return None;
+            }
+            Some(if leg.split == 0.0 { 1.0 - declared } else { leg.split })
+        })
+        .collect()
+}
+
+/// A token's symbol, or a shortened address when the route has no entry for it — an unknown token
+/// still has to read as a distinct hop rather than vanish from the path.
+fn token_label(token: &CoreAddress, symbols: &HashMap<CoreAddress, String>) -> String {
+    if let Some(symbol) = symbols.get(token) {
+        return symbol.clone();
+    }
+    let hex = token.to_string();
+    match hex.get(..8) {
+        Some(prefix) => format!("{prefix}…"),
+        None => hex,
+    }
 }
 
 /// A Fynd quote for the re-solved order.
@@ -47,17 +160,21 @@ pub(crate) struct SolvedAmount {
     /// Output after Fynd's own estimated gas cost.
     pub amount_out_net_gas: U256,
     pub gas_estimate: U256,
-    /// Which algorithm won and the path its route took.
-    pub route: RouteSummary,
+    /// Name of the algorithm whose route won the quote: `bellman_ford`, `most_liquid`,
+    /// `path_frank_wolfe`, `water_fill`. Empty when the quote declared none, or when this is a
+    /// re-executed outcome (it only feeds the slippage numbers and does not re-declare a route).
+    pub algorithm: String,
     /// The complete serialized Fynd quote (route, per-hop pools/amounts, encoded transaction) for
     /// dumping improvements. `None` when not captured (e.g. the HTTP resolve path).
     #[serde(default)]
     pub quote_json: Option<String>,
     /// The solved route, kept in memory so [`SteppingSolver::reexecute`] can replay it at
-    /// back-of-block. `None` for re-executed results and mocks. Not serialized (the slim
-    /// projection in `quote_json` covers the JSONL) and excluded from equality (a route carries
-    /// unserializable, incomparable protocol states). Boxed so a route-carrying `SolvedAmount`
-    /// doesn't blow up `Outcome`'s size relative to its other variants.
+    /// back-of-block and so [`render_route`] can derive the readable path at serialization time
+    /// (serialized under `route`, alongside `algorithm`). `None` for re-executed results and
+    /// mocks. Not serialized directly (the derived path and the slim projection in `quote_json`
+    /// cover the JSONL) and excluded from equality (a route carries unserializable, incomparable
+    /// protocol states). Boxed so a route-carrying `SolvedAmount` doesn't blow up `Outcome`'s size
+    /// relative to its other variants.
     #[serde(skip)]
     pub solved_route: Option<Box<Route>>,
 }
@@ -294,7 +411,7 @@ mod tests {
             amount_out: U256::from(amount_out),
             amount_out_net_gas: U256::from(net),
             gas_estimate: U256::from(21_000),
-            route: RouteSummary::default(),
+            algorithm: String::new(),
             quote_json: None,
             solved_route: None,
         })
@@ -547,5 +664,173 @@ mod tests {
         assert_eq!(range.verdict, Verdict::CoverageMiss);
         let slippage = range.slippage.unwrap();
         assert!((slippage.bps - 100.0).abs() < 0.01, "expected +100 bps, got {}", slippage.bps);
+    }
+
+    /// A token address keyed by its symbol's last byte — distinct across the symbols used below,
+    /// where the first byte is not (USDT and USDC share it) — so `symbols()` can name it back.
+    fn token(symbol: &str) -> CoreAddress {
+        let tag = symbol
+            .as_bytes()
+            .last()
+            .copied()
+            .unwrap_or(0);
+        CoreAddress::from(vec![tag; 20])
+    }
+
+    /// A symbol table for the symbols used below.
+    fn symbols() -> HashMap<CoreAddress, String> {
+        ["USDT", "DAI", "WETH", "USDC"]
+            .into_iter()
+            .map(|symbol| (token(symbol), symbol.to_string()))
+            .collect()
+    }
+
+    /// One route leg. `split` follows `Route`'s convention: an explicit fraction, or 0.0 for the
+    /// leg that takes whatever is left.
+    fn leg<'a>(
+        token_in: &'a CoreAddress,
+        token_out: &'a CoreAddress,
+        protocol: &'a str,
+        split: f64,
+    ) -> Leg<'a> {
+        Leg { token_in, token_out, protocol, split }
+    }
+
+    #[test]
+    fn test_render_legs_multi_hop() {
+        // Connecting legs chain into one arrow path; no percentages, since nothing is split.
+        let (usdt, dai, weth) = (token("USDT"), token("DAI"), token("WETH"));
+        let route = render_legs(
+            &[leg(&usdt, &dai, "uniswap_v2", 0.0), leg(&dai, &weth, "vm:balancer", 0.0)],
+            &symbols(),
+        );
+        assert_eq!(route, "USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH");
+    }
+
+    #[test]
+    fn test_render_legs_split() {
+        // Two legs out of USDC: the 0.6 leg is explicit, the 0.0 leg takes the remainder. They fan
+        // out of the same token so they cannot share one chain — each becomes its own path, joined
+        // by " + ", and both carry their share.
+        let (usdc, weth) = (token("USDC"), token("WETH"));
+        let route = render_legs(
+            &[leg(&usdc, &weth, "uniswap_v3", 0.6), leg(&usdc, &weth, "vm:curve", 0.0)],
+            &symbols(),
+        );
+        assert_eq!(route, "USDC -[uniswap_v3 60%]-> WETH + USDC -[vm:curve 40%]-> WETH");
+    }
+
+    #[test]
+    fn test_render_legs_split_then_common_hop() {
+        // A split that reconverges: both legs land on WETH, then one leg carries on to USDC. The
+        // continuation chains onto the path that ended at WETH rather than starting a third path.
+        let (usdt, dai, weth, usdc) = (token("USDT"), token("DAI"), token("WETH"), token("USDC"));
+        let route = render_legs(
+            &[
+                leg(&usdt, &weth, "uniswap_v3", 0.25),
+                leg(&usdt, &dai, "vm:curve", 0.0),
+                leg(&dai, &usdc, "uniswap_v2", 0.0),
+            ],
+            &symbols(),
+        );
+        assert_eq!(
+            route,
+            "USDT -[uniswap_v3 25%]-> WETH + USDT -[vm:curve 75%]-> DAI -[uniswap_v2]-> USDC"
+        );
+    }
+
+    #[test]
+    fn test_render_legs_unknown_token() {
+        // A long-tail token with no entry in the symbol table still has to read as a distinct
+        // hop, so it falls back to a shortened address rather than an empty string.
+        let (usdt, unknown) = (token("USDT"), CoreAddress::from(vec![0xab; 20]));
+        assert_eq!(
+            render_legs(&[leg(&usdt, &unknown, "uniswap_v2", 0.0)], &symbols()),
+            "USDT -[uniswap_v2]-> 0xababab…"
+        );
+    }
+
+    #[test]
+    fn test_render_legs_empty() {
+        assert_eq!(render_legs(&[], &symbols()), "");
+    }
+
+    #[test]
+    fn test_render_route_resolves_symbols_from_the_route_itself() {
+        // Unlike `render_legs` above (fed a hand-built symbol table), this exercises the glue
+        // that reads symbols directly off a real `Route`'s own token map.
+        let route =
+            test_support::route(&[("uniswap_v2", "USDT", "DAI"), ("vm:balancer", "DAI", "WETH")]);
+        assert_eq!(render_route(&route), "USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH");
+    }
+}
+
+/// Test-only route construction, shared by tests here and in sibling modules (`jsonl`) that need
+/// a real `Route` with resolvable token symbols — as opposed to the pure-rendering tests above,
+/// which build `Leg`s directly to stay decoupled from `Swap`'s heavier constructor.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::collections::HashMap;
+
+    use alloy::primitives::U256;
+    use chrono::NaiveDateTime;
+    use fynd_core::types::{Route, Swap};
+    use num_bigint::BigUint;
+    use tycho_simulation::{
+        evm::protocol::uniswap_v2::state::UniswapV2State,
+        tycho_common::{
+            models::{protocol::ProtocolComponent, token::Token, Chain, ChangeType},
+            Bytes,
+        },
+    };
+
+    /// Build a route from `(protocol, token_in_symbol, token_out_symbol)` hops, chained in order.
+    /// Each hop gets a throwaway `UniswapV2State` pool — real enough to satisfy `Swap::new`,
+    /// irrelevant to what the route-summary code reads (protocol id, token addresses, and the
+    /// route's own token map).
+    pub(crate) fn route(hops: &[(&str, &str, &str)]) -> Route {
+        let mut tokens: HashMap<Bytes, Token> = HashMap::new();
+        let mut swaps = Vec::with_capacity(hops.len());
+        for &(protocol, token_in_symbol, token_out_symbol) in hops {
+            let token_in = symbol_token(token_in_symbol);
+            let token_out = symbol_token(token_out_symbol);
+            let component = ProtocolComponent::new(
+                "test-pool",
+                protocol,
+                "swap",
+                Chain::Ethereum,
+                vec![token_in.address.clone(), token_out.address.clone()],
+                vec![],
+                HashMap::new(),
+                ChangeType::default(),
+                Bytes::default(),
+                NaiveDateTime::default(),
+            );
+            swaps.push(Swap::new(
+                "test-pool".to_string(),
+                protocol.to_string(),
+                token_in.address.clone(),
+                token_out.address.clone(),
+                BigUint::from(1_000u64),
+                BigUint::from(990u64),
+                BigUint::from(100_000u64),
+                component,
+                Box::new(UniswapV2State::new(U256::from(1_000_000u64), U256::from(1_000_000u64))),
+            ));
+            tokens.insert(token_in.address.clone(), token_in);
+            tokens.insert(token_out.address.clone(), token_out);
+        }
+        Route::new(swaps, tokens).expect("test route must not be empty")
+    }
+
+    /// A deterministic token keyed by its symbol's last byte, matching the address scheme the
+    /// pure-rendering tests use so both layers agree on the same token identity.
+    fn symbol_token(symbol: &str) -> Token {
+        let tag = symbol
+            .as_bytes()
+            .last()
+            .copied()
+            .unwrap_or(0);
+        Token::new(&Bytes::from(vec![tag; 20]), symbol, 18, 0, &[], Chain::Ethereum, 100)
     }
 }

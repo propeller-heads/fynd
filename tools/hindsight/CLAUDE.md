@@ -131,14 +131,17 @@ vanished at N).
 - `RangeComparison` — a trade solved at top and back, including gas-netted settled output and
   the top route's `Slippage` between the two states (from its re-execution at back).
 - `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
-- `RouteSummary` — which algorithm won a solved state and the path its route took. Carried on
-  `SolvedAmount` as typed fields (not dug out of the serialized quote) so the metrics and the
-  per-trade log line read it directly.
+- `SolvedAmount` — a solved state's amounts plus `algorithm` (which worker pool won the quote) and
+  `solved_route` (the full `fynd_core::types::Route`, kept in memory to replay at back-of-block).
+  The readable path is not stored: `resolve::render_route` derives it from `solved_route` at
+  serialization/log time, reading token symbols off the route's own token map via
+  `Route::token_symbol`.
 
 ### Route attribution
 
 A solved state records the algorithm whose route won the quote — the worker pool that beat the
-others on that order — and that route rendered as a readable path:
+others on that order — and, derived from its route at serialization time, that route rendered as
+a readable path:
 
 ```
 USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH

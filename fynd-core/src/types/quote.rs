@@ -1153,6 +1153,18 @@ impl Route {
     pub(crate) fn tokens(&self) -> &HashMap<Bytes, Token> {
         &self.tokens
     }
+
+    /// Returns the symbol of `address`, resolved from this route's own token map (populated by
+    /// the algorithm that built the route). `None` if the route carries no entry for it — for
+    /// example a route built without a token map (tests, replays).
+    ///
+    /// Lets a caller outside this crate render a human-readable path (tokens and protocols
+    /// interleaved) without needing a separate, externally-sourced token table.
+    pub fn token_symbol(&self, address: &Address) -> Option<&str> {
+        self.tokens
+            .get(address)
+            .map(|token| token.symbol.as_str())
+    }
 }
 
 /// The result of a route-finding algorithm: a route plus its gas-adjusted net output.
@@ -1955,6 +1967,26 @@ mod tests {
             .map(|(a, b)| make_swap(a, b, 1000, 990))
             .collect();
         Route::new(swaps, HashMap::new()).unwrap()
+    }
+
+    #[test]
+    fn test_route_token_symbol_resolves_from_own_map() {
+        let token_in = token(0x01, "TIN");
+        let token_out = token(0x02, "TOUT");
+        let tokens = HashMap::from([
+            (token_in.address.clone(), token_in.clone()),
+            (token_out.address.clone(), token_out.clone()),
+        ]);
+        let route = Route::new(vec![make_swap(0x01, 0x02, 1000, 990)], tokens).unwrap();
+        assert_eq!(route.token_symbol(&make_address(0x01)), Some("TIN"));
+        assert_eq!(route.token_symbol(&make_address(0x02)), Some("TOUT"));
+    }
+
+    #[test]
+    fn test_route_token_symbol_missing_returns_none() {
+        // `make_route` builds with an empty token map: any address is unresolved.
+        let route = make_route(vec![(0x01, 0x02)]);
+        assert_eq!(route.token_symbol(&make_address(0x01)), None);
     }
 
     #[rstest]

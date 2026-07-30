@@ -16,7 +16,7 @@ use fynd_core::types::{OrderQuote, Swap, Transaction};
 use tracing::{info, warn};
 
 use crate::{
-    resolve::{Outcome, RangeComparison, StateResult},
+    resolve::{render_route, Outcome, RangeComparison, StateResult},
     usd::Prices,
 };
 
@@ -216,8 +216,8 @@ fn state_record(
         "gas_estimate": solved.map(|s| s.gas_estimate.to_string()),
         // Flat route attribution, so a jq pass can group by algorithm or read the path at a glance
         // without walking the nested per-hop route below.
-        "algorithm": solved.map(|s| s.route.algorithm.as_str()),
-        "route": solved.map(|s| s.route.path.as_str()),
+        "algorithm": solved.map(|s| s.algorithm.as_str()),
+        "route": solved.map(|s| s.solved_route.as_deref().map(render_route).unwrap_or_default()),
         "improvement_usd": improvement_usd,
         "fynd_value_usd": fynd_value_usd,
         "settled_value_usd": prices.value_usd(token_out, range.settled_amount_out),
@@ -282,7 +282,7 @@ mod tests {
     use super::*;
     use crate::{
         decoder::{AttributionSource, DecodedTrade, Registry, SandwichEvidence, SolverQuote},
-        resolve::{build_range, RouteSummary, SolvedAmount},
+        resolve::{build_range, test_support, SolvedAmount},
     };
 
     fn empty_prices() -> Prices {
@@ -433,27 +433,27 @@ mod tests {
                 "gas_estimate":"0","split":1.0}]}"#
                 .to_string(),
         );
-        let route = RouteSummary {
-            algorithm: "bellman_ford".to_string(),
-            path: "WETH -[uniswap_v3]-> DAI -[vm:curve]-> USDC".to_string(),
-        };
+        let solved_route = Box::new(test_support::route(&[
+            ("uniswap_v3", "WETH", "DAI"),
+            ("vm:curve", "DAI", "USDC"),
+        ]));
         // Top: gross 1010 USDC → +$10. Back: gross 1002 USDC → +$2. Both win. The top route's
         // re-execution matches the fresh back solve, so the slippage numbers read off `back`.
         let top = Outcome::Solved(SolvedAmount {
             amount_out: U256::from(1_010_000_000u64),
             amount_out_net_gas: U256::from(1_005_000_000u64),
             gas_estimate: U256::from(21_000u64),
-            route: route.clone(),
+            algorithm: "bellman_ford".to_string(),
             quote_json: quote.clone(),
-            solved_route: None,
+            solved_route: Some(solved_route.clone()),
         });
         let back = Outcome::Solved(SolvedAmount {
             amount_out: U256::from(1_002_000_000u64),
             amount_out_net_gas: U256::from(1_001_000_000u64),
             gas_estimate: U256::from(21_000u64),
-            route,
+            algorithm: "bellman_ford".to_string(),
             quote_json: quote,
-            solved_route: None,
+            solved_route: Some(solved_route),
         });
         let range = build_range(&trade, &prices, top, back.clone(), &back);
 
@@ -617,7 +617,7 @@ mod tests {
                 amount_out: U256::from(amount),
                 amount_out_net_gas: U256::from(amount),
                 gas_estimate: U256::from(21_000u64),
-                route: RouteSummary::default(),
+                algorithm: String::new(),
                 quote_json: None,
                 solved_route: None,
             })

@@ -3835,6 +3835,7 @@ dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
+ "chrono",
  "clap",
  "futures 0.3.32",
  "fynd-client",

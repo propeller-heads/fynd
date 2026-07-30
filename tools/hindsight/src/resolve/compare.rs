@@ -144,14 +144,14 @@ pub(crate) fn verdict(outcome: &Outcome, deltas: &Deltas) -> Verdict {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolve::{RouteSummary, SolvedAmount};
+    use crate::resolve::SolvedAmount;
 
     fn solved(amount_out: u64, net: u64) -> Outcome {
         Outcome::Solved(SolvedAmount {
             amount_out: U256::from(amount_out),
             amount_out_net_gas: U256::from(net),
             gas_estimate: U256::from(21_000),
-            route: RouteSummary::default(),
+            algorithm: String::new(),
             quote_json: None,
             solved_route: None,
         })
