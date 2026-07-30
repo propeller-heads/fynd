@@ -472,22 +472,16 @@ impl ComputationManager {
         );
     }
 
-    /// Recovers from a broadcast lag without a full-topology recompute.
+    ////// Recovers from a broadcast lag without a full-topology recompute.
     ///
-    /// Drains every event still buffered in `event_rx` (returning the receiver to
-    /// the live tail so it cannot immediately re-lag), coalesces them into one
-    /// incremental `ChangedComponents`, and recomputes just that union.
+    /// Drains the events still buffered in `event_rx` (returning the receiver to the live tail so
+    /// it cannot immediately re-lag), coalesces them into one incremental `ChangedComponents`,
+    /// and recomputes just that union.
     ///
-    /// Trade-off: this only recomputes components named in the *drained* events, not
-    /// the ones lost in the *dropped* (skipped) window. Added/updated components missed
-    /// there self-correct on their next `MarketUpdated`. Components REMOVED only in the
-    /// dropped window are different: they are already gone from market topology, so they
-    /// never reappear in a future event, and this path never prunes them either — their
-    /// stale `spot_prices`/`pool_depths` entries persist for the life of the process
-    /// (production runs no full recompute anymore). This is bounded and does not affect
-    /// routing correctness (the routing graph is gated separately and self-resyncs), but
-    /// it is a known limitation; a topology-reconciliation follow-up is tracked to prune
-    /// these entries without resorting to a full recompute.
+    /// Components lost in the dropped window are not recomputed. Added and updated ones
+    /// self-correct on their next `MarketUpdated`; removed ones never reappear, leaving stale
+    /// `spot_prices`/`pool_depths` entries for the life of the process. Routing is unaffected:
+    /// derived data is only read per graph edge, and a removed component has no edges.
     async fn recover_from_lag(&self, event_rx: &mut broadcast::Receiver<MarketEvent>) {
         let mut drained = Vec::new();
         loop {
