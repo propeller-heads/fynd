@@ -122,6 +122,13 @@ impl TransferLedger {
     /// All three compare same-token amounts, so the proof needs no prices. Each condition
     /// closed a real mis-decode (the last: a wash-loop MEV bundle, tx `0x280b9939…`, whose $10k
     /// loops let a $51 position change pass the 1% test).
+    ///
+    /// # Round trips
+    ///
+    /// A net on both sides is not enough to prove a swap. When the tracked address both paid and
+    /// was repaid in *both* tokens it went out and came back — an arbitrage or liquidity probe —
+    /// and the two leftovers are what the round trip cost, not a conversion of one into the other.
+    /// Those are declined; see `is_round_trip`.
     pub(crate) fn net_swap(&self, tracked: Address) -> Option<NetSwap> {
         let mut amounts_by_token: HashMap<Address, TokenAmounts> = HashMap::new();
         for &(token, from, to, value) in &self.transfers {
@@ -272,7 +279,37 @@ fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwa
     }
     let (&token_in, &amount_in) = net_sent.iter().next()?;
     let (&token_out, &amount_out) = net_received.iter().next()?;
+    if is_round_trip(amounts_by_token, token_in, token_out) {
+        debug!(?token_in, ?token_out, "declining round-trip flow");
+        return None;
+    }
     Some(NetSwap { token_in, amount_in, token_out, amount_out })
+}
+
+/// Whether the tracked address's flow in both swap tokens is bidirectional, which makes the net a
+/// round trip rather than a swap.
+///
+/// A swap is one-directional on at least one side: the trader pays `token_in` and is paid
+/// `token_out`. Routing can send part of one side back — a refunded input, an unspent hop — and
+/// that leaves only *that* side bidirectional, so it still decodes. Both sides bidirectional means
+/// the address went out and came back in both tokens, and the residues are the round trip's cost.
+///
+/// Pairing those residues as a trade invents enormous wins, because the leftovers bear no relation
+/// to each other: tx `0x9aa81b8a…` on Base sends 758.2556 SOSO and 251.500210 USDC into one pool
+/// and takes 758.1039 SOSO and 251.500211 USDC straight back out, netting -0.1517 SOSO and
+/// +0.000001 USDC. Read as a swap that is a 15,000x improvement for Fynd; it is a bot paying
+/// 0.15 SOSO of fees to gain a wei. One such bot produced 3,168 fake wins on Base in a day.
+fn is_round_trip(
+    amounts_by_token: &HashMap<Address, TokenAmounts>,
+    token_in: Address,
+    token_out: Address,
+) -> bool {
+    let bidirectional = |token: Address| {
+        amounts_by_token
+            .get(&token)
+            .is_some_and(|amounts| !amounts.sent.is_zero() && !amounts.received.is_zero())
+    };
+    bidirectional(token_in) && bidirectional(token_out)
 }
 
 /// Drop residue legs from one side of an ambiguous net, per the three-condition proof in
@@ -327,6 +364,45 @@ mod tests {
 
         let result = net_swap(&logs, &[], sender).unwrap();
         assert_eq!(result, swap(token_a, 1000, token_b, 2000));
+    }
+
+    #[test]
+    fn test_round_trip_through_one_pool_is_not_a_swap() {
+        // The shape of tx 0x9aa81b8a… on Base: the sender pushes both tokens into one pool and
+        // takes both straight back, netting a small loss in one and a wei of gain in the other.
+        // Pairing those residues reads as a 15,000x win for Fynd.
+        let sender = addr(1);
+        let pool = addr(50);
+        let soso = addr(10);
+        let usdc = addr(11);
+
+        let logs = vec![
+            make_transfer_log(usdc, pool, sender, U256::from(251_500_211u64)),
+            make_transfer_log(soso, sender, pool, U256::from(758_255u64)),
+            make_transfer_log(soso, pool, sender, U256::from(758_103u64)),
+            make_transfer_log(usdc, sender, pool, U256::from(251_500_210u64)),
+        ];
+
+        assert_eq!(net_swap(&logs, &[], sender), None);
+    }
+
+    #[test]
+    fn test_refunded_input_still_decodes() {
+        // Only the input side is bidirectional — the router hands back an unspent remainder. That
+        // is a real swap and must survive the round-trip check.
+        let sender = addr(1);
+        let pool = addr(50);
+        let token_in = addr(10);
+        let token_out = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_in, sender, pool, U256::from(1000)),
+            make_transfer_log(token_in, pool, sender, U256::from(100)),
+            make_transfer_log(token_out, pool, sender, U256::from(2000)),
+        ];
+
+        let result = net_swap(&logs, &[], sender).unwrap();
+        assert_eq!(result, swap(token_in, 900, token_out, 2000));
     }
 
     #[test]
