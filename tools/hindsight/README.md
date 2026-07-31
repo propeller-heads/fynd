@@ -52,14 +52,14 @@ All take `--chain` (selects the address book) and `--registry` /
                     │
                     │   direct solver           →  [ SenderNetting ]
                     │   batch settler / solver  →  [ CowSettlement, IntentNetting ]
-                    │   venue relay             →  [ RelayNetting ]
+                    │   venue relay             →  [ RelayCalldata, RelayNetting ]
                     │   venue metamask          →  [ MetaMaskNetting ]
                     │  TraderFlow
                     ▼
-           ┌─────────────────┐  embedded_quote  ┌─────────────────┐
+           ┌─────────────────┐   swap_intent    ┌─────────────────┐
            │ post-processing │ ───────────────▶ │ SolverKnowledge │
            └────────┬────────┘                  └─────────────────┘
-                    │  veto → venue attribution → solver attribution → gas → quote → sandwich scan
+                    │  veto → venue attribution → solver attribution → gas → intent → sandwich scan
                     ▼
               DecodedTrade
 ```
@@ -85,7 +85,7 @@ trait TradeDecoder<P> {
 match role {
     Sender      => vec![Box::new(SenderNetting)],
     Intent      => intents::decoders_for(),       // [CowSettlement, IntentNetting]
-    Venue(name) => venues::decoders_for(name),   // e.g. "relay" → [RelayNetting]
+    Venue(name) => venues::decoders_for(name),   // e.g. "relay" → [RelayCalldata, RelayNetting]
 }
 ```
 
@@ -117,16 +117,18 @@ match role {
                       ▼                    ▼             ▼                ▼
            venues::decoders_for(name)  intents::decoders_for()  SenderNetting   intents::decoders_for()
                       │                 └──── intents/ ────┘    netting_dec.rs  └──── intents/ ────┘
-           ┌──────────┴───────────┐
-           ▼                      ▼
-     [RelayNetting]        [MetaMaskNetting]
-     (venues/relay.rs)     (venues/metamask.rs)
+           ┌──────────┴─────────────────┐
+           ▼                            ▼
+     [RelayCalldata, RelayNetting]  [MetaMaskNetting]
+     (venues/relay.rs)              (venues/metamask.rs)
 
    direct call vs a solver-settled intent order — SAME solver, DIFFERENT decoder:
      0x called directly             → Sender → [ SenderNetting ]        (your own tx, your gas)
      0x settling your intent order  → Intent → intents::decoders_for()  (a solver settles for you)
    an intent source with a richer signal gets its own decoder ahead of the netting fallback —
-   CoW reads its Trade event (intents/cow.rs), then IntentNetting catches the rest.
+   CoW reads its Trade event (intents/cow.rs), then IntentNetting catches the rest. Relay is the
+   same shape: RelayCalldata reads the settling solver's own calldata (SwapIntent) plus a
+   recipient-anchored ledger query for the settled output, ahead of RelayNetting.
 
    implement a new decoder where the entity that carries the flow lives:
    ├─ new venue                       → venues/<name>.rs  +  arm in venues::decoders_for("<name>")
@@ -157,19 +159,29 @@ the swap. `MetaMaskNetting` backs the fee out to 991.
 
 ### Solver knowledge (`solvers/`)
 
-What a solver's transactions reveal beyond its address — a calldata quote (KyberSwap's
-`clientData`, ParaSwap's word layout, 0x's positive-slippage action), a match-time veto (LiFi's
-bridge orders), the integrator tag a frontend records in the solver's event (LiFi's Diamond), or
-the fee recipients its calldata names (KyberSwap's `feeReceivers`). A fee recipient read this way
-covers a frontend that has no address-book entry: the calldata says who is paid, and the transfer
-ledger says how much, so the cut is added back and the settled output stays gross.
-Every method defaults to "nothing to add", so most solvers are a single address-book line with no
-code; those with code are registered in `solvers::IMPLEMENTATIONS`.
+What a solver's transactions reveal beyond its address — a calldata-recovered swap intent
+(KyberSwap's ABI decode plus its `clientData` quote, ParaSwap's word layout, Fly's packed layout),
+a match-time veto (LiFi's bridge orders), the integrator tag a frontend records in the solver's
+event (LiFi's Diamond), or the fee recipients its calldata names (KyberSwap's `feeReceivers`). A
+fee recipient read this way covers a frontend that has no address-book entry: the calldata says
+who is paid, and the transfer ledger says how much, so the cut is added back and the settled
+output stays gross. Every method defaults to "nothing to add", so most solvers are a single
+address-book line with no code; those with code are registered in `solvers::IMPLEMENTATIONS`.
 
 ```rust
 trait SolverKnowledge {
-    /// The solver's off-chain quote declared in its calldata, when it embeds one.
-    fn embedded_quote(&self, input: &[u8], amount_in: U256) -> Option<SolverQuote> { None }
+    /// The trader's swap terms (token in/out, amounts, the on-chain min_amount_out floor, and —
+    /// when the calldata declares one — the solver's off-chain quote), when the solver frame's
+    /// own calldata carries them — how a reverted trade's floor is recovered (a revert emits no
+    /// logs to net a settled amount from). `amount_in_hint` is the decoded flow's input amount,
+    /// when known (absent for a reverted trade); scan-based extractors (ParaSwap) need it to
+    /// locate fields by value rather than by ABI offset.
+    fn swap_intent(&self, input: &[u8], amount_in_hint: Option<U256>) -> Option<SwapIntent> { None }
+
+    /// The address this solver's calldata declares as the output recipient — how a
+    /// calldata-primary decode (RelayCalldata) learns whose receipt to read the settled amount
+    /// from, since calldata alone never carries a settled amount.
+    fn output_recipient(&self, input: &[u8]) -> Option<Address> { None }
 
     /// The veto this solver's logs place on a matched transaction that is not a swap.
     fn solver_veto(&self, logs: &[Log]) -> Option<Veto> { None }
@@ -219,8 +231,8 @@ collectors are re-verified on every chain a venue is added on.
 
 | You want to… | Touch | Without it |
 |---|---|---|
-| Track a new solver | One line in the address book's `[solvers]` section. No code — trades sent straight to the router then match on the entry point and decode like any other; the quote and veto rows below are optional extras | Trades sent directly to the solver's router never match, so they never appear in the output; trades a known venue routed through it still decode, but the solver is recorded as "unknown" |
-| Read a solver's quote from its calldata | A `SolverKnowledge` impl in `solvers/`, registered in `solvers::IMPLEMENTATIONS` | Records for that solver carry no quote |
+| Track a new solver | One line in the address book's `[solvers]` section. No code — trades sent straight to the router then match on the entry point and decode like any other; the intent and veto rows below are optional extras | Trades sent directly to the solver's router never match, so they never appear in the output; trades a known venue routed through it still decode, but the solver is recorded as "unknown" |
+| Recover a solver's swap terms (tokens, amounts, on-chain floor, and — when its calldata declares one — its off-chain quote) | A `swap_intent` method on its `SolverKnowledge` impl, dispatched with the settling solver frame's own input | A trade's record carries no `min_amount_out` / `declared_quote` / `quote_timestamp` |
 | Skip a solver's non-swap orders | A `solver_veto` method on its `SolverKnowledge` impl | Those orders decode as trades that never happened, with absurd rates |
 | Add a venue | A `[venues.<name>]` section in the address book, a `TradeDecoder` in `venues/`, one arm in `venues::decoders_for` | The venue's trades are missed: with no entry-point match they only surface when a known solver logs inside them, and intent decoding then excludes the trader |
 | Extend what Hindsight knows about a venue | That venue's module in `venues/` — never anywhere else | Decoding degrades silently |
