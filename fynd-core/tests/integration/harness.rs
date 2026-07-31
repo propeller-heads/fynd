@@ -69,7 +69,7 @@ impl TestHarness {
     }
 }
 
-fn load_pools() -> HashMap<String, fynd_core::WorkerPoolConfig> {
+fn load_pools() -> HashMap<String, fynd_core::PoolConfig> {
     let toml_content = include_str!("../../../worker_pools.toml");
     fynd_test_fixtures::parse_pools_toml(toml_content).expect("failed to parse worker_pools.toml")
 }

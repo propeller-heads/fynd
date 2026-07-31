@@ -16,7 +16,7 @@ use clap::Parser;
 use fynd_client::FyndClientBuilder;
 use fynd_rpc::{
     builder::{FyndRPC, FyndRPCBuilder},
-    config::{WorkerPoolConfig, WorkerPoolsConfig},
+    config::{PoolConfig, WorkerPoolsConfig},
     parse_chain,
     protocols::resolve_protocols,
 };
@@ -155,7 +155,7 @@ fn parse_worker_counts(s: &str) -> Result<Vec<usize>> {
     Ok(counts)
 }
 
-fn validate_single_pool(config: &WorkerPoolsConfig) -> Result<(String, WorkerPoolConfig)> {
+fn validate_single_pool(config: &WorkerPoolsConfig) -> Result<(String, PoolConfig)> {
     if config.pools().is_empty() {
         bail!("base config has no pools; exactly one pool is required");
     }
@@ -173,7 +173,7 @@ fn validate_single_pool(config: &WorkerPoolsConfig) -> Result<(String, WorkerPoo
 fn build_solver(
     args: &Args,
     pool_name: &str,
-    pool_config: &WorkerPoolConfig,
+    pool_config: &PoolConfig,
     protocols: &[String],
     workers: usize,
 ) -> Result<FyndRPC> {
@@ -475,7 +475,7 @@ mod tests {
         let mut pools = HashMap::new();
         pools.insert(
             "test_pool".to_string(),
-            WorkerPoolConfig::new("most_liquid")
+            PoolConfig::new("most_liquid")
                 .with_num_workers(4)
                 .with_task_queue_capacity(1000)
                 .with_min_hops(1)
@@ -494,7 +494,7 @@ mod tests {
         let mut pools = HashMap::new();
         pools.insert(
             "a".to_string(),
-            WorkerPoolConfig::new("most_liquid")
+            PoolConfig::new("most_liquid")
                 .with_num_workers(4)
                 .with_task_queue_capacity(1000)
                 .with_min_hops(1)
@@ -503,7 +503,7 @@ mod tests {
         );
         pools.insert(
             "b".to_string(),
-            WorkerPoolConfig::new("dijkstra")
+            PoolConfig::new("dijkstra")
                 .with_num_workers(2)
                 .with_task_queue_capacity(500)
                 .with_min_hops(1)
