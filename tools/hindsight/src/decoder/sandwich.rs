@@ -284,7 +284,9 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         }
     }

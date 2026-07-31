@@ -22,7 +22,7 @@ use serde::Serialize;
 use tycho_simulation::tycho_common::models::Address as CoreAddress;
 
 use crate::{
-    decoder::{AttributionSource, DecodedTrade, SandwichEvidence, SolverQuote},
+    decoder::{AttributionSource, DecodedTrade, SandwichEvidence},
     usd::Prices,
 };
 
@@ -242,8 +242,14 @@ pub(crate) struct RangeComparison {
     pub settled_amount_out_net_gas: U256,
     /// Wei cost of the settled route's gas, when the trader paid it (from the decoder).
     pub settled_gas: Option<U256>,
-    /// The solver's own off-chain quote from its calldata, when declared (from the decoder).
-    pub quote: Option<SolverQuote>,
+    /// The on-chain enforced floor declared in the settling solver frame's own calldata (from
+    /// the decoder).
+    pub min_amount_out: Option<U256>,
+    /// The solver's own off-chain quote, when its calldata declares one (from the decoder;
+    /// unit-checked against the settled amount).
+    pub declared_quote: Option<U256>,
+    /// Unix timestamp of `declared_quote`, when the calldata carries one.
+    pub quote_timestamp: Option<u64>,
     /// Evidence that a front-run and a back-run bracketed this trade (from the decoder). `None`
     /// when no bracket pair was found.
     pub sandwich: Option<SandwichEvidence>,
@@ -327,7 +333,9 @@ pub(crate) fn build_range(
         settled_amount_out: trade.amount_out,
         settled_amount_out_net_gas: settled_net_gas,
         settled_gas: trade.settled_gas,
-        quote: trade.quote.clone(),
+        min_amount_out: trade.min_amount_out,
+        declared_quote: trade.declared_quote,
+        quote_timestamp: trade.quote_timestamp,
         sandwich: trade.sandwich.clone(),
         top,
         back,
@@ -401,7 +409,9 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         }
     }
