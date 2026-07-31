@@ -310,7 +310,10 @@ pub struct MarketState {
     /// is applied.
     label: StateLabel,
     /// All components indexed by their ID.
-    components: HashMap<ComponentId, ProtocolComponent>,
+    ///
+    /// Like `simulation_states`, components are `Arc`-shared and never mutated in
+    /// place: `upsert_components` replaces whole entries.
+    components: HashMap<ComponentId, Arc<ProtocolComponent>>,
     /// All states indexed by their component ID.
     ///
     /// States are `Arc`-shared, never mutated in place: block updates replace whole
@@ -396,7 +399,9 @@ impl MarketState {
 
     /// Gets a component by ID.
     pub fn get_component(&self, id: &str) -> Option<&ProtocolComponent> {
-        self.components.get(id)
+        self.components
+            .get(id)
+            .map(|component| component.as_ref())
     }
 
     /// Gets a simulation state by ID.
@@ -427,7 +432,7 @@ impl MarketState {
             let protocol_system = component.protocol_system.clone();
             let previous = self
                 .components
-                .insert(component.id.clone(), component);
+                .insert(component.id.clone(), Arc::new(component));
             if previous.is_none() {
                 *self
                     .pool_counts
@@ -501,12 +506,11 @@ impl MarketState {
     /// - Tokens referenced by those components
     /// - Gas price and block info
     pub fn extract_subset(&self, component_ids: &HashSet<ComponentId>) -> MarketState {
-        // Filter components
-        let components: HashMap<ComponentId, ProtocolComponent> = self
+        let components: HashMap<ComponentId, Arc<ProtocolComponent>> = self
             .components
             .iter()
             .filter(|(id, _)| component_ids.contains(*id))
-            .map(|(id, component)| (id.clone(), component.clone()))
+            .map(|(id, component)| (id.clone(), Arc::clone(component)))
             .collect();
 
         // Collect all token addresses from the filtered components
@@ -515,7 +519,6 @@ impl MarketState {
             .flat_map(|c| &c.tokens)
             .collect();
 
-        // Filter tokens
         let tokens: HashMap<Address, Token> = self
             .tokens
             .iter()
@@ -684,6 +687,24 @@ mod tests {
             &market.simulation_states["pool_ab"],
             &subset.simulation_states["pool_ab"],
         ));
+    }
+
+    /// Components in the subset must also be shared, not copied.
+    #[test]
+    fn extract_subset_shares_components() {
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([component("pool_ab", &[token_a.clone(), token_b.clone()])]);
+        market.upsert_tokens([token_a.clone(), token_b]);
+        market.update_states([(
+            "pool_ab".to_string(),
+            Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+        )]);
+
+        let subset = market.extract_subset(&HashSet::from(["pool_ab".to_string()]));
+
+        assert!(Arc::ptr_eq(&market.components["pool_ab"], &subset.components["pool_ab"],));
     }
 
     /// A subset extracted before a block update must keep the state it was
