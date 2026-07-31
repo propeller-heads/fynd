@@ -106,6 +106,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `HTTP_PORT` | API port (default: `3000`) |
 | `WORKER_POOLS_CONFIG` | Worker pools config file (default: `worker_pools.toml`) |
 | `BLOCKLIST_CONFIG` | Blocklist config file |
+| `EXCLUSIVE_SWAP_CONTROLLER_KEY` | Restricted exclusive-liquidity deployments only — see [Exclusive liquidity](#exclusive-liquidity-restricted). Unset in ordinary deployments |
 | `RUST_LOG` | Tracing filter (e.g. `info,fynd=debug`) |
 | `METRICS_PORT` | Prometheus metrics server port (default: `9898`, requires `metrics` feature) |
 | `FYND_HOSTED_SWAGGER_URL` | Server URL advertised by the hosted OpenAPI spec. When unset, the hosted Swagger UI (`/docs/hosted/`) is not served — only the self-hosted `/docs/` |
@@ -134,6 +135,35 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --package fynd-core --package fynd-rpc-types --package fynd-rpc --package fynd-client` — doc build (broken links, missing docs)
 - OpenAPI drift: `cargo run -- openapi | jq 'del(.info.version)'` vs `clients/openapi.json`
 - TypeScript: `pnpm --dir clients/typescript install && pnpm --dir clients/typescript --filter @kayibal/fynd-client run test`
+
+## Exclusive Liquidity (restricted)
+
+A limited, opt-in service offered to specific deployments — **not** part of the normal routing path.
+Ordinary deployments configure no exclusivity policy, every pool stays `LiquidityScope::PublicOnly`,
+and nothing below applies. Treat it as out of scope unless a task names it.
+
+Worker pools are partitioned by `LiquidityScope` (`fynd-core/src/worker_pool_router/`):
+
+- `PublicOnly` (default) — public liquidity only. Its best candidate is the **committed amount out**,
+  the reference output a quote must at least deliver
+- `All` — also routes through components an `ExclusivityPolicy`
+  (`fynd-core/src/feed/exclusivity.rs`, a caller-supplied `ProtocolComponent` predicate) classifies
+  as exclusive. Its candidates may beat the public reference; the difference is **surplus**, tracked
+  in `SurplusInfo` / `OrderQuote::surplus_amount()` and never serialized on the wire
+
+Exclusive components only reach `MarketState` if the protocol's stream filter admits them. That is
+opt-in per protocol via the `exclusive:` prefix on a `--protocols` entry (e.g.
+`--protocols all_onchain,exclusive:ekubo_v3`), handled in
+`fynd-core/src/feed/protocol_registry.rs`; `EXCLUSIVE_CAPABLE_PROTOCOLS` lists the protocols that
+have such a variant (`ekubo_v3` only) and the prefix is rejected for any other. Stream admission is
+independent of the routing policy below — opting in without an `ExclusivityPolicy` leaves those
+pools indistinguishable from public liquidity.
+
+Enabled per pool via `liquidity_scope = "all"` in `worker_pools.toml`; a pool that sets it without a
+configured policy fails the build (`SolverBuildError::LiquidityScopeWithoutPolicy`). Encoding a leg
+that carries a committed amount is protocol-specific and lives in
+`fynd-core/src/encoding/exclusive_swap.rs`, which needs `EXCLUSIVE_SWAP_CONTROLLER_KEY`. See
+`fynd-core/CLAUDE.md` for the crate-level detail.
 
 ## Related Repositories
 
