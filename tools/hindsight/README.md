@@ -75,10 +75,10 @@ read the value movements, the calldata, the protocol's event logs, some combinat
 a source we have not needed yet; netting is simply the one that exists today.
 
 ```rust
-trait TradeDecoder<P> {
+trait TradeDecoder {
     fn name(&self) -> &'static str;
     /// The trader's flow, or `None` when this decoder cannot read the transaction.
-    async fn decode(&self, ctx: &mut DecodeContext<P>) -> Option<TraderFlow>;
+    async fn decode(&self, ctx: &mut DecodeContext) -> Option<TraderFlow>;
 }
 
 // decode.rs — the matched entity selects its decoders

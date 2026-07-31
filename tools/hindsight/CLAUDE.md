@@ -80,6 +80,14 @@ Match → trace → decode → veto → record.
 Three address tiers: **venue** (order-flow owner, `tx.to`), **solver** (router that settled the
 trade), **liquidity venues** (pools inside traces — not modeled here).
 
+Decode is a pure function of receipt, trace, and calldata — `DecodeContext` carries no RPC
+provider, so no `TradeDecoder` issues one. The one fact that used to require a lookup
+(`IntentNetting`'s contract-or-EOA check on a candidate address) is instead prefetched by the
+decoder driver (`Decoder::prefetch_contract_flags`) before per-tx decode runs, scoped to exactly
+the candidates `intents::netting::intent_candidates` would enumerate for that block's intent-role
+transactions — not every address in every ledger, since intent fills are a small fraction of
+matched transactions — and joined into the same cross-block `code_cache` the driver already owned.
+
 ### The address book (`registry/<chain>.toml`)
 
 All chain- and protocol-specific data lives in a per-chain TOML, embedded for the six chains listed
