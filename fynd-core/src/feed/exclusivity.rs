@@ -5,9 +5,9 @@
 //! through them to capture the surplus they offer above the best public-market rate. Both worker
 //! pool kinds serve the same request; they differ only in which liquidity their workers may route
 //! through. Isolation is achieved by filtering each worker's local graph topology/events through
-//! `filter_topology`/`scope_event` when the worker pool's `LiquidityScope` is `PublicOnly` — the
-//! shared `MarketState` is never duplicated. Workers of `All`-scoped worker pools ingest
-//! everything.
+//! `remove_exclusive_components`/`scope_event` when the worker pool's `LiquidityScope` is
+//! `PublicOnly` — the shared `MarketState` is never duplicated. Workers of `All`-scoped worker
+//! pools ingest everything.
 //!
 //! A component is classified from its own data via `is_exclusive`, applied generically to every
 //! ingested component.
@@ -31,7 +31,7 @@ pub(crate) fn is_exclusive(component: &ProtocolComponent) -> bool {
 }
 
 /// Removes exclusive components from a full topology map.
-pub(crate) fn filter_topology(
+pub(crate) fn remove_exclusive_components(
     market: &MarketState,
     topology: HashMap<ComponentId, Vec<Address>>,
 ) -> HashMap<ComponentId, Vec<Address>> {
@@ -51,7 +51,7 @@ pub(crate) fn scope_event(market: &MarketState, event: MarketEvent) -> MarketEve
     let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
         event;
 
-    let added_components = filter_topology(market, added_components);
+    let added_components = remove_exclusive_components(market, added_components);
     let removed_components = filter_component_ids(market, &removed_components);
     let updated_components = filter_component_ids(market, &updated_components);
 
@@ -120,11 +120,11 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_topology() {
+    fn test_remove_exclusive_components() {
         let market = market_with(vec![public_component("pub-1"), exclusive_component("excl-1")]);
         let topology = market.component_topology();
 
-        let filtered = filter_topology(&market, topology);
+        let filtered = remove_exclusive_components(&market, topology);
         assert!(filtered.contains_key("pub-1"));
         assert!(!filtered.contains_key("excl-1"));
     }
