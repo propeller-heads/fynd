@@ -123,8 +123,17 @@ pub(crate) struct DecodedTrade {
 /// Log a disagreement between the calldata-recovered intent and the netted flow, on any of the
 /// three terms they both claim. The ledger stays authoritative for what settled; two
 /// independently-derived readings landing on different terms is diagnostic signal we would
-/// otherwise lose, not a decode failure.
-fn warn_on_intent_disagreement(tx_hash: TxHash, intent: &SwapIntent, flow: &TraderFlow) {
+/// otherwise lose, not a decode failure. Skipped for `relay-calldata`, whose flow already IS the
+/// intent, so there is nothing independent to disagree with.
+fn warn_on_intent_disagreement(
+    decoder: &str,
+    tx_hash: TxHash,
+    intent: Option<&SwapIntent>,
+    flow: &TraderFlow,
+) {
+    let Some(intent) = intent.filter(|_| decoder != "relay-calldata") else {
+        return;
+    };
     if intent.token_in == flow.swap.token_in &&
         intent.token_out == flow.swap.token_out &&
         intent.amount_in == flow.swap.amount_in
@@ -322,6 +331,7 @@ impl<P: Provider> Decoder<P> {
             entry_point,
             transfer_ledger: &transfer_ledger,
             input: &root.input,
+            root,
             venue: None,
         };
         let Some((decoder, mut flow)) = recover(&mut ctx).await else {
@@ -398,15 +408,7 @@ impl<P: Provider> Decoder<P> {
             flow.swap.amount_out,
         );
 
-        // Netting-based decoders derive their flow from the ledger, independently of the intent
-        // above — relay-calldata's own flow already IS the intent, so a disagreement there would
-        // be redundant with the cross-check comparison instead.
-        if decoder != "relay-calldata" {
-            if let Some(intent) = &intent {
-                warn_on_intent_disagreement(receipt.transaction_hash, intent, &flow);
-            }
-        }
-
+        warn_on_intent_disagreement(decoder, receipt.transaction_hash, intent.as_ref(), &flow);
         let (min_amount_out, declared_quote, quote_timestamp) = intent_fields(intent.as_ref());
 
         Some(DecodedTrade {

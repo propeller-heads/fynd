@@ -23,6 +23,7 @@ const SELECTORS: [[u8; 4]; 5] = [
     [0x62, 0x7d, 0xd5, 0x6a],
 ];
 
+const TO_ADDRESS_OFFSET: usize = 72;
 const FROM_ASSET_OFFSET: usize = 92;
 const TO_ASSET_OFFSET: usize = 112;
 const AMOUNT_IN_OFFSET: usize = 132;
@@ -52,13 +53,18 @@ fn read_packed(input: &[u8], header_offset: usize) -> Option<U256> {
     Some(U256::from_be_slice(word) >> usize::from(shift))
 }
 
+/// Whether `input` opens with one of Fly's packed-layout selectors.
+fn has_fly_selector(input: &[u8]) -> Option<()> {
+    let selector: [u8; 4] = input.get(0..4)?.try_into().ok()?;
+    SELECTORS
+        .contains(&selector)
+        .then_some(())
+}
+
 /// Parse a Fly/Magpie frame's packed calldata. `None` when the selector does not match, or any
 /// field's bytes fall outside the input — bounds are checked, never assumed.
 fn parse(input: &[u8]) -> Option<SwapData> {
-    let selector: [u8; 4] = input.get(0..4)?.try_into().ok()?;
-    if !SELECTORS.contains(&selector) {
-        return None;
-    }
+    has_fly_selector(input)?;
     let from_asset =
         Address::from_slice(input.get(FROM_ASSET_OFFSET..FROM_ASSET_OFFSET + ADDRESS_LEN)?);
     let to_asset = Address::from_slice(input.get(TO_ASSET_OFFSET..TO_ASSET_OFFSET + ADDRESS_LEN)?);
@@ -94,6 +100,14 @@ impl SolverKnowledge for Fly {
             intent.with_quote(data.expected_amount_out, None)
         })
     }
+
+    /// The packed blob's `toAddress` field. In practice this is Relay's own router, not the
+    /// trader — Relay receives the output and forwards it — so callers must read the settled
+    /// output as what this address *received*, not treat it as the trader.
+    fn output_recipient(&self, input: &[u8]) -> Option<Address> {
+        has_fly_selector(input)?;
+        Some(Address::from_slice(input.get(TO_ADDRESS_OFFSET..TO_ADDRESS_OFFSET + ADDRESS_LEN)?))
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +134,30 @@ mod tests {
         assert_eq!(intent.amount_in, U256::from(19_694_643u64));
         assert_eq!(intent.min_amount_out, U256::from(10_217_898_321_149_381u64));
         assert_eq!(intent.quoted_amount_out(), U256::from(10_321_109_415_302_405u64));
+    }
+
+    #[test]
+    fn test_real_fixture_output_recipient() {
+        // Relay's own router — the delivery address, not the trader (see the method's doc).
+        let recipient = Fly
+            .output_recipient(&real_input())
+            .unwrap();
+        assert_eq!(recipient, address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"));
+    }
+
+    #[test]
+    fn test_output_recipient_wrong_selector() {
+        let mut input = real_input();
+        input[0] = 0xff;
+        assert!(Fly.output_recipient(&input).is_none());
+    }
+
+    #[test]
+    fn test_output_recipient_truncated_input() {
+        let full = real_input();
+        assert!(Fly
+            .output_recipient(&full[..80])
+            .is_none());
     }
 
     #[test]

@@ -126,6 +126,13 @@ impl SolverKnowledge for Kyberswap {
         })
     }
 
+    /// `SwapDescriptionV2.dstReceiver` — `KyberSwap` passes this straight down to the inner pool,
+    /// which pays it directly; the router itself never touches the output.
+    fn output_recipient(&self, input: &[u8]) -> Option<Address> {
+        let call = swapCall::abi_decode(input).ok()?;
+        Some(call.execution.desc.dstReceiver)
+    }
+
     /// The integrator fee recipients Kyber's router is told to pay out of the swap.
     ///
     /// Read from the root call only. A wrapper that nests Kyber's calldata (Relay, `MetaMask`)
@@ -284,6 +291,23 @@ mod tests {
         // No clientData quote declared: the accessor falls back to the floor.
         assert_eq!(intent.quoted_amount_out(), U256::from(990_000u64));
         assert_eq!(intent.timestamp, None);
+    }
+
+    #[test]
+    fn test_output_recipient_round_trip() {
+        let src = Address::repeat_byte(0x11);
+        let dst = Address::repeat_byte(0x22);
+        let recipient = Kyberswap
+            .output_recipient(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, ""))
+            .unwrap();
+        assert_eq!(recipient, Address::repeat_byte(0x77));
+    }
+
+    #[test]
+    fn test_output_recipient_garbage_input() {
+        assert!(Kyberswap
+            .output_recipient(&[])
+            .is_none());
     }
 
     #[test]

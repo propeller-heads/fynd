@@ -169,6 +169,15 @@ impl TransferLedger {
         participants
     }
 
+    /// Gross amount of `token` received by `recipient` alone, regardless of sender (native ETH is
+    /// `Address::ZERO`). Zero when the recipient received none of it.
+    pub(crate) fn received_by_address(&self, recipient: Address, token: Address) -> U256 {
+        self.transfers
+            .iter()
+            .filter(|&&(transfer_token, _, to, _)| transfer_token == token && to == recipient)
+            .fold(U256::ZERO, |total, &(_, _, _, value)| total.saturating_add(value))
+    }
+
     /// Gross total received per token by any of `recipients`, regardless of sender (native ETH
     /// keyed by `Address::ZERO`).
     pub(crate) fn received_by(&self, recipients: &HashSet<Address>) -> HashMap<Address, U256> {
@@ -727,6 +736,28 @@ mod tests {
         assert!(transfer_ledger
             .received_by(&HashSet::new())
             .is_empty());
+    }
+
+    #[test]
+    fn test_received_by_address_sums_only_the_one_recipient_and_token() {
+        let recipient = addr(7);
+        let token = addr(10);
+        let logs = vec![
+            make_transfer_log(token, addr(50), recipient, U256::from(1_000)),
+            make_transfer_log(token, addr(51), recipient, U256::from(500)),
+            // Different recipient, same token: excluded.
+            make_transfer_log(token, addr(50), addr(8), U256::from(999)),
+            // Same recipient, different token: excluded.
+            make_transfer_log(addr(11), addr(50), recipient, U256::from(999)),
+        ];
+        let native = vec![(addr(50), recipient, U256::from(999))];
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
+        assert_eq!(transfer_ledger.received_by_address(recipient, token), U256::from(1_500u64));
+        assert_eq!(
+            transfer_ledger.received_by_address(recipient, Address::ZERO),
+            U256::from(999u64)
+        );
+        assert_eq!(transfer_ledger.received_by_address(addr(200), token), U256::ZERO);
     }
 
     #[test]
