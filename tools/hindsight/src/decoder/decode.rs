@@ -18,6 +18,7 @@ use alloy::{
     network::AnyTransactionReceipt,
     primitives::{Address, U256},
     providers::Provider,
+    rpc::types::trace::geth::CallFrame,
 };
 use async_trait::async_trait;
 
@@ -129,6 +130,10 @@ pub(crate) struct DecodeContext<'a, P> {
     /// The transaction's root calldata. Venues declare their solver in it; some solvers embed
     /// their quote.
     pub input: &'a [u8],
+    /// The transaction's root trace frame. A decoder that must find the settling solver's own
+    /// call (its calldata, its declared output recipient) walks this itself rather than netting
+    /// the ledger — e.g. a packed calldata layout (Fly) only decodes inside its own frame.
+    pub root: &'a CallFrame,
     /// The matched venue's address-book section (entry points, fee collectors, solver aliases),
     /// set when the transaction entered through a venue so venue decoders never look themselves
     /// up by name. `None` for direct and intent transactions.
@@ -214,7 +219,7 @@ mod tests {
     use alloy::{providers::RootProvider, rpc::client::RpcClient, transports::mock::Asserter};
 
     use super::*;
-    use crate::decoder::test_utils::{addr, receipt, swap, tx_hash};
+    use crate::decoder::test_utils::{addr, frame, receipt, swap, tx_hash};
 
     /// Always declines.
     struct Declines;
@@ -267,6 +272,7 @@ mod tests {
         let mut code_cache = HashMap::new();
         let receipt = receipt(tx_hash(1), addr(1), Some(addr(2)), vec![]);
         let transfer_ledger = TransferLedger::from_transaction(&[], &[]);
+        let root = frame("CALL", addr(1), addr(2), 0);
         let mut ctx = DecodeContext {
             provider: &provider,
             registry: &registry,
@@ -275,6 +281,7 @@ mod tests {
             entry_point: addr(2),
             transfer_ledger: &transfer_ledger,
             input: &[],
+            root: &root,
             venue: None,
         };
         try_decoders(decoders, &mut ctx).await

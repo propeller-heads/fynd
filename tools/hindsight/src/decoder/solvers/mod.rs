@@ -125,6 +125,15 @@ pub(crate) trait SolverKnowledge: Send + Sync {
         None
     }
 
+    /// The address this solver's calldata declares as the output recipient, when it carries one
+    /// plainly enough to recover — how a calldata-primary decode learns whose receipt to read the
+    /// settled amount from, since calldata alone never carries a settled amount. Dispatched with
+    /// the same solver-frame input as `swap_intent`. `None` when the calldata carries no such
+    /// field (most solvers deliver to the caller implicitly) or it did not parse.
+    fn output_recipient(&self, _input: &[u8]) -> Option<Address> {
+        None
+    }
+
     /// The veto this solver's logs place on a matched transaction that is not decodable as a
     /// swap. Checked at match time — before attribution names the solver, and before the
     /// transaction costs a trace.
@@ -197,6 +206,15 @@ pub(crate) fn swap_intent(
         .iter()
         .find(|(name, _)| *name == solver)?;
     knowledge.swap_intent(input, amount_in_hint)
+}
+
+/// The address the solver frame's own calldata declares as the output recipient, dispatched on
+/// the attributed solver so a lookalike blob from another router cannot masquerade as one.
+pub(crate) fn output_recipient(solver: &str, input: &[u8]) -> Option<Address> {
+    let (_, knowledge) = IMPLEMENTATIONS
+        .iter()
+        .find(|(name, _)| *name == solver)?;
+    knowledge.output_recipient(input)
 }
 
 /// The output-token fee the solver's declared fee recipients were paid, when its calldata names
