@@ -268,7 +268,7 @@ pub(crate) fn record_range(
             volume_usd = volume.unwrap_or(0.0),
             settled_usd = priced(range.settled_amount_out),
             fynd_usd = priced(solved.amount_out),
-            quoted_usd = range.quote.as_ref().map_or(0.0, |quote| priced(quote.amount_out)),
+            quoted_usd = range.declared_quote.map_or(0.0, priced),
             savings_usd,
             route = %solved.solved_route.as_deref().map(render_route).unwrap_or_default(),
             "trade comparison"
@@ -587,7 +587,9 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         }
     }

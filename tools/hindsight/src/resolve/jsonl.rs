@@ -174,9 +174,9 @@ fn comparison_record(
         "settled_amount_out": range.settled_amount_out.to_string(),
         "settled_amount_out_net_gas": range.settled_amount_out_net_gas.to_string(),
         "settled_gas_cost": range.settled_gas.map(|gas| gas.to_string()),
-        "quoted_amount_out": range.quote.as_ref().map(|q| q.amount_out.to_string()),
-        "quote_source": range.quote.as_ref().and_then(|q| q.source.clone()),
-        "quote_timestamp": range.quote.as_ref().and_then(|q| q.timestamp),
+        "min_amount_out": range.min_amount_out.map(|amount| amount.to_string()),
+        "quoted_amount_out": range.declared_quote.map(|amount| amount.to_string()),
+        "quote_timestamp": range.quote_timestamp,
         "sandwich": range.sandwich,
         "slippage": slippage,
         "top": state_record(&range.top, range, prices_top),
@@ -281,7 +281,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::{AttributionSource, DecodedTrade, Registry, SandwichEvidence, SolverQuote},
+        decoder::{AttributionSource, DecodedTrade, Registry, SandwichEvidence},
         resolve::{build_range, test_support, SolvedAmount},
     };
 
@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn test_comparison_record_with_solver_quote() {
+    fn test_comparison_record_with_declared_quote() {
         let trade = DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 25_480_207,
@@ -343,11 +343,9 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
-            quote: Some(SolverQuote {
-                amount_out: U256::from(70_400_409_935u64),
-                source: Some("relay".to_string()),
-                timestamp: Some(1_783_421_726),
-            }),
+            min_amount_out: Some(U256::from(69_996_280_564u64)),
+            declared_quote: Some(U256::from(70_400_409_935u64)),
+            quote_timestamp: Some(1_783_421_726),
             sandwich: None,
         };
         let range = build_range(
@@ -364,7 +362,8 @@ mod tests {
                 .unwrap(),
             "70400409935"
         );
-        assert_eq!(rec.pointer("/quote_source").unwrap(), "relay");
+        assert_eq!(rec.pointer("/min_amount_out").unwrap(), "69996280564");
+        assert!(rec.pointer("/quote_source").is_none());
         assert_eq!(
             rec.pointer("/quote_timestamp")
                 .unwrap()
@@ -422,7 +421,9 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         };
         // quote_json is already the slim projection (what order_quote_to_outcome stores).
@@ -544,7 +545,9 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         };
         // A coverage gap: Fynd could not solve at either state.
@@ -601,7 +604,9 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         };
         trade.sandwich = Some(SandwichEvidence {

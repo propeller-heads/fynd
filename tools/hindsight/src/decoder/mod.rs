@@ -44,15 +44,14 @@ use futures::stream::StreamExt;
 use tracing::{debug, warn};
 
 use crate::decoder::{
-    decode::{recover, DecodeContext, GasScope},
+    decode::{recover, DecodeContext, GasScope, TraderFlow},
     matching::MatchedSolverTrade,
+    solvers::SwapIntent,
     trace::{collect_native_transfers, fetch_trace, route_gas},
     transfer_ledger::TransferLedger,
 };
 pub(crate) use crate::decoder::{
-    registry::Registry,
-    sandwich::SandwichEvidence,
-    solvers::{attribution::AttributionSource, SolverQuote},
+    registry::Registry, sandwich::SandwichEvidence, solvers::attribution::AttributionSource,
 };
 
 /// A decoded solver trade: what token went in, what came out.
@@ -100,16 +99,81 @@ pub(crate) struct DecodedTrade {
     /// rebalances) or the route's gas could not be isolated from the trace.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_gas: Option<U256>,
-    /// The solver's own off-chain quote for this swap, recovered from calldata (see
-    /// `solvers::embedded_quote` for the solvers that declare one). Informational — it is what
-    /// the venue compared against at decision time, as opposed to `amount_out`, which is what
-    /// execution delivered.
+    /// The on-chain enforced floor declared in the settling solver frame's own calldata (see
+    /// `solvers::swap_intent` for the solvers that declare one). A settled trade cleared this by
+    /// construction; it is recorded so avoidance analysis has the same field on both settled and
+    /// reverted trades. `None` when no solver frame was found or its calldata did not parse.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub quote: Option<SolverQuote>,
+    pub min_amount_out: Option<U256>,
+    /// The solver's own off-chain quote, when its calldata declares one (unit-checked against
+    /// the settled amount; a quote that fails the check is dropped, keeping `min_amount_out`).
+    /// This is calldata-declared and self-reported — distinct from `amount_out`, which is what
+    /// the settlement ledger actually delivered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_quote: Option<U256>,
+    /// Unix timestamp of `declared_quote`, when the calldata carries one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote_timestamp: Option<u64>,
     /// Evidence that a front-run and a back-run bracketed this trade (see
     /// `sandwich::detect`). `None` when no bracket pair was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandwich: Option<SandwichEvidence>,
+}
+
+/// Log a disagreement between the calldata-recovered intent and the netted flow, on any of the
+/// three terms they both claim. The ledger stays authoritative for what settled; two
+/// independently-derived readings landing on different terms is diagnostic signal we would
+/// otherwise lose, not a decode failure.
+fn warn_on_intent_disagreement(tx_hash: TxHash, intent: &SwapIntent, flow: &TraderFlow) {
+    if intent.token_in == flow.swap.token_in &&
+        intent.token_out == flow.swap.token_out &&
+        intent.amount_in == flow.swap.amount_in
+    {
+        return;
+    }
+    warn!(
+        tx = %tx_hash,
+        intent_token_in = %intent.token_in,
+        intent_token_out = %intent.token_out,
+        intent_amount_in = %intent.amount_in,
+        flow_token_in = %flow.swap.token_in,
+        flow_token_out = %flow.swap.token_out,
+        flow_amount_in = %flow.swap.amount_in,
+        "calldata-recovered intent disagrees with the netted flow"
+    );
+}
+
+/// Copy the calldata-declared terms off a parsed intent, or all-`None` when no intent was
+/// recovered. Split out of `decode_transaction` purely to keep it under the line limit.
+/// The trader's swap terms, when the settling solver frame's own calldata declares them.
+///
+/// Dispatched with the solver frame's input, not the root transaction's — a packed calldata layout
+/// (Fly) uses offsets valid only in its own frame — and with the decoded flow's input amount as a
+/// hint for scan-based extractors (`ParaSwap`). A declared quote that fails the unit-plausibility
+/// check against `settled_amount_out` is dropped (quotes are self-reported); the ABI-decoded terms
+/// stay either way.
+fn solver_intent(
+    root: &CallFrame,
+    registry: &Registry,
+    solver: &str,
+    amount_in: U256,
+    settled_amount_out: U256,
+) -> Option<SwapIntent> {
+    let frame = trace::find_solver_frame(root, registry)?;
+    let mut intent = solvers::swap_intent(solver, &frame.input, Some(amount_in))?;
+    if let Some(quoted) = intent.declared_quote() {
+        if !solvers::plausible_quote(quoted, settled_amount_out) {
+            intent.clear_quote();
+        }
+    }
+    Some(intent)
+}
+
+fn intent_fields(intent: Option<&SwapIntent>) -> (Option<U256>, Option<U256>, Option<u64>) {
+    let min_amount_out = intent.map(|intent| intent.min_amount_out);
+    let declared_quote = intent.and_then(SwapIntent::declared_quote);
+    let quote_timestamp = intent.and_then(|intent| intent.timestamp);
+    (min_amount_out, declared_quote, quote_timestamp)
 }
 
 /// Max concurrent trace requests per block. Bounds RPC load so a block
@@ -324,11 +388,26 @@ impl<P: Provider> Decoder<P> {
         }
         .map(|units| units * U256::from(receipt.effective_gas_price));
 
-        // The solver's off-chain quote, when its calldata declares one. Dispatched on the
-        // attributed solver so a lookalike blob from another router cannot masquerade as a
-        // quote, and unit-checked against the settled amount (quotes are self-reported).
-        let quote = solvers::embedded_quote(&attribution.solver, &root.input, flow.swap.amount_in)
-            .filter(|quote| solvers::plausible_quote(quote, flow.swap.amount_out));
+        // The calldata-declared swap terms (see `solver_intent`). Only the netting amounts above
+        // stay authoritative for what actually settled; these are informational.
+        let intent = solver_intent(
+            root,
+            registry,
+            &attribution.solver,
+            flow.swap.amount_in,
+            flow.swap.amount_out,
+        );
+
+        // Netting-based decoders derive their flow from the ledger, independently of the intent
+        // above — relay-calldata's own flow already IS the intent, so a disagreement there would
+        // be redundant with the cross-check comparison instead.
+        if decoder != "relay-calldata" {
+            if let Some(intent) = &intent {
+                warn_on_intent_disagreement(receipt.transaction_hash, intent, &flow);
+            }
+        }
+
+        let (min_amount_out, declared_quote, quote_timestamp) = intent_fields(intent.as_ref());
 
         Some(DecodedTrade {
             tx_hash: receipt.transaction_hash,
@@ -346,7 +425,9 @@ impl<P: Provider> Decoder<P> {
             venue_fee_in: flow.venue_fee_in,
             venue_fee_out: flow.venue_fee_out,
             settled_gas,
-            quote,
+            min_amount_out,
+            declared_quote,
+            quote_timestamp,
             // The full receipts slice isn't available here (this fn only sees the one matched
             // transaction); the caller (`decode_block`) fills this in once decoding succeeds.
             sandwich: None,
