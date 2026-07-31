@@ -132,7 +132,7 @@ where
                 LiquidityScope::PublicOnly => {
                     remove_exclusive_components(market.base_market_state(), topology)
                 }
-                LiquidityScope::All => topology,
+                LiquidityScope::IncludeExclusive => topology,
             }
         };
 
@@ -147,7 +147,7 @@ where
             let market = self.market_data.read().await;
             match self.liquidity_scope {
                 LiquidityScope::PublicOnly => scope_event(market.base_market_state(), event),
-                LiquidityScope::All => event,
+                LiquidityScope::IncludeExclusive => event,
             }
         };
         match event {

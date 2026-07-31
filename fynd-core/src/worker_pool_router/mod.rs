@@ -105,13 +105,13 @@ fn user_margin(improvement: &BigUint, user_share_bps: u32) -> BigUint {
 ///
 /// A `PublicOnly` worker pool routes only through public liquidity and provides the committed
 /// (quoted) reference output; its workers filter exclusive components out of their graphs. An
-/// `All` worker pool applies no filtering — its workers ingest whatever the deployment's stream
-/// delivers. In a deployment opted into exclusive components at the stream filter, an `All`
-/// worker pool may beat the public reference — in which case the protocol captures the surplus.
-/// Without that opt-in, no exclusive components ever arrive and the two scopes behave
-/// identically.
+/// `IncludeExclusive` worker pool applies no filtering — its workers ingest whatever the
+/// deployment's stream delivers. In a deployment opted into exclusive components at the stream
+/// filter, an `IncludeExclusive` worker pool may beat the public reference — in which case the
+/// protocol captures the surplus. Without that opt-in, no exclusive components ever arrive and
+/// the two scopes behave identically.
 ///
-/// Serialized in snake_case (`"public_only"` / `"all"`) in `worker_pools.toml` via
+/// Serialized in snake_case (`"public_only"` / `"include_exclusive"`) in `worker_pools.toml` via
 /// [`PoolConfig`].
 ///
 /// [`PoolConfig`]: crate::PoolConfig
@@ -119,12 +119,12 @@ fn user_margin(improvement: &BigUint, user_share_bps: u32) -> BigUint {
 #[serde(rename_all = "snake_case")]
 pub enum LiquidityScope {
     /// Routes through public liquidity only, establishing the committed reference output.
+    #[default]
     PublicOnly,
     /// No filtering: routes through whatever the stream delivers, exclusive components
     /// included if the deployment opted into them. Candidates from this scope may capture
     /// surplus above the public reference.
-    #[default]
-    All,
+    IncludeExclusive,
 }
 
 /// Handle to a solver pool for dispatching orders.
@@ -139,7 +139,7 @@ pub struct SolverPoolHandle {
 }
 
 impl SolverPoolHandle {
-    /// Creates a new solver pool handle with the default [`LiquidityScope::All`] scope.
+    /// Creates a new solver pool handle with the default [`LiquidityScope::PublicOnly`] scope.
     pub fn new(name: impl Into<String>, queue: TaskQueueHandle) -> Self {
         Self { name: name.into(), queue, liquidity_scope: LiquidityScope::default() }
     }
@@ -189,7 +189,7 @@ impl OrderResponses {
         let quotes = self
             .quotes
             .iter()
-            .filter(|(pool, _)| pool_scopes.get(pool) != Some(&LiquidityScope::All))
+            .filter(|(pool, _)| pool_scopes.get(pool) != Some(&LiquidityScope::IncludeExclusive))
             .cloned()
             .collect();
         OrderResponses {
@@ -239,11 +239,11 @@ impl WorkerPoolRouter {
 
     /// Returns `true` when surplus routing is active: it needs both scopes configured — a
     /// [`LiquidityScope::PublicOnly`] pool for the committed reference and a
-    /// [`LiquidityScope::All`] pool that may beat it.
+    /// [`LiquidityScope::IncludeExclusive`] pool that may beat it.
     fn surplus_routing_active(&self) -> bool {
         self.solver_pools
             .iter()
-            .any(|p| p.liquidity_scope() == LiquidityScope::All) &&
+            .any(|p| p.liquidity_scope() == LiquidityScope::IncludeExclusive) &&
             self.solver_pools
                 .iter()
                 .any(|p| p.liquidity_scope() == LiquidityScope::PublicOnly)
@@ -408,14 +408,15 @@ impl WorkerPoolRouter {
             })
             .collect();
 
-        // Pre-compute which worker pool names have the exclusive-access (`All`) scope, for
-        // scope-aware early return gating. The gating only applies when surplus routing is
+        // Pre-compute which worker pool names have the exclusive-access (`IncludeExclusive`)
+        // scope, for scope-aware early return gating. The gating only applies when surplus
+        // routing is
         // active — the surplus overlay then needs one response from each scope; otherwise plain
         // count-based gating applies.
         let exclusive_access_pool_names: HashSet<String> = self
             .solver_pools
             .iter()
-            .filter(|p| p.liquidity_scope() == LiquidityScope::All)
+            .filter(|p| p.liquidity_scope() == LiquidityScope::IncludeExclusive)
             .map(|p| p.name().to_string())
             .collect();
         let surplus_routing_active = self.surplus_routing_active();
@@ -753,7 +754,7 @@ fn combine_with_surplus(
     let best_exclusive_access_candidate = responses
         .quotes
         .iter()
-        .filter(|(pool, _)| pool_scopes.get(pool) == Some(&LiquidityScope::All))
+        .filter(|(pool, _)| pool_scopes.get(pool) == Some(&LiquidityScope::IncludeExclusive))
         .filter(|(_, q)| q.status() == QuoteStatus::Success)
         .filter(|(_, q)| {
             options
@@ -1295,7 +1296,7 @@ mod tests {
         let public_pool = public_pool.with_liquidity_scope(LiquidityScope::PublicOnly);
         let (exclusive_pool, exclusive_worker) =
             create_mock_pool("exclusive_pool", exclusive_response, exclusive_delay_ms.unwrap_or(0));
-        let exclusive_pool = exclusive_pool.with_liquidity_scope(LiquidityScope::All);
+        let exclusive_pool = exclusive_pool.with_liquidity_scope(LiquidityScope::IncludeExclusive);
 
         let config = WorkerPoolRouterConfig::default()
             .with_timeout(Duration::from_millis(2000))
@@ -1889,7 +1890,7 @@ mod tests {
     fn exclusive_access_pool_scopes() -> HashMap<String, LiquidityScope> {
         HashMap::from([
             ("public_pool".to_string(), LiquidityScope::PublicOnly),
-            ("exclusive_access_pool".to_string(), LiquidityScope::All),
+            ("exclusive_access_pool".to_string(), LiquidityScope::IncludeExclusive),
         ])
     }
 

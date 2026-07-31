@@ -1479,16 +1479,17 @@ impl SolverParts {
 mod tests {
     use super::*;
 
-    /// An unscoped pool resolves to `All` — no filtering.
+    /// An unscoped pool resolves to `PublicOnly` — exclusive components are filtered out unless
+    /// a pool explicitly opts in with `IncludeExclusive`.
     #[test]
-    fn test_unscoped_pool_resolves_to_all() {
+    fn test_unscoped_pool_resolves_to_public_only() {
         let config = PoolConfig::new("most_liquid");
         assert_eq!(config.liquidity_scope(), None);
         assert_eq!(
             config
                 .liquidity_scope()
                 .unwrap_or_default(),
-            LiquidityScope::All
+            LiquidityScope::PublicOnly
         );
     }
 }

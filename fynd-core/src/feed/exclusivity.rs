@@ -6,8 +6,8 @@
 //! pool kinds serve the same request; they differ only in which liquidity their workers may route
 //! through. Isolation is achieved by filtering each worker's local graph topology/events through
 //! `remove_exclusive_components`/`scope_event` when the worker pool's `LiquidityScope` is
-//! `PublicOnly` — the shared `MarketState` is never duplicated. Workers of `All`-scoped worker
-//! pools ingest everything.
+//! `PublicOnly` — the shared `MarketState` is never duplicated. Workers of
+//! `IncludeExclusive`-scoped worker pools ingest everything.
 //!
 //! A component is classified from its own data via `is_exclusive`, applied generically to every
 //! ingested component.
