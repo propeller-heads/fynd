@@ -25,7 +25,7 @@ use crate::{
     },
     feed::{
         events::{MarketEvent, MarketEventHandler},
-        exclusivity::{filter_topology, scope_event},
+        exclusivity::{remove_exclusive_components, scope_event},
         market_data::MarketData,
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
@@ -70,7 +70,7 @@ where
     worker_id: usize,
     /// Worker pool name (used as the `pool` metric label).
     pool_name: String,
-    /// Which liquidity this worker ingests; see [`LiquidityScope`].
+    /// Which liquidity this worker ingests.
     liquidity_scope: LiquidityScope,
 }
 
@@ -113,7 +113,7 @@ where
         }
     }
 
-    /// Sets which liquidity this worker ingests; see [`LiquidityScope`].
+    /// Sets which liquidity this worker ingests.
     pub(crate) fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = scope;
         self
@@ -129,7 +129,9 @@ where
             let market = self.market_data.read().await;
             let topology = market.component_topology().clone(); // clone to avoid holding the lock
             match self.liquidity_scope {
-                LiquidityScope::PublicOnly => filter_topology(market.base_market_state(), topology),
+                LiquidityScope::PublicOnly => {
+                    remove_exclusive_components(market.base_market_state(), topology)
+                }
                 LiquidityScope::All => topology,
             }
         };

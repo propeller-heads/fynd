@@ -134,7 +134,7 @@ pub struct SolverPoolHandle {
     name: String,
     /// Queue handle for this worker pool.
     queue: TaskQueueHandle,
-    /// Which liquidity this worker pool routes through; see [`LiquidityScope`].
+    /// Which liquidity this worker pool routes through.
     liquidity_scope: LiquidityScope,
 }
 

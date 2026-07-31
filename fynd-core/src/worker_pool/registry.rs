@@ -60,7 +60,7 @@ pub(crate) struct SpawnWorkersParams {
     pub derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
     /// Sender for shutdown signals.
     pub shutdown_tx: broadcast::Sender<()>,
-    /// Liquidity scope applied to every worker in this worker pool; see [`LiquidityScope`].
+    /// Liquidity scope applied to every worker in this worker pool.
     pub liquidity_scope: LiquidityScope,
 }
 

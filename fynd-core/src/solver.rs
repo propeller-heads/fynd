@@ -159,7 +159,7 @@ pub struct PoolConfig {
     /// Absent = no restriction. Typically 3–10 entries (e.g. WETH, USDC, USDT, DAI).
     #[serde(default)]
     connector_tokens: Option<Vec<String>>,
-    /// The worker pool's liquidity scope; see [`LiquidityScope`].
+    /// Which liquidity this worker pool routes through.
     #[serde(default)]
     liquidity_scope: Option<LiquidityScope>,
 }

@@ -47,7 +47,7 @@ pub struct WorkerPoolConfig {
     algorithm_config: AlgorithmConfig,
     /// Task queue capacity (maximum number of pending tasks).
     task_queue_capacity: usize,
-    /// Which liquidity this worker pool's workers ingest; see [`LiquidityScope`].
+    /// Which liquidity this worker pool's workers ingest.
     liquidity_scope: LiquidityScope,
 }
 
@@ -261,7 +261,7 @@ impl WorkerPoolBuilder {
         self
     }
 
-    /// Sets which liquidity this pool's workers ingest; see [`LiquidityScope`].
+    /// Sets which liquidity this pool's workers ingest.
     pub fn liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.config.liquidity_scope = scope;
         self
