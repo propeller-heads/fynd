@@ -109,6 +109,12 @@ pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
 
 /// Register metric descriptions with the active recorder.
 pub(crate) fn describe() {
+    describe_trade_metrics();
+}
+
+/// Register descriptions for the per-trade re-solve metrics: savings, slippage, volume, and the
+/// monitor's own pacing.
+fn describe_trade_metrics() {
     describe_counter!(
         TRADES_TOTAL,
         "Re-solved trades above the dust floor, labeled by venue / solver / chain / outcome / \

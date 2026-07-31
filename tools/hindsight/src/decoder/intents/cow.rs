@@ -147,7 +147,7 @@ mod tests {
     use super::*;
     use crate::decoder::{
         registry::Registry,
-        test_utils::{addr, receipt, swap, tx_hash},
+        test_utils::{addr, frame, receipt, swap, tx_hash},
         transfer_ledger::TransferLedger,
     };
 
@@ -187,6 +187,7 @@ mod tests {
         let mut code_cache = HashMap::new();
         let receipt = receipt(tx_hash(1), addr(2), Some(COW_SETTLEMENT), logs);
         let transfer_ledger = TransferLedger::from_transaction(&[], &[]);
+        let root = frame("CALL", addr(2), COW_SETTLEMENT, 0);
         let mut ctx = DecodeContext {
             provider: &provider,
             registry: &registry,
@@ -195,6 +196,7 @@ mod tests {
             entry_point: COW_SETTLEMENT,
             transfer_ledger: &transfer_ledger,
             input: &[],
+            root: &root,
             venue: None,
         };
         CowSettlement.decode(&mut ctx).await

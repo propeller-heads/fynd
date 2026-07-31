@@ -3,6 +3,11 @@
 //! Relay differs from direct solver swaps in two ways: its router sends a venue fee to a collector
 //! address on either side of the swap, and its solvers submit rebalancing fills whose transaction
 //! sender has no net flow.
+//!
+//! Two decoders, tried in order (`venues::decoders_for`): [`RelayCalldata`] reads the trader's
+//! terms straight from the settling solver's own calldata, and [`RelayNetting`] nets the ledger
+//! for the solvers `RelayCalldata` cannot parse (0x Settler) or transactions with no solver frame
+//! at all. See `.claude/plans/calldata-first-decoding.md` for the empirics behind the ordering.
 
 use std::collections::HashSet;
 
@@ -13,10 +18,98 @@ use alloy::{
 use async_trait::async_trait;
 
 use crate::decoder::{
-    decode::{DecodeContext, TradeDecoder, TraderFlow},
+    decode::{DecodeContext, GasScope, TradeDecoder, TraderFlow},
     netting_decoders::venue_flow,
+    solvers, trace,
     transfer_ledger::{NetSwap, TransferLedger},
 };
+
+/// Relay's calldata-primary decoder.
+///
+/// Reads `token_in`/`token_out`/`amount_in` straight from the settling solver frame's `SwapIntent`
+/// (already the post-fee, on-chain-enforced terms — Relay pays its input-side fee to the
+/// collector *before* forwarding into the solver call) and recovers the settled `amount_out` as
+/// the gross amount of `intent.token_out` received by the output recipient the same calldata
+/// declares — the one field calldata can never carry. Declines (falling through to
+/// [`RelayNetting`]) when no solver frame or intent is found, the recipient never received the
+/// token, or either guard below fails.
+///
+/// Two guards protect against the recipient-receipt query mis-attributing a multi-order
+/// transaction's output (see the design doc's risk section — not observed in the sampled traffic,
+/// but cheap to check): the recovered output must clear the intent's on-chain floor (a successful
+/// trade cleared it by construction, so a violation means the wrong legs were picked up), and,
+/// when the calldata also declares a quote, it must sit within `plausible_quote`'s band of the
+/// recovered output.
+pub(crate) struct RelayCalldata;
+
+#[async_trait]
+impl<P: Provider> TradeDecoder<P> for RelayCalldata {
+    fn name(&self) -> &'static str {
+        "relay-calldata"
+    }
+
+    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+        let addresses = ctx.venue?;
+        let solver_frame = trace::find_solver_frame(ctx.root, ctx.registry)?;
+        let solver = ctx.registry.label(solver_frame.to?);
+        let intent = solvers::swap_intent(&solver, &solver_frame.input, None)?;
+        let recipient = solvers::output_recipient(&solver, &solver_frame.input)?;
+
+        let amount_out = ctx
+            .transfer_ledger
+            .received_by_address(recipient, intent.token_out);
+        if amount_out.is_zero() || amount_out < intent.min_amount_out {
+            return None;
+        }
+        if let Some(quoted) = intent.declared_quote() {
+            if !solvers::plausible_quote(quoted, amount_out) {
+                return None;
+            }
+        }
+
+        // Both fees are already on the right basis (§1 of the design doc): the intent's
+        // `amount_in` is post-input-fee and the recipient's receipt is pre-output-fee, so neither
+        // amount above needs adjusting — the fee is recorded for transparency only.
+        let fees = ctx
+            .transfer_ledger
+            .received_by(&addresses.fee_collectors);
+        let venue_fee_in = fees
+            .get(&intent.token_in)
+            .copied()
+            .filter(|fee| !fee.is_zero());
+        let venue_fee_out = fees
+            .get(&intent.token_out)
+            .copied()
+            .filter(|fee| !fee.is_zero());
+
+        // A trader-sent Relay transaction charges the solver frame's gas (see `GasScope`); a
+        // solver-initiated rebalance charges nothing. Ledger-derived rather than assumed: the
+        // sender net-sending the input token is what "trader-funded" means here.
+        let sender = ctx.receipt.from;
+        let net_sent = ctx
+            .transfer_ledger
+            .group_net_sent(&HashSet::from([sender]));
+        let gas_scope = if net_sent.contains_key(&intent.token_in) {
+            GasScope::SolverFrame
+        } else {
+            GasScope::NotCharged
+        };
+
+        Some(TraderFlow {
+            tracked: sender,
+            swap: NetSwap {
+                token_in: intent.token_in,
+                amount_in: intent.amount_in,
+                token_out: intent.token_out,
+                amount_out,
+            },
+            venue_fee_in,
+            venue_fee_out,
+            solver_override: None,
+            gas_scope,
+        })
+    }
+}
 
 /// Relay's netting decoder.
 pub(crate) struct RelayNetting;
@@ -133,7 +226,7 @@ mod tests {
     use crate::decoder::{
         decode::GasScope,
         registry::Registry,
-        test_utils::{addr, make_transfer_log, receipt, swap, tx_hash},
+        test_utils::{addr, frame, make_transfer_log, receipt, swap, tx_hash},
     };
 
     fn transfer_ledger(logs: &[Log], native: &[(Address, Address, U256)]) -> TransferLedger {
@@ -160,6 +253,7 @@ mod tests {
         let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
         let mut code_cache = HashMap::new();
         let receipt = receipt(tx_hash(1), sender, Some(entry_point), vec![]);
+        let root = frame("CALL", sender, entry_point, 0);
         let mut ctx = DecodeContext {
             provider: &provider,
             registry,
@@ -168,6 +262,7 @@ mod tests {
             entry_point,
             transfer_ledger: ledger,
             input: &[],
+            root: &root,
             venue: registry.venue("relay"),
         };
         RelayNetting.decode(&mut ctx).await
@@ -352,5 +447,200 @@ mod tests {
         assert_eq!(flow.venue_fee_in, None);
         assert_eq!(flow.venue_fee_out, None);
         assert_eq!(flow.gas_scope, GasScope::NotCharged);
+    }
+
+    mod relay_calldata {
+        use alloy::{primitives::address, rpc::types::trace::geth::CallFrame};
+
+        use super::*;
+
+        /// Fly's own router — same address on every chain (`docs.fly.trade`).
+        const FLY: Address = address!("0x20f6ee51340adeed01a59b0e65cb3703f3dc860c");
+        /// 0x's `AllowanceHolder` — a registered solver with no `swap_intent` support.
+        const ZEROX: Address = address!("0xdef1c0ded9bec7f1a1670819833240f027b25eff");
+        /// Relay's own router — in the live fixture this is both the entry point and the
+        /// declared output recipient Fly's calldata carries (Relay receives and forwards).
+        const ROUTER: Address = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
+
+        /// The real Fly calldata used by `solvers::fly`'s fixture tests: USDT in, native out,
+        /// `amount_in` 19,694,643, `min_amount_out` 10,217,898,321,149,381, declared quote
+        /// 10,321,109,415,302,405.
+        fn fly_input() -> Vec<u8> {
+            let text = include_str!("../solvers/fixtures/fly_input.txt").trim();
+            alloy::hex::decode(text.strip_prefix("0x").unwrap_or(text)).unwrap()
+        }
+
+        const TOKEN_IN: Address = address!("0xfde4c96c8593536e31f229ea8f37b2ada2699bb2");
+        const AMOUNT_IN: u64 = 19_694_643;
+        const MIN_AMOUNT_OUT: u128 = 10_217_898_321_149_381;
+        const QUOTED_AMOUNT_OUT: u128 = 10_321_109_415_302_405;
+
+        /// A root frame: `sender -> router -> solver`, the solver frame carrying `input`.
+        fn root_with_solver_frame(sender: Address, router: Address, solver: Address) -> CallFrame {
+            let mut solver_call = frame("CALL", router, solver, 0);
+            solver_call.input = fly_input().into();
+            let mut root = frame("CALL", sender, router, 0);
+            root.calls = vec![solver_call];
+            root
+        }
+
+        async fn decode_calldata(
+            registry: &Registry,
+            root: &CallFrame,
+            ledger: &TransferLedger,
+            sender: Address,
+            router: Address,
+        ) -> Option<TraderFlow> {
+            let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
+            let mut code_cache = HashMap::new();
+            let receipt = receipt(tx_hash(1), sender, Some(router), vec![]);
+            let mut ctx = DecodeContext {
+                provider: &provider,
+                registry,
+                code_cache: &mut code_cache,
+                receipt: &receipt,
+                entry_point: router,
+                transfer_ledger: ledger,
+                input: &[],
+                root,
+                venue: registry.venue("relay"),
+            };
+            RelayCalldata.decode(&mut ctx).await
+        }
+
+        #[tokio::test]
+        async fn test_decode_recovers_output_from_recipient_receipt() {
+            // The router — the declared recipient — receives native ETH above the floor; the
+            // sender pays the input token directly (sender-funded).
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let root = root_with_solver_frame(sender, ROUTER, FLY);
+            let logs = vec![make_transfer_log(TOKEN_IN, sender, ROUTER, U256::from(AMOUNT_IN))];
+            let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
+            let ledger = TransferLedger::from_transaction(&logs, &native);
+
+            let flow = decode_calldata(&registry, &root, &ledger, sender, ROUTER)
+                .await
+                .unwrap();
+            assert_eq!(flow.tracked, sender);
+            assert_eq!(flow.swap.token_in, TOKEN_IN);
+            assert_eq!(flow.swap.token_out, Address::ZERO);
+            assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
+            assert_eq!(flow.swap.amount_out, U256::from(MIN_AMOUNT_OUT + 1_000));
+            assert_eq!(flow.gas_scope, GasScope::SolverFrame);
+        }
+
+        #[tokio::test]
+        async fn test_decode_below_floor_declines() {
+            // The recipient's receipt sits under the intent's on-chain floor: a successful trade
+            // clears its floor by construction, so this means the query mis-attributed.
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let root = root_with_solver_frame(sender, ROUTER, FLY);
+            let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT - 1))];
+            let ledger = TransferLedger::from_transaction(&[], &native);
+
+            assert!(decode_calldata(&registry, &root, &ledger, sender, ROUTER)
+                .await
+                .is_none());
+        }
+
+        #[tokio::test]
+        async fn test_decode_no_recipient_receipt_declines() {
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let root = root_with_solver_frame(sender, ROUTER, FLY);
+            let ledger = TransferLedger::from_transaction(&[], &[]);
+
+            assert!(decode_calldata(&registry, &root, &ledger, sender, ROUTER)
+                .await
+                .is_none());
+        }
+
+        #[tokio::test]
+        async fn test_decode_no_solver_frame_declines() {
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let root = frame("CALL", sender, ROUTER, 0);
+            let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
+            let ledger = TransferLedger::from_transaction(&[], &native);
+
+            assert!(decode_calldata(&registry, &root, &ledger, sender, ROUTER)
+                .await
+                .is_none());
+        }
+
+        #[tokio::test]
+        async fn test_decode_solver_without_intent_support_declines() {
+            // 0x is a registered solver (matches `find_solver_frame`) but has no `swap_intent`
+            // implementation: the calldata path has nothing to recover, so it falls through.
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let root = root_with_solver_frame(sender, ROUTER, ZEROX);
+            let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
+            let ledger = TransferLedger::from_transaction(&[], &native);
+
+            assert!(decode_calldata(&registry, &root, &ledger, sender, ROUTER)
+                .await
+                .is_none());
+        }
+
+        #[tokio::test]
+        async fn test_decode_implausible_quote_declines() {
+            // A recovered output more than 2x the declared quote: `plausible_quote`'s band would
+            // reject it as a unit mismatch or a mis-attributed receipt, even though it clears the
+            // floor comfortably.
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let root = root_with_solver_frame(sender, ROUTER, FLY);
+            let implausible = U256::from(QUOTED_AMOUNT_OUT) * U256::from(3u64);
+            let native = vec![(addr(50), ROUTER, implausible)];
+            let ledger = TransferLedger::from_transaction(&[], &native);
+
+            assert!(decode_calldata(&registry, &root, &ledger, sender, ROUTER)
+                .await
+                .is_none());
+        }
+
+        #[tokio::test]
+        async fn test_decode_collector_funded_is_not_charged_gas() {
+            // The fee collector, not the sender, net-sends the input token: a solver-initiated
+            // rebalance, which charges no gas to any trader.
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let collector = relay_collector(&registry);
+            let root = root_with_solver_frame(sender, ROUTER, FLY);
+            let logs = vec![make_transfer_log(TOKEN_IN, collector, ROUTER, U256::from(AMOUNT_IN))];
+            let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
+            let ledger = TransferLedger::from_transaction(&logs, &native);
+
+            let flow = decode_calldata(&registry, &root, &ledger, sender, ROUTER)
+                .await
+                .unwrap();
+            assert_eq!(flow.gas_scope, GasScope::NotCharged);
+        }
+
+        #[tokio::test]
+        async fn test_decode_records_venue_fee_without_adjusting_amounts() {
+            // An input-side fee leg to the real Relay collector: recorded for transparency, but
+            // `amount_in` stays the intent's raw figure — it is already post-fee (§1 of the design
+            // doc), unlike netting's fee back-out.
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let collector = relay_collector(&registry);
+            let root = root_with_solver_frame(sender, ROUTER, FLY);
+            let logs = vec![
+                make_transfer_log(TOKEN_IN, sender, ROUTER, U256::from(AMOUNT_IN)),
+                make_transfer_log(TOKEN_IN, ROUTER, collector, U256::from(40)),
+            ];
+            let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
+            let ledger = TransferLedger::from_transaction(&logs, &native);
+
+            let flow = decode_calldata(&registry, &root, &ledger, sender, ROUTER)
+                .await
+                .unwrap();
+            assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
+            assert_eq!(flow.venue_fee_in, Some(U256::from(40)));
+        }
     }
 }

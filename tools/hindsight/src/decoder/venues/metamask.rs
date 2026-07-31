@@ -73,7 +73,7 @@ mod tests {
     use crate::decoder::{
         decode::GasScope,
         registry::Registry,
-        test_utils::{addr, make_transfer_log, receipt, swap, tx_hash},
+        test_utils::{addr, frame, make_transfer_log, receipt, swap, tx_hash},
         transfer_ledger::TransferLedger,
     };
 
@@ -108,6 +108,7 @@ mod tests {
         let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
         let mut code_cache = HashMap::new();
         let receipt = receipt(tx_hash(1), sender, Some(entry_point), vec![]);
+        let root = frame("CALL", sender, entry_point, 0);
         let mut ctx = DecodeContext {
             provider: &provider,
             registry,
@@ -116,6 +117,7 @@ mod tests {
             entry_point,
             transfer_ledger: ledger,
             input,
+            root: &root,
             venue: registry.venue("metamask"),
         };
         MetaMaskNetting.decode(&mut ctx).await
