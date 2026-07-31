@@ -707,6 +707,35 @@ mod tests {
         assert!(Arc::ptr_eq(&market.components["pool_ab"], &subset.components["pool_ab"],));
     }
 
+    /// A subset extracted before a component upsert must keep the component it
+    /// was extracted with: `upsert_components` replaces whole entries and must
+    /// never mutate a shared component in place.
+    #[test]
+    fn extracted_subset_is_isolated_from_later_component_upserts() {
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([component("pool_ab", &[token_a.clone(), token_b.clone()])]);
+        market.upsert_tokens([token_a.clone(), token_b.clone()]);
+        market.update_states([(
+            "pool_ab".to_string(),
+            Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+        )]);
+
+        let subset = market.extract_subset(&HashSet::from(["pool_ab".to_string()]));
+        let mut replacement = component("pool_ab", &[token_a, token_b]);
+        replacement.protocol_system = "replacement_protocol".to_string();
+        market.upsert_components([replacement]);
+
+        let old_component = subset
+            .get_component("pool_ab")
+            .expect("subset keeps its entry");
+        assert_ne!(
+            old_component.protocol_system, "replacement_protocol",
+            "subset must keep the pre-upsert component"
+        );
+    }
+
     /// A subset extracted before a block update must keep the state it was
     /// extracted with: `update_states` replaces whole entries and must never
     /// mutate a shared state in place.
