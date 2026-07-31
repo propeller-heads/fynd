@@ -43,7 +43,7 @@ impl ChangedComponents {
     /// Used for startup and lag recovery scenarios.
     pub fn all(market: MarketDataView) -> Self {
         Self {
-            added: market.component_topology().clone(),
+            added: market.component_topology(),
             removed: vec![],
             updated: vec![],
             is_full_recompute: true,
