@@ -3,14 +3,14 @@
 //! Solver addresses live in the address book's `[solvers]` section, and for most solvers that
 //! line is all that is needed: matching, attribution, and gas isolation work from the address
 //! alone. A solver whose transactions carry more information than that gets a module here with a
-//! `SolverKnowledge` impl registered in `IMPLEMENTATIONS`: an off-chain quote embedded in
-//! calldata, or a matching veto for order shapes that are not same-chain swaps.
+//! `SolverKnowledge` impl registered in `IMPLEMENTATIONS`: a swap intent recovered from calldata,
+//! or a matching veto for order shapes that are not same-chain swaps.
 
 pub(crate) mod attribution;
+pub(crate) mod fly;
 pub(crate) mod kyberswap;
 pub(crate) mod lifi;
 pub(crate) mod paraswap;
-pub(crate) mod zeroex;
 
 use alloy::{
     primitives::{Address, U256},
@@ -19,22 +19,90 @@ use alloy::{
 
 use crate::decoder::{registry::Registry, veto::Veto};
 
-/// A solver's own off-chain quote for the swap, recovered from calldata.
+/// A trader's swap terms recovered from a solver frame's own calldata: what the trade moved, the
+/// floor the trader would accept, and — when the calldata declares one — the solver's own
+/// off-chain quote.
 ///
-/// This is the number the venue compared against at decision time — what the solver's API
-/// promised — as opposed to the settled amount, which is what execution delivered. The fields
-/// carry no solver name; the record's `solver` column already says who.
-#[derive(Debug, Clone, serde::Serialize)]
-pub(crate) struct SolverQuote {
-    /// Quoted output in `token_out` native units.
-    pub amount_out: U256,
-    /// The integrator that requested the route (e.g. "relay", "metamask", "Instadapp") — the
-    /// true frontend, even when the transaction enters through a wrapper contract. Only some
-    /// solvers declare it.
-    pub source: Option<String>,
-    /// Unix timestamp of the quote, when present. Joined against block time downstream to
-    /// separate stale-quote slippage from routing quality.
+/// `token_in`/`token_out`/`amount_in`/`min_amount_out` are the on-chain enforced terms of the
+/// swap itself, recovered so a reverted swap can still be judged against its floor, since a
+/// revert emits no logs to net a settled amount from. The declared quote is different: it is the
+/// number the venue compared against at decision time — what the solver's API promised — as
+/// opposed to the settled amount, which is what execution delivered. It is self-reported and not
+/// every solver declares one, so it is read through [`SwapIntent::quoted_amount_out`] (falls back
+/// to the floor) or [`SwapIntent::declared_quote`] (the raw value, for callers that must tell a
+/// real quote from the fallback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct SwapIntent {
+    /// `Address::ZERO` for native ETH.
+    pub token_in: Address,
+    /// `Address::ZERO` for native ETH.
+    pub token_out: Address,
+    pub amount_in: U256,
+    /// The trader's on-chain enforced floor for `token_out` — the swap reverts below it.
+    pub min_amount_out: U256,
+    /// The solver's declared off-chain quote, when its calldata carries one. Private: the
+    /// ABI-decoded fields above are hard facts, this one is self-reported, so it is read only
+    /// through the accessors, never assumed present.
+    quoted_amount_out: Option<U256>,
+    /// Unix timestamp of the declared quote, when present. Only `KyberSwap`'s `clientData`
+    /// exposes one.
     pub timestamp: Option<u64>,
+}
+
+impl SwapIntent {
+    /// A swap intent with just the ABI-enforced terms: token in/out, amount in, and the on-chain
+    /// floor. No declared quote or timestamp — attach one with [`SwapIntent::with_quote`].
+    pub(crate) fn new(
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+        min_amount_out: U256,
+    ) -> Self {
+        Self {
+            token_in,
+            token_out,
+            amount_in,
+            min_amount_out,
+            quoted_amount_out: None,
+            timestamp: None,
+        }
+    }
+
+    /// Attach the solver's declared off-chain quote and, when known, its timestamp.
+    pub(crate) fn with_quote(mut self, quoted_amount_out: U256, timestamp: Option<u64>) -> Self {
+        self.quoted_amount_out = Some(quoted_amount_out);
+        self.timestamp = timestamp;
+        self
+    }
+
+    /// The best available "what was promised": the solver's declared quote, or — when absent —
+    /// the enforced floor.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "only called from tests in this PR; its production caller is the \
+                      reverted-swap path in the stacked follow-up PR"
+        )
+    )]
+    pub(crate) fn quoted_amount_out(&self) -> U256 {
+        self.quoted_amount_out
+            .unwrap_or(self.min_amount_out)
+    }
+
+    /// The raw declared quote, `None` when the calldata carried none. Distinct from
+    /// [`SwapIntent::quoted_amount_out`], which falls back to the floor — analysts need to tell
+    /// a real quote from the fallback.
+    pub(crate) fn declared_quote(&self) -> Option<U256> {
+        self.quoted_amount_out
+    }
+
+    /// Drop the declared quote, keeping the ABI-enforced terms. Used when the settled amount
+    /// shows the quote was self-reported garbage (see [`plausible_quote`]) — the ABI fields stay
+    /// trustworthy either way.
+    pub(crate) fn clear_quote(&mut self) {
+        self.quoted_amount_out = None;
+    }
 }
 
 /// Solver-specific knowledge beyond the address-book entry.
@@ -42,8 +110,16 @@ pub(crate) struct SolverQuote {
 /// Every method has a default meaning "this solver has nothing to add", so a solver only
 /// implements the capabilities it has; most solvers need no code at all.
 pub(crate) trait SolverKnowledge: Send + Sync {
-    /// The solver's off-chain quote declared in the transaction's calldata, when it embeds one.
-    fn embedded_quote(&self, _input: &[u8], _amount_in: U256) -> Option<SolverQuote> {
+    /// The swap terms encoded in the solver frame's own calldata, when this solver's calldata
+    /// carries them plainly enough to recover without netting a settled amount. Dispatched with
+    /// the solver frame's input (found via `trace::find_solver_frame`/the reverted-tolerant
+    /// variant), not the root transaction's — a packed calldata layout (Fly) uses offsets valid
+    /// only in its own frame.
+    ///
+    /// `amount_in_hint` is the decoded flow's input amount, when one is known — absent for a
+    /// reverted trade, which has no netted flow to draw it from. Some extractors (`ParaSwap`) need
+    /// it to locate fields by value rather than by ABI offset.
+    fn swap_intent(&self, _input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
         None
     }
 
@@ -66,7 +142,7 @@ pub(crate) trait SolverKnowledge: Send + Sync {
 /// The solvers with a `SolverKnowledge` implementation, by address-book name. A solver absent
 /// here needs none — its address-book entry alone is complete.
 const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
-    ("0x", &zeroex::ZeroEx),
+    ("fly", &fly::Fly),
     ("kyberswap", &kyberswap::Kyberswap),
     ("lifi", &lifi::Lifi),
     ("paraswap", &paraswap::Paraswap),
@@ -102,27 +178,28 @@ pub(crate) fn integrator(logs: &[Log]) -> Option<String> {
         .find_map(|(_, knowledge)| knowledge.integrator(logs))
 }
 
-/// The solver's off-chain quote declared in the transaction's calldata, when the attributed
-/// solver is known to embed one.
-pub(crate) fn embedded_quote(solver: &str, input: &[u8], amount_in: U256) -> Option<SolverQuote> {
+/// The swap terms encoded in the solver frame's own calldata, dispatched on the attributed
+/// solver so a lookalike blob from another router cannot masquerade as an intent.
+pub(crate) fn swap_intent(
+    solver: &str,
+    input: &[u8],
+    amount_in_hint: Option<U256>,
+) -> Option<SwapIntent> {
     let (_, knowledge) = IMPLEMENTATIONS
         .iter()
         .find(|(name, _)| *name == solver)?;
-    knowledge.embedded_quote(input, amount_in)
+    knowledge.swap_intent(input, amount_in_hint)
 }
 
-/// Whether a quoted output is in the same units as the settled one.
+/// Whether a declared quote is in the same units as the settled output.
 ///
 /// Quotes are self-reported calldata: integrators sometimes fill them in a different token or
 /// decimal basis (seen live: quoted 1.2e23 vs settled 1.2e11), which would fabricate a -100%
 /// slippage. A real quote and its settlement differ by slippage, never by orders of magnitude,
 /// so anything outside a 2x band is dropped rather than recorded.
-pub(crate) fn plausible_quote(quote: &SolverQuote, settled_amount_out: U256) -> bool {
-    quote.amount_out <= settled_amount_out.saturating_mul(U256::from(2)) &&
-        settled_amount_out <=
-            quote
-                .amount_out
-                .saturating_mul(U256::from(2))
+pub(crate) fn plausible_quote(quoted_amount_out: U256, settled_amount_out: U256) -> bool {
+    quoted_amount_out <= settled_amount_out.saturating_mul(U256::from(2)) &&
+        settled_amount_out <= quoted_amount_out.saturating_mul(U256::from(2))
 }
 
 #[cfg(test)]
@@ -185,32 +262,33 @@ mod tests {
 
     #[test]
     fn test_plausible_quote_slippage_and_unit_mismatch() {
-        let quote = |amount: u128| SolverQuote {
-            amount_out: U256::from(amount),
-            source: None,
-            timestamp: None,
-        };
         // The audited Relay+KyberSwap trade: quoted 70,400.41, settled 69,996.28 — 57bps of
         // slippage, kept.
-        assert!(plausible_quote(&quote(70_400_409_935), U256::from(69_996_280_564u64)));
+        assert!(plausible_quote(U256::from(70_400_409_935u64), U256::from(69_996_280_564u64)));
         // Seen live via Instadapp: quoted in 18-decimal units, settled in 6 — dropped.
         assert!(!plausible_quote(
-            &quote(120_001_117_253_254_637_416_284),
+            U256::from(120_001_117_253_254_637_416_284u128),
             U256::from(120_000_000_000u64)
         ));
     }
 
     #[test]
-    fn test_embedded_quote_dispatch() {
-        // A ParaSwap-shaped word triple only parses when the attributed solver is paraswap;
-        // an unlisted solver never yields a quote from the same bytes.
+    fn test_swap_intent_dispatch_scoped_to_the_attributed_solver() {
+        // A ParaSwap-shaped calldata (token pair, then the fromAmount/toAmount/quotedAmount
+        // triple) only parses into an intent when the attributed solver is paraswap; an unlisted
+        // solver never yields one from the same bytes.
         let amount_in = U256::from(171_521_496u64);
         let mut input = vec![0xe3u8, 0xea, 0xd5, 0x9e];
-        for word in [amount_in, U256::from(171_430_663u64), U256::from(171_602_266u64), U256::ZERO]
-        {
+        for word in [
+            U256::from(0x1111u64), // srcToken
+            U256::from(0x2222u64), // destToken
+            amount_in,
+            U256::from(171_430_663u64),
+            U256::from(171_602_266u64),
+        ] {
             input.extend_from_slice(&word.to_be_bytes::<32>());
         }
-        assert!(embedded_quote("paraswap", &input, amount_in).is_some());
-        assert!(embedded_quote("1inch", &input, amount_in).is_none());
+        assert!(swap_intent("paraswap", &input, Some(amount_in)).is_some());
+        assert!(swap_intent("1inch", &input, Some(amount_in)).is_none());
     }
 }

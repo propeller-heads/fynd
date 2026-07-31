@@ -57,6 +57,8 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x1f8db310f32d48b6180ff902ec60c586128cef47" = "tycho"
 "0xfd0b31d2e955fa55e3fa641fe90e08b677188d35" = "tycho"
 "0xda892c989d07a18b5dd3f392d949f00df15c5736" = "tycho"
+# Fly (formerly Magpie) DexAggregator — same address on every chain (docs.fly.trade/developers/deployments)
+"0x20f6ee51340adeed01a59b0e65cb3703f3dc860c" = "fly"
 
 # Venues — platforms that initiate a trade and route it through a solver found in the
 # trace. Each section name must have a decode strategy in code (venues::Venue);
