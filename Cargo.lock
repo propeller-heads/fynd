@@ -7907,7 +7907,7 @@ dependencies = [
 [[package]]
 name = "tycho-client"
 version = "0.342.0"
-source = "git+https://github.com/propeller-heads/tycho?rev=6d2fd4d1943792ea971f2b6c4f1cb1976afb36d0#6d2fd4d1943792ea971f2b6c4f1cb1976afb36d0"
+source = "git+https://github.com/propeller-heads/tycho?rev=fdc37336ee8372f8c9488feeff1e5e21203513d4#fdc37336ee8372f8c9488feeff1e5e21203513d4"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7936,7 +7936,7 @@ dependencies = [
 [[package]]
 name = "tycho-common"
 version = "0.342.0"
-source = "git+https://github.com/propeller-heads/tycho?rev=6d2fd4d1943792ea971f2b6c4f1cb1976afb36d0#6d2fd4d1943792ea971f2b6c4f1cb1976afb36d0"
+source = "git+https://github.com/propeller-heads/tycho?rev=fdc37336ee8372f8c9488feeff1e5e21203513d4#fdc37336ee8372f8c9488feeff1e5e21203513d4"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -7964,7 +7964,7 @@ dependencies = [
 [[package]]
 name = "tycho-ethereum"
 version = "0.342.0"
-source = "git+https://github.com/propeller-heads/tycho?rev=6d2fd4d1943792ea971f2b6c4f1cb1976afb36d0#6d2fd4d1943792ea971f2b6c4f1cb1976afb36d0"
+source = "git+https://github.com/propeller-heads/tycho?rev=fdc37336ee8372f8c9488feeff1e5e21203513d4#fdc37336ee8372f8c9488feeff1e5e21203513d4"
 dependencies = [
  "alloy",
  "async-trait",
@@ -7985,7 +7985,7 @@ dependencies = [
 [[package]]
 name = "tycho-execution"
 version = "0.342.0"
-source = "git+https://github.com/propeller-heads/tycho?rev=6d2fd4d1943792ea971f2b6c4f1cb1976afb36d0#6d2fd4d1943792ea971f2b6c4f1cb1976afb36d0"
+source = "git+https://github.com/propeller-heads/tycho?rev=fdc37336ee8372f8c9488feeff1e5e21203513d4#fdc37336ee8372f8c9488feeff1e5e21203513d4"
 dependencies = [
  "alloy",
  "chrono",
@@ -8005,7 +8005,7 @@ dependencies = [
 [[package]]
 name = "tycho-simulation"
 version = "0.342.0"
-source = "git+https://github.com/propeller-heads/tycho?rev=6d2fd4d1943792ea971f2b6c4f1cb1976afb36d0#6d2fd4d1943792ea971f2b6c4f1cb1976afb36d0"
+source = "git+https://github.com/propeller-heads/tycho?rev=fdc37336ee8372f8c9488feeff1e5e21203513d4#fdc37336ee8372f8c9488feeff1e5e21203513d4"
 dependencies = [
  "alloy",
  "alloy-chains",

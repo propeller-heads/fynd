@@ -14,10 +14,7 @@
 
 use std::collections::HashMap;
 
-use tycho_simulation::{
-    evm::protocol::ekubo_v3::EXCLUSIVE_EXTENSIONS,
-    tycho_common::models::{protocol::ProtocolComponent, Address},
-};
+use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
 
 use crate::{
     feed::{events::MarketEvent, market_data::MarketState},
@@ -25,16 +22,12 @@ use crate::{
 };
 
 /// Returns `true` when the component offers exclusive liquidity, i.e. is swappable only with
-/// off-chain authorization.
+/// off-chain authorization. The `is_exclusive` static attribute is stamped by tycho-simulation's
+/// decoder; absence means the component is public.
 pub(crate) fn is_exclusive(component: &ProtocolComponent) -> bool {
     component
         .static_attributes
-        .get("extension")
-        .is_some_and(|extension| {
-            EXCLUSIVE_EXTENSIONS
-                .iter()
-                .any(|addr| addr.as_slice() == &extension[..])
-        })
+        .contains_key("is_exclusive")
 }
 
 /// Removes exclusive components from a full topology map.
@@ -77,22 +70,18 @@ fn filter_component_ids(market: &MarketState, ids: &[ComponentId]) -> Vec<Compon
         .collect()
 }
 
-/// Stamps the signed-exclusive-swap extension onto a component's static attributes so tests can
-/// build exclusive components without protocol-specific fixtures.
+/// Stamps the `is_exclusive` attribute onto a component's static attributes, mirroring
+/// tycho-simulation's decoder tagging, so tests can build exclusive components without
+/// protocol-specific fixtures.
 #[cfg(test)]
 pub(crate) fn mark_exclusive(component: &mut ProtocolComponent) {
-    component.static_attributes.insert(
-        "extension".to_string(),
-        EXCLUSIVE_EXTENSIONS[0]
-            .as_slice()
-            .into(),
-    );
+    component
+        .static_attributes
+        .insert("is_exclusive".to_string(), vec![1u8].into());
 }
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::address;
-
     use super::*;
     use crate::{
         algorithm::test_utils::{component, token},
@@ -115,23 +104,17 @@ mod tests {
         market
     }
 
-    fn component_with_extension(extension: Vec<u8>) -> ProtocolComponent {
+    fn component_with_extension() -> ProtocolComponent {
         let mut c = public_component("pub-1");
         c.static_attributes
-            .insert("extension".to_string(), extension.into());
+            .insert("extension".to_string(), vec![0x55, 0x19].into());
         c
     }
 
     #[rstest::rstest]
-    #[case::exclusive_extension(exclusive_component("excl-1"), true)]
+    #[case::tagged(exclusive_component("excl-1"), true)]
     #[case::missing_attribute(public_component("pub-1"), false)]
-    #[case::other_extension(
-        component_with_extension(
-            address!("0x517E506700271AEa091b02f42756F5E174Af5230").as_slice().to_vec()
-        ),
-        false
-    )]
-    #[case::garbage_attribute(component_with_extension(vec![0x55, 0x19]), false)]
+    #[case::untagged_extension(component_with_extension(), false)]
     fn test_is_exclusive(#[case] component: ProtocolComponent, #[case] expected: bool) {
         assert_eq!(is_exclusive(&component), expected);
     }
