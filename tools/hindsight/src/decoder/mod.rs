@@ -30,7 +30,7 @@ mod veto;
 #[cfg(test)]
 mod test_utils;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use alloy::{
     eips::BlockId,
@@ -44,7 +44,7 @@ use futures::stream::StreamExt;
 use tracing::{debug, warn};
 
 use crate::decoder::{
-    decode::{recover, DecodeContext, GasScope, TraderFlow},
+    decode::{recover, DecodeContext, GasScope, TraderFlow, TraderRole},
     matching::MatchedSolverTrade,
     trace::{collect_native_transfers, fetch_trace, route_gas},
     transfer_ledger::TransferLedger,
@@ -213,6 +213,22 @@ fn intent_fields(intent: Option<&SwapIntent>) -> (Option<U256>, Option<U256>, Op
     (min_amount_out, declared_quote, quote_timestamp)
 }
 
+/// Whether `address` has contract code. On RPC failure, treated as a contract — the conservative
+/// default so an unknown address is never mistaken for an EOA swapper (see
+/// `intents::netting::find_intent_trade`).
+///
+/// v0 limitation: an EIP-7702-delegated account carries code, so a 7702 swapper EOA is classified
+/// as a contract and dropped. 7702 is not yet widely used, so this is accepted for now.
+async fn fetch_contract_flag<P: Provider>(provider: &P, address: Address) -> bool {
+    match provider.get_code_at(address).await {
+        Ok(code) => !code.is_empty(),
+        Err(error) => {
+            warn!(%address, %error, "failed to fetch code; treating as contract");
+            true
+        }
+    }
+}
+
 /// Max concurrent trace requests per block. Bounds RPC load so a block
 /// with many solver trades still completes within the block time
 /// without tripping provider rate limits.
@@ -249,13 +265,14 @@ impl<P: Provider> Decoder<P> {
     /// Decode solver trades from a block — settled and reverted alike, as one list told apart by
     /// `DecodedTrade::status`.
     ///
-    /// Fetches all receipts in one `eth_getBlockReceipts` call, then matches each transaction one
-    /// of three ways: a settled trade, matched by entry point or by a known solver's log (the log
-    /// path catches filler-initiated intent fills, `UniswapX`, 1inch limit orders, where `tx.to`
-    /// is a rotating filler); a reverted candidate, matched by entry point alone (a revert emits
-    /// no logs — see `matching::select`); or neither, and the transaction is dropped before it
-    /// costs a trace. Both matched shapes join one bounded trace wave; the trace recovers native
-    /// ETH flows and attributes the settling (or attempted) solver either way.
+    /// Fetches all receipts in one `eth_getBlockReceipts` call, matches each transaction as a
+    /// settled trade (entry point or a known solver's log — the log path catches
+    /// filler-initiated intent fills, `UniswapX`, 1inch limit orders, where `tx.to` is a rotating
+    /// filler) or a reverted candidate (entry point alone — a revert emits no logs; see
+    /// `matching::select`), or drops it before it costs a trace. Every matched transaction joins
+    /// one bounded trace wave, then contract-or-EOA facts for this block's intent-role candidates
+    /// are prefetched in one batch (`prefetch_contract_flags`) so per-transaction decode itself
+    /// issues no RPC of its own.
     pub(crate) async fn decode_block(
         &mut self,
         block_number: u64,
@@ -304,6 +321,9 @@ impl<P: Provider> Decoder<P> {
         .collect::<Vec<_>>()
         .await;
 
+        self.prefetch_contract_flags(&matched, &traces)
+            .await;
+
         let mut trades = Vec::new();
         for ((index, matched), trace) in matched.into_iter().zip(traces) {
             let tx_index = matched
@@ -334,11 +354,61 @@ impl<P: Provider> Decoder<P> {
         Ok(trades)
     }
 
+    /// Gather contract-or-EOA facts for this block's intent-role candidates, so per-tx decode
+    /// reads no RPC of its own (see `intents::netting::find_intent_trade`). Scoped to exactly the
+    /// candidate set `intents::netting::intent_candidates` would enumerate for each settled
+    /// intent-role trade in this block — not every address in every ledger, and not reverted
+    /// candidates, which never reach the `TraderFlow` decoder chain at all. Results join the
+    /// cross-block `code_cache`, so a recurring candidate (a router, a pool) costs one RPC call
+    /// for the life of the run.
+    async fn prefetch_contract_flags(
+        &mut self,
+        matched: &[(usize, MatchedSolverTrade<'_>)],
+        traces: &[anyhow::Result<CallFrame>],
+    ) {
+        let mut candidates = HashSet::new();
+        for ((_, trade), trace) in matched.iter().zip(traces) {
+            if trade.reverted {
+                continue;
+            }
+            let Ok(root) = trace else { continue };
+            if !matches!(
+                TraderRole::classify(trade.entry_point, &self.registry),
+                TraderRole::Intent
+            ) {
+                continue;
+            }
+            let mut native = Vec::new();
+            collect_native_transfers(root, &mut native);
+            let ledger = TransferLedger::from_transaction(trade.receipt.logs(), &native);
+            let exclude = [trade.entry_point, trade.receipt.from];
+            for (candidate, _) in
+                intents::netting::intent_candidates(&ledger, &exclude, &self.registry)
+            {
+                if !self.code_cache.contains_key(&candidate) {
+                    candidates.insert(candidate);
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        let provider = &self.provider;
+        let fetched: Vec<(Address, bool)> = futures::stream::iter(candidates)
+            .map(|address| async move { (address, fetch_contract_flag(provider, address).await) })
+            .buffered(TRACE_CONCURRENCY)
+            .collect()
+            .await;
+        self.code_cache.extend(fetched);
+    }
+
     /// Decode one matched transaction: settled trades run the full `TraderFlow` decoder chain
     /// (`decode_settled`); reverted candidates skip it — there is no netted flow to decode, only
-    /// the settling solver frame's own calldata to read (`decode_reverted`).
+    /// the settling solver frame's own calldata to read (`decode_reverted`). Neither path issues
+    /// RPC of its own: settled decode reads the contract-flags prefetched for this block, and
+    /// reverted decode never needed RPC beyond the trace already fetched.
     async fn decode_transaction(
-        &mut self,
+        &self,
         matched: MatchedSolverTrade<'_>,
         root: &CallFrame,
         block_number: u64,
@@ -406,15 +476,18 @@ impl<P: Provider> Decoder<P> {
     }
 
     /// Decode one settled transaction from its trace: build the transfer ledger, run the
-    /// decoders for its entity, veto non-trades, attribute the solver, and account gas and quote.
+    /// decoders for its entity, veto non-trades, attribute the solver, and account gas and
+    /// quote. Issues no RPC — the one fact a decoder used to fetch lazily (is a candidate address
+    /// a contract or an EOA) was prefetched for the whole block before this ran (see
+    /// `prefetch_contract_flags`).
     async fn decode_settled(
-        &mut self,
+        &self,
         matched: MatchedSolverTrade<'_>,
         root: &CallFrame,
         block_number: u64,
         tx_index: u64,
     ) -> Option<DecodedTrade> {
-        let Self { provider, registry, code_cache } = self;
+        let registry = &self.registry;
         let MatchedSolverTrade { receipt, entry_point, .. } = matched;
         let logs = receipt.logs();
         let sender = receipt.from;
@@ -424,9 +497,8 @@ impl<P: Provider> Decoder<P> {
         let transfer_ledger = TransferLedger::from_transaction(logs, &native);
 
         let mut ctx = DecodeContext {
-            provider,
             registry,
-            code_cache,
+            contract_flags: &self.code_cache,
             receipt,
             entry_point,
             transfer_ledger: &transfer_ledger,
@@ -538,12 +610,14 @@ impl<P: Provider> Decoder<P> {
 #[cfg(test)]
 mod tests {
     use alloy::{
-        primitives::{address, U256},
+        primitives::{address, Bytes, U256},
         providers::{mock::Asserter, ProviderBuilder},
     };
 
     use super::*;
-    use crate::decoder::test_utils::{addr, frame, make_transfer_log, receipt, tx_hash};
+    use crate::decoder::test_utils::{
+        addr, frame, make_pool_log, make_transfer_log, receipt, tx_hash,
+    };
 
     /// 1inch v6 — a `[solvers]` entry in the ethereum address book, so a transaction into it
     /// matches on its entry point alone.
@@ -628,5 +702,51 @@ mod tests {
         assert!(trade.token_in.is_none());
         assert!(trade.amount_out.is_none());
         assert!(trade.sandwich.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_intent_fill_prefetches_the_candidate_contract_flag() {
+        // An unregistered entry point (tx.to) classifies as an intent fill once one of the
+        // receipt's logs fingerprints a known solver (ONEINCH here) — the filler-initiated shape
+        // (`UniswapX`, 1inch limit orders, where `tx.to` is a rotating filler). `CowSettlement`
+        // declines (no Trade event), so `IntentNetting` looks for the swapper's net flow.
+        // ONEINCH doubles as the swap counterparty: since it is a known solver, it is excluded
+        // from `intent_candidates`, leaving the swapper as the sole candidate the driver's
+        // prefetch must resolve before decode runs — decode itself makes no RPC call for it.
+        let entry_point = addr(5);
+        let sender = addr(2);
+        let swapper = addr(100);
+        let token_a = addr(10);
+        let token_b = addr(11);
+
+        let asserter = Asserter::new();
+        asserter.push_success(&vec![receipt(
+            tx_hash(1),
+            sender,
+            Some(entry_point),
+            vec![
+                make_pool_log(ONEINCH),
+                make_transfer_log(token_a, swapper, ONEINCH, U256::from(1_000)),
+                make_transfer_log(token_b, ONEINCH, swapper, U256::from(2_000)),
+            ],
+        )]);
+        asserter.push_success(&frame("CALL", sender, entry_point, 0));
+        // The prefetch's one `eth_getCode` call, for the swapper — an EOA.
+        asserter.push_success(&Bytes::default());
+
+        let mut decoder = Decoder::new(
+            ProviderBuilder::default().connect_mocked_client(asserter),
+            Registry::ethereum(),
+        );
+        let trades = decoder
+            .decode_block(21_000_000)
+            .await
+            .expect("decode_block should succeed");
+
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].sender, swapper);
+        assert_eq!(trades[0].decoder, "intent-netting");
+        assert_eq!(trades[0].token_in, Some(token_a));
+        assert_eq!(trades[0].token_out, Some(token_b));
     }
 }

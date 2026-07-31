@@ -30,14 +30,12 @@ pub(crate) mod rabby;
 pub(crate) mod rainbow;
 pub(crate) mod relay;
 
-use alloy::providers::{Provider, RootProvider};
-
 use crate::decoder::decode::TradeDecoder;
 
 /// The decoders tried for a venue, in order (first hit wins). This is the one place a venue is
 /// registered — adding a venue is a `mod` declaration plus one arm here. A name that resolves to
 /// no decoders is rejected by the registry at load time (see `has_decoder`).
-pub(crate) fn decoders_for<P: Provider>(name: &str) -> Vec<Box<dyn TradeDecoder<P>>> {
+pub(crate) fn decoders_for(name: &str) -> Vec<Box<dyn TradeDecoder>> {
     match name {
         "relay" => vec![Box::new(relay::RelayCalldata), Box::new(relay::RelayNetting)],
         "metamask" => vec![Box::new(metamask::MetaMaskNetting)],
@@ -50,9 +48,8 @@ pub(crate) fn decoders_for<P: Provider>(name: &str) -> Vec<Box<dyn TradeDecoder<
 
 /// Whether a venue name resolves to a decoder — derived from `decoders_for` so the two cannot
 /// drift. The registry uses this at load time to reject an address-book venue with no decoder.
-/// The provider type is irrelevant; only whether a decoder exists matters.
 pub(crate) fn has_decoder(name: &str) -> bool {
-    !decoders_for::<RootProvider>(name).is_empty()
+    !decoders_for(name).is_empty()
 }
 
 #[cfg(test)]

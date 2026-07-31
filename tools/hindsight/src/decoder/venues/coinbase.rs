@@ -5,7 +5,6 @@
 //! output token, sent to its fee wallet. Nets the sender's flow and backs that fee out through the
 //! shared `venue_flow` — no venue-specific corrections.
 
-use alloy::providers::Provider;
 use async_trait::async_trait;
 
 use crate::decoder::{
@@ -17,13 +16,13 @@ use crate::decoder::{
 pub(crate) struct CoinbaseNetting;
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for CoinbaseNetting {
+impl TradeDecoder for CoinbaseNetting {
     fn name(&self) -> &'static str {
         "coinbase-netting"
     }
 
     /// Net the sender's flow and back the output-token fee out.
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         let addresses = ctx.venue?;
         venue_flow(
             ctx.transfer_ledger,
@@ -38,12 +37,7 @@ impl<P: Provider> TradeDecoder<P> for CoinbaseNetting {
 mod tests {
     use std::collections::HashMap;
 
-    use alloy::{
-        primitives::{Address, U256},
-        providers::RootProvider,
-        rpc::client::RpcClient,
-        transports::mock::Asserter,
-    };
+    use alloy::primitives::{Address, U256};
 
     use super::*;
     use crate::decoder::{
@@ -68,14 +62,12 @@ mod tests {
         sender: Address,
         entry_point: Address,
     ) -> Option<TraderFlow> {
-        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
-        let mut code_cache = HashMap::new();
+        let contract_flags = HashMap::new();
         let receipt = receipt(tx_hash(1), sender, Some(entry_point), vec![]);
         let root = frame("CALL", sender, entry_point, 0);
         let mut ctx = DecodeContext {
-            provider: &provider,
             registry,
-            code_cache: &mut code_cache,
+            contract_flags: &contract_flags,
             receipt: &receipt,
             entry_point,
             transfer_ledger: ledger,

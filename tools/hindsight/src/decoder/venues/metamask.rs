@@ -7,7 +7,7 @@
 //! `MetaMask`'s own fee, and on dust trades — where the fee dominates — that fabricates extreme
 //! "wins".
 
-use alloy::{providers::Provider, sol, sol_types::SolCall};
+use alloy::{sol, sol_types::SolCall};
 use async_trait::async_trait;
 
 use crate::decoder::{
@@ -26,14 +26,14 @@ sol! {
 pub(crate) struct MetaMaskNetting;
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for MetaMaskNetting {
+impl TradeDecoder for MetaMaskNetting {
     fn name(&self) -> &'static str {
         "metamask-netting"
     }
 
     /// Net the sender's flow, back the venue fee out of it, and attribute the solver from the
     /// router calldata.
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         let addresses = ctx.venue?;
         let mut flow = venue_flow(
             ctx.transfer_ledger,
@@ -62,12 +62,7 @@ fn solver_from_calldata(input: &[u8], metamask: &VenueAddresses) -> Option<Strin
 mod tests {
     use std::collections::HashMap;
 
-    use alloy::{
-        primitives::{Address, Bytes, U256},
-        providers::RootProvider,
-        rpc::client::RpcClient,
-        transports::mock::Asserter,
-    };
+    use alloy::primitives::{Address, Bytes, U256};
 
     use super::*;
     use crate::decoder::{
@@ -105,14 +100,12 @@ mod tests {
         entry_point: Address,
         input: &[u8],
     ) -> Option<TraderFlow> {
-        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
-        let mut code_cache = HashMap::new();
+        let contract_flags = HashMap::new();
         let receipt = receipt(tx_hash(1), sender, Some(entry_point), vec![]);
         let root = frame("CALL", sender, entry_point, 0);
         let mut ctx = DecodeContext {
-            provider: &provider,
             registry,
-            code_cache: &mut code_cache,
+            contract_flags: &contract_flags,
             receipt: &receipt,
             entry_point,
             transfer_ledger: ledger,
