@@ -14,7 +14,9 @@ fn to_biguint(amount: U256) -> BigUint {
 }
 
 /// Basis-point deltas of a Fynd quote against the settled amount (positive = Fynd better).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+/// `Deltas::default()` (both `None`) when there is nothing settled to compare against — an
+/// unsolved outcome, or a reverted trade.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub(crate) struct Deltas {
     /// `fynd amount_out` vs the settled amount, both gross of gas — always like-for-like, and
     /// the basis of the headline `Verdict`.
@@ -24,10 +26,6 @@ pub(crate) struct Deltas {
     /// (the settled side stays gross while Fynd's is charged) — most Relay settlements are
     /// operator-submitted so their trader gas is legitimately absent. Not used for verdicts.
     pub net_bps: Option<f64>,
-}
-
-impl Deltas {
-    const NONE: Self = Self { raw_bps: None, net_bps: None };
 }
 
 /// Slippage of the top-of-block route re-executed at back-of-block: how the route's output moved
@@ -115,7 +113,7 @@ pub(crate) fn compare(
     settled_net_gas: U256,
 ) -> Deltas {
     let Outcome::Solved(solved) = outcome else {
-        return Deltas::NONE;
+        return Deltas::default();
     };
     Deltas {
         raw_bps: raw_bps_diff(&to_biguint(solved.amount_out), &to_biguint(settled_amount_out)),
@@ -139,6 +137,29 @@ pub(crate) fn verdict(outcome: &Outcome, deltas: &Deltas) -> Verdict {
         Some(_) => Verdict::Loss,
         None => Verdict::Unsolvable,
     }
+}
+
+/// Judge a solved outcome against a floor (`min_amount_out`), independent of whether anything
+/// settled — the same judgment a reverted trade needs against its on-chain floor, and a settled
+/// trade can use too when a floor happens to be known (it cleared the floor by construction, but
+/// the margin is still informative). `(None, None)` when the state was not solved or no floor is
+/// known.
+///
+/// Returns `(fillable, margin_bps)`: `fillable` is whether the quoted output would have cleared
+/// the floor; `margin_bps` is the signed bps of `(quote - floor) / floor`, positive meaning the
+/// quote cleared it with room to spare. `margin_bps` is `None` when the floor is zero (no
+/// denominator to divide by) even though `fillable` still answers in that case, since any output
+/// clears a zero floor.
+pub(crate) fn floor_judgment(
+    outcome: &Outcome,
+    min_amount_out: Option<U256>,
+) -> (Option<bool>, Option<f64>) {
+    let (Outcome::Solved(solved), Some(floor)) = (outcome, min_amount_out) else {
+        return (None, None);
+    };
+    let fillable = solved.amount_out >= floor;
+    let margin_bps = raw_bps_diff(&to_biguint(solved.amount_out), &to_biguint(floor));
+    (Some(fillable), margin_bps)
 }
 
 #[cfg(test)]
@@ -191,7 +212,7 @@ mod tests {
     fn test_compare_unsolvable() {
         let (settled, net) = gross(10_000);
         let d = compare(&Outcome::Unsolvable("no route".into()), settled, net);
-        assert_eq!(d, Deltas::NONE);
+        assert_eq!(d, Deltas::default());
     }
 
     #[test]
@@ -285,5 +306,52 @@ mod tests {
     #[test]
     fn slippage_none_for_zero_quoted_output() {
         assert_eq!(slippage(&solved(0, 0), &solved(10, 10)), None);
+    }
+
+    #[test]
+    fn test_floor_judgment_exactly_at_floor() {
+        let (fillable, margin_bps) =
+            floor_judgment(&solved(10_000, 9_900), Some(U256::from(10_000u64)));
+        assert_eq!(fillable, Some(true));
+        assert_eq!(margin_bps, Some(0.0));
+    }
+
+    #[test]
+    fn test_floor_judgment_above_and_below_floor() {
+        let (fillable, margin_bps) =
+            floor_judgment(&solved(10_100, 10_000), Some(U256::from(10_000u64)));
+        assert_eq!(fillable, Some(true));
+        assert!(margin_bps.unwrap() > 0.0);
+
+        let (fillable, margin_bps) =
+            floor_judgment(&solved(9_900, 9_800), Some(U256::from(10_000u64)));
+        assert_eq!(fillable, Some(false));
+        assert!(margin_bps.unwrap() < 0.0);
+    }
+
+    #[test]
+    fn test_floor_judgment_unsolved() {
+        let (fillable, margin_bps) =
+            floor_judgment(&Outcome::Unsolvable("no route".into()), Some(U256::from(10_000u64)));
+        assert_eq!(fillable, None);
+        assert_eq!(margin_bps, None);
+    }
+
+    #[test]
+    fn test_floor_judgment_no_floor_known() {
+        // A solved outcome with no floor to judge against (e.g. a settled trade whose calldata
+        // declared no min_amount_out) — neither field applies.
+        let (fillable, margin_bps) = floor_judgment(&solved(10_000, 9_900), None);
+        assert_eq!(fillable, None);
+        assert_eq!(margin_bps, None);
+    }
+
+    #[test]
+    fn test_floor_judgment_zero_floor() {
+        // Any non-negative quote clears a zero floor: fillable is Some(true), but there is no
+        // denominator to divide by for the margin.
+        let (fillable, margin_bps) = floor_judgment(&solved(10_000, 9_900), Some(U256::ZERO));
+        assert_eq!(fillable, Some(true));
+        assert_eq!(margin_bps, None);
     }
 }

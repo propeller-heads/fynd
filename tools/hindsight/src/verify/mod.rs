@@ -17,7 +17,7 @@ use anyhow::Context;
 use tracing::warn;
 
 use crate::{
-    decoder::{DecodedTrade, Decoder},
+    decoder::{DecodedTrade, Decoder, TradeStatus},
     verify::allium::{AlliumClient, AlliumRow},
 };
 
@@ -109,7 +109,12 @@ pub(crate) async fn run<P: Provider>(
     let mut decimals = HashMap::new();
     for &block in blocks {
         let ours = match decoder.decode_block(block).await {
-            Ok(ours) => ours,
+            // Allium's `aggregator_trades` only records swaps that settled; a reverted trade has
+            // no counterpart there to diff against.
+            Ok(decoded) => decoded
+                .into_iter()
+                .filter(|trade| trade.status == TradeStatus::Settled)
+                .collect::<Vec<_>>(),
             Err(error) => {
                 warn!(block, %error, "failed to decode block; skipping");
                 continue;
@@ -188,6 +193,27 @@ async fn compare_block<P: Provider>(
     }
 }
 
+/// The settled swap terms a comparison needs, extracted from a `DecodedTrade` up front so the
+/// rest of this module can work with plain values rather than re-checking `Option`s everywhere.
+/// `run` only ever passes settled trades into `compare_block` (Allium has nothing to diff a
+/// revert against), so by the settled/reverted invariant these are always present — but the type
+/// system does not know that from a filter, so a missing term is still handled, not unwrapped.
+struct SettledTerms {
+    token_in: Address,
+    token_out: Address,
+    amount_in: U256,
+    amount_out: U256,
+}
+
+fn settled_terms(trade: &DecodedTrade) -> Option<SettledTerms> {
+    Some(SettledTerms {
+        token_in: trade.token_in?,
+        token_out: trade.token_out?,
+        amount_in: trade.amount_in?,
+        amount_out: trade.amount_out?,
+    })
+}
+
 async fn compare_trade<P: Provider>(
     provider: &P,
     ours: &DecodedTrade,
@@ -195,10 +221,20 @@ async fn compare_trade<P: Provider>(
     tolerance_bps: f64,
     decimals: &mut HashMap<Address, u8>,
 ) -> TxComparison {
+    let Some(terms) = settled_terms(ours) else {
+        return TxComparison {
+            tx_hash: ours.tx_hash,
+            status: Status::OursOnly,
+            detail: "settled trade has no known terms (should have been filtered out earlier)"
+                .to_string(),
+        };
+    };
+
     let mut detail = Vec::new();
-    let token_ok = tokens_agree(ours, rows, &mut detail);
+    let token_ok = tokens_agree(&terms, rows, &mut detail);
     let solver_ok = solver_agrees(ours, rows, &mut detail);
-    let amount_ok = amounts_agree(provider, ours, rows, tolerance_bps, decimals, &mut detail).await;
+    let amount_ok =
+        amounts_agree(provider, &terms, rows, tolerance_bps, decimals, &mut detail).await;
 
     let status = if !token_ok {
         Status::TokenMismatch
@@ -215,8 +251,8 @@ async fn compare_trade<P: Provider>(
 
 /// Allium splits a multi-leg swap into per-leg rows, so check membership in sets rather than
 /// exact one-to-one matching: our netted `token_in` must appear among the sold tokens and our
-/// `token_out` among the bought tokens across all rows for this tx.
-fn tokens_agree(ours: &DecodedTrade, rows: &[&AlliumRow], detail: &mut Vec<String>) -> bool {
+/// `token_out` among the bought tokens across all rows for a tx.
+fn tokens_agree(terms: &SettledTerms, rows: &[&AlliumRow], detail: &mut Vec<String>) -> bool {
     let sold: HashSet<Address> = rows
         .iter()
         .filter_map(|r| {
@@ -234,13 +270,13 @@ fn tokens_agree(ours: &DecodedTrade, rows: &[&AlliumRow], detail: &mut Vec<Strin
         })
         .collect();
 
-    let in_ok = sold.contains(&ours.token_in);
-    let out_ok = bought.contains(&ours.token_out);
+    let in_ok = sold.contains(&terms.token_in);
+    let out_ok = bought.contains(&terms.token_out);
     if !in_ok {
-        detail.push(format!("token_in {} not among Allium sold tokens", ours.token_in));
+        detail.push(format!("token_in {} not among Allium sold tokens", terms.token_in));
     }
     if !out_ok {
-        detail.push(format!("token_out {} not among Allium bought tokens", ours.token_out));
+        detail.push(format!("token_out {} not among Allium bought tokens", terms.token_out));
     }
     in_ok && out_ok
 }
@@ -263,7 +299,7 @@ fn solver_agrees(ours: &DecodedTrade, rows: &[&AlliumRow], detail: &mut Vec<Stri
 
 async fn amounts_agree<P: Provider>(
     provider: &P,
-    ours: &DecodedTrade,
+    terms: &SettledTerms,
     rows: &[&AlliumRow],
     tolerance_bps: f64,
     decimals: &mut HashMap<Address, u8>,
@@ -281,11 +317,15 @@ async fn amounts_agree<P: Provider>(
         return true;
     };
 
-    let in_leg =
-        AmountLeg { token: ours.token_in, ours: ours.amount_in, theirs: sold, field: "amount_in" };
+    let in_leg = AmountLeg {
+        token: terms.token_in,
+        ours: terms.amount_in,
+        theirs: sold,
+        field: "amount_in",
+    };
     let out_leg = AmountLeg {
-        token: ours.token_out,
-        ours: ours.amount_out,
+        token: terms.token_out,
+        ours: terms.amount_out,
         theirs: bought,
         field: "amount_out",
     };
@@ -418,15 +458,16 @@ mod tests {
             tx_hash: TxHash::ZERO,
             block_number: 1,
             tx_index: 0,
+            status: crate::decoder::TradeStatus::Settled,
             venue: "relay".to_string(),
             solver: solver.to_string(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
             sender: addr(1),
-            token_in,
-            token_out,
-            amount_in: U256::from(1000),
-            amount_out: U256::from(2000),
+            token_in: Some(token_in),
+            token_out: Some(token_out),
+            amount_in: Some(U256::from(1000)),
+            amount_out: Some(U256::from(2000)),
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
@@ -451,19 +492,31 @@ mod tests {
     #[test]
     fn test_token_match_both_present() {
         let ours = trade(addr(10), addr(11), "1inch");
+        let terms = settled_terms(&ours).unwrap();
         let allium = row(addr(10), addr(11), "1inch");
         let mut detail = Vec::new();
-        assert!(tokens_agree(&ours, &[&allium], &mut detail));
+        assert!(tokens_agree(&terms, &[&allium], &mut detail));
         assert!(detail.is_empty());
     }
 
     #[test]
     fn test_token_match_mismatched_tokens() {
         let ours = trade(addr(10), addr(99), "1inch");
+        let terms = settled_terms(&ours).unwrap();
         let allium = row(addr(10), addr(11), "1inch");
         let mut detail = Vec::new();
-        assert!(!tokens_agree(&ours, &[&allium], &mut detail));
+        assert!(!tokens_agree(&terms, &[&allium], &mut detail));
         assert_eq!(detail.len(), 1);
+    }
+
+    #[test]
+    fn test_settled_terms_is_none_for_a_reverted_trade() {
+        let mut ours = trade(addr(10), addr(11), "1inch");
+        ours.status = crate::decoder::TradeStatus::Reverted {
+            cause: crate::decoder::RevertCause::Other("execution reverted".to_string()),
+        };
+        ours.token_in = None;
+        assert!(settled_terms(&ours).is_none());
     }
 
     #[test]

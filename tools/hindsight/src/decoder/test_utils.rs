@@ -120,3 +120,35 @@ pub(crate) fn receipt(
         contract_address: None,
     })
 }
+
+/// A synthetic reverted (status-0) receipt: no logs, since a reverted transaction emits none.
+pub(crate) fn reverted_receipt(
+    hash: TxHash,
+    from: Address,
+    to: Option<Address>,
+) -> AnyTransactionReceipt {
+    WithOtherFields::new(TransactionReceipt {
+        inner: AnyReceiptEnvelope {
+            inner: ReceiptWithBloom {
+                receipt: Receipt {
+                    status: Eip658Value::Eip658(false),
+                    cumulative_gas_used: 0,
+                    logs: vec![],
+                },
+                logs_bloom: Bloom::default(),
+            },
+            r#type: 0,
+        },
+        transaction_hash: hash,
+        transaction_index: None,
+        block_hash: None,
+        block_number: None,
+        gas_used: 0,
+        effective_gas_price: 0,
+        blob_gas_used: None,
+        blob_gas_price: None,
+        from,
+        to,
+        contract_address: None,
+    })
+}

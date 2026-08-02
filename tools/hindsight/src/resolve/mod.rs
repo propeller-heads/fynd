@@ -22,7 +22,7 @@ use serde::Serialize;
 use tycho_simulation::tycho_common::models::Address as CoreAddress;
 
 use crate::{
-    decoder::{AttributionSource, DecodedTrade, SandwichEvidence},
+    decoder::{AttributionSource, DecodedTrade, SandwichEvidence, TradeStatus},
     usd::Prices,
 };
 
@@ -207,39 +207,70 @@ pub(crate) enum Outcome {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct StateResult {
     pub outcome: Outcome,
+    /// Fynd vs the settled output. `Deltas::default()` (all `None`) when nothing settled to
+    /// compare against — a reverted trade.
     pub deltas: Deltas,
     pub verdict: Verdict,
+    /// Whether the quote cleared the trade's on-chain floor (`min_amount_out`), when one is
+    /// known. Computed for both settled and reverted trades — a settled trade cleared its floor
+    /// by construction, but the margin is still informative. `None` when the state was not
+    /// solved or no floor is known.
+    pub fillable: Option<bool>,
+    pub margin_bps: Option<f64>,
 }
 
 impl StateResult {
-    fn new(outcome: Outcome, settled_amount_out: U256, settled_net_gas: U256) -> Self {
-        let outcome = compare::served(outcome, settled_amount_out);
-        let deltas = compare::compare(&outcome, settled_amount_out, settled_net_gas);
+    /// `settled` is `Some((gross, net_gas))` for a settled trade, `None` for a reverted one —
+    /// there is nothing settled to compare gross output against, so `deltas`/`verdict` fall back
+    /// to their unsolved-comparison values (`Deltas::default()`, `Verdict::Unsolvable`) even when
+    /// `outcome` itself solved; `fillable`/`margin_bps` are unaffected, since they judge the
+    /// outcome against `min_amount_out`, not against a settled amount.
+    fn new(outcome: Outcome, settled: Option<(U256, U256)>, min_amount_out: Option<U256>) -> Self {
+        let outcome = match settled {
+            Some((gross, _)) => compare::served(outcome, gross),
+            None => outcome,
+        };
+        let deltas = match settled {
+            Some((gross, net)) => compare::compare(&outcome, gross, net),
+            None => Deltas::default(),
+        };
         let verdict = compare::verdict(&outcome, &deltas);
-        Self { outcome, deltas, verdict }
+        let (fillable, margin_bps) = compare::floor_judgment(&outcome, min_amount_out);
+        Self { outcome, deltas, verdict, fillable, margin_bps }
     }
 }
 
-/// A trade re-solved at both block states, presented as a range.
+/// A trade re-solved at both block states, presented as a range — settled or reverted, told
+/// apart by `status`. A reverted trade's settled-only fields (`settled_amount_out` and friends)
+/// are simply absent; everything else about the record has the same shape.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RangeComparison {
     pub tx_hash: TxHash,
     pub block_number: u64,
     pub tx_index: u64,
+    #[serde(flatten)]
+    pub status: TradeStatus,
     pub venue: String,
     pub solver: String,
     /// The evidence tier the solver label came from (from the decoder).
     pub solver_source: AttributionSource,
-    /// Which decoder recovered the settled trade.
+    /// Which decoder recovered the trade.
     pub decoder: &'static str,
-    pub token_in: Address,
-    pub token_out: Address,
-    pub amount_in: U256,
-    pub settled_amount_out: U256,
+    /// The trader, from the decoder: the netted flow's tracked party for a settled trade, or the
+    /// transaction sender for a reverted one (there is no netted flow to draw a different party
+    /// from). Lets a venue-filler fill (e.g. Relay's rotating filler) be segmented by its actual
+    /// trader without an on-chain lookup.
+    pub sender: Address,
+    /// `None` only for a reverted trade whose solver frame's calldata did not parse.
+    pub token_in: Option<Address>,
+    pub token_out: Option<Address>,
+    pub amount_in: Option<U256>,
+    /// `None` for a reverted trade: nothing was delivered.
+    pub settled_amount_out: Option<U256>,
     /// Settled output after the gas the trader paid for the route, in `token_out` units. Equals
     /// `settled_amount_out` when that gas is unknown, was paid by someone else, or the output
-    /// token is unpriced.
-    pub settled_amount_out_net_gas: U256,
+    /// token is unpriced. `None` for a reverted trade.
+    pub settled_amount_out_net_gas: Option<U256>,
     /// Wei cost of the settled route's gas, when the trader paid it (from the decoder).
     pub settled_gas: Option<U256>,
     /// The on-chain enforced floor declared in the settling solver frame's own calldata (from
@@ -251,17 +282,18 @@ pub(crate) struct RangeComparison {
     /// Unix timestamp of `declared_quote`, when the calldata carries one.
     pub quote_timestamp: Option<u64>,
     /// Evidence that a front-run and a back-run bracketed this trade (from the decoder). `None`
-    /// when no bracket pair was found.
+    /// when no bracket pair was found, or the trade reverted.
     pub sandwich: Option<SandwichEvidence>,
-    /// Optimistic: solved at state N-1, before the block's swaps moved the pools.
-    pub top: StateResult,
+    /// Optimistic: solved at state N-1, before the block's swaps moved the pools. `None` when
+    /// the trade's terms were unknown — there was nothing to solve.
+    pub top: Option<StateResult>,
     /// Pessimistic: solved fresh at state N, after the block's swaps moved the pools — what
-    /// routing at the block's end state would deliver.
-    pub back: StateResult,
-    /// Headline verdict — top-of-block (the optimistic default).
-    pub verdict: Verdict,
+    /// routing at the block's end state would deliver. `None` alongside `top`.
+    pub back: Option<StateResult>,
+    /// Headline verdict — top-of-block (the optimistic default). `None` alongside `top`.
+    pub verdict: Option<Verdict>,
     /// Slippage of the top route between quote time (N-1) and re-execution (N). `None` when the
-    /// top was unsolved or the re-execution failed.
+    /// top was unsolved, the re-execution failed, or the trade's terms were unknown.
     pub slippage: Option<Slippage>,
 }
 
@@ -280,14 +312,16 @@ pub(crate) trait SteppingSolver {
     async fn reexecute(&self, top: &SolvedAmount) -> Outcome;
 }
 
-/// Build a `RangeComparison` from a trade's three outcomes: the top-of-block solve, the fresh
-/// back-of-block solve, and the top route's re-execution at back-of-block (which feeds only the
-/// `slippage` field).
+/// Build a `RangeComparison` from a trade and, when its terms were known, the three outcomes
+/// solving it produced: the top-of-block solve, the fresh back-of-block solve, and the top
+/// route's re-execution at back-of-block (which feeds only the `slippage` field). `None` when the
+/// trade's terms were unknown — there was nothing to solve, so `top`/`back`/`verdict`/`slippage`
+/// on the returned comparison are all `None` too, but the trade is still recorded.
 ///
 /// When the decoder isolated the gas the trader paid for the settled route, its cost is converted
 /// into `token_out` units at the `prices` snapshot (top-of-block — a fine approximation for a gas
 /// deduction) and subtracted from the settled output, so both sides of the net comparison carry
-/// their own gas.
+/// their own gas. Reverted trades have no settled output to deduct from — `settled` is `None`.
 ///
 /// When the decoder flagged the trade as sandwiched, each *solved* state's verdict becomes
 /// `Verdict::Sandwiched`: its win or loss measures the MEV that moved the settled output, not
@@ -298,40 +332,55 @@ pub(crate) trait SteppingSolver {
 pub(crate) fn build_range(
     trade: &DecodedTrade,
     prices: &Prices,
-    top: Outcome,
-    back: Outcome,
-    reexecuted: &Outcome,
+    solved: Option<(Outcome, Outcome, Outcome)>,
 ) -> RangeComparison {
-    let settled_net_gas = trade
-        .settled_gas
-        .and_then(|gas| prices.gas_in_token(gas, trade.token_out))
-        .map_or(trade.amount_out, |gas_out| trade.amount_out.saturating_sub(gas_out));
-    // Computed from the raw outcomes: the coverage-miss reclassification below discards the
-    // solved amounts the slippage is measured from.
-    let slippage = compare::slippage(&top, reexecuted);
-    let mut top = StateResult::new(top, trade.amount_out, settled_net_gas);
-    let mut back = StateResult::new(back, trade.amount_out, settled_net_gas);
-    if trade.sandwich.is_some() {
-        for state in [&mut top, &mut back] {
-            if let Outcome::Solved(_) = state.outcome {
-                state.verdict = Verdict::Sandwiched;
+    let settled = trade.amount_out.map(|gross| {
+        let net_gas = trade
+            .settled_gas
+            .and_then(|gas| {
+                trade
+                    .token_out
+                    .and_then(|token| prices.gas_in_token(gas, token))
+            })
+            .map_or(gross, |gas_out| gross.saturating_sub(gas_out));
+        (gross, net_gas)
+    });
+
+    let (top, back, verdict, slippage) = match solved {
+        Some((top_outcome, back_outcome, reexecuted)) => {
+            // Computed from the raw outcomes: the coverage-miss reclassification below discards
+            // the solved amounts the slippage is measured from.
+            let slippage = compare::slippage(&top_outcome, &reexecuted);
+            let mut top = StateResult::new(top_outcome, settled, trade.min_amount_out);
+            let mut back = StateResult::new(back_outcome, settled, trade.min_amount_out);
+            if trade.sandwich.is_some() {
+                for state in [&mut top, &mut back] {
+                    if let Outcome::Solved(_) = state.outcome {
+                        state.verdict = Verdict::Sandwiched;
+                    }
+                }
             }
+            let verdict = top.verdict;
+            (Some(top), Some(back), Some(verdict), slippage)
         }
-    }
-    let verdict = top.verdict;
+        None => (None, None, None, None),
+    };
+
     RangeComparison {
         tx_hash: trade.tx_hash,
         block_number: trade.block_number,
         tx_index: trade.tx_index,
+        status: trade.status.clone(),
         venue: trade.venue.clone(),
         solver: trade.solver.clone(),
         solver_source: trade.solver_source,
         decoder: trade.decoder,
+        sender: trade.sender,
         token_in: trade.token_in,
         token_out: trade.token_out,
         amount_in: trade.amount_in,
-        settled_amount_out: trade.amount_out,
-        settled_amount_out_net_gas: settled_net_gas,
+        settled_amount_out: settled.map(|(gross, _)| gross),
+        settled_amount_out_net_gas: settled.map(|(_, net)| net),
         settled_gas: trade.settled_gas,
         min_amount_out: trade.min_amount_out,
         declared_quote: trade.declared_quote,
@@ -345,10 +394,15 @@ pub(crate) fn build_range(
 }
 
 /// Re-solve every trade in a held block at top-of-block, advance to back-of-block, then measure
-/// each trade twice at the new state: re-execute its top route against the pools as the block
-/// left them (for the slippage), and solve it fresh (for the `back` comparison). Solving all
-/// trades at one state before advancing keeps each state's reads consistent and steps the chain
-/// only once per block.
+/// each again at the new state: its top route is re-executed against the pools as the block left
+/// them (for the slippage) and it is solved fresh (for the `back` comparison). Solving everything
+/// at one state before advancing keeps each state's reads consistent and steps the chain only
+/// once per block. Settled and reverted trades go through the same wave — a reverted trade whose
+/// solver calldata parsed into a `SwapIntent` is solved exactly like a settled one, judged against
+/// its `min_amount_out` floor instead of a settled amount.
+///
+/// A trade with unknown terms (a reverted trade whose solver calldata did not parse) is recorded
+/// but not solved — there is nothing to feed the solver.
 pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
     solver: &S,
     trades: &[DecodedTrade],
@@ -356,28 +410,41 @@ pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
 ) -> anyhow::Result<Vec<RangeComparison>> {
     let mut tops = Vec::with_capacity(trades.len());
     for trade in trades {
-        tops.push(
-            solver
-                .solve(trade.token_in, trade.token_out, trade.amount_in)
-                .await,
-        );
+        let top = match trade.terms() {
+            Some((token_in, token_out, amount_in)) => Some(
+                solver
+                    .solve(token_in, token_out, amount_in)
+                    .await,
+            ),
+            None => None,
+        };
+        tops.push(top);
     }
 
     solver.advance().await?;
 
     let mut ranges = Vec::with_capacity(trades.len());
     for (trade, top) in trades.iter().zip(tops) {
+        let Some(top) = top else {
+            ranges.push(build_range(trade, prices, None));
+            continue;
+        };
         let reexecuted = match &top {
             Outcome::Solved(solved) => solver.reexecute(solved).await,
             Outcome::Partial(_) | Outcome::Unsolvable(_) => {
                 Outcome::Unsolvable("no top-of-block route to re-execute".to_string())
             }
         };
+        // `top` was solved from `trade.terms()`, so the terms are known here too.
+        let (token_in, token_out, amount_in) = trade
+            .terms()
+            .expect("a solved top implies known terms");
         let back = solver
-            .solve(trade.token_in, trade.token_out, trade.amount_in)
+            .solve(token_in, token_out, amount_in)
             .await;
-        ranges.push(build_range(trade, prices, top, back, &reexecuted));
+        ranges.push(build_range(trade, prices, Some((top, back, reexecuted))));
     }
+
     Ok(ranges)
 }
 
@@ -397,15 +464,71 @@ mod tests {
             tx_hash: TxHash::default(),
             block_number: 21_000_000,
             tx_index: 0,
+            status: TradeStatus::Settled,
             venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
             sender: Address::ZERO,
-            token_in: Address::repeat_byte(0x11),
-            token_out: Address::repeat_byte(0x22),
-            amount_in: U256::from(1_000u64),
-            amount_out: U256::from(settled),
+            token_in: Some(Address::repeat_byte(0x11)),
+            token_out: Some(Address::repeat_byte(0x22)),
+            amount_in: Some(U256::from(1_000u64)),
+            amount_out: Some(U256::from(settled)),
+            venue_fee_in: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
+            sandwich: None,
+        }
+    }
+
+    /// A reverted trade whose solver calldata parsed into a `SwapIntent` — carries terms and a
+    /// floor (`min_amount_out`) but no settled output.
+    fn reverted_trade(cause: crate::decoder::RevertCause, min_amount_out: u64) -> DecodedTrade {
+        DecodedTrade {
+            tx_hash: TxHash::repeat_byte(0x02),
+            block_number: 21_000_000,
+            tx_index: 1,
+            status: TradeStatus::Reverted { cause },
+            venue: "relay".into(),
+            solver: "fly".into(),
+            solver_source: AttributionSource::TraceMatch,
+            decoder: "reverted",
+            sender: Address::ZERO,
+            token_in: Some(Address::repeat_byte(0x11)),
+            token_out: Some(Address::repeat_byte(0x22)),
+            amount_in: Some(U256::from(1_000u64)),
+            amount_out: None,
+            venue_fee_in: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            min_amount_out: Some(U256::from(min_amount_out)),
+            declared_quote: None,
+            quote_timestamp: None,
+            sandwich: None,
+        }
+    }
+
+    /// A reverted trade whose solver calldata did not parse — no terms, nothing to solve.
+    fn reverted_trade_without_terms() -> DecodedTrade {
+        DecodedTrade {
+            tx_hash: TxHash::repeat_byte(0x03),
+            block_number: 21_000_000,
+            tx_index: 2,
+            status: TradeStatus::Reverted {
+                cause: crate::decoder::RevertCause::Other("unknown revert".to_string()),
+            },
+            venue: "relay".into(),
+            solver: "relay".into(),
+            solver_source: AttributionSource::Fallback,
+            decoder: "reverted",
+            sender: Address::ZERO,
+            token_in: None,
+            token_out: None,
+            amount_in: None,
+            amount_out: None,
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
@@ -470,12 +593,12 @@ mod tests {
         let range = build_range(
             &trade(10_000),
             &empty_prices(),
-            solved(10_200, 10_100),
-            solved(10_010, 9_990),
-            &solved(10_010, 9_990),
+            Some((solved(10_200, 10_100), solved(10_010, 9_990), solved(10_010, 9_990))),
         );
-        assert_eq!(range.verdict, Verdict::Win); // top is the headline
-        assert!(range.top.deltas.raw_bps.unwrap() > range.back.deltas.raw_bps.unwrap());
+        assert_eq!(range.verdict, Some(Verdict::Win)); // top is the headline
+        let top = range.top.unwrap();
+        let back = range.back.unwrap();
+        assert!(top.deltas.raw_bps.unwrap() > back.deltas.raw_bps.unwrap());
     }
 
     #[test]
@@ -484,13 +607,12 @@ mod tests {
         let range = build_range(
             &trade(10_000),
             &empty_prices(),
-            solved(1_000, 990),
-            solved(1_000, 990),
-            &solved(1_000, 990),
+            Some((solved(1_000, 990), solved(1_000, 990), solved(1_000, 990))),
         );
-        assert_eq!(range.verdict, Verdict::CoverageMiss);
-        assert_eq!(range.top.deltas, Deltas { raw_bps: None, net_bps: None });
-        assert!(matches!(range.top.outcome, Outcome::Partial(_)));
+        assert_eq!(range.verdict, Some(Verdict::CoverageMiss));
+        let top = range.top.unwrap();
+        assert_eq!(top.deltas, Deltas { raw_bps: None, net_bps: None });
+        assert!(matches!(top.outcome, Outcome::Partial(_)));
     }
 
     #[test]
@@ -505,17 +627,17 @@ mod tests {
         let range = build_range(
             &sandwiched,
             &empty_prices(),
-            solved(10_200, 10_100),
-            solved(9_800, 9_700),
-            &solved(9_800, 9_700),
+            Some((solved(10_200, 10_100), solved(9_800, 9_700), solved(9_800, 9_700))),
         );
 
-        assert_eq!(range.verdict, Verdict::Sandwiched);
-        assert_eq!(range.top.verdict, Verdict::Sandwiched);
-        assert_eq!(range.back.verdict, Verdict::Sandwiched);
+        assert_eq!(range.verdict, Some(Verdict::Sandwiched));
+        let top = range.top.unwrap();
+        let back = range.back.unwrap();
+        assert_eq!(top.verdict, Verdict::Sandwiched);
+        assert_eq!(back.verdict, Verdict::Sandwiched);
         // Deltas are unaffected by the override: still computed for offline analysis.
-        assert!(range.top.deltas.raw_bps.unwrap() > 0.0);
-        assert!(range.back.deltas.raw_bps.unwrap() < 0.0);
+        assert!(top.deltas.raw_bps.unwrap() > 0.0);
+        assert!(back.deltas.raw_bps.unwrap() < 0.0);
     }
 
     #[test]
@@ -532,14 +654,16 @@ mod tests {
         let range = build_range(
             &sandwiched,
             &empty_prices(),
-            solved(10_200, 10_100),
-            Outcome::Unsolvable("missing token in Tycho".into()),
-            &Outcome::Unsolvable("re-execution failed".into()),
+            Some((
+                solved(10_200, 10_100),
+                Outcome::Unsolvable("missing token in Tycho".into()),
+                Outcome::Unsolvable("re-execution failed".into()),
+            )),
         );
 
-        assert_eq!(range.top.verdict, Verdict::Sandwiched);
-        assert_eq!(range.back.verdict, Verdict::Unsolvable);
-        assert_eq!(range.verdict, Verdict::Sandwiched); // headline follows top
+        assert_eq!(range.top.unwrap().verdict, Verdict::Sandwiched);
+        assert_eq!(range.back.unwrap().verdict, Verdict::Unsolvable);
+        assert_eq!(range.verdict, Some(Verdict::Sandwiched)); // headline follows top
     }
 
     #[test]
@@ -549,18 +673,16 @@ mod tests {
         let mut with_gas = trade(10_000);
         with_gas.settled_gas = Some(U256::from(100u64));
         let mut prices = empty_prices();
-        prices.insert(with_gas.token_out, 2.0);
+        prices.insert(with_gas.token_out.unwrap(), 2.0);
 
         let range = build_range(
             &with_gas,
             &prices,
-            solved(10_050, 9_990),
-            solved(10_050, 9_990),
-            &solved(10_050, 9_990),
+            Some((solved(10_050, 9_990), solved(10_050, 9_990), solved(10_050, 9_990))),
         );
-        assert_eq!(range.settled_amount_out_net_gas, U256::from(9_800u64));
-        assert_eq!(range.settled_amount_out, U256::from(10_000u64));
-        assert_eq!(range.verdict, Verdict::Win);
+        assert_eq!(range.settled_amount_out_net_gas, Some(U256::from(9_800u64)));
+        assert_eq!(range.settled_amount_out, Some(U256::from(10_000u64)));
+        assert_eq!(range.verdict, Some(Verdict::Win));
     }
 
     #[test]
@@ -573,12 +695,42 @@ mod tests {
         let range = build_range(
             &with_gas,
             &empty_prices(),
-            solved(10_050, 9_990),
-            solved(10_050, 9_990),
-            &solved(10_050, 9_990),
+            Some((solved(10_050, 9_990), solved(10_050, 9_990), solved(10_050, 9_990))),
         );
-        assert_eq!(range.settled_amount_out_net_gas, U256::from(10_000u64));
-        assert_eq!(range.verdict, Verdict::Win);
+        assert_eq!(range.settled_amount_out_net_gas, Some(U256::from(10_000u64)));
+        assert_eq!(range.verdict, Some(Verdict::Win));
+    }
+
+    #[test]
+    fn test_build_range_unknown_terms_records_without_solving() {
+        // A reverted trade whose solver calldata did not parse: nothing to solve, but it is
+        // still recorded, tagged by its cause.
+        let range = build_range(&reverted_trade_without_terms(), &empty_prices(), None);
+        assert!(matches!(range.status, TradeStatus::Reverted { .. }));
+        assert!(range.token_in.is_none());
+        assert!(range.top.is_none());
+        assert!(range.back.is_none());
+        assert_eq!(range.verdict, None);
+        assert_eq!(range.slippage, None);
+    }
+
+    #[test]
+    fn test_build_range_reverted_trade_judged_against_floor() {
+        // A reverted trade with known terms and a floor: no settled amount to compare against
+        // (deltas/verdict stay at their unsolved defaults), but fillable/margin_bps still judge
+        // the quote against min_amount_out.
+        let range = build_range(
+            &reverted_trade(crate::decoder::RevertCause::SlippageFloor, 10_000),
+            &empty_prices(),
+            Some((solved(9_800, 9_700), solved(10_100, 10_000), solved(10_100, 10_000))),
+        );
+        assert!(range.settled_amount_out.is_none());
+        let top = range.top.unwrap();
+        let back = range.back.unwrap();
+        assert_eq!(top.deltas, Deltas { raw_bps: None, net_bps: None });
+        assert_eq!(top.fillable, Some(false));
+        assert_eq!(back.fillable, Some(true));
+        assert!(back.margin_bps.unwrap() > 0.0);
     }
 
     #[tokio::test]
@@ -598,9 +750,11 @@ mod tests {
 
         assert_eq!(ranges.len(), 2);
         for range in &ranges {
-            assert_eq!(range.top.verdict, Verdict::Win);
-            assert_eq!(range.back.verdict, Verdict::Loss);
-            assert!(range.top.deltas.raw_bps.unwrap() > range.back.deltas.raw_bps.unwrap());
+            let top = range.top.as_ref().unwrap();
+            let back = range.back.as_ref().unwrap();
+            assert_eq!(top.verdict, Verdict::Win);
+            assert_eq!(back.verdict, Verdict::Loss);
+            assert!(top.deltas.raw_bps.unwrap() > back.deltas.raw_bps.unwrap());
             let slippage = range.slippage.unwrap();
             assert!(slippage.bps < 0.0, "re-execution below quote must be negative slippage");
             assert_eq!(slippage.quoted_amount_out, U256::from(10_200u64));
@@ -623,9 +777,46 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ranges[0].top.verdict, Verdict::Unsolvable);
-        assert_eq!(ranges[0].back.verdict, Verdict::Win);
+        assert_eq!(ranges[0].top.as_ref().unwrap().verdict, Verdict::Unsolvable);
+        assert_eq!(ranges[0].back.as_ref().unwrap().verdict, Verdict::Win);
         assert_eq!(ranges[0].slippage, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_block_range_solves_reverts_and_skips_unknown_terms() {
+        // The floor is 10_000: unfillable at top, fillable at back — the shape a sequencer that
+        // fills against fresher state would avoid. The intent-less revert has no terms, so it is
+        // recorded but never reaches the solver.
+        let solver = MockStepping {
+            advanced: std::sync::atomic::AtomicBool::new(false),
+            top: solved(9_800, 9_700),
+            back: solved(10_100, 10_000),
+            reexecuted: solved(10_100, 10_000),
+        };
+        let trades = [
+            reverted_trade(crate::decoder::RevertCause::SlippageFloor, 10_000),
+            reverted_trade_without_terms(),
+        ];
+        let ranges = resolve_block_range(&solver, &trades, &empty_prices())
+            .await
+            .unwrap();
+
+        assert_eq!(ranges.len(), 2);
+        assert!(ranges[1].top.is_none(), "the terms-less revert must not be solved");
+
+        let comparison = &ranges[0];
+        assert_eq!(comparison.min_amount_out, Some(U256::from(10_000u64)));
+        assert_eq!(
+            comparison
+                .top
+                .as_ref()
+                .unwrap()
+                .fillable,
+            Some(false)
+        );
+        let back = comparison.back.as_ref().unwrap();
+        assert_eq!(back.fillable, Some(true));
+        assert!(back.margin_bps.unwrap() > 0.0);
     }
 
     #[test]
@@ -635,9 +826,7 @@ mod tests {
         let range = build_range(
             &trade(10_000),
             &empty_prices(),
-            solved(10_000, 9_900),
-            solved(10_500, 10_400),
-            &solved(10_050, 9_950),
+            Some((solved(10_000, 9_900), solved(10_500, 10_400), solved(10_050, 9_950))),
         );
         let slippage = range.slippage.unwrap();
         assert!((slippage.bps - 50.0).abs() < 0.01, "expected +50 bps, got {}", slippage.bps);
@@ -650,11 +839,13 @@ mod tests {
         let range = build_range(
             &trade(10_000),
             &empty_prices(),
-            solved(10_000, 9_900),
-            Outcome::Unsolvable("no route at back-of-block".into()),
-            &solved(10_050, 9_950),
+            Some((
+                solved(10_000, 9_900),
+                Outcome::Unsolvable("no route at back-of-block".into()),
+                solved(10_050, 9_950),
+            )),
         );
-        assert_eq!(range.back.verdict, Verdict::Unsolvable);
+        assert_eq!(range.back.unwrap().verdict, Verdict::Unsolvable);
         let slippage = range.slippage.unwrap();
         assert!((slippage.bps - 50.0).abs() < 0.01, "expected +50 bps, got {}", slippage.bps);
     }
@@ -667,11 +858,9 @@ mod tests {
         let range = build_range(
             &trade(10_000),
             &empty_prices(),
-            solved(1_000, 990),
-            solved(1_010, 1_000),
-            &solved(1_010, 1_000),
+            Some((solved(1_000, 990), solved(1_010, 1_000), solved(1_010, 1_000))),
         );
-        assert_eq!(range.verdict, Verdict::CoverageMiss);
+        assert_eq!(range.verdict, Some(Verdict::CoverageMiss));
         let slippage = range.slippage.unwrap();
         assert!((slippage.bps - 100.0).abs() < 0.01, "expected +100 bps, got {}", slippage.bps);
     }

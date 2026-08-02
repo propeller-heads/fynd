@@ -23,6 +23,10 @@ const SELECTORS: [[u8; 4]; 5] = [
     [0x62, 0x7d, 0xd5, 0x6a],
 ];
 
+/// Fly's `InsufficientAmountOut()` custom error selector (`DexAggregator.sol`) — the marker for a
+/// slippage-floor revert.
+const INSUFFICIENT_AMOUNT_OUT: [u8; 4] = [0xe5, 0x29, 0x70, 0xaa];
+
 const TO_ADDRESS_OFFSET: usize = 72;
 const FROM_ASSET_OFFSET: usize = 92;
 const TO_ASSET_OFFSET: usize = 112;
@@ -108,6 +112,11 @@ impl SolverKnowledge for Fly {
         has_fly_selector(input)?;
         Some(Address::from_slice(input.get(TO_ADDRESS_OFFSET..TO_ADDRESS_OFFSET + ADDRESS_LEN)?))
     }
+
+    /// `InsufficientAmountOut()`'s selector as the frame's revert output.
+    fn is_slippage_floor(&self, output: Option<&[u8]>, _revert_reason: Option<&str>) -> bool {
+        output.is_some_and(|output| output.starts_with(&INSUFFICIENT_AMOUNT_OUT))
+    }
 }
 
 #[cfg(test)]
@@ -133,7 +142,7 @@ mod tests {
         assert_eq!(intent.token_out, Address::ZERO);
         assert_eq!(intent.amount_in, U256::from(19_694_643u64));
         assert_eq!(intent.min_amount_out, U256::from(10_217_898_321_149_381u64));
-        assert_eq!(intent.quoted_amount_out(), U256::from(10_321_109_415_302_405u64));
+        assert_eq!(intent.declared_quote(), Some(U256::from(10_321_109_415_302_405u64)));
     }
 
     #[test]
@@ -191,6 +200,14 @@ mod tests {
         // Zero out the word the amountOutMin pointer resolves to (ptr 281 in this fixture).
         input[281..313].fill(0);
         assert!(Fly.swap_intent(&input, None).is_none());
+    }
+
+    #[test]
+    fn test_is_slippage_floor_matches_the_selector() {
+        assert!(Fly.is_slippage_floor(Some(&INSUFFICIENT_AMOUNT_OUT), None));
+        assert!(Fly.is_slippage_floor(Some(&[0xe5, 0x29, 0x70, 0xaa, 0x00, 0x01]), None));
+        assert!(!Fly.is_slippage_floor(Some(&[0xde, 0xad, 0xbe, 0xef]), None));
+        assert!(!Fly.is_slippage_floor(None, None));
     }
 
     #[test]

@@ -29,9 +29,8 @@ use crate::decoder::{registry::Registry, veto::Veto};
 /// revert emits no logs to net a settled amount from. The declared quote is different: it is the
 /// number the venue compared against at decision time — what the solver's API promised — as
 /// opposed to the settled amount, which is what execution delivered. It is self-reported and not
-/// every solver declares one, so it is read through [`SwapIntent::quoted_amount_out`] (falls back
-/// to the floor) or [`SwapIntent::declared_quote`] (the raw value, for callers that must tell a
-/// real quote from the fallback).
+/// every solver declares one, so it is read through [`SwapIntent::declared_quote`], `None` when
+/// the calldata carried no quote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct SwapIntent {
     /// `Address::ZERO` for native ETH.
@@ -76,24 +75,7 @@ impl SwapIntent {
         self
     }
 
-    /// The best available "what was promised": the solver's declared quote, or — when absent —
-    /// the enforced floor.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "only called from tests in this PR; its production caller is the \
-                      reverted-swap path in the stacked follow-up PR"
-        )
-    )]
-    pub(crate) fn quoted_amount_out(&self) -> U256 {
-        self.quoted_amount_out
-            .unwrap_or(self.min_amount_out)
-    }
-
-    /// The raw declared quote, `None` when the calldata carried none. Distinct from
-    /// [`SwapIntent::quoted_amount_out`], which falls back to the floor — analysts need to tell
-    /// a real quote from the fallback.
+    /// The solver's declared off-chain quote, `None` when the calldata carried none.
     pub(crate) fn declared_quote(&self) -> Option<U256> {
         self.quoted_amount_out
     }
@@ -146,6 +128,15 @@ pub(crate) trait SolverKnowledge: Send + Sync {
     /// `crate::decoder::venue_attribution`).
     fn integrator(&self, _logs: &[Log]) -> Option<String> {
         None
+    }
+
+    /// Whether a reverted call frame's output or revert reason matches this solver's
+    /// slippage-floor marker — the avoidable class of revert a fresher quote could have cleared
+    /// (Fly's `InsufficientAmountOut()` selector, `KyberSwap`'s "Return amount is not enough"
+    /// revert reason). Checked against every frame in a reverted trace's subtree (see
+    /// `trace::classify_revert_cause`), so a solver need not be attributed yet to be recognized.
+    fn is_slippage_floor(&self, _output: Option<&[u8]>, _revert_reason: Option<&str>) -> bool {
+        false
     }
 }
 
@@ -209,6 +200,16 @@ pub(crate) fn output_recipient(solver: &str, input: &[u8]) -> Option<Address> {
         .iter()
         .find(|(name, _)| *name == solver)?;
     knowledge.output_recipient(input)
+}
+
+/// Whether a reverted call frame's output or revert reason matches any registered solver's
+/// slippage-floor marker. Unscoped by attribution — the marker is a hard fact about the frame's
+/// own bytes, and only one solver's check can ever match a given frame — so every implementation
+/// is tried.
+pub(crate) fn is_slippage_floor(output: Option<&[u8]>, revert_reason: Option<&str>) -> bool {
+    IMPLEMENTATIONS
+        .iter()
+        .any(|(_, knowledge)| knowledge.is_slippage_floor(output, revert_reason))
 }
 
 /// Whether a declared quote is in the same units as the settled output.

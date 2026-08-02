@@ -19,6 +19,9 @@ use crate::decoder::solvers::{SolverKnowledge, SwapIntent};
 const KYBERSWAP_NATIVE: Address =
     alloy::primitives::address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
 
+/// `KyberSwap`'s slippage-floor revert reason.
+const INSUFFICIENT_RETURN: &str = "Return amount is not enough";
+
 sol! {
     /// `MetaAggregationRouterV2.swap`'s parameter shape, verified against a live reverted trade
     /// (tx 0xd3b7ffae…, Base): decoding recovered `srcToken`/`dstToken`/`amount`/`minReturnAmount`
@@ -122,6 +125,11 @@ impl SolverKnowledge for Kyberswap {
         let call = swapCall::abi_decode(input).ok()?;
         Some(call.execution.desc.dstReceiver)
     }
+
+    /// "Return amount is not enough" as the frame's revert reason.
+    fn is_slippage_floor(&self, _output: Option<&[u8]>, revert_reason: Option<&str>) -> bool {
+        revert_reason.is_some_and(|reason| reason.contains(INSUFFICIENT_RETURN))
+    }
 }
 
 #[cfg(test)]
@@ -208,8 +216,8 @@ mod tests {
         assert_eq!(intent.token_out, dst);
         assert_eq!(intent.amount_in, U256::from(1_000_000u64));
         assert_eq!(intent.min_amount_out, U256::from(990_000u64));
-        // No clientData quote declared: the accessor falls back to the floor.
-        assert_eq!(intent.quoted_amount_out(), U256::from(990_000u64));
+        // No clientData quote declared.
+        assert_eq!(intent.declared_quote(), None);
         assert_eq!(intent.timestamp, None);
     }
 
@@ -238,7 +246,7 @@ mod tests {
             .swap_intent(&swap_calldata(src, dst, 1_000_000, 990_000, BLOB), None)
             .unwrap();
         assert_eq!(intent.min_amount_out, U256::from(990_000u64));
-        assert_eq!(intent.quoted_amount_out(), U256::from(70_400_409_935u64));
+        assert_eq!(intent.declared_quote(), Some(U256::from(70_400_409_935u64)));
         assert_eq!(intent.timestamp, Some(1_783_421_726));
     }
 
@@ -254,7 +262,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(intent.quoted_amount_out(), U256::from(990_000u64));
+        assert_eq!(intent.declared_quote(), None);
         assert_eq!(intent.timestamp, None);
     }
 
@@ -280,6 +288,15 @@ mod tests {
         assert!(Kyberswap
             .swap_intent(&swap_calldata(a, b, 1_000, 0, ""), None)
             .is_none());
+    }
+
+    #[test]
+    fn test_is_slippage_floor_matches_the_revert_reason() {
+        assert!(Kyberswap.is_slippage_floor(None, Some(INSUFFICIENT_RETURN)));
+        assert!(Kyberswap
+            .is_slippage_floor(None, Some("execution reverted: Return amount is not enough")));
+        assert!(!Kyberswap.is_slippage_floor(None, Some("execution reverted")));
+        assert!(!Kyberswap.is_slippage_floor(None, None));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use alloy::{
 };
 use anyhow::Context;
 
-use crate::decoder::registry::Registry;
+use crate::decoder::{registry::Registry, solvers};
 
 /// Fetch the callTracer root frame for a transaction.
 ///
@@ -79,18 +79,40 @@ pub(crate) fn route_gas(root: &CallFrame, registry: &Registry) -> Option<U256> {
         .filter(|gas| !gas.is_zero())
 }
 
-/// Depth-first search for the first call frame into a known solver, skipping reverted frames
-/// (and their subtrees), which settle nothing.
+/// Depth-first search for the call frame that settled or tried the swap with a known solver.
 ///
-/// The one walk serves both questions asked of a trace: *who* settled the swap (the frame's
-/// `to`, for attribution) and *what the route cost* (the frame's `gas_used`, for gas
-/// accounting) — so the gas charged is always the gas of the exact frame the solver label came
-/// from.
+/// Prefers the frame that actually settled — skipping reverted frames and their subtrees, which
+/// settle nothing — and, only when that search finds nothing, falls back to a tolerant search
+/// that descends into reverted frames too. Plain "ignore every revert" (the simpler-looking
+/// alternative) would get a settled trade wrong: a router that tried solver A (which reverted)
+/// before succeeding via solver B has both frames in its trace, and a revert-blind walk can
+/// attribute to whichever it reaches first in depth-first order, not whichever actually settled.
+/// The two-phase preference handles both shapes with one function: a settled trade always finds
+/// its real solver frame in the first (strict) pass, and a reverted trade — which has no settled
+/// frame by definition — falls through to the second (tolerant) pass, since a revert emits no
+/// logs and the frame that tried is the only frame there is to attribute to or recover calldata
+/// from (see the trace fixtures for both shapes observed live).
+///
+/// The one walk serves every question asked of a trace: *who* settled or tried the swap (the
+/// frame's `to`, for attribution and calldata extraction) and *what the route cost* (the frame's
+/// `gas_used`, for gas accounting) — so the gas charged is always the gas of the exact frame the
+/// solver label came from.
 pub(crate) fn find_solver_frame<'a>(
     frame: &'a CallFrame,
     registry: &Registry,
 ) -> Option<&'a CallFrame> {
-    if frame.error.is_some() {
+    find_solver_frame_impl(frame, registry, false)
+        .or_else(|| find_solver_frame_impl(frame, registry, true))
+}
+
+/// Shared walk for both passes of [`find_solver_frame`]: the only difference is whether a frame's
+/// own revert stops the search or not.
+fn find_solver_frame_impl<'a>(
+    frame: &'a CallFrame,
+    registry: &Registry,
+    tolerate_reverts: bool,
+) -> Option<&'a CallFrame> {
+    if frame.error.is_some() && !tolerate_reverts {
         return None;
     }
     if let Some(to) = frame.to {
@@ -101,7 +123,103 @@ pub(crate) fn find_solver_frame<'a>(
     frame
         .calls
         .iter()
-        .find_map(|child| find_solver_frame(child, registry))
+        .find_map(|child| find_solver_frame_impl(child, registry, tolerate_reverts))
+}
+
+/// The geth call tracer's exact error string for a frame that ran out of gas.
+const OUT_OF_GAS: &str = "out of gas";
+
+/// Why a reverted transaction failed, classified from its trace.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
+pub(crate) enum RevertCause {
+    /// A slippage-floor revert: Fly's `InsufficientAmountOut()` or `KyberSwap`'s "Return amount is
+    /// not enough" — the class of revert a fresher quote could have avoided.
+    SlippageFloor,
+    /// A frame ran out of gas.
+    OutOfGas,
+    /// Any other cause, taken from the deepest reverted frame's error or revert reason.
+    Other(String),
+}
+
+/// Classify why a reverted transaction's root frame failed, from its whole reverted subtree.
+///
+/// Checked in order of specificity: a slippage-floor marker (Fly's custom-error selector in any
+/// frame's output, or `KyberSwap`'s revert reason string) anywhere in the subtree wins even when a
+/// deeper frame failed for an unrelated reason — real reverts often cascade through several
+/// frames, and the slippage-floor check is the one classification callers act on (it is the
+/// avoidable class). Otherwise, any frame with the exact "out of gas" error settles it. Anything
+/// else falls back to the deepest reverted frame's own error or revert reason.
+pub(crate) fn classify_revert_cause(root: &CallFrame) -> RevertCause {
+    if has_slippage_floor_marker(root) {
+        return RevertCause::SlippageFloor;
+    }
+    if has_out_of_gas(root) {
+        return RevertCause::OutOfGas;
+    }
+    RevertCause::Other(deepest_revert_reason(root).unwrap_or_else(|| "unknown revert".to_string()))
+}
+
+fn has_slippage_floor_marker(frame: &CallFrame) -> bool {
+    let output = frame.output.as_ref().map(AsRef::as_ref);
+    solvers::is_slippage_floor(output, frame.revert_reason.as_deref()) ||
+        frame
+            .calls
+            .iter()
+            .any(has_slippage_floor_marker)
+}
+
+fn has_out_of_gas(frame: &CallFrame) -> bool {
+    frame.error.as_deref() == Some(OUT_OF_GAS) || frame.calls.iter().any(has_out_of_gas)
+}
+
+/// The error or revert reason of the deepest reverted frame, by depth-first search — the last
+/// (deepest) hit wins, since a subtree's own failure is usually more specific than an ancestor's
+/// bubbled-up "execution reverted".
+fn deepest_revert_reason(frame: &CallFrame) -> Option<String> {
+    let mut deepest: Option<(usize, String)> = None;
+    collect_deepest_revert_reason(frame, 0, &mut deepest);
+    deepest.map(|(_, reason)| reason)
+}
+
+fn collect_deepest_revert_reason(
+    frame: &CallFrame,
+    depth: usize,
+    deepest: &mut Option<(usize, String)>,
+) {
+    if let Some(reason) = frame_revert_reason(frame) {
+        if deepest
+            .as_ref()
+            .is_none_or(|(best_depth, _)| depth >= *best_depth)
+        {
+            *deepest = Some((depth, reason));
+        }
+    }
+    for child in &frame.calls {
+        collect_deepest_revert_reason(child, depth + 1, deepest);
+    }
+}
+
+/// One frame's revert reason: the tracer's own ABI-decoded string when it provides one, otherwise
+/// the generic error message with the frame's raw output selector appended when there is one to
+/// show (`"execution reverted (0x12345678)"`). Several RPC providers never populate
+/// `revert_reason` at all, even for a frame whose output does encode a selector (a custom error,
+/// or an `Error(string)` the tracer did not bother decoding) — the selector is what is left to
+/// classify offline, so it is surfaced rather than dropped.
+fn frame_revert_reason(frame: &CallFrame) -> Option<String> {
+    if let Some(reason) = frame.revert_reason.clone() {
+        return Some(reason);
+    }
+    let error = frame.error.clone()?;
+    let selector = frame
+        .output
+        .as_ref()
+        .filter(|output| output.len() >= 4)
+        .map(|output| format!("0x{}", alloy::hex::encode(&output[..4])));
+    Some(match selector {
+        Some(selector) => format!("{error} ({selector})"),
+        None => error,
+    })
 }
 
 /// Best guess at an unknown router: the entry point's direct child call that moved the most
@@ -144,6 +262,7 @@ pub(crate) fn largest_external_call(
 #[cfg(test)]
 mod tests {
     use alloy::primitives::address;
+    use tycho_simulation::tycho_common::models::Chain;
 
     use super::*;
     use crate::decoder::test_utils::{addr, frame};
@@ -270,15 +389,183 @@ mod tests {
     }
 
     #[test]
-    fn test_find_solver_frame_reverted_frames() {
+    fn test_find_solver_frame_prefers_a_settled_frame_over_a_reverted_attempt() {
+        // The exact shape the doc comment calls out: a router tried solver A (which reverted)
+        // before succeeding via solver B. The strict pass must attribute to B, not whichever it
+        // reaches first in depth-first order.
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let zerox = address!("0x0000000000001ff3684f28c67538d4d072c22734");
+
+        let mut attempt_a = frame("CALL", addr(2), oneinch, 0);
+        attempt_a.error = Some("execution reverted".to_string());
+        let attempt_b = frame("CALL", addr(2), zerox, 0);
+        let mut root = frame("CALL", addr(1), addr(2), 0);
+        root.calls = vec![attempt_a, attempt_b];
+
+        let found = find_solver_frame(&root, &registry).unwrap();
+        assert_eq!(found.to, Some(zerox));
+    }
+
+    #[test]
+    fn test_find_solver_frame_falls_back_when_nothing_settled() {
+        // A reverted trade has no settled frame by definition: the strict pass finds nothing, so
+        // the tolerant fallback is the only way to recover which router the trader was routed
+        // through — the frame that tried is the only frame there is to find.
         let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
 
-        let mut reverted = frame("CALL", addr(2), oneinch, 0);
-        reverted.error = Some("execution reverted".to_string());
+        let mut solver_call = frame("CALL", addr(2), oneinch, 0);
+        solver_call.error = Some("execution reverted".to_string());
         let mut root = frame("CALL", addr(1), addr(2), 0);
-        root.calls = vec![reverted];
+        root.error = Some("execution reverted".to_string());
+        root.calls = vec![solver_call];
 
-        assert!(find_solver_frame(&root, &registry).is_none());
+        let found = find_solver_frame(&root, &registry).unwrap();
+        assert_eq!(found.to, Some(oneinch));
+    }
+
+    #[test]
+    fn test_find_solver_frame_real_fly_slippage_trace() {
+        // Real reverted trace (Base, Relay -> Fly): the fly frame itself reverted
+        // (InsufficientAmountOut), nested inside the reverted router and approval-proxy frames.
+        // Nothing settled, so the strict pass finds nothing and the fallback recovers it.
+        let root: CallFrame = serde_json::from_str(include_str!(
+            "fixtures/trace_revert_fly_slippage_0xcba01d0c.json"
+        ))
+        .unwrap();
+        let fly = address!("0x20f6ee51340adeed01a59b0e65cb3703f3dc860c");
+        let found = find_solver_frame(&root, &Registry::builtin(Chain::Base).unwrap()).unwrap();
+        assert_eq!(found.to, Some(fly));
+    }
+
+    #[test]
+    fn test_find_solver_frame_real_out_of_gas_trace() {
+        // Real reverted trace (Base): the fly frame itself succeeded (err = None) — the router
+        // ran out of gas on a later, unrelated call — so the strict pass already finds it, even
+        // though it sits under two reverted ancestors.
+        let root: CallFrame =
+            serde_json::from_str(include_str!("fixtures/trace_revert_out_of_gas_0x08fee57c.json"))
+                .unwrap();
+        let fly = address!("0x20f6ee51340adeed01a59b0e65cb3703f3dc860c");
+        let found = find_solver_frame(&root, &Registry::builtin(Chain::Base).unwrap()).unwrap();
+        assert_eq!(found.to, Some(fly));
+        assert!(found.error.is_none());
+    }
+
+    #[test]
+    fn test_classify_revert_cause_real_fly_slippage() {
+        let root: CallFrame = serde_json::from_str(include_str!(
+            "fixtures/trace_revert_fly_slippage_0xcba01d0c.json"
+        ))
+        .unwrap();
+        assert_eq!(classify_revert_cause(&root), RevertCause::SlippageFloor);
+    }
+
+    #[test]
+    fn test_classify_revert_cause_real_kyber_slippage() {
+        let root: CallFrame = serde_json::from_str(include_str!(
+            "fixtures/trace_revert_kyber_slippage_0xd3b7ffae.json"
+        ))
+        .unwrap();
+        assert_eq!(classify_revert_cause(&root), RevertCause::SlippageFloor);
+    }
+
+    #[test]
+    fn test_classify_revert_cause_real_out_of_gas() {
+        let root: CallFrame =
+            serde_json::from_str(include_str!("fixtures/trace_revert_out_of_gas_0x08fee57c.json"))
+                .unwrap();
+        assert_eq!(classify_revert_cause(&root), RevertCause::OutOfGas);
+    }
+
+    #[test]
+    fn test_classify_revert_cause_real_other() {
+        // A `transferFrom` failure deep inside Fly's frame (a custom ERC-20 error, not one of the
+        // known slippage markers): neither Fly's nor KyberSwap's marker matches, so it falls back
+        // to the deepest reverted frame's own error — this RPC never populates `revertReason`, so
+        // the frame's raw output selector (0xe450d38c, `ERC20InsufficientBalance(address,uint256,
+        // uint256)`) is appended to the generic message rather than left unclassifiable.
+        let root: CallFrame = serde_json::from_str(include_str!(
+            "fixtures/trace_revert_transfer_failure_0x12d802d5.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            classify_revert_cause(&root),
+            RevertCause::Other("execution reverted (0xe450d38c)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_classify_revert_cause_synthetic_slippage_and_gas() {
+        let mut fly_floor = frame("CALL", addr(1), addr(2), 0);
+        fly_floor.error = Some("execution reverted".to_string());
+        fly_floor.output = Some(alloy::primitives::Bytes::from_static(&[0xe5, 0x29, 0x70, 0xaa]));
+        assert_eq!(classify_revert_cause(&fly_floor), RevertCause::SlippageFloor);
+
+        let mut kyber_floor = frame("CALL", addr(1), addr(2), 0);
+        kyber_floor.error = Some("execution reverted".to_string());
+        kyber_floor.revert_reason = Some("Return amount is not enough".to_string());
+        assert_eq!(classify_revert_cause(&kyber_floor), RevertCause::SlippageFloor);
+
+        let mut out_of_gas = frame("CALL", addr(1), addr(2), 0);
+        out_of_gas.error = Some("out of gas".to_string());
+        assert_eq!(classify_revert_cause(&out_of_gas), RevertCause::OutOfGas);
+    }
+
+    #[test]
+    fn test_classify_revert_cause_prefers_deepest_reason() {
+        let mut inner = frame("CALL", addr(2), addr(3), 0);
+        inner.error = Some("transferFrom failed".to_string());
+        let mut outer = frame("CALL", addr(1), addr(2), 0);
+        outer.error = Some("execution reverted".to_string());
+        outer.calls = vec![inner];
+
+        assert_eq!(
+            classify_revert_cause(&outer),
+            RevertCause::Other("transferFrom failed".to_string())
+        );
+    }
+
+    #[test]
+    fn test_classify_revert_cause_real_zeroex_slippage() {
+        // Real reverted trace (Base): 0x's own TooMuchSlippage(address,uint256,uint256) bubbles
+        // through the Settler and AllowanceHolder frames, both registered as solver "0x".
+        let root: CallFrame = serde_json::from_str(include_str!(
+            "fixtures/trace_revert_zeroex_slippage_0x157e025b.json"
+        ))
+        .unwrap();
+        assert_eq!(classify_revert_cause(&root), RevertCause::SlippageFloor);
+    }
+
+    #[test]
+    fn test_frame_revert_reason_appends_the_selector_when_undecoded() {
+        // No `revert_reason` (this RPC never populates it) but the frame's raw output carries a
+        // selector: the generic message gets it appended, so an unrecognized custom error stays
+        // classifiable offline instead of collapsing into a bare "execution reverted".
+        let mut custom_error = frame("CALL", addr(1), addr(2), 0);
+        custom_error.error = Some("execution reverted".to_string());
+        custom_error.output =
+            Some(alloy::primitives::Bytes::from_static(&[0x12, 0x34, 0x56, 0x78]));
+        assert_eq!(
+            frame_revert_reason(&custom_error),
+            Some("execution reverted (0x12345678)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_frame_revert_reason_prefers_the_decoded_reason() {
+        let mut decoded = frame("CALL", addr(1), addr(2), 0);
+        decoded.error = Some("execution reverted".to_string());
+        decoded.revert_reason = Some("Return amount is not enough".to_string());
+        decoded.output = Some(alloy::primitives::Bytes::from_static(&[0x12, 0x34, 0x56, 0x78]));
+        assert_eq!(frame_revert_reason(&decoded), Some("Return amount is not enough".to_string()));
+    }
+
+    #[test]
+    fn test_frame_revert_reason_no_output_stays_bare() {
+        let mut bare = frame("CALL", addr(1), addr(2), 0);
+        bare.error = Some("execution reverted".to_string());
+        assert_eq!(frame_revert_reason(&bare), Some("execution reverted".to_string()));
     }
 }

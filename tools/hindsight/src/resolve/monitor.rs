@@ -33,7 +33,7 @@ use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
     provider_from,
-    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver},
+    resolve::{resolve_block_range, Outcome, RangeComparison, SolvedAmount, SteppingSolver},
     telemetry,
     usd::Prices,
 };
@@ -500,9 +500,12 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
 
     let mut comparisons = match cfg.comparisons_dir.as_ref() {
         Some(dir) => {
-            let writer = super::jsonl::RotatingWriter::open(dir)?;
-            info!(path = %writer.current_path().display(), "appending comparisons to JSONL");
-            Some(writer)
+            let comparisons = super::jsonl::RotatingWriter::open(dir)?;
+            info!(
+                comparisons_path = %comparisons.current_path().display(),
+                "appending comparisons to JSONL"
+            );
+            Some(comparisons)
         }
         None => None,
     };
@@ -617,59 +620,50 @@ async fn run_session<P: Provider>(
             }
         }
 
-        let trades = match decode_block_when_available(decoder, target, pacing.rpc_lag_budget).await
-        {
-            Ok(trades) => trades,
-            Err(e) => {
-                totals.skipped_blocks += 1;
-                telemetry::record_skipped_block();
-                warn!(
-                    block = target,
-                    skipped_total = totals.skipped_blocks,
-                    "decode failed, skipping block: {e}"
-                );
-                if let Err(e) = adapter.advance().await {
-                    return SessionEnd::Unhealthy(e.to_string());
+        let decoded =
+            match decode_block_when_available(decoder, target, pacing.rpc_lag_budget).await {
+                Ok(decoded) => decoded,
+                Err(e) => {
+                    totals.skipped_blocks += 1;
+                    telemetry::record_skipped_block();
+                    warn!(
+                        block = target,
+                        skipped_total = totals.skipped_blocks,
+                        "decode failed, skipping block: {e}"
+                    );
+                    if let Err(e) = adapter.advance().await {
+                        return SessionEnd::Unhealthy(e.to_string());
+                    }
+                    continue;
                 }
-                continue;
-            }
-        };
+            };
 
         let start = Instant::now();
         // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
         // USD valuation.
         let prices_top = snapshot_prices(adapter.solver, decoder.registry()).await;
-        let ranges = match resolve_block_range(adapter, &trades, &prices_top).await {
-            Ok(ranges) => ranges,
+        let (ranges, prices_back) = match resolve_and_snapshot_back(
+            adapter,
+            decoder,
+            &decoded,
+            &prices_top,
+            target,
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
             Err(e) => return SessionEnd::Unhealthy(e.to_string()),
         };
-        // resolve_block_range advanced the solver to back-of-block (N); snapshot again so the
-        // back-of-block improvement is valued against the state it was solved at.
-        let prices_back = snapshot_prices(adapter.solver, decoder.registry()).await;
-        // The back-of-block solve should land on `target`. On a reorg/gap/resync the stream can
-        // apply a different block, silently pairing the back state with another block's trades.
-        // The top-of-block (N-1) headline is unaffected; warn so the mispaired back state is
-        // visible.
-        let applied = adapter.current_block().await;
-        if applied != Some(target) {
-            warn!(
-                target,
-                applied = ?applied,
-                "back-of-block state is not the target block; back comparison may be off"
-            );
-        }
-        for range in &ranges {
-            telemetry::record_range(
-                range,
-                &cfg.chain.name,
-                &prices_top,
-                &prices_back,
-                decoder.registry(),
-            );
-        }
-        if let Some(rotating) = comparisons.as_mut() {
-            super::jsonl::write_comparisons(rotating.writer(), &ranges, &prices_top, &prices_back);
-        }
+        record_block_resolution(
+            &BlockRecording {
+                chain: &cfg.chain.name,
+                registry: decoder.registry(),
+                ranges: &ranges,
+                prices_top: &prices_top,
+                prices_back: &prices_back,
+            },
+            comparisons,
+        );
         let elapsed_s = start.elapsed().as_secs_f64();
         telemetry::record_block_seconds(elapsed_s);
 
@@ -683,6 +677,71 @@ async fn run_session<P: Provider>(
             info!(processed = totals.processed, "reached --max-blocks");
             return SessionEnd::Complete;
         }
+    }
+}
+
+/// Resolve one block's trades (settled and reverted) at both states, then snapshot back-of-block
+/// prices.
+///
+/// `resolve_block_range` advances the solver to back-of-block (N) as a side effect, so the price
+/// snapshot must be taken after it returns to value the back-of-block improvement against the
+/// state it was solved at. The back-of-block solve should land on `target`; on a reorg, gap, or
+/// resync the stream can apply a different block, silently pairing the back state with another
+/// block's trades — the top-of-block (N-1) headline is unaffected, but this is worth a warning so
+/// the mispairing is visible.
+async fn resolve_and_snapshot_back<P: Provider>(
+    adapter: &StepAdapter<'_>,
+    decoder: &Decoder<P>,
+    decoded: &[DecodedTrade],
+    prices_top: &Prices,
+    target: u64,
+) -> anyhow::Result<(Vec<RangeComparison>, Prices)> {
+    let ranges = resolve_block_range(adapter, decoded, prices_top).await?;
+    let prices_back = snapshot_prices(adapter.solver, decoder.registry()).await;
+    let applied = adapter.current_block().await;
+    if applied != Some(target) {
+        warn!(
+            target,
+            applied = ?applied,
+            "back-of-block state is not the target block; back comparison may be off"
+        );
+    }
+    Ok((ranges, prices_back))
+}
+
+/// One block's re-solved trades, bundled so the recording helper below takes a handful of
+/// parameters instead of every constituent piece separately.
+struct BlockRecording<'a> {
+    chain: &'a str,
+    registry: &'a Registry,
+    ranges: &'a [RangeComparison],
+    prices_top: &'a Prices,
+    prices_back: &'a Prices,
+}
+
+/// Record and persist one block's re-solved trades — settled and reverted alike, told apart by
+/// each record's `status`: Prometheus metrics, plus the single JSONL stream when the run was
+/// configured with `--comparisons-dir`.
+fn record_block_resolution(
+    block: &BlockRecording<'_>,
+    comparisons: &mut Option<super::jsonl::RotatingWriter>,
+) {
+    for range in block.ranges {
+        telemetry::record_range(
+            range,
+            block.chain,
+            block.prices_top,
+            block.prices_back,
+            block.registry,
+        );
+    }
+    if let Some(rotating) = comparisons.as_mut() {
+        super::jsonl::write_comparisons(
+            rotating.writer(),
+            block.ranges,
+            block.prices_top,
+            block.prices_back,
+        );
     }
 }
 
