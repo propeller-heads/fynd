@@ -1,4 +1,11 @@
 
+## [0.97.14](https://github.com/propeller-heads/fynd/compare/0.97.13...0.97.14) (2026-08-03)
+
+### Features
+
+* **feed:** stream exclusive pools via the exclusive: protocol prefix ([d8510fd](https://github.com/propeller-heads/fynd/commit/d8510fdc22bea47132c79e1c84f361bfa37fad65))
+
+
 
 ## [0.97.12](https://github.com/propeller-heads/fynd/compare/0.97.11...0.97.12) (2026-07-30)
 
