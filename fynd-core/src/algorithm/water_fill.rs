@@ -29,7 +29,7 @@
 //! assembled through the shared split primitives and can be encoded on-chain.
 
 use std::{
-    cmp::{Ordering, Reverse},
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
@@ -1318,15 +1318,10 @@ fn score_candidate_edges<'a, W>(
 /// but is load-bearing for `WETH → ETH → token` routes where Tycho models native ETH as `0x0`, so
 /// it is anchored explicitly.
 fn derive_anchor_tokens<W>(graph: &RoutingGraph<W>) -> HashSet<Address> {
-    let mut by_degree: Vec<(NodeIndex, usize)> = graph
-        .node_indices()
-        .map(|node| (node, graph.edges(node).count()))
-        .collect();
-    by_degree.sort_unstable_by_key(|(_, degree)| Reverse(*degree));
-    let mut anchors: HashSet<Address> = by_degree
-        .into_iter()
-        .take(DERIVED_ANCHOR_COUNT)
-        .map(|(node, _)| graph[node].clone())
+    let mut anchors: HashSet<Address> = graph
+        .most_connected_tokens(DERIVED_ANCHOR_COUNT)
+        .iter()
+        .cloned()
         .collect();
     anchors.insert(Address::from([0u8; 20]));
     anchors

@@ -4,6 +4,7 @@
 //! representation. GraphManager handles both building graphs from market data and updating them
 //! based on market events.
 
+mod generation_cache;
 pub mod petgraph;
 pub mod routing_graph;
 

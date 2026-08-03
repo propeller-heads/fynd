@@ -4,12 +4,20 @@
 //! work which only depends on the graph — resolving a token address to its node, sizing per-node
 //! arrays — is a lookup rather than a scan over every node.
 
-use std::{collections::HashMap, ops::Deref};
+use std::{
+    cmp::Reverse,
+    collections::HashMap,
+    ops::Deref,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use tycho_simulation::tycho_common::models::Address;
 
-use super::petgraph::{EdgeData, StableDiGraph};
+use super::{
+    generation_cache::GenerationCache,
+    petgraph::{EdgeData, StableDiGraph},
+};
 
 /// A [`StableDiGraph`] together with the token-to-node index maintained as nodes are inserted.
 ///
@@ -20,6 +28,10 @@ pub struct RoutingGraph<D> {
     node_map: HashMap<Address, NodeIndex>,
     node_index_bound: usize,
     generation: u64,
+    /// Tokens ranked by out-edge degree, keyed by how many were asked for. Rebuilt lazily
+    /// whenever the generation moves on; see
+    /// [`most_connected_tokens`](Self::most_connected_tokens).
+    most_connected: Mutex<GenerationCache<usize, Arc<Vec<Address>>>>,
 }
 
 impl<D> RoutingGraph<D> {
@@ -30,6 +42,7 @@ impl<D> RoutingGraph<D> {
             node_map: HashMap::new(),
             node_index_bound: 0,
             generation: 0,
+            most_connected: Mutex::new(GenerationCache::new()),
         }
     }
 
@@ -54,6 +67,34 @@ impl<D> RoutingGraph<D> {
     /// last cleared.
     pub fn node_index_bound(&self) -> usize {
         self.node_index_bound
+    }
+
+    /// Returns the `count` tokens with the most outgoing edges, highest degree first.
+    ///
+    /// The ranking is a pure function of the topology, so it is computed once per generation and
+    /// shared by every caller until the graph changes.
+    pub(crate) fn most_connected_tokens(&self, count: usize) -> Arc<Vec<Address>> {
+        // The cache holds only memoised values, so a panic while building one cannot leave it
+        // logically inconsistent — recover from poisoning rather than failing every later solve.
+        let mut cache = self
+            .most_connected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        cache.get_or_insert_with(self.generation, count, || {
+            let mut by_degree: Vec<(NodeIndex, usize)> = self
+                .graph
+                .node_indices()
+                .map(|node| (node, self.graph.edges(node).count()))
+                .collect();
+            by_degree.sort_unstable_by_key(|(_, degree)| Reverse(*degree));
+            Arc::new(
+                by_degree
+                    .into_iter()
+                    .take(count)
+                    .map(|(node, _)| self.graph[node].clone())
+                    .collect(),
+            )
+        })
     }
 
     /// Returns the node holding `address`, inserting it if the token is not yet in the graph.
@@ -119,6 +160,8 @@ impl<D> Deref for RoutingGraph<D> {
 
 #[cfg(test)]
 mod tests {
+    use ::petgraph::visit::EdgeRef;
+
     use super::*;
 
     fn addr(byte: u8) -> Address {
@@ -215,6 +258,100 @@ mod tests {
         graph.insert_node(&addr(1));
 
         assert_eq!(graph.generation(), before);
+    }
+
+    /// Builds the degree ranking from scratch, the way the memo's callers would without it.
+    fn ranked_by_degree(graph: &RoutingGraph<()>, count: usize) -> Vec<Address> {
+        let mut by_degree: Vec<(NodeIndex, usize)> = graph
+            .node_indices()
+            .map(|node| (node, graph.edges(node).count()))
+            .collect();
+        by_degree.sort_unstable_by_key(|(_, degree)| Reverse(*degree));
+        by_degree
+            .into_iter()
+            .take(count)
+            .map(|(node, _)| graph[node].clone())
+            .collect()
+    }
+
+    /// Hub token (`addr(1)`) with `spokes` outgoing edges, plus one edge between two leaves.
+    fn hub_graph(spokes: u8) -> RoutingGraph<()> {
+        let mut graph = RoutingGraph::<()>::new();
+        let hub = graph.insert_node(&addr(1));
+        for spoke in 0..spokes {
+            let leaf = graph.insert_node(&addr(10 + spoke));
+            graph.insert_edge(hub, leaf, EdgeData::new(format!("hub_{spoke}")));
+            graph.insert_edge(leaf, hub, EdgeData::new(format!("hub_{spoke}")));
+        }
+        graph
+    }
+
+    #[test]
+    fn test_most_connected_tokens_matches_a_fresh_ranking() {
+        let graph = hub_graph(4);
+
+        assert_eq!(*graph.most_connected_tokens(3), ranked_by_degree(&graph, 3));
+    }
+
+    #[test]
+    fn test_most_connected_tokens_repeated_access_is_stable() {
+        let graph = hub_graph(4);
+
+        let first = graph.most_connected_tokens(3);
+        let second = graph.most_connected_tokens(3);
+
+        assert_eq!(first, second);
+        assert!(Arc::ptr_eq(&first, &second), "a repeat access must not rebuild the ranking");
+    }
+
+    #[test]
+    fn test_most_connected_tokens_separate_counts_do_not_collide() {
+        let graph = hub_graph(4);
+
+        assert_eq!(graph.most_connected_tokens(1).len(), 1);
+        assert_eq!(graph.most_connected_tokens(3).len(), 3);
+    }
+
+    #[test]
+    fn test_most_connected_tokens_reflects_added_edges() {
+        let mut graph = hub_graph(2);
+        let hub = graph
+            .node_index(&addr(1))
+            .expect("hub exists");
+        assert_eq!(graph.most_connected_tokens(1)[0], addr(1));
+
+        // Give a leaf more edges than the hub, so the top of the ranking has to change.
+        let leaf = graph
+            .node_index(&addr(10))
+            .expect("leaf exists");
+        for extra in 0..4u8 {
+            let other = graph.insert_node(&addr(100 + extra));
+            graph.insert_edge(leaf, other, EdgeData::new(format!("leaf_{extra}")));
+        }
+
+        assert_eq!(graph.most_connected_tokens(1)[0], addr(10));
+        assert_eq!(*graph.most_connected_tokens(2), ranked_by_degree(&graph, 2));
+        assert!(graph.node_index(&addr(1)) == Some(hub), "node indices are stable across inserts");
+    }
+
+    #[test]
+    fn test_most_connected_tokens_reflects_removed_edges() {
+        let mut graph = hub_graph(3);
+        assert_eq!(graph.most_connected_tokens(1)[0], addr(1));
+
+        let hub = graph
+            .node_index(&addr(1))
+            .expect("hub exists");
+        let outgoing: Vec<EdgeIndex> = graph
+            .edges(hub)
+            .map(|edge| edge.id())
+            .collect();
+        for edge in outgoing {
+            graph.remove_edge(edge);
+        }
+
+        assert_eq!(*graph.most_connected_tokens(4), ranked_by_degree(&graph, 4));
+        assert_ne!(graph.most_connected_tokens(1)[0], addr(1));
     }
 
     #[test]
