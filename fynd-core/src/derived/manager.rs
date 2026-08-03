@@ -208,12 +208,12 @@ impl ComputationManager {
     ) -> Result<(Self, broadcast::Receiver<DerivedDataEvent>), ComputationError> {
         let (mut manager, event_rx) = Self::empty(market_data);
         manager.register(SpotPriceComputation::new())?;
+        manager.register(PoolDepthComputation::new(config.depth_slippage_threshold)?)?;
         manager.register(
             TokenGasPriceComputation::default()
                 .with_max_hops(config.max_hop)
                 .with_gas_token(config.gas_token),
         )?;
-        manager.register(PoolDepthComputation::new(config.depth_slippage_threshold)?)?;
         Ok((manager, event_rx))
     }
 
@@ -1296,9 +1296,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_computations_cascade_failure_in_registration_order() {
+    async fn default_computations_cascade_failure_in_dependency_order() {
         // Real fynd flow: a full recompute with no sim state makes spot prices fail
-        // outright, cascading ComputationFailed to every dependent in registration order.
+        // outright, cascading ComputationFailed to every dependent. Token prices require both
+        // spot prices and depths, so they come last.
         let (manager, _event_rx) = ComputationManager::new(
             ComputationManagerConfig::new(),
             market_with_component_no_sim_state(),
@@ -1312,8 +1313,8 @@ mod tests {
             vec![
                 ("new_block", ""),
                 ("failed", "spot_prices"),
-                ("failed", "token_prices"),
                 ("failed", "pool_depths"),
+                ("failed", "token_prices"),
             ]
         );
     }
