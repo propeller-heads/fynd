@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use crate::decoder::{
     decode::{DecodeContext, TradeDecoder, TraderFlow},
     netting_decoders::venue_flow,
-    transfer_ledger::{NetSwap, TransferLedger},
+    transfer_ledger::{NetSwap, TransferLedger, RESIDUE_GROSS_RATIO},
 };
 
 /// Relay's netting decoder.
@@ -66,6 +66,9 @@ impl<P: Provider> TradeDecoder<P> for RelayNetting {
 /// the collector took 0.000536 ETH, and anchoring on the collector reported a 468,826 bps win
 /// against a trade that actually beat Fynd by 45 bps.
 ///
+/// A candidate output under `RESIDUE_GROSS_RATIO` of its token's flow through the transaction is
+/// a fee leg rather than the fill, and is skipped.
+///
 /// Declines (returns `None`) when the shape is ambiguous: not exactly one input token, a
 /// same-token "swap", more than one token back to the collector, or more than one external
 /// recipient or output (a batched multi-order fill, like netting's multi-leg decline).
@@ -102,6 +105,15 @@ fn decode_rebalance(
         // something back and is therefore never a pure sink.
         if token == token_in {
             return None;
+        }
+        // A sliver of the token's flow is a fee, not the fill. On tx `0x3dc3f83e…` the executor
+        // paid 0.1% of the bought WETH to one address and 99.9% to the payee, who had also
+        // forwarded the input and so was not a pure sink — leaving the fee recipient as the only
+        // candidate. Read as the output it reported a 9,990,000 bps win on a trade Fynd matched.
+        if amount.saturating_mul(U256::from(RESIDUE_GROSS_RATIO)) <
+            transfer_ledger.token_gross(token)
+        {
+            continue;
         }
         outputs.push((token, amount));
     }
@@ -248,6 +260,49 @@ mod tests {
             decode_rebalance(&transfer_ledger(&logs, &native), &collectors, &routers, addr(200))
                 .unwrap();
         assert_eq!(got, swap(token_in, 1000, Address::ZERO, 2000));
+    }
+
+    #[test]
+    fn test_rebalance_skips_a_fee_sized_output_leg() {
+        // The shape of tx 0x3dc3f83e…: the executor splits the bought token 0.1% to a fee address
+        // and 99.9% to the payee, who also forwarded the input and is therefore not a pure sink.
+        // With only the fee address left as a candidate, its sliver was read as the whole output.
+        let fee_collector = addr(99);
+        let executor = addr(50);
+        let payee = addr(7);
+        let fee_recipient = addr(8);
+        let token_in = addr(10);
+        let token_out = addr(11);
+        let collectors = HashSet::from([fee_collector]);
+        let routers = HashSet::from([addr(2)]);
+        let logs = vec![
+            make_transfer_log(token_in, fee_collector, payee, U256::from(1000)),
+            make_transfer_log(token_in, payee, executor, U256::from(1000)),
+            make_transfer_log(token_out, executor, fee_recipient, U256::from(1)),
+            make_transfer_log(token_out, executor, payee, U256::from(999)),
+        ];
+        assert!(decode_rebalance(&transfer_ledger(&logs, &[]), &collectors, &routers, addr(200))
+            .is_none());
+    }
+
+    #[test]
+    fn test_rebalance_keeps_a_full_size_output_leg() {
+        // The same shape without the fee split: the sink recipient holds the whole output, so it
+        // is the fill and still decodes.
+        let fee_collector = addr(99);
+        let pool = addr(50);
+        let recipient = addr(7);
+        let token_in = addr(10);
+        let token_out = addr(11);
+        let collectors = HashSet::from([fee_collector]);
+        let routers = HashSet::from([addr(2)]);
+        let logs = vec![
+            make_transfer_log(token_in, fee_collector, pool, U256::from(1000)),
+            make_transfer_log(token_out, pool, recipient, U256::from(999)),
+        ];
+        let got = decode_rebalance(&transfer_ledger(&logs, &[]), &collectors, &routers, addr(200))
+            .unwrap();
+        assert_eq!(got, swap(token_in, 1000, token_out, 999));
     }
 
     #[test]
