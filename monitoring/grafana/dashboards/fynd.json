@@ -289,6 +289,27 @@
         },
         "overrides": []
       }
+    },
+    {
+      "id": 12,
+      "title": "Solve Duration by Pool (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, pool) (rate(worker_pool_solve_duration_seconds_bucket[1m])))",
+          "legendFormat": "{{pool}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      }
     }
   ],
   "schemaVersion": 39
