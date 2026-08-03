@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     decoder::Registry,
-    resolve::{render_route, Outcome, RangeComparison, StateResult, Verdict},
+    resolve::{render_route, Outcome, RangeComparison, StateResult, Verdict, MIN_NOTIONAL_USD},
     usd::Prices,
 };
 
@@ -35,14 +35,6 @@ const UNTRACED_TRANSACTIONS: &str = "hindsight_untraced_transactions_total";
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
 /// from the gas-token-anchored valuation).
 const USD_OUTLIER_THRESHOLD: f64 = 1_000.0;
-
-/// Settled USD notional below which a trade is excluded from the win-rate (`TRADES_TOTAL`) and bps
-/// (`SAVINGS_BPS`) metrics. On a dust trade a few wei of rounding is tens to thousands of bps, so
-/// dust dominates those unweighted quantiles and win counts while contributing nothing real. The
-/// USD-weighted histograms (`VOLUME_USD`/`SAVINGS_USD`/`IMPROVEMENT_USD`) keep every trade — a $5
-/// win adds $5 — so total savings and volume stay complete. A trade whose notional cannot be
-/// priced is kept: we do not drop what we cannot measure.
-const MIN_NOTIONAL_USD: f64 = 100.0;
 
 /// Whether a USD savings value is large enough to log for inspection.
 fn is_usd_outlier(usd: f64) -> bool {
@@ -239,8 +231,10 @@ pub(crate) fn record_range(
     }
 
     // Dust guard: sub-`MIN_NOTIONAL_USD` trades distort the unweighted win-rate and bps quantiles,
-    // so they are kept out of `TRADES_TOTAL` and `SAVINGS_BPS`. An unpriced trade has no known
-    // notional and is kept. The notional is a per-trade quantity, so both states share this gate.
+    // so they are kept out of `TRADES_TOTAL` and `SAVINGS_BPS`. The USD-weighted histograms
+    // (`VOLUME_USD`/`SAVINGS_USD`/`IMPROVEMENT_USD`) keep every trade — a $5 win adds $5 — so
+    // total savings and volume stay complete. An unpriced trade has no known notional and is
+    // kept. The notional is a per-trade quantity, so both states share this gate.
     let above_floor = volume.is_none_or(|usd| usd >= MIN_NOTIONAL_USD);
 
     let savings_top = record_state(range, &range.top, "top", &labels, prices_top, above_floor);

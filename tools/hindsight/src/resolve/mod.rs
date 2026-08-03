@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use alloy::primitives::{Address, TxHash, U256};
 use async_trait::async_trait;
-pub(crate) use compare::{Deltas, Slippage, Verdict};
+pub(crate) use compare::{Deltas, Slippage, Verdict, MIN_NOTIONAL_USD};
 use fynd_core::types::{Route, Swap};
 use serde::Serialize;
 use tycho_simulation::tycho_common::models::Address as CoreAddress;
