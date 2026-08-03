@@ -143,8 +143,8 @@ metrics-util = "0.20"
 # Tycho
 # TEMPORARY: pinned to propeller-heads/tycho#1254 for the unreleased `EXCLUSIVE_EXTENSIONS`
 # export.
-tycho-execution = { git = "https://github.com/propeller-heads/tycho", rev = "fdc37336ee8372f8c9488feeff1e5e21203513d4" }
-tycho-simulation = { git = "https://github.com/propeller-heads/tycho", rev = "fdc37336ee8372f8c9488feeff1e5e21203513d4" }
+tycho-execution = { git = "https://github.com/propeller-heads/tycho", rev = "f0eb6035d8bcf72fa3369c21ce233787e53d2a78" }
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho", rev = "f0eb6035d8bcf72fa3369c21ce233787e53d2a78" }
 typetag = "0.2"
 
 # Compression

@@ -22,8 +22,8 @@ use crate::{
 };
 
 /// Returns `true` when the component offers exclusive liquidity, i.e. is swappable only with
-/// off-chain authorization. The `is_exclusive` static attribute is stamped by tycho-simulation's
-/// decoder; absence means the component is public.
+/// off-chain authorization. Signaled by the `is_exclusive` static attribute; absence means the
+/// component is public.
 pub(crate) fn is_exclusive(component: &ProtocolComponent) -> bool {
     component
         .static_attributes
@@ -70,9 +70,8 @@ fn filter_component_ids(market: &MarketState, ids: &[ComponentId]) -> Vec<Compon
         .collect()
 }
 
-/// Stamps the `is_exclusive` attribute onto a component's static attributes, mirroring
-/// tycho-simulation's decoder tagging, so tests can build exclusive components without
-/// protocol-specific fixtures.
+/// Stamps the `is_exclusive` attribute onto a component's static attributes, so tests can build
+/// exclusive components without protocol-specific fixtures.
 #[cfg(test)]
 pub(crate) fn mark_exclusive(component: &mut ProtocolComponent) {
     component
