@@ -29,7 +29,7 @@
 //! assembled through the shared split primitives and can be encoded on-chain.
 
 use std::{
-    cmp::{Ordering, Reverse},
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
@@ -51,7 +51,7 @@ use super::{
 use crate::{
     derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketDataView, MarketState, StateLabel},
-    graph::{petgraph::StableDiGraph, EdgeData, Path, PetgraphStableDiGraphManager},
+    graph::{EdgeData, Path, PetgraphStableDiGraphManager, RoutingGraph},
     types::{ComponentId, Order, Route, RouteResult},
     AlgorithmError,
 };
@@ -295,7 +295,7 @@ impl WaterFillAlgorithm {
     #[instrument(level = "debug", skip_all)]
     async fn setup<'a>(
         &self,
-        graph: &'a StableDiGraph<DepthAndPrice>,
+        graph: &'a RoutingGraph<DepthAndPrice>,
         market: MarketData,
         label: Option<StateLabel>,
         derived: Option<SharedDerivedDataRef>,
@@ -471,7 +471,7 @@ impl WaterFillAlgorithm {
 }
 
 impl Algorithm for WaterFillAlgorithm {
-    type GraphType = StableDiGraph<DepthAndPrice>;
+    type GraphType = RoutingGraph<DepthAndPrice>;
     type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
 
     fn name(&self) -> &str {
@@ -1161,7 +1161,7 @@ fn timed_out(start: &Instant, timeout_ms: u64) -> bool {
 /// Runs the bounded discovery and returns the candidate paths plus their `(index, full-amount
 /// gross output)` ranking, best first.
 fn find_candidate_paths<'a, W>(
-    graph: &'a StableDiGraph<W>,
+    graph: &'a RoutingGraph<W>,
     market: &MarketDataView<'_>,
     order: &Order,
     cfg: CandidateSearchConfig<'_>,
@@ -1215,14 +1215,13 @@ where
 }
 
 fn find_token_node<W>(
-    graph: &StableDiGraph<W>,
+    graph: &RoutingGraph<W>,
     token: &Address,
     reason: NoPathReason,
     order: &Order,
 ) -> Result<NodeIndex, AlgorithmError> {
     graph
-        .node_indices()
-        .find(|&node| &graph[node] == token)
+        .node_index(token)
         .ok_or(AlgorithmError::NoPath {
             from: order.token_in().clone(),
             to: order.token_out().clone(),
@@ -1231,7 +1230,7 @@ fn find_token_node<W>(
 }
 
 fn expand_candidate_state<'a, W>(
-    graph: &'a StableDiGraph<W>,
+    graph: &'a RoutingGraph<W>,
     market: &MarketDataView<'_>,
     cfg: &CandidateSearchConfig<'_>,
     target: NodeIndex,
@@ -1266,7 +1265,7 @@ fn expand_candidate_state<'a, W>(
 }
 
 fn candidate_edges_for_state<'a, W>(
-    graph: &'a StableDiGraph<W>,
+    graph: &'a RoutingGraph<W>,
     market: &MarketDataView<'_>,
     cfg: &CandidateSearchConfig<'_>,
     target: NodeIndex,
@@ -1280,7 +1279,7 @@ fn candidate_edges_for_state<'a, W>(
 }
 
 fn score_candidate_edges<'a, W>(
-    graph: &'a StableDiGraph<W>,
+    graph: &'a RoutingGraph<W>,
     market: &MarketDataView<'_>,
     cfg: &CandidateSearchConfig<'_>,
     target: NodeIndex,
@@ -1318,23 +1317,18 @@ fn score_candidate_edges<'a, W>(
 /// chain without a hardcoded per-chain list. The native-ETH zero address carries near-zero degree
 /// but is load-bearing for `WETH → ETH → token` routes where Tycho models native ETH as `0x0`, so
 /// it is anchored explicitly.
-fn derive_anchor_tokens<W>(graph: &StableDiGraph<W>) -> HashSet<Address> {
-    let mut by_degree: Vec<(NodeIndex, usize)> = graph
-        .node_indices()
-        .map(|node| (node, graph.edges(node).count()))
-        .collect();
-    by_degree.sort_unstable_by_key(|(_, degree)| Reverse(*degree));
-    let mut anchors: HashSet<Address> = by_degree
-        .into_iter()
-        .take(DERIVED_ANCHOR_COUNT)
-        .map(|(node, _)| graph[node].clone())
+fn derive_anchor_tokens<W>(graph: &RoutingGraph<W>) -> HashSet<Address> {
+    let mut anchors: HashSet<Address> = graph
+        .most_connected_tokens(DERIVED_ANCHOR_COUNT)
+        .iter()
+        .cloned()
         .collect();
     anchors.insert(Address::from([0u8; 20]));
     anchors
 }
 
 fn candidate_priority<W>(
-    graph: &StableDiGraph<W>,
+    graph: &RoutingGraph<W>,
     node: NodeIndex,
     target: NodeIndex,
     cfg: &CandidateSearchConfig<'_>,
@@ -1353,7 +1347,7 @@ fn candidate_priority<W>(
 }
 
 fn can_extend_path<W>(
-    graph: &StableDiGraph<W>,
+    graph: &RoutingGraph<W>,
     state: &CandidatePathState<'_, W>,
     next_node: NodeIndex,
     target: NodeIndex,

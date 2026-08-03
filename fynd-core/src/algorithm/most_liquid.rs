@@ -8,7 +8,7 @@
 //! 5. Returning the best route with stats recorded to the tracing span
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -16,7 +16,6 @@ use std::{
 use metrics::{counter, histogram};
 use num_bigint::{BigInt, BigUint};
 use num_traits::ToPrimitive;
-use petgraph::prelude::EdgeRef;
 use tracing::{debug, instrument, trace};
 use tycho_simulation::{
     tycho_common::simulation::protocol_sim::ProtocolSim,
@@ -28,7 +27,7 @@ use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
     derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketState, StateLabel},
-    graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
+    graph::{Path, PetgraphStableDiGraphManager, RoutingGraph},
     types::{ComponentId, Order, Route, RouteResult, Swap},
     AlgorithmError,
 };
@@ -208,19 +207,20 @@ impl MostLiquidAlgorithm {
         })
     }
 
-    /// Finds all paths between two tokens using BFS directly on the graph.
+    /// Finds all paths between two tokens within the hop budget.
     ///
-    /// This is a helper method that operates on the graph without needing the graph manager.
-    /// It performs BFS traversal to find all paths within the hop budget.
+    /// Resolves the token addresses to nodes and defers to the graph's enumeration, which is
+    /// memoised for as long as the topology is unchanged.
     ///
     /// # Errors
     ///
     /// Returns `AlgorithmError` if:
+    /// - The hop bounds are invalid
     /// - Source token is not in the graph
     /// - Destination token is not in the graph
     #[instrument(level = "debug", skip(graph, connector_tokens))]
     pub(crate) fn find_paths<'a>(
-        graph: &'a StableDiGraph<DepthAndPrice>,
+        graph: &'a RoutingGraph<DepthAndPrice>,
         from: &Address,
         to: &Address,
         min_hops: usize,
@@ -235,70 +235,28 @@ impl MostLiquidAlgorithm {
             });
         }
 
-        // Find source and destination nodes by address
-        // TODO: this could be optimized by using a node index map in the graph manager
         let from_idx = graph
-            .node_indices()
-            .find(|&n| &graph[n] == from)
+            .node_index(from)
             .ok_or(AlgorithmError::NoPath {
                 from: from.clone(),
                 to: to.clone(),
                 reason: NoPathReason::SourceTokenNotInGraph,
             })?;
         let to_idx = graph
-            .node_indices()
-            .find(|&n| &graph[n] == to)
+            .node_index(to)
             .ok_or(AlgorithmError::NoPath {
                 from: from.clone(),
                 to: to.clone(),
                 reason: NoPathReason::DestinationTokenNotInGraph,
             })?;
 
-        let mut paths = Vec::new();
-        let mut queue = VecDeque::new();
-        queue.push_back((from_idx, Path::new()));
-
-        while let Some((current_node, current_path)) = queue.pop_front() {
-            if current_path.len() >= max_hops {
-                continue;
-            }
-
-            for edge in graph.edges(current_node) {
-                let next_node = edge.target();
-                let next_addr = &graph[next_node];
-
-                // Skip paths that revisit a token already in the path.
-                // Exception: when source == destination, the destination may appear at the end
-                // (forming a first == last cycle, e.g. USDC → WETH → USDC). All other intermediate
-                // cycles (e.g. USDC → WETH → WBTC → WETH) are not supported by Tycho execution.
-                let already_visited = current_path.tokens.contains(&next_addr);
-                let is_closing_circular_route = from_idx == to_idx && next_node == to_idx;
-                if already_visited && !is_closing_circular_route {
-                    continue;
-                }
-
-                // Skip disallowed connector tokens. Endpoints (from / to) are always permitted.
-                let is_destination = next_node == to_idx;
-                if !is_destination {
-                    if let Some(tokens) = connector_tokens {
-                        if !tokens.contains(next_addr) {
-                            continue;
-                        }
-                    }
-                }
-
-                let mut new_path = current_path.clone();
-                new_path.add_hop(&graph[current_node], edge.weight(), next_addr);
-
-                if next_node == to_idx && new_path.len() >= min_hops {
-                    paths.push(new_path.clone());
-                }
-
-                queue.push_back((next_node, new_path));
-            }
-        }
-
-        Ok(paths)
+        graph
+            .enumerate_paths(from_idx, to_idx, min_hops, max_hops, connector_tokens)
+            .ok_or_else(|| {
+                AlgorithmError::Other(
+                    "enumerated path no longer resolves against the graph".to_string(),
+                )
+            })
     }
 
     /// Attempts to score a path based on spot prices and minimum liquidity depth.
@@ -473,7 +431,7 @@ impl Default for MostLiquidAlgorithm {
 }
 
 impl Algorithm for MostLiquidAlgorithm {
-    type GraphType = StableDiGraph<DepthAndPrice>;
+    type GraphType = RoutingGraph<DepthAndPrice>;
     type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
 
     fn name(&self) -> &str {
@@ -1939,6 +1897,58 @@ mod tests {
         assert_eq!(result.route().swaps().len(), 2, "Should use 2-hop path due to min_hops=2");
         assert_eq!(result.route().swaps()[0].component_id(), "pool_ac");
         assert_eq!(result.route().swaps()[1].component_id(), "pool_cb");
+    }
+
+    /// Only the most recent path enumeration is retained, so alternating token pairs evict each
+    /// other on every solve. Thrash must cost time, never correctness.
+    #[tokio::test]
+    async fn test_alternating_pairs_solve_identically_under_slot_thrash() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market_weighted(vec![
+            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(3.0)),
+            ("pool_cb", &token_c, &token_b, MockProtocolSim::new(5.0)),
+        ]);
+
+        let algorithm = MostLiquidAlgorithm::new();
+        let to_b = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let to_c = order(&token_a, &token_c, 100, OrderSide::Sell);
+        let derived =
+            setup_derived_with_token_prices(&[token_b.address.clone(), token_c.address.clone()]);
+
+        let mut to_b_routes = Vec::new();
+        let mut to_c_routes = Vec::new();
+        for _ in 0..3 {
+            for (ord, routes) in [(&to_b, &mut to_b_routes), (&to_c, &mut to_c_routes)] {
+                let result = algorithm
+                    .find_best_route(
+                        manager.graph(),
+                        market.clone(),
+                        None,
+                        Some(derived.clone()),
+                        ord,
+                    )
+                    .await
+                    .unwrap();
+                routes.push(
+                    result
+                        .route()
+                        .swaps()
+                        .iter()
+                        .map(|swap| swap.component_id().to_string())
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+
+        assert_eq!(to_b_routes[0], to_b_routes[1]);
+        assert_eq!(to_b_routes[0], to_b_routes[2]);
+        assert_eq!(to_c_routes[0], to_c_routes[1]);
+        assert_eq!(to_c_routes[0], to_c_routes[2]);
+        assert_ne!(to_b_routes[0], to_c_routes[0], "the two orders must differ to be a test");
     }
 
     #[tokio::test]

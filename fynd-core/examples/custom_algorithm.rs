@@ -22,7 +22,7 @@ use std::{collections::HashMap, env, str::FromStr, time::Duration};
 use fynd_core::{
     derived::SharedDerivedDataRef,
     feed::market_data::{MarketData, StateLabel},
-    graph::{PetgraphStableDiGraphManager, StableDiGraph},
+    graph::{PetgraphStableDiGraphManager, RoutingGraph},
     types::RouteResult,
     Algorithm, AlgorithmError, ComputationRequirements, EncodingOptions, FyndBuilder, Order,
     OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, Swap,
@@ -55,7 +55,7 @@ impl Algorithm for DirectPoolAlgorithm {
     // Reuse the built-in petgraph manager — it handles graph initialization and
     // market event updates automatically. We just need a simple graph with no
     // edge weights (unit `()` type).
-    type GraphType = StableDiGraph<()>;
+    type GraphType = RoutingGraph<()>;
     type GraphManager = PetgraphStableDiGraphManager<()>;
 
     fn name(&self) -> &str {

@@ -4,11 +4,14 @@
 //! representation. GraphManager handles both building graphs from market data and updating them
 //! based on market events.
 
+mod generation_cache;
 pub mod petgraph;
+pub mod routing_graph;
 
 use std::collections::HashMap;
 
 pub use petgraph::{EdgeData, PetgraphStableDiGraphManager, StableDiGraph};
+pub use routing_graph::RoutingGraph;
 use thiserror::Error;
 use tycho_simulation::{
     tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim},
