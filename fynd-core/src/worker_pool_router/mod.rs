@@ -727,10 +727,10 @@ impl WorkerPoolRouter {
 /// public reference is quoted, with zero surplus; the trade then executes on exclusive liquidity
 /// at the public price.
 ///
-/// Per-leg attribution: the route's excess over the committed amount (`realized − committed`)
+/// Per-leg attribution: the route's surplus over the committed amount (`realized − committed`)
 /// is deducted from the exclusive legs — each leg absorbs what it can, capped at its own output,
 /// in route order. Only exclusive legs can withhold output, so the whole
-/// excess must come out of them; public branches pay out in full. If the exclusive legs cannot
+/// surplus must come out of them; public branches pay out in full. If the exclusive legs cannot
 /// absorb all of it, the remainder is left with the user (who then receives more than the
 /// committed amount).
 ///
@@ -817,7 +817,7 @@ fn combine_with_surplus(
     let mut surplus_quote = exclusive_candidate.clone();
 
     // Final output of each swap's path, walked backwards (a path's terminal output propagates
-    // to its chained predecessors). Converting captured excess into a leg's token needs the
+    // to its chained predecessors). Converting captured surplus into a leg's token needs the
     // realized downstream price `path_final_out / leg_out`; for terminal legs the ratio is 1.
     let path_final_outs: Vec<BigUint> = surplus_quote
         .route()
@@ -838,15 +838,15 @@ fn combine_with_surplus(
         .unwrap_or_default();
 
     if let Some(route) = surplus_quote.route_mut() {
-        // Capture the route's excess at the exclusive legs.
+        // Capture the route's surplus at the exclusive legs.
         // Each leg absorbs up to its path's capacity; any remainder is left with the user.
-        let mut excess = exclusive_route_amount_out - &committed_amount_out;
+        let mut surplus = exclusive_route_amount_out - &committed_amount_out;
         for (i, swap) in route.swaps_mut().iter_mut().enumerate() {
             if policy.is_exclusive(swap.protocol_component()) {
                 let Some(path_final_out) = path_final_outs.get(i) else {
                     continue;
                 };
-                let captured = excess
+                let captured = surplus
                     .clone()
                     .min(path_final_out.clone());
                 // Convert into the leg's own token, rounding down so any error is taken
@@ -866,7 +866,7 @@ fn combine_with_surplus(
                     swap.amount_out(),
                 );
                 let committed_leg = swap.amount_out() - &captured_leg;
-                excess -= captured;
+                surplus -= captured;
                 swap.set_committed_amount_out(committed_leg);
             }
         }
@@ -895,7 +895,7 @@ fn combine_with_surplus(
 /// route, no route at all, or an exclusive leg that sits mid-path.
 ///
 /// Both constraints are v1 restrictions that keep per-leg surplus attribution exact and
-/// unambiguous: a mid-route leg would need inverse simulation to convert the excess into its
+/// unambiguous: a mid-route leg would need inverse simulation to convert the surplus into its
 /// token, and multiple exclusive legs make the per-pool attribution non-unique. Both are
 /// deferred to a future version. Terminal is defined as producing the route's overall output
 /// token (`Route::output_token`).
@@ -2046,7 +2046,7 @@ mod tests {
 
     #[test]
     fn test_combine_committed_leg_deduction() {
-        // leg = 995, committed = 910, realized = 1000: the route's excess (90) is deducted from
+        // leg = 995, committed = 910, realized = 1000: the route's surplus (90) is deducted from
         // the exclusive leg in full — committed_leg = 995 − 90 = 905, exactly, no rounding.
         let responses = OrderResponses {
             order_id: "test-order".to_string(),
@@ -2168,7 +2168,7 @@ mod tests {
             .expect("should have a public swap");
         assert_eq!(public_leg.committed_amount_out(), None);
 
-        // The public branch (600) pays out in full, so the entire excess
+        // The public branch (600) pays out in full, so the entire surplus
         // (1100 − 1010 = 90) is deducted from the exclusive leg: committed_leg = 500 − 90 =
         // 410. The user receives 600 + 410 = 1010 (exactly the committed amount) and the
         // exclusive component captures all 90.
