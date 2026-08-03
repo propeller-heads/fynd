@@ -95,3 +95,52 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
 1. `WorkerPoolRouter` fans out to all pools in parallel
 2. Each pool dispatches to a `SolverWorker` → `Algorithm::find_best_route` → `RouteResult`
 3. Selects best by `amount_out_net_gas` → optional `Encoder` → `Quote`
+
+## Exclusive Liquidity (restricted)
+
+A limited, opt-in service for specific deployments — **not** part of the normal routing path. With no
+`ExclusivityPolicy` configured (the default) every pool is `LiquidityScope::PublicOnly`, none of this
+code runs, and the flows above are complete. Skip this section unless a task names it.
+
+Exclusive components must first be admitted to the stream. `feed/protocol_registry.rs` parses each
+`--protocols` entry into a `ProtocolSpec { system, exclusive }` (`Display` renders it back to the
+entry form): the `exclusive:` prefix (e.g. `exclusive:ekubo_v3`) selects the protocol's
+exclusive-inclusive filter — for Ekubo V3,
+`ekubo_v3_extension_filter_with_signed_exclusive_swap` instead of the default
+`ekubo_v3_extension_filter`, which drops SignedExclusiveSwap pools. The private
+`EXCLUSIVE_CAPABLE_PROTOCOLS` is the single source of truth for which protocols accept the prefix;
+applying it elsewhere is a `DataFeedError::Config`. The prefix is stripped before registration, so
+Tycho only sees the bare system name.
+
+`parse_protocols` also rejects a list naming one protocol both with and without the prefix. Registration
+is keyed by system name (the stream builder and decoder both hold `HashMap`s), so such a list would
+otherwise stream whichever variant happened to come last. Callers going through
+`fynd_rpc::protocols::resolve_protocols` never hit this — it merges the variants first — but a
+`Vec<String>` assembled by hand for `FyndBuilder::new` can, and gets an error rather than an
+order-dependent stream.
+
+Pools are partitioned by `LiquidityScope` (`worker_pool_router/`, re-exported at the crate root):
+
+- `PublicOnly` (default) — public liquidity only. Its best candidate is the **committed amount out**,
+  the reference output the quote must at least deliver.
+- `All` — also routes through components the configured `ExclusivityPolicy`
+  (`feed/exclusivity.rs`) classifies as exclusive.
+
+Isolation is per worker, not per state: `MarketState` is never duplicated. `PublicOnly` workers hold
+`Some(policy)` and filter exclusive components out of their local graph topology and incoming
+`MarketEvent`s; `All` workers hold `None` and ingest everything.
+
+After public ranking, `combine_with_surplus` overlays any `All`-scope candidate that beats the
+committed amount and records the difference as `SurplusInfo` (`OrderQuote::surplus_amount()`,
+`committed_amount_out()`, `Swap::committed_amount_out()`). All are `#[serde(skip)]` — internal, not
+on the wire.
+
+Enable with `FyndBuilder::exclusivity_policy(predicate)` (`Fn(&ProtocolComponent) -> bool`), then set
+the scope per pool via `PoolConfig::with_liquidity_scope()` or `liquidity_scope = "all"` in
+`worker_pools.toml`. A pool with a scope but no policy fails the build
+(`SolverBuildError::LiquidityScopeWithoutPolicy`).
+
+Encoding a committed leg is protocol-specific: `encoding/exclusive_swap.rs` is Ekubo-only. It signs
+an EIP-712 authorization with `EXCLUSIVE_SWAP_CONTROLLER_KEY` and packs it, plus a derived Q32 fee,
+into the `SignedExclusiveSwap` extension's `user_data`. Encoding an exclusive leg without that env
+var fails.
