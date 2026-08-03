@@ -372,6 +372,50 @@ mod tests {
         (comp.to_string(), addr(b_in), addr(b_out))
     }
 
+    /// A handed-out snapshot must keep showing the block it was taken at, even after the store
+    /// recomputes. Solvers hold these across a whole solve, so a recompute leaking into one would
+    /// mean a route priced against two different blocks at once.
+    #[test]
+    fn test_shared_snapshot_is_isolated_from_later_recomputes() {
+        let mut store = DerivedData::new();
+        let key = pair_key("pool_a", 0x01, 0x02);
+
+        let mut first = SpotPrices::default();
+        first.insert(key.clone(), 1.0);
+        store.set_spot_prices(first, vec![], 10, true);
+
+        let snapshot = store
+            .spot_prices_shared()
+            .expect("spot prices were just set");
+        assert_eq!(snapshot.get(&key), Some(&1.0));
+
+        let mut second = SpotPrices::default();
+        second.insert(key.clone(), 2.0);
+        store.set_spot_prices(second, vec![], 11, true);
+
+        assert_eq!(snapshot.get(&key), Some(&1.0), "held snapshot must not see the recompute");
+        assert_eq!(
+            store
+                .spot_prices_shared()
+                .and_then(|p| p.get(&key).copied()),
+            Some(2.0),
+            "a fresh read must see the recompute"
+        );
+    }
+
+    /// Two reads between recomputes must share one allocation rather than copy the map.
+    #[test]
+    fn test_shared_snapshot_reads_share_one_allocation() {
+        let mut store = DerivedData::new();
+        let mut prices = SpotPrices::default();
+        prices.insert(pair_key("pool_a", 0x01, 0x02), 1.0);
+        store.set_spot_prices(prices, vec![], 10, true);
+
+        let a = store.spot_prices_shared().unwrap();
+        let b = store.spot_prices_shared().unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
     #[test]
     fn test_token_prices_block_tracks_independently() {
         let mut store = DerivedData::new();
