@@ -22,7 +22,7 @@ infrastructure.
 
 | Endpoint | Handler | Description |
 |---|---|---|
-| `POST /v1/quote` | `handlers::quote` | Submit orders, receive optimal routes |
+| `POST /v1/quote` | `handlers::quote` | Submit orders, receive optimal routes. The `x-exclusive-access: true` request header (set by the authenticating proxy, never by the caller) allocates exclusive-access worker pools to the request; any other value or none restricts it to public pools. Only meaningful when the server is unreachable except through that proxy |
 | `GET /v1/health` | `handlers::health` | Health check (data freshness, derived data readiness, gas-price staleness, solver pool count). Returns 503 when market data is stale, derived data is not ready, or the gas price is stale |
 | `GET /v1/info` | `handlers::info` | Static metadata about this Fynd instance (version, chain, spender address) |
 | `GET /v1/prices` | `handlers::get_prices` | Token prices, spot prices, component depths (experimental feature only) |
@@ -48,6 +48,7 @@ annotations live in one place.
 | `handlers.rs` | Request handlers for `/v1/quote`, `/v1/health`, and `/v1/info` |
 | `dto.rs` | Re-exports wire types from `fynd-rpc-types` (conversions to `fynd-core` types live in `fynd-rpc-types` via the `core` feature) |
 | `error.rs` | `ApiError` type with HTTP status code mapping |
+| `exclusive_access.rs` | Reads the `x-exclusive-access` header into `fynd_core::ExclusiveAccess` |
 | `prices.rs` | Types and helpers for `GET /v1/prices`: query params, response DTOs (`PricesResponse`, `TokenPriceEntry`, etc.), `price_to_decimal_string` exact decimal serialization |
 | `middleware.rs` | HTTP metrics middleware: records `http_request_duration_seconds` (histogram) and `http_requests_total` (counter with per-client `user_identity`/`user_plan`/`client_version` labels sourced from proxy-injected headers) |
 

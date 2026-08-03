@@ -58,7 +58,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 ### Core Components
 
 1. **RouterApi** (`fynd-rpc/src/api/`) — Actix Web HTTP handlers: `POST /v1/quote`, `GET /v1/health`, `GET /v1/info`
-2. **WorkerPoolRouter** (`fynd-core/src/worker_pool_router/`) — Fans out orders to all pools, selects best by `amount_out_net_gas`
+2. **WorkerPoolRouter** (`fynd-core/src/worker_pool_router/`) — Allocates the pools that serve each order, fans out to those, selects best by `amount_out_net_gas`
 3. **WorkerPool** (`fynd-core/src/worker_pool/`) — N `SolverWorker` instances on dedicated OS threads per pool
 4. **Algorithm trait** (`fynd-core/src/algorithm/`) — Pluggable route-finding; built-in:
    `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`, and
@@ -80,7 +80,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 **Quote request path** (`POST /v1/quote`):
 1. `RouterApi` validates the request
-2. `WorkerPoolRouter` fans out each order to all worker pools in parallel
+2. `WorkerPoolRouter` allocates the worker pools serving each order (an exclusive-access pool only for a request carrying the `x-exclusive-access` entitlement) and fans out to them in parallel
 3. Each pool's `TaskQueue` dispatches to a `SolverWorker` on a dedicated OS thread
 4. Worker calls `Algorithm::find_best_route` with its local graph + shared market/derived data
 5. `WorkerPoolRouter` collects results, ranks candidates by `amount_out_net_gas` descending; if price guard is enabled it validates in rank order

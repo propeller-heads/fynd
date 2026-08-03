@@ -6,6 +6,8 @@ mod docs;
 pub mod dto;
 /// [`ApiError`] type with HTTP status code mapping.
 pub mod error;
+/// Resolves the caller's exclusive-liquidity entitlement from the request headers.
+pub(crate) mod exclusive_access;
 /// Request handlers for `/v1/quote`, `/v1/health`, and `/v1/info`.
 pub mod handlers;
 /// HTTP metrics middleware recording request duration and per-client usage.

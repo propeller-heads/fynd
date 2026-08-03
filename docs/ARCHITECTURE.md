@@ -153,12 +153,13 @@ Actix Web HTTP handlers. Validates requests, delegates to WorkerPoolRouter, retu
 
 Orchestrates quote requests across multiple worker pools:
 
-1. Fans out each order to all pools in parallel
-2. Manages per-request timeouts with optional early return
-3. Refines gas estimates using `estimate_gas_usage` (tycho-execution) before cross-pool ranking — algorithms use a fast naive estimate internally; this step applies a more accurate one that accounts for token transfers and protocol overhead
-4. Selects the best solution by refined `amount_out_net_gas`
-5. Optionally encodes winning solutions into on-chain transactions (when `EncodingOptions` are provided)
-6. Reports failures with error types and metrics
+1. Allocates the worker pools that serve each order, before dispatch. A worker pool declares which requests it serves (`WorkerPoolAdmission`) and each order is classified against it (`RequestClass`) — today on the caller's entitlement to exclusive liquidity, so an unentitled request is never dispatched to an exclusive-access worker pool
+2. Fans out each order to its allocated worker pools in parallel
+3. Manages per-request timeouts with optional early return
+4. Refines gas estimates using `estimate_gas_usage` (tycho-execution) before cross-pool ranking — algorithms use a fast naive estimate internally; this step applies a more accurate one that accounts for token transfers and protocol overhead
+5. Selects the best solution by refined `amount_out_net_gas`
+6. Optionally encodes winning solutions into on-chain transactions (when `EncodingOptions` are provided)
+7. Reports failures with error types and metrics
 
 ***
 
@@ -296,7 +297,7 @@ Client POST /v1/quote
 RouterApi (validate)
     │
     ▼
-WorkerPoolRouter (fan-out to all pools)
+WorkerPoolRouter (allocate pools, then fan out)
     │
     ├──► Pool A Queue ──► Worker ──► Algorithm ──► Quote
     ├──► Pool B Queue ──► Worker ──► Algorithm ──► Quote
