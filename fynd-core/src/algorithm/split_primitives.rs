@@ -263,12 +263,15 @@ impl ProtocolSim for SelectiveZeroGasSim {
 ///
 /// Assumes `f` is roughly unimodal (has one maximum). `max_evals` controls the
 /// number of function evaluations (higher = more precise but slower).
+///
+/// Returns the argmax together with `f` at that point, which the search already computed —
+/// callers that need the value should take it rather than pay for another evaluation.
 pub(crate) fn golden_section_search(
     f: impl Fn(f64) -> f64,
     mut lo: f64,
     mut hi: f64,
     max_evals: usize,
-) -> f64 {
+) -> (f64, f64) {
     let inv_phi = (5_f64.sqrt() - 1.0) / 2.0;
 
     let mut x1 = hi - inv_phi * (hi - lo);
@@ -295,9 +298,9 @@ pub(crate) fn golden_section_search(
     }
 
     if f1 >= f2 {
-        x1
+        (x1, f1)
     } else {
-        x2
+        (x2, f2)
     }
 }
 
@@ -501,6 +504,7 @@ pub(crate) fn build_post_swap_overrides(
         &root_hop.descriptor.token_in.address,
         &total_amount,
         &MarketOverrides::empty(),
+        PreSwapState::Discard,
     )?
     .post_swap)
 }
@@ -511,6 +515,18 @@ struct SplitSwap {
     amount_in: BigUint,
 }
 
+/// Whether a split execution needs each hop's pre-swap pool state kept.
+///
+/// Copying it is only worth doing for the caller that turns the execution into a [`Route`];
+/// the line search runs this same plan repeatedly and reads nothing but amounts and gas.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreSwapState {
+    /// Copy each hop's pool state into the result.
+    Keep,
+    /// Skip the copy.
+    Discard,
+}
+
 /// One pool swap in a split route, after it has been simulated.
 struct SimulatedSplitSwap {
     hop: HopDescriptor,
@@ -518,7 +534,9 @@ struct SimulatedSplitSwap {
     amount_in: BigUint,
     amount_out: BigUint,
     gas: BigUint,
-    pre_swap_state: Box<dyn ProtocolSim>,
+    /// The pool state before this swap; `None` when the execution was run with
+    /// [`PreSwapState::Discard`].
+    pre_swap_state: Option<Box<dyn ProtocolSim>>,
 }
 
 /// The outcome of simulating a whole split route.
@@ -655,6 +673,7 @@ fn execute_split_plan(
     start_token: &Bytes,
     start_amount: &BigUint,
     base_overrides: &MarketOverrides,
+    pre_swap: PreSwapState,
 ) -> Result<SplitExecution, AlgorithmError> {
     for path in paths {
         path.validate_token_cycles()?;
@@ -714,7 +733,10 @@ fn execute_split_plan(
                 amount_in: split_swap.amount_in,
                 amount_out: result.amount,
                 gas: result.gas,
-                pre_swap_state: sim.clone_box(),
+                pre_swap_state: match pre_swap {
+                    PreSwapState::Keep => Some(sim.clone_box()),
+                    PreSwapState::Discard => None,
+                },
             });
             post_swap = post_swap.with_override(split_swap.hop.component_id, result.new_state);
 
@@ -821,6 +843,7 @@ pub(crate) fn evaluate_total_output(
         &first_hop.token_in.address,
         total_amount,
         overrides,
+        PreSwapState::Discard,
     )?;
     let total_out = terminal_tokens
         .iter()
@@ -895,6 +918,7 @@ pub(crate) fn build_split_route(
         order.token_in(),
         order.amount(),
         &MarketOverrides::empty(),
+        PreSwapState::Keep,
     )?;
     let mut swaps = Vec::new();
     let mut route_tokens: HashMap<Bytes, Token> = HashMap::new();
@@ -909,6 +933,10 @@ pub(crate) fn build_split_route(
 
         let in_addr = executed.hop.token_in.address.clone();
         let out_addr = executed.hop.token_out.address.clone();
+        // Present because this execution asked for `PreSwapState::Keep`.
+        let pre_swap_state = executed.pre_swap_state.ok_or_else(|| {
+            AlgorithmError::Other("split execution dropped a pre-swap state".to_string())
+        })?;
         swaps.push(
             Swap::new(
                 executed.hop.component_id,
@@ -919,7 +947,7 @@ pub(crate) fn build_split_route(
                 executed.amount_out,
                 executed.gas,
                 component.clone(),
-                executed.pre_swap_state,
+                pre_swap_state,
             )
             .with_split(executed.split),
         );
@@ -1035,8 +1063,11 @@ mod tests {
     fn test_golden_section_finds_maximum() {
         // Maximize -(x - 0.3)^2; true maximum at x = 0.3.
         let f = |x: f64| -(x - 0.3) * (x - 0.3);
-        let result = golden_section_search(f, 0.0, 1.0, 100);
+        let (result, value) = golden_section_search(f, 0.0, 1.0, 100);
         assert!((result - 0.3).abs() < 1e-4, "expected ~0.3, got {result}");
+        // The returned value must be `f` at the returned point, since callers use it in place
+        // of re-evaluating.
+        assert!((value - f(result)).abs() < f64::EPSILON, "returned value must equal f(argmax)");
     }
 
     // ==================== PathAllocation::validate_token_cycles Tests ====================
