@@ -44,6 +44,17 @@ fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth
         .set(queue_depth as f64);
 }
 
+/// Records per-pool solve latency: one algorithm's own working time for one order, excluding
+/// queue wait. Unlike `worker_router_solve_duration_seconds`, which times the router racing every
+/// pool and so belongs to no single pool, this is attributable per pool.
+///
+/// Successful solves only — a pool that exhausts its timeout returns before this point and is
+/// counted in `worker_router_solver_failures_total{error_type="timeout"}` instead.
+fn record_solve_duration(pool_name: &str, solve_time: Duration) {
+    metrics::histogram!("worker_pool_solve_duration_seconds", "pool" => pool_name.to_string())
+        .record(solve_time.as_secs_f64());
+}
+
 /// A solver worker instance that maintains a market graph and processes solve requests.
 pub(crate) struct SolverWorker<A>
 where
@@ -341,9 +352,10 @@ where
             }
         };
 
-        let solve_time_ms = start_time.elapsed().as_millis() as u64;
+        let solve_time = start_time.elapsed();
+        record_solve_duration(&self.pool_name, solve_time);
 
-        Ok(SingleOrderQuote::new(order_quote, solve_time_ms))
+        Ok(SingleOrderQuote::new(order_quote, solve_time.as_millis() as u64))
     }
 
     /// Waits for required derived data to become ready, or until timeout.
@@ -1233,6 +1245,37 @@ mod tests {
         }
         assert!(wait_seen, "queue wait histogram not recorded");
         assert!(depth_seen, "queue depth gauge not recorded");
+    }
+
+    #[test]
+    fn solve_duration_metric_recorded() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_solve_duration("test_pool", std::time::Duration::from_millis(120));
+        });
+
+        let mut solve_seen = false;
+        for (key, _unit, _description, value) in snapshotter.snapshot().into_vec() {
+            let key = key.key();
+            if key.name() != "worker_pool_solve_duration_seconds" {
+                continue;
+            }
+            let pool_label = key
+                .labels()
+                .find(|label| label.key() == "pool")
+                .map(|label| label.value().to_string());
+            assert_eq!(pool_label.as_deref(), Some("test_pool"));
+            let DebugValue::Histogram(samples) = value else {
+                panic!("expected histogram, got {value:?}");
+            };
+            assert_eq!(samples.len(), 1);
+            assert!((samples[0].into_inner() - 0.120).abs() < 1e-9);
+            solve_seen = true;
+        }
+        assert!(solve_seen, "solve duration histogram not recorded");
     }
 
     #[test]
