@@ -1899,6 +1899,58 @@ mod tests {
         assert_eq!(result.route().swaps()[1].component_id(), "pool_cb");
     }
 
+    /// Only the most recent path enumeration is retained, so alternating token pairs evict each
+    /// other on every solve. Thrash must cost time, never correctness.
+    #[tokio::test]
+    async fn test_alternating_pairs_solve_identically_under_slot_thrash() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market_weighted(vec![
+            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(3.0)),
+            ("pool_cb", &token_c, &token_b, MockProtocolSim::new(5.0)),
+        ]);
+
+        let algorithm = MostLiquidAlgorithm::new();
+        let to_b = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let to_c = order(&token_a, &token_c, 100, OrderSide::Sell);
+        let derived =
+            setup_derived_with_token_prices(&[token_b.address.clone(), token_c.address.clone()]);
+
+        let mut to_b_routes = Vec::new();
+        let mut to_c_routes = Vec::new();
+        for _ in 0..3 {
+            for (ord, routes) in [(&to_b, &mut to_b_routes), (&to_c, &mut to_c_routes)] {
+                let result = algorithm
+                    .find_best_route(
+                        manager.graph(),
+                        market.clone(),
+                        None,
+                        Some(derived.clone()),
+                        ord,
+                    )
+                    .await
+                    .unwrap();
+                routes.push(
+                    result
+                        .route()
+                        .swaps()
+                        .iter()
+                        .map(|swap| swap.component_id().to_string())
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+
+        assert_eq!(to_b_routes[0], to_b_routes[1]);
+        assert_eq!(to_b_routes[0], to_b_routes[2]);
+        assert_eq!(to_c_routes[0], to_c_routes[1]);
+        assert_eq!(to_c_routes[0], to_c_routes[2]);
+        assert_ne!(to_b_routes[0], to_c_routes[0], "the two orders must differ to be a test");
+    }
+
     #[tokio::test]
     async fn test_find_best_route_respects_max_hops() {
         // Setup: Only path is A->B->C (2 hops)

@@ -19,7 +19,7 @@ use petgraph::{
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
-    generation_cache::GenerationCache,
+    generation_cache::{GenerationCache, LastQueryCache},
     petgraph::{EdgeData, StableDiGraph},
     Path,
 };
@@ -91,12 +91,14 @@ pub struct RoutingGraph<D> {
     /// whenever the generation moves on; see
     /// [`most_connected_tokens`](Self::most_connected_tokens).
     most_connected: Mutex<GenerationCache<usize, Arc<Vec<Address>>>>,
-    /// Subgraphs keyed by `(source, max_hops)`; see
-    /// [`reachable_subgraph`](Self::reachable_subgraph).
-    subgraphs: Mutex<GenerationCache<(NodeIndex, usize), Arc<Subgraph>>>,
-    /// Enumerated paths keyed by `(source, target, max_hops, connector allowlist)`; see
-    /// [`enumerate_paths`](Self::enumerate_paths).
-    path_skeletons: Mutex<GenerationCache<PathQuery, Arc<Vec<PathSkeleton>>>>,
+    /// The most recent subgraph, keyed by `(source, max_hops)`; see
+    /// [`reachable_subgraph`](Self::reachable_subgraph). Single-slot because an entry is sized
+    /// by the graph while the key varies with the tokens being quoted.
+    subgraphs: Mutex<LastQueryCache<(NodeIndex, usize), Arc<Subgraph>>>,
+    /// The most recent path enumeration, keyed by `(source, target, max_hops, connector
+    /// allowlist)`; see [`enumerate_paths`](Self::enumerate_paths). Single-slot for the same
+    /// reason, and its key varies over token pairs rather than single tokens.
+    path_skeletons: Mutex<LastQueryCache<PathQuery, Arc<Vec<PathSkeleton>>>>,
 }
 
 /// Everything [`RoutingGraph::enumerate_paths`] varies on.
@@ -111,8 +113,8 @@ impl<D> RoutingGraph<D> {
             node_index_bound: 0,
             generation: 0,
             most_connected: Mutex::new(GenerationCache::new()),
-            subgraphs: Mutex::new(GenerationCache::new()),
-            path_skeletons: Mutex::new(GenerationCache::new()),
+            subgraphs: Mutex::new(LastQueryCache::new()),
+            path_skeletons: Mutex::new(LastQueryCache::new()),
         }
     }
 
@@ -167,17 +169,21 @@ impl<D> RoutingGraph<D> {
         })
     }
 
-    /// Returns the subgraph reachable from `source` within `max_hops`, memoised per generation.
+    /// Returns the subgraph reachable from `source` within `max_hops`.
     ///
     /// Expansion stops at `max_hops`: nodes discovered at that depth are recorded but their own
     /// edges are not, so the result depends only on the topology, the source and the budget.
+    ///
+    /// Only the most recent `(source, max_hops)` is retained. Each solve makes one such query,
+    /// so consecutive orders out of the same token share the traversal while the memory stays
+    /// flat however many tokens are quoted.
     pub(crate) fn reachable_subgraph(&self, source: NodeIndex, max_hops: usize) -> Arc<Subgraph> {
         // See most_connected_tokens on why poisoning is recovered from rather than propagated.
         let mut cache = self
             .subgraphs
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        cache.get_or_insert_with(self.generation, (source, max_hops), || {
+        cache.get_or_replace(self.generation, (source, max_hops), || {
             Arc::new(self.build_reachable_subgraph(source, max_hops))
         })
     }
@@ -223,9 +229,13 @@ impl<D> RoutingGraph<D> {
     /// are the same token. Tokens outside `connector_tokens` may not appear as intermediate hops;
     /// the target is always allowed.
     ///
+    /// Only the most recent query is retained, for the same reason as
+    /// [`reachable_subgraph`](Self::reachable_subgraph): each solve makes one, and an
+    /// enumeration is sized by the graph rather than by the request.
+    ///
     /// Returns `None` if a memoised path no longer resolves against the graph, which the
     /// generation invariant rules out — every topology change advances the generation and so
-    /// discards the entries built before it.
+    /// discards the entry built before it.
     pub(crate) fn enumerate_paths(
         &self,
         source: NodeIndex,
@@ -241,7 +251,7 @@ impl<D> RoutingGraph<D> {
                 .path_skeletons
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            cache.get_or_insert_with(self.generation, query, || {
+            cache.get_or_replace(self.generation, query, || {
                 Arc::new(self.build_path_skeletons(source, target, max_hops, connector_tokens))
             })
         };
@@ -633,6 +643,8 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second), "a repeat access must not rebuild the subgraph");
     }
 
+    /// Only the most recent query is retained, so every one of these displaces the last. Each
+    /// must still answer for its own key rather than hand back what the previous call built.
     #[test]
     fn test_reachable_subgraph_separate_sources_and_budgets_do_not_collide() {
         let graph = hub_graph(3);
@@ -643,34 +655,13 @@ mod tests {
             .node_index(&addr(10))
             .expect("leaf exists");
 
-        assert_eq!(
-            graph
-                .reachable_subgraph(hub, 1)
-                .adj
-                .len(),
-            1
-        );
-        assert_eq!(
-            graph
-                .reachable_subgraph(hub, 2)
-                .adj
-                .len(),
-            4
-        );
-        assert_eq!(
-            graph
-                .reachable_subgraph(leaf, 1)
-                .adj
-                .len(),
-            1
-        );
-        assert_eq!(
-            graph
-                .reachable_subgraph(hub, 1)
-                .adj
-                .len(),
-            1
-        );
+        for (source, max_hops) in [(hub, 1), (hub, 2), (leaf, 1), (hub, 1), (leaf, 1)] {
+            let memoised = graph.reachable_subgraph(source, max_hops);
+            let fresh = graph.build_reachable_subgraph(source, max_hops);
+            assert_eq!(adjacency_pairs(&memoised), adjacency_pairs(&fresh));
+            assert_eq!(memoised.token_nodes, fresh.token_nodes);
+            assert_eq!(memoised.component_ids, fresh.component_ids);
+        }
     }
 
     #[test]
@@ -800,6 +791,29 @@ mod tests {
 
         assert_eq!(unrestricted.len(), 2);
         assert_eq!(path_components(&restricted), vec![vec!["ac".to_string()]]);
+    }
+
+    /// Alternating pairs displace each other in the single slot, so each call has to re-derive
+    /// its own answer.
+    #[test]
+    fn test_enumerate_paths_alternating_pairs_do_not_collide() {
+        let graph = triangle_graph();
+        let (a, b, c) = (node(&graph, 1), node(&graph, 2), node(&graph, 3));
+
+        for _ in 0..2 {
+            let to_c = graph
+                .enumerate_paths(a, c, 1, 2, None)
+                .expect("paths resolve");
+            assert_eq!(
+                path_components(&to_c),
+                vec![vec!["ac".to_string()], vec!["ab".to_string(), "bc".to_string()]]
+            );
+
+            let to_b = graph
+                .enumerate_paths(a, b, 1, 2, None)
+                .expect("paths resolve");
+            assert_eq!(path_components(&to_b), vec![vec!["ab".to_string()]]);
+        }
     }
 
     #[test]

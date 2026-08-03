@@ -1739,6 +1739,59 @@ mod tests {
         assert_eq!(*result.net_amount_out(), BigInt::from(4_000_000_000u64 - 800_000u64));
     }
 
+    /// Only the most recent subgraph is retained, so alternating input tokens evict each other
+    /// on every solve. A thrashing slot must cost time, never correctness. The two inputs sit in
+    /// disjoint neighbourhoods, so one order served from the other's subgraph would not find its
+    /// own token at all.
+    #[tokio::test]
+    async fn test_alternating_input_tokens_solve_identically_under_slot_thrash() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+        let token_e = token(0x05, "E");
+
+        // A -> B -> D and C -> E -> D. Within two hops neither input reaches the other.
+        let (market, manager) = setup_market_bf(vec![
+            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(3.0)),
+            ("pool_ce", &token_c, &token_e, MockProtocolSim::new(5.0)),
+            ("pool_ed", &token_e, &token_d, MockProtocolSim::new(2.0)),
+        ]);
+
+        let algo = bf_algorithm(2, 1000);
+        let from_a = order(&token_a, &token_d, 1_000_000, OrderSide::Sell);
+        let from_c = order(&token_c, &token_d, 1_000_000, OrderSide::Sell);
+
+        let mut from_a_routes = Vec::new();
+        let mut from_c_routes = Vec::new();
+        for _ in 0..3 {
+            for (ord, routes) in [(&from_a, &mut from_a_routes), (&from_c, &mut from_c_routes)] {
+                let result = algo
+                    .find_best_route(manager.graph(), market.clone(), None, None, ord)
+                    .await
+                    .unwrap();
+                routes.push(
+                    result
+                        .route()
+                        .swaps()
+                        .iter()
+                        .map(|swap| swap.component_id().to_string())
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+
+        assert_eq!(from_a_routes[0], vec!["pool_ab".to_string(), "pool_bd".to_string()]);
+        assert_eq!(from_c_routes[0], vec!["pool_ce".to_string(), "pool_ed".to_string()]);
+        assert!(from_a_routes
+            .iter()
+            .all(|r| *r == from_a_routes[0]));
+        assert!(from_c_routes
+            .iter()
+            .all(|r| *r == from_c_routes[0]));
+    }
+
     #[tokio::test]
     async fn test_gas_aware_falls_back_to_gross_without_derived() {
         // Same diamond graph as above, but without derived data.
