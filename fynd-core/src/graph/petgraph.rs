@@ -16,7 +16,7 @@ use petgraph::{graph::NodeIndex, stable_graph};
 use tracing::{debug, trace};
 use tycho_simulation::tycho_common::models::Address;
 
-use super::GraphManager;
+use super::{GraphManager, RoutingGraph};
 use crate::{
     feed::{
         events::{EventError, MarketEvent, MarketEventHandler},
@@ -75,42 +75,24 @@ pub type StableDiGraph<D> = stable_graph::StableDiGraph<Address, EdgeData<D>>;
 /// Using StableDiGraph ensures edge indices remain valid after removals, making edge_map viable.
 pub struct PetgraphStableDiGraphManager<D: Clone> {
     // Stable directed graph with token addresses as nodes and edge data (component id + weight) as
-    // edges. Using StableDiGraph ensures edge indices remain valid after removals, making
-    // edge_map viable.
-    graph: StableDiGraph<D>,
+    // edges, plus the token-to-node index it maintains. Using StableDiGraph ensures edge indices
+    // remain valid after removals, making edge_map viable.
+    graph: RoutingGraph<D>,
     // Map from ComponentId to edge indices for fast removal and weight updates.
     edge_map: HashMap<ComponentId, Vec<EdgeIndex>>,
-    // Map from token address to node index for fast node lookups.
-    node_map: HashMap<Address, NodeIndex>,
 }
 
 impl<D: Clone> PetgraphStableDiGraphManager<D> {
     /// Creates a new empty graph manager.
     pub fn new() -> Self {
-        Self { graph: StableDiGraph::default(), edge_map: HashMap::new(), node_map: HashMap::new() }
+        Self { graph: RoutingGraph::new(), edge_map: HashMap::new() }
     }
 
     /// Helper function to find a node index by address
     pub(crate) fn find_node(&self, addr: &Address) -> Result<NodeIndex, GraphError> {
-        self.node_map
-            .get(addr)
-            .copied()
+        self.graph
+            .node_index(addr)
             .ok_or_else(|| GraphError::TokenNotFound(addr.clone()))
-    }
-
-    /// Helper function to get or create a node for the given address.
-    /// Returns the node index, creating the node if it doesn't exist.
-    fn get_or_create_node(&mut self, addr: &Address) -> NodeIndex {
-        // Check if node already exists
-        match self.find_node(addr) {
-            Ok(node_idx) => node_idx,
-            Err(_) => {
-                let node_idx = self.graph.add_node(addr.clone());
-                self.node_map
-                    .insert(addr.clone(), node_idx);
-                node_idx
-            }
-        }
     }
 
     /// Helper function to add an edge to the graph.
@@ -121,9 +103,9 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     /// * `to_idx` - The index of the to node.
     /// * `component_id` - The ID of the component represented by this edge.
     fn add_edge(&mut self, from_idx: NodeIndex, to_idx: NodeIndex, component_id: &ComponentId) {
-        let edge_idx = self
-            .graph
-            .add_edge(from_idx, to_idx, EdgeData::new(component_id.clone()));
+        let edge_idx =
+            self.graph
+                .insert_edge(from_idx, to_idx, EdgeData::new(component_id.clone()));
         self.edge_map
             .entry(component_id.clone())
             .or_default()
@@ -185,7 +167,7 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
             sorted_tokens.sort();
             let node_indices: Vec<NodeIndex> = sorted_tokens
                 .iter()
-                .map(|token| self.get_or_create_node(token))
+                .map(|token| self.graph.insert_node(token))
                 .collect();
             self.add_component_edges(comp_id, &node_indices);
         }
@@ -288,7 +270,7 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
                 // Error if edge weight is not found (edge is not in graph)
                 let edge_data = self
                     .graph
-                    .edge_weight_mut(edge_idx)
+                    .edge_data_mut(edge_idx)
                     .ok_or_else(|| GraphError::ComponentsNotFound(vec![component_id.clone()]))?;
                 // Verify the component ID matches
                 if edge_data.component_id == *component_id {
@@ -364,7 +346,7 @@ impl<D: Clone + super::EdgeWeightFromSimAndDerived> PetgraphStableDiGraphManager
             .filter(|(_, w)| w.is_some())
             .count();
         for (edge_idx, weight) in updates {
-            if let Some(edge_data) = self.graph.edge_weight_mut(edge_idx) {
+            if let Some(edge_data) = self.graph.edge_data_mut(edge_idx) {
                 edge_data.data = weight;
             }
         }
@@ -391,12 +373,11 @@ impl<D: Clone> Default for PetgraphStableDiGraphManager<D> {
     }
 }
 
-impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDiGraphManager<D> {
+impl<D: Clone + Send + Sync> GraphManager<RoutingGraph<D>> for PetgraphStableDiGraphManager<D> {
     fn initialize_graph(&mut self, component_topology: &HashMap<ComponentId, Vec<Address>>) {
         // Clear existing graph and component map
-        self.graph = StableDiGraph::default();
+        self.graph.clear();
         self.edge_map.clear();
-        self.node_map.clear();
 
         // Sort tokens for deterministic NodeIndex assignment across processes
         // given the same input. HashMap/HashSet iteration order varies per
@@ -412,8 +393,7 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
         unique_tokens.sort();
 
         for token in unique_tokens {
-            let node_idx = self.graph.add_node(token.clone());
-            self.node_map.insert(token, node_idx);
+            self.graph.insert_node(&token);
         }
 
         // Sort components for deterministic edge insertion order.
@@ -425,13 +405,13 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
             sorted_tokens.sort();
             let node_indices: Vec<NodeIndex> = sorted_tokens
                 .iter()
-                .map(|token| self.node_map[*token])
+                .map(|token| self.graph.insert_node(token))
                 .collect();
             self.add_component_edges(comp_id, &node_indices);
         }
     }
 
-    fn graph(&self) -> &StableDiGraph<D> {
+    fn graph(&self) -> &RoutingGraph<D> {
         &self.graph
     }
 }

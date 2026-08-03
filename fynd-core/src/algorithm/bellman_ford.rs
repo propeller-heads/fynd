@@ -48,7 +48,7 @@ use crate::{
         SharedDerivedDataRef,
     },
     feed::market_data::{MarketData, MarketState, StateLabel},
-    graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
+    graph::{PetgraphStableDiGraphManager, RoutingGraph},
     types::{ComponentId, Order, Route, RouteResult, Swap},
 };
 
@@ -141,7 +141,7 @@ impl BellmanFordAlgorithm {
     /// pool states.
     pub(crate) async fn build_context(
         &self,
-        graph: &StableDiGraph<()>,
+        graph: &RoutingGraph<()>,
         market: MarketData,
         label: Option<StateLabel>,
         derived: Option<SharedDerivedDataRef>,
@@ -159,16 +159,14 @@ impl BellmanFordAlgorithm {
         };
 
         let token_in_node = graph
-            .node_indices()
-            .find(|&n| &graph[n] == order.token_in())
+            .node_index(order.token_in())
             .ok_or(AlgorithmError::NoPath {
                 from: order.token_in().clone(),
                 to: order.token_out().clone(),
                 reason: NoPathReason::SourceTokenNotInGraph,
             })?;
         let token_out_node = graph
-            .node_indices()
-            .find(|&n| &graph[n] == order.token_out())
+            .node_index(order.token_out())
             .ok_or(AlgorithmError::NoPath {
                 from: order.token_in().clone(),
                 to: order.token_out().clone(),
@@ -214,12 +212,7 @@ impl BellmanFordAlgorithm {
             .map(|(&node, token)| (node, token.address.clone()))
             .collect();
 
-        let max_idx = graph
-            .node_indices()
-            .map(|n| n.index())
-            .max()
-            .unwrap_or(0) +
-            1;
+        let max_idx = graph.node_index_bound();
 
         let scoring = if self.gas_aware {
             RouteScoringMode::NetOutput
@@ -733,7 +726,7 @@ impl BellmanFordAlgorithm {
     /// Returns `(adjacency_list, token_nodes, component_ids)` or `NoPath` if the
     /// subgraph is empty (no outgoing edges from the source).
     pub(crate) fn get_subgraph(
-        graph: &StableDiGraph<()>,
+        graph: &RoutingGraph<()>,
         token_in_node: NodeIndex,
         max_hops: usize,
         order: &Order,
@@ -836,7 +829,7 @@ impl BellmanFordAlgorithm {
 }
 
 impl Algorithm for BellmanFordAlgorithm {
-    type GraphType = StableDiGraph<()>;
+    type GraphType = RoutingGraph<()>;
     type GraphManager = PetgraphStableDiGraphManager<()>;
 
     fn name(&self) -> &str {

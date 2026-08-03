@@ -635,7 +635,7 @@ mod tests {
             computations::{SpotPriceComputation, TokenGasPriceComputation},
             DerivedData,
         },
-        graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+        graph::{PetgraphStableDiGraphManager, RoutingGraph},
         types::{OrderSide, Route, RouteResult, Swap},
         AlgorithmError,
     };
@@ -659,7 +659,7 @@ mod tests {
     }
 
     impl Algorithm for MockAlgorithm {
-        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphType = RoutingGraph<DepthAndPrice>;
         type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
 
         fn name(&self) -> &str {
@@ -692,7 +692,7 @@ mod tests {
     struct InvalidRouteAlgorithm;
 
     impl Algorithm for InvalidRouteAlgorithm {
-        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphType = RoutingGraph<DepthAndPrice>;
         type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
 
         fn name(&self) -> &str {

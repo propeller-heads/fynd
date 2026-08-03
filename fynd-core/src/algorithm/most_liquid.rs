@@ -27,7 +27,7 @@ use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
     derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketState, StateLabel},
-    graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
+    graph::{Path, PetgraphStableDiGraphManager, RoutingGraph},
     types::{ComponentId, Order, Route, RouteResult, Swap},
     AlgorithmError,
 };
@@ -219,7 +219,7 @@ impl MostLiquidAlgorithm {
     /// - Destination token is not in the graph
     #[instrument(level = "debug", skip(graph, connector_tokens))]
     pub(crate) fn find_paths<'a>(
-        graph: &'a StableDiGraph<DepthAndPrice>,
+        graph: &'a RoutingGraph<DepthAndPrice>,
         from: &Address,
         to: &Address,
         min_hops: usize,
@@ -234,19 +234,15 @@ impl MostLiquidAlgorithm {
             });
         }
 
-        // Find source and destination nodes by address
-        // TODO: this could be optimized by using a node index map in the graph manager
         let from_idx = graph
-            .node_indices()
-            .find(|&n| &graph[n] == from)
+            .node_index(from)
             .ok_or(AlgorithmError::NoPath {
                 from: from.clone(),
                 to: to.clone(),
                 reason: NoPathReason::SourceTokenNotInGraph,
             })?;
         let to_idx = graph
-            .node_indices()
-            .find(|&n| &graph[n] == to)
+            .node_index(to)
             .ok_or(AlgorithmError::NoPath {
                 from: from.clone(),
                 to: to.clone(),
@@ -473,7 +469,7 @@ impl Default for MostLiquidAlgorithm {
 }
 
 impl Algorithm for MostLiquidAlgorithm {
-    type GraphType = StableDiGraph<DepthAndPrice>;
+    type GraphType = RoutingGraph<DepthAndPrice>;
     type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
 
     fn name(&self) -> &str {

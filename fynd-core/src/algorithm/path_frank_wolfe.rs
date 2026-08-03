@@ -30,7 +30,7 @@ use super::{
 use crate::{
     derived::{computation::ComputationRequirements, SharedDerivedDataRef},
     feed::market_data::{MarketData, StateLabel},
-    graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
+    graph::{PetgraphStableDiGraphManager, RoutingGraph},
     types::{quote::Order, OrderSide, Route, RouteResult},
 };
 
@@ -662,7 +662,7 @@ impl PathFrankWolfeAlgorithm {
 }
 
 impl Algorithm for PathFrankWolfeAlgorithm {
-    type GraphType = StableDiGraph<()>;
+    type GraphType = RoutingGraph<()>;
     type GraphManager = PetgraphStableDiGraphManager<()>;
 
     fn name(&self) -> &str {
