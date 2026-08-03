@@ -11,6 +11,7 @@ pub(crate) mod fly;
 pub(crate) mod kyberswap;
 pub(crate) mod lifi;
 pub(crate) mod paraswap;
+pub(crate) mod zeroex;
 
 use std::collections::HashSet;
 
@@ -163,6 +164,7 @@ const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
     ("kyberswap", &kyberswap::Kyberswap),
     ("lifi", &lifi::Lifi),
     ("paraswap", &paraswap::Paraswap),
+    ("0x", &zeroex::ZeroEx),
 ];
 
 /// The veto a solver places on a matched transaction that must be skipped instead of decoded,
