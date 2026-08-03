@@ -302,6 +302,19 @@ impl<P: Provider> Decoder<P> {
             registry,
         );
 
+        // A frontend routing through the solver can take a cut of the output without owning a
+        // venue section, declaring its fee recipients in the solver's own calldata. Backed out
+        // here so the settled output is gross, like Fynd's re-solve; a no-op when a venue
+        // fingerprint already accounted an output fee.
+        if let Some(fee) = solvers::declared_output_fee(
+            &attribution.solver,
+            &root.input,
+            &transfer_ledger,
+            flow.swap.token_out,
+        ) {
+            flow.gross_output_fee(fee);
+        }
+
         // Gas the trader paid for the settled route, as a wei cost. The flow's gas scope says
         // which gas that is — see `GasScope`.
         let settled_gas = match flow.gas_scope {
