@@ -3524,6 +3524,7 @@ dependencies = [
  "serde_with",
  "tempfile",
  "thiserror 1.0.69",
+ "tikv-jemallocator",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.28.0",
