@@ -24,13 +24,14 @@
 //! snapshot amounts between rounds or use a priority-based processing order.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
-use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use petgraph::graph::NodeIndex;
 use tracing::{debug, instrument, trace, warn};
 use tycho_simulation::{
     tycho_common::models::Address,
@@ -48,13 +49,9 @@ use crate::{
         SharedDerivedDataRef,
     },
     feed::market_data::{MarketData, MarketState, StateLabel},
-    graph::{PetgraphStableDiGraphManager, RoutingGraph},
+    graph::{routing_graph::Subgraph, PetgraphStableDiGraphManager, RoutingGraph},
     types::{ComponentId, Order, Route, RouteResult, Swap},
 };
-
-/// BFS subgraph: adjacency list, token node set, and component ID set.
-type Subgraph =
-    (HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>, HashSet<NodeIndex>, HashSet<ComponentId>);
 
 /// Everything needed to call `find_single_route` repeatedly without redoing setup.
 ///
@@ -64,7 +61,7 @@ type Subgraph =
 pub(crate) struct BellmanFordContext {
     pub(crate) token_in_node: NodeIndex,
     pub(crate) token_out_node: NodeIndex,
-    pub(crate) adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
+    pub(crate) subgraph: Arc<Subgraph>,
     pub(crate) token_map: HashMap<NodeIndex, Token>,
     pub(crate) market_data: MarketState,
     pub(crate) gas_price_wei: Option<BigUint>,
@@ -181,9 +178,16 @@ impl BellmanFordAlgorithm {
             });
         }
 
-        // BFS from token_in up to max_hops, building adjacency list and component set.
-        let (adj, token_nodes, component_ids) =
-            Self::get_subgraph(graph, token_in_node, self.max_hops, order)?;
+        // BFS from token_in up to max_hops, building adjacency list and component set. Shared
+        // across orders that start from the same token while the topology is unchanged.
+        let subgraph = graph.reachable_subgraph(token_in_node, self.max_hops);
+        if subgraph.adj.is_empty() {
+            return Err(AlgorithmError::NoPath {
+                from: order.token_in().clone(),
+                to: order.token_out().clone(),
+                reason: NoPathReason::NoGraphPath,
+            });
+        }
 
         let market_view = match label.as_ref() {
             Some(l) => market
@@ -192,7 +196,8 @@ impl BellmanFordAlgorithm {
                 .map_err(|e| AlgorithmError::Other(e.to_string()))?,
             None => market.read().await,
         };
-        let token_map: HashMap<NodeIndex, Token> = token_nodes
+        let token_map: HashMap<NodeIndex, Token> = subgraph
+            .token_nodes
             .iter()
             .filter_map(|&node| {
                 market_view
@@ -201,7 +206,7 @@ impl BellmanFordAlgorithm {
                     .map(|t| (node, t))
             })
             .collect();
-        let market_data = market_view.extract_subset_with_overlay(&component_ids);
+        let market_data = market_view.extract_subset_with_overlay(&subgraph.component_ids);
         let gas_price_wei = market_data
             .gas_price()
             .map(|gp| gp.effective_gas_price().clone());
@@ -221,7 +226,8 @@ impl BellmanFordAlgorithm {
         };
 
         debug!(
-            edges = adj
+            edges = subgraph
+                .adj
                 .values()
                 .map(Vec::len)
                 .sum::<usize>(),
@@ -232,7 +238,7 @@ impl BellmanFordAlgorithm {
         Ok(BellmanFordContext {
             token_in_node,
             token_out_node,
-            adj,
+            subgraph,
             token_map,
             market_data,
             gas_price_wei,
@@ -376,7 +382,7 @@ impl BellmanFordAlgorithm {
                 }
 
                 let Some(token_u) = ctx.token_map.get(&u) else { continue };
-                let Some(edges) = ctx.adj.get(&u) else { continue };
+                let Some(edges) = ctx.subgraph.adj.get(&u) else { continue };
 
                 for (v, component_id) in edges {
                     let v_idx = v.index();
@@ -719,57 +725,6 @@ impl BellmanFordAlgorithm {
 
         path.reverse();
         Ok(path)
-    }
-
-    /// Extracts the subgraph reachable from `token_in_node` within `max_hops` via BFS.
-    ///
-    /// Returns `(adjacency_list, token_nodes, component_ids)` or `NoPath` if the
-    /// subgraph is empty (no outgoing edges from the source).
-    pub(crate) fn get_subgraph(
-        graph: &RoutingGraph<()>,
-        token_in_node: NodeIndex,
-        max_hops: usize,
-        order: &Order,
-    ) -> Result<Subgraph, AlgorithmError> {
-        let mut adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = HashMap::new();
-        let mut token_nodes: HashSet<NodeIndex> = HashSet::new();
-        let mut component_ids: HashSet<ComponentId> = HashSet::new();
-        let mut visited_nodes = HashSet::new();
-        let mut queued_nodes = VecDeque::new();
-
-        visited_nodes.insert(token_in_node);
-        token_nodes.insert(token_in_node);
-        queued_nodes.push_back((token_in_node, 0usize));
-
-        while let Some((node, depth)) = queued_nodes.pop_front() {
-            if depth >= max_hops {
-                continue;
-            }
-            for edge in graph.edges(node) {
-                let target = edge.target();
-                let cid = edge.weight().component_id.clone();
-
-                adj.entry(node)
-                    .or_default()
-                    .push((target, cid.clone()));
-                component_ids.insert(cid);
-                token_nodes.insert(target);
-
-                if visited_nodes.insert(target) {
-                    queued_nodes.push_back((target, depth + 1));
-                }
-            }
-        }
-
-        if adj.is_empty() {
-            return Err(AlgorithmError::NoPath {
-                from: order.token_in().clone(),
-                to: order.token_out().clone(),
-                reason: NoPathReason::NoGraphPath,
-            });
-        }
-
-        Ok((adj, token_nodes, component_ids))
     }
 
     /// Computes net_amount_out by subtracting gas costs from the output amount.

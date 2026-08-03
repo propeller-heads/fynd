@@ -6,18 +6,32 @@
 
 use std::{
     cmp::Reverse,
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     ops::Deref,
     sync::{Arc, Mutex, PoisonError},
 };
 
-use petgraph::graph::{EdgeIndex, NodeIndex};
+use petgraph::{
+    graph::{EdgeIndex, NodeIndex},
+    visit::EdgeRef,
+};
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
     generation_cache::GenerationCache,
     petgraph::{EdgeData, StableDiGraph},
 };
+use crate::types::ComponentId;
+
+/// The part of a graph reachable from one node within a hop budget.
+pub struct Subgraph {
+    /// Outgoing edges of every expanded node, as `(target, component)` pairs.
+    pub adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
+    /// Every node touched, the source included.
+    pub token_nodes: HashSet<NodeIndex>,
+    /// Every component backing an edge in `adj`.
+    pub component_ids: HashSet<ComponentId>,
+}
 
 /// A [`StableDiGraph`] together with the token-to-node index maintained as nodes are inserted.
 ///
@@ -32,6 +46,9 @@ pub struct RoutingGraph<D> {
     /// whenever the generation moves on; see
     /// [`most_connected_tokens`](Self::most_connected_tokens).
     most_connected: Mutex<GenerationCache<usize, Arc<Vec<Address>>>>,
+    /// Subgraphs keyed by `(source, max_hops)`; see
+    /// [`reachable_subgraph`](Self::reachable_subgraph).
+    subgraphs: Mutex<GenerationCache<(NodeIndex, usize), Arc<Subgraph>>>,
 }
 
 impl<D> RoutingGraph<D> {
@@ -43,6 +60,7 @@ impl<D> RoutingGraph<D> {
             node_index_bound: 0,
             generation: 0,
             most_connected: Mutex::new(GenerationCache::new()),
+            subgraphs: Mutex::new(GenerationCache::new()),
         }
     }
 
@@ -95,6 +113,55 @@ impl<D> RoutingGraph<D> {
                     .collect(),
             )
         })
+    }
+
+    /// Returns the subgraph reachable from `source` within `max_hops`, memoised per generation.
+    ///
+    /// Expansion stops at `max_hops`: nodes discovered at that depth are recorded but their own
+    /// edges are not, so the result depends only on the topology, the source and the budget.
+    pub(crate) fn reachable_subgraph(&self, source: NodeIndex, max_hops: usize) -> Arc<Subgraph> {
+        // See most_connected_tokens on why poisoning is recovered from rather than propagated.
+        let mut cache = self
+            .subgraphs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        cache.get_or_insert_with(self.generation, (source, max_hops), || {
+            Arc::new(self.build_reachable_subgraph(source, max_hops))
+        })
+    }
+
+    fn build_reachable_subgraph(&self, source: NodeIndex, max_hops: usize) -> Subgraph {
+        let mut adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = HashMap::new();
+        let mut token_nodes: HashSet<NodeIndex> = HashSet::new();
+        let mut component_ids: HashSet<ComponentId> = HashSet::new();
+        let mut visited_nodes = HashSet::new();
+        let mut queued_nodes = VecDeque::new();
+
+        visited_nodes.insert(source);
+        token_nodes.insert(source);
+        queued_nodes.push_back((source, 0usize));
+
+        while let Some((node, depth)) = queued_nodes.pop_front() {
+            if depth >= max_hops {
+                continue;
+            }
+            for edge in self.graph.edges(node) {
+                let target = edge.target();
+                let component_id = edge.weight().component_id.clone();
+
+                adj.entry(node)
+                    .or_default()
+                    .push((target, component_id.clone()));
+                component_ids.insert(component_id);
+                token_nodes.insert(target);
+
+                if visited_nodes.insert(target) {
+                    queued_nodes.push_back((target, depth + 1));
+                }
+            }
+        }
+
+        Subgraph { adj, token_nodes, component_ids }
     }
 
     /// Returns the node holding `address`, inserting it if the token is not yet in the graph.
@@ -352,6 +419,150 @@ mod tests {
 
         assert_eq!(*graph.most_connected_tokens(4), ranked_by_degree(&graph, 4));
         assert_ne!(graph.most_connected_tokens(1)[0], addr(1));
+    }
+
+    /// Flattens a subgraph's adjacency into a comparable, order-independent form.
+    fn adjacency_pairs(subgraph: &Subgraph) -> Vec<(usize, usize, ComponentId)> {
+        let mut pairs: Vec<(usize, usize, ComponentId)> = subgraph
+            .adj
+            .iter()
+            .flat_map(|(source, targets)| {
+                targets
+                    .iter()
+                    .map(|(target, component)| (source.index(), target.index(), component.clone()))
+            })
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    #[test]
+    fn test_reachable_subgraph_respects_the_hop_budget() {
+        // a -> b -> c, so a one-hop budget expands `a` only and never records `b`'s edge.
+        let mut graph = RoutingGraph::<()>::new();
+        let a = graph.insert_node(&addr(1));
+        let b = graph.insert_node(&addr(2));
+        let c = graph.insert_node(&addr(3));
+        graph.insert_edge(a, b, EdgeData::new("ab".to_string()));
+        graph.insert_edge(b, c, EdgeData::new("bc".to_string()));
+
+        let one_hop = graph.reachable_subgraph(a, 1);
+        assert_eq!(adjacency_pairs(&one_hop), vec![(a.index(), b.index(), "ab".to_string())]);
+        assert_eq!(one_hop.token_nodes, HashSet::from([a, b]));
+        assert_eq!(one_hop.component_ids, HashSet::from(["ab".to_string()]));
+
+        let two_hops = graph.reachable_subgraph(a, 2);
+        assert_eq!(
+            adjacency_pairs(&two_hops),
+            vec![
+                (a.index(), b.index(), "ab".to_string()),
+                (b.index(), c.index(), "bc".to_string())
+            ]
+        );
+        assert_eq!(two_hops.token_nodes, HashSet::from([a, b, c]));
+    }
+
+    #[test]
+    fn test_reachable_subgraph_repeated_access_is_stable() {
+        let graph = hub_graph(3);
+        let hub = graph
+            .node_index(&addr(1))
+            .expect("hub exists");
+
+        let first = graph.reachable_subgraph(hub, 2);
+        let second = graph.reachable_subgraph(hub, 2);
+
+        assert!(Arc::ptr_eq(&first, &second), "a repeat access must not rebuild the subgraph");
+    }
+
+    #[test]
+    fn test_reachable_subgraph_separate_sources_and_budgets_do_not_collide() {
+        let graph = hub_graph(3);
+        let hub = graph
+            .node_index(&addr(1))
+            .expect("hub exists");
+        let leaf = graph
+            .node_index(&addr(10))
+            .expect("leaf exists");
+
+        assert_eq!(
+            graph
+                .reachable_subgraph(hub, 1)
+                .adj
+                .len(),
+            1
+        );
+        assert_eq!(
+            graph
+                .reachable_subgraph(hub, 2)
+                .adj
+                .len(),
+            4
+        );
+        assert_eq!(
+            graph
+                .reachable_subgraph(leaf, 1)
+                .adj
+                .len(),
+            1
+        );
+        assert_eq!(
+            graph
+                .reachable_subgraph(hub, 1)
+                .adj
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_reachable_subgraph_reflects_an_added_edge() {
+        let mut graph = hub_graph(2);
+        let hub = graph
+            .node_index(&addr(1))
+            .expect("hub exists");
+        let before = graph.reachable_subgraph(hub, 1);
+        assert!(!before.component_ids.contains("late"));
+
+        let late = graph.insert_node(&addr(200));
+        graph.insert_edge(hub, late, EdgeData::new("late".to_string()));
+
+        let after = graph.reachable_subgraph(hub, 1);
+        assert!(after.component_ids.contains("late"), "a new edge must appear in the subgraph");
+        assert!(after.token_nodes.contains(&late));
+        assert_eq!(
+            adjacency_pairs(&after),
+            adjacency_pairs(&graph.build_reachable_subgraph(hub, 1))
+        );
+    }
+
+    #[test]
+    fn test_reachable_subgraph_reflects_a_removed_edge() {
+        let mut graph = hub_graph(2);
+        let hub = graph
+            .node_index(&addr(1))
+            .expect("hub exists");
+        assert_eq!(
+            graph
+                .reachable_subgraph(hub, 1)
+                .component_ids
+                .len(),
+            2
+        );
+
+        let doomed = graph
+            .edges(hub)
+            .map(|edge| edge.id())
+            .next()
+            .expect("hub has edges");
+        graph.remove_edge(doomed);
+
+        let after = graph.reachable_subgraph(hub, 1);
+        assert_eq!(after.component_ids.len(), 1, "a removed edge must leave the subgraph");
+        assert_eq!(
+            adjacency_pairs(&after),
+            adjacency_pairs(&graph.build_reachable_subgraph(hub, 1))
+        );
     }
 
     #[test]
