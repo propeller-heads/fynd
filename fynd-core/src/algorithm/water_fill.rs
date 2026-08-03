@@ -145,6 +145,22 @@ struct StepResult {
     new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
 }
 
+/// A path's simulated probe for the chunk size currently being allocated.
+///
+/// Each chunk of a water-fill ladder simulates every candidate path but commits only the winner.
+/// [`WaterFillAlgorithm::simulate_step`] is a pure function of (path, market, overlay, amount), and
+/// the first three of those only change for paths whose pools the winner just wrote — so every
+/// other path would re-simulate to a bit-identical result. Keeping the probe and reusing it is
+/// exact: it changes which simulations run, never what they return.
+enum Probe {
+    /// Not simulated at the current chunk size yet.
+    Cold,
+    /// Simulated and failed. The inputs are unchanged since, so it would fail again.
+    Failed,
+    /// Simulated successfully. Taken when this path wins a chunk and its states are committed.
+    Ready(StepResult),
+}
+
 /// Shared inputs threaded through every split-allocation pass: the ranked candidate paths, the
 /// market snapshot, gas pricing, and the order under a single solve clock. Bundled so the
 /// allocation methods take one context instead of the same six references each.
@@ -861,20 +877,42 @@ impl WaterFillAlgorithm {
         let mut cum_in: Vec<BigUint> = vec![BigUint::zero(); path_count];
         let mut activated: Vec<bool> = vec![!gate; path_count];
 
+        // Each path allocates against its own overlay and `select_disjoint` guarantees the subset
+        // shares no pools, so committing the winner leaves every other path's inputs untouched.
+        let mut probes: Vec<Probe> = (0..path_count)
+            .map(|_| Probe::Cold)
+            .collect();
+        let mut probe_chunk: Option<BigUint> = None;
+
         for chunk_idx in 0..num_chunks {
             if ctx.start.elapsed().as_millis() as u64 > timeout_ms {
                 break;
             }
             let chunk = if chunk_idx == 0 { &base_chunk + &remainder } else { base_chunk.clone() };
 
-            let mut best: Option<(usize, BigInt, StepResult)> = None;
+            // The first chunk carries the remainder, so it is the one size that differs; a probe
+            // is only valid for the size it was simulated at.
+            if probe_chunk.as_ref() != Some(&chunk) {
+                probes
+                    .iter_mut()
+                    .for_each(|p| *p = Probe::Cold);
+                probe_chunk = Some(chunk.clone());
+            }
+
+            let mut best: Option<(usize, BigInt)> = None;
             for (i, &path_idx) in subset.iter().enumerate() {
-                let Some(step) = Self::simulate_step(
-                    &ctx.ordered[path_idx],
-                    ctx.market,
-                    &committed[i],
-                    chunk.clone(),
-                ) else {
+                if matches!(probes[i], Probe::Cold) {
+                    probes[i] = match Self::simulate_step(
+                        &ctx.ordered[path_idx],
+                        ctx.market,
+                        &committed[i],
+                        chunk.clone(),
+                    ) {
+                        Some(step) => Probe::Ready(step),
+                        None => Probe::Failed,
+                    };
+                }
+                let Probe::Ready(step) = &probes[i] else {
                     continue;
                 };
                 let gross_marginal = BigInt::from(step.amount_out.clone());
@@ -886,14 +924,19 @@ impl WaterFillAlgorithm {
                 };
                 if best
                     .as_ref()
-                    .map(|(_, m, _)| &net_marginal > m)
+                    .map(|(_, m)| &net_marginal > m)
                     .unwrap_or(true)
                 {
-                    best = Some((i, net_marginal, step));
+                    best = Some((i, net_marginal));
                 }
             }
 
-            let Some((best_i, _, step)) = best else {
+            let Some((best_i, _)) = best else {
+                break;
+            };
+            // Only a `Ready` probe can win, and committing consumes it.
+            let Probe::Ready(step) = std::mem::replace(&mut probes[best_i], Probe::Cold) else {
+                debug_assert!(false, "the winning path must have a ready probe");
                 break;
             };
             for (id, state) in step.new_states {
@@ -1005,23 +1048,54 @@ impl WaterFillAlgorithm {
         let mut counts: Vec<usize> = vec![0; subset.len()];
         let mut schedule: Vec<(usize, BigUint)> = Vec::with_capacity(num_chunks);
 
+        // Fill-and-spill shares one overlay, so committing the winner only disturbs paths that
+        // touch a pool the winner wrote. A path's written pools are exactly its own hops, so the
+        // winner's path pools are the invalidation set.
+        let path_pools: Vec<HashSet<ComponentId>> = subset
+            .iter()
+            .map(|&path_idx| {
+                path_key(&ctx.ordered[path_idx])
+                    .into_iter()
+                    .collect()
+            })
+            .collect();
+        let mut probes: Vec<Probe> = (0..subset.len())
+            .map(|_| Probe::Cold)
+            .collect();
+        let mut probe_chunk: Option<BigUint> = None;
+
         for chunk_idx in 0..num_chunks {
             if ctx.start.elapsed().as_millis() as u64 > timeout_ms {
                 break;
             }
             let chunk = if chunk_idx == 0 { &base_chunk + &remainder } else { base_chunk.clone() };
 
-            let mut best: Option<(usize, BigInt, StepResult)> = None;
+            // The first chunk carries the remainder, so it is the one size that differs; a probe
+            // is only valid for the size it was simulated at.
+            if probe_chunk.as_ref() != Some(&chunk) {
+                probes
+                    .iter_mut()
+                    .for_each(|p| *p = Probe::Cold);
+                probe_chunk = Some(chunk.clone());
+            }
+
+            let mut best: Option<(usize, BigInt)> = None;
             for (i, &path_idx) in subset.iter().enumerate() {
                 if !activated[i] && active_count >= self.max_paths {
                     continue;
                 }
-                let Some(step) = Self::simulate_step(
-                    &ctx.ordered[path_idx],
-                    ctx.market,
-                    &overlay,
-                    chunk.clone(),
-                ) else {
+                if matches!(probes[i], Probe::Cold) {
+                    probes[i] = match Self::simulate_step(
+                        &ctx.ordered[path_idx],
+                        ctx.market,
+                        &overlay,
+                        chunk.clone(),
+                    ) {
+                        Some(step) => Probe::Ready(step),
+                        None => Probe::Failed,
+                    };
+                }
+                let Probe::Ready(step) = &probes[i] else {
                     continue;
                 };
                 let gross_marginal = BigInt::from(step.amount_out.clone());
@@ -1033,18 +1107,28 @@ impl WaterFillAlgorithm {
                 };
                 if best
                     .as_ref()
-                    .map(|(_, m, _)| &net_marginal > m)
+                    .map(|(_, m)| &net_marginal > m)
                     .unwrap_or(true)
                 {
-                    best = Some((i, net_marginal, step));
+                    best = Some((i, net_marginal));
                 }
             }
 
-            let Some((best_i, _, step)) = best else {
+            let Some((best_i, _)) = best else {
+                break;
+            };
+            // Only a `Ready` probe can win, and committing consumes it.
+            let Probe::Ready(step) = std::mem::replace(&mut probes[best_i], Probe::Cold) else {
+                debug_assert!(false, "the winning path must have a ready probe");
                 break;
             };
             for (id, state) in step.new_states {
                 overlay.insert(id, state);
+            }
+            for (i, pools) in path_pools.iter().enumerate() {
+                if !pools.is_disjoint(&path_pools[best_i]) {
+                    probes[i] = Probe::Cold;
+                }
             }
             if !activated[best_i] {
                 activated[best_i] = true;
