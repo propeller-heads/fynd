@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use alloy::{
     primitives::{aliases::U48, keccak256, Address, Keccak256, U160, U256},
     sol_types::SolValue,
@@ -96,7 +94,7 @@ impl TryFrom<&OrderQuote> for Solution {
                     s.gas_estimate().clone(),
                 )
                 .with_split(*s.split())
-                .with_protocol_state(Arc::from(s.protocol_state().clone_box()))
+                .with_protocol_state(s.protocol_state_shared())
                 .with_estimated_amount_in(s.amount_in().clone()))
             })
             .collect::<Result<Vec<_>, SolveError>>()?;

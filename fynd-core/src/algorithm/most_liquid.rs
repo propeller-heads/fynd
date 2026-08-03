@@ -9,6 +9,7 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -383,17 +384,16 @@ impl MostLiquidAlgorithm {
                     kind: "component",
                     id: Some(component_id.clone()),
                 })?;
-            let component_state = market
-                .get_simulation_state(component_id)
+            // Resolved as a shared handle so the `Swap` below can hold the state without a copy.
+            let state_shared = state_overrides
+                .get(component_id)
+                .map(|s| Arc::from(s.clone_box()))
+                .or_else(|| market.get_simulation_state_shared(component_id))
                 .ok_or_else(|| AlgorithmError::DataNotFound {
                     kind: "simulation state",
                     id: Some(component_id.clone()),
                 })?;
-
-            let state = state_overrides
-                .get(component_id)
-                .map(Box::as_ref)
-                .unwrap_or(component_state);
+            let state = state_shared.as_ref();
 
             // Simulate the swap
             let result = state
@@ -401,7 +401,7 @@ impl MostLiquidAlgorithm {
                 .map_err(|e| AlgorithmError::Other(format!("simulation error: {:?}", e)))?;
 
             // Record the swap
-            swaps.push(Swap::new(
+            swaps.push(Swap::new_shared(
                 component_id.clone(),
                 component.protocol_system.clone(),
                 token_in.address.clone(),
@@ -410,7 +410,7 @@ impl MostLiquidAlgorithm {
                 result.amount.clone(),
                 result.gas,
                 component.clone(),
-                state.clone_box(),
+                Arc::clone(&state_shared),
             ));
             tokens
                 .entry(token_in.address.clone())

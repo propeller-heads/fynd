@@ -553,17 +553,17 @@ impl BellmanFordAlgorithm {
                 })?;
             // Use the override's sim state if available so the route reflects overridden pools.
             let sim_state = overrides
-                .get(component_id)
+                .get_shared(component_id)
                 .or_else(|| {
                     ctx.market_data
-                        .get_simulation_state(component_id)
+                        .get_simulation_state_shared(component_id)
                 })
                 .ok_or_else(|| AlgorithmError::DataNotFound {
                     kind: "simulation state",
                     id: Some(component_id.clone()),
                 })?;
 
-            swaps.push(Swap::new(
+            swaps.push(Swap::new_shared(
                 component_id.clone(),
                 component.protocol_system.clone(),
                 token_in.address.clone(),
@@ -572,7 +572,7 @@ impl BellmanFordAlgorithm {
                 amount[to_node.index()].clone(),
                 edge_gas[to_node.index()].clone(),
                 component.clone(),
-                sim_state.clone_box(),
+                sim_state,
             ));
             tokens
                 .entry(token_in.address.clone())

@@ -411,6 +411,14 @@ impl MarketState {
             .map(|b| b.as_ref())
     }
 
+    /// Gets a shared handle to a simulation state by ID.
+    ///
+    /// For callers that need to keep the state past this borrow — building a candidate route, for
+    /// instance — so they share the stored state instead of deep-copying it.
+    pub fn get_simulation_state_shared(&self, id: &str) -> Option<Arc<dyn ProtocolSim>> {
+        self.simulation_states.get(id).cloned()
+    }
+
     /// Gets a token by address.
     pub fn get_token(&self, address: &Address) -> Option<&Token> {
         self.tokens.get(address)

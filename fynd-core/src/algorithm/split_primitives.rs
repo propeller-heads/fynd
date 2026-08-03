@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
@@ -158,6 +161,17 @@ impl MarketOverrides {
 
     pub(crate) fn get(&self, id: &ComponentId) -> Option<&dyn ProtocolSim> {
         self.0.get(id).map(|b| b.as_ref())
+    }
+
+    /// Returns an owned handle to an override entry, for callers that keep the state.
+    ///
+    /// Overrides are stored owned rather than shared, so this still copies. It stays cheap in
+    /// practice because only committed hops of a split route get an override, whereas the
+    /// unoverridden path it complements resolves straight to a shared market state.
+    pub(crate) fn get_shared(&self, id: &ComponentId) -> Option<Arc<dyn ProtocolSim>> {
+        self.0
+            .get(id)
+            .map(|b| Arc::from(b.clone_box()))
     }
 }
 
