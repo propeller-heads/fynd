@@ -6,7 +6,8 @@
 
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque},
+    hash::{Hash, Hasher},
     ops::Deref,
     sync::{Arc, Mutex, PoisonError},
 };
@@ -20,6 +21,7 @@ use tycho_simulation::tycho_common::models::Address;
 use super::{
     generation_cache::GenerationCache,
     petgraph::{EdgeData, StableDiGraph},
+    Path,
 };
 use crate::types::ComponentId;
 
@@ -31,6 +33,49 @@ pub struct Subgraph {
     pub token_nodes: HashSet<NodeIndex>,
     /// Every component backing an edge in `adj`.
     pub component_ids: HashSet<ComponentId>,
+}
+
+/// A path recorded as graph indices, so it can outlive the borrow a [`Path`] holds.
+///
+/// `nodes` has one more entry than `edges`, matching [`Path`]'s tokens and edge data.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct PathSkeleton {
+    nodes: Vec<NodeIndex>,
+    edges: Vec<EdgeIndex>,
+}
+
+impl PathSkeleton {
+    fn new() -> Self {
+        Self { nodes: Vec::new(), edges: Vec::new() }
+    }
+
+    fn add_hop(&mut self, from: NodeIndex, edge: EdgeIndex, to: NodeIndex) {
+        if self.nodes.is_empty() {
+            self.nodes.push(from);
+        }
+        self.nodes.push(to);
+        self.edges.push(edge);
+    }
+
+    fn len(&self) -> usize {
+        self.edges.len()
+    }
+}
+
+/// Identifies a connector-token allowlist well enough to key a cache on it.
+///
+/// The allowlist comes from operator configuration and is fixed for the lifetime of an
+/// algorithm, so an order-independent fold over the members' hashes distinguishes the sets a
+/// process actually uses. `None` (no restriction) and an empty allowlist are distinct.
+fn connector_tokens_key(connector_tokens: Option<&HashSet<Address>>) -> u64 {
+    let Some(tokens) = connector_tokens else {
+        return 0;
+    };
+    tokens.iter().fold(1, |key, token| {
+        let mut hasher = DefaultHasher::new();
+        token.hash(&mut hasher);
+        key.wrapping_add(hasher.finish())
+    })
 }
 
 /// A [`StableDiGraph`] together with the token-to-node index maintained as nodes are inserted.
@@ -49,7 +94,13 @@ pub struct RoutingGraph<D> {
     /// Subgraphs keyed by `(source, max_hops)`; see
     /// [`reachable_subgraph`](Self::reachable_subgraph).
     subgraphs: Mutex<GenerationCache<(NodeIndex, usize), Arc<Subgraph>>>,
+    /// Enumerated paths keyed by `(source, target, max_hops, connector allowlist)`; see
+    /// [`enumerate_paths`](Self::enumerate_paths).
+    path_skeletons: Mutex<GenerationCache<PathQuery, Arc<Vec<PathSkeleton>>>>,
 }
+
+/// Everything [`RoutingGraph::enumerate_paths`] varies on.
+type PathQuery = (NodeIndex, NodeIndex, usize, u64);
 
 impl<D> RoutingGraph<D> {
     /// Creates an empty routing graph.
@@ -61,6 +112,7 @@ impl<D> RoutingGraph<D> {
             generation: 0,
             most_connected: Mutex::new(GenerationCache::new()),
             subgraphs: Mutex::new(GenerationCache::new()),
+            path_skeletons: Mutex::new(GenerationCache::new()),
         }
     }
 
@@ -162,6 +214,112 @@ impl<D> RoutingGraph<D> {
         }
 
         Subgraph { adj, token_nodes, component_ids }
+    }
+
+    /// Enumerates every path from `source` to `target` between `min_hops` and `max_hops`, in
+    /// breadth-first order, memoised per generation.
+    ///
+    /// Paths that revisit a token are skipped, except for the closing hop when source and target
+    /// are the same token. Tokens outside `connector_tokens` may not appear as intermediate hops;
+    /// the target is always allowed.
+    ///
+    /// Returns `None` if a memoised path no longer resolves against the graph, which the
+    /// generation invariant rules out — every topology change advances the generation and so
+    /// discards the entries built before it.
+    pub(crate) fn enumerate_paths(
+        &self,
+        source: NodeIndex,
+        target: NodeIndex,
+        min_hops: usize,
+        max_hops: usize,
+        connector_tokens: Option<&HashSet<Address>>,
+    ) -> Option<Vec<Path<'_, D>>> {
+        let query = (source, target, max_hops, connector_tokens_key(connector_tokens));
+        let skeletons = {
+            // See most_connected_tokens on why poisoning is recovered from rather than propagated.
+            let mut cache = self
+                .path_skeletons
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            cache.get_or_insert_with(self.generation, query, || {
+                Arc::new(self.build_path_skeletons(source, target, max_hops, connector_tokens))
+            })
+        };
+
+        skeletons
+            .iter()
+            .filter(|skeleton| skeleton.len() >= min_hops)
+            .map(|skeleton| self.materialize_path(skeleton))
+            .collect()
+    }
+
+    /// Enumerates paths up to `max_hops`; the `min_hops` floor is applied when reading the cache
+    /// so that one traversal serves every floor under the same ceiling.
+    fn build_path_skeletons(
+        &self,
+        source: NodeIndex,
+        target: NodeIndex,
+        max_hops: usize,
+        connector_tokens: Option<&HashSet<Address>>,
+    ) -> Vec<PathSkeleton> {
+        let mut paths = Vec::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((source, PathSkeleton::new()));
+
+        while let Some((current_node, current_path)) = queue.pop_front() {
+            if current_path.len() >= max_hops {
+                continue;
+            }
+
+            for edge in self.graph.edges(current_node) {
+                let next_node = edge.target();
+
+                // Skip paths that revisit a token already in the path. Exception: when source ==
+                // target, the target may appear at the end (forming a first == last cycle, e.g.
+                // USDC -> WETH -> USDC). All other intermediate cycles (e.g. USDC -> WETH -> WBTC
+                // -> WETH) are not supported by Tycho execution.
+                let already_visited = current_path.nodes.contains(&next_node);
+                let is_closing_circular_route = source == target && next_node == target;
+                if already_visited && !is_closing_circular_route {
+                    continue;
+                }
+
+                // Skip disallowed connector tokens. Endpoints are always permitted.
+                if next_node != target {
+                    if let Some(tokens) = connector_tokens {
+                        if !tokens.contains(&self.graph[next_node]) {
+                            continue;
+                        }
+                    }
+                }
+
+                let mut new_path = current_path.clone();
+                new_path.add_hop(current_node, edge.id(), next_node);
+
+                if next_node == target {
+                    paths.push(new_path.clone());
+                }
+
+                queue.push_back((next_node, new_path));
+            }
+        }
+
+        paths
+    }
+
+    /// Resolves a skeleton back into a [`Path`] borrowing this graph.
+    fn materialize_path(&self, skeleton: &PathSkeleton) -> Option<Path<'_, D>> {
+        let tokens = skeleton
+            .nodes
+            .iter()
+            .map(|node| self.graph.node_weight(*node))
+            .collect::<Option<Vec<_>>>()?;
+        let edge_data = skeleton
+            .edges
+            .iter()
+            .map(|edge| self.graph.edge_weight(*edge))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Path { tokens, edge_data })
     }
 
     /// Returns the node holding `address`, inserting it if the token is not yet in the graph.
@@ -563,6 +721,146 @@ mod tests {
             adjacency_pairs(&after),
             adjacency_pairs(&graph.build_reachable_subgraph(hub, 1))
         );
+    }
+
+    /// The component sequence of each enumerated path, in enumeration order.
+    fn path_components(paths: &[Path<'_, ()>]) -> Vec<Vec<ComponentId>> {
+        paths
+            .iter()
+            .map(|path| {
+                path.edge_iter()
+                    .iter()
+                    .map(|edge| edge.component_id.clone())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// `a -> b -> c` via `ab`/`bc`, plus a direct `ac`.
+    fn triangle_graph() -> RoutingGraph<()> {
+        let mut graph = RoutingGraph::<()>::new();
+        let a = graph.insert_node(&addr(1));
+        let b = graph.insert_node(&addr(2));
+        let c = graph.insert_node(&addr(3));
+        graph.insert_edge(a, b, EdgeData::new("ab".to_string()));
+        graph.insert_edge(b, c, EdgeData::new("bc".to_string()));
+        graph.insert_edge(a, c, EdgeData::new("ac".to_string()));
+        graph
+    }
+
+    fn node(graph: &RoutingGraph<()>, byte: u8) -> NodeIndex {
+        graph
+            .node_index(&addr(byte))
+            .expect("token is in the graph")
+    }
+
+    #[test]
+    fn test_enumerate_paths_returns_every_route_within_the_budget() {
+        let graph = triangle_graph();
+        let (a, c) = (node(&graph, 1), node(&graph, 3));
+
+        let paths = graph
+            .enumerate_paths(a, c, 1, 2, None)
+            .expect("paths resolve");
+
+        assert_eq!(
+            path_components(&paths),
+            vec![vec!["ac".to_string()], vec!["ab".to_string(), "bc".to_string()]]
+        );
+    }
+
+    #[test]
+    fn test_enumerate_paths_min_hops_narrows_a_shared_traversal() {
+        let graph = triangle_graph();
+        let (a, c) = (node(&graph, 1), node(&graph, 3));
+
+        let one_hop_floor = graph
+            .enumerate_paths(a, c, 1, 2, None)
+            .expect("paths resolve");
+        let two_hop_floor = graph
+            .enumerate_paths(a, c, 2, 2, None)
+            .expect("paths resolve");
+
+        assert_eq!(one_hop_floor.len(), 2);
+        assert_eq!(path_components(&two_hop_floor), vec![vec!["ab".to_string(), "bc".to_string()]]);
+    }
+
+    #[test]
+    fn test_enumerate_paths_distinguishes_connector_allowlists() {
+        let graph = triangle_graph();
+        let (a, c) = (node(&graph, 1), node(&graph, 3));
+
+        let unrestricted = graph
+            .enumerate_paths(a, c, 1, 2, None)
+            .expect("paths resolve");
+        // Only the direct hop survives once the intermediate token is disallowed.
+        let restricted = graph
+            .enumerate_paths(a, c, 1, 2, Some(&HashSet::new()))
+            .expect("paths resolve");
+
+        assert_eq!(unrestricted.len(), 2);
+        assert_eq!(path_components(&restricted), vec![vec!["ac".to_string()]]);
+    }
+
+    #[test]
+    fn test_enumerate_paths_reflects_an_added_edge() {
+        let mut graph = triangle_graph();
+        let (a, c) = (node(&graph, 1), node(&graph, 3));
+        assert_eq!(
+            graph
+                .enumerate_paths(a, c, 1, 2, None)
+                .expect("paths resolve")
+                .len(),
+            2
+        );
+
+        graph.insert_edge(a, c, EdgeData::new("ac2".to_string()));
+
+        let paths = graph
+            .enumerate_paths(a, c, 1, 2, None)
+            .expect("paths resolve");
+        assert!(
+            path_components(&paths).contains(&vec!["ac2".to_string()]),
+            "a new pool must produce a new path",
+        );
+    }
+
+    #[test]
+    fn test_enumerate_paths_reflects_a_removed_edge() {
+        let mut graph = triangle_graph();
+        let (a, b, c) = (node(&graph, 1), node(&graph, 2), node(&graph, 3));
+        assert_eq!(
+            graph
+                .enumerate_paths(a, c, 1, 2, None)
+                .expect("paths resolve")
+                .len(),
+            2
+        );
+
+        let doomed = graph
+            .edges(b)
+            .map(|edge| edge.id())
+            .next()
+            .expect("b has an outgoing edge");
+        graph.remove_edge(doomed);
+
+        let paths = graph
+            .enumerate_paths(a, c, 1, 2, None)
+            .expect("paths resolve");
+        assert_eq!(path_components(&paths), vec![vec!["ac".to_string()]]);
+    }
+
+    #[test]
+    fn test_enumerate_paths_allows_a_closing_cycle_back_to_the_source() {
+        let mut graph = triangle_graph();
+        let (a, b) = (node(&graph, 1), node(&graph, 2));
+        graph.insert_edge(b, a, EdgeData::new("ba".to_string()));
+
+        let paths = graph
+            .enumerate_paths(a, a, 2, 2, None)
+            .expect("paths resolve");
+
+        assert_eq!(path_components(&paths), vec![vec!["ab".to_string(), "ba".to_string()]]);
     }
 
     #[test]

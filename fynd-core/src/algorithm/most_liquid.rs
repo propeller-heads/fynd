@@ -8,14 +8,13 @@
 //! 5. Returning the best route with stats recorded to the tracing span
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
 use metrics::{counter, histogram};
 use num_bigint::{BigInt, BigUint};
 use num_traits::ToPrimitive;
-use petgraph::prelude::EdgeRef;
 use tracing::{debug, instrument, trace};
 use tycho_simulation::{
     tycho_common::simulation::protocol_sim::ProtocolSim,
@@ -207,14 +206,15 @@ impl MostLiquidAlgorithm {
         })
     }
 
-    /// Finds all paths between two tokens using BFS directly on the graph.
+    /// Finds all paths between two tokens within the hop budget.
     ///
-    /// This is a helper method that operates on the graph without needing the graph manager.
-    /// It performs BFS traversal to find all paths within the hop budget.
+    /// Resolves the token addresses to nodes and defers to the graph's enumeration, which is
+    /// memoised for as long as the topology is unchanged.
     ///
     /// # Errors
     ///
     /// Returns `AlgorithmError` if:
+    /// - The hop bounds are invalid
     /// - Source token is not in the graph
     /// - Destination token is not in the graph
     #[instrument(level = "debug", skip(graph, connector_tokens))]
@@ -249,51 +249,13 @@ impl MostLiquidAlgorithm {
                 reason: NoPathReason::DestinationTokenNotInGraph,
             })?;
 
-        let mut paths = Vec::new();
-        let mut queue = VecDeque::new();
-        queue.push_back((from_idx, Path::new()));
-
-        while let Some((current_node, current_path)) = queue.pop_front() {
-            if current_path.len() >= max_hops {
-                continue;
-            }
-
-            for edge in graph.edges(current_node) {
-                let next_node = edge.target();
-                let next_addr = &graph[next_node];
-
-                // Skip paths that revisit a token already in the path.
-                // Exception: when source == destination, the destination may appear at the end
-                // (forming a first == last cycle, e.g. USDC → WETH → USDC). All other intermediate
-                // cycles (e.g. USDC → WETH → WBTC → WETH) are not supported by Tycho execution.
-                let already_visited = current_path.tokens.contains(&next_addr);
-                let is_closing_circular_route = from_idx == to_idx && next_node == to_idx;
-                if already_visited && !is_closing_circular_route {
-                    continue;
-                }
-
-                // Skip disallowed connector tokens. Endpoints (from / to) are always permitted.
-                let is_destination = next_node == to_idx;
-                if !is_destination {
-                    if let Some(tokens) = connector_tokens {
-                        if !tokens.contains(next_addr) {
-                            continue;
-                        }
-                    }
-                }
-
-                let mut new_path = current_path.clone();
-                new_path.add_hop(&graph[current_node], edge.weight(), next_addr);
-
-                if next_node == to_idx && new_path.len() >= min_hops {
-                    paths.push(new_path.clone());
-                }
-
-                queue.push_back((next_node, new_path));
-            }
-        }
-
-        Ok(paths)
+        graph
+            .enumerate_paths(from_idx, to_idx, min_hops, max_hops, connector_tokens)
+            .ok_or_else(|| {
+                AlgorithmError::Other(
+                    "enumerated path no longer resolves against the graph".to_string(),
+                )
+            })
     }
 
     /// Attempts to score a path based on spot prices and minimum liquidity depth.
