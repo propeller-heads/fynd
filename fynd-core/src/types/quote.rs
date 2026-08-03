@@ -14,7 +14,10 @@
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
@@ -1600,6 +1603,16 @@ pub enum RouteValidationError {
     },
 }
 
+/// Deserializes a pool state into a shared handle.
+fn deserialize_shared_protocol_sim<'de, D>(
+    deserializer: D,
+) -> Result<Arc<dyn ProtocolSim>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Box::<dyn ProtocolSim>::deserialize(deserializer).map(Arc::from)
+}
+
 /// A single swap within a route.
 ///
 /// Represents an atomic swap on a specific liquidity pool (component).
@@ -1626,7 +1639,13 @@ pub struct Swap {
     /// Protocol component to perform the swap.
     protocol_component: ProtocolComponent,
     /// Protocol state used to perform the swap.
-    protocol_state: Box<dyn ProtocolSim>,
+    ///
+    /// Shared rather than owned: a solve builds one `Swap` per candidate hop and discards all but
+    /// the winner, so copying the pool state into each one is pure waste. `typetag` only derives
+    /// `Deserialize` for `Box<dyn Trait>`, hence the explicit hop through `Box` below; the wire
+    /// format is unchanged.
+    #[serde(deserialize_with = "deserialize_shared_protocol_sim")]
+    protocol_state: Arc<dyn ProtocolSim>,
     /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
     #[serde_as(as = "DisplayFromStr")]
     split: f64,
@@ -1654,6 +1673,36 @@ impl Swap {
         gas_estimate: BigUint,
         protocol_component: ProtocolComponent,
         protocol_state: Box<dyn ProtocolSim>,
+    ) -> Self {
+        Self::new_shared(
+            component_id,
+            protocol,
+            token_in,
+            token_out,
+            amount_in,
+            amount_out,
+            gas_estimate,
+            protocol_component,
+            Arc::from(protocol_state),
+        )
+    }
+
+    /// Creates a new swap that shares an existing pool state instead of taking ownership of one.
+    ///
+    /// Prefer this when the state is already behind an `Arc` — market states are, since a block
+    /// update installs them shared. A solve builds a `Swap` per candidate hop and keeps only the
+    /// winner's, so sharing here avoids copying a pool state per discarded candidate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_shared(
+        component_id: ComponentId,
+        protocol: String,
+        token_in: Address,
+        token_out: Address,
+        amount_in: BigUint,
+        amount_out: BigUint,
+        gas_estimate: BigUint,
+        protocol_component: ProtocolComponent,
+        protocol_state: Arc<dyn ProtocolSim>,
     ) -> Self {
         Self {
             component_id,
@@ -1726,6 +1775,11 @@ impl Swap {
     /// Returns the protocol state.
     pub fn protocol_state(&self) -> &dyn ProtocolSim {
         self.protocol_state.as_ref()
+    }
+
+    /// Returns a shared handle to the pool state, without copying it.
+    pub fn protocol_state_shared(&self) -> Arc<dyn ProtocolSim> {
+        Arc::clone(&self.protocol_state)
     }
 
     /// Returns the split of this swap.
@@ -2348,6 +2402,57 @@ mod tests {
         assert_eq!(swap.amount_in, BigUint::from(1_000_000_000_000_000_000u64));
         assert_eq!(swap.amount_out, BigUint::from(999_000_000_000_000_000u64));
         assert_eq!(swap.gas_estimate, BigUint::from(150_000u64));
+    }
+
+    /// The two constructors must be indistinguishable on the wire: `new` takes an owned state and
+    /// `new_shared` a shared one, but a `Swap` built either way has to serialize identically, or
+    /// switching a call site from one to the other would change the API response.
+    #[test]
+    fn test_new_and_new_shared_serialize_identically() {
+        let token_in = token(0x01, "TIN");
+        let token_out = token(0x02, "TOUT");
+        let build = |state: Option<Arc<dyn ProtocolSim>>| match state {
+            Some(shared) => Swap::new_shared(
+                "pool-1".to_string(),
+                "uniswap_v2".to_string(),
+                make_address(0x01),
+                make_address(0x02),
+                BigUint::from(1000u64),
+                BigUint::from(990u64),
+                BigUint::from(100_000u64),
+                component("test-pool", &[token_in.clone(), token_out.clone()]),
+                shared,
+            ),
+            None => Swap::new(
+                "pool-1".to_string(),
+                "uniswap_v2".to_string(),
+                make_address(0x01),
+                make_address(0x02),
+                BigUint::from(1000u64),
+                BigUint::from(990u64),
+                BigUint::from(100_000u64),
+                component("test-pool", &[token_in.clone(), token_out.clone()]),
+                Box::new(MockProtocolSim::default()),
+            ),
+        };
+
+        let owned = serde_json::to_string(&build(None)).unwrap();
+        let shared =
+            serde_json::to_string(&build(Some(Arc::new(MockProtocolSim::default())))).unwrap();
+        assert_eq!(owned, shared);
+
+        // And the wire format still round-trips through the custom deserializer.
+        let parsed: Swap = serde_json::from_str(&shared).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), shared);
+    }
+
+    /// Cloning a `Swap` must share the pool state rather than deep-copying it — that sharing is the
+    /// whole point of holding it behind an `Arc`.
+    #[test]
+    fn test_swap_clone_shares_protocol_state() {
+        let swap = make_swap(0x01, 0x02, 1000, 990);
+        let copy = swap.clone();
+        assert!(Arc::ptr_eq(&swap.protocol_state_shared(), &copy.protocol_state_shared()));
     }
 
     #[test]

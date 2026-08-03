@@ -25,6 +25,7 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -68,8 +69,8 @@ pub(crate) struct BellmanFordContext {
     pub(crate) token_map: HashMap<NodeIndex, Token>,
     pub(crate) market_data: MarketState,
     pub(crate) gas_price_wei: Option<BigUint>,
-    pub(crate) token_prices: Option<TokenGasPrices>,
-    pub(crate) spot_prices: Option<SpotPrices>,
+    pub(crate) token_prices: Option<Arc<TokenGasPrices>>,
+    pub(crate) spot_prices: Option<Arc<SpotPrices>>,
     pub(crate) node_address: HashMap<NodeIndex, Address>,
     pub(crate) max_idx: usize,
     pub(crate) scoring: RouteScoringMode,
@@ -153,7 +154,7 @@ impl BellmanFordAlgorithm {
 
         let (token_prices, spot_prices) = if let Some(ref d) = derived {
             let guard = d.read().await;
-            (guard.token_prices().cloned(), guard.spot_prices().cloned())
+            (guard.token_prices_shared(), guard.spot_prices_shared())
         } else {
             (None, None)
         };
@@ -303,7 +304,7 @@ impl BellmanFordAlgorithm {
             &final_amount_out,
             &route,
             &gas_price,
-            ctx.token_prices.as_ref(),
+            ctx.token_prices.as_deref(),
             &spfa.spot_product,
             &ctx.node_address,
             ctx.token_in_node,
@@ -433,14 +434,14 @@ impl BellmanFordAlgorithm {
                         component_id,
                         ctx.node_address.get(&u),
                         ctx.node_address.get(v),
-                        ctx.spot_prices.as_ref(),
+                        ctx.spot_prices.as_deref(),
                     );
 
                     // Gas-aware comparison: compare net amounts (gross - gas cost in token terms)
                     let is_better = if gas_aware {
                         let v_price = Self::resolve_token_price(
                             ctx.node_address.get(v),
-                            ctx.token_prices.as_ref(),
+                            ctx.token_prices.as_deref(),
                             candidate_spot,
                             ctx.node_address.get(&ctx.token_in_node),
                         );
@@ -457,7 +458,7 @@ impl BellmanFordAlgorithm {
                         if !input_below_hop_gas && net_candidate <= BigInt::ZERO {
                             let u_price = Self::resolve_token_price(
                                 ctx.node_address.get(&u),
-                                ctx.token_prices.as_ref(),
+                                ctx.token_prices.as_deref(),
                                 spot_product[u_idx],
                                 ctx.node_address.get(&ctx.token_in_node),
                             );
@@ -552,17 +553,17 @@ impl BellmanFordAlgorithm {
                 })?;
             // Use the override's sim state if available so the route reflects overridden pools.
             let sim_state = overrides
-                .get(component_id)
+                .get_shared(component_id)
                 .or_else(|| {
                     ctx.market_data
-                        .get_simulation_state(component_id)
+                        .get_simulation_state_shared(component_id)
                 })
                 .ok_or_else(|| AlgorithmError::DataNotFound {
                     kind: "simulation state",
                     id: Some(component_id.clone()),
                 })?;
 
-            swaps.push(Swap::new(
+            swaps.push(Swap::new_shared(
                 component_id.clone(),
                 component.protocol_system.clone(),
                 token_in.address.clone(),
@@ -571,7 +572,7 @@ impl BellmanFordAlgorithm {
                 amount[to_node.index()].clone(),
                 edge_gas[to_node.index()].clone(),
                 component.clone(),
-                sim_state.clone_box(),
+                sim_state,
             ));
             tokens
                 .entry(token_in.address.clone())

@@ -416,13 +416,14 @@ impl PathFrankWolfeAlgorithm {
             }
         };
 
-        let step_size =
+        let (step_size, step_output) =
             golden_section_search(evaluate_split, 0.0, 1.0, self.config.line_search_evals);
 
         // Gas-aware activation: at step 0 the candidate carries no flow and no
         // gas, so this comparison only accepts the candidate when its extra
-        // output covers its extra gas.
-        if evaluate_split(step_size) <= evaluate_split(0.0) {
+        // output covers its extra gas. `step_output` is the search's own evaluation at
+        // `step_size`, so only the step-0 baseline needs simulating here.
+        if step_output <= evaluate_split(0.0) {
             return 0.0;
         }
         step_size

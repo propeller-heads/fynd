@@ -125,7 +125,18 @@ impl DerivedData {
 
     /// Returns token prices if computed.
     pub fn token_prices(&self) -> Option<&TokenGasPrices> {
-        self.output(TokenGasPriceComputation::ID)
+        self.output::<Arc<TokenGasPrices>>(TokenGasPriceComputation::ID)
+            .map(Arc::as_ref)
+    }
+
+    /// Returns a shared handle to the token prices, for readers that outlive the store lock.
+    ///
+    /// Solving snapshots this map once per order. Handing out the `Arc` keeps that snapshot O(1)
+    /// instead of copying every entry, and the map is replaced wholesale on recompute so a held
+    /// handle stays internally consistent with the block it was taken at.
+    pub fn token_prices_shared(&self) -> Option<Arc<TokenGasPrices>> {
+        self.output::<Arc<TokenGasPrices>>(TokenGasPriceComputation::ID)
+            .map(Arc::clone)
     }
 
     /// Returns the block at which token prices were last computed.
@@ -163,7 +174,7 @@ impl DerivedData {
                 .extend(new_failures);
         }
 
-        self.set_output(TokenGasPriceComputation::ID, prices, block);
+        self.set_output(TokenGasPriceComputation::ID, Arc::new(prices), block);
     }
 
     /// Returns `(block, error)` for this token address if it failed in a past
@@ -273,7 +284,15 @@ impl DerivedData {
 
     /// Returns spot prices if computed.
     pub fn spot_prices(&self) -> Option<&SpotPrices> {
-        self.output(SpotPriceComputation::ID)
+        self.output::<Arc<SpotPrices>>(SpotPriceComputation::ID)
+            .map(Arc::as_ref)
+    }
+
+    /// Returns a shared handle to the spot prices. See
+    /// [`token_prices_shared`](Self::token_prices_shared).
+    pub fn spot_prices_shared(&self) -> Option<Arc<SpotPrices>> {
+        self.output::<Arc<SpotPrices>>(SpotPriceComputation::ID)
+            .map(Arc::clone)
     }
 
     /// Returns the block at which spot prices were last computed.
@@ -307,7 +326,7 @@ impl DerivedData {
                 .extend(new_failures);
         }
 
-        self.set_output(SpotPriceComputation::ID, prices, block);
+        self.set_output(SpotPriceComputation::ID, Arc::new(prices), block);
     }
 
     /// Returns `(block, error)` for this key if it failed in a past spot price
@@ -351,6 +370,50 @@ mod tests {
 
     fn pair_key(comp: &str, b_in: u8, b_out: u8) -> SpotPriceKey {
         (comp.to_string(), addr(b_in), addr(b_out))
+    }
+
+    /// A handed-out snapshot must keep showing the block it was taken at, even after the store
+    /// recomputes. Solvers hold these across a whole solve, so a recompute leaking into one would
+    /// mean a route priced against two different blocks at once.
+    #[test]
+    fn test_shared_snapshot_is_isolated_from_later_recomputes() {
+        let mut store = DerivedData::new();
+        let key = pair_key("pool_a", 0x01, 0x02);
+
+        let mut first = SpotPrices::default();
+        first.insert(key.clone(), 1.0);
+        store.set_spot_prices(first, vec![], 10, true);
+
+        let snapshot = store
+            .spot_prices_shared()
+            .expect("spot prices were just set");
+        assert_eq!(snapshot.get(&key), Some(&1.0));
+
+        let mut second = SpotPrices::default();
+        second.insert(key.clone(), 2.0);
+        store.set_spot_prices(second, vec![], 11, true);
+
+        assert_eq!(snapshot.get(&key), Some(&1.0), "held snapshot must not see the recompute");
+        assert_eq!(
+            store
+                .spot_prices_shared()
+                .and_then(|p| p.get(&key).copied()),
+            Some(2.0),
+            "a fresh read must see the recompute"
+        );
+    }
+
+    /// Two reads between recomputes must share one allocation rather than copy the map.
+    #[test]
+    fn test_shared_snapshot_reads_share_one_allocation() {
+        let mut store = DerivedData::new();
+        let mut prices = SpotPrices::default();
+        prices.insert(pair_key("pool_a", 0x01, 0x02), 1.0);
+        store.set_spot_prices(prices, vec![], 10, true);
+
+        let a = store.spot_prices_shared().unwrap();
+        let b = store.spot_prices_shared().unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[test]
