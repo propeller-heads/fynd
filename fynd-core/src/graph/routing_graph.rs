@@ -19,12 +19,27 @@ pub struct RoutingGraph<D> {
     graph: StableDiGraph<D>,
     node_map: HashMap<Address, NodeIndex>,
     node_index_bound: usize,
+    generation: u64,
 }
 
 impl<D> RoutingGraph<D> {
     /// Creates an empty routing graph.
     pub fn new() -> Self {
-        Self { graph: StableDiGraph::default(), node_map: HashMap::new(), node_index_bound: 0 }
+        Self {
+            graph: StableDiGraph::default(),
+            node_map: HashMap::new(),
+            node_index_bound: 0,
+            generation: 0,
+        }
+    }
+
+    /// Returns a counter that changes whenever the graph's topology changes.
+    ///
+    /// Anything derived purely from the topology stays valid as long as this is unchanged.
+    /// Edge weight updates do not bump it: they carry no topology, and callers that depend on
+    /// weights read them through the graph rather than caching them.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Returns the node holding `address`, or `None` if the token is not in the graph.
@@ -52,6 +67,7 @@ impl<D> RoutingGraph<D> {
         self.node_index_bound = self
             .node_index_bound
             .max(node.index() + 1);
+        self.generation += 1;
         node
     }
 
@@ -62,11 +78,13 @@ impl<D> RoutingGraph<D> {
         to: NodeIndex,
         data: EdgeData<D>,
     ) -> EdgeIndex {
+        self.generation += 1;
         self.graph.add_edge(from, to, data)
     }
 
     /// Removes an edge. Node indices are unaffected — the graph is stable.
     pub(crate) fn remove_edge(&mut self, edge: EdgeIndex) {
+        self.generation += 1;
         self.graph.remove_edge(edge);
     }
 
@@ -81,6 +99,7 @@ impl<D> RoutingGraph<D> {
         self.graph = StableDiGraph::default();
         self.node_map.clear();
         self.node_index_bound = 0;
+        self.generation += 1;
     }
 }
 
@@ -147,6 +166,55 @@ mod tests {
             .max()
             .expect("graph has nodes");
         assert_eq!(graph.node_index_bound(), max_index + 1);
+    }
+
+    #[test]
+    fn test_generation_advances_on_topology_change() {
+        let mut graph = RoutingGraph::<()>::new();
+        let start = graph.generation();
+
+        let from = graph.insert_node(&addr(1));
+        let after_node = graph.generation();
+        assert_ne!(after_node, start, "inserting a node must advance the generation");
+
+        let to = graph.insert_node(&addr(2));
+        let edge = graph.insert_edge(from, to, EdgeData::new("pool1".to_string()));
+        let after_edge = graph.generation();
+        assert_ne!(after_edge, after_node, "inserting an edge must advance the generation");
+
+        graph.remove_edge(edge);
+        let after_removal = graph.generation();
+        assert_ne!(after_removal, after_edge, "removing an edge must advance the generation");
+
+        graph.clear();
+        assert_ne!(graph.generation(), after_removal, "clearing must advance the generation");
+    }
+
+    #[test]
+    fn test_generation_unchanged_by_edge_data_update() {
+        let mut graph = RoutingGraph::<u8>::new();
+        let from = graph.insert_node(&addr(1));
+        let to = graph.insert_node(&addr(2));
+        let edge = graph.insert_edge(from, to, EdgeData::new("pool1".to_string()));
+
+        let before = graph.generation();
+        graph
+            .edge_data_mut(edge)
+            .expect("edge exists")
+            .data = Some(7);
+
+        assert_eq!(graph.generation(), before);
+    }
+
+    #[test]
+    fn test_insert_node_does_not_advance_generation_when_present() {
+        let mut graph = RoutingGraph::<()>::new();
+        graph.insert_node(&addr(1));
+
+        let before = graph.generation();
+        graph.insert_node(&addr(1));
+
+        assert_eq!(graph.generation(), before);
     }
 
     #[test]
