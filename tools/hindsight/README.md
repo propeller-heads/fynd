@@ -226,7 +226,7 @@ collectors are re-verified on every chain a venue is added on.
 | You want to… | Touch | Without it |
 |---|---|---|
 | Track a new solver | One line in the address book's `[solvers]` section. No code — trades sent straight to the router then match on the entry point and decode like any other; the intent and veto rows below are optional extras | Trades sent directly to the solver's router never match, so they never appear in the output; trades a known venue routed through it still decode, but the solver is recorded as "unknown" |
-| Recover a solver's swap terms (tokens, amounts, on-chain floor, and — when its calldata declares one — its off-chain quote) | A `swap_intent` method on its `SolverKnowledge` impl, dispatched with the settling solver frame's own input | A trade's record carries no `min_amount_out` / `declared_quote` / `quote_timestamp` |
+| Recover a solver's swap terms (tokens, amounts, on-chain floor, and — when its calldata declares one — its off-chain quote) | A `swap_intent` method on its `SolverKnowledge` impl, dispatched with the settling solver frame's own input | A settled trade's record carries no `min_amount_out` / `declared_quote` / `quote_timestamp`; a revert is still recorded (venue, solver, cause) but with no `SwapIntent`, so it cannot be resolved or judged for avoidance — only counted as parser coverage |
 | Skip a solver's non-swap orders | A `solver_veto` method on its `SolverKnowledge` impl | Those orders decode as trades that never happened, with absurd rates |
 | Add a venue | A `[venues.<name>]` section in the address book, a `TradeDecoder` in `venues/`, one arm in `venues::decoders_for` | The venue's trades are missed: with no entry-point match they only surface when a known solver logs inside them, and intent decoding then excludes the trader |
 | Extend what Hindsight knows about a venue | That venue's module in `venues/` — never anywhere else | Decoding degrades silently |
@@ -241,20 +241,27 @@ collectors are re-verified on every chain a venue is added on.
 ```
  tycho stream ──▶ in-process Fynd solver, held at block N-1
                              │
-      decode block N         │  re-solve every settled trade   →  top-of-block result
+      decode block N         │  re-solve every trade with known terms  →  top-of-block result
                              ▼
                      advance solver to N
-                             │  re-solve every trade again     →  back-of-block result
+                             │  re-solve every trade again              →  back-of-block result
                              ▼
                       RangeComparison ──▶ JSONL records + Prometheus metrics
 ```
 
+A settled and a reverted trade go through the same wave: `RangeComparison` carries a `status`
+field (`settled` or `reverted`, with a cause) rather than being two record types. A trade with
+unknown terms — a reverted swap whose solver calldata did not parse — is recorded but not solved.
+
 Top-of-block (state N-1) is the optimistic comparison — Fynd sees the pools before the block's
-own swaps moved them; back-of-block (state N) is the pessimistic one. The headline verdict is
-top-of-block: `Win`, `Loss`, `CoverageMiss` (Fynd filled under half the settled size),
-`Unsolvable`, or `Sandwiched` (the settled output was moved by MEV; excluded from savings
-aggregates). Watchdogs rebuild the solver when the tycho feed dies or the monitor falls too
-far behind chain head (`--max-lag-blocks`).
+own swaps moved them; back-of-block (state N) is the pessimistic one. For a settled trade, the
+headline verdict is top-of-block: `Win`, `Loss`, `CoverageMiss` (Fynd filled under half the
+settled size), `Unsolvable`, or `Sandwiched` (the settled output was moved by MEV; excluded from
+savings aggregates). A reverted trade has no settled output to score a verdict against, but each
+state still carries a `fillable`/`margin_bps` judgment against the trader's on-chain floor
+(`min_amount_out`) — how many reverts a sequencer filling against fresher state could avoid.
+Watchdogs rebuild the solver when the tycho feed dies or the monitor falls too far behind chain
+head (`--max-lag-blocks`).
 
 Each solved state also records which algorithm won the quote and the route it took, rendered as
 `USDT -[uniswap_v2]-> DAI -[vm:balancer]-> WETH` (a split fans into ` + `-joined legs, each with its

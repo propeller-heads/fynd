@@ -41,7 +41,13 @@ pub(crate) fn run(args: ReportArgs) -> anyhow::Result<()> {
     if all.is_empty() {
         bail!("no comparison records found in {}", args.comparisons_dir.display());
     }
-    let records = filter_by_venue(all, &args.venue)?;
+    // Savings and win-rate only mean something for a trade that actually delivered an output —
+    // filter reverted trades out explicitly rather than relying on their absent `top` state.
+    let settled: Vec<Comparison> = all
+        .into_iter()
+        .filter(|record| record.status == "settled")
+        .collect();
+    let records = filter_by_venue(settled, &args.venue)?;
     let report = aggregate::build(&records);
     let filter = (!args.venue.is_empty()).then(|| args.venue.join(", "));
     let html = html::render(&report, filter.as_deref());
@@ -85,7 +91,8 @@ fn filter_by_venue(records: Vec<Comparison>, venues: &[String]) -> anyhow::Resul
     Ok(filtered)
 }
 
-/// Read and parse every `.jsonl` file in `dir` into comparison records. Malformed lines are
+/// Read and parse every `comparisons-*.jsonl` file in `dir` into comparison records — settled and
+/// reverted trades alike; `run` filters to settled before aggregating. Malformed lines are
 /// counted and skipped rather than failing the whole report — a truncated final line from an
 /// interrupted run should not lose the rest of the data.
 fn read_comparisons(dir: &Path) -> anyhow::Result<Vec<Comparison>> {
@@ -95,12 +102,15 @@ fn read_comparisons(dir: &Path) -> anyhow::Result<Vec<Comparison>> {
         .map(|entry| entry.path())
         .filter(|path| {
             path.extension()
-                .is_some_and(|ext| ext == "jsonl")
+                .is_some_and(|ext| ext == "jsonl") &&
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("comparisons-"))
         })
         .collect();
     files.sort();
     if files.is_empty() {
-        bail!("no .jsonl files in {}", dir.display());
+        bail!("no comparisons-*.jsonl files in {}", dir.display());
     }
 
     let mut records = Vec::new();
@@ -142,8 +152,9 @@ mod tests {
 
     fn line(block: u64, verdict: &str) -> String {
         serde_json::json!({
-            "block": block, "settled_tx": format!("0x{block:064x}"),
+            "block": block, "tx_hash": format!("0x{block:064x}"),
             "venue": "relay", "solver": "1inch", "token_in": "0xaaa", "token_out": "0xbbb",
+            "status": "settled",
             "top": {"verdict": verdict, "net_bps": 1.0, "improvement_usd": 1.0, "settled_value_usd": 1.0},
         })
         .to_string()
@@ -172,6 +183,22 @@ mod tests {
     }
 
     #[test]
+    fn test_ignores_non_comparisons_jsonl_files() {
+        // Only `comparisons-*.jsonl` files are read; anything else in the directory (an old
+        // stream from a prior version, a stray file) is left alone rather than fed to the parser.
+        let dir = write_dir(
+            "with-other-files",
+            &[
+                ("comparisons-2026-07-20.jsonl", &format!("{}\n", line(1, "win"))),
+                ("other-2026-07-20.jsonl", "{\"block\":1}\n"),
+            ],
+        );
+        let records = read_comparisons(&dir).unwrap();
+        assert_eq!(records.len(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn test_empty_dir_is_an_error() {
         let dir = write_dir("empty", &[]);
         assert!(read_comparisons(&dir).is_err());
@@ -180,8 +207,8 @@ mod tests {
 
     fn venue_record(venue: &str) -> Comparison {
         serde_json::from_value(serde_json::json!({
-            "block": 1, "settled_tx": "0x1", "venue": venue, "solver": "1inch",
-            "token_in": "0xaaa", "token_out": "0xbbb",
+            "block": 1, "tx_hash": "0x1", "venue": venue, "solver": "1inch",
+            "token_in": "0xaaa", "token_out": "0xbbb", "status": "settled",
             "top": {"verdict": "win", "net_bps": 1.0, "improvement_usd": 1.0, "settled_value_usd": 1.0},
         }))
         .unwrap()

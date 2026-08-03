@@ -63,7 +63,10 @@ pub(crate) fn detect(
     if victim_pools.is_empty() {
         return None;
     }
-    let token = direction_token(victim.token_out, registry);
+    // Sandwich detection only makes sense for a trade that actually moved the pools; a reverted
+    // trade (or one whose calldata did not parse) has no settled output token to key the
+    // direction on.
+    let token = direction_token(victim.token_out?, registry);
 
     let front_start = victim_index.saturating_sub(WINDOW);
     let back_end = (victim_index + WINDOW).min(receipts.len().saturating_sub(1));
@@ -272,15 +275,16 @@ mod tests {
             tx_hash: TxHash::default(),
             block_number: 1,
             tx_index: 0,
+            status: crate::decoder::TradeStatus::Settled,
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
             sender,
-            token_in: addr(59),
-            token_out,
-            amount_in: U256::from(1_000u64),
-            amount_out: U256::from(2_000u64),
+            token_in: Some(addr(59)),
+            token_out: Some(token_out),
+            amount_in: Some(U256::from(1_000u64)),
+            amount_out: Some(U256::from(2_000u64)),
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,

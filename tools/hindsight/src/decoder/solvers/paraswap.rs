@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(intent.token_out, address_from_word(dst_token));
         assert_eq!(intent.amount_in, amount_in);
         assert_eq!(intent.min_amount_out, U256::from(171_430_663u64));
-        assert_eq!(intent.quoted_amount_out(), U256::from(171_602_266u64));
+        assert_eq!(intent.declared_quote(), Some(U256::from(171_602_266u64)));
     }
 
     #[test]

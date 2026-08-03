@@ -26,13 +26,16 @@ name needs `--registry`.
   `ALLIUM_API_KEY` and `ALLIUM_QUERY_ID`.
 
 - **`monitor`** — Live mode: drives an in-process `fynd-core` solver block-by-block. For each
-  block it decodes settled trades, solves each order at top-of-block (state N-1), then measures
-  twice at back-of-block (state N): the top route is re-executed via `fynd_core::replay_route`
-  to measure slippage between quote time and execution time, and the order is solved fresh to
-  show what routing at the block's end state would deliver. Emits `RangeComparison` JSONL
-  records. Exposes a Prometheus metrics endpoint (`--metrics-port`). `--max-lag-blocks` (default
-  100, ~20 min on mainnet) bounds how far it may fall behind chain head before rebuilding the
-  solver.
+  block it decodes every trade — settled and reverted alike — solves each one with known terms at
+  top-of-block (state N-1), then measures twice at back-of-block (state N): the top route is
+  re-executed via `fynd_core::replay_route` to measure slippage between quote time and execution
+  time, and the trade is solved fresh to show what routing at the block's end state would
+  deliver. A settled trade is judged against what it settled for; a reverted trade whose calldata
+  parsed into a `SwapIntent` is judged against whether the quote would have cleared the trader's
+  on-chain floor (`min_amount_out`) instead — told apart by one `status` field, not by separate
+  record types. Emits one `RangeComparison` JSONL stream (`comparisons-*.jsonl`) and exposes a
+  Prometheus metrics endpoint (`--metrics-port`). `--max-lag-blocks` (default 100, ~20 min on
+  mainnet) bounds how far it may fall behind chain head before rebuilding the solver.
 
 - **`report`** — Offline: read the `comparisons-YYYY-MM-DD.jsonl` files a `monitor` run wrote
   (`--comparisons-dir`) and render a single self-contained HTML file (`-o`, defaults to
@@ -58,7 +61,7 @@ Match → trace → decode → veto → record.
 
 | File/dir | Purpose |
 |---|---|
-| `matching.rs` | Receipt-only filter: is this transaction a solver trade at all, plus match-time vetoes |
+| `matching.rs` | Receipt-only filter: is this transaction a solver trade at all — settled or reverted, distinguished by `MatchedSolverTrade::reverted`. A settled match is filtered by tx.to/solver logs plus match-time vetoes; a reverted match is by entry point alone (gated by `REVERT_DECODED_VENUES`) — a revert emits no logs, so this is the only signal available |
 | `decode.rs` | The `TradeDecoder` trait, the matched entity → decoders mapping, `DecodeContext`, `TraderFlow` |
 | `netting_decoders.rs` | Netting toolkit (`sender_flow`, `venue_flow`) plus the `SenderNetting` decoder |
 | `transfer_ledger.rs` | Builds a transfer ledger from logs and native ETH flows |
@@ -66,9 +69,9 @@ Match → trace → decode → veto → record.
 | `registry.rs` | Per-chain address book, loaded from TOML (see below) |
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |
 | `venues/` | Per-venue `TradeDecoder` impls (Relay, MetaMask, Rabby), listed in `venues::decoders_for`. Relay has two, tried in order: `RelayCalldata` (calldata-primary, see below) then `RelayNetting` (the fallback) |
-| `solvers/` | Per-solver knowledge: embedded quotes, match-time vetoes, attribution, and swap intents (`fly.rs`'s packed-calldata parser, `kyberswap.rs`'s ABI-decoded `swap` params, `zeroex.rs`'s ABI-decoded `AllowanceHolder.exec`/`Settler.execute`) recovered from a solver frame's own calldata, plus the declared output recipient (`output_recipient`) that lets `RelayCalldata` anchor the settled amount |
+| `solvers/` | Per-solver knowledge: embedded quotes, match-time vetoes, attribution, swap intents (`fly.rs`'s packed-calldata parser, `kyberswap.rs`'s ABI-decoded `swap` params, `zeroex.rs`'s ABI-decoded `AllowanceHolder.exec`/`Settler.execute`) recovered from a solver frame's own calldata via `trace::find_solver_frame` — for settled trades that frame settled, for reverted trades the frame that tried — plus each solver's slippage-floor marker (`is_slippage_floor`, e.g. Fly's `InsufficientAmountOut()` selector, KyberSwap's "Return amount is not enough" reason, `zeroex.rs`'s `TooMuchSlippage(address,uint256,uint256)` selector) and the declared output recipient (`output_recipient`) that lets `RelayCalldata` anchor the settled amount |
 | `intents/` | Intent-role decoders (solver-sent, trader-not-sender): `cow.rs` reads CoW's `Trade` event, `netting.rs` is the generic net-flow finder, `decoders_for` lists them |
-| `trace.rs` | Transaction trace fetching and processing |
+| `trace.rs` | Transaction trace fetching and processing: `find_solver_frame` (the frame that settled the swap, or — when nothing settled — the frame that tried) and revert-cause classification (the generic subtree walk, out-of-gas, deepest-revert-reason; the slippage-floor marker itself is asked of `solvers::`, never hardcoded here) |
 
 `src/verify/` contains the Allium integration:
 - `allium.rs` — Allium API client for the `verify` subcommand
@@ -93,10 +96,10 @@ their solver in calldata — `solver_aliases`).
 
 | File | Purpose |
 |---|---|
-| `mod.rs` | `SteppingSolver` trait; `resolve_block_range` — solve all trades at top, advance, then re-execute each top route and solve each trade fresh at back |
-| `compare.rs` | `Verdict` / `Deltas` / `Slippage` — bps diff, win/loss/coverage-miss classification, quote-vs-re-execution slippage |
+| `mod.rs` | `SteppingSolver` trait; `resolve_block_range` — one wave over every trade (settled and reverted alike): solve those with known terms at top, advance, then re-execute each top route and solve fresh at back. A trade with unknown terms is recorded but not solved |
+| `compare.rs` | `Verdict` / `Deltas` / `Slippage` — bps diff, win/loss/coverage-miss classification, quote-vs-re-execution slippage; `floor_judgment` — fillable/margin judgment against `min_amount_out`, used for both settled and reverted trades when a floor is known |
 | `monitor.rs` | Production `monitor` subcommand: in-process solver, block subscription, JSONL emission |
-| `jsonl.rs` | Append-only JSONL writer used by `monitor` |
+| `jsonl.rs` | `write_comparisons` — the one append-only JSONL stream (`comparisons-*.jsonl`) `monitor` writes, via the rotating-by-day `RotatingWriter`; every trade's record carries `tx_hash`, `sender` (the netted trader for a settled trade, the transaction sender for a reverted one — segments venue-filler fills like Relay's rotating filler without an on-chain lookup), a flat `status` (`settled`/`reverted`), and, for a revert, `cause`/`cause_detail` |
 
 ### Report (`src/report/`)
 
@@ -105,7 +108,7 @@ self-contained HTML file.
 
 | File | Purpose |
 |---|---|
-| `mod.rs` | `ReportArgs`; reads every `.jsonl` in the dir, skipping malformed lines |
+| `mod.rs` | `ReportArgs`; reads every `comparisons-*.jsonl` in the dir, skipping malformed lines, then filters to `status == "settled"` before aggregating — savings and win-rate only mean something for a trade that delivered an output |
 | `record.rs` | The subset of the JSONL record the report deserializes; round-trip tested against `jsonl::write_comparisons` |
 | `aggregate.rs` | Pure aggregations over the records (verdicts, coverage, savings, per-group, movers) |
 | `html.rs` | Renders the aggregates to a self-contained HTML file (inline CSS, `<div>` bars, no assets) |
@@ -146,14 +149,48 @@ fees are still recorded via `venue_fee_in`/`venue_fee_out` for transparency. See
 coverage rises from 60.0% (netting alone) to 91.4% (calldata-first union), with zero divergences
 across the 165 trades both paths could decode.
 
+### Revert model
+
+A reverted trade is still a trade — one that did not fill — so it is modeled by `DecodedTrade`,
+told apart from a settled one by its `status` field (`TradeStatus::Settled` or
+`TradeStatus::Reverted { cause }`), not by a parallel type. Reverted Relay swaps are matched by
+entry point alone (no logs to match on), decoded from their trace for the settling solver — via
+the same `trace::find_solver_frame` a settled trade uses, whose strict-then-tolerant walk falls
+back to "the frame that tried" when nothing settled — and, when that solver's calldata supports
+it (Fly, KyberSwap), the trader's terms (`token_in`/`token_out`/`amount_in`/`min_amount_out`),
+which land in the same fields a settled trade's terms do. `RevertCause` classifies why the
+transaction failed: `SlippageFloor` (a registered solver's `is_slippage_floor` marker — Fly's
+`InsufficientAmountOut()` selector, KyberSwap's "Return amount is not enough" reason, 0x's
+`TooMuchSlippage(address,uint256,uint256)` selector or a routed-through liquidity source's
+"return too low" — the avoidable class), `OutOfGas`, or `Other` (the deepest reverted frame's
+error/revert reason, with the frame's raw output selector appended when the tracer decoded no
+string reason, e.g. `"execution reverted (0x12345678)"` — several RPC providers never populate
+a decoded reason at all, so the selector is what stays classifiable offline).
+
+A reverted trade with known terms is re-solved at top-of-block (N-1) and back-of-block (N)
+through the same wave a settled trade goes through (`resolve_block_range`), then judged by the
+same `StateResult` every trade gets: `fillable` (quote ≥ `min_amount_out`) and `margin_bps`
+(signed bps of the quote against the floor), quantifying how many reverts a sequencer filling
+against fresher state could avoid. A settled trade gets this judgment too, whenever a floor is
+known — it cleared the floor by construction, but the margin is still informative. A trade with
+unknown terms (a reverted trade whose solver calldata did not parse) is recorded but not solved —
+only counted, so parser coverage stays measurable — and every trade, settled or reverted, writes
+to the one `comparisons-YYYY-MM-DD.jsonl` stream; there is no separate revert stream or type.
+
 ### Key types
 
-- `DecodedTrade` — decoded on-chain trade; amounts are venue-fee-adjusted so re-solve compares
-  like-for-like. Carries `sandwich` evidence when a bracket pair was found, and `min_amount_out`,
-  `declared_quote`, and `quote_timestamp` (the calldata-declared terms copied off the settling
-  solver's `SwapIntent`, when one was recovered).
-- `RangeComparison` — a trade solved at top and back, including gas-netted settled output and
-  the top route's `Slippage` between the two states (from its re-execution at back).
+- `DecodedTrade` — a decoded on-chain trade, settled or reverted, told apart by `status:
+  TradeStatus`. A settled trade always carries `token_in`/`token_out`/`amount_in`/`amount_out`
+  (amounts venue-fee-adjusted so re-solve compares like-for-like) and, when a bracket pair was
+  found, `sandwich` evidence; a reverted trade carries `token_in`/`token_out`/`amount_in` only
+  when its solver frame's calldata parsed, and never `amount_out` — nothing was delivered. Both
+  carry `min_amount_out`, `declared_quote`, and `quote_timestamp` when known (the calldata-declared
+  terms copied off the settling solver's `SwapIntent`).
+- `RangeComparison` — a trade solved at top and back — settled or reverted, told apart by
+  `status` — including gas-netted settled output (settled only), the top route's `Slippage`
+  between the two states, and, per state, the `fillable`/`margin_bps` judgment against
+  `min_amount_out` when a floor is known. `top`/`back`/`verdict`/`slippage` are absent when the
+  trade's terms were unknown.
 - `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
 - `SolvedAmount` — a solved state's amounts plus `algorithm` (which worker pool won the quote) and
   `solved_route` (the full `fynd_core::types::Route`, kept in memory to replay at back-of-block).

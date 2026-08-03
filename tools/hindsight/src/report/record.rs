@@ -9,16 +9,25 @@
 use serde::Deserialize;
 
 /// One re-solved trade: the settled trade's identity plus Fynd's result at each block state.
+/// Carries both settled and reverted trades (told apart by `status`) — the report filters to
+/// `status == "settled"` before aggregating (see `report::run`), since Allium-style savings and
+/// win-rate views only make sense for a trade that actually delivered an output.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Comparison {
     pub block: u64,
-    pub settled_tx: String,
+    pub tx_hash: String,
     pub venue: String,
     pub solver: String,
-    pub token_in: String,
-    pub token_out: String,
+    /// `None` only for a reverted trade with no known terms — always present once filtered to
+    /// `status == "settled"`.
+    pub token_in: Option<String>,
+    pub token_out: Option<String>,
+    pub status: String,
     /// Optimistic state (N-1); the report's headline, matching the monitor's headline verdict.
-    pub top: State,
+    /// `None` only for a reverted trade with no known terms — a settled trade always carries one
+    /// (see `DecodedTrade`'s settled/reverted invariant), so every record this module aggregates
+    /// (already filtered to `status == "settled"`) has one.
+    pub top: Option<State>,
 }
 
 /// Fynd's result at one block state.
@@ -81,15 +90,16 @@ mod tests {
             tx_hash: TxHash::repeat_byte(0x42),
             block_number: 25_000_000,
             tx_index: 0,
+            status: crate::decoder::TradeStatus::Settled,
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
             sender: Address::ZERO,
-            token_in: weth,
-            token_out: usdc,
-            amount_in: U256::from(1_000u64),
-            amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
+            token_in: Some(weth),
+            token_out: Some(usdc),
+            amount_in: Some(U256::from(1_000u64)),
+            amount_out: Some(U256::from(1_000_000_000u64)), // settled 1000 USDC
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
@@ -110,9 +120,7 @@ mod tests {
         let range = build_range(
             &trade,
             &prices,
-            top,
-            Outcome::Unsolvable("x".into()),
-            &Outcome::Unsolvable("x".into()),
+            Some((top, Outcome::Unsolvable("x".into()), Outcome::Unsolvable("x".into()))),
         );
 
         let mut buf = Vec::new();
@@ -123,10 +131,12 @@ mod tests {
         assert_eq!(record.block, 25_000_000);
         assert_eq!(record.venue, "relay");
         assert_eq!(record.solver, "1inch");
-        assert_eq!(record.top.verdict, "win");
-        assert!(record.top.is_scored());
-        assert!(record.top.net_bps.unwrap() > 0.0);
-        assert!((record.top.improvement_usd.unwrap() - 10.0).abs() < 1e-3);
-        assert_eq!(record.token_out, format!("{usdc:#x}"));
+        assert_eq!(record.status, "settled");
+        let top = record.top.unwrap();
+        assert_eq!(top.verdict, "win");
+        assert!(top.is_scored());
+        assert!(top.net_bps.unwrap() > 0.0);
+        assert!((top.improvement_usd.unwrap() - 10.0).abs() < 1e-3);
+        assert_eq!(record.token_out, Some(format!("{usdc:#x}")));
     }
 }

@@ -17,6 +17,17 @@
 //! bare entry is declined rather than guessed, per the "no dead code, no guessing" rule; if bare
 //! entries turn out to matter, the `token_in` question needs its own investigation, not a shortcut
 //! here.
+//!
+//! `is_slippage_floor` covers 0x's own `TooMuchSlippage(address,uint256,uint256)`, thrown by
+//! `SettlerAbstract`/`SettlerErrors.sol` (`revertTooMuchSlippage`) — also verified against
+//! 0x-settler's source and confirmed live: the selector appears in real reverted Base traces
+//! bubbling through both registered 0x addresses (Settler and `AllowanceHolder`), full
+//! ABI-encoded as `(token, expected, actual)` (see
+//! `fixtures/trace_revert_zeroex_slippage_0x157e025b.json`, whose deepest frame decodes to
+//! `token=USDC, expected=0xdd2ab926, actual=0`). `"return too low"` is not 0x's own error — it is
+//! the revert string of at least one inner liquidity source 0x's Settler routes through (observed
+//! live from a `Kipseli PropAMM` pool) — but 0x is the only address our registry knows about
+//! anywhere in those traces, so it is recognized here rather than left unclassified.
 
 use alloy::{
     primitives::{Address, U256},
@@ -68,6 +79,13 @@ fn normalize_native(token: Address) -> Address {
         token
     }
 }
+
+/// `keccak256("TooMuchSlippage(address,uint256,uint256)")[..4]`.
+const TOO_MUCH_SLIPPAGE: [u8; 4] = [0x97, 0xa6, 0xf3, 0xb9];
+
+/// Revert reason from a liquidity source 0x's Settler routed through, when its own output floor
+/// was not met.
+const RETURN_TOO_LOW: &str = "return too low";
 
 /// Settler's own terms, decoded from an `execute` call regardless of how it was reached (wrapped
 /// in `AllowanceHolder.exec` or, if it ever occurs, called directly).
@@ -136,6 +154,14 @@ impl SolverKnowledge for ZeroEx {
             return decode_execute(&call.data).map(|terms| terms.recipient);
         }
         decode_execute(input).map(|terms| terms.recipient)
+    }
+
+    /// Whether a reverted frame's output is 0x's own `TooMuchSlippage` selector, or its revert
+    /// reason is the "return too low" string a liquidity source 0x's Settler routes through
+    /// returns.
+    fn is_slippage_floor(&self, output: Option<&[u8]>, revert_reason: Option<&str>) -> bool {
+        output.is_some_and(|output| output.starts_with(&TOO_MUCH_SLIPPAGE)) ||
+            revert_reason.is_some_and(|reason| reason.contains(RETURN_TOO_LOW))
     }
 }
 
@@ -286,5 +312,27 @@ mod tests {
     fn test_native_eth_sentinel_normalized() {
         assert_eq!(normalize_native(ZEROEX_NATIVE), Address::ZERO);
         assert_eq!(normalize_native(USDC), USDC);
+    }
+
+    #[test]
+    fn test_is_slippage_floor_matches_the_selector() {
+        // The full ABI-encoded shape (token, expected, actual) — only the selector is checked.
+        let mut output = TOO_MUCH_SLIPPAGE.to_vec();
+        output.extend_from_slice(&[0u8; 96]);
+        assert!(ZeroEx.is_slippage_floor(Some(&output), None));
+        assert!(!ZeroEx.is_slippage_floor(Some(&[0xde, 0xad, 0xbe, 0xef]), None));
+    }
+
+    #[test]
+    fn test_is_slippage_floor_matches_the_revert_reason() {
+        assert!(ZeroEx.is_slippage_floor(None, Some("return too low")));
+        // Substring, not exact match: geth's callTracer sometimes carries surrounding context.
+        assert!(ZeroEx.is_slippage_floor(None, Some("execution reverted: return too low")));
+        assert!(!ZeroEx.is_slippage_floor(None, Some("out of gas")));
+    }
+
+    #[test]
+    fn test_is_slippage_floor_declines_when_neither_is_present() {
+        assert!(!ZeroEx.is_slippage_floor(None, None));
     }
 }

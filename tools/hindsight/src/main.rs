@@ -16,7 +16,7 @@ use tracing_subscriber::EnvFilter;
 use tycho_simulation::tycho_common::models::Chain;
 
 use crate::{
-    decoder::{DecodedTrade, Decoder, Registry},
+    decoder::{DecodedTrade, Decoder, Registry, TradeStatus},
     report::ReportArgs,
     resolve::monitor::MonitorArgs,
     verify::allium::AlliumClient,
@@ -182,11 +182,11 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
     for block_number in &blocks {
         info!(block = block_number, "decoding solver trades");
         let start = Instant::now();
-        let trades = match decoder
+        let decoded = match decoder
             .decode_block(*block_number)
             .await
         {
-            Ok(trades) => trades,
+            Ok(decoded) => decoded,
             Err(error) => {
                 warn!(block = block_number, %error, "failed to decode block; skipping");
                 continue;
@@ -194,12 +194,22 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
         };
         let elapsed_ms = start.elapsed().as_millis();
 
-        if trades.is_empty() {
+        if decoded.is_empty() {
             info!(block = block_number, elapsed_ms, "no solver trades found");
         } else {
-            info!(block = block_number, count = trades.len(), elapsed_ms, "decoded trades");
+            let reverted = decoded
+                .iter()
+                .filter(|trade| trade.status != TradeStatus::Settled)
+                .count();
+            info!(
+                block = block_number,
+                trades = decoded.len(),
+                reverted,
+                elapsed_ms,
+                "decoded trades"
+            );
         }
-        all_trades.extend(trades);
+        all_trades.extend(decoded);
     }
 
     if args.json {
@@ -256,6 +266,9 @@ pub(crate) async fn resolve_blocks<P: Provider>(
     }
 }
 
+/// Print every decoded trade — settled or reverted, told apart by `status`. A settled trade's
+/// terms are always known (see `DecodedTrade`'s settled/reverted invariant); a reverted one may
+/// have none, when its solver calldata did not parse.
 #[expect(clippy::print_stdout)]
 fn print_trades(trades: &[DecodedTrade]) {
     if trades.is_empty() {
@@ -271,10 +284,14 @@ fn print_trades(trades: &[DecodedTrade]) {
         println!("  venue:      {}", trade.venue);
         println!("  solver:     {}", trade.solver);
         println!("  sender:     {}", trade.sender);
-        println!("  token_in:   {}", trade.token_in);
-        println!("  amount_in:  {}", trade.amount_in);
-        println!("  token_out:  {}", trade.token_out);
-        println!("  amount_out: {}", trade.amount_out);
+        match &trade.status {
+            TradeStatus::Settled => println!("  status:     settled"),
+            TradeStatus::Reverted { cause } => println!("  status:     reverted ({cause:?})"),
+        }
+        print_option("token_in:", trade.token_in);
+        print_option("amount_in:", trade.amount_in);
+        print_option("token_out:", trade.token_out);
+        print_option("amount_out:", trade.amount_out);
         if let Some(sandwich) = &trade.sandwich {
             println!(
                 "  sandwich:   front={} back={} attacker={}",
@@ -282,6 +299,16 @@ fn print_trades(trades: &[DecodedTrade]) {
             );
         }
         println!();
+    }
+}
+
+/// Print a labeled field that may be unknown — `unknown` (not blank) so a reverted trade whose
+/// terms did not parse still reads as "we checked and found nothing" rather than an empty value.
+#[expect(clippy::print_stdout)]
+fn print_option<T: std::fmt::Display>(label: &str, value: Option<T>) {
+    match value {
+        Some(value) => println!("  {label:<12}{value}"),
+        None => println!("  {label:<12}unknown"),
     }
 }
 

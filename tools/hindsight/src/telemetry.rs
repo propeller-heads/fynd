@@ -6,12 +6,13 @@
 use std::time::Duration;
 
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use alloy::primitives::{Address, U256};
 use metrics::{counter, describe_counter, describe_histogram, histogram, Unit};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing::{error, info, warn};
 
 use crate::{
-    decoder::Registry,
+    decoder::{Registry, RevertCause, TradeStatus},
     resolve::{render_route, Outcome, RangeComparison, StateResult, Verdict},
     usd::Prices,
 };
@@ -30,6 +31,9 @@ const RPC_INDEX_WAIT: &str = "hindsight_rpc_index_wait_seconds";
 const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
 const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
 const UNTRACED_TRANSACTIONS: &str = "hindsight_untraced_transactions_total";
+const REVERTED_SWAPS_TOTAL: &str = "hindsight_reverted_swaps_total";
+const REVERT_FILLABLE_TOTAL: &str = "hindsight_revert_fillable_total";
+const REVERT_MARGIN_BPS: &str = "hindsight_revert_margin_bps";
 
 /// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
@@ -107,9 +111,20 @@ pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
     }
 }
 
+/// Metric label for a reverted swap's cause — a closed, bounded set. `Other`'s free-text detail
+/// stays in the JSONL records, never in a label.
+pub(crate) fn revert_cause_label(cause: &RevertCause) -> &'static str {
+    match cause {
+        RevertCause::SlippageFloor => "slippage_floor",
+        RevertCause::OutOfGas => "out_of_gas",
+        RevertCause::Other(_) => "other",
+    }
+}
+
 /// Register metric descriptions with the active recorder.
 pub(crate) fn describe() {
     describe_trade_metrics();
+    describe_revert_metrics();
 }
 
 /// Register descriptions for the per-trade re-solve metrics: savings, slippage, volume, and the
@@ -208,9 +223,29 @@ fn describe_trade_metrics() {
     );
 }
 
-/// Record a two-state range: the top-of-block (N-1) and back-of-block (N) outcomes, each tagged
-/// with a `state` label ("top"/"back"). `prices_top`/`prices_back` are the solver's token-price
-/// snapshots at each state, used to value savings in USD; an empty map disables USD for that state.
+/// Register descriptions for the reverted-swap metrics.
+fn describe_revert_metrics() {
+    describe_counter!(
+        REVERTED_SWAPS_TOTAL,
+        "Reverted Relay swaps seen, labeled by venue / solver / chain / cause \
+         (slippage_floor|out_of_gas|other) / decoded (true|false). The decoded=false slice is \
+         parser-coverage: reverts whose solver frame or calldata could not be recovered"
+    );
+    describe_counter!(
+        REVERT_FILLABLE_TOTAL,
+        "Decoded, solved reverts whose quote is judged against the trader's on-chain floor \
+         (min_amount_out), labeled by venue / solver / chain / state (top|back) / fillable \
+         (true|false). The avoidance rate is fillable=true over the total at either state"
+    );
+    describe_histogram!(
+        REVERT_MARGIN_BPS,
+        Unit::Count,
+        "Signed bps of (quote - min_amount_out) / min_amount_out for decoded, solved reverts \
+         (positive = cleared the floor with room to spare), labeled by venue / solver / chain / \
+         state (top|back)"
+    );
+}
+/// Record one re-solved trade — settled or reverted, told apart by `range.status`.
 pub(crate) fn record_range(
     range: &RangeComparison,
     chain: &str,
@@ -218,6 +253,49 @@ pub(crate) fn record_range(
     prices_back: &Prices,
     registry: &Registry,
 ) {
+    match &range.status {
+        TradeStatus::Settled => {
+            record_settled_range(range, chain, prices_top, prices_back, registry);
+        }
+        TradeStatus::Reverted { cause } => record_reverted_range(range, cause, chain, registry),
+    }
+}
+
+/// Record a settled trade's two-state range: the top-of-block (N-1) and back-of-block (N)
+/// outcomes, each tagged with a `state` label ("top"/"back"). `prices_top`/`prices_back` are the
+/// solver's token-price snapshots at each state, used to value savings in USD; an empty map
+/// disables USD for that state.
+fn record_settled_range(
+    range: &RangeComparison,
+    chain: &str,
+    prices_top: &Prices,
+    prices_back: &Prices,
+    registry: &Registry,
+) {
+    // A settled trade always carries these by construction (see `DecodedTrade`'s settled/
+    // reverted invariant); the early return is a defensive guard, not the expected path.
+    let (
+        Some(top),
+        Some(back),
+        Some(verdict),
+        Some(token_in),
+        Some(token_out),
+        Some(amount_in),
+        Some(settled_amount_out),
+    ) = (
+        &range.top,
+        &range.back,
+        range.verdict,
+        range.token_in,
+        range.token_out,
+        range.amount_in,
+        range.settled_amount_out,
+    )
+    else {
+        warn!(tx = %range.tx_hash, "settled range is missing terms or solved states; skipping metrics");
+        return;
+    };
+
     let labels = MetricLabels {
         venue: venue_label(&range.venue, registry),
         solver: solver_label(&range.solver, registry),
@@ -231,15 +309,15 @@ pub(crate) fn record_range(
     // outside the solver's graph) — without the fallback, unsolvable volume would be
     // systematically undercounted.
     let volume = prices_top
-        .value_usd(range.token_out, range.settled_amount_out)
-        .or_else(|| prices_top.value_usd(range.token_in, range.amount_in));
+        .value_usd(token_out, settled_amount_out)
+        .or_else(|| prices_top.value_usd(token_in, amount_in));
     if let Some(volume) = volume {
         histogram!(
             VOLUME_USD,
             "venue" => labels.venue.to_string(),
             "solver" => labels.solver.to_string(),
             "chain" => labels.chain.to_string(),
-            "outcome" => outcome_label(range.verdict).to_string(),
+            "outcome" => outcome_label(verdict).to_string(),
         )
         .record(volume);
     }
@@ -249,9 +327,10 @@ pub(crate) fn record_range(
     // notional and is kept. The notional is a per-trade quantity, so both states share this gate.
     let above_floor = volume.is_none_or(|usd| usd >= MIN_NOTIONAL_USD);
 
-    let savings_top = record_state(range, &range.top, "top", &labels, prices_top, above_floor);
-    record_state(range, &range.back, "back", &labels, prices_back, above_floor);
-    record_slippage(range, &labels, prices_back);
+    let settled = (token_out, settled_amount_out);
+    let savings_top = record_state(range, top, "top", &labels, prices_top, above_floor, settled);
+    record_state(range, back, "back", &labels, prices_back, above_floor, settled);
+    record_slippage(range, &labels, prices_back, token_out, verdict);
 
     // One structured line per priced comparison, on the headline basis (top-of-block, gross).
     // Loki ingests pod stdout, so this line feeds the dashboard's top-trades table; keep the
@@ -262,10 +341,10 @@ pub(crate) fn record_range(
     // `route` is last on purpose: it is the only field whose value contains spaces, so a LogQL
     // regexp can only bound it by end-of-line. Keep it last, or the dashboard's route column
     // silently swallows every field after it.
-    if let (Some(savings_usd), Outcome::Solved(solved)) = (savings_top, &range.top.outcome) {
+    if let (Some(savings_usd), Outcome::Solved(solved)) = (savings_top, &top.outcome) {
         let priced = |amount| {
             prices_top
-                .value_usd(range.token_out, amount)
+                .value_usd(token_out, amount)
                 .unwrap_or(0.0)
         };
         info!(
@@ -273,12 +352,12 @@ pub(crate) fn record_range(
             block = range.block_number,
             venue = %range.venue,
             solver = %range.solver,
-            token_in = %range.token_in,
-            token_out = %range.token_out,
-            verdict = %outcome_label(range.verdict),
-            algorithm = %algorithm_label(&range.top.outcome),
+            token_in = %token_in,
+            token_out = %token_out,
+            verdict = %outcome_label(verdict),
+            algorithm = %algorithm_label(&top.outcome),
             volume_usd = volume.unwrap_or(0.0),
-            settled_usd = priced(range.settled_amount_out),
+            settled_usd = priced(settled_amount_out),
             fynd_usd = priced(solved.amount_out),
             quoted_usd = range.declared_quote.map_or(0.0, priced),
             savings_usd,
@@ -288,16 +367,16 @@ pub(crate) fn record_range(
     }
 }
 
-/// Record one block-state of a range under a `state` label. Emits the trade counter, and — for a
-/// solved state — the gross bps delta, the signed USD savings, and the USD uplift (only when
-/// Fynd beats the settled trade; a venue routes elsewhere when Fynd is worse). All highlighted
-/// metrics compare gross vs gross, matching the headline verdict.
+/// Record one block-state of a settled range under a `state` label. Emits the trade counter, and
+/// — for a solved state — the gross bps delta, the signed USD savings, and the USD uplift (only
+/// when Fynd beats the settled trade; a venue routes elsewhere when Fynd is worse). All
+/// highlighted metrics compare gross vs gross, matching the headline verdict.
 ///
 /// A sandwiched state's output was moved by MEV, not by Fynd's own routing, so it skips the
 /// `SAVINGS_BPS`/`SAVINGS_USD`/`IMPROVEMENT_USD` histograms — the USD histograms carry no
 /// outcome label, so skipping is the only way to keep the "value of adding Fynd" aggregates
 /// clean. The USD value is still computed and returned so the per-trade Loki line (in
-/// `record_range`) keeps logging.
+/// `record_settled_range`) keeps logging.
 ///
 /// Returns the signed USD savings it computed, `None` when the state is unsolved or unpriced.
 fn record_state(
@@ -307,7 +386,9 @@ fn record_state(
     labels: &MetricLabels<'_>,
     prices: &Prices,
     above_floor: bool,
+    settled: (Address, U256),
 ) -> Option<f64> {
+    let (token_out, settled_amount_out) = settled;
     let algorithm = algorithm_label(&state.outcome);
 
     if above_floor {
@@ -343,7 +424,7 @@ fn record_state(
     let Outcome::Solved(solved) = &state.outcome else {
         return None;
     };
-    let usd = prices.savings_usd(range.token_out, solved.amount_out, range.settled_amount_out)?;
+    let usd = prices.savings_usd(token_out, solved.amount_out, settled_amount_out)?;
     if sandwiched {
         return Some(usd);
     }
@@ -355,12 +436,9 @@ fn record_state(
             state = state_label,
             venue = %range.venue,
             solver = %range.solver,
-            token_in = %range.token_in,
-            token_out = %range.token_out,
-            amount_in = %range.amount_in,
-            settled_out = %range.settled_amount_out,
+            settled_out = %settled_amount_out,
             fynd_out = %solved.amount_out,
-            token_out_price = ?prices.get(range.token_out),
+            token_out_price = ?prices.get(token_out),
             usd,
             "USD outlier — inspect for token mispricing vs genuinely large trade"
         );
@@ -396,11 +474,17 @@ fn record_state(
 /// Valued at `prices_back`, the state the surplus is realized at. Sandwiched trades are not
 /// skipped: the comparison is Fynd-quote vs Fynd-re-execution, so the settled trade's MEV does
 /// not enter it, and block N's pool moves are real either way.
-fn record_slippage(range: &RangeComparison, labels: &MetricLabels<'_>, prices: &Prices) {
+fn record_slippage(
+    range: &RangeComparison,
+    labels: &MetricLabels<'_>,
+    prices: &Prices,
+    token_out: Address,
+    verdict: Verdict,
+) {
     let Some(slippage) = range.slippage else {
         return;
     };
-    let outcome = outcome_label(range.verdict).to_string();
+    let outcome = outcome_label(verdict).to_string();
     histogram!(
         SLIPPAGE_BPS,
         "venue" => labels.venue.to_string(),
@@ -410,11 +494,9 @@ fn record_slippage(range: &RangeComparison, labels: &MetricLabels<'_>, prices: &
     )
     .record(slippage.bps);
 
-    let Some(usd) = prices.savings_usd(
-        range.token_out,
-        slippage.reexecuted_amount_out,
-        slippage.quoted_amount_out,
-    ) else {
+    let Some(usd) =
+        prices.savings_usd(token_out, slippage.reexecuted_amount_out, slippage.quoted_amount_out)
+    else {
         return;
     };
     histogram!(
@@ -435,10 +517,10 @@ fn record_slippage(range: &RangeComparison, labels: &MetricLabels<'_>, prices: &
             block = range.block_number,
             venue = %range.venue,
             solver = %range.solver,
-            token_out = %range.token_out,
+            token_out = %token_out,
             quoted_out = %slippage.quoted_amount_out,
             reexecuted_out = %slippage.reexecuted_amount_out,
-            token_out_price = ?prices.get(range.token_out),
+            token_out_price = ?prices.get(token_out),
             usd,
             "positive slippage USD outlier — inspect for token mispricing vs a genuine pool move"
         );
@@ -450,6 +532,64 @@ fn record_slippage(range: &RangeComparison, labels: &MetricLabels<'_>, prices: &
         "chain" => labels.chain.to_string(),
     )
     .record(usd);
+}
+
+/// Record a reverted trade: always the "seen" counter (parser coverage, via the `decoded` label —
+/// whether its solver calldata parsed into terms), and — when its terms were known enough to
+/// solve — each state's fillable/margin judgment against `min_amount_out`.
+fn record_reverted_range(
+    range: &RangeComparison,
+    cause: &RevertCause,
+    chain: &str,
+    registry: &Registry,
+) {
+    counter!(
+        REVERTED_SWAPS_TOTAL,
+        "venue" => venue_label(&range.venue, registry).to_string(),
+        "solver" => solver_label(&range.solver, registry).to_string(),
+        "chain" => chain.to_string(),
+        "cause" => revert_cause_label(cause).to_string(),
+        "decoded" => if range.token_in.is_some() { "true" } else { "false" },
+    )
+    .increment(1);
+
+    let labels = MetricLabels {
+        venue: venue_label(&range.venue, registry),
+        solver: solver_label(&range.solver, registry),
+        chain,
+    };
+    if let Some(top) = &range.top {
+        record_revert_state(top, "top", &labels);
+    }
+    if let Some(back) = &range.back {
+        record_revert_state(back, "back", &labels);
+    }
+}
+
+/// Record one state of a revert judgment: the fillable counter and the signed margin histogram,
+/// both only when the state was solved (there is nothing to judge otherwise).
+fn record_revert_state(state: &StateResult, state_label: &'static str, labels: &MetricLabels<'_>) {
+    if let Some(fillable) = state.fillable {
+        counter!(
+            REVERT_FILLABLE_TOTAL,
+            "venue" => labels.venue.to_string(),
+            "solver" => labels.solver.to_string(),
+            "chain" => labels.chain.to_string(),
+            "state" => state_label,
+            "fillable" => if fillable { "true" } else { "false" },
+        )
+        .increment(1);
+    }
+    if let Some(margin_bps) = state.margin_bps {
+        histogram!(
+            REVERT_MARGIN_BPS,
+            "venue" => labels.venue.to_string(),
+            "solver" => labels.solver.to_string(),
+            "chain" => labels.chain.to_string(),
+            "state" => state_label,
+        )
+        .record(margin_bps);
+    }
 }
 
 pub(crate) fn record_block_seconds(seconds: f64) {
@@ -557,6 +697,7 @@ fn configure_buckets(
         .set_buckets_for_metric(Matcher::Full(IMPROVEMENT_USD.into()), SAVINGS_USD_BUCKETS)?
         .set_buckets_for_metric(Matcher::Full(SLIPPAGE_BPS.into()), SAVINGS_BPS_BUCKETS)?
         .set_buckets_for_metric(Matcher::Full(SLIPPAGE_USD.into()), SAVINGS_USD_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(REVERT_MARGIN_BPS.into()), SAVINGS_BPS_BUCKETS)?
         .set_buckets_for_metric(
             Matcher::Full(POSITIVE_SLIPPAGE_USD.into()),
             POSITIVE_SLIPPAGE_USD_BUCKETS,
@@ -571,6 +712,7 @@ fn configure_buckets(
 mod tests {
     use alloy::primitives::{address, Address, TxHash, U256};
     use metrics_exporter_prometheus::PrometheusBuilder;
+    use tycho_simulation::tycho_common::models::Chain;
 
     use super::*;
     use crate::{
@@ -587,15 +729,68 @@ mod tests {
             tx_hash: TxHash::default(),
             block_number: 21_000_000,
             tx_index: 0,
+            status: TradeStatus::Settled,
             venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
             sender: Address::ZERO,
-            token_in: Address::repeat_byte(0x11),
-            token_out,
-            amount_in: U256::from(1_000u64),
-            amount_out: U256::from(settled),
+            token_in: Some(Address::repeat_byte(0x11)),
+            token_out: Some(token_out),
+            amount_in: Some(U256::from(1_000u64)),
+            amount_out: Some(U256::from(settled)),
+            venue_fee_in: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
+            sandwich: None,
+        }
+    }
+
+    /// A reverted trade with known terms and a floor, for the unified revert-metrics tests.
+    fn reverted_trade(cause: RevertCause, min_amount_out: u64) -> DecodedTrade {
+        DecodedTrade {
+            tx_hash: TxHash::default(),
+            block_number: 21_000_000,
+            tx_index: 0,
+            status: TradeStatus::Reverted { cause },
+            venue: "relay".into(),
+            solver: "fly".into(),
+            solver_source: AttributionSource::TraceMatch,
+            decoder: "reverted",
+            sender: Address::ZERO,
+            token_in: Some(Address::repeat_byte(0x11)),
+            token_out: Some(Address::repeat_byte(0x22)),
+            amount_in: Some(U256::from(1_000u64)),
+            amount_out: None,
+            venue_fee_in: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            min_amount_out: Some(U256::from(min_amount_out)),
+            declared_quote: None,
+            quote_timestamp: None,
+            sandwich: None,
+        }
+    }
+
+    /// A reverted trade whose solver calldata did not parse — no terms, nothing to solve.
+    fn undecoded_reverted_trade(cause: RevertCause) -> DecodedTrade {
+        DecodedTrade {
+            tx_hash: TxHash::default(),
+            block_number: 21_000_000,
+            tx_index: 1,
+            status: TradeStatus::Reverted { cause },
+            venue: "relay".into(),
+            solver: "relay".into(),
+            solver_source: AttributionSource::Fallback,
+            decoder: "reverted",
+            sender: Address::ZERO,
+            token_in: None,
+            token_out: None,
+            amount_in: None,
+            amount_out: None,
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
@@ -649,9 +844,11 @@ mod tests {
         let range = build_range(
             &trade(usdc, 1_000_000_000),
             &empty_prices(),
-            solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
-            solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
-            &Outcome::Unsolvable("x".into()),
+            Some((
+                solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
+                solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
+                Outcome::Unsolvable("x".into()),
+            )),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -690,9 +887,11 @@ mod tests {
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
             &empty_prices(),
-            Outcome::Unsolvable("missing token in Tycho".into()),
-            Outcome::Unsolvable("missing token in Tycho".into()),
-            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
+            Some((
+                Outcome::Unsolvable("missing token in Tycho".into()),
+                Outcome::Unsolvable("missing token in Tycho".into()),
+                Outcome::Unsolvable("no top-of-block route to re-execute".into()),
+            )),
         );
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -747,9 +946,11 @@ mod tests {
         let range = build_range(
             &trade(usdc, 1_000_000_000),
             &empty_prices(),
-            solved(1_010_000_000, 1_005_000_000),
-            solved(998_000_000, 995_000_000),
-            &solved(998_000_000, 995_000_000),
+            Some((
+                solved(1_010_000_000, 1_005_000_000),
+                solved(998_000_000, 995_000_000),
+                solved(998_000_000, 995_000_000),
+            )),
         );
         // USDC priced at 2e-9 native-units per ETH-wei (ETH = $2000) anchors ETH→USD.
         let mut prices = empty_prices();
@@ -802,9 +1003,11 @@ mod tests {
         let range = build_range(
             &trade(usdc, 1_000_000_000),
             &empty_prices(),
-            solved(1_000_000_000, 995_000_000),
-            solved(1_005_000_000, 1_000_000_000),
-            &solved(1_005_000_000, 1_000_000_000),
+            Some((
+                solved(1_000_000_000, 995_000_000),
+                solved(1_005_000_000, 1_000_000_000),
+                solved(1_005_000_000, 1_000_000_000),
+            )),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -845,9 +1048,11 @@ mod tests {
         let range = build_range(
             &trade(usdc, 1_000_000_000),
             &empty_prices(),
-            solved(1_000_000_000, 995_000_000),
-            solved(995_000_000, 990_000_000),
-            &solved(995_000_000, 990_000_000),
+            Some((
+                solved(1_000_000_000, 995_000_000),
+                solved(995_000_000, 990_000_000),
+                solved(995_000_000, 990_000_000),
+            )),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -886,9 +1091,11 @@ mod tests {
         let range = build_range(
             &trade(usdc, 1_000_000_000),
             &empty_prices(),
-            solved(1_000_000_000, 995_000_000),
-            solved(1_002_000_000, 997_000_000),
-            &Outcome::Unsolvable("re-execution failed: no simulation state".into()),
+            Some((
+                solved(1_000_000_000, 995_000_000),
+                solved(1_002_000_000, 997_000_000),
+                Outcome::Unsolvable("re-execution failed: no simulation state".into()),
+            )),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -937,9 +1144,7 @@ mod tests {
         let range = build_range(
             &t,
             &empty_prices(),
-            solved(1_100, 1_050),
-            solved(1_100, 1_050),
-            &solved(1_100, 1_050),
+            Some((solved(1_100, 1_050), solved(1_100, 1_050), solved(1_100, 1_050))),
         );
 
         let recorder = PrometheusBuilder::new().build_recorder();
@@ -970,9 +1175,7 @@ mod tests {
         let range = build_range(
             &t,
             &empty_prices(),
-            solved(1_100, 1_050),
-            solved(1_100, 1_050),
-            &solved(1_100, 1_050),
+            Some((solved(1_100, 1_050), solved(1_100, 1_050), solved(1_100, 1_050))),
         );
 
         let recorder = PrometheusBuilder::new().build_recorder();
@@ -998,14 +1201,16 @@ mod tests {
         // unsolvable volume would be systematically undercounted.
         let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         let mut t = trade(Address::repeat_byte(0x42), 1_000);
-        t.token_in = usdc;
-        t.amount_in = U256::from(1_000_000_000u64); // 1000 USDC
+        t.token_in = Some(usdc);
+        t.amount_in = Some(U256::from(1_000_000_000u64)); // 1000 USDC
         let range = build_range(
             &t,
             &empty_prices(),
-            Outcome::Unsolvable("no route".into()),
-            Outcome::Unsolvable("no route".into()),
-            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
+            Some((
+                Outcome::Unsolvable("no route".into()),
+                Outcome::Unsolvable("no route".into()),
+                Outcome::Unsolvable("no top-of-block route to re-execute".into()),
+            )),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -1030,9 +1235,11 @@ mod tests {
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
             &empty_prices(),
-            Outcome::Unsolvable("x".into()),
-            Outcome::Unsolvable("x".into()),
-            &Outcome::Unsolvable("x".into()),
+            Some((
+                Outcome::Unsolvable("x".into()),
+                Outcome::Unsolvable("x".into()),
+                Outcome::Unsolvable("x".into()),
+            )),
         );
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -1067,11 +1274,13 @@ mod tests {
         let range = build_range(
             &sandwiched,
             &prices,
-            solved(1_100_000_000, 1_090_000_000),
-            solved(1_100_000_000, 1_090_000_000),
-            &solved(1_100_000_000, 1_090_000_000),
+            Some((
+                solved(1_100_000_000, 1_090_000_000),
+                solved(1_100_000_000, 1_090_000_000),
+                solved(1_100_000_000, 1_090_000_000),
+            )),
         );
-        assert_eq!(range.verdict, Verdict::Sandwiched);
+        assert_eq!(range.verdict, Some(Verdict::Sandwiched));
 
         let recorder = configure_buckets(PrometheusBuilder::new())
             .unwrap()
@@ -1099,9 +1308,11 @@ mod tests {
         let range = build_range(
             &trade(usdc, 1_000_000),
             &empty_prices(),
-            solved(1_005_000, 1_005_000),
-            solved(1_005_000, 1_005_000),
-            &solved(1_005_000, 1_005_000),
+            Some((
+                solved(1_005_000, 1_005_000),
+                solved(1_005_000, 1_005_000),
+                solved(1_005_000, 1_005_000),
+            )),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -1130,9 +1341,7 @@ mod tests {
         let range = build_range(
             &trade(Address::repeat_byte(0x42), 1_000),
             &empty_prices(),
-            solved(1_100, 1_050),
-            solved(1_100, 1_050),
-            &solved(1_100, 1_050),
+            Some((solved(1_100, 1_050), solved(1_100, 1_050), solved(1_100, 1_050))),
         );
         let recorder = configure_buckets(PrometheusBuilder::new())
             .unwrap()
@@ -1150,5 +1359,134 @@ mod tests {
         let rendered = handle.render();
         assert!(rendered.contains("hindsight_trades_total"), "rendered: {rendered}");
         assert!(rendered.contains("hindsight_savings_bps"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn test_revert_cause_labels() {
+        assert_eq!(revert_cause_label(&RevertCause::SlippageFloor), "slippage_floor");
+        assert_eq!(revert_cause_label(&RevertCause::OutOfGas), "out_of_gas");
+        assert_eq!(
+            revert_cause_label(&RevertCause::Other("execution reverted".to_string())),
+            "other"
+        );
+    }
+
+    #[test]
+    fn test_record_range_reverted_labels_decoded_and_cause() {
+        let decoded =
+            build_range(&reverted_trade(RevertCause::SlippageFloor, 10_000), &empty_prices(), None);
+        let undecoded =
+            build_range(&undecoded_reverted_trade(RevertCause::OutOfGas), &empty_prices(), None);
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(
+                &decoded,
+                "base",
+                &empty_prices(),
+                &empty_prices(),
+                &Registry::builtin(Chain::Base).unwrap(),
+            );
+            record_range(
+                &undecoded,
+                "base",
+                &empty_prices(),
+                &empty_prices(),
+                &Registry::builtin(Chain::Base).unwrap(),
+            );
+        });
+        let rendered = handle.render();
+
+        assert!(rendered.contains("cause=\"slippage_floor\""), "rendered: {rendered}");
+        assert!(rendered.contains("cause=\"out_of_gas\""), "rendered: {rendered}");
+        assert!(rendered.contains("decoded=\"true\""), "rendered: {rendered}");
+        assert!(rendered.contains("decoded=\"false\""), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn test_record_range_reverted_fillable_and_margin() {
+        let trade = reverted_trade(RevertCause::SlippageFloor, 10_000);
+        let range = build_range(
+            &trade,
+            &empty_prices(),
+            Some((solved(9_800, 9_700), solved(10_200, 10_100), solved(10_200, 10_100))),
+        );
+
+        let recorder = configure_buckets(PrometheusBuilder::new())
+            .unwrap()
+            .build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(
+                &range,
+                "base",
+                &empty_prices(),
+                &empty_prices(),
+                &Registry::builtin(Chain::Base).unwrap(),
+            );
+        });
+        let rendered = handle.render();
+
+        assert!(rendered.contains("hindsight_revert_fillable_total"), "rendered: {rendered}");
+        assert!(rendered.contains("state=\"top\""), "rendered: {rendered}");
+        assert!(rendered.contains("state=\"back\""), "rendered: {rendered}");
+        assert!(rendered.contains("fillable=\"false\""), "rendered: {rendered}");
+        assert!(rendered.contains("fillable=\"true\""), "rendered: {rendered}");
+        assert!(rendered.contains("hindsight_revert_margin_bps_bucket"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn test_record_range_reverted_unsolved_state_skips_fillable_metrics() {
+        let trade = reverted_trade(RevertCause::OutOfGas, 10_000);
+        let range = build_range(
+            &trade,
+            &empty_prices(),
+            Some((
+                Outcome::Unsolvable("no route".into()),
+                Outcome::Unsolvable("no route".into()),
+                Outcome::Unsolvable("no route".into()),
+            )),
+        );
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(
+                &range,
+                "base",
+                &empty_prices(),
+                &empty_prices(),
+                &Registry::builtin(Chain::Base).unwrap(),
+            );
+        });
+        let rendered = handle.render();
+
+        assert!(!rendered.contains("hindsight_revert_fillable_total"), "rendered: {rendered}");
+        assert!(!rendered.contains("hindsight_revert_margin_bps"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn test_record_range_reverted_with_unknown_terms_still_counted_as_seen() {
+        // No terms to solve, but the "seen" counter (parser coverage) must still fire.
+        let trade = undecoded_reverted_trade(RevertCause::Other("execution reverted".to_string()));
+        let range = build_range(&trade, &empty_prices(), None);
+
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            record_range(
+                &range,
+                "base",
+                &empty_prices(),
+                &empty_prices(),
+                &Registry::builtin(Chain::Base).unwrap(),
+            );
+        });
+        let rendered = handle.render();
+
+        assert!(rendered.contains("hindsight_reverted_swaps_total"), "rendered: {rendered}");
+        assert!(rendered.contains("decoded=\"false\""), "rendered: {rendered}");
+        assert!(!rendered.contains("hindsight_revert_fillable_total"), "rendered: {rendered}");
     }
 }

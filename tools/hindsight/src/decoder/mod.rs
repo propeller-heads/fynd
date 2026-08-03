@@ -46,17 +46,43 @@ use tracing::{debug, warn};
 use crate::decoder::{
     decode::{recover, DecodeContext, GasScope, TraderFlow},
     matching::MatchedSolverTrade,
-    solvers::SwapIntent,
     trace::{collect_native_transfers, fetch_trace, route_gas},
     transfer_ledger::TransferLedger,
 };
 pub(crate) use crate::decoder::{
-    registry::Registry, sandwich::SandwichEvidence, solvers::attribution::AttributionSource,
+    registry::Registry,
+    sandwich::SandwichEvidence,
+    solvers::{attribution::AttributionSource, SwapIntent},
+    trace::RevertCause,
 };
 
-/// A decoded solver trade: what token went in, what came out.
+/// Whether a matched transaction settled or reverted on-chain. Serialized flattened into
+/// `DecodedTrade`'s own JSON object (`"status":"settled"`, or `"status":"reverted"` plus
+/// `"cause"`), so a settled and a reverted trade read as the same record shape, told apart by
+/// this one field rather than by which fields happen to be present.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum TradeStatus {
+    Settled,
+    Reverted { cause: RevertCause },
+}
+
+/// A decoded solver trade: what token went in, what came out — settled or reverted, told apart by
+/// `status`. Both are trades in the same sense: a trader routed through a solver; one just did
+/// not fill.
 ///
 /// Native ETH is represented as `Address::ZERO`.
+///
+/// # The settled/reverted invariant
+///
+/// A settled trade always carries `token_in`/`token_out`/`amount_in`/`amount_out`:
+/// `Decoder::decode_settled` only ever returns `Some(DecodedTrade)` once a `TraderFlow` decoder
+/// has recovered a real swap, and never leaves them empty. A reverted trade carries
+/// `token_in`/`token_out`/`amount_in` only when its solver frame's calldata parsed into a
+/// `SwapIntent` — a revert emits no logs, so calldata is the only source; when it did not parse,
+/// all three are `None`. The trade is still recorded (not filtered out) so parser coverage stays
+/// measurable against every reverted candidate. `amount_out` is settled-only: nothing was
+/// delivered on a revert, by definition.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct DecodedTrade {
     pub tx_hash: TxHash,
@@ -64,39 +90,54 @@ pub(crate) struct DecodedTrade {
     /// The transaction's position in its block, from the receipt (falls back to its position in
     /// the fetched receipt slice when the RPC omitted it).
     pub tx_index: u64,
+    #[serde(flatten)]
+    pub status: TradeStatus,
     pub venue: String,
     pub solver: String,
     /// The evidence tier the solver label came from (see `solvers::attribution`). Downstream
     /// analysis weighs low-trust tiers (`largest_call`, fallback) differently — e.g. when judging
     /// an embedded quote.
     pub solver_source: AttributionSource,
-    /// Which decoder recovered this trade (see `decode`). Once several decoders can carry a
-    /// venue's trades this measures how often each one carries a trade the others could not.
+    /// Which decoder recovered this trade (see `decode`), or `"reverted"` when nothing settled to
+    /// hand to a `TradeDecoder` — a reverted trade's terms, when recoverable, come straight from
+    /// the solver frame's own calldata, not the netting/calldata decoder chain. Once several
+    /// decoders can carry a venue's trades this measures how often each one carries a trade the
+    /// others could not.
     pub decoder: &'static str,
     pub sender: Address,
-    pub token_in: Address,
-    pub token_out: Address,
+    /// `None` only for a reverted trade whose solver frame's calldata did not parse — see the
+    /// settled/reverted invariant above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_in: Option<Address>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_out: Option<Address>,
     /// Input amount that actually entered the swap — a venue fee taken from the input (see
-    /// `venue_fee_in`) is already subtracted, so a re-solve compares like-for-like.
-    pub amount_in: U256,
+    /// `venue_fee_in`) is already subtracted, so a re-solve compares like-for-like. For a
+    /// reverted trade this is the calldata-declared amount, not a netted one (see the
+    /// settled/reverted invariant above).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount_in: Option<U256>,
     /// Gross swap output — a venue fee taken from the output (see `venue_fee_out`) is added
     /// back, so the settled amount is the full swap proceeds, comparable to Fynd's gross output.
-    pub amount_out: U256,
+    /// `None` for a reverted trade: nothing was delivered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount_out: Option<U256>,
     /// Venue fee taken from the input token before swapping (e.g. Relay's fee), in `token_in`
-    /// units. `None` when no known fee collector took a cut. Recorded for transparency; it is
-    /// already excluded from `amount_in`.
+    /// units. `None` when no known fee collector took a cut, or the trade reverted. Recorded for
+    /// transparency; it is already excluded from `amount_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub venue_fee_in: Option<U256>,
     /// Venue fee taken from the output token after swapping, in `token_out` units. `None` when
-    /// no known fee collector took a cut. Recorded for transparency; it is already added back into
-    /// `amount_out`.
+    /// no known fee collector took a cut, or the trade reverted. Recorded for transparency; it is
+    /// already added back into `amount_out`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub venue_fee_out: Option<U256>,
     /// Wei cost of the gas the trader paid for the settled route (`gas_used ×
     /// effective_gas_price`). For venue-wrapped entries (Relay, `MetaMask`) the venue's own
     /// overhead is excluded — it is charged whichever router the venue picks, like the venue
     /// fee. `None` when the trader did not pay the transaction's gas (intent fills, solver
-    /// rebalances) or the route's gas could not be isolated from the trace.
+    /// rebalances), the route's gas could not be isolated from the trace, or the trade reverted
+    /// (nothing settled to charge gas against).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_gas: Option<U256>,
     /// The on-chain enforced floor declared in the settling solver frame's own calldata (see
@@ -115,9 +156,20 @@ pub(crate) struct DecodedTrade {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quote_timestamp: Option<u64>,
     /// Evidence that a front-run and a back-run bracketed this trade (see
-    /// `sandwich::detect`). `None` when no bracket pair was found.
+    /// `sandwich::detect`). `None` when no bracket pair was found, or the trade reverted —
+    /// nothing settled to be sandwiched around.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandwich: Option<SandwichEvidence>,
+}
+
+impl DecodedTrade {
+    /// This trade's swap terms, when known — always `Some` for a settled trade (see the
+    /// settled/reverted invariant above), and for a reverted trade only when its solver frame's
+    /// calldata parsed. `resolve::resolve_block_range` uses this to decide whether a trade can be
+    /// solved at all: a trade with unknown terms is recorded but not re-solved.
+    pub(crate) fn terms(&self) -> Option<(Address, Address, U256)> {
+        Some((self.token_in?, self.token_out?, self.amount_in?))
+    }
 }
 
 /// Log a disagreement between the calldata-recovered intent and the netted flow, on any of the
@@ -153,7 +205,7 @@ fn warn_on_intent_disagreement(
 }
 
 /// Copy the calldata-declared terms off a parsed intent, or all-`None` when no intent was
-/// recovered. Split out of `decode_transaction` purely to keep it under the line limit.
+/// recovered.
 fn intent_fields(intent: Option<&SwapIntent>) -> (Option<U256>, Option<U256>, Option<u64>) {
     let min_amount_out = intent.map(|intent| intent.min_amount_out);
     let declared_quote = intent.and_then(SwapIntent::declared_quote);
@@ -194,15 +246,16 @@ impl<P: Provider> Decoder<P> {
         &self.registry
     }
 
-    /// Decode solver trades from a block.
+    /// Decode solver trades from a block — settled and reverted alike, as one list told apart by
+    /// `DecodedTrade::status`.
     ///
-    /// Fetches all receipts in one `eth_getBlockReceipts` call, then matches a
-    /// transaction two ways: its entry point (`tx.to`) is a known venue or
-    /// solver, or one of its logs was emitted by a known solver. The
-    /// second case catches filler-initiated intent fills (`UniswapX`, 1inch
-    /// limit orders) where `tx.to` is a rotating filler. Matched transactions are
-    /// traced concurrently; the trace recovers native ETH flows and attributes
-    /// the settling solver.
+    /// Fetches all receipts in one `eth_getBlockReceipts` call, then matches each transaction one
+    /// of three ways: a settled trade, matched by entry point or by a known solver's log (the log
+    /// path catches filler-initiated intent fills, `UniswapX`, 1inch limit orders, where `tx.to`
+    /// is a rotating filler); a reverted candidate, matched by entry point alone (a revert emits
+    /// no logs — see `matching::select`); or neither, and the transaction is dropped before it
+    /// costs a trace. Both matched shapes join one bounded trace wave; the trace recovers native
+    /// ETH flows and attributes the settling (or attempted) solver either way.
     pub(crate) async fn decode_block(
         &mut self,
         block_number: u64,
@@ -251,20 +304,17 @@ impl<P: Provider> Decoder<P> {
         .collect::<Vec<_>>()
         .await;
 
-        let mut trades = Vec::with_capacity(matched.len());
+        let mut trades = Vec::new();
         for ((index, matched), trace) in matched.into_iter().zip(traces) {
             let tx_index = matched
                 .receipt
                 .transaction_index
                 .unwrap_or(index as u64);
+            let tx_hash = matched.receipt.transaction_hash;
             let root = match trace {
                 Ok(root) => root,
                 Err(e) => {
-                    warn!(
-                        block = block_number,
-                        tx = %matched.receipt.transaction_hash,
-                        "skipping untraceable transaction: {e}"
-                    );
+                    warn!(block = block_number, tx = %tx_hash, "skipping untraceable transaction: {e}");
                     crate::telemetry::record_untraced_transaction();
                     continue;
                 }
@@ -273,16 +323,20 @@ impl<P: Provider> Decoder<P> {
                 .decode_transaction(matched, &root, block_number, tx_index)
                 .await
             {
-                let evidence = sandwich::detect(&receipts, index, &trade, &self.registry);
-                trade.sandwich = evidence;
+                // Sandwich detection only makes sense around a trade that actually moved the
+                // pools; a reverted trade has nothing to be sandwiched around.
+                if trade.status == TradeStatus::Settled {
+                    trade.sandwich = sandwich::detect(&receipts, index, &trade, &self.registry);
+                }
                 trades.push(trade);
             }
         }
         Ok(trades)
     }
 
-    /// Decode one matched transaction from its trace: build the transfer ledger, run the decoders
-    /// for its entity, veto non-trades, attribute the solver, and account gas and quote.
+    /// Decode one matched transaction: settled trades run the full `TraderFlow` decoder chain
+    /// (`decode_settled`); reverted candidates skip it — there is no netted flow to decode, only
+    /// the settling solver frame's own calldata to read (`decode_reverted`).
     async fn decode_transaction(
         &mut self,
         matched: MatchedSolverTrade<'_>,
@@ -290,8 +344,78 @@ impl<P: Provider> Decoder<P> {
         block_number: u64,
         tx_index: u64,
     ) -> Option<DecodedTrade> {
+        if matched.reverted {
+            return Some(self.decode_reverted(matched, root, block_number, tx_index));
+        }
+        self.decode_settled(matched, root, block_number, tx_index)
+            .await
+    }
+
+    /// Decode a reverted candidate from its trace: attribute the solver the same way a settled
+    /// trade would be (the strict-then-tolerant `find_solver_frame` walk falls back to the frame
+    /// that tried, since nothing settled), recover its swap terms when that solver's calldata
+    /// supports it, and classify why the transaction failed. The terms are `None` — not an
+    /// error — when no solver frame was found, its solver has no `swap_intent` support, or the
+    /// calldata did not parse; the trade is still recorded so parser coverage is measurable
+    /// against every reverted candidate. Always produces a trade: unlike a settled decode, there
+    /// is no veto or missing-flow case to decline on.
+    fn decode_reverted(
+        &self,
+        matched: MatchedSolverTrade<'_>,
+        root: &CallFrame,
+        block_number: u64,
+        tx_index: u64,
+    ) -> DecodedTrade {
+        let registry = &self.registry;
+        let MatchedSolverTrade { receipt, entry_point, .. } = matched;
+        let sender = receipt.from;
+        let venue = registry.label(entry_point);
+        let attribution =
+            solvers::attribution::attribute(None, root, entry_point, sender, registry);
+        // A reverted trade has no netted flow to draw an input-amount hint from — only the
+        // ABI/offset-based extractors (Fly, KyberSwap) can recover an intent here.
+        let intent = trace::find_solver_frame(root, registry)
+            .and_then(|frame| solvers::swap_intent(&attribution.solver, &frame.input, None));
+        let (min_amount_out, declared_quote, quote_timestamp) = intent_fields(intent.as_ref());
+        let (token_in, token_out, amount_in) = match &intent {
+            Some(intent) => (Some(intent.token_in), Some(intent.token_out), Some(intent.amount_in)),
+            None => (None, None, None),
+        };
+        DecodedTrade {
+            tx_hash: receipt.transaction_hash,
+            block_number,
+            tx_index,
+            status: TradeStatus::Reverted { cause: trace::classify_revert_cause(root) },
+            venue,
+            solver: attribution.solver,
+            solver_source: attribution.source,
+            decoder: "reverted",
+            sender,
+            token_in,
+            token_out,
+            amount_in,
+            amount_out: None,
+            venue_fee_in: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            min_amount_out,
+            declared_quote,
+            quote_timestamp,
+            sandwich: None,
+        }
+    }
+
+    /// Decode one settled transaction from its trace: build the transfer ledger, run the
+    /// decoders for its entity, veto non-trades, attribute the solver, and account gas and quote.
+    async fn decode_settled(
+        &mut self,
+        matched: MatchedSolverTrade<'_>,
+        root: &CallFrame,
+        block_number: u64,
+        tx_index: u64,
+    ) -> Option<DecodedTrade> {
         let Self { provider, registry, code_cache } = self;
-        let MatchedSolverTrade { receipt, entry_point } = matched;
+        let MatchedSolverTrade { receipt, entry_point, .. } = matched;
         let logs = receipt.logs();
         let sender = receipt.from;
 
@@ -388,15 +512,16 @@ impl<P: Provider> Decoder<P> {
             tx_hash: receipt.transaction_hash,
             block_number,
             tx_index,
+            status: TradeStatus::Settled,
             venue,
             solver: attribution.solver,
             solver_source: attribution.source,
             decoder,
             sender: flow.tracked,
-            token_in: flow.swap.token_in,
-            token_out: flow.swap.token_out,
-            amount_in: flow.swap.amount_in,
-            amount_out: flow.swap.amount_out,
+            token_in: Some(flow.swap.token_in),
+            token_out: Some(flow.swap.token_out),
+            amount_in: Some(flow.swap.amount_in),
+            amount_out: Some(flow.swap.amount_out),
             venue_fee_in: flow.venue_fee_in,
             venue_fee_out: flow.venue_fee_out,
             settled_gas,
@@ -460,5 +585,48 @@ mod tests {
         // Only the untraceable transaction is lost; before, it took the whole block with it.
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].tx_hash, tx_hash(2));
+    }
+
+    /// A Relay transaction that reverted before settling, decoded end to end through
+    /// `decode_block`: matched by entry point alone, attributed via the trace's tolerant
+    /// fallback, and recorded with no swap terms (an unregistered "solver" frame, so its calldata
+    /// carries no `swap_intent`).
+    #[tokio::test]
+    async fn test_reverted_relay_transaction_decodes_with_a_reverted_status() {
+        let registry = Registry::ethereum();
+        let relay = *registry
+            .venue("relay")
+            .unwrap()
+            .entry_points
+            .iter()
+            .next()
+            .unwrap();
+        let sender = addr(1);
+
+        let asserter = Asserter::new();
+        asserter.push_success(&vec![crate::decoder::test_utils::reverted_receipt(
+            tx_hash(1),
+            sender,
+            Some(relay),
+        )]);
+        let mut root = frame("CALL", sender, relay, 0);
+        root.error = Some("execution reverted".to_string());
+
+        asserter.push_success(&root);
+
+        let mut decoder =
+            Decoder::new(ProviderBuilder::default().connect_mocked_client(asserter), registry);
+        let trades = decoder
+            .decode_block(21_000_000)
+            .await
+            .expect("decode_block should succeed");
+
+        assert_eq!(trades.len(), 1);
+        let trade = &trades[0];
+        assert!(matches!(trade.status, TradeStatus::Reverted { .. }));
+        assert_eq!(trade.venue, "relay");
+        assert!(trade.token_in.is_none());
+        assert!(trade.amount_out.is_none());
+        assert!(trade.sandwich.is_none());
     }
 }

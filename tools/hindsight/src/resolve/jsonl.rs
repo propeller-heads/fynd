@@ -16,13 +16,20 @@ use fynd_core::types::{OrderQuote, Swap, Transaction};
 use tracing::{info, warn};
 
 use crate::{
+    decoder::{RevertCause, TradeStatus},
     resolve::{render_route, Outcome, RangeComparison, StateResult},
+    telemetry::revert_cause_label,
     usd::Prices,
 };
 
-/// Append-only comparisons writer that rotates to a new file at each UTC day boundary —
-/// `comparisons-YYYY-MM-DD.jsonl` inside its directory — so an external sync job (e.g. an S3
-/// upload `CronJob`) ships closed daily files instead of re-shipping one ever-growing one.
+/// The rotating file's name prefix — every trade, settled or reverted, writes here (see
+/// `RangeComparison`'s `status` field); there is only one stream.
+const PREFIX: &str = "comparisons";
+
+/// Append-only writer that rotates to a new file at each UTC day boundary — `comparisons-YYYY-MM
+/// -DD.jsonl` inside its directory — so an external sync job (e.g. an S3 upload `CronJob`) ships
+/// closed daily files instead of re-shipping one ever-growing one. `monitor` opens one of these in
+/// its `--comparisons-dir`.
 pub(crate) struct RotatingWriter {
     dir: PathBuf,
     date: String,
@@ -30,7 +37,8 @@ pub(crate) struct RotatingWriter {
 }
 
 impl RotatingWriter {
-    /// Open today's file inside `dir` for appending, creating the directory if needed.
+    /// Open today's `comparisons-*.jsonl` file inside `dir` for appending, creating the directory
+    /// if needed.
     pub(crate) fn open(dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)
@@ -59,23 +67,23 @@ impl RotatingWriter {
             return;
         }
         if let Err(e) = self.writer.flush() {
-            warn!(error = %e, "failed to flush comparisons file before rotation");
+            warn!(error = %e, "failed to flush jsonl file before rotation");
         }
         match open_dated(&self.dir, &date) {
             Ok(writer) => {
-                info!(path = %dated_path(&self.dir, &date).display(), "rotated comparisons file");
+                info!(path = %dated_path(&self.dir, &date).display(), "rotated jsonl file");
                 self.writer = writer;
                 self.date = date;
             }
             Err(e) => {
-                warn!(error = %e, "failed to rotate comparisons file; keeping the previous day's");
+                warn!(error = %e, "failed to rotate jsonl file; keeping the previous day's");
             }
         }
     }
 }
 
 fn dated_path(dir: &Path, date: &str) -> PathBuf {
-    dir.join(format!("comparisons-{date}.jsonl"))
+    dir.join(format!("{PREFIX}-{date}.jsonl"))
 }
 
 fn open_dated(dir: &Path, date: &str) -> anyhow::Result<BufWriter<std::fs::File>> {
@@ -139,61 +147,87 @@ pub(crate) fn write_comparisons<W: std::io::Write>(
     }
 }
 
-/// Build the JSON record for one re-solved trade: block, settled tx, decoded amounts, a `top`
-/// and `back` state (each with its verdict, bps, USD delta, and slim route/calldata or unsolvable
-/// reason), and the top route's slippage between the two states. Top is valued at N-1 prices,
-/// back (and the slippage) at N prices, matching the state each was produced at.
+/// A record's flat status fields: `status` ("settled"/"reverted"), and — for a revert — a bounded
+/// `cause` label (matching `telemetry::revert_cause_label`) plus its free-text `cause_detail`.
+/// Kept flat (not the nested `{"kind":...}` shape `RevertCause` itself serializes to) so a jq
+/// pass can filter on `status`/`cause` directly, matching the old `reverts-*.jsonl` ergonomics
+/// now that both streams are one.
+fn status_fields(status: &TradeStatus) -> (&'static str, Option<&'static str>, Option<&str>) {
+    match status {
+        TradeStatus::Settled => ("settled", None, None),
+        TradeStatus::Reverted { cause } => {
+            let detail = match cause {
+                RevertCause::Other(detail) => Some(detail.as_str()),
+                RevertCause::SlippageFloor | RevertCause::OutOfGas => None,
+            };
+            ("reverted", Some(revert_cause_label(cause)), detail)
+        }
+    }
+}
+
+/// Build the JSON record for one re-solved trade — settled or reverted, told apart by `status`:
+/// block, tx, decoded amounts, a `top` and `back` state (each with its verdict, bps, fillable/
+/// margin judgment, and slim route/calldata or unsolvable reason), and the top route's slippage
+/// between the two states. `top`/`back`/`slippage` are `null` when the trade's terms were
+/// unknown — there was nothing to solve. Top is valued at N-1 prices, back (and the slippage) at
+/// N prices, matching the state each was produced at.
 fn comparison_record(
     range: &RangeComparison,
     prices_top: &Prices,
     prices_back: &Prices,
 ) -> serde_json::Value {
+    let (status, cause, cause_detail) = status_fields(&range.status);
     // Signed in both directions; the positive records are the "revenue if we charged positive
     // slippage" view, filtered downstream.
     let slippage = range.slippage.map(|slippage| {
-        serde_json::json!({
-            "bps": slippage.bps,
-            "usd": prices_back.savings_usd(
-                range.token_out,
+        let usd = range.token_out.and_then(|token_out| {
+            prices_back.savings_usd(
+                token_out,
                 slippage.reexecuted_amount_out,
                 slippage.quoted_amount_out,
-            ),
-        })
+            )
+        });
+        serde_json::json!({ "bps": slippage.bps, "usd": usd })
     });
     serde_json::json!({
         "block": range.block_number,
         "tx_index": range.tx_index,
-        "settled_tx": range.tx_hash,
+        "tx_hash": range.tx_hash,
+        "status": status,
+        "cause": cause,
+        "cause_detail": cause_detail,
         "venue": range.venue,
         "solver": range.solver,
         "solver_source": range.solver_source,
         "decoder": range.decoder,
-        "token_in": format!("{:#x}", range.token_in),
-        "token_out": format!("{:#x}", range.token_out),
-        "amount_in": range.amount_in.to_string(),
-        "settled_amount_out": range.settled_amount_out.to_string(),
-        "settled_amount_out_net_gas": range.settled_amount_out_net_gas.to_string(),
+        "sender": format!("{:#x}", range.sender),
+        "token_in": range.token_in.map(|token| format!("{token:#x}")),
+        "token_out": range.token_out.map(|token| format!("{token:#x}")),
+        "amount_in": range.amount_in.map(|amount| amount.to_string()),
+        "settled_amount_out": range.settled_amount_out.map(|amount| amount.to_string()),
+        "settled_amount_out_net_gas": range.settled_amount_out_net_gas.map(|amount| amount.to_string()),
         "settled_gas_cost": range.settled_gas.map(|gas| gas.to_string()),
         "min_amount_out": range.min_amount_out.map(|amount| amount.to_string()),
         "quoted_amount_out": range.declared_quote.map(|amount| amount.to_string()),
         "quote_timestamp": range.quote_timestamp,
         "sandwich": range.sandwich,
         "slippage": slippage,
-        "top": state_record(&range.top, range, prices_top),
-        "back": state_record(&range.back, range, prices_back),
+        "top": range.top.as_ref().map(|top| state_record(top, range, prices_top)),
+        "back": range.back.as_ref().map(|back| state_record(back, range, prices_back)),
     })
 }
 
-/// JSON for one block-state of an improvement: verdict, bps, Fynd amounts, the USD improvement
-/// (gross Fynd output minus the gross settled output, valued at `prices` — the same basis as the
-/// headline verdict), the winning route's algorithm and rendered path, and the slim quote.
-/// `settled_value_usd` stays gross — it is the trade's notional, not a comparison.
+/// JSON for one block-state of a trade: verdict, bps, Fynd amounts, the USD improvement (gross
+/// Fynd output minus the gross settled output, valued at `prices` — the same basis as the
+/// headline verdict), the winning route's algorithm and rendered path, the slim quote, and the
+/// fillable/margin judgment against `min_amount_out` (present whenever a floor is known, settled
+/// or reverted). `settled_value_usd`/`improvement_usd` are `null` for a reverted trade — nothing
+/// settled to value or improve on.
 fn state_record(
     state: &StateResult,
     range: &RangeComparison,
     prices: &Prices,
 ) -> serde_json::Value {
-    let token_out = range.token_out;
     let solved = match &state.outcome {
         Outcome::Solved(solved) => Some(solved),
         Outcome::Partial(_) | Outcome::Unsolvable(_) => None,
@@ -204,13 +238,25 @@ fn state_record(
         Outcome::Unsolvable(reason) | Outcome::Partial(reason) => Some(reason.as_str()),
         Outcome::Solved(_) => None,
     };
-    let improvement_usd =
-        solved.and_then(|s| prices.savings_usd(token_out, s.amount_out, range.settled_amount_out));
-    let fynd_value_usd = solved.and_then(|s| prices.value_usd(token_out, s.amount_out));
+    let token_and_settled = range
+        .token_out
+        .zip(range.settled_amount_out);
+    let improvement_usd = solved.and_then(|s| {
+        token_and_settled
+            .and_then(|(token_out, settled)| prices.savings_usd(token_out, s.amount_out, settled))
+    });
+    let fynd_value_usd = range
+        .token_out
+        .zip(solved)
+        .and_then(|(token_out, s)| prices.value_usd(token_out, s.amount_out));
+    let settled_value_usd =
+        token_and_settled.and_then(|(token_out, settled)| prices.value_usd(token_out, settled));
     serde_json::json!({
         "verdict": state.verdict,
         "net_bps": state.deltas.net_bps,
         "raw_bps": state.deltas.raw_bps,
+        "fillable": state.fillable,
+        "margin_bps": state.margin_bps,
         "fynd_amount_out": solved.map(|s| s.amount_out.to_string()),
         "fynd_amount_out_net_gas": solved.map(|s| s.amount_out_net_gas.to_string()),
         "gas_estimate": solved.map(|s| s.gas_estimate.to_string()),
@@ -220,7 +266,7 @@ fn state_record(
         "route": solved.map(|s| s.solved_route.as_deref().map(render_route).unwrap_or_default()),
         "improvement_usd": improvement_usd,
         "fynd_value_usd": fynd_value_usd,
-        "settled_value_usd": prices.value_usd(token_out, range.settled_amount_out),
+        "settled_value_usd": settled_value_usd,
         "unsolvable_reason": unsolvable_reason,
         "quote": solved
             .and_then(|s| s.quote_json.as_deref())
@@ -331,15 +377,16 @@ mod tests {
             tx_hash: TxHash::default(),
             block_number: 25_480_207,
             tx_index: 3,
+            status: TradeStatus::Settled,
             venue: "relay".into(),
             solver: "kyberswap".into(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
-            sender: Address::ZERO,
-            token_in: Address::ZERO,
-            token_out: Address::repeat_byte(0x22),
-            amount_in: U256::from(1_000u64),
-            amount_out: U256::from(69_996_280_564u64),
+            sender: Address::repeat_byte(0x77),
+            token_in: Some(Address::ZERO),
+            token_out: Some(Address::repeat_byte(0x22)),
+            amount_in: Some(U256::from(1_000u64)),
+            amount_out: Some(U256::from(69_996_280_564u64)),
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
@@ -351,12 +398,16 @@ mod tests {
         let range = build_range(
             &trade,
             &empty_prices(),
-            Outcome::Unsolvable("x".into()),
-            Outcome::Unsolvable("x".into()),
-            &Outcome::Unsolvable("x".into()),
+            Some((
+                Outcome::Unsolvable("x".into()),
+                Outcome::Unsolvable("x".into()),
+                Outcome::Unsolvable("x".into()),
+            )),
         );
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
         assert_eq!(rec.pointer("/tx_index").unwrap(), 3);
+        assert_eq!(rec.pointer("/sender").unwrap(), &format!("{:#x}", Address::repeat_byte(0x77)));
+        assert_eq!(rec.pointer("/status").unwrap(), "settled");
         assert_eq!(
             rec.pointer("/quoted_amount_out")
                 .unwrap(),
@@ -409,15 +460,16 @@ mod tests {
             tx_hash: TxHash::default(),
             block_number: 25_000_000,
             tx_index: 0,
+            status: TradeStatus::Settled,
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
             sender: Address::ZERO,
-            token_in: weth,
-            token_out: usdc,
-            amount_in: U256::from(1_000u64),
-            amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
+            token_in: Some(weth),
+            token_out: Some(usdc),
+            amount_in: Some(U256::from(1_000u64)),
+            amount_out: Some(U256::from(1_000_000_000u64)), // settled 1000 USDC
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
@@ -456,7 +508,7 @@ mod tests {
             quote_json: quote,
             solved_route: Some(solved_route),
         });
-        let range = build_range(&trade, &prices, top, back.clone(), &back);
+        let range = build_range(&trade, &prices, Some((top, back.clone(), back)));
 
         comparison_record(&range, &prices, &prices)
     }
@@ -533,15 +585,16 @@ mod tests {
             tx_hash: TxHash::default(),
             block_number: 25_000_000,
             tx_index: 0,
+            status: TradeStatus::Settled,
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
             sender: Address::ZERO,
-            token_in: Address::repeat_byte(0x11),
-            token_out: Address::repeat_byte(0x22),
-            amount_in: U256::from(1_000u64),
-            amount_out: U256::from(1_000u64),
+            token_in: Some(Address::repeat_byte(0x11)),
+            token_out: Some(Address::repeat_byte(0x22)),
+            amount_in: Some(U256::from(1_000u64)),
+            amount_out: Some(U256::from(1_000u64)),
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
@@ -554,9 +607,11 @@ mod tests {
         let range = build_range(
             &trade,
             &empty_prices(),
-            Outcome::Unsolvable("missing token in Tycho".into()),
-            Outcome::Unsolvable("missing token in Tycho".into()),
-            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
+            Some((
+                Outcome::Unsolvable("missing token in Tycho".into()),
+                Outcome::Unsolvable("missing token in Tycho".into()),
+                Outcome::Unsolvable("no top-of-block route to re-execute".into()),
+            )),
         );
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
         assert_eq!(rec.pointer("/top/verdict").unwrap(), "unsolvable");
@@ -592,15 +647,16 @@ mod tests {
             tx_hash: TxHash::default(),
             block_number: 25_000_000,
             tx_index: 42,
+            status: TradeStatus::Settled,
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
             sender: Address::ZERO,
-            token_in: Address::repeat_byte(0x11),
-            token_out: Address::repeat_byte(0x22),
-            amount_in: U256::from(1_000u64),
-            amount_out: U256::from(1_000u64),
+            token_in: Some(Address::repeat_byte(0x11)),
+            token_out: Some(Address::repeat_byte(0x22)),
+            amount_in: Some(U256::from(1_000u64)),
+            amount_out: Some(U256::from(1_000u64)),
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
@@ -627,8 +683,11 @@ mod tests {
                 solved_route: None,
             })
         };
-        let range =
-            build_range(&trade, &empty_prices(), solved(1_100), solved(1_050), &solved(1_050));
+        let range = build_range(
+            &trade,
+            &empty_prices(),
+            Some((solved(1_100), solved(1_050), solved(1_050))),
+        );
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
 
         assert_eq!(rec.pointer("/tx_index").unwrap(), 42);
@@ -644,5 +703,149 @@ mod tests {
                 .unwrap(),
             &format!("{:#x}", Address::repeat_byte(0x44))
         );
+    }
+
+    fn revert_solved(amount_out: u64) -> Outcome {
+        Outcome::Solved(SolvedAmount {
+            amount_out: U256::from(amount_out),
+            amount_out_net_gas: U256::from(amount_out),
+            gas_estimate: U256::from(21_000),
+            algorithm: String::new(),
+            quote_json: None,
+            solved_route: None,
+        })
+    }
+
+    fn reverted_trade(cause: RevertCause) -> DecodedTrade {
+        DecodedTrade {
+            tx_hash: TxHash::repeat_byte(0x55),
+            block_number: 25_000_000,
+            tx_index: 9,
+            status: TradeStatus::Reverted { cause },
+            venue: "relay".into(),
+            solver: "fly".into(),
+            solver_source: AttributionSource::TraceMatch,
+            decoder: "reverted",
+            sender: Address::repeat_byte(0x99),
+            token_in: Some(Address::repeat_byte(0x11)),
+            token_out: Some(Address::repeat_byte(0x22)),
+            amount_in: Some(U256::from(1_000u64)),
+            amount_out: None,
+            venue_fee_in: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            min_amount_out: Some(U256::from(10_000u64)),
+            declared_quote: None,
+            quote_timestamp: None,
+            sandwich: None,
+        }
+    }
+
+    #[test]
+    fn test_reverted_record_slippage_floor_fillable_at_back() {
+        let trade = reverted_trade(RevertCause::SlippageFloor);
+        let range = build_range(
+            &trade,
+            &empty_prices(),
+            Some((revert_solved(9_800), revert_solved(10_200), revert_solved(10_200))),
+        );
+        let rec = comparison_record(&range, &empty_prices(), &empty_prices());
+
+        assert_eq!(rec.pointer("/tx_index").unwrap(), 9);
+        assert_eq!(rec.pointer("/tx_hash").unwrap(), &TxHash::repeat_byte(0x55).to_string());
+        // A reverted trade still records who sent it — the tx sender, since there is no netted
+        // flow to draw a different tracked party from.
+        assert_eq!(rec.pointer("/sender").unwrap(), &format!("{:#x}", Address::repeat_byte(0x99)));
+        assert_eq!(rec.pointer("/status").unwrap(), "reverted");
+        assert_eq!(rec.pointer("/cause").unwrap(), "slippage_floor");
+        assert!(rec
+            .pointer("/cause_detail")
+            .unwrap()
+            .is_null());
+        assert_eq!(rec.pointer("/min_amount_out").unwrap(), "10000");
+        // Nothing settled: settled-only fields are absent.
+        assert!(rec
+            .pointer("/settled_amount_out")
+            .unwrap()
+            .is_null());
+        assert_eq!(rec.pointer("/top/fillable").unwrap(), false);
+        assert_eq!(rec.pointer("/back/fillable").unwrap(), true);
+        assert!(
+            rec.pointer("/back/margin_bps")
+                .unwrap()
+                .as_f64()
+                .unwrap() >
+                0.0
+        );
+    }
+
+    #[test]
+    fn test_reverted_record_other_cause_carries_detail() {
+        let trade = reverted_trade(RevertCause::Other("execution reverted".to_string()));
+        let range = build_range(
+            &trade,
+            &empty_prices(),
+            Some((
+                Outcome::Unsolvable("no route".into()),
+                Outcome::Unsolvable("no route".into()),
+                Outcome::Unsolvable("no route".into()),
+            )),
+        );
+        let rec = comparison_record(&range, &empty_prices(), &empty_prices());
+
+        assert_eq!(rec.pointer("/cause").unwrap(), "other");
+        assert_eq!(rec.pointer("/cause_detail").unwrap(), "execution reverted");
+        assert!(rec
+            .pointer("/top/fillable")
+            .unwrap()
+            .is_null());
+    }
+
+    #[test]
+    fn test_reverted_trade_with_unknown_terms_has_no_top_or_back() {
+        let mut trade = reverted_trade(RevertCause::Other("unknown revert".to_string()));
+        trade.token_in = None;
+        trade.token_out = None;
+        trade.amount_in = None;
+        trade.min_amount_out = None;
+        let range = build_range(&trade, &empty_prices(), None);
+        let rec = comparison_record(&range, &empty_prices(), &empty_prices());
+
+        assert_eq!(rec.pointer("/status").unwrap(), "reverted");
+        assert!(rec.pointer("/top").unwrap().is_null());
+        assert!(rec.pointer("/back").unwrap().is_null());
+        assert!(rec
+            .pointer("/token_in")
+            .unwrap()
+            .is_null());
+    }
+
+    #[test]
+    fn test_write_comparisons_appends_lines_for_settled_and_reverted() {
+        let settled_range = build_range(
+            &reverted_trade(RevertCause::OutOfGas),
+            &empty_prices(),
+            Some((Outcome::Unsolvable("x".into()), revert_solved(10_000), revert_solved(10_000))),
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        write_comparisons(
+            &mut buf,
+            std::slice::from_ref(&settled_range),
+            &empty_prices(),
+            &empty_prices(),
+        );
+        write_comparisons(
+            &mut buf,
+            std::slice::from_ref(&settled_range),
+            &empty_prices(),
+            &empty_prices(),
+        );
+
+        let text = String::from_utf8(buf).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        for line in text.lines() {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(value["cause"], "out_of_gas");
+        }
     }
 }

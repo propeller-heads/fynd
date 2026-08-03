@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use crate::report::record::Comparison;
+use crate::report::record::{Comparison, State};
 
 /// Number of trades listed in the biggest-wins and biggest-losses tables.
 const TOP_TRADES: usize = 10;
@@ -75,14 +75,27 @@ pub(crate) struct GroupStats {
 
 /// One row in the biggest-wins or biggest-losses table.
 pub(crate) struct TradeRow {
-    pub settled_tx: String,
+    pub tx_hash: String,
     pub venue: String,
     pub solver: String,
     pub net_bps: Option<f64>,
     pub improvement_usd: f64,
 }
 
-/// Aggregate every view from the parsed records.
+/// A settled record's `top` state. `report::run` filters records to `status == "settled"` before
+/// this module ever sees them, and a settled trade always carries a `top` state by construction
+/// (see `DecodedTrade`'s settled/reverted invariant) — a missing one here means that filter was
+/// bypassed.
+fn top(record: &Comparison) -> &State {
+    record
+        .top
+        .as_ref()
+        .expect("settled comparison record must carry a top state")
+}
+
+/// Aggregate every view from the parsed records. Callers must pre-filter to `status == "settled"`
+/// (see `report::run`) — every aggregation here is judged on `top`, which only a settled record is
+/// guaranteed to carry.
 pub(crate) fn build(records: &[Comparison]) -> Report {
     Report {
         summary: summary(records),
@@ -110,10 +123,9 @@ fn verdict_stats(records: &[Comparison]) -> Vec<VerdictStat> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     let mut notional: HashMap<&str, f64> = HashMap::new();
     for record in records {
-        let verdict = record.top.verdict.as_str();
+        let verdict = top(record).verdict.as_str();
         *counts.entry(verdict).or_default() += 1;
-        *notional.entry(verdict).or_default() += record
-            .top
+        *notional.entry(verdict).or_default() += top(record)
             .settled_value_usd
             .unwrap_or(0.0);
     }
@@ -136,26 +148,26 @@ fn verdict_stats(records: &[Comparison]) -> Vec<VerdictStat> {
 fn savings(records: &[Comparison]) -> Savings {
     let scored: Vec<&Comparison> = records
         .iter()
-        .filter(|r| r.top.is_scored())
+        .filter(|r| top(r).is_scored())
         .collect();
     // The savings-bps headline is over wins only — how much better Fynd was when it won, not
     // diluted by the losses.
     let mut win_bps: Vec<f64> = scored
         .iter()
-        .filter(|r| r.top.verdict == "win")
-        .filter_map(|r| r.top.net_bps)
+        .filter(|r| top(r).verdict == "win")
+        .filter_map(|r| top(r).net_bps)
         .collect();
     Savings {
         scored: scored.len(),
         wins: scored
             .iter()
-            .filter(|r| r.top.verdict == "win")
+            .filter(|r| top(r).verdict == "win")
             .count(),
         median_win_bps: median(&mut win_bps),
         won_usd: scored
             .iter()
-            .filter(|r| r.top.verdict == "win")
-            .filter_map(|r| r.top.improvement_usd)
+            .filter(|r| top(r).verdict == "win")
+            .filter_map(|r| top(r).improvement_usd)
             .sum(),
     }
 }
@@ -173,29 +185,29 @@ fn group_stats(records: &[Comparison], key: impl Fn(&Comparison) -> &String) -> 
         .map(|(name, group)| {
             let mut net_bps: Vec<f64> = group
                 .iter()
-                .filter(|r| r.top.is_scored())
-                .filter_map(|r| r.top.net_bps)
+                .filter(|r| top(r).is_scored())
+                .filter_map(|r| top(r).net_bps)
                 .collect();
             GroupStats {
                 name: name.clone(),
                 count: group.len(),
                 wins: group
                     .iter()
-                    .filter(|r| r.top.verdict == "win")
+                    .filter(|r| top(r).verdict == "win")
                     .count(),
                 losses: group
                     .iter()
-                    .filter(|r| r.top.verdict == "loss")
+                    .filter(|r| top(r).verdict == "loss")
                     .count(),
                 unsolved: group
                     .iter()
-                    .filter(|r| !r.top.is_served())
+                    .filter(|r| !top(r).is_served())
                     .count(),
                 median_net_bps: median(&mut net_bps),
                 total_improvement_usd: group
                     .iter()
-                    .filter(|r| r.top.is_scored())
-                    .filter_map(|r| r.top.improvement_usd)
+                    .filter(|r| top(r).is_scored())
+                    .filter_map(|r| top(r).improvement_usd)
                     .sum(),
             }
         })
@@ -231,15 +243,15 @@ fn top_losses(records: &[Comparison]) -> Vec<TradeRow> {
 fn trade_rows(records: &[Comparison], verdict: &str) -> Vec<TradeRow> {
     records
         .iter()
-        .filter(|r| r.top.verdict == verdict)
+        .filter(|r| top(r).verdict == verdict)
         .filter_map(|r| {
-            r.top
+            top(r)
                 .improvement_usd
                 .map(|usd| TradeRow {
-                    settled_tx: r.settled_tx.clone(),
+                    tx_hash: r.tx_hash.clone(),
                     venue: r.venue.clone(),
                     solver: r.solver.clone(),
-                    net_bps: r.top.net_bps,
+                    net_bps: top(r).net_bps,
                     improvement_usd: usd,
                 })
         })
@@ -250,14 +262,14 @@ fn unsolvable_tokens(records: &[Comparison]) -> Vec<Count> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for record in records
         .iter()
-        .filter(|r| !r.top.is_served())
+        .filter(|r| !top(r).is_served())
     {
-        *counts
-            .entry(record.token_in.as_str())
-            .or_default() += 1;
-        *counts
-            .entry(record.token_out.as_str())
-            .or_default() += 1;
+        if let Some(token_in) = record.token_in.as_deref() {
+            *counts.entry(token_in).or_default() += 1;
+        }
+        if let Some(token_out) = record.token_out.as_deref() {
+            *counts.entry(token_out).or_default() += 1;
+        }
     }
     let mut ranked: Vec<Count> = counts
         .into_iter()
@@ -299,11 +311,12 @@ mod tests {
     ) -> Comparison {
         serde_json::from_value(serde_json::json!({
             "block": block,
-            "settled_tx": format!("0x{block:064x}"),
+            "tx_hash": format!("0x{block:064x}"),
             "venue": venue,
             "solver": solver,
             "token_in": "0xaaa",
             "token_out": "0xbbb",
+            "status": "settled",
             "top": {
                 "verdict": verdict,
                 "net_bps": bps,
