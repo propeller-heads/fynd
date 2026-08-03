@@ -888,8 +888,8 @@ fn combine_with_surplus(
     result
 }
 
-/// Returns `true` only for routes carrying exactly one exclusive leg, positioned as the terminal
-/// leg of its path.
+/// Returns `true` only for routes carrying exactly one exclusive leg that is the terminal leg of
+/// its path.
 ///
 /// Returns `false` for routes with no exclusive leg, more than one exclusive leg, an empty
 /// route, no route at all, or an exclusive leg that sits mid-path.
@@ -897,9 +897,8 @@ fn combine_with_surplus(
 /// Both constraints are v1 restrictions that keep per-leg surplus attribution exact and
 /// unambiguous: a mid-route leg would need inverse simulation to convert the excess into its
 /// token, and multiple exclusive legs make the per-pool attribution non-unique. Both are
-/// deferred to a future version. Path boundaries are detected by checking whether the next
-/// swap's `token_in` differs from the current swap's `token_out` — correct for Fynd's sequential
-/// route representation, but would need revisiting if routes gain explicit path-boundary markers.
+/// deferred to a future version. Terminal is defined as producing the route's overall output
+/// token (`Route::output_token`).
 fn has_valid_exclusive_route(quote: &OrderQuote, policy: &ExclusivityPolicy) -> bool {
     let Some(route) = quote.route() else {
         return false;
@@ -910,18 +909,18 @@ fn has_valid_exclusive_route(quote: &OrderQuote, policy: &ExclusivityPolicy) -> 
         return false;
     }
 
+    let Some(output_token) = route.output_token() else {
+        return false;
+    };
+
     let mut exclusive_count = 0;
 
-    for (i, swap) in swaps.iter().enumerate() {
+    for swap in swaps {
         if !policy.is_exclusive(swap.protocol_component()) {
             continue;
         }
 
-        // A swap is terminal if it's the last swap or the next swap starts a new path
-        // (its token_in doesn't match this swap's token_out).
-        let is_terminal = i == swaps.len() - 1 || swaps[i + 1].token_in() != swap.token_out();
-
-        if !is_terminal {
+        if *swap.token_out() != output_token {
             return false;
         }
         exclusive_count += 1;
@@ -2279,6 +2278,40 @@ mod tests {
     // Two exclusive legs: out of scope for v1 (ambiguous per-pool attribution).
     #[case::two_exclusive_legs(
         &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x01, 0x02)], false)]
+    // Diamond split: 0x01 splits into 0x01->0x02 (exclusive) and 0x01->0x03, both merging into
+    // 0x02->0x04 and 0x03->0x04. The exclusive leg feeds the merge point, not the route's output
+    // (0x04), so it's mid-path even though the next serialized swap starts a sibling branch.
+    #[case::exclusive_leg_feeding_diamond_merge(
+        &[
+            ("vm:exclusive", 0x01, 0x02),
+            ("uniswap_v2", 0x01, 0x03),
+            ("uniswap_v2", 0x02, 0x04),
+            ("uniswap_v2", 0x03, 0x04),
+        ],
+        false)]
+    // Same diamond shape, reordered so the exclusive leg's real continuation is adjacent to it —
+    // regression case for a prior bug where terminal-ness was inferred from adjacency alone.
+    #[case::exclusive_leg_feeding_diamond_merge_reordered(
+        &[
+            ("vm:exclusive", 0x01, 0x02),
+            ("uniswap_v2", 0x02, 0x04),
+            ("uniswap_v2", 0x01, 0x03),
+            ("uniswap_v2", 0x03, 0x04),
+        ],
+        false)]
+    // Sibling branches sharing a prefix: 0x01->0x02->0x03->0x04 alongside
+    // 0x01->0x02->0x05->0x04(exclusive). The exclusive leg is the terminal hop of its own branch
+    // and produces the route's output token, so it's valid despite sharing 0x01->0x02 with the
+    // other branch.
+    #[case::exclusive_leg_on_sibling_branch(
+        &[
+            ("uniswap_v2", 0x01, 0x02),
+            ("uniswap_v2", 0x02, 0x03),
+            ("uniswap_v2", 0x03, 0x04),
+            ("uniswap_v2", 0x02, 0x05),
+            ("vm:exclusive", 0x05, 0x04),
+        ],
+        true)]
     fn test_exclusive_route_validation(#[case] legs: &[(&str, u8, u8)], #[case] expected: bool) {
         let quote = make_route_quote(legs);
         assert_eq!(has_valid_exclusive_route(&quote, &exclusive_policy()), expected);
