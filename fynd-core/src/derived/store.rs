@@ -125,7 +125,18 @@ impl DerivedData {
 
     /// Returns token prices if computed.
     pub fn token_prices(&self) -> Option<&TokenGasPrices> {
-        self.output(TokenGasPriceComputation::ID)
+        self.output::<Arc<TokenGasPrices>>(TokenGasPriceComputation::ID)
+            .map(Arc::as_ref)
+    }
+
+    /// Returns a shared handle to the token prices, for readers that outlive the store lock.
+    ///
+    /// Solving snapshots this map once per order. Handing out the `Arc` keeps that snapshot O(1)
+    /// instead of copying every entry, and the map is replaced wholesale on recompute so a held
+    /// handle stays internally consistent with the block it was taken at.
+    pub fn token_prices_shared(&self) -> Option<Arc<TokenGasPrices>> {
+        self.output::<Arc<TokenGasPrices>>(TokenGasPriceComputation::ID)
+            .map(Arc::clone)
     }
 
     /// Returns the block at which token prices were last computed.
@@ -163,7 +174,7 @@ impl DerivedData {
                 .extend(new_failures);
         }
 
-        self.set_output(TokenGasPriceComputation::ID, prices, block);
+        self.set_output(TokenGasPriceComputation::ID, Arc::new(prices), block);
     }
 
     /// Returns `(block, error)` for this token address if it failed in a past
@@ -273,7 +284,15 @@ impl DerivedData {
 
     /// Returns spot prices if computed.
     pub fn spot_prices(&self) -> Option<&SpotPrices> {
-        self.output(SpotPriceComputation::ID)
+        self.output::<Arc<SpotPrices>>(SpotPriceComputation::ID)
+            .map(Arc::as_ref)
+    }
+
+    /// Returns a shared handle to the spot prices. See
+    /// [`token_prices_shared`](Self::token_prices_shared).
+    pub fn spot_prices_shared(&self) -> Option<Arc<SpotPrices>> {
+        self.output::<Arc<SpotPrices>>(SpotPriceComputation::ID)
+            .map(Arc::clone)
     }
 
     /// Returns the block at which spot prices were last computed.
@@ -307,7 +326,7 @@ impl DerivedData {
                 .extend(new_failures);
         }
 
-        self.set_output(SpotPriceComputation::ID, prices, block);
+        self.set_output(SpotPriceComputation::ID, Arc::new(prices), block);
     }
 
     /// Returns `(block, error)` for this key if it failed in a past spot price
