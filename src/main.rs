@@ -35,6 +35,10 @@
 
 use std::time::Duration;
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[cfg(feature = "metrics")]
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use anyhow::anyhow;
@@ -47,6 +51,8 @@ use fynd_rpc::{
 };
 mod cli;
 mod commands;
+#[cfg(feature = "jemalloc")]
+mod jemalloc_stats;
 use cli::{Cli, Commands};
 #[cfg(feature = "metrics")]
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
@@ -362,6 +368,9 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
 
     #[cfg(feature = "metrics")]
     let _metrics_task = create_metrics_exporter(&args.metrics_host, args.metrics_port, &args.chain);
+
+    #[cfg(feature = "jemalloc")]
+    let _jemalloc_stats_task = jemalloc_stats::spawn_stats_reporter();
 
     // Setup solver, but allow SIGINT to cancel it for fast exit during startup
     let solver = tokio::select! {

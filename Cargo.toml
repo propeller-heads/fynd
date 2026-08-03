@@ -9,11 +9,15 @@ description = "High-performance DeFi route-finding engine — embeddable library
 license = "MIT"
 
 [features]
-default = ["metrics"]
+default = ["metrics", "jemalloc"]
 # Enables the Prometheus metrics exporter on a separate HTTP server.
 # Disable with `--no-default-features` to omit Actix-Web and the Prometheus
 # recorder from the binary (e.g. for embedded/minimal builds).
 metrics = ["dep:actix-web", "dep:metrics-exporter-prometheus", "dep:metrics"]
+# Uses jemalloc as the global allocator. Under concurrent load jemalloc returns
+# freed pages to the OS instead of retaining them as RSS the way glibc's per-thread
+# arenas do; disable with `--no-default-features` for minimal builds.
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 
 [dependencies]
 fynd-rpc = { workspace = true }
@@ -54,6 +58,11 @@ tycho-simulation = { workspace = true }
 # Encoding/formatting for derive-connector-tokens
 chrono = { workspace = true }
 hex = { workspace = true }
+
+# Allocator (gated behind the `jemalloc` feature). tikv-jemalloc-ctl reads heap
+# stats for the periodic reporter in `jemalloc_stats`.
+tikv-jemallocator = { workspace = true, optional = true }
+tikv-jemalloc-ctl = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
@@ -166,6 +175,10 @@ chrono = "0.4"
 itertools = "0.14.0"
 hex = "0.4"
 sha2 = "0.10"
+
+# Allocator
+tikv-jemallocator = "0.7"
+tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }
 
 # Internal crates
 fynd-core = { path = "fynd-core", version = "0.97.14" }

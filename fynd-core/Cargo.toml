@@ -38,6 +38,13 @@ tokio-tungstenite.workspace = true
 alloy = { workspace = true, features = ["sol-types", "signer-local"] }
 
 [features]
+# Default-on so the replayed-market test binary uses the same allocator as the `fynd` binary,
+# which defaults jemalloc on too. `#[global_allocator]` binds per binary crate, and the
+# integration test binary is its own crate — without this it would silently measure the system
+# allocator while the production binary used jemalloc. Only affects the test target; the
+# dependency is a dev-dependency, so nothing reaches consumers of this crate.
+default = ["jemalloc"]
+jemalloc = []
 test-utils = []
 # Block-step-controller build path: lets a caller release buffered blocks one at
 # a time (deterministic stepping). Used by the hindsight monitor; the API is not
@@ -45,6 +52,7 @@ test-utils = []
 experimental = []
 
 [dev-dependencies]
+tikv-jemallocator.workspace = true
 rstest.workspace = true
 tempfile.workspace = true
 toml.workspace = true
