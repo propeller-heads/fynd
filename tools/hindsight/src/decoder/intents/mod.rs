@@ -8,16 +8,13 @@
 pub(crate) mod cow;
 pub(crate) mod netting;
 
-use alloy::{
-    primitives::{Address, B256},
-    providers::Provider,
-};
+use alloy::primitives::{Address, B256};
 
 use crate::decoder::{decode::TradeDecoder, registry::Registry};
 
 /// The decoders tried for the Intent role, first flow wins: a source with a rich signal (`CoW`'s
 /// `Trade` event) is tried before the generic net-flow finder that works for any intent fill.
-pub(crate) fn decoders_for<P: Provider>() -> Vec<Box<dyn TradeDecoder<P>>> {
+pub(crate) fn decoders_for() -> Vec<Box<dyn TradeDecoder>> {
     vec![Box::new(cow::CowSettlement), Box::new(netting::IntentNetting)]
 }
 

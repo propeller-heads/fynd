@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 
-use alloy::{primitives::U256, providers::Provider, sol, sol_types::SolCall};
+use alloy::{primitives::U256, sol, sol_types::SolCall};
 use async_trait::async_trait;
 
 use crate::decoder::{
@@ -29,14 +29,14 @@ sol! {
 pub(crate) struct RainbowCalldata;
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for RainbowCalldata {
+impl TradeDecoder for RainbowCalldata {
     fn name(&self) -> &'static str {
         "rainbow-calldata"
     }
 
     /// Net the sender's flow, then subtract the input-side fee read from the calldata so the
     /// amount that entered the swap is comparable to a re-solve. Declines any non-ETH→token call.
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         let fee = eth_to_token_fee(ctx.input)?;
         // The router keeps no fee transfer, so there is nothing for `venue_flow` to back out; it
         // just nets the sender. The input-side fee is applied here.
@@ -60,12 +60,7 @@ fn eth_to_token_fee(input: &[u8]) -> Option<U256> {
 mod tests {
     use std::collections::HashMap;
 
-    use alloy::{
-        primitives::{Address, U256},
-        providers::RootProvider,
-        rpc::client::RpcClient,
-        transports::mock::Asserter,
-    };
+    use alloy::primitives::{Address, U256};
 
     use super::*;
     use crate::decoder::{
@@ -91,15 +86,13 @@ mod tests {
         entry_point: Address,
     ) -> Option<TraderFlow> {
         let registry = Registry::ethereum();
-        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
-        let mut code_cache = HashMap::new();
+        let contract_flags = HashMap::new();
         let user = addr(1);
         let receipt = receipt(tx_hash(1), user, Some(entry_point), vec![]);
         let root = frame("CALL", user, entry_point, 0);
         let mut ctx = DecodeContext {
-            provider: &provider,
             registry: &registry,
-            code_cache: &mut code_cache,
+            contract_flags: &contract_flags,
             receipt: &receipt,
             entry_point,
             transfer_ledger: ledger,

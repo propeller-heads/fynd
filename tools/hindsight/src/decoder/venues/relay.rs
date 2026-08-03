@@ -11,10 +11,7 @@
 
 use std::collections::HashSet;
 
-use alloy::{
-    primitives::{Address, U256},
-    providers::Provider,
-};
+use alloy::primitives::{Address, U256};
 use async_trait::async_trait;
 
 use crate::decoder::{
@@ -43,12 +40,12 @@ use crate::decoder::{
 pub(crate) struct RelayCalldata;
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for RelayCalldata {
+impl TradeDecoder for RelayCalldata {
     fn name(&self) -> &'static str {
         "relay-calldata"
     }
 
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         let addresses = ctx.venue?;
         let solver_frame = trace::find_solver_frame(ctx.root, ctx.registry)?;
         let solver = ctx.registry.label(solver_frame.to?);
@@ -115,7 +112,7 @@ impl<P: Provider> TradeDecoder<P> for RelayCalldata {
 pub(crate) struct RelayNetting;
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for RelayNetting {
+impl TradeDecoder for RelayNetting {
     fn name(&self) -> &'static str {
         "relay-netting"
     }
@@ -124,7 +121,7 @@ impl<P: Provider> TradeDecoder<P> for RelayNetting {
     /// When the sender has no net flow the transaction is a solver-initiated rebalancing fill,
     /// decoded by anchoring on the fee collector instead (Relay funds the swap from it); the
     /// collector is the funding source there, not a fee recipient, so no fee is backed out.
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         let addresses = ctx.venue?;
         if let Some(flow) = venue_flow(
             ctx.transfer_ledger,
@@ -216,11 +213,7 @@ fn decode_rebalance(
 mod tests {
     use std::collections::HashMap;
 
-    use alloy::{
-        providers::RootProvider,
-        rpc::{client::RpcClient, types::Log},
-        transports::mock::Asserter,
-    };
+    use alloy::rpc::types::Log;
 
     use super::*;
     use crate::decoder::{
@@ -250,14 +243,12 @@ mod tests {
         sender: Address,
         entry_point: Address,
     ) -> Option<TraderFlow> {
-        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
-        let mut code_cache = HashMap::new();
+        let contract_flags = HashMap::new();
         let receipt = receipt(tx_hash(1), sender, Some(entry_point), vec![]);
         let root = frame("CALL", sender, entry_point, 0);
         let mut ctx = DecodeContext {
-            provider: &provider,
             registry,
-            code_cache: &mut code_cache,
+            contract_flags: &contract_flags,
             receipt: &receipt,
             entry_point,
             transfer_ledger: ledger,
@@ -491,13 +482,11 @@ mod tests {
             sender: Address,
             router: Address,
         ) -> Option<TraderFlow> {
-            let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
-            let mut code_cache = HashMap::new();
+            let contract_flags = HashMap::new();
             let receipt = receipt(tx_hash(1), sender, Some(router), vec![]);
             let mut ctx = DecodeContext {
-                provider: &provider,
                 registry,
-                code_cache: &mut code_cache,
+                contract_flags: &contract_flags,
                 receipt: &receipt,
                 entry_point: router,
                 transfer_ledger: ledger,

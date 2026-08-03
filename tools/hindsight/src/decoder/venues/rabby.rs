@@ -13,7 +13,7 @@
 //! token and would miss that, so the wrapped-native fee is recognized here and grossed back into
 //! the ETH output.
 
-use alloy::{primitives::Address, providers::Provider};
+use alloy::primitives::Address;
 use async_trait::async_trait;
 
 use crate::decoder::{
@@ -25,14 +25,14 @@ use crate::decoder::{
 pub(crate) struct RabbyNetting;
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for RabbyNetting {
+impl TradeDecoder for RabbyNetting {
     fn name(&self) -> &'static str {
         "rabby-netting"
     }
 
     /// Net the sender's flow and back the 0.25% fee out. A fee in the output token is handled by
     /// the shared `venue_flow`; a WETH fee on an ETH-output swap is grossed back in here.
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         let addresses = ctx.venue?;
         let mut flow = venue_flow(
             ctx.transfer_ledger,
@@ -60,10 +60,7 @@ impl<P: Provider> TradeDecoder<P> for RabbyNetting {
 mod tests {
     use std::collections::HashMap;
 
-    use alloy::{
-        primitives::U256, providers::RootProvider, rpc::client::RpcClient,
-        transports::mock::Asserter,
-    };
+    use alloy::primitives::U256;
 
     use super::*;
     use crate::decoder::{
@@ -90,14 +87,12 @@ mod tests {
         sender: Address,
         entry_point: Address,
     ) -> Option<TraderFlow> {
-        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
-        let mut code_cache = HashMap::new();
+        let contract_flags = HashMap::new();
         let receipt = receipt(tx_hash(1), sender, Some(entry_point), vec![]);
         let root = frame("CALL", sender, entry_point, 0);
         let mut ctx = DecodeContext {
-            provider: &provider,
             registry,
-            code_cache: &mut code_cache,
+            contract_flags: &contract_flags,
             receipt: &receipt,
             entry_point,
             transfer_ledger: ledger,

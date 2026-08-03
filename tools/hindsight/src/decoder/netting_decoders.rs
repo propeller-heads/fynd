@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use alloy::{primitives::Address, providers::Provider};
+use alloy::primitives::Address;
 use async_trait::async_trait;
 
 use crate::decoder::{
@@ -110,12 +110,12 @@ fn back_out_venue_fees(
 pub(crate) struct SenderNetting;
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for SenderNetting {
+impl TradeDecoder for SenderNetting {
     fn name(&self) -> &'static str {
         "sender-netting"
     }
 
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         sender_flow(ctx.transfer_ledger, ctx.receipt.from, ctx.entry_point)
     }
 }
