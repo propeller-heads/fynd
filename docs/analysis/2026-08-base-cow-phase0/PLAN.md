@@ -468,9 +468,19 @@ K. **NATIVE PROTOCOLS ONLY for APEX (user decision, 2026-08-04, schedule-driven)
    APEX cannot see (engine-inclusive gap, stated in the report). Full-native config cell
    deferred, not cut.
 
-USER SIGN-OFFS OUTSTANDING: (1) headline reframing — apex(batch) vs apex(singles) as the
-batching-isolated number, apex_vs_fynd engine-inclusive alongside, with item G's pairing rule;
-(2) escalation thresholds (extractor <50%, price coverage >20% dropped pools).
+L. **apex(batch) vs INDIVIDUAL FYND is a first-class headline (user, 2026-08-04).** Both
+   metrics ship: apex_vs_fynd answers the commercial question (does batch clearing beat what
+   fynd delivers per order today), apex-batch-vs-apex-singles remains the mechanism-isolation
+   control explaining WHY. Fynd baselines per stage, state-consistent per the comparability
+   invariant: stages 2/3(a) use the dataset's recorded per-trade fynd quotes (top =
+   trade-time N−1 state, same anchor as the orders' economics); stage 3(b)/4 use fynd solved
+   per order AT the same persisted/live block state (offline via Solver::from_recording on the
+   persisted snapshot, or in-process at the live state). Comparison restricted to orders fynd
+   actually quoted (top verdict solvable), exclusions counted.
+
+USER SIGN-OFFS OUTSTANDING: (1) item G's pairing rule for the batch-vs-singles cell (the
+metric pair itself is settled by item L); (2) escalation thresholds (extractor <50%, price
+coverage >20% dropped pools).
 
 COMPARABILITY INVARIANT (user, 2026-08-04): every APEX cell is measured on the SAME states and
 conventions as the Fynd cell it is compared against — same cloned N−1/N pool states (top =
