@@ -46,3 +46,29 @@ positive per-order gaps only, valued at day-median USD prices (negatives counted
 The intent USD denominator includes the wash pair (as in the analytic scan); its orders
 never enter APEX. Decimals-free scheme: zero pools ⇒ tokens declared 18-dec, raw amounts,
 per-raw-unit prices — exact, see the binary's module docs.
+
+## Engine-inclusive fynd baseline (plan item L; added 2026-08-04)
+
+Each APEX-filled order is also compared against **fynd's own N−1 quote** for that trade
+(`top.fynd_amount_out`, pro-rata for partial fills), on the subset fynd solved
+(`fynd_compared`; APEX fills without a fynd quote are counted `fynd_uncompared`, ~5%).
+USD deltas are valued against each order's quarantined USD notional (re-pricing raw units
+lets one wrong-decimals quote dominate the sum).
+
+| window | compared | apex ≥ fynd | median bps | mean bps | Σ delta (10 d) |
+|---|---|---|---|---|---|
+| 1 | 19,887 | 48.3% | −28.8 | +6.3 | +$4.6k |
+| 5 | 71,042 | 49.8% | −5.6 | +11.5 | +$9.3k |
+| 15 | 134,147 | 52.0% | +26.5 | +19.2 | +$13.0k |
+| 30 | 199,933 | 53.9% | +31.8 | +24.5 | +$15.4k |
+| 150 | 277,305 | 58.8% | +39.8 | +31.0 | +$39.1k |
+
+(100 bps floor cell; the 50 bps cells shift medians up — tighter floors force clearings closer
+to settled — without moving the Σ delta by more than ~2%.)
+
+Reading: order-vs-order clearing with zero AMMs is **roughly at par with fynd per-order routing
+at the single block** (median slightly negative, mean and total positive — the uniform clearing
+price redistributes within the limit band), and pulls ahead as windows grow: at 5 minutes APEX
+beats fynd's quote on 59% of compared fills, median +40 bps, ≈ +$3.9k/day on the compared
+subset. This is the engine-inclusive view; the batching-isolated headline remains
+apex(batch) vs apex(singles).

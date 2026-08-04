@@ -6,6 +6,13 @@
     "apex_matched_usd": 1240231.8719995336,
     "apex_matched_pct": 0.550693037988283,
     "apex_surplus_usd": 10054.599538255487,
+    "fynd": {
+      "compared_orders": 19909,
+      "apex_ge_fynd_share": 0.5162991611833844,
+      "mean_bps": 7.346681464038162,
+      "median_bps": 3.72799835363427,
+      "usd_delta": 4578.340314285884
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 10912,
@@ -26,9 +33,11 @@
       "negative_fill_gaps": 7957,
       "negative_gap_usd": 1297.1314569242702,
       "components_solved": 104758,
-      "components_multi_order": 105199
+      "components_multi_order": 105199,
+      "fynd_compared": 19909,
+      "fynd_uncompared": 1037
     },
-    "wall_ms": 324
+    "wall_ms": 330
   },
   {
     "window_blocks": 1,
@@ -37,6 +46,13 @@
     "apex_matched_usd": 1243263.5441944625,
     "apex_matched_pct": 0.5520391739882539,
     "apex_surplus_usd": 12937.281254363295,
+    "fynd": {
+      "compared_orders": 19887,
+      "apex_ge_fynd_share": 0.4832302509176849,
+      "mean_bps": 6.31044560348877,
+      "median_bps": -28.818437189120104,
+      "usd_delta": 4640.962516413325
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 11201,
@@ -57,9 +73,11 @@
       "negative_fill_gaps": 10152,
       "negative_gap_usd": 4123.057879047152,
       "components_solved": 104758,
-      "components_multi_order": 105199
+      "components_multi_order": 105199,
+      "fynd_compared": 19887,
+      "fynd_uncompared": 1045
     },
-    "wall_ms": 306
+    "wall_ms": 371
   },
   {
     "window_blocks": 1,
@@ -68,6 +86,13 @@
     "apex_matched_usd": 1254284.2154037287,
     "apex_matched_pct": 0.5569326193559465,
     "apex_surplus_usd": 19310.578018152926,
+    "fynd": {
+      "compared_orders": 19858,
+      "apex_ge_fynd_share": 0.48247557659381607,
+      "mean_bps": 4.245483696528748,
+      "median_bps": -83.43858005523855,
+      "usd_delta": 4770.241512502397
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 11244,
@@ -88,9 +113,11 @@
       "negative_fill_gaps": 10153,
       "negative_gap_usd": 10428.79045262248,
       "components_solved": 104758,
-      "components_multi_order": 105199
+      "components_multi_order": 105199,
+      "fynd_compared": 19858,
+      "fynd_uncompared": 1048
     },
-    "wall_ms": 304
+    "wall_ms": 348
   },
   {
     "window_blocks": 5,
@@ -99,6 +126,13 @@
     "apex_matched_usd": 7702246.886909831,
     "apex_matched_pct": 3.419984466815706,
     "apex_surplus_usd": 31567.84622625331,
+    "fynd": {
+      "compared_orders": 70900,
+      "apex_ge_fynd_share": 0.5308039492242596,
+      "mean_bps": 9.43359767371906,
+      "median_bps": 5.812724520503995,
+      "usd_delta": 8708.983245648687
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 42717,
@@ -119,9 +153,11 @@
       "negative_fill_gaps": 27214,
       "negative_gap_usd": 5857.4106125790795,
       "components_solved": 80190,
-      "components_multi_order": 80400
+      "components_multi_order": 80400,
+      "fynd_compared": 70900,
+      "fynd_uncompared": 2863
     },
-    "wall_ms": 1258
+    "wall_ms": 1292
   },
   {
     "window_blocks": 5,
@@ -130,6 +166,13 @@
     "apex_matched_usd": 7703216.368473271,
     "apex_matched_pct": 3.420414940148554,
     "apex_surplus_usd": 47347.70241337614,
+    "fynd": {
+      "compared_orders": 71042,
+      "apex_ge_fynd_share": 0.49847977252892656,
+      "mean_bps": 11.463950720892226,
+      "median_bps": -5.6126876840517745,
+      "usd_delta": 9274.379921513344
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 43626,
@@ -150,9 +193,11 @@
       "negative_fill_gaps": 34871,
       "negative_gap_usd": 21537.996192818977,
       "components_solved": 80190,
-      "components_multi_order": 80400
+      "components_multi_order": 80400,
+      "fynd_compared": 71042,
+      "fynd_uncompared": 2883
     },
-    "wall_ms": 1643
+    "wall_ms": 1262
   },
   {
     "window_blocks": 5,
@@ -161,6 +206,13 @@
     "apex_matched_usd": 7767814.71226734,
     "apex_matched_pct": 3.4490981718861926,
     "apex_surplus_usd": 86245.87744830872,
+    "fynd": {
+      "compared_orders": 70909,
+      "apex_ge_fynd_share": 0.4976237149021986,
+      "mean_bps": 14.349067475585462,
+      "median_bps": -9.157845161863898,
+      "usd_delta": 9318.993944174896
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 43758,
@@ -181,9 +233,11 @@
       "negative_fill_gaps": 35084,
       "negative_gap_usd": 60259.97050616397,
       "components_solved": 80190,
-      "components_multi_order": 80400
+      "components_multi_order": 80400,
+      "fynd_compared": 70909,
+      "fynd_uncompared": 2883
     },
-    "wall_ms": 1466
+    "wall_ms": 1257
   },
   {
     "window_blocks": 15,
@@ -191,7 +245,14 @@
     "intent_usd": 225212920.16513962,
     "apex_matched_usd": 17539199.15852141,
     "apex_matched_pct": 7.78782991031803,
-    "apex_surplus_usd": 56596.19636800579,
+    "apex_surplus_usd": 56596.19636800578,
+    "fynd": {
+      "compared_orders": 133824,
+      "apex_ge_fynd_share": 0.5550648613103778,
+      "mean_bps": 14.452180423632305,
+      "median_bps": 8.964141298943508,
+      "usd_delta": 12795.05905170153
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 91930,
@@ -212,9 +273,11 @@
       "negative_fill_gaps": 46837,
       "negative_gap_usd": 12794.489000468977,
       "components_solved": 33620,
-      "components_multi_order": 33639
+      "components_multi_order": 33639,
+      "fynd_compared": 133824,
+      "fynd_uncompared": 4096
     },
-    "wall_ms": 3576
+    "wall_ms": 3526
   },
   {
     "window_blocks": 15,
@@ -223,6 +286,13 @@
     "apex_matched_usd": 17438492.740120485,
     "apex_matched_pct": 7.743113817508132,
     "apex_surplus_usd": 92422.46835602542,
+    "fynd": {
+      "compared_orders": 134147,
+      "apex_ge_fynd_share": 0.5202650823350503,
+      "mean_bps": 19.18799351853916,
+      "median_bps": 26.493500190669746,
+      "usd_delta": 13036.051487335368
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 93418,
@@ -243,9 +313,11 @@
       "negative_fill_gaps": 62499,
       "negative_gap_usd": 48456.61096854382,
       "components_solved": 33620,
-      "components_multi_order": 33639
+      "components_multi_order": 33639,
+      "fynd_compared": 134147,
+      "fynd_uncompared": 4209
     },
-    "wall_ms": 3822
+    "wall_ms": 4385
   },
   {
     "window_blocks": 15,
@@ -254,6 +326,13 @@
     "apex_matched_usd": 17527004.800942216,
     "apex_matched_pct": 7.782415319729599,
     "apex_surplus_usd": 178431.3791144147,
+    "fynd": {
+      "compared_orders": 134135,
+      "apex_ge_fynd_share": 0.5187311290863682,
+      "mean_bps": 28.6483654872944,
+      "median_bps": 31.802412946378798,
+      "usd_delta": 13614.343288702848
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 93738,
@@ -274,9 +353,11 @@
       "negative_fill_gaps": 63547,
       "negative_gap_usd": 134345.14551919856,
       "components_solved": 33620,
-      "components_multi_order": 33639
+      "components_multi_order": 33639,
+      "fynd_compared": 134135,
+      "fynd_uncompared": 4162
     },
-    "wall_ms": 4306
+    "wall_ms": 3103
   },
   {
     "window_blocks": 30,
@@ -285,6 +366,13 @@
     "apex_matched_usd": 27369303.550203573,
     "apex_matched_pct": 12.152634729008778,
     "apex_surplus_usd": 78738.91398535293,
+    "fynd": {
+      "compared_orders": 200106,
+      "apex_ge_fynd_share": 0.6027855236724536,
+      "mean_bps": 19.515717865948613,
+      "median_bps": 14.17434443656981,
+      "usd_delta": 15346.135732259458
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 150135,
@@ -306,9 +394,11 @@
       "negative_fill_gaps": 56403,
       "negative_gap_usd": 18571.730480640486,
       "components_solved": 20174,
-      "components_multi_order": 20175
+      "components_multi_order": 20175,
+      "fynd_compared": 200106,
+      "fynd_uncompared": 4942
     },
-    "wall_ms": 5963
+    "wall_ms": 4766
   },
   {
     "window_blocks": 30,
@@ -317,6 +407,13 @@
     "apex_matched_usd": 27649507.1567474,
     "apex_matched_pct": 12.277051927781551,
     "apex_surplus_usd": 133974.15258353052,
+    "fynd": {
+      "compared_orders": 199933,
+      "apex_ge_fynd_share": 0.5387454797357115,
+      "mean_bps": 24.52451854353672,
+      "median_bps": 31.79760234910857,
+      "usd_delta": 15390.83490686691
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 151898,
@@ -337,9 +434,11 @@
       "negative_fill_gaps": 85855,
       "negative_gap_usd": 73915.15668649596,
       "components_solved": 20174,
-      "components_multi_order": 20175
+      "components_multi_order": 20175,
+      "fynd_compared": 199933,
+      "fynd_uncompared": 4970
     },
-    "wall_ms": 8918
+    "wall_ms": 5337
   },
   {
     "window_blocks": 30,
@@ -348,6 +447,13 @@
     "apex_matched_usd": 27811849.075168766,
     "apex_matched_pct": 12.349135677817886,
     "apex_surplus_usd": 270752.70734177745,
+    "fynd": {
+      "compared_orders": 200467,
+      "apex_ge_fynd_share": 0.5350755984775549,
+      "mean_bps": 35.67812374644989,
+      "median_bps": 41.801506483014606,
+      "usd_delta": 16220.620876736335
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 152699,
@@ -367,19 +473,28 @@
       "price_underflow": 0,
       "zero_limit_excluded": 1529,
       "negative_fill_gaps": 88607,
-      "negative_gap_usd": 210311.04813058296,
+      "negative_gap_usd": 210311.048130583,
       "components_solved": 20174,
-      "components_multi_order": 20175
+      "components_multi_order": 20175,
+      "fynd_compared": 200467,
+      "fynd_uncompared": 5009
     },
-    "wall_ms": 8684
+    "wall_ms": 5114
   },
   {
     "window_blocks": 150,
     "limit_bps": 50,
     "intent_usd": 225212920.16513962,
-    "apex_matched_usd": 51200256.12922877,
-    "apex_matched_pct": 22.73415578985685,
-    "apex_surplus_usd": 152456.9620062225,
+    "apex_matched_usd": 51200256.12922876,
+    "apex_matched_pct": 22.734155789856846,
+    "apex_surplus_usd": 152456.96200622246,
+    "fynd": {
+      "compared_orders": 269046,
+      "apex_ge_fynd_share": 0.6714428016026999,
+      "mean_bps": 24.033491903553983,
+      "median_bps": 19.238239677224946,
+      "usd_delta": 38472.389209980225
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 243025,
@@ -401,17 +516,26 @@
       "negative_fill_gaps": 52905,
       "negative_gap_usd": 30678.224145630436,
       "components_solved": 10593,
-      "components_multi_order": 10593
+      "components_multi_order": 10593,
+      "fynd_compared": 269046,
+      "fynd_uncompared": 5821
     },
-    "wall_ms": 4305
+    "wall_ms": 4401
   },
   {
     "window_blocks": 150,
     "limit_bps": 100,
     "intent_usd": 225212920.16513962,
-    "apex_matched_usd": 52045926.973464884,
-    "apex_matched_pct": 23.1096541598509,
-    "apex_surplus_usd": 254713.2330711573,
+    "apex_matched_usd": 52045926.97346489,
+    "apex_matched_pct": 23.10965415985091,
+    "apex_surplus_usd": 254713.23307115724,
+    "fynd": {
+      "compared_orders": 277305,
+      "apex_ge_fynd_share": 0.5883052956131336,
+      "mean_bps": 30.9969673630781,
+      "median_bps": 39.84382176342194,
+      "usd_delta": 39091.51567680242
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 250923,
@@ -433,9 +557,11 @@
       "negative_fill_gaps": 103323,
       "negative_gap_usd": 131333.1071130245,
       "components_solved": 10593,
-      "components_multi_order": 10593
+      "components_multi_order": 10593,
+      "fynd_compared": 277305,
+      "fynd_uncompared": 5949
     },
-    "wall_ms": 3656
+    "wall_ms": 4090
   },
   {
     "window_blocks": 150,
@@ -443,7 +569,14 @@
     "intent_usd": 225212920.16513962,
     "apex_matched_usd": 51481283.383164056,
     "apex_matched_pct": 22.858938708052314,
-    "apex_surplus_usd": 499528.4585302662,
+    "apex_surplus_usd": 499528.45853026625,
+    "fynd": {
+      "compared_orders": 277780,
+      "apex_ge_fynd_share": 0.5742170062639499,
+      "mean_bps": 48.53614145677767,
+      "median_bps": 66.93230565289092,
+      "usd_delta": 38279.22656392476
+    },
     "counters": {
       "orders_in": 541983,
       "filled": 251224,
@@ -463,10 +596,12 @@
       "price_underflow": 1,
       "zero_limit_excluded": 1529,
       "negative_fill_gaps": 111898,
-      "negative_gap_usd": 374264.76371388027,
+      "negative_gap_usd": 374264.76371388015,
       "components_solved": 10593,
-      "components_multi_order": 10593
+      "components_multi_order": 10593,
+      "fynd_compared": 277780,
+      "fynd_uncompared": 5831
     },
-    "wall_ms": 3977
+    "wall_ms": 3986
   }
 ]
