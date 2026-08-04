@@ -459,8 +459,24 @@ J. Implementation sweep: runner.rs catch_unwind doc rewritten against the real p
    (`tokens[&addr]` indexes, `get_order` expect); stale panic-validate-result.md reference
    retired.
 
+K. **NATIVE PROTOCOLS ONLY for APEX (user decision, 2026-08-04, schedule-driven).** The APEX
+   pool universe is restricted to natively-simulated protocols (uniswap_v2/v3/v4, aerodrome,
+   …); vm:* pools are excluded from the subset filter. Rationale: time to ship + VM ~5×
+   simulation latency inside the 1 s budget + native states are the serializable ones for
+   capture. The singles control shares the restriction, so the batching-isolated headline is
+   unaffected; apex_vs_fynd gains the caveat that fynd's baseline may route through vm:* pools
+   APEX cannot see (engine-inclusive gap, stated in the report). Full-native config cell
+   deferred, not cut.
+
 USER SIGN-OFFS OUTSTANDING: (1) headline reframing — apex(batch) vs apex(singles) as the
 batching-isolated number, apex_vs_fynd engine-inclusive alongside, with item G's pairing rule;
 (2) escalation thresholds (extractor <50%, price coverage >20% dropped pools).
+
+COMPARABILITY INVARIANT (user, 2026-08-04): every APEX cell is measured on the SAME states and
+conventions as the Fynd cell it is compared against — same cloned N−1/N pool states (top =
+fair counterfactual headline, back = biased-bottom floor including self-impact, identical bias
+semantics both engines), same decoded orders and extracted limits, same gross-vs-gross gas
+basis, same component partitioning across batch/singles cells. No APEX number is reported
+against a Fynd number measured at a different state.
 
 NEXT: build step 0 (scaling + adapter + prices + limits property tests), then shadow run.
