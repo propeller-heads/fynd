@@ -30,7 +30,7 @@ use tycho_simulation::{
 };
 
 use crate::{
-    algorithm::{Algorithm, AlgorithmConfig, BellmanFordAlgorithm},
+    algorithm::{bellman_ford::FindRouteOptions, Algorithm, AlgorithmConfig, BellmanFordAlgorithm},
     derived::{
         computation::{
             ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
@@ -129,11 +129,20 @@ impl TokenGasPriceComputation {
                 .with_gas_aware(false);
         let router = BellmanFordAlgorithm::with_config(config);
 
+        let wanted = self.tokens_to_price(&topology, filter_tokens);
+        let graph = graph_manager.graph();
+
+        // One relaxation from the gas token yields the buy route for every token it reaches, so the
+        // buy side costs a single pass however many tokens are priced.
+        let buys = self
+            .buy_routes(&router, graph, market, &wanted)
+            .await?;
+
         let mut prices = HashMap::new();
         let mut failed_items = Vec::new();
-        for token in self.tokens_to_price(&topology, filter_tokens) {
+        for token in wanted {
             match self
-                .price_token(&router, graph_manager.graph(), market, &token)
+                .price_token(&router, graph, market, &token, buys.get(&token))
                 .await
             {
                 Some(priced) => {
@@ -147,6 +156,38 @@ impl TokenGasPriceComputation {
         }
 
         Ok((prices, block, failed_items))
+    }
+
+    /// The buy route to every token the gas token reaches, from one relaxation.
+    ///
+    /// The context is built from the gas token, so its subgraph is everything within `max_hops` of
+    /// it. `probe_destination` only satisfies the order's shape — the returned routes cover every
+    /// destination, not that one.
+    async fn buy_routes(
+        &self,
+        router: &BellmanFordAlgorithm,
+        graph: &RouterGraph,
+        market: &MarketData,
+        wanted: &HashSet<Address>,
+    ) -> Result<HashMap<Address, Route>, ComputationError> {
+        let Some(probe_destination) = wanted.iter().next() else {
+            return Ok(HashMap::new());
+        };
+        let order = Order::new(
+            self.gas_token.clone(),
+            probe_destination.clone(),
+            self.simulation_amount.clone(),
+            OrderSide::Sell,
+            Address::zero(20),
+        );
+        let Ok(ctx) = router
+            .build_context(graph, market.clone(), None, None, &order)
+            .await
+        else {
+            // No subgraph around the gas token means nothing is priceable this block.
+            return Ok(HashMap::new());
+        };
+        Ok(router.find_routes_from_source(&ctx, &order, FindRouteOptions::default()))
     }
 
     /// Every token in the graph but the gas token, narrowed to `filter_tokens` when given.
@@ -175,11 +216,13 @@ impl TokenGasPriceComputation {
         graph: &RouterGraph,
         market: &MarketData,
         token: &Address,
+        buy: Option<&Route>,
     ) -> Option<(Price, HashSet<ComponentId>)> {
-        let buy = self
-            .solve(router, graph, market, &self.gas_token, token, self.simulation_amount.clone())
-            .await?;
+        let buy = buy?.clone();
         let buy_out = route_output(&buy, token);
+        if buy_out.is_zero() {
+            return None;
+        }
         let sell = self
             .solve(router, graph, market, token, &self.gas_token, buy_out.clone())
             .await?;

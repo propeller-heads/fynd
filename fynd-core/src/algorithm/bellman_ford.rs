@@ -268,6 +268,48 @@ impl BellmanFordAlgorithm {
     /// `opts.overrides` to evaluate alternative component states without redoing the setup in
     /// `ctx`. Overrides shadow the corresponding component in `ctx.market_data` for both
     /// relaxation and route construction.
+    /// Every token the source reaches, with the route to it and what that route returns, from one
+    /// relaxation.
+    ///
+    /// [`find_single_route`](Self::find_single_route) runs the same pass and reads one node out of
+    /// it. The relaxation fills the best amount at every node, so a caller that wants all of them —
+    /// pricing every token against the gas token, say — pays for one pass rather than one per
+    /// destination. `ctx` must be built from the source token; `ctx.token_out_node` is not read.
+    ///
+    /// Tokens the source cannot reach, and those whose route cannot be rebuilt, are absent.
+    pub(crate) fn find_routes_from_source(
+        &self,
+        ctx: &BellmanFordContext,
+        order: &Order,
+        opts: FindRouteOptions,
+    ) -> HashMap<Address, Route> {
+        let spfa = self.run_spfa(ctx, order, &opts.overrides, Instant::now());
+
+        let mut routes = HashMap::new();
+        for (idx, amount) in spfa.amount.iter().enumerate() {
+            if amount.is_zero() || idx == ctx.token_in_node.index() {
+                continue;
+            }
+            let node = NodeIndex::new(idx);
+            let Some(address) = ctx.node_address.get(&node) else {
+                continue;
+            };
+            let Ok(path_edges) = Self::reconstruct_path(node, ctx.token_in_node, &spfa.predecessor)
+            else {
+                continue;
+            };
+            let Ok(route) =
+                Self::build_route(ctx, &path_edges, &spfa.amount, &spfa.edge_gas, &opts.overrides)
+            else {
+                continue;
+            };
+            routes.insert(address.clone(), route);
+        }
+
+        debug!(reached = routes.len(), "priced every destination from one relaxation");
+        routes
+    }
+
     pub(crate) fn find_single_route(
         &self,
         ctx: &BellmanFordContext,
