@@ -52,6 +52,31 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 # Fly (formerly Magpie) DexAggregator — same address on Base and most chains
 # (docs.fly.trade/developers/deployments)
 "0x20f6ee51340adeed01a59b0e65cb3703f3dc860c" = "fly"
+# Bebop Blend (PMM) settlement — 9.6k trades/$12.6M in the 7d sample (Dune dex_aggregator.trades,
+# 2026-07-31; Basescan tag "Bebop: Blend"). Maker-initiated: ~0.1% of its trades enter via tx.to,
+# the rest match via its logs, like the UniswapX reactor on mainnet.
+"0xbbbbbbb520d69a9775e85b458c58c648259fad5f" = "bebop"
+# Bebop JAM Settlement on Base (Basescan tag). Base runs the JAM v2 address, NOT mainnet's
+# 0xbebebeb0…f47b — the two chains genuinely differ. Also maker-initiated (~4% via tx.to).
+"0xbeb0b0623f66be8ce162ebdfa2ec543a522f4ea6" = "bebop"
+# Odos Router V2 on Base (docs.odos.xyz/build/contracts, Base row — mainnet V2 is a different
+# address) and V3 (one address on every EVM chain per the same docs; no Base volume yet).
+"0x19ceead7105607cd444f5ad10dd51356436095a1" = "odos"
+"0x0d05a7d3448512b78fa8a9e46c4872c88c4a0d05" = "odos"
+# SushiSwap RedSnwapper aggregator entry point — 5k trades/$865k in 7d, 100% entered via tx.to
+# (Dune project=sushiswap, 2026-07-31; Basescan tag "SushiSwap: RedSnwapper").
+"0xac4c6e212a361c968f1725b4d055b47e63f80b75" = "sushiswap"
+# OpenOcean Exchange V2 proxy — 13k trades/$822k in 7d, ~61% via tx.to (Basescan tag
+# "OpenOcean: Exchange V2").
+"0x6352a56caadc4f1e25cd6c75970fa768a3304e64" = "openocean"
+# ParaSwap Augustus v5 on Base — 654 trades/$708k in 7d (Dune project=velora version=5, decoded as
+# paraswap_base AugustusSwapper). Base-specific: mainnet's v5 Augustus is a different address.
+"0x59c7c832e96d2568bea6db468c1aadcbbda08a52" = "paraswap"
+# Native RFQ pools carrying Base volume ($1.8M + $1.4M in 7d; Dune decodes both as native_base
+# NativeRFQPool). Aggregator-reached (0% via tx.to — Bitget routes into the first one); Native's
+# docs say the pool set evolves, so re-derive when coverage drops.
+"0x571af1490e7fbfcb4231b5bcd7ef6b6b2f35ce5b" = "native"
+"0xb909713394cf63f9771b1f7101590f729c27cec6" = "native"
 
 # Venues. Relay's Base contracts and fee collector are the same addresses as mainnet — Relay docs
 # list the Base solver/fee collector as 0xf70da978…, so its fee back-out is verified. Its routers
