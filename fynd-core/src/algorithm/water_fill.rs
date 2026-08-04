@@ -691,6 +691,14 @@ impl WaterFillAlgorithm {
         }
 
         let mut sims = 0usize;
+        // A recipient's post-transfer amount is `cum[recipient] + delta`, and neither changes while
+        // the donor loop runs — both are only touched once a move is applied or `delta` halves. So
+        // the recipient's net is the same whichever donor is offering, and simulating it once per
+        // recipient rather than once per (donor, recipient) pair is what turns the pass's
+        // simulation count from roughly P^2 into 2P. Entries survive an applied move except for the
+        // two paths whose `cum` it changed; halving `delta` invalidates all of them.
+        let mut recip_nets: Vec<Option<Option<BigInt>>> = vec![None; path_count];
+
         while delta >= min_delta && !delta.is_zero() {
             if ctx.start.elapsed().as_millis() as u64 > timeout_ms || sims >= EXCHANGE_MAX_SIMS {
                 break;
@@ -714,15 +722,23 @@ impl WaterFillAlgorithm {
                     if recipient == donor || sims >= EXCHANGE_MAX_SIMS {
                         continue;
                     }
-                    let recip_amt = &cum[recipient] + &delta;
-                    let Some(recip_net) =
-                        Self::path_net(ctx, &ctx.ordered[active[recipient]], &recip_amt)
+                    if recip_nets[recipient].is_none() {
+                        let recip_amt = &cum[recipient] + &delta;
+                        let net = Self::path_net(ctx, &ctx.ordered[active[recipient]], &recip_amt);
+                        // A path that fails to simulate costs no budget, as before.
+                        if net.is_some() {
+                            sims += 1;
+                        }
+                        recip_nets[recipient] = Some(net);
+                    }
+                    let Some(recip_net) = recip_nets[recipient]
+                        .as_ref()
+                        .and_then(Option::as_ref)
                     else {
                         continue;
                     };
-                    sims += 1;
                     let before = &net_cache[donor] + &net_cache[recipient];
-                    let after = &donor_net + &recip_net;
+                    let after = &donor_net + recip_net;
                     if after <= before {
                         continue;
                     }
@@ -736,7 +752,7 @@ impl WaterFillAlgorithm {
                             donor,
                             recipient,
                             donor_net: donor_net.clone(),
-                            recip_net,
+                            recip_net: recip_net.clone(),
                             gain,
                         });
                     }
@@ -745,12 +761,18 @@ impl WaterFillAlgorithm {
 
             let Some(mv) = best else {
                 delta = &delta / 2usize;
+                recip_nets
+                    .iter_mut()
+                    .for_each(|net| *net = None);
                 continue;
             };
             cum[mv.donor] = &cum[mv.donor] - &delta;
             cum[mv.recipient] = &cum[mv.recipient] + &delta;
             net_cache[mv.donor] = mv.donor_net;
             net_cache[mv.recipient] = mv.recip_net;
+            // Only these two paths' `cum` moved, so only their probes are stale.
+            recip_nets[mv.donor] = None;
+            recip_nets[mv.recipient] = None;
         }
         cum
     }
