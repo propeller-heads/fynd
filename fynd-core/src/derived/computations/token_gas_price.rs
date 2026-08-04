@@ -5,17 +5,22 @@
 //!
 //! For each token in the graph:
 //!
-//! 1. **Buy**: solve `gas_token -> token` for `simulation_amount`, giving `buy_out`.
-//! 2. **Sell**: solve `token -> gas_token` for `buy_out`, giving `sell_out`.
-//! 3. **Mid price**: `buy_price = buy_out / simulation_amount` and `sell_price = buy_out /
-//!    sell_out`, and the token's price is their mean, kept as an exact fraction.
+//! One relaxation from the gas token yields the best route to every token it reaches, and a token's
+//! price is what its route returns over what it was given: `buy_out / simulation_amount`.
 //!
-//! Both solves run [`BellmanFordAlgorithm`] with gas-aware scoring off. Off is what keeps this
-//! non-circular: gas-aware scoring converts a route's gas into output-token terms, which needs the
-//! prices this computation produces. Nothing here reads derived data, so token prices depend on no
-//! other computation.
+//! The router runs with gas-aware scoring off. Off is what keeps this non-circular: gas-aware
+//! scoring converts a route's gas into output-token terms, which needs the prices this computation
+//! produces. Nothing here reads derived data, so token prices depend on no other computation.
 //!
 //! A router already ranks paths by what they return, so pricing needs no ranking rule of its own.
+//!
+//! # Limitation: the price is what you pay to buy, not what you would realise selling
+//!
+//! Selling back is not solved. Those solves are many sources into one destination, each starting
+//! from its own buy output, and slippage makes the relaxation amount-dependent, so they cannot
+//! share the single pass the buy side gets — one per token does not fit in a block. So the price
+//! omits what leaving the token would cost: about a fee for an ordinary token, more for one with a
+//! transfer tax or a thin exit.
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,7 +29,7 @@ use num_bigint::BigUint;
 #[cfg(test)]
 use num_traits::ToPrimitive;
 use num_traits::Zero;
-use tracing::{debug, instrument, trace, Span};
+use tracing::{debug, instrument, Span};
 use tycho_simulation::{
     tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
 };
@@ -141,10 +146,7 @@ impl TokenGasPriceComputation {
         let mut prices = HashMap::new();
         let mut failed_items = Vec::new();
         for token in wanted {
-            match self
-                .price_token(&router, graph, market, &token, buys.get(&token))
-                .await
-            {
+            match self.price_from_buy(&token, buys.get(&token)) {
                 Some(priced) => {
                     prices.insert(token, priced);
                 }
@@ -205,75 +207,24 @@ impl TokenGasPriceComputation {
             .collect()
     }
 
-    /// Solves `gas_token -> token` for the simulation amount and `token -> gas_token` for what came
-    /// back, returning the mean of the two prices and the components both routes used.
-    ///
-    /// `None` when either direction has no route or returns nothing. A price needs both legs: one
-    /// leg alone says only that the token can be bought.
-    async fn price_token(
+    /// The price a buy route implies: what it returned over what it was given.
+    fn price_from_buy(
         &self,
-        router: &BellmanFordAlgorithm,
-        graph: &RouterGraph,
-        market: &MarketData,
         token: &Address,
         buy: Option<&Route>,
     ) -> Option<(Price, HashSet<ComponentId>)> {
-        let buy = buy?.clone();
-        let buy_out = route_output(&buy, token);
+        let buy = buy?;
+        let buy_out = route_output(buy, token);
         if buy_out.is_zero() {
             return None;
         }
-        let sell = self
-            .solve(router, graph, market, token, &self.gas_token, buy_out.clone())
-            .await?;
-        let sell_out = route_output(&sell, &self.gas_token);
-
-        // buy_price = buy_out / simulation_amount and sell_price = buy_out / sell_out, meaned over
-        // a common denominator so nothing is lost to an intermediate divide.
-        let price = Price {
-            numerator: &buy_out * (&sell_out + &self.simulation_amount),
-            denominator: BigUint::from(2u8) * &self.simulation_amount * &sell_out,
-        };
-
-        let components = [&buy, &sell]
-            .into_iter()
-            .flat_map(Route::swaps)
+        let price = Price { numerator: buy_out, denominator: self.simulation_amount.clone() };
+        let components = buy
+            .swaps()
+            .iter()
             .map(|swap| swap.component_id().to_string())
             .collect();
-
-        trace!(token = ?token, %buy_out, %sell_out, "priced from a solved buy and sell");
         Some((price, components))
-    }
-
-    /// Solves one direction, or `None` when there is no route or it returns nothing.
-    async fn solve(
-        &self,
-        router: &BellmanFordAlgorithm,
-        graph: &RouterGraph,
-        market: &MarketData,
-        token_in: &Address,
-        token_out: &Address,
-        amount: BigUint,
-    ) -> Option<Route> {
-        if amount.is_zero() {
-            return None;
-        }
-        let order = Order::new(
-            token_in.clone(),
-            token_out.clone(),
-            amount,
-            OrderSide::Sell,
-            Address::zero(20),
-        );
-        // Derived data is deliberately withheld: gas-blind the router does not need it, and this
-        // computation is the one filling the part of it that would be read.
-        let route = router
-            .find_best_route(graph, market.clone(), None, None, &order)
-            .await
-            .ok()?
-            .route()
-            .clone();
-        (!route_output(&route, token_out).is_zero()).then_some(route)
     }
 
     /// Re-solves only the tokens whose stored routes ran through a changed component.
@@ -462,15 +413,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prices_a_token_from_a_solved_buy_and_sell() {
+    async fn test_prices_a_token_from_the_route_that_buys_it() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
         let prices =
             prices_for(&eth, vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]).await;
 
-        // The gas token is 1:1 with itself, and a fee-free symmetric pool round-trips exactly, so
-        // buy and sell prices agree and their mean is the pool's rate.
+        // The gas token is 1:1 with itself, and a fee-free pool returns its rate exactly.
         let eth_price = prices
             .get(&eth.address)
             .expect("gas token should be priced");
