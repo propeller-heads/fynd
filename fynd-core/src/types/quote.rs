@@ -796,7 +796,7 @@ pub struct OrderQuote {
     #[serde(skip)]
     no_route_cause: Option<SolveError>,
     /// Order-level surplus summary, populated when this quote executes through an exclusive
-    /// pool.
+    /// component.
     ///
     /// Informational only (observability); the value the encoder acts on is the per-leg
     /// [`Swap::committed_amount_out`]. `None` for pure public quotes. `#[serde(skip)]` — internal
@@ -1101,7 +1101,7 @@ impl BlockInfo {
 
 /// A route consisting of one or more swaps, either sequential or split.
 ///
-/// A route describes the path through liquidity pools to execute a swap.
+/// A route describes the path through components (liquidity pools) to execute a swap.
 /// For sequential (multi-hop) swaps, the output of each swap becomes the input
 /// of the next. For split swaps, the input is divided across multiple parallel
 /// paths (each swap carries a `split` fraction).
@@ -1602,11 +1602,11 @@ pub enum RouteValidationError {
 
 /// A single swap within a route.
 ///
-/// Represents an atomic swap on a specific liquidity pool (component).
+/// Represents an atomic swap on a specific component (liquidity pool).
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Swap {
-    /// Identifier of the liquidity pool component.
+    /// Identifier of the component (liquidity pool).
     component_id: ComponentId,
     /// Protocol system identifier (e.g., "uniswap_v2", "uniswap_v3", "vm:balancer").
     protocol: String,
@@ -1683,7 +1683,7 @@ impl Swap {
         self.committed_amount_out = Some(committed_amount_out);
     }
 
-    /// Returns the component ID of the liquidity pool.
+    /// Returns the component ID (liquidity pool) of the swap.
     pub fn component_id(&self) -> &str {
         &self.component_id
     }
@@ -1858,14 +1858,14 @@ mod tests {
         let token_in = token(token_in_byte, "TIN");
         let token_out = token(token_out_byte, "TOUT");
         Swap::new(
-            "pool-1".to_string(),
+            "component-1".to_string(),
             "uniswap_v2".to_string(),
             make_address(token_in_byte),
             make_address(token_out_byte),
             BigUint::from(amount_in),
             BigUint::from(amount_out),
             BigUint::from(100_000u64),
-            component("test-pool", &[token_in, token_out]),
+            component("test-component", &[token_in, token_out]),
             Box::new(MockProtocolSim::default()),
         )
     }
@@ -2310,7 +2310,7 @@ mod tests {
     #[test]
     fn test_swap_deserializes_amounts_from_strings() {
         let json = r#"{
-            "component_id": "pool-1",
+            "component_id": "component-1",
             "protocol": "uniswap_v2",
             "token_in": "0x0101010101010101010101010101010101010101",
             "token_out": "0x0202020202020202020202020202020202020202",
@@ -2319,7 +2319,7 @@ mod tests {
             "gas_estimate": "150000",
             "split": "0",
             "protocol_component": {
-                "id": "test-pool",
+                "id": "test-component",
                 "protocol_system": "uniswap_v2",
                 "protocol_type_name": "swap",
                 "chain": "ethereum",

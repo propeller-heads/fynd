@@ -1,13 +1,13 @@
 //! Exclusive-component classification and per-worker graph filtering.
 //!
 //! "Exclusive" means accessible only to Fynd: such components must never enter the route a
-//! public pool returns, while an exclusive-access pool routes through them to capture the
-//! surplus they offer above the best public-market rate. Both pool kinds serve the same
-//! request; they differ only in which liquidity their workers may route through. Isolation is
-//! achieved by filtering each worker's local graph topology/events through the pool's
-//! `ExclusivityPolicy` — the shared `MarketState` is never duplicated. Workers of public pools
-//! hold `Some(policy)` and filter; workers of exclusive-access pools hold `None` and ingest
-//! everything.
+//! public worker pool returns, while an exclusive-access worker pool routes through them to
+//! capture the surplus they offer above the best public-market rate. Both worker pool kinds
+//! serve the same request; they differ only in which liquidity their workers may route through.
+//! Isolation is achieved by filtering each worker's local graph topology/events through the
+//! worker pool's `ExclusivityPolicy` — the shared `MarketState` is never duplicated. Workers of
+//! public worker pools hold `Some(policy)` and filter; workers of exclusive-access worker pools
+//! hold `None` and ingest everything.
 
 use std::{collections::HashMap, sync::Arc};
 

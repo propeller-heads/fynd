@@ -41,7 +41,7 @@ pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
 pub(crate) struct SpawnWorkersParams {
     /// Algorithm name (e.g., "most_liquid") — used for thread naming and logging.
     pub algorithm: String,
-    /// Pool name from configuration (used as the `pool` metric label).
+    /// Worker pool name from configuration (used as the `pool` metric label).
     pub pool_name: String,
     /// Number of worker threads to spawn.
     pub num_workers: usize,
@@ -51,7 +51,7 @@ pub(crate) struct SpawnWorkersParams {
     pub task_rx: async_channel::Receiver<SolveTask>,
     /// Shared market data reference.
     pub market_data: MarketData,
-    /// Shared derived data reference (pool depths, token prices).
+    /// Shared derived data reference (component depths, token prices).
     pub derived_data: SharedDerivedDataRef,
     /// Broadcast receiver for market events.
     pub event_rx: broadcast::Receiver<MarketEvent>,
@@ -59,11 +59,11 @@ pub(crate) struct SpawnWorkersParams {
     pub derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
     /// Sender for shutdown signals.
     pub shutdown_tx: broadcast::Sender<()>,
-    /// Exclusivity policy applied to every worker in this pool, cloned per worker.
+    /// Exclusivity policy applied to every worker in this worker pool, cloned per worker.
     ///
-    /// `Some(policy)` filters exclusive components out of each worker's graph (public pools);
-    /// `None` keeps every component (exclusive-access pools, or no exclusive components
-    /// configured).
+    /// `Some(policy)` filters exclusive components out of each worker's graph (public worker
+    /// pools); `None` keeps every component (exclusive-access worker pools, or no exclusive
+    /// components configured).
     pub exclusivity_policy: Option<ExclusivityPolicy>,
 }
 

@@ -128,7 +128,7 @@ pub struct ServeArgs {
     pub gas_price_stale_threshold_secs: Option<u64>,
 
     /// Enable partial block (flashblock) updates from the Tycho stream.
-    /// When enabled, pool state updates arrive mid-block rather than only at finalization,
+    /// When enabled, component state updates arrive mid-block rather than only at finalization,
     /// reducing latency. Only applies to on-chain protocols.
     #[arg(long)]
     pub partial_blocks: bool,

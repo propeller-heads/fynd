@@ -98,12 +98,12 @@ pub(crate) struct SimResult {
     pub(crate) marginal_price_product: f64,
     /// Per-hop `(amount_out, gas)` in path order.
     pub(crate) hop_results: Vec<(BigUint, BigUint)>,
-    /// Per-hop post-swap pool states in path order. Apply these as overrides
-    /// before simulating another path so shared pools see depleted reserves.
+    /// Per-hop post-swap component states in path order. Apply these as overrides
+    /// before simulating another path so shared components see depleted reserves.
     pub(crate) post_swap_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
 }
 
-/// Pool state overrides for passing degraded states to `find_single_route`.
+/// Component state overrides for passing degraded states to `find_single_route`.
 #[derive(Default)]
 pub(crate) struct MarketOverrides(HashMap<ComponentId, Box<dyn ProtocolSim>>);
 
@@ -112,7 +112,7 @@ impl MarketOverrides {
         Self::default()
     }
 
-    /// Insert a degraded pool state as an override.
+    /// Insert a degraded component state as an override.
     pub(crate) fn with_override(mut self, id: ComponentId, sim: Box<dyn ProtocolSim>) -> Self {
         self.0.insert(id, sim);
         self
@@ -120,9 +120,9 @@ impl MarketOverrides {
 
     /// Wraps an existing override entry so that `get_amount_out().gas` is zero for
     /// the specified `(token_in, token_out)` pair, but unchanged for other pairs
-    /// through the same pool.
+    /// through the same component.
     ///
-    /// Different token pairs through the same pool are separate on-chain swaps with
+    /// Different token pairs through the same component are separate on-chain swaps with
     /// independent gas costs, so only committed pairs should be zeroed. Call this
     /// once per committed `(component_id, token_in, token_out)` triple.
     ///
@@ -398,7 +398,7 @@ pub(crate) fn compute_marginal_price_product(
 /// For each hop, the path's own post-swap states are checked first, then
 /// `overrides`, then the live market state. Returns the final output amount,
 /// marginal price product (spot prices at the state each hop executed
-/// against), per-hop results, and the post-swap pool states.
+/// against), per-hop results, and the post-swap component states.
 pub(crate) fn simulate_path(
     hops: &[HopDescriptor],
     amount_in: &BigUint,
@@ -412,7 +412,7 @@ pub(crate) fn simulate_path(
     let mut marginal_price_product = 1.0;
 
     for hop in hops {
-        // Prefer this path's own post-swap state so a pool reused by an
+        // Prefer this path's own post-swap state so a component reused by an
         // earlier hop is simulated on depleted reserves, not fresh ones.
         let sim = post_swap_states
             .iter()
@@ -454,7 +454,7 @@ pub(crate) fn simulate_path(
     })
 }
 
-/// Builds post-swap pool states after all paths in a split-route solution
+/// Builds post-swap component states after all paths in a split-route solution
 /// have been executed.
 ///
 /// For example, if the current solution splits 1000 USDC→ETH across:
@@ -497,7 +497,7 @@ struct SplitSwap {
     amount_in: BigUint,
 }
 
-/// One pool swap in a split route, after it has been simulated.
+/// One component swap in a split route, after it has been simulated.
 struct SimulatedSplitSwap {
     hop: HopDescriptor,
     split: f64,
@@ -627,13 +627,13 @@ fn build_in_degree(hops_by_token: &HashMap<Bytes, Vec<SplitSwap>>) -> HashMap<By
 /// Simulates a split route from start token to outputs and returns the outcome.
 ///
 /// Swaps run in dependency order, so each token is fully pooled from all its
-/// inflows before being re-split downstream, and every swap sees the pool state
-/// left by the swaps before it — so paths sharing a pool no longer each assume
+/// inflows before being re-split downstream, and every swap sees the component state
+/// left by the swaps before it — so paths sharing a component no longer each assume
 /// fresh liquidity. This one pass backs scoring, candidate discovery, and route
 /// assembly, so all three agree on the same executable route. Round-trips that
 /// end on the input token are supported.
 ///
-/// Errors if a path revisits an intermediate token, a pool cannot be simulated,
+/// Errors if a path revisits an intermediate token, a component cannot be simulated,
 /// or the merged swaps cannot be ordered (a genuine dependency cycle).
 fn execute_split_plan(
     paths: &[PathAllocation],
@@ -824,7 +824,7 @@ pub(crate) fn evaluate_total_output(
 /// Assembles a [`Route`] from split-route path allocations with shared-hop
 /// deduplication.
 ///
-/// Paths may share pool hops (same `component_id`, `token_in`, `token_out`).
+/// Paths may share component hops (same `component_id`, `token_in`, `token_out`).
 /// When they do, this function emits one combined swap rather than duplicates.
 /// Within each branch collection of swaps sharing a `token_in`, the tycho-execution
 /// remainder convention is applied: sorted by fraction descending, all but the
@@ -838,8 +838,8 @@ pub(crate) fn evaluate_total_output(
 /// has been emitted.
 ///
 /// Why this matters:
-/// - `merge_shared_hops` collapses a shared pool hop into one swap (not one per path), saving gas
-///   by calling the pool once with combined input.
+/// - `merge_shared_hops` collapses a shared component hop into one swap (not one per path), saving
+///   gas by calling the component once with combined input.
 /// - That single swap's split fraction is computed against the full token balance, so all inflows
 ///   must be complete before it is emitted.
 /// - The in-degree of each token tracks how many upstream swaps produce it; the token is processed
@@ -847,29 +847,29 @@ pub(crate) fn evaluate_total_output(
 ///
 /// Note: the TychoRouter contract *could* support interleaved splits
 /// (partial consume, more inflows, consume rest), but that would require
-/// an extra swap on the same pool, spending more gas.
+/// an extra swap on the same component, spending more gas.
 ///
 /// For example, given paths of different lengths that converge on the same
 /// intermediate token:
 ///
 /// ```text
-/// Path 1 (2 hops): WETH -> USDC -(pool A)-> DAI
-/// Path 2 (3 hops): WETH -> USDT -> USDC -(pool A)-> DAI
+/// Path 1 (2 hops): WETH -> USDC -(component A)-> DAI
+/// Path 2 (3 hops): WETH -> USDT -> USDC -(component A)-> DAI
 /// ```
 ///
-/// Pool A (USDC→DAI) is merged into one swap. If USDC were visited before
-/// the USDT→USDC hop completes, Pool A would see only Path 1's USDC. The
+/// Component A (USDC→DAI) is merged into one swap. If USDC were visited before
+/// the USDT→USDC hop completes, Component A would see only Path 1's USDC. The
 /// topological sort prevents this by waiting for all inflows to USDC
-/// before emitting Pool A's swap. This extends to downstream splits too:
+/// before emitting Component A's swap. This extends to downstream splits too:
 ///
 /// ```text
-/// Path 1: WETH -> USDC -> DAI (Pool A) -> PEPE (Pool B)  (0.5)
-/// Path 2: WETH -> USDC -> DAI (Pool A) -> PEPE (Pool C)  (0.5)
-/// Path 3: WETH -> USDT -> USDC -> DAI (Pool A) -> PEPE (Pool B or C)
+/// Path 1: WETH -> USDC -> DAI (Component A) -> PEPE (Component B)  (0.5)
+/// Path 2: WETH -> USDC -> DAI (Component A) -> PEPE (Component C)  (0.5)
+/// Path 3: WETH -> USDT -> USDC -> DAI (Component A) -> PEPE (Component B or C)
 /// ```
 ///
-/// The DAI→PEPE split between Pool B and Pool C must wait until all DAI
-/// has been produced (from both paths through the merged Pool A swap).
+/// The DAI→PEPE split between Component B and Component C must wait until all DAI
+/// has been produced (from both paths through the merged Component A swap).
 pub(crate) fn build_split_route(
     paths: &[PathAllocation],
     market: &MarketState,
@@ -933,11 +933,11 @@ mod tests {
         types::OrderSide,
     };
 
-    fn make_market(pools: Vec<(&str, Vec<Token>, Box<dyn ProtocolSim>)>) -> MarketState {
+    fn make_market(components: Vec<(&str, Vec<Token>, Box<dyn ProtocolSim>)>) -> MarketState {
         let mut market = MarketState::new();
-        for (pool_id, tokens, sim) in pools {
-            market.upsert_components(std::iter::once(component(pool_id, &tokens)));
-            market.update_states([(pool_id.to_string(), sim)]);
+        for (component_id, tokens, sim) in components {
+            market.upsert_components(std::iter::once(component(component_id, &tokens)));
+            market.update_states([(component_id.to_string(), sim)]);
             market.upsert_tokens(tokens);
         }
         market
@@ -1130,12 +1130,12 @@ mod tests {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
         let market = make_market(vec![(
-            "pool_ab",
+            "component_ab",
             vec![token_a.clone(), token_b.clone()],
             Box::new(MockProtocolSim::new(3.0)),
         )]);
 
-        let hops = [HopDescriptor::new("pool_ab".to_string(), token_a, token_b)];
+        let hops = [HopDescriptor::new("component_ab".to_string(), token_a, token_b)];
 
         let product =
             compute_marginal_price_product(&hops, &market, &MarketOverrides::empty()).unwrap();
@@ -1149,20 +1149,20 @@ mod tests {
         let token_c = token(0x0C, "C");
         let market = make_market(vec![
             (
-                "pool_ab",
+                "component_ab",
                 vec![token_a.clone(), token_b.clone()],
                 Box::new(MockProtocolSim::new(2.0)),
             ),
             (
-                "pool_bc",
+                "component_bc",
                 vec![token_b.clone(), token_c.clone()],
                 Box::new(MockProtocolSim::new(4.0)),
             ),
         ]);
 
         let hops = [
-            HopDescriptor::new("pool_ab".to_string(), token_a, token_b.clone()),
-            HopDescriptor::new("pool_bc".to_string(), token_b, token_c),
+            HopDescriptor::new("component_ab".to_string(), token_a, token_b.clone()),
+            HopDescriptor::new("component_bc".to_string(), token_b, token_c),
         ];
 
         let product =
@@ -1176,16 +1176,16 @@ mod tests {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
         let market = make_market(vec![(
-            "pool_ab",
+            "component_ab",
             vec![token_a.clone(), token_b.clone()],
             Box::new(MockProtocolSim::new(3.0)),
         )]);
 
-        let hops = [HopDescriptor::new("pool_ab".to_string(), token_a, token_b)];
+        let hops = [HopDescriptor::new("component_ab".to_string(), token_a, token_b)];
 
-        // Override pool_ab with a different spot price.
+        // Override component_ab with a different spot price.
         let overrides = MarketOverrides::empty()
-            .with_override("pool_ab".to_string(), Box::new(MockProtocolSim::new(7.0)));
+            .with_override("component_ab".to_string(), Box::new(MockProtocolSim::new(7.0)));
 
         let product = compute_marginal_price_product(&hops, &market, &overrides).unwrap();
         assert!((product - 7.0).abs() < f64::EPSILON, "expected 7.0, got {product}");
@@ -1200,20 +1200,20 @@ mod tests {
         let token_c = token(0x0C, "C");
         let market = make_market(vec![
             (
-                "pool_ab",
+                "component_ab",
                 vec![token_a.clone(), token_b.clone()],
                 Box::new(MockProtocolSim::new(2.0)),
             ),
             (
-                "pool_bc",
+                "component_bc",
                 vec![token_b.clone(), token_c.clone()],
                 Box::new(MockProtocolSim::new(3.0)),
             ),
         ]);
 
         let hops = [
-            HopDescriptor::new("pool_ab".to_string(), token_a, token_b.clone()),
-            HopDescriptor::new("pool_bc".to_string(), token_b, token_c),
+            HopDescriptor::new("component_ab".to_string(), token_a, token_b.clone()),
+            HopDescriptor::new("component_bc".to_string(), token_b, token_c),
         ];
 
         let amount_in = BigUint::from(1000u64);
@@ -1232,23 +1232,23 @@ mod tests {
 
     #[test]
     fn test_simulate_path_contains_simulation_panic() {
-        // Pool math that panics (e.g. U256 division by zero on degenerate amounts) must
+        // Component math that panics (e.g. U256 division by zero on degenerate amounts) must
         // surface as a SimulationFailed error, not unwind through the solver thread.
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
         let market = make_market(vec![(
-            "pool_ab",
+            "component_ab",
             vec![token_a.clone(), token_b.clone()],
             Box::new(DivByZeroSim::default()),
         )]);
 
-        let hops = [HopDescriptor::new("pool_ab".to_string(), token_a, token_b)];
+        let hops = [HopDescriptor::new("component_ab".to_string(), token_a, token_b)];
         let result =
             simulate_path(&hops, &BigUint::from(1000u64), &market, &MarketOverrides::empty());
 
         match result {
             Err(AlgorithmError::SimulationFailed { component_id, error }) => {
-                assert_eq!(component_id, "pool_ab");
+                assert_eq!(component_id, "component_ab");
                 assert!(error.contains("panic"), "error should mention the panic: {error}");
             }
             Err(other) => panic!("expected SimulationFailed, got {other:?}"),
@@ -1264,18 +1264,23 @@ mod tests {
         let sim_ab = MockProtocolSim::new(2.0).with_gas(100_000);
         let sim_bc = MockProtocolSim::new(3.0).with_gas(70_000);
         let market = make_market(vec![
-            ("pool_ab", vec![token_a.clone(), token_b.clone()], Box::new(sim_ab.clone())),
-            ("pool_bc", vec![token_b.clone(), token_c.clone()], Box::new(sim_bc.clone())),
+            ("component_ab", vec![token_a.clone(), token_b.clone()], Box::new(sim_ab.clone())),
+            ("component_bc", vec![token_b.clone(), token_c.clone()], Box::new(sim_bc.clone())),
         ]);
 
-        // Zero gas on pool_ab, leave pool_bc as a normal override.
+        // Zero gas on component_ab, leave component_bc as a normal override.
         let overrides = MarketOverrides::empty()
-            .with_override("pool_ab".to_string(), Box::new(sim_ab))
-            .with_zero_gas("pool_ab".to_string(), token_a.address.clone(), token_b.address.clone())
-            .with_override("pool_bc".to_string(), Box::new(sim_bc));
+            .with_override("component_ab".to_string(), Box::new(sim_ab))
+            .with_zero_gas(
+                "component_ab".to_string(),
+                token_a.address.clone(),
+                token_b.address.clone(),
+            )
+            .with_override("component_bc".to_string(), Box::new(sim_bc));
 
-        let hops_ab = [HopDescriptor::new("pool_ab".to_string(), token_a.clone(), token_b.clone())];
-        let hops_bc = [HopDescriptor::new("pool_bc".to_string(), token_b, token_c)];
+        let hops_ab =
+            [HopDescriptor::new("component_ab".to_string(), token_a.clone(), token_b.clone())];
+        let hops_bc = [HopDescriptor::new("component_bc".to_string(), token_b, token_c)];
         let amount_in = BigUint::from(1000u64);
 
         let hop_gas_sum = |sim: &SimResult| -> BigUint {
@@ -1297,7 +1302,7 @@ mod tests {
             "zero-gas override should report gas=0"
         );
 
-        // pool_bc is a normal override — its gas should be unaffected.
+        // component_bc is a normal override — its gas should be unaffected.
         let result_bc = simulate_path(&hops_bc, &amount_in, &market, &overrides).unwrap();
         assert_eq!(
             hop_gas_sum(&result_bc),
@@ -1310,30 +1315,31 @@ mod tests {
     fn test_evaluate_total_output_two_paths() {
         // 50/50 split of 1000 across two parallel 1-hop paths:
         //
-        //       500 -- pool_1 (price=2.0) --> 1000
+        //       500 -- component_1 (price=2.0) --> 1000
         //      /                                   \
         //  1000                                     2500
         //      \                                   /
-        //       500 -- pool_2 (price=3.0) --> 1500
+        //       500 -- component_2 (price=3.0) --> 1500
         //
         // total_gas = 50k + 60k = 110k
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
         let market = make_market(vec![
             (
-                "pool_1",
+                "component_1",
                 vec![token_a.clone(), token_b.clone()],
                 Box::new(MockProtocolSim::new(2.0).with_gas(50_000)),
             ),
             (
-                "pool_2",
+                "component_2",
                 vec![token_a.clone(), token_b.clone()],
                 Box::new(MockProtocolSim::new(3.0).with_gas(60_000)),
             ),
         ]);
 
-        let hops_1 = [HopDescriptor::new("pool_1".to_string(), token_a.clone(), token_b.clone())];
-        let hops_2 = [HopDescriptor::new("pool_2".to_string(), token_a, token_b)];
+        let hops_1 =
+            [HopDescriptor::new("component_1".to_string(), token_a.clone(), token_b.clone())];
+        let hops_2 = [HopDescriptor::new("component_2".to_string(), token_a, token_b)];
 
         let paths: Vec<&[HopDescriptor]> = vec![&hops_1, &hops_2];
         let fractions = [0.5, 0.5];
@@ -1348,8 +1354,8 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_total_output_shared_pool_depletes() {
-        // Two "paths" through the SAME constant-product pool. Sequential
+    fn test_evaluate_total_output_shared_component_depletes() {
+        // Two "paths" through the SAME constant-product component. Sequential
         // simulation must thread the post-swap state, so the combined output
         // matches one full-amount swap instead of double-counting the fresh
         // reserves for each half.
@@ -1361,13 +1367,15 @@ mod tests {
             gas: 50_000,
         };
         let market = make_market(vec![(
-            "pool",
+            "component",
             vec![token_a.clone(), token_b.clone()],
             Box::new(cp.clone()),
         )]);
 
-        let hops_1 = [HopDescriptor::new("pool".to_string(), token_a.clone(), token_b.clone())];
-        let hops_2 = [HopDescriptor::new("pool".to_string(), token_a.clone(), token_b.clone())];
+        let hops_1 =
+            [HopDescriptor::new("component".to_string(), token_a.clone(), token_b.clone())];
+        let hops_2 =
+            [HopDescriptor::new("component".to_string(), token_a.clone(), token_b.clone())];
         let paths: Vec<&[HopDescriptor]> = vec![&hops_1, &hops_2];
         let total_amount = BigUint::from(1000u64);
 
@@ -1393,7 +1401,7 @@ mod tests {
         // equals the full-amount swap up to per-chunk rounding.
         assert!(
             total_out < &half_fresh_out * 2u32,
-            "shared pool must deplete between paths: {total_out} >= {}",
+            "shared component must deplete between paths: {total_out} >= {}",
             &half_fresh_out * 2u32
         );
         let diff = BigInt::from(total_out) - BigInt::from(full_swap_out);
@@ -1405,7 +1413,7 @@ mod tests {
 
     #[test]
     fn test_evaluate_total_output_gas_deduplication() {
-        // Two paths share pool P1 (pre-split hop). P1's gas should be
+        // Two paths share component P1 (pre-split hop). P1's gas should be
         // counted once, not twice.
         //
         //              P2 (50k gas) --> C
@@ -1472,29 +1480,29 @@ mod tests {
         let token_d = token(0x0D, "D");
         let market = make_market(vec![
             (
-                "tripool",
+                "tricomponent",
                 vec![token_a.clone(), token_b.clone(), token_c.clone()],
                 Box::new(MockProtocolSim::new(2.0).with_gas(80_000)),
             ),
             (
-                "pool_bd",
+                "component_bd",
                 vec![token_b.clone(), token_d.clone()],
                 Box::new(MockProtocolSim::new(1.0)),
             ),
             (
-                "pool_cd",
+                "component_cd",
                 vec![token_c.clone(), token_d.clone()],
                 Box::new(MockProtocolSim::new(1.0)),
             ),
         ]);
 
         let hops_b = [
-            HopDescriptor::new("tripool".to_string(), token_a.clone(), token_b.clone()),
-            HopDescriptor::new("pool_bd".to_string(), token_b, token_d.clone()),
+            HopDescriptor::new("tricomponent".to_string(), token_a.clone(), token_b.clone()),
+            HopDescriptor::new("component_bd".to_string(), token_b, token_d.clone()),
         ];
         let hops_c = [
-            HopDescriptor::new("tripool".to_string(), token_a.clone(), token_c.clone()),
-            HopDescriptor::new("pool_cd".to_string(), token_c.clone(), token_d.clone()),
+            HopDescriptor::new("tricomponent".to_string(), token_a.clone(), token_c.clone()),
+            HopDescriptor::new("component_cd".to_string(), token_c.clone(), token_d.clone()),
         ];
 
         let total_amount = BigUint::from(1000u64);
@@ -1555,23 +1563,23 @@ mod tests {
 
     #[test]
     fn test_gas_dedup_different_tokens() {
-        // A single 3-token pool used for two different token pairs is two
+        // A single 3-token component used for two different token pairs is two
         // distinct hops — gas must be counted for each.
         //
-        //  A -- TRIPOOL (A→B) --> B    (path 1)
-        //  B -- TRIPOOL (B→C) --> C    (path 2)
+        //  A -- TRICOMPONENT (A→B) --> B    (path 1)
+        //  B -- TRICOMPONENT (B→C) --> C    (path 2)
         //
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
         let token_c = token(0x0C, "C");
         let market = make_market(vec![(
-            "tripool",
+            "tricomponent",
             vec![token_a.clone(), token_b.clone(), token_c.clone()],
             Box::new(MockProtocolSim::new(1.0).with_gas(80_000)),
         )]);
 
-        let hops_1 = [HopDescriptor::new("tripool".to_string(), token_a, token_b.clone())];
-        let hops_2 = [HopDescriptor::new("tripool".to_string(), token_b, token_c)];
+        let hops_1 = [HopDescriptor::new("tricomponent".to_string(), token_a, token_b.clone())];
+        let hops_2 = [HopDescriptor::new("tricomponent".to_string(), token_b, token_c)];
 
         let paths: Vec<&[HopDescriptor]> = vec![&hops_1, &hops_2];
         let fractions = [0.5, 0.5];
@@ -1581,16 +1589,16 @@ mod tests {
         let (_, total_gas) =
             evaluate_total_output(&paths, &fractions, &total_amount, &market, &overrides).unwrap();
 
-        // Different token pairs on the same pool: 80k + 80k = 160k
+        // Different token pairs on the same component: 80k + 80k = 160k
         assert_eq!(total_gas, 160_000);
     }
 
     #[test]
-    fn test_build_post_swap_overrides_degrades_used_pools() {
+    fn test_build_post_swap_overrides_degrades_used_components() {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
         let market = make_market(vec![(
-            "pool_ab",
+            "component_ab",
             vec![token_a.clone(), token_b.clone()],
             Box::new(ConstantProductSim {
                 reserve_0: BigUint::from(10_000u64),
@@ -1602,7 +1610,7 @@ mod tests {
         let allocation = PathAllocation {
             hops: vec![SimulatedHop {
                 descriptor: HopDescriptor::new(
-                    "pool_ab".to_string(),
+                    "component_ab".to_string(),
                     token_a.clone(),
                     token_b.clone(),
                 ),
@@ -1618,10 +1626,10 @@ mod tests {
         let degraded = build_post_swap_overrides(&[allocation], &market).unwrap();
 
         // xy=k: amount_out = amount_in * reserve_out / (reserve_in + amount_in)
-        // Fresh pool (10000/20000): 100 * 20000 / (10000 + 100) = 198
+        // Fresh component (10000/20000): 100 * 20000 / (10000 + 100) = 198
         let probe = BigUint::from(100u64);
         let fresh_out = market
-            .get_simulation_state("pool_ab")
+            .get_simulation_state("component_ab")
             .unwrap()
             .get_amount_out(probe.clone(), &token_a, &token_b)
             .unwrap()
@@ -1630,9 +1638,9 @@ mod tests {
 
         // The 1000-in allocation produces 1000*20000/(10000+1000) = 1818 out,
         // shifting reserves to (10000+1000, 20000-1818) = (11000, 18182).
-        // Degraded pool: 100 * 18182 / (11000 + 100) = 163
+        // Degraded component: 100 * 18182 / (11000 + 100) = 163
         let degraded_out = degraded
-            .get(&"pool_ab".to_string())
+            .get(&"component_ab".to_string())
             .unwrap()
             .get_amount_out(probe, &token_a, &token_b)
             .unwrap()
@@ -1735,12 +1743,12 @@ mod tests {
 
         let branch_collection = vec![
             SplitSwap {
-                hop: HopDescriptor::new("pool1".to_string(), token_a.clone(), token_b.clone()),
+                hop: HopDescriptor::new("component1".to_string(), token_a.clone(), token_b.clone()),
                 split: 0.7,
                 amount_in: BigUint::ZERO,
             },
             SplitSwap {
-                hop: HopDescriptor::new("pool2".to_string(), token_a.clone(), token_b.clone()),
+                hop: HopDescriptor::new("component2".to_string(), token_a.clone(), token_b.clone()),
                 split: 0.3,
                 amount_in: BigUint::ZERO,
             },
@@ -1759,12 +1767,12 @@ mod tests {
     fn test_assign_splits_and_amounts_single_hop() {
         // A single hop receives the entire amount with split = 0.0.
         //
-        //  1000 -- pool1 (split=0.0) --> B
+        //  1000 -- component1 (split=0.0) --> B
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
 
         let branch_collection = vec![SplitSwap {
-            hop: HopDescriptor::new("pool1".to_string(), token_a, token_b),
+            hop: HopDescriptor::new("component1".to_string(), token_a, token_b),
             split: 1.0,
             amount_in: BigUint::ZERO,
         }];
@@ -1784,17 +1792,29 @@ mod tests {
         // 3 paths splitting at source: last swap at the split point must
         // have split=0.0.
         //
-        //       500 -- pool1 (price=2) --> 1000
+        //       500 -- component1 (price=2) --> 1000
         //      /
-        //  1000---- 300 -- pool2 (price=3) -->  900
+        //  1000---- 300 -- component2 (price=3) -->  900
         //      \
-        //       200 -- pool3 (price=4) -->  800
+        //       200 -- component3 (price=4) -->  800
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
         let market = make_market(vec![
-            ("pool1", vec![token_a.clone(), token_b.clone()], Box::new(MockProtocolSim::new(2.0))),
-            ("pool2", vec![token_a.clone(), token_b.clone()], Box::new(MockProtocolSim::new(3.0))),
-            ("pool3", vec![token_a.clone(), token_b.clone()], Box::new(MockProtocolSim::new(4.0))),
+            (
+                "component1",
+                vec![token_a.clone(), token_b.clone()],
+                Box::new(MockProtocolSim::new(2.0)),
+            ),
+            (
+                "component2",
+                vec![token_a.clone(), token_b.clone()],
+                Box::new(MockProtocolSim::new(3.0)),
+            ),
+            (
+                "component3",
+                vec![token_a.clone(), token_b.clone()],
+                Box::new(MockProtocolSim::new(4.0)),
+            ),
         ]);
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
@@ -1803,7 +1823,7 @@ mod tests {
             PathAllocation {
                 hops: vec![SimulatedHop {
                     descriptor: HopDescriptor::new(
-                        "pool1".to_string(),
+                        "component1".to_string(),
                         token_a.clone(),
                         token_b.clone(),
                     ),
@@ -1818,7 +1838,7 @@ mod tests {
             PathAllocation {
                 hops: vec![SimulatedHop {
                     descriptor: HopDescriptor::new(
-                        "pool2".to_string(),
+                        "component2".to_string(),
                         token_a.clone(),
                         token_b.clone(),
                     ),
@@ -1833,7 +1853,7 @@ mod tests {
             PathAllocation {
                 hops: vec![SimulatedHop {
                     descriptor: HopDescriptor::new(
-                        "pool3".to_string(),
+                        "component3".to_string(),
                         token_a.clone(),
                         token_b.clone(),
                     ),
@@ -1852,12 +1872,12 @@ mod tests {
 
         assert_eq!(swaps.len(), 3);
 
-        // Sorted descending: pool1 (0.5), pool2 (0.3), pool3 (0.2).
-        assert_eq!(swaps[0].component_id(), "pool1");
+        // Sorted descending: component1 (0.5), component2 (0.3), component3 (0.2).
+        assert_eq!(swaps[0].component_id(), "component1");
         assert_eq!(*swaps[0].split(), 0.5);
-        assert_eq!(swaps[1].component_id(), "pool2");
+        assert_eq!(swaps[1].component_id(), "component2");
         assert_eq!(*swaps[1].split(), 0.3);
-        assert_eq!(swaps[2].component_id(), "pool3");
+        assert_eq!(swaps[2].component_id(), "component3");
         assert_eq!(*swaps[2].split(), 0.0);
     }
 
@@ -1869,12 +1889,12 @@ mod tests {
         let token_c = token(0x0C, "C");
         let market = make_market(vec![
             (
-                "pool_ab",
+                "component_ab",
                 vec![token_a.clone(), token_b.clone()],
                 Box::new(MockProtocolSim::new(2.0)),
             ),
             (
-                "pool_bc",
+                "component_bc",
                 vec![token_b.clone(), token_c.clone()],
                 Box::new(MockProtocolSim::new(3.0)),
             ),
@@ -1886,7 +1906,7 @@ mod tests {
             hops: vec![
                 SimulatedHop {
                     descriptor: HopDescriptor::new(
-                        "pool_ab".to_string(),
+                        "component_ab".to_string(),
                         token_a.clone(),
                         token_b.clone(),
                     ),
@@ -1894,7 +1914,7 @@ mod tests {
                     gas: gas.clone(),
                 },
                 SimulatedHop {
-                    descriptor: HopDescriptor::new("pool_bc".to_string(), token_b, token_c),
+                    descriptor: HopDescriptor::new("component_bc".to_string(), token_b, token_c),
                     amount_out: BigUint::from(6000u64),
                     gas,
                 },
@@ -1915,8 +1935,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_split_route_shared_first_pool() {
-        // Two paths sharing pool P1 at A→B, diverging at B→C (P2 vs P3).
+    fn test_build_split_route_shared_first_component() {
+        // Two paths sharing component P1 at A→B, diverging at B→C (P2 vs P3).
         //
         //                  P2 (price=3) --> C
         //                 /
@@ -2026,33 +2046,33 @@ mod tests {
         // Paths A→B→Z and A→C→Z: source-level split with different
         // intermediate tokens.
         //
-        //       pool_ab --> B -- pool_bz
+        //       component_ab --> B -- component_bz
         //      /                         \
         //  A --                           Z
         //      \                         /
-        //       pool_ac --> C -- pool_cz
+        //       component_ac --> C -- component_cz
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
         let token_c = token(0x0C, "C");
         let token_z = token(0x1A, "Z");
         let market = make_market(vec![
             (
-                "pool_ab",
+                "component_ab",
                 vec![token_a.clone(), token_b.clone()],
                 Box::new(MockProtocolSim::new(2.0)),
             ),
             (
-                "pool_ac",
+                "component_ac",
                 vec![token_a.clone(), token_c.clone()],
                 Box::new(MockProtocolSim::new(3.0)),
             ),
             (
-                "pool_bz",
+                "component_bz",
                 vec![token_b.clone(), token_z.clone()],
                 Box::new(MockProtocolSim::new(4.0)),
             ),
             (
-                "pool_cz",
+                "component_cz",
                 vec![token_c.clone(), token_z.clone()],
                 Box::new(MockProtocolSim::new(5.0)),
             ),
@@ -2065,7 +2085,7 @@ mod tests {
                 hops: vec![
                     SimulatedHop {
                         descriptor: HopDescriptor::new(
-                            "pool_ab".to_string(),
+                            "component_ab".to_string(),
                             token_a.clone(),
                             token_b.clone(),
                         ),
@@ -2074,7 +2094,7 @@ mod tests {
                     },
                     SimulatedHop {
                         descriptor: HopDescriptor::new(
-                            "pool_bz".to_string(),
+                            "component_bz".to_string(),
                             token_b,
                             token_z.clone(),
                         ),
@@ -2091,7 +2111,7 @@ mod tests {
                 hops: vec![
                     SimulatedHop {
                         descriptor: HopDescriptor::new(
-                            "pool_ac".to_string(),
+                            "component_ac".to_string(),
                             token_a.clone(),
                             token_c.clone(),
                         ),
@@ -2099,7 +2119,11 @@ mod tests {
                         gas: gas.clone(),
                     },
                     SimulatedHop {
-                        descriptor: HopDescriptor::new("pool_cz".to_string(), token_c, token_z),
+                        descriptor: HopDescriptor::new(
+                            "component_cz".to_string(),
+                            token_c,
+                            token_z,
+                        ),
                         amount_out: BigUint::from(6000u64),
                         gas,
                     },
@@ -2116,77 +2140,77 @@ mod tests {
 
         assert_eq!(swaps.len(), 4, "expected 4 swaps (2 source + 2 intermediate)");
 
-        // Source-level split: pool_ab (0.6) first, pool_ac (0.4) last.
-        assert_eq!(swaps[0].component_id(), "pool_ab");
+        // Source-level split: component_ab (0.6) first, component_ac (0.4) last.
+        assert_eq!(swaps[0].component_id(), "component_ab");
         assert_eq!(*swaps[0].split(), 0.6);
         assert_eq!(*swaps[0].amount_in(), BigUint::from(600u64));
         assert_eq!(*swaps[0].amount_out(), BigUint::from(1200u64));
 
-        assert_eq!(swaps[1].component_id(), "pool_ac");
+        assert_eq!(swaps[1].component_id(), "component_ac");
         assert_eq!(*swaps[1].split(), 0.0);
         assert_eq!(*swaps[1].amount_in(), BigUint::from(400u64));
         assert_eq!(*swaps[1].amount_out(), BigUint::from(1200u64));
 
         // Intermediate swaps: single hops from B and C, all split=0.0.
-        assert_eq!(swaps[2].component_id(), "pool_bz");
+        assert_eq!(swaps[2].component_id(), "component_bz");
         assert_eq!(*swaps[2].split(), 0.0);
         assert_eq!(*swaps[2].amount_in(), BigUint::from(1200u64));
         assert_eq!(*swaps[2].amount_out(), BigUint::from(4800u64));
 
-        assert_eq!(swaps[3].component_id(), "pool_cz");
+        assert_eq!(swaps[3].component_id(), "component_cz");
         assert_eq!(*swaps[3].split(), 0.0);
         assert_eq!(*swaps[3].amount_in(), BigUint::from(1200u64));
         assert_eq!(*swaps[3].amount_out(), BigUint::from(6000u64));
     }
 
     #[test]
-    fn test_build_split_route_cross_depth_shared_pool() {
-        // Two paths of different lengths share Pool A (USDC→DAI).
+    fn test_build_split_route_cross_depth_shared_component() {
+        // Two paths of different lengths share Component A (USDC→DAI).
         // The BFS must process all USDC inflows before visiting USDC's
         // outgoing swaps.
         //
-        //  WETH ──┬────────────────────▶ USDC ─── pool_a ──▶ DAI
+        //  WETH ──┬────────────────────▶ USDC ─── component_a ──▶ DAI
         //         │                      ▲
         //         └──────────▶ USDT ─────┘
         //
         // Path 1 (2 hops): WETH → USDC → DAI      (0.6 fraction)
         // Path 2 (3 hops): WETH → USDT → USDC → DAI (0.4 fraction)
         //
-        // Pool A appears in both paths with (USDC, DAI). After merging,
-        // Pool A's amount_in must reflect USDC from *both* paths.
+        // Component A appears in both paths with (USDC, DAI). After merging,
+        // Component A's amount_in must reflect USDC from *both* paths.
         let weth = token(0x01, "WETH");
         let usdc = token(0x02, "USDC");
         let usdt = token(0x03, "USDT");
         let dai = token(0x04, "DAI");
         let market = make_market(vec![
             (
-                "pool_weth_usdc",
+                "component_weth_usdc",
                 vec![weth.clone(), usdc.clone()],
                 Box::new(MockProtocolSim::new(2.0)),
             ),
             (
-                "pool_weth_usdt",
+                "component_weth_usdt",
                 vec![weth.clone(), usdt.clone()],
                 Box::new(MockProtocolSim::new(3.0)),
             ),
             (
-                "pool_usdt_usdc",
+                "component_usdt_usdc",
                 vec![usdt.clone(), usdc.clone()],
                 Box::new(MockProtocolSim::new(1.0)),
             ),
-            ("pool_a", vec![usdc.clone(), dai.clone()], Box::new(MockProtocolSim::new(1.0))),
+            ("component_a", vec![usdc.clone(), dai.clone()], Box::new(MockProtocolSim::new(1.0))),
         ]);
         let ord = order(&weth, &dai, 1000, OrderSide::Sell);
 
         let gas = BigUint::from(50_000u64);
 
-        // Path 1: WETH --(pool_weth_usdc)--> USDC --(pool_a)--> DAI
-        // 600 WETH in, 1200 USDC out from first hop, 1200 DAI out from pool_a
+        // Path 1: WETH --(component_weth_usdc)--> USDC --(component_a)--> DAI
+        // 600 WETH in, 1200 USDC out from first hop, 1200 DAI out from component_a
         let path1 = PathAllocation {
             hops: vec![
-                HopDescriptor::new("pool_weth_usdc".to_string(), weth.clone(), usdc.clone())
+                HopDescriptor::new("component_weth_usdc".to_string(), weth.clone(), usdc.clone())
                     .with_amounts(BigUint::from(1200u64), gas.clone()),
-                HopDescriptor::new("pool_a".to_string(), usdc.clone(), dai.clone())
+                HopDescriptor::new("component_a".to_string(), usdc.clone(), dai.clone())
                     .with_amounts(BigUint::from(1200u64), gas.clone()),
             ],
             flow_fraction: 0.6,
@@ -2195,16 +2219,16 @@ mod tests {
             marginal_price_product: 2.0,
         };
 
-        // Path 2: WETH --(pool_weth_usdt)--> USDT --(pool_usdt_usdc)--> USDC
-        //         --(pool_a)--> DAI
-        // 400 WETH in, 1200 USDT out, 1200 USDC out, 1200 DAI out from pool_a
+        // Path 2: WETH --(component_weth_usdt)--> USDT --(component_usdt_usdc)--> USDC
+        //         --(component_a)--> DAI
+        // 400 WETH in, 1200 USDT out, 1200 USDC out, 1200 DAI out from component_a
         let path2 = PathAllocation {
             hops: vec![
-                HopDescriptor::new("pool_weth_usdt".to_string(), weth.clone(), usdt.clone())
+                HopDescriptor::new("component_weth_usdt".to_string(), weth.clone(), usdt.clone())
                     .with_amounts(BigUint::from(1200u64), gas.clone()),
-                HopDescriptor::new("pool_usdt_usdc".to_string(), usdt.clone(), usdc.clone())
+                HopDescriptor::new("component_usdt_usdc".to_string(), usdt.clone(), usdc.clone())
                     .with_amounts(BigUint::from(1200u64), gas.clone()),
-                HopDescriptor::new("pool_a".to_string(), usdc.clone(), dai.clone())
+                HopDescriptor::new("component_a".to_string(), usdc.clone(), dai.clone())
                     .with_amounts(BigUint::from(1200u64), gas),
             ],
             flow_fraction: 0.4,
@@ -2216,73 +2240,73 @@ mod tests {
         let route = build_split_route(&[path1, path2], &market, &ord).unwrap();
         let swaps = route.swaps();
 
-        // Pool A is shared and merged: it should receive the total USDC
+        // Component A is shared and merged: it should receive the total USDC
         // from both paths (1200 + 1200 = 2400).
-        let pool_a_swap = swaps
+        let component_a_swap = swaps
             .iter()
-            .find(|s| s.component_id() == "pool_a")
-            .expect("pool_a swap must exist");
+            .find(|s| s.component_id() == "component_a")
+            .expect("component_a swap must exist");
         assert_eq!(
-            *pool_a_swap.amount_in(),
+            *component_a_swap.amount_in(),
             BigUint::from(2400u64),
-            "pool_a must receive USDC from both paths (1200 + 1200)"
+            "component_a must receive USDC from both paths (1200 + 1200)"
         );
         assert_eq!(
-            *pool_a_swap.amount_out(),
+            *component_a_swap.amount_out(),
             BigUint::from(2400u64),
-            "pool_a amount_out should be the merged total"
+            "component_a amount_out should be the merged total"
         );
 
-        // Pool A is merged into one swap, so its gas is counted once.
-        // Total = 4 distinct pools × 50k gas = 200k (not 5 × 50k).
-        assert_eq!(swaps.len(), 4, "pool_a must appear once, not once per path");
+        // Component A is merged into one swap, so its gas is counted once.
+        // Total = 4 distinct components × 50k gas = 200k (not 5 × 50k).
+        assert_eq!(swaps.len(), 4, "component_a must appear once, not once per path");
         assert_eq!(
             route.total_gas(),
             BigUint::from(200_000u64),
-            "gas must be counted once per pool, not once per path"
+            "gas must be counted once per component, not once per path"
         );
     }
 
     #[test]
     fn test_build_split_route_cross_depth_convergence_with_downstream_split() {
-        // Cross-depth convergence on Pool A (USDC→DAI) followed by a
-        // downstream split at DAI (Pool B and Pool C → PEPE).
+        // Cross-depth convergence on Component A (USDC→DAI) followed by a
+        // downstream split at DAI (Component B and Component C → PEPE).
         //
-        //  WETH ──┬──────────────▶ USDC ── pool_a ──▶ DAI ──┬── pool_b ──▶ PEPE
+        //  WETH ──┬──────────────▶ USDC ── component_a ──▶ DAI ──┬── component_b ──▶ PEPE
         //         │                  ▲                      │
-        //         └──────▶ USDT ─────┘                      └── pool_c ──▶ PEPE
+        //         └──────▶ USDT ─────┘                      └── component_c ──▶ PEPE
         //
-        // Path 1: WETH → USDC → DAI → PEPE (Pool B)    fraction 0.3
-        // Path 2: WETH → USDC → DAI → PEPE (Pool C)    fraction 0.3
-        // Path 3: WETH → USDT → USDC → DAI → PEPE (Pool B) fraction 0.4
+        // Path 1: WETH → USDC → DAI → PEPE (Component B)    fraction 0.3
+        // Path 2: WETH → USDC → DAI → PEPE (Component C)    fraction 0.3
+        // Path 3: WETH → USDT → USDC → DAI → PEPE (Component B) fraction 0.4
         //
-        // Pool A is shared across all 3 paths. The DAI split between Pool B
-        // and Pool C must wait until all DAI has been produced (from both
-        // the direct and USDT-detour paths through the merged Pool A swap).
+        // Component A is shared across all 3 paths. The DAI split between Component B
+        // and Component C must wait until all DAI has been produced (from both
+        // the direct and USDT-detour paths through the merged Component A swap).
         let weth = token(0x01, "WETH");
         let usdc = token(0x02, "USDC");
         let usdt = token(0x03, "USDT");
         let dai = token(0x04, "DAI");
         let pepe = token(0x05, "PEPE");
         let market = make_market(vec![
-            ("pool_wu", vec![weth.clone(), usdc.clone()], Box::new(MockProtocolSim::new(2.0))),
-            ("pool_wt", vec![weth.clone(), usdt.clone()], Box::new(MockProtocolSim::new(3.0))),
-            ("pool_tu", vec![usdt.clone(), usdc.clone()], Box::new(MockProtocolSim::new(1.0))),
-            ("pool_a", vec![usdc.clone(), dai.clone()], Box::new(MockProtocolSim::new(1.0))),
-            ("pool_b", vec![dai.clone(), pepe.clone()], Box::new(MockProtocolSim::new(5.0))),
-            ("pool_c", vec![dai.clone(), pepe.clone()], Box::new(MockProtocolSim::new(4.0))),
+            ("component_wu", vec![weth.clone(), usdc.clone()], Box::new(MockProtocolSim::new(2.0))),
+            ("component_wt", vec![weth.clone(), usdt.clone()], Box::new(MockProtocolSim::new(3.0))),
+            ("component_tu", vec![usdt.clone(), usdc.clone()], Box::new(MockProtocolSim::new(1.0))),
+            ("component_a", vec![usdc.clone(), dai.clone()], Box::new(MockProtocolSim::new(1.0))),
+            ("component_b", vec![dai.clone(), pepe.clone()], Box::new(MockProtocolSim::new(5.0))),
+            ("component_c", vec![dai.clone(), pepe.clone()], Box::new(MockProtocolSim::new(4.0))),
         ]);
         let ord = order(&weth, &pepe, 1000, OrderSide::Sell);
         let gas = BigUint::from(50_000u64);
 
-        // Path 1: WETH → USDC → DAI → PEPE (Pool B)
+        // Path 1: WETH → USDC → DAI → PEPE (Component B)
         let path1 = PathAllocation {
             hops: vec![
-                HopDescriptor::new("pool_wu".to_string(), weth.clone(), usdc.clone())
+                HopDescriptor::new("component_wu".to_string(), weth.clone(), usdc.clone())
                     .with_amounts(BigUint::from(600u64), gas.clone()),
-                HopDescriptor::new("pool_a".to_string(), usdc.clone(), dai.clone())
+                HopDescriptor::new("component_a".to_string(), usdc.clone(), dai.clone())
                     .with_amounts(BigUint::from(600u64), gas.clone()),
-                HopDescriptor::new("pool_b".to_string(), dai.clone(), pepe.clone())
+                HopDescriptor::new("component_b".to_string(), dai.clone(), pepe.clone())
                     .with_amounts(BigUint::from(3000u64), gas.clone()),
             ],
             flow_fraction: 0.3,
@@ -2291,14 +2315,14 @@ mod tests {
             marginal_price_product: 10.0,
         };
 
-        // Path 2: WETH → USDC → DAI → PEPE (Pool C)
+        // Path 2: WETH → USDC → DAI → PEPE (Component C)
         let path2 = PathAllocation {
             hops: vec![
-                HopDescriptor::new("pool_wu".to_string(), weth.clone(), usdc.clone())
+                HopDescriptor::new("component_wu".to_string(), weth.clone(), usdc.clone())
                     .with_amounts(BigUint::from(600u64), gas.clone()),
-                HopDescriptor::new("pool_a".to_string(), usdc.clone(), dai.clone())
+                HopDescriptor::new("component_a".to_string(), usdc.clone(), dai.clone())
                     .with_amounts(BigUint::from(600u64), gas.clone()),
-                HopDescriptor::new("pool_c".to_string(), dai.clone(), pepe.clone())
+                HopDescriptor::new("component_c".to_string(), dai.clone(), pepe.clone())
                     .with_amounts(BigUint::from(2400u64), gas.clone()),
             ],
             flow_fraction: 0.3,
@@ -2307,16 +2331,16 @@ mod tests {
             marginal_price_product: 8.0,
         };
 
-        // Path 3: WETH → USDT → USDC → DAI → PEPE (Pool B)
+        // Path 3: WETH → USDT → USDC → DAI → PEPE (Component B)
         let path3 = PathAllocation {
             hops: vec![
-                HopDescriptor::new("pool_wt".to_string(), weth.clone(), usdt.clone())
+                HopDescriptor::new("component_wt".to_string(), weth.clone(), usdt.clone())
                     .with_amounts(BigUint::from(1200u64), gas.clone()),
-                HopDescriptor::new("pool_tu".to_string(), usdt.clone(), usdc.clone())
+                HopDescriptor::new("component_tu".to_string(), usdt.clone(), usdc.clone())
                     .with_amounts(BigUint::from(1200u64), gas.clone()),
-                HopDescriptor::new("pool_a".to_string(), usdc.clone(), dai.clone())
+                HopDescriptor::new("component_a".to_string(), usdc.clone(), dai.clone())
                     .with_amounts(BigUint::from(1200u64), gas.clone()),
-                HopDescriptor::new("pool_b".to_string(), dai.clone(), pepe.clone())
+                HopDescriptor::new("component_b".to_string(), dai.clone(), pepe.clone())
                     .with_amounts(BigUint::from(6000u64), gas),
             ],
             flow_fraction: 0.4,
@@ -2328,92 +2352,92 @@ mod tests {
         let route = build_split_route(&[path1, path2, path3], &market, &ord).unwrap();
         let swaps = route.swaps();
 
-        // Pool A is merged: total USDC in = 600+600+1200 = 2400,
+        // Component A is merged: total USDC in = 600+600+1200 = 2400,
         // total DAI out = 600+600+1200 = 2400.
-        let pool_a_swap = swaps
+        let component_a_swap = swaps
             .iter()
-            .find(|s| s.component_id() == "pool_a")
-            .expect("pool_a swap must exist");
+            .find(|s| s.component_id() == "component_a")
+            .expect("component_a swap must exist");
         assert_eq!(
-            *pool_a_swap.amount_in(),
+            *component_a_swap.amount_in(),
             BigUint::from(2400u64),
-            "pool_a must receive all USDC from both direct and USDT-detour paths"
+            "component_a must receive all USDC from both direct and USDT-detour paths"
         );
 
-        // Pool B is merged (paths 1+3): DAI in from both = fraction 0.7
-        // Pool C has only path 2: DAI in = fraction 0.3
-        let pool_b_swap = swaps
+        // Component B is merged (paths 1+3): DAI in from both = fraction 0.7
+        // Component C has only path 2: DAI in = fraction 0.3
+        let component_b_swap = swaps
             .iter()
-            .find(|s| s.component_id() == "pool_b")
-            .expect("pool_b swap must exist");
-        let pool_c_swap = swaps
+            .find(|s| s.component_id() == "component_b")
+            .expect("component_b swap must exist");
+        let component_c_swap = swaps
             .iter()
-            .find(|s| s.component_id() == "pool_c")
-            .expect("pool_c swap must exist");
+            .find(|s| s.component_id() == "component_c")
+            .expect("component_c swap must exist");
 
-        // Total DAI = 2400. Pool B gets 0.7 fraction, Pool C gets the
+        // Total DAI = 2400. Component B gets 0.7 fraction, Component C gets the
         // remainder. Amounts are simulated from the emitted route, not summed
         // from path-local fixtures.
         assert_eq!(
-            *pool_b_swap.amount_out(),
+            *component_b_swap.amount_out(),
             BigUint::from(8400u64),
-            "pool_b amount_out should be simulated from emitted amount_in"
+            "component_b amount_out should be simulated from emitted amount_in"
         );
         assert_eq!(
-            *pool_c_swap.amount_out(),
+            *component_c_swap.amount_out(),
             BigUint::from(2880u64),
-            "pool_c amount_out should be simulated from remainder amount_in"
+            "component_c amount_out should be simulated from remainder amount_in"
         );
 
-        // Verify ordering: pool_a must appear before pool_b and pool_c
+        // Verify ordering: component_a must appear before component_b and component_c
         // (DAI must be fully produced before splitting).
-        let pool_a_idx = swaps
+        let component_a_idx = swaps
             .iter()
-            .position(|s| s.component_id() == "pool_a")
+            .position(|s| s.component_id() == "component_a")
             .unwrap();
-        let pool_b_idx = swaps
+        let component_b_idx = swaps
             .iter()
-            .position(|s| s.component_id() == "pool_b")
+            .position(|s| s.component_id() == "component_b")
             .unwrap();
-        let pool_c_idx = swaps
+        let component_c_idx = swaps
             .iter()
-            .position(|s| s.component_id() == "pool_c")
-            .unwrap();
-        assert!(
-            pool_a_idx < pool_b_idx && pool_a_idx < pool_c_idx,
-            "pool_a (idx {pool_a_idx}) must appear before pool_b (idx {pool_b_idx}) \
-             and pool_c (idx {pool_c_idx})"
-        );
-
-        // Also verify USDT→USDC appears before pool_a (USDC→DAI).
-        let pool_tu_idx = swaps
-            .iter()
-            .position(|s| s.component_id() == "pool_tu")
+            .position(|s| s.component_id() == "component_c")
             .unwrap();
         assert!(
-            pool_tu_idx < pool_a_idx,
-            "pool_tu (idx {pool_tu_idx}) must appear before pool_a (idx {pool_a_idx})"
+            component_a_idx < component_b_idx && component_a_idx < component_c_idx,
+            "component_a (idx {component_a_idx}) must appear before component_b (idx {component_b_idx}) \
+             and component_c (idx {component_c_idx})"
         );
 
-        // Pool A is merged into one swap, so its gas is counted once.
-        // Total = 6 distinct pools × 50k gas = 300k (not 8 × 50k).
-        assert_eq!(swaps.len(), 6, "pool_a must appear once, not once per path");
+        // Also verify USDT→USDC appears before component_a (USDC→DAI).
+        let component_tu_idx = swaps
+            .iter()
+            .position(|s| s.component_id() == "component_tu")
+            .unwrap();
+        assert!(
+            component_tu_idx < component_a_idx,
+            "component_tu (idx {component_tu_idx}) must appear before component_a (idx {component_a_idx})"
+        );
+
+        // Component A is merged into one swap, so its gas is counted once.
+        // Total = 6 distinct components × 50k gas = 300k (not 8 × 50k).
+        assert_eq!(swaps.len(), 6, "component_a must appear once, not once per path");
         assert_eq!(
             route.total_gas(),
             BigUint::from(300_000u64),
-            "gas must be counted once per pool, not once per path"
+            "gas must be counted once per component, not once per path"
         );
     }
 
     #[test]
-    fn test_build_split_route_rejects_reverse_order_shared_pools() {
-        // Two paths use Pool A and Pool B in opposite order:
+    fn test_build_split_route_rejects_reverse_order_shared_components() {
+        // Two paths use Component A and Component B in opposite order:
         //
-        //         ┌── USDC ── pool_a ──▶ DAI ── PEPE ── pool_b ──▶ UNI ── WBTC
+        //         ┌── USDC ── component_a ──▶ DAI ── PEPE ── component_b ──▶ UNI ── WBTC
         //  WETH ──┤
-        //         └── PEPE ── pool_b ──▶ UNI ── USDC ── pool_a ──▶ DAI ── WBTC
+        //         └── PEPE ── component_b ──▶ UNI ── USDC ── component_a ──▶ DAI ── WBTC
         //
-        // merge_shared_hops collapses Pool A and Pool B into single swaps,
+        // merge_shared_hops collapses Component A and Component B into single swaps,
         // creating the cycle: USDC → DAI → PEPE → UNI → USDC.
         let weth = token(0x01, "WETH");
         let usdc = token(0x02, "USDC");
@@ -2422,29 +2446,29 @@ mod tests {
         let uni = token(0x05, "UNI");
         let wbtc = token(0x06, "WBTC");
         let market = make_market(vec![
-            ("pool_wu", vec![weth.clone(), usdc.clone()], Box::new(MockProtocolSim::new(2.0))),
-            ("pool_a", vec![usdc.clone(), dai.clone()], Box::new(MockProtocolSim::new(1.0))),
-            ("pool_dp", vec![dai.clone(), pepe.clone()], Box::new(MockProtocolSim::new(5.0))),
-            ("pool_b", vec![pepe.clone(), uni.clone()], Box::new(MockProtocolSim::new(1.0))),
-            ("pool_uw", vec![uni.clone(), wbtc.clone()], Box::new(MockProtocolSim::new(3.0))),
-            ("pool_wp", vec![weth.clone(), pepe.clone()], Box::new(MockProtocolSim::new(4.0))),
-            ("pool_us", vec![uni.clone(), usdc.clone()], Box::new(MockProtocolSim::new(1.0))),
-            ("pool_dw", vec![dai.clone(), wbtc.clone()], Box::new(MockProtocolSim::new(2.0))),
+            ("component_wu", vec![weth.clone(), usdc.clone()], Box::new(MockProtocolSim::new(2.0))),
+            ("component_a", vec![usdc.clone(), dai.clone()], Box::new(MockProtocolSim::new(1.0))),
+            ("component_dp", vec![dai.clone(), pepe.clone()], Box::new(MockProtocolSim::new(5.0))),
+            ("component_b", vec![pepe.clone(), uni.clone()], Box::new(MockProtocolSim::new(1.0))),
+            ("component_uw", vec![uni.clone(), wbtc.clone()], Box::new(MockProtocolSim::new(3.0))),
+            ("component_wp", vec![weth.clone(), pepe.clone()], Box::new(MockProtocolSim::new(4.0))),
+            ("component_us", vec![uni.clone(), usdc.clone()], Box::new(MockProtocolSim::new(1.0))),
+            ("component_dw", vec![dai.clone(), wbtc.clone()], Box::new(MockProtocolSim::new(2.0))),
         ]);
         let ord = order(&weth, &wbtc, 1000, OrderSide::Sell);
         let gas = BigUint::from(50_000u64);
 
         let path1 = PathAllocation {
             hops: vec![
-                HopDescriptor::new("pool_wu".to_string(), weth.clone(), usdc.clone())
+                HopDescriptor::new("component_wu".to_string(), weth.clone(), usdc.clone())
                     .with_amounts(BigUint::from(1200u64), gas.clone()),
-                HopDescriptor::new("pool_a".to_string(), usdc.clone(), dai.clone())
+                HopDescriptor::new("component_a".to_string(), usdc.clone(), dai.clone())
                     .with_amounts(BigUint::from(1200u64), gas.clone()),
-                HopDescriptor::new("pool_dp".to_string(), dai.clone(), pepe.clone())
+                HopDescriptor::new("component_dp".to_string(), dai.clone(), pepe.clone())
                     .with_amounts(BigUint::from(6000u64), gas.clone()),
-                HopDescriptor::new("pool_b".to_string(), pepe.clone(), uni.clone())
+                HopDescriptor::new("component_b".to_string(), pepe.clone(), uni.clone())
                     .with_amounts(BigUint::from(6000u64), gas.clone()),
-                HopDescriptor::new("pool_uw".to_string(), uni.clone(), wbtc.clone())
+                HopDescriptor::new("component_uw".to_string(), uni.clone(), wbtc.clone())
                     .with_amounts(BigUint::from(18000u64), gas.clone()),
             ],
             flow_fraction: 0.6,
@@ -2455,15 +2479,15 @@ mod tests {
 
         let path2 = PathAllocation {
             hops: vec![
-                HopDescriptor::new("pool_wp".to_string(), weth.clone(), pepe.clone())
+                HopDescriptor::new("component_wp".to_string(), weth.clone(), pepe.clone())
                     .with_amounts(BigUint::from(1600u64), gas.clone()),
-                HopDescriptor::new("pool_b".to_string(), pepe.clone(), uni.clone())
+                HopDescriptor::new("component_b".to_string(), pepe.clone(), uni.clone())
                     .with_amounts(BigUint::from(1600u64), gas.clone()),
-                HopDescriptor::new("pool_us".to_string(), uni.clone(), usdc.clone())
+                HopDescriptor::new("component_us".to_string(), uni.clone(), usdc.clone())
                     .with_amounts(BigUint::from(1600u64), gas.clone()),
-                HopDescriptor::new("pool_a".to_string(), usdc.clone(), dai.clone())
+                HopDescriptor::new("component_a".to_string(), usdc.clone(), dai.clone())
                     .with_amounts(BigUint::from(1600u64), gas.clone()),
-                HopDescriptor::new("pool_dw".to_string(), dai.clone(), wbtc.clone())
+                HopDescriptor::new("component_dw".to_string(), dai.clone(), wbtc.clone())
                     .with_amounts(BigUint::from(3200u64), gas),
             ],
             flow_fraction: 0.4,
@@ -2472,23 +2496,23 @@ mod tests {
             marginal_price_product: 8.0,
         };
 
-        // merge_shared_hops collapses Pool A and Pool B into single entries.
+        // merge_shared_hops collapses Component A and Component B into single entries.
         let merged = merge_shared_hops(&[path1.clone(), path2.clone()]).unwrap();
         assert_eq!(
             merged[&usdc.address]
                 .iter()
-                .filter(|s| s.hop.component_id == "pool_a")
+                .filter(|s| s.hop.component_id == "component_a")
                 .count(),
             1,
-            "merge_shared_hops merges pool_a into one"
+            "merge_shared_hops merges component_a into one"
         );
         assert_eq!(
             merged[&pepe.address]
                 .iter()
-                .filter(|s| s.hop.component_id == "pool_b")
+                .filter(|s| s.hop.component_id == "component_b")
                 .count(),
             1,
-            "merge_shared_hops merges pool_b into one"
+            "merge_shared_hops merges component_b into one"
         );
 
         // build_split_route rejects the combination.

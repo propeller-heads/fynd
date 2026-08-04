@@ -128,11 +128,11 @@ impl ComputationRequirements {
 /// Typed error for a failed computation item.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum FailedItemError {
-    /// The pool's simulation state was not available in shared market data.
+    /// The component's simulation state was not available in shared market data.
     #[error("missing simulation state")]
     MissingSimulationState,
 
-    /// Token metadata (decimals, symbol) was not found for the pool's tokens.
+    /// Token metadata (decimals, symbol) was not found for the component's tokens.
     #[error("missing token metadata")]
     MissingTokenMetadata,
 
@@ -157,7 +157,7 @@ pub enum FailedItemError {
     #[error("simulation failed: {0}")]
     SimulationFailed(String),
 
-    /// Every simulation path for this pool failed.
+    /// Every simulation path for this component failed.
     #[error("all simulation paths failed")]
     AllSimulationPathsFailed,
 }

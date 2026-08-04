@@ -613,7 +613,7 @@ pub enum BackendKind {
 pub enum QuoteStatus {
     /// A valid route was found and `route`, `amount_out`, and `gas_estimate` are populated.
     Success,
-    /// No swap path exists between the requested token pair on any available pool.
+    /// No swap path exists between the requested token pair on available swap components (pools).
     NoRouteFound,
     /// A path exists but available liquidity is too low for the requested amount.
     InsufficientLiquidity,
@@ -658,7 +658,7 @@ impl BlockInfo {
     }
 }
 
-/// A single atomic swap on one liquidity pool within a [`Route`].
+/// A single atomic swap on one component (liquidity pool) within a [`Route`].
 #[derive(Debug, Clone)]
 pub struct Swap {
     component_id: String,
@@ -673,7 +673,7 @@ pub struct Swap {
 }
 
 impl Swap {
-    /// The identifier of the liquidity pool component (e.g. a pool address).
+    /// The identifier of the component (e.g. a liquidity pool address).
     pub fn component_id(&self) -> &str {
         &self.component_id
     }

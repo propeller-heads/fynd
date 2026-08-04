@@ -12,10 +12,10 @@ task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 500
 
-# Example: an exclusive-access pool. `liquidity_scope = "all"` lets this pool route through
-# exclusive components (in addition to all public liquidity) to capture surplus above the best
-# public rate. Public pools (liquidity_scope omitted; defaults to "public_only") never see exclusive
-# components.
+# Example: an exclusive-access worker pool. `liquidity_scope = "all"` lets this worker pool route
+# through exclusive components (in addition to all public liquidity) to capture surplus above the
+# best public rate. Public worker pools (liquidity_scope omitted; defaults to "public_only") never
+# see exclusive components.
 # [pools.exclusive_access]
 # algorithm = "bellman_ford"
 # num_workers = 3
@@ -34,16 +34,16 @@ timeout_ms = 500
 # max_hops   = 3
 # timeout_ms = 500
 # connector_tokens = [
-#     "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  # WETH    — 1639 pools
-#     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # USDC    —  330 pools
-#     "0xdac17f958d2ee523a2206206994597c13d831ec7",  # USDT    —  237 pools
-#     "0x0000000000000000000000000000000000000000",  # ETH     —  195 pools
-#     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",  # WBTC    —   78 pools
-#     "0x6b175474e89094c44da98b954eedeac495271d0f",  # DAI     —   43 pools
-#     "0x68749665ff8d2d112fa859aa293f07a622782f38",  # XAUt    —   23 pools
-#     "0x45804880de22913dafe09f4980848ece6ecbaf78",  # PAXG    —   19 pools
-#     "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",  # UNI     —   19 pools
-#     "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",  # wstETH  —   19 pools
+#     "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  # WETH    — 1639 components
+#     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # USDC    —  330 components
+#     "0xdac17f958d2ee523a2206206994597c13d831ec7",  # USDT    —  237 components
+#     "0x0000000000000000000000000000000000000000",  # ETH     —  195 components
+#     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",  # WBTC    —   78 components
+#     "0x6b175474e89094c44da98b954eedeac495271d0f",  # DAI     —   43 components
+#     "0x68749665ff8d2d112fa859aa293f07a622782f38",  # XAUt    —   23 components
+#     "0x45804880de22913dafe09f4980848ece6ecbaf78",  # PAXG    —   19 components
+#     "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",  # UNI     —   19 components
+#     "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",  # wstETH  —   19 components
 # ]
 #
 # --- Base ---
@@ -52,14 +52,14 @@ timeout_ms = 500
 # max_hops   = 3
 # timeout_ms = 500
 # connector_tokens = [
-#     "0x4200000000000000000000000000000000000006",  # WETH    —  565 pools
-#     "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",  # USDC    —  259 pools
-#     "0xb20a4bd059f5914a2f8b9c18881c637f79efb7df",  # ADS     —  104 pools
-#     "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b",  # VIRTUAL —   89 pools
-#     "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",  # cbBTC   —   45 pools
-#     "0x0000000000000000000000000000000000000000",  # ETH     —   38 pools
-#     "0x940181a94a35a4569e4529a3cdfb74e38fd98631",  # AERO    —   13 pools
-#     "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2",  # USDT    —   11 pools
-#     "0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf",  # VVV     —   11 pools
-#     "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",  # cbETH   —   10 pools
+#     "0x4200000000000000000000000000000000000006",  # WETH    —  565 components
+#     "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",  # USDC    —  259 components
+#     "0xb20a4bd059f5914a2f8b9c18881c637f79efb7df",  # ADS     —  104 components
+#     "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b",  # VIRTUAL —   89 components
+#     "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",  # cbBTC   —   45 components
+#     "0x0000000000000000000000000000000000000000",  # ETH     —   38 components
+#     "0x940181a94a35a4569e4529a3cdfb74e38fd98631",  # AERO    —   13 components
+#     "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2",  # USDT    —   11 components
+#     "0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf",  # VVV     —   11 components
+#     "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",  # cbETH   —   10 components
 # ]

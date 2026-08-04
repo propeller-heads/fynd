@@ -115,7 +115,7 @@ impl TokenGasPriceComputation {
     ) -> Result<HashMap<Address, Vec<CandidatePath<'a>>>, ComputationError> {
         let graph = graph_manager.graph();
 
-        // If gas token has no pools, it won't be in the graph → no paths to discover
+        // If gas token has no components, it won't be in the graph → no paths to discover
         let Ok(entry_node) = graph_manager.find_node(&self.gas_token) else {
             return Ok(HashMap::new());
         };
@@ -147,7 +147,7 @@ impl TokenGasPriceComputation {
                 // buy_price = forward_spot (target per gas when buying)
                 // sell_price = 1/reverse_spot (target per gas when selling)
                 // spread = |buy_price - sell_price|
-                // Score = spread directly (lower = better, 0 for symmetric pools)
+                // Score = spread directly (lower = better, 0 for symmetric components)
                 let buy_price = frame.forward_spot;
                 let sell_price = 1.0 / frame.reverse_spot;
                 let spot_spread = (buy_price - sell_price).abs();
@@ -179,7 +179,8 @@ impl TokenGasPriceComputation {
                 let rev_key: SpotPriceKey =
                     (component_id.clone(), next_token.clone(), token_reached.clone());
 
-                // Skip edges with missing spot prices (pool may have failed spot price computation)
+                // Skip edges with missing spot prices (component may have failed spot price
+                // computation)
                 let Some(&fwd_spot) = spot_prices.get(&fwd_key) else {
                     continue;
                 };
@@ -385,8 +386,8 @@ impl TokenGasPriceComputation {
         }
 
         // Collect all component IDs from every candidate path per token.
-        // This ensures path_components captures any pool that could flip which path is best,
-        // not just pools on the currently-selected path.
+        // This ensures path_components captures any component that could flip which path is best,
+        // not just components on the currently-selected path.
         let all_candidate_components: HashMap<Address, HashSet<ComponentId>> = paths_by_token
             .iter()
             .map(|(token, candidates)| {
@@ -404,7 +405,7 @@ impl TokenGasPriceComputation {
             .collect();
 
         // Sort each token's paths: lowest spread last (for popping). A NaN score (degenerate
-        // pool math in the spread computation) cannot rank a path and would panic a
+        // component math in the spread computation) cannot rank a path and would panic a
         // partial_cmp-based sort, so drop those candidates and sort with the float total order.
         for paths in paths_by_token.values_mut() {
             paths.retain(|path| !path.score.is_nan());
@@ -445,7 +446,7 @@ impl TokenGasPriceComputation {
         }
 
         // Extend each token's path_components with all candidate path components so
-        // incremental recomputation fires when any competing path's pool changes.
+        // incremental recomputation fires when any competing path's component changes.
         for (token, (_, _, components)) in best_prices.iter_mut() {
             if let Some(all_comps) = all_candidate_components.get(token) {
                 components.extend(all_comps.iter().cloned());
@@ -661,17 +662,17 @@ mod tests {
 
     // ==================== Test Helpers ====================
 
-    /// Sets up a complete test environment: market with pools + precomputed spot prices.
+    /// Sets up a complete test environment: market with components + precomputed spot prices.
     /// Returns (market_guard, store) ready for computation.
     async fn setup_test_env(
-        pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
+        components: Vec<(&str, &Token, &Token, MockProtocolSim)>,
     ) -> (MarketData, SharedDerivedDataRef) {
-        let (wrapped_market, _) = setup_market_weighted(pools.clone());
+        let (wrapped_market, _) = setup_market_weighted(components.clone());
 
         let wrapped_store = DerivedData::new_shared();
         let spot_comp = SpotPriceComputation::new();
         let changed = ChangedComponents {
-            added: pools
+            added: components
                 .iter()
                 .map(|(id, t1, t2, _)| {
                     (id.to_string(), vec![t1.address.clone(), t2.address.clone()])
@@ -694,9 +695,9 @@ mod tests {
     }
 
     async fn setup_graph_and_spot_prices(
-        pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
+        components: Vec<(&str, &Token, &Token, MockProtocolSim)>,
     ) -> (PetgraphStableDiGraphManager<()>, SpotPrices) {
-        let (market, derived) = setup_test_env(pools).await;
+        let (market, derived) = setup_test_env(components).await;
         let market = market_read(&market);
 
         let mut graph = PetgraphStableDiGraphManager::new();
@@ -723,24 +724,28 @@ mod tests {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
-        let (graph_manager, spot_prices) =
-            setup_graph_and_spot_prices(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000.0))])
-                .await;
+        let (graph_manager, spot_prices) = setup_graph_and_spot_prices(vec![(
+            "component",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(2000.0),
+        )])
+        .await;
 
         let computation = computation_for(&eth.address);
         let paths = computation
             .discover_paths(&graph_manager, &spot_prices)
             .unwrap();
 
-        // Exactly 1 path to USDC (single hop via "pool")
+        // Exactly 1 path to USDC (single hop via "component")
         let usdc_paths = &paths[&usdc.address];
         assert_eq!(usdc_paths.len(), 1, "should have exactly 1 path to USDC");
 
         let path = &usdc_paths[0];
         assert_eq!(path.path.len(), 1, "path should be single hop");
-        assert_eq!(path.path.edge_data[0].component_id, "pool");
+        assert_eq!(path.path.edge_data[0].component_id, "component");
 
-        // For a symmetric pool, spread = 0
+        // For a symmetric component, spread = 0
         assert_eq!(path.score, 0.0);
     }
 
@@ -779,19 +784,27 @@ mod tests {
 
     #[tokio::test]
     async fn nan_scored_paths_are_dropped_not_panicked_on() {
-        // Degenerate pool math can yield a NaN spot-price spread. A NaN-scored candidate must
+        // Degenerate component math can yield a NaN spot-price spread. A NaN-scored candidate must
         // be dropped — never panicked on — and the affected token simply gets no price.
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
-        let (market, _) =
-            setup_market_weighted(vec![("nan_pool", &eth, &usdc, MockProtocolSim::new(2000.0))]);
+        let (market, _) = setup_market_weighted(vec![(
+            "nan_component",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(2000.0),
+        )]);
         // Inject NaN spot prices directly: the spread |forward - 1/reverse| becomes NaN.
         let mut spot_prices = SpotPrices::default();
-        spot_prices
-            .insert(("nan_pool".to_string(), eth.address.clone(), usdc.address.clone()), f64::NAN);
-        spot_prices
-            .insert(("nan_pool".to_string(), usdc.address.clone(), eth.address.clone()), f64::NAN);
+        spot_prices.insert(
+            ("nan_component".to_string(), eth.address.clone(), usdc.address.clone()),
+            f64::NAN,
+        );
+        spot_prices.insert(
+            ("nan_component".to_string(), usdc.address.clone(), eth.address.clone()),
+            f64::NAN,
+        );
 
         let computation = computation_for(&eth.address);
         let (prices, _, _) = computation
@@ -848,10 +861,10 @@ mod tests {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
-        // Two pools with different spot prices
+        // Two components with different spot prices
         let (graph, spot_prices) = setup_graph_and_spot_prices(vec![
-            ("pool_low", &eth, &usdc, MockProtocolSim::new(1000.0)),
-            ("pool_high", &eth, &usdc, MockProtocolSim::new(2000.0)),
+            ("component_low", &eth, &usdc, MockProtocolSim::new(1000.0)),
+            ("component_high", &eth, &usdc, MockProtocolSim::new(2000.0)),
         ])
         .await;
 
@@ -860,19 +873,19 @@ mod tests {
             .discover_paths(&graph, &spot_prices)
             .unwrap();
 
-        // Exactly 2 paths to USDC (one via each pool)
+        // Exactly 2 paths to USDC (one via each component)
         let usdc_paths = &paths[&usdc.address];
         assert_eq!(usdc_paths.len(), 2, "should have exactly 2 paths to USDC");
 
         // MockProtocolSim's spot_price is symmetric: forward_spot = 1/reverse_spot,
-        // so spread = |forward - 1/reverse| = 0 for all pools.
+        // so spread = |forward - 1/reverse| = 0 for all components.
         // TODO: Test with asymmetric simulation component to verify non-zero spread ranking.
         for path in usdc_paths {
             assert_eq!(path.path.len(), 1, "path should be single hop");
             assert_eq!(path.score, 0.0, "symmetric mock produces zero spread");
         }
 
-        // Verify both pools are discovered (order is arbitrary when scores are equal)
+        // Verify both components are discovered (order is arbitrary when scores are equal)
         let component_ids: Vec<_> = usdc_paths
             .iter()
             .map(|p| {
@@ -881,8 +894,8 @@ mod tests {
                     .as_str()
             })
             .collect();
-        assert!(component_ids.contains(&"pool_low"));
-        assert!(component_ids.contains(&"pool_high"));
+        assert!(component_ids.contains(&"component_low"));
+        assert!(component_ids.contains(&"component_high"));
     }
 
     // ==================== compute_spread_and_mid_price tests ====================
@@ -913,7 +926,7 @@ mod tests {
         // mid_price = (buy_price + sell_price) / 2 ≈ 2085.79
         let gas_units: u64 = 1_000_000_000_000_000; // 1e15
         let (market, _) = setup_test_env(vec![(
-            "pool",
+            "component",
             &eth,
             &usdc,
             MockProtocolSim::new(2000.0)
@@ -1002,7 +1015,7 @@ mod tests {
             "gas token numerator should equal simulation amount"
         );
 
-        // USDC mid-price should be 2000 (symmetric pool, no fee)
+        // USDC mid-price should be 2000 (symmetric component, no fee)
         // Small deviation due to gas cost adjustment in buy_price/sell_price
         let usdc_price = prices
             .get(&usdc.address)
@@ -1129,7 +1142,7 @@ mod tests {
 
         // Create market without spot prices set
         let (market, _) =
-            setup_market_weighted(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000.0))]);
+            setup_market_weighted(vec![("component", &eth, &usdc, MockProtocolSim::new(2000.0))]);
         let derived = DerivedData::new_shared(); // No spot prices
         let changed = ChangedComponents::default();
 
@@ -1145,12 +1158,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compute_gas_token_with_no_pools_returns_only_self() {
+    async fn test_compute_gas_token_with_no_components_returns_only_self() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
         let dai = token(2, "DAI");
 
-        // Create a pool that doesn't include ETH (gas token)
+        // Create a component that doesn't include ETH (gas token)
         let (market, derived) =
             setup_test_env(vec![("usdc_dai", &usdc, &dai, MockProtocolSim::new(1.0))]).await;
         let changed = ChangedComponents::default();
@@ -1177,26 +1190,26 @@ mod tests {
     async fn test_path_components_includes_all_candidate_paths() {
         // Diamond topology: two paths to token_a
         //
-        //   pool_direct: ETH → token_a  (fee-free, ratio=2, lower spread → selected)
-        //   pool_indirect_1 + pool_indirect_2: ETH → token_b → token_a (higher spread)
+        //   component_direct: ETH → token_a  (fee-free, ratio=2, lower spread → selected)
+        //   component_indirect_1 + component_indirect_2: ETH → token_b → token_a (higher spread)
         //
-        // After full compute, token_a's path_components must include all three pool IDs
-        // even though only pool_direct is on the best path.
+        // After full compute, token_a's path_components must include all three component IDs
+        // even though only component_direct is on the best path.
         let eth = token(0, "ETH");
         let token_a = token(1, "A");
         let token_b = token(2, "B");
 
         let (market, derived) = setup_test_env(vec![
-            ("pool_direct", &eth, &token_a, MockProtocolSim::new(2.0).with_gas(0)),
+            ("component_direct", &eth, &token_a, MockProtocolSim::new(2.0).with_gas(0)),
             (
-                "pool_indirect_1",
+                "component_indirect_1",
                 &eth,
                 &token_b,
                 MockProtocolSim::new(3.0)
                     .with_fee(0.1)
                     .with_gas(0),
             ),
-            ("pool_indirect_2", &token_b, &token_a, MockProtocolSim::new(1.0).with_gas(0)),
+            ("component_indirect_2", &token_b, &token_a, MockProtocolSim::new(1.0).with_gas(0)),
         ])
         .await;
         let changed = ChangedComponents::default();
@@ -1219,43 +1232,43 @@ mod tests {
         assert!(
             entry
                 .path_components
-                .contains("pool_direct"),
-            "path_components should contain pool_direct (best path)"
+                .contains("component_direct"),
+            "path_components should contain component_direct (best path)"
         );
         assert!(
             entry
                 .path_components
-                .contains("pool_indirect_1"),
-            "path_components should contain pool_indirect_1 (competing path)"
+                .contains("component_indirect_1"),
+            "path_components should contain component_indirect_1 (competing path)"
         );
         assert!(
             entry
                 .path_components
-                .contains("pool_indirect_2"),
-            "path_components should contain pool_indirect_2 (competing path)"
+                .contains("component_indirect_2"),
+            "path_components should contain component_indirect_2 (competing path)"
         );
     }
 
     #[tokio::test]
-    async fn test_incremental_recompute_triggered_by_competing_path_pool() {
+    async fn test_incremental_recompute_triggered_by_competing_path_component() {
         // Same diamond topology as above.
-        // After full compute, changing pool_indirect_1 (not on best path) must
+        // After full compute, changing component_indirect_1 (not on best path) must
         // put token_a in tokens_to_recompute because it's now in path_components.
         let eth = token(0, "ETH");
         let token_a = token(1, "A");
         let token_b = token(2, "B");
 
         let (market, derived) = setup_test_env(vec![
-            ("pool_direct", &eth, &token_a, MockProtocolSim::new(2.0).with_gas(0)),
+            ("component_direct", &eth, &token_a, MockProtocolSim::new(2.0).with_gas(0)),
             (
-                "pool_indirect_1",
+                "component_indirect_1",
                 &eth,
                 &token_b,
                 MockProtocolSim::new(3.0)
                     .with_fee(0.1)
                     .with_gas(0),
             ),
-            ("pool_indirect_2", &token_b, &token_a, MockProtocolSim::new(1.0).with_gas(0)),
+            ("component_indirect_2", &token_b, &token_a, MockProtocolSim::new(1.0).with_gas(0)),
         ])
         .await;
 
@@ -1267,11 +1280,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Incremental change: only pool_indirect_1 updated
+        // Incremental change: only component_indirect_1 updated
         let incremental_changed = ChangedComponents {
             added: HashMap::new(),
             removed: vec![],
-            updated: vec!["pool_indirect_1".to_string()],
+            updated: vec!["component_indirect_1".to_string()],
             is_full_recompute: false,
         };
 
@@ -1293,11 +1306,11 @@ mod tests {
 
         assert!(
             tokens_to_recompute.contains(&token_a.address),
-            "token_a should be scheduled for recomputation when pool_indirect_1 changes"
+            "token_a should be scheduled for recomputation when component_indirect_1 changes"
         );
         assert!(
             tokens_to_recompute.contains(&token_b.address),
-            "token_b should be scheduled for recomputation when pool_indirect_1 changes"
+            "token_b should be scheduled for recomputation when component_indirect_1 changes"
         );
     }
 
@@ -1308,10 +1321,12 @@ mod tests {
 
         // Create market without gas price set
         let mut market_inner = MarketState::new();
-        let comp = component("pool", &[eth.clone(), usdc.clone()]);
+        let comp = component("component", &[eth.clone(), usdc.clone()]);
         market_inner.upsert_components(std::iter::once(comp));
-        market_inner
-            .update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
+        market_inner.update_states([(
+            "component".to_string(),
+            Box::new(MockProtocolSim::new(2000.0)) as _,
+        )]);
         market_inner.upsert_tokens([eth.clone(), usdc.clone()]);
         let market = MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market_inner)));
 
@@ -1319,7 +1334,7 @@ mod tests {
         let derived = DerivedData::new_shared();
         let changed = ChangedComponents {
             added: std::collections::HashMap::from([(
-                "pool".to_string(),
+                "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
             removed: vec![],

@@ -7,13 +7,13 @@ multiple DeFi protocols in real-time.
 ## What is Fynd
 
 Fynd is a solver that indexes live DEX liquidity via Tycho's streaming API, maintains an in-memory
-graph of token pairs and pools, and runs pluggable routing algorithms on dedicated OS threads to
+graph of token pairs and components (liquidity pools), and runs pluggable routing algorithms on dedicated OS threads to
 find optimal swap paths. It exposes an HTTP RPC for quote requests and returns the best
 gas-aware solution with optional on-chain transaction encoding.
 
 Key properties:
 - **Multi-protocol**: Routes through any on-chain protocol supported by Tycho, plus RFQ protocols
-- **Real-time**: Tycho Stream keeps all pool states synchronized every block
+- **Real-time**: Tycho Stream keeps all component states synchronized every block
 - **Multi-algorithm competition**: Multiple worker pools compete in parallel; best result wins
 - **Gas-aware**: Best solution selected by net output after gas costs
 - **Extensible**: Implement the `Algorithm` trait to add new routing strategies
@@ -63,9 +63,9 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 4. **Algorithm trait** (`fynd-core/src/algorithm/`) — Pluggable route-finding; built-in:
    `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`, and
    `WaterFillAlgorithm`
-5. **MarketState** (`fynd-core/src/feed/market_data.rs`) — `Arc<RwLock<>>` of all pool/token/gas state; accessed via `MarketData` handle
+5. **MarketState** (`fynd-core/src/feed/market_data.rs`) — `Arc<RwLock<>>` of all component/token/gas state; accessed via `MarketData` handle
 6. **TychoFeed** (`fynd-core/src/feed/tycho_feed.rs`) — Background task: Tycho WebSocket → MarketState → broadcast events
-7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, pool depths, token gas prices
+7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, component (pool) depths, token gas prices
 8. **Encoding** (`fynd-core/src/encoding/`) — Encodes solved routes into on-chain transactions via `TychoEncoder`
 9. **Graph** (`fynd-core/src/graph/`) — `GraphManager` trait + `PetgraphStableDiGraphManager` implementation
 
@@ -76,7 +76,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 2. Writes new component/token/state data into `MarketState` (write lock)
 3. Broadcasts `MarketEvent` → each `SolverWorker` updates its local graph via `GraphManager`
 4. `GasPriceFetcher` runs independently on a timer → fetches gas price from RPC node → writes to `MarketState`
-5. Triggers `ComputationManager` → runs spot prices → pool depths → token gas prices (in dependency order) → broadcasts `DerivedDataEvent` → workers update edge weights
+5. Triggers `ComputationManager` → runs spot prices → component (pool) depths → token gas prices (in dependency order) → broadcasts `DerivedDataEvent` → workers update edge weights
 
 **Quote request path** (`POST /v1/quote`):
 1. `RouterApi` validates the request
@@ -91,7 +91,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 - **Actix/Tokio runtime** (async I/O): HTTP server, TychoFeed, WorkerPoolRouter, gas fetcher, ComputationManager
 - **Worker pools** (dedicated OS threads): Each `SolverWorker` has a local graph and single-thread tokio runtime
-- **Communication**: `async_channel` (pool queues), `oneshot` (responses), `broadcast` (events), `Arc<RwLock<>>` (shared data)
+- **Communication**: `async_channel` (worker pool queues), `oneshot` (responses), `broadcast` (events), `Arc<RwLock<>>` (shared data)
 
 ## Configuration
 

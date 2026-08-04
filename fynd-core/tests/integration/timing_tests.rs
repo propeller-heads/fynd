@@ -66,7 +66,7 @@ async fn test_solve_time_p95_within_threshold() {
     );
 }
 
-/// No individual solve should exceed the router timeout (max pool timeout + margin).
+/// No individual solve should exceed the router timeout (max worker pool timeout + margin).
 #[tokio::test]
 async fn test_no_solve_exceeds_absolute_cap() {
     let harness = TestHarness::from_fixture().await;

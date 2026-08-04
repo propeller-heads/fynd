@@ -125,7 +125,7 @@ use crate::{derived::DerivedData, feed::market_data::MarketDataView};
 /// Trait for edge weight types that can be computed from a ProtocolSim and DerivedData.
 ///
 /// Implement this trait for edge data types that should use pre-computed derived data
-/// (pool depths, spot prices, etc.) instead of computing them from scratch.
+/// (component depths, spot prices, etc.) instead of computing them from scratch.
 pub trait EdgeWeightFromSimAndDerived: Sized {
     /// Computes edge weight data using ProtocolSim and pre-computed DerivedData.
     ///
@@ -135,7 +135,7 @@ pub trait EdgeWeightFromSimAndDerived: Sized {
     /// * `component_id` - The component ID for derived data lookup
     /// * `token_in` - The input token
     /// * `token_out` - The output token
-    /// * `derived` - Pre-computed derived data (pool depths, spot prices, etc.)
+    /// * `derived` - Pre-computed derived data (component depths, spot prices, etc.)
     ///
     /// # Returns
     ///

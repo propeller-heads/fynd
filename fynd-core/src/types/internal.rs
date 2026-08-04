@@ -89,7 +89,7 @@ pub enum SolveError {
     InsufficientLiquidity {
         /// Amount the user requested.
         required: BigUint,
-        /// Maximum amount available in the pool.
+        /// Maximum amount available in the component.
         available: BigUint,
     },
 
@@ -160,7 +160,7 @@ pub enum SolveError {
     #[error("required data missing: {0}")]
     MissingData(String),
 
-    /// Pool simulation failed while evaluating a route.
+    /// Component simulation failed while evaluating a route.
     #[error("simulation failed: {0}")]
     SimulationFailed(String),
 }

@@ -2,7 +2,7 @@
 //!
 //! Runs off the block-update path: on a fixed interval it takes a non-blocking
 //! read of [`MarketState`](crate::feed::market_data::MarketState) and exports
-//! pool counts and synchronizer status per protocol. Sampling independently of
+//! component counts and synchronizer status per protocol. Sampling independently of
 //! the Tycho feed keeps these gauges flowing even when the feed itself is
 //! stalled — which is exactly when the sync-status metrics matter.
 
@@ -17,7 +17,7 @@ use tycho_simulation::tycho_client::feed::SynchronizerState;
 
 use crate::feed::market_data::MarketData;
 
-/// Periodically exports per-protocol pool counts and sync status as gauges.
+/// Periodically exports per-protocol component counts and sync status as gauges.
 pub(crate) struct MetricsSampler {
     market_data: MarketData,
     sample_interval: Duration,
@@ -41,32 +41,36 @@ impl MetricsSampler {
             let Some(state) = self.market_data.try_read() else {
                 continue;
             };
-            let pool_counts = state.pool_counts_by_protocol().clone();
+            let component_counts = state
+                .component_counts_by_protocol()
+                .clone();
             let sync_states = state.protocol_sync_states().clone();
             drop(state);
 
-            emit_market_metrics(&pool_counts, &sync_states);
+            emit_market_metrics(&component_counts, &sync_states);
         }
     }
 }
 
-/// Sets the per-protocol gauges from a snapshot of pool counts and sync states.
+/// Sets the per-protocol gauges from a snapshot of component counts and sync states.
 ///
 /// Protocols are the union of both maps: a protocol that reported a sync
-/// status but has no pools yet exports a zero pool count rather than no series.
+/// status but has no components yet exports a zero component count rather than no series.
 fn emit_market_metrics(
-    pool_counts: &HashMap<String, u64>,
+    component_counts: &HashMap<String, u64>,
     sync_states: &HashMap<String, SynchronizerState>,
 ) {
-    let protocols: HashSet<&String> = pool_counts
+    let protocols: HashSet<&String> = component_counts
         .keys()
         .chain(sync_states.keys())
         .collect();
     for protocol in protocols {
-        let count = pool_counts
+        let count = component_counts
             .get(protocol)
             .copied()
             .unwrap_or(0);
+        // Counts components; the legacy "pools" metric name is kept so existing
+        // dashboards and alerts keep working (queried in monitoring/grafana/dashboards/fynd.json).
         gauge!("market_pools_per_protocol", "protocol" => protocol.clone()).set(count as f64);
     }
 
@@ -151,11 +155,11 @@ mod tests {
     }
 
     #[test]
-    fn emit_market_metrics_records_pool_and_sync_gauges() {
+    fn emit_market_metrics_records_component_and_sync_gauges() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
 
-        let pool_counts =
+        let component_counts =
             HashMap::from([("uniswap_v2".to_string(), 100u64), ("curve".to_string(), 5u64)]);
         let sync_states = HashMap::from([
             ("uniswap_v2".to_string(), SynchronizerState::Ready(header(42))),
@@ -163,7 +167,7 @@ mod tests {
         ]);
 
         metrics::with_local_recorder(&recorder, || {
-            emit_market_metrics(&pool_counts, &sync_states);
+            emit_market_metrics(&component_counts, &sync_states);
         });
 
         let recorded = snapshotter.snapshot().into_vec();
@@ -172,12 +176,12 @@ mod tests {
             find_gauge(&recorded, "market_pools_per_protocol", &[("protocol", "uniswap_v2")]),
             100.0
         );
-        // A protocol with pools but no sync status yet is still exported.
+        // A protocol with components but no sync status yet is still exported.
         assert_eq!(
             find_gauge(&recorded, "market_pools_per_protocol", &[("protocol", "curve")]),
             5.0
         );
-        // A protocol with a sync status but no pools yet must export zero, not
+        // A protocol with a sync status but no components yet must export zero, not
         // be absent, so dashboards see it immediately.
         assert_eq!(
             find_gauge(&recorded, "market_pools_per_protocol", &[("protocol", "uniswap_v3")]),

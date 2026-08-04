@@ -192,7 +192,7 @@ pub trait Algorithm: Send + Sync {
     /// * `market` - Shared reference to market data for state lookups (algorithms acquire their own
     ///   locks)
     /// * `label` - Optional overlay label; when `Some`, the algorithm reads market state through
-    ///   the named overlay so per-request pool overrides are applied during solving
+    ///   the named overlay so per-request component overrides are applied during solving
     /// * `derived` - Optional shared reference to derived data (token prices, etc.)
     /// * `order` - The order to solve
     ///
@@ -272,7 +272,7 @@ pub enum AlgorithmError {
     #[non_exhaustive]
     #[error("simulation failed for {component_id}: {error}")]
     SimulationFailed {
-        /// ID of the pool component that failed.
+        /// ID of the component (liquidity pool) that failed.
         component_id: String,
         /// Underlying simulation error message.
         error: String,

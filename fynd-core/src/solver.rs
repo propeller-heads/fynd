@@ -67,7 +67,8 @@ pub mod defaults {
     pub const MIN_TOKEN_QUALITY: i32 = 100;
     /// Maximum age (in days) of trading history required for a token to be considered liquid.
     pub const TRADED_N_DAYS_AGO: u64 = 3;
-    /// Multiplier applied to a pool's TVL when estimating available liquidity.
+    /// Multiplier applied to a component's (liquidity pool's) TVL when estimating available
+    /// liquidity.
     pub const TVL_BUFFER_RATIO: f64 = 1.1;
     /// How often the gas price is refreshed from the RPC node.
     pub const GAS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -86,7 +87,7 @@ pub mod defaults {
     pub const POOL_MIN_HOPS: usize = 1;
     /// Maximum number of hops allowed in a route.
     pub const POOL_MAX_HOPS: usize = 3;
-    /// Per-pool solve timeout in milliseconds.
+    /// Per-worker-pool solve timeout in milliseconds.
     pub const POOL_TIMEOUT_MS: u64 = 100;
 }
 
@@ -131,16 +132,16 @@ fn parse_connector_tokens(
     Ok(Some(set))
 }
 
-/// Per-pool configuration for [`FyndBuilder::add_pool`].
+/// Configuration for one worker pool, used by [`FyndBuilder::add_pool`].
 #[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolConfig {
-    /// Algorithm name for this pool (e.g., `"most_liquid"`).
+    /// Algorithm name for this worker pool (e.g., `"most_liquid"`).
     algorithm: String,
-    /// Number of worker threads for this pool.
+    /// Number of worker threads for this worker pool.
     #[serde(default = "num_cpus::get")]
     num_workers: usize,
-    /// Task queue capacity for this pool.
+    /// Task queue capacity for this worker pool.
     #[serde(default = "default_task_queue_capacity")]
     task_queue_capacity: usize,
     /// Minimum hops to search (must be >= 1).
@@ -159,15 +160,16 @@ pub struct PoolConfig {
     /// Absent = no restriction. Typically 3–10 entries (e.g. WETH, USDC, USDT, DAI).
     #[serde(default)]
     connector_tokens: Option<Vec<String>>,
-    /// Pool liquidity scope: `public_only` or `all` (routes through exclusive liquidity as
-    /// well). Setting this key (either value) declares exclusive routing intent and requires an
-    /// exclusivity policy; absent = plain deployment, no filtering.
+    /// Worker pool liquidity scope: `public_only` or `all` (routes through exclusive liquidity
+    /// as well). Setting this key (either value) declares exclusive routing intent and requires
+    /// an exclusivity policy; absent = plain deployment, no filtering.
     #[serde(default)]
     liquidity_scope: Option<LiquidityScope>,
 }
 
 impl PoolConfig {
-    /// Creates a new pool config with the given algorithm name and defaults for all other fields.
+    /// Creates a new worker pool config with the given algorithm name and defaults for all other
+    /// fields.
     pub fn new(algorithm: impl Into<String>) -> Self {
         Self {
             algorithm: algorithm.into(),
@@ -187,12 +189,12 @@ impl PoolConfig {
         &self.algorithm
     }
 
-    /// Returns the pool's liquidity scope.
+    /// Returns the worker pool's liquidity scope.
     pub fn liquidity_scope(&self) -> Option<LiquidityScope> {
         self.liquidity_scope
     }
 
-    /// Sets the pool's liquidity scope (public or exclusive-access).
+    /// Sets the worker pool's liquidity scope (public or exclusive-access).
     pub fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = Some(scope);
         self
@@ -303,7 +305,7 @@ pub enum SolverBuildError {
     /// The router fee fetcher could not be created (e.g. malformed RPC URL).
     #[error("failed to create router fee fetcher: {0}")]
     RouterFeeFetcher(String),
-    /// A pool referenced an algorithm name that is not registered.
+    /// A worker pool referenced an algorithm name that is not registered.
     #[error(transparent)]
     UnknownAlgorithm(#[from] UnknownAlgorithmError),
     /// No native gas token is defined for the requested chain.
@@ -313,7 +315,7 @@ pub enum SolverBuildError {
     #[error("no worker pools configured")]
     NoPools,
     /// A worker pool sets `liquidity_scope` but no exclusivity policy is configured. The
-    /// policy is what public pools filter by and what the router identifies exclusive legs
+    /// policy is what public worker pools filter by and what the router identifies exclusive legs
     /// with — without it, nothing distinguishes exclusive protocol components from public ones.
     #[error(
         "a worker pool sets liquidity_scope but no exclusivity policy is configured; \
@@ -341,7 +343,7 @@ pub enum SolverBuildError {
     StepControllerChannelClosed,
 }
 
-/// Internal pool entry — either a built-in algorithm (by name) or a custom one.
+/// Internal worker pool entry — either a built-in algorithm (by name) or a custom one.
 enum PoolEntry {
     BuiltIn {
         name: String,
@@ -368,7 +370,7 @@ impl PoolEntry {
     }
 }
 
-/// Pool entry backed by a custom [`Algorithm`] implementation.
+/// Worker pool entry backed by a custom [`Algorithm`] implementation.
 struct CustomPoolEntry {
     name: String,
     num_workers: usize,
@@ -377,7 +379,7 @@ struct CustomPoolEntry {
     max_hops: usize,
     timeout_ms: u64,
     max_routes: Option<usize>,
-    /// Pool liquidity scope: public (default) or exclusive-access.
+    /// Worker pool liquidity scope: public (default) or exclusive-access.
     liquidity_scope: Option<LiquidityScope>,
     /// Applies the custom algorithm to a `WorkerPoolBuilder`.
     configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
@@ -431,9 +433,9 @@ pub struct FyndBuilder {
     price_guard_enabled: bool,
     price_providers: Vec<Box<dyn PriceProvider>>,
     pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
-    /// Predicate identifying exclusive components. Shared by all pools: public pools exclude
-    /// matching components, exclusive-access pools include them. `None` ⇒ no pool filters
-    /// anything.
+    /// Predicate identifying exclusive components. Shared by all worker pools: public worker
+    /// pools exclude matching components, exclusive-access worker pools include them. `None` ⇒
+    /// no worker pool filters anything.
     exclusivity_policy: Option<ExclusivityPolicy>,
 }
 
@@ -502,7 +504,7 @@ impl FyndBuilder {
         self
     }
 
-    /// Filters out pools whose last trade is older than `days` days (default: 3).
+    /// Filters out components whose last trade is older than `days` days (default: 3).
     pub fn traded_n_days_ago(mut self, days: u64) -> Self {
         self.traded_n_days_ago = days;
         self
@@ -534,7 +536,7 @@ impl FyndBuilder {
 
     /// Enables partial block (flashblock) updates from the Tycho stream (default: `false`).
     ///
-    /// When enabled, the stream delivers pool state updates mid-block rather than only at
+    /// When enabled, the stream delivers component state updates mid-block rather than only at
     /// finalization, reducing latency. Only supported for on-chain protocols; RFQ streams are
     /// unaffected.
     pub fn partial_blocks(mut self, enabled: bool) -> Self {
@@ -560,7 +562,7 @@ impl FyndBuilder {
         self
     }
 
-    /// Shorthand: adds a single pool named `"default"` using a built-in algorithm by name.
+    /// Shorthand: adds a single worker pool named `"default"` using a built-in algorithm by name.
     pub fn algorithm(mut self, algorithm: impl Into<String>) -> Self {
         self.pools.push(PoolEntry::BuiltIn {
             name: "default".to_string(),
@@ -577,7 +579,7 @@ impl FyndBuilder {
         self
     }
 
-    /// Shorthand: adds a single pool with a custom [`Algorithm`] implementation.
+    /// Shorthand: adds a single worker pool with a custom [`Algorithm`] implementation.
     ///
     /// The `factory` closure is called once per worker thread.
     pub fn with_algorithm<A, F>(mut self, name: impl Into<String>, factory: F) -> Self
@@ -657,8 +659,8 @@ impl FyndBuilder {
 
     /// Sets the predicate that classifies components as exclusive.
     ///
-    /// Public pools exclude matching components from their graphs; exclusive-access pools
-    /// include them. Without a policy, no pool filters anything.
+    /// Public worker pools exclude matching components from their graphs; exclusive-access
+    /// worker pools include them. Without a policy, no worker pool filters anything.
     pub fn exclusivity_policy<F>(mut self, predicate: F) -> Self
     where
         F: Fn(&tycho_simulation::tycho_common::models::protocol::ProtocolComponent) -> bool
@@ -670,7 +672,7 @@ impl FyndBuilder {
         self
     }
 
-    /// Adds a named pool using the given [`PoolConfig`].
+    /// Adds a named worker pool using the given [`PoolConfig`].
     ///
     /// # Errors
     ///
@@ -704,11 +706,11 @@ impl FyndBuilder {
             return Err(SolverBuildError::NoPools);
         }
 
-        // Setting `liquidity_scope` on any pool (either value) declares exclusive routing
-        // intent, which requires a policy: public pools filter by it and the router identifies
-        // exclusive legs with it. Without one, a `public_only` pool could not honor its label
-        // and an `all` pool could not produce anything distinct. Pools with the key absent are
-        // plain deployments and need no policy.
+        // Setting `liquidity_scope` on any worker pool (either value) declares exclusive routing
+        // intent, which requires a policy: public worker pools filter by it and the router
+        // identifies exclusive legs with it. Without one, a `public_only` worker pool could not
+        // honor its label and an `all` worker pool could not produce anything distinct. Worker
+        // pools with the key absent are plain deployments and need no policy.
         if self.exclusivity_policy.is_none() &&
             self.pools
                 .iter()
@@ -761,15 +763,17 @@ impl FyndBuilder {
         let derived_data: SharedDerivedDataRef = computation_manager.store();
         let derived_event_tx = computation_manager.event_sender();
 
-        // Subscribe event channels before spawning (one for computation manager + one per pool)
+        // Subscribe event channels before spawning (one for computation manager + one per worker
+        // pool)
         let computation_event_rx = tycho_feed.subscribe();
         let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
 
-        // Shared across all pools: public pools exclude exclusive components, exclusive-access
-        // pools include them. `None` ⇒ no pool filters anything (original behaviour).
+        // Shared across all worker pools: public worker pools exclude exclusive components,
+        // exclusive-access worker pools include them. `None` ⇒ no worker pool filters anything
+        // (original behaviour).
         let exclusivity_policy = self.exclusivity_policy.take();
         let pools = std::mem::take(&mut self.pools);
 
@@ -777,9 +781,9 @@ impl FyndBuilder {
             let pool_event_rx = tycho_feed.subscribe();
             let derived_rx = derived_event_tx.subscribe();
 
-            // Explicit `public_only` pools (and unscoped pools, harmlessly) get the policy so
-            // their workers filter exclusive components out; `all` pools get `None` and ingest
-            // everything.
+            // Explicit `public_only` worker pools (and unscoped ones, harmlessly) get the policy
+            // so their workers filter exclusive components out; `all` worker pools get `None`
+            // and ingest everything.
             let pool_scope = pool_entry
                 .liquidity_scope()
                 .unwrap_or_default();
@@ -1171,7 +1175,7 @@ impl Solver {
     ///
     /// # Errors
     ///
-    /// Returns [`SolveError`] if all pools fail or the router timeout elapses.
+    /// Returns [`SolveError`] if all worker pools fail or the router timeout elapses.
     pub async fn quote(&self, request: QuoteRequest) -> Result<Quote, SolveError> {
         self.router.quote(request).await
     }
@@ -1180,8 +1184,8 @@ impl Solver {
     ///
     /// Ready means:
     /// - The Tycho feed has delivered at least one market snapshot.
-    /// - The computation manager has completed at least one derived-data cycle (spot prices, pool
-    ///   depths, token gas prices).
+    /// - The computation manager has completed at least one derived-data cycle (spot prices,
+    ///   component depths, token gas prices).
     /// - Router fees have been loaded from the on-chain FeeCalculator at least once.
     ///
     /// The method polls every 500 ms and returns as soon as all conditions are
@@ -1230,7 +1234,7 @@ impl Solver {
     /// then [`quote`](Self::quote).
     ///
     /// VM-backed protocol states that couldn't be serialized will be absent from
-    /// the recording. Pools without states will be registered as components but
+    /// the recording. Components without states will still be registered but
     /// won't contribute to routing.
     ///
     /// Requires the `test-utils` feature.
@@ -1438,7 +1442,7 @@ impl Solver {
 pub struct SolverParts {
     /// Routes quote requests across worker pools.
     router: WorkerPoolRouter,
-    /// One [`WorkerPool`] per configured algorithm pool.
+    /// One [`WorkerPool`] per entry configured via [`FyndBuilder::add_pool`].
     worker_pools: Vec<WorkerPool>,
     /// Live market snapshot shared across all components.
     market_data: MarketData,

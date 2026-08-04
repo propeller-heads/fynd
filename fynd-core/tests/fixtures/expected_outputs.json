@@ -1,12 +1,12 @@
 {
   "metadata": {
     "block_number": 24838913,
-    "num_pools": 2377,
+    "num_components": 2377,
     "num_tokens": 1688,
     "fynd_version": "0.77.0",
     "derived_data": {
-      "spot_price_pools": 1372,
-      "pool_depth_pools": 1308,
+      "components_with_spot_prices": 1372,
+      "components_with_depths": 1308,
       "token_prices": 1125
     }
   },

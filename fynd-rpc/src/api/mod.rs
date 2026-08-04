@@ -68,7 +68,7 @@ pub struct ApiDoc;
         prices::PricesResponse,
         prices::TokenPriceEntry,
         prices::SpotPriceEntry,
-        prices::PoolDepthEntry,
+        prices::ComponentDepthEntry,
     ))
 )]
 pub struct ExperimentalApiDoc;

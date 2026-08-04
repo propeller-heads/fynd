@@ -261,14 +261,14 @@ describe('fromWireQuote', () => {
     expect(quote.route).toBeDefined();
     expect(quote.route?.swaps).toHaveLength(1);
     const swap = quote.route?.swaps[0];
-    expect(swap?.poolId).toBe('0xpool');
+    expect(swap?.componentId).toBe('0xpool');
     expect(swap?.protocol).toBe('uniswap_v2');
     expect(swap?.amountIn).toBe(1000n);
     expect(swap?.amountOut).toBe(3500n);
     expect(swap?.gasEstimate).toBe(80000n);
   });
 
-  it('maps component_id to poolId', () => {
+  it('maps component_id to componentId', () => {
     const wire: WireSolution = {
       ...baseWireSolution,
       orders: [
@@ -291,7 +291,7 @@ describe('fromWireQuote', () => {
       ],
     };
     const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
-    expect(quote.route?.swaps[0]?.poolId).toBe('0xpool123');
+    expect(quote.route?.swaps[0]?.componentId).toBe('0xpool123');
   });
 
   it('priceImpactBps is undefined when wire value is null', () => {

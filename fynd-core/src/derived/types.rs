@@ -15,7 +15,7 @@ use crate::types::ComponentId;
 
 /// Key for spot price lookups: (component_id, token_in, token_out).
 ///
-/// Uniquely identifies a directional price within a specific pool.
+/// Uniquely identifies a directional price within a specific component.
 pub type SpotPriceKey = (ComponentId, Address, Address);
 
 /// Spot prices map: key -> spot price as f64.
@@ -24,18 +24,18 @@ pub type SpotPriceKey = (ComponentId, Address, Address);
 pub type SpotPrices = HashMap<SpotPriceKey, f64>;
 
 // =============================================================================
-// Pool Depth Types
+// Component Depth Types
 // =============================================================================
 
-/// Key for pool depth lookups: (component_id, token_in, token_out).
+/// Key for component depth lookups: (component_id, token_in, token_out).
 ///
-/// Uniquely identifies a directional liquidity depth within a specific pool.
-pub type PoolDepthKey = (ComponentId, Address, Address);
+/// Uniquely identifies a directional liquidity depth within a specific component.
+pub type ComponentDepthKey = (ComponentId, Address, Address);
 
-/// Pool depths map: key -> maximum input amount at the configured slippage threshold.
+/// Component depths map: key -> maximum input amount at the configured slippage threshold.
 ///
 /// Represents how much can be traded before the specified price impact.
-pub type PoolDepths = HashMap<PoolDepthKey, BigUint>;
+pub type ComponentDepths = HashMap<ComponentDepthKey, BigUint>;
 
 // =============================================================================
 // Token Gas Price Types
@@ -49,17 +49,17 @@ pub type TokenGasPrices = HashMap<TokenGasPriceKey, Price>;
 
 /// Token price with path dependency tracking for incremental computation.
 ///
-/// Tracks which components (pools) were used in the selected path,
-/// enabling selective recomputation when only specific pools change.
+/// Tracks which components were used in the selected path,
+/// enabling selective recomputation when only specific components change.
 #[derive(Debug, Clone)]
 pub struct TokenPriceEntry {
     /// The computed mid-price relative to gas token.
     pub price: Price,
-    /// Components (pool IDs) from all candidate paths considered for this token.
+    /// Component IDs from all candidate paths considered for this token.
     ///
     /// Used for invalidation: if any of these components change,
-    /// this token's price needs recomputation. Includes pools from all discovered
-    /// paths, not just the selected best path, so a change in any competing pool
+    /// this token's price needs recomputation. Includes components from all discovered
+    /// paths, not just the selected best path, so a change in any competing component
     /// triggers recomputation.
     pub path_components: HashSet<ComponentId>,
 }

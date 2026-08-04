@@ -11,11 +11,11 @@
 //!    customized, but initially it's set to relay to all solvers.
 //! 2. **Timeout**: Cancel if solver response takes too long
 //! 3. **Collection**: Wait for N responses OR timeout per order
-//! 4. **Gas refinement**: Before cross-pool ranking, replace each candidate's naive
-//!    `route.total_gas()` estimate (used internally by algorithms for intra-pool ranking) with the
-//!    more accurate `estimate_gas_usage` from tycho-execution, which accounts for token transfer
-//!    costs and router overhead. The `amount_out_net_gas` values are rescaled proportionally so the
-//!    final ranking reflects realistic execution cost.
+//! 4. **Gas refinement**: Before ranking across worker pools, replace each candidate's naive
+//!    `route.total_gas()` estimate (used internally by algorithms for ranking within a worker pool)
+//!    with the more accurate `estimate_gas_usage` from tycho-execution, which accounts for token
+//!    transfer costs and router overhead. The `amount_out_net_gas` values are rescaled
+//!    proportionally so the final ranking reflects realistic execution cost.
 //! 5. **Selection**: Choose best quote (max refined `amount_out_net_gas`)
 //! 6. **Encoding**: If [`EncodingOptions`](crate::EncodingOptions) are provided in the request,
 //!    encode winning solutions into executable on-chain transactions via the
@@ -104,10 +104,10 @@ fn user_margin(improvement: &BigUint, user_share_bps: u32) -> BigUint {
 /// Which liquidity a solver pool (a group of workers) routes through, and therefore what its
 /// candidates mean in a quote.
 ///
-/// A `Public` pool routes only through public liquidity and provides the committed (quoted)
+/// A public worker pool routes only through public liquidity and provides the committed (quoted)
 /// reference output; its workers are given the [`ExclusivityPolicy`] so exclusive components
-/// never enter their graphs. An `ExclusiveAccess` pool routes through all liquidity, public and
-/// exclusive components alike, and may beat that reference — in which case the protocol
+/// never enter their graphs. An exclusive-access worker pool routes through all liquidity, public
+/// and exclusive components alike, and may beat that reference — in which case the protocol
 /// captures the surplus.
 ///
 /// Serialized in snake_case (`"public_only"` / `"all"`) in `worker_pools.toml` via
@@ -128,11 +128,11 @@ pub enum LiquidityScope {
 /// Handle to a solver pool for dispatching orders.
 #[derive(Clone)]
 pub struct SolverPoolHandle {
-    /// Human-readable name for this pool (used in logging & metrics).
+    /// Human-readable name for this worker pool (used in logging & metrics).
     name: String,
-    /// Queue handle for this pool.
+    /// Queue handle for this worker pool.
     queue: TaskQueueHandle,
-    /// Whether this pool routes public-only or all liquidity.
+    /// Whether this worker pool routes public-only or all liquidity.
     liquidity_scope: LiquidityScope,
 }
 
@@ -142,15 +142,14 @@ impl SolverPoolHandle {
         Self { name: name.into(), queue, liquidity_scope: LiquidityScope::PublicOnly }
     }
 
-    /// Sets the pool's liquidity scope (e.g. [`LiquidityScope::All`] for a pool
-    /// that routes
-    /// through exclusive liquidity as well).
+    /// Sets the worker pool's liquidity scope (e.g. [`LiquidityScope::All`] for a worker pool
+    /// that routes through exclusive liquidity as well).
     pub fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = scope;
         self
     }
 
-    /// Returns the pool name.
+    /// Returns the worker pool name.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -160,7 +159,7 @@ impl SolverPoolHandle {
         &self.queue
     }
 
-    /// Returns the pool's liquidity scope.
+    /// Returns the worker pool's liquidity scope.
     pub fn liquidity_scope(&self) -> LiquidityScope {
         self.liquidity_scope
     }
@@ -179,7 +178,7 @@ pub(crate) struct OrderResponses {
 }
 
 impl OrderResponses {
-    /// Returns a copy keeping only candidates from public-scoped pools.
+    /// Returns a copy keeping only candidates from public-scoped worker pools.
     ///
     /// These form the committed reference and the ranked fallback chain (ranked by `rank_quotes`,
     /// consumed by the price guard); exclusive-access candidates are overlaid separately by
@@ -286,8 +285,8 @@ impl WorkerPoolRouter {
             refine_gas_estimates(&mut order_responses, encoding_options)?;
         }
 
-        // Map each pool name to its liquidity scope so candidate quotes can be split into public vs
-        // exclusive-access.
+        // Map each worker pool name to its liquidity scope so candidate quotes can be split into
+        // public vs exclusive-access.
         let pool_scopes: HashMap<String, LiquidityScope> = self
             .solver_pools
             .iter()
@@ -299,7 +298,7 @@ impl WorkerPoolRouter {
 
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
         // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
-        // fallback chain. When an `ExclusiveAccess`-scoped pool is configured, the winning
+        // fallback chain. When an `ExclusiveAccess`-scoped worker pool is configured, the winning
         // exclusive-access candidate is overlaid
         // onto that ranked list (prepended) by `combine_with_surplus`, so the fallbacks are
         // preserved.
@@ -409,8 +408,8 @@ impl WorkerPoolRouter {
             })
             .collect();
 
-        // Pre-compute which pool names have the ExclusiveAccess scope, for scope-aware early
-        // return gating.
+        // Pre-compute which worker pool names have the ExclusiveAccess scope, for scope-aware
+        // early return gating.
         let exclusive_access_pool_names: HashSet<String> = self
             .solver_pools
             .iter()
@@ -439,7 +438,7 @@ impl WorkerPoolRouter {
 
                 // Timeout reached
                 _ = tokio::time::sleep_until(deadline_instant) => {
-                    // Mark all remaining pools as timed out
+                    // Mark all remaining worker pools as timed out
                     let elapsed_ms = deadline.saturating_duration_since(Instant::now())
                         .as_millis() as u64;
                     for pool_name in remaining_pools.drain() {
@@ -467,10 +466,10 @@ impl WorkerPoolRouter {
                             // Extract the OrderQuote from SingleOrderQuote
                             quotes.push((pool_name.clone(), single_quote.order().clone()));
 
-                            // Scope-aware early return: when an exclusive-access pool is
-                            // configured, only fire once we have ≥1 public AND the
-                            // exclusive-access pool (so the surplus overlay has both inputs).
-                            // Without an exclusive-access pool, use pure
+                            // Scope-aware early return: when an exclusive-access worker pool is
+                            // configured, only fire once we have ≥1 public response AND the
+                            // exclusive-access worker pool's response (so the surplus overlay has
+                            // both inputs). Without an exclusive-access worker pool, use pure
                             // count-based gating (original behaviour).
                             let scope_ready = if has_exclusive_access_pool {
                                 has_public_response && has_exclusive_access_response
@@ -493,10 +492,10 @@ impl WorkerPoolRouter {
                         }
                         Some((pool_name, Err(e))) => {
                             remaining_pools.remove(&pool_name);
-                            // A failed exclusive-access pool still counts as "responded" for
-                            // gating — we know it won't produce a surplus quote, so the public
-                            // pool can
-                            // early-return without waiting for a result that will never come.
+                            // A failed exclusive-access worker pool still counts as "responded"
+                            // for gating — we know it won't produce a surplus quote, so the
+                            // public worker pools can early-return without waiting for a result
+                            // that will never come.
                             if exclusive_access_pool_names.contains(&pool_name) {
                                 has_exclusive_access_response = true;
                             }
@@ -522,7 +521,7 @@ impl WorkerPoolRouter {
         histogram!("worker_router_solve_duration_seconds").record(duration);
         histogram!("worker_router_solver_responses").record(quotes.len() as f64);
 
-        // Record failures by pool and error type
+        // Record failures by worker pool and error type
         for (pool_name, error) in &failed_solvers {
             let error_type = match error {
                 SolveError::Timeout { .. } => "timeout",
@@ -687,10 +686,10 @@ impl WorkerPoolRouter {
 /// Builds the final ranked quote list for one order by deciding whether an exclusive-access
 /// route should execute instead of the best public route.
 ///
-/// Inputs: `public_ranked` is the ranking of public-pool quotes from `rank_quotes`; its head is
-/// the public reference from which the committed amount is derived. `responses` additionally
-/// holds the candidates from `ExclusiveAccess`-scoped pools (routes that may use exclusive
-/// components).
+/// Inputs: `public_ranked` is the ranking of public-worker-pool quotes from `rank_quotes`; its
+/// head is the public reference from which the committed amount is derived. `responses`
+/// additionally holds the candidates from `ExclusiveAccess`-scoped worker pools (routes that may
+/// use exclusive components).
 ///
 /// A candidate must at least match the public reference net of gas; what it produces on top,
 /// `improvement = exclusive_net − public_net`, is then split. The user's net target is
@@ -854,7 +853,7 @@ fn combine_with_surplus(
                 // its path (validator), so path_final_out equals the leg's output and this
                 // divides by itself — a plain subtraction. Once mid-path legs are allowed,
                 // the "user gets at least the committed amount" guarantee also requires the
-                // pools after the leg to have diminishing returns.
+                // components after the leg to have diminishing returns.
                 let captured_leg = if *path_final_out == BigUint::ZERO {
                     BigUint::ZERO
                 } else {
@@ -896,7 +895,7 @@ fn combine_with_surplus(
 ///
 /// Both constraints are v1 restrictions that keep per-leg surplus attribution exact and
 /// unambiguous: a mid-route leg would need inverse simulation to convert the surplus into its
-/// token, and multiple exclusive legs make the per-pool attribution non-unique. Both are
+/// token, and multiple exclusive legs make the per-component attribution non-unique. Both are
 /// deferred to a future version. Terminal is defined as producing the route's overall output
 /// token (`Route::output_token`).
 fn has_valid_exclusive_route(quote: &OrderQuote, policy: &ExclusivityPolicy) -> bool {
@@ -1751,9 +1750,9 @@ mod tests {
         make_exclusive_quote_with_leg(amount_out, amount_out, amount_out)
     }
 
-    /// Split route with two parallel branches (same token pair): a public pool producing
-    /// `public_leg_out` and an exclusive pool producing `exclusive_leg_out`. Route output is the
-    /// sum of the branches; zero gas cost.
+    /// Split route with two parallel branches (same token pair): a public component producing
+    /// `public_leg_out` and an exclusive component producing `exclusive_leg_out`. Route output is
+    /// the sum of the branches; zero gas cost.
     fn make_exclusive_split_quote(public_leg_out: u64, exclusive_leg_out: u64) -> SingleOrderQuote {
         let make_token = |addr: Address| Token {
             address: addr,
@@ -2275,7 +2274,7 @@ mod tests {
         true)]
     #[case::no_exclusive_leg(
         &[("uniswap_v2", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)], false)]
-    // Two exclusive legs: out of scope for v1 (ambiguous per-pool attribution).
+    // Two exclusive legs: out of scope for v1 (ambiguous per-component attribution).
     #[case::two_exclusive_legs(
         &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x01, 0x02)], false)]
     // Diamond split: 0x01 splits into 0x01->0x02 (exclusive) and 0x01->0x03, both merging into

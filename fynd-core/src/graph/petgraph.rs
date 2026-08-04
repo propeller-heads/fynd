@@ -28,7 +28,7 @@ use crate::{
 
 /// Data stored on each edge of the graph.
 ///
-/// Contains the component ID (which pool this edge represents) and
+/// Contains the component ID (which component this edge represents) and
 /// optional algorithm-specific data. The type `D` is generic to allow
 /// different algorithms to store their own scoring data.
 ///
@@ -313,14 +313,14 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
 impl<D: Clone + super::EdgeWeightFromSimAndDerived> PetgraphStableDiGraphManager<D> {
     /// Updates edge weights using simulation states and pre-computed derived data.
     ///
-    /// Uses pre-computed derived data (spot prices, pool depths, etc.) to update
+    /// Uses pre-computed derived data (spot prices, component depths, etc.) to update
     /// edge weights. This is more accurate than computing from scratch as it uses
     /// data computed with slippage thresholds via `query_pool_swap` or binary search.
     ///
     /// # Arguments
     ///
     /// * `market` - The market data containing simulation states and tokens
-    /// * `derived` - Pre-computed derived data (pool depths, spot prices, etc.)
+    /// * `derived` - Pre-computed derived data (component depths, spot prices, etc.)
     ///
     /// # Returns
     ///
@@ -496,19 +496,21 @@ mod tests {
         let token_c = addr("0x6B175474E89094C44Da98b954EedeAC495271d0F"); // DAI
         let token_d = addr("0xdAC17F958D2ee523a2206206994597C13D831ec7"); // USDT
 
-        // Pool 1: A-B-C (3-token pool, fully connected)
-        topology
-            .insert("pool1".to_string(), vec![token_a.clone(), token_b.clone(), token_c.clone()]);
-        // Pool 2: C-D (2-token pool, overlapping with pool 1)
-        topology.insert("pool2".to_string(), vec![token_c.clone(), token_d.clone()]);
+        // Component 1: A-B-C (3-token component, fully connected)
+        topology.insert(
+            "component1".to_string(),
+            vec![token_a.clone(), token_b.clone(), token_c.clone()],
+        );
+        // Component 2: C-D (2-token component, overlapping with component 1)
+        topology.insert("component2".to_string(), vec![token_c.clone(), token_d.clone()]);
 
         manager.initialize_graph(&topology);
 
         let graph = manager.graph();
         // 4 unique tokens
         assert_eq!(graph.node_count(), 4);
-        // Pool 1: 3 pairs × 2 directions = 6 edges (A-B, B-A, A-C, C-A, B-C, C-B)
-        // Pool 2: 1 pair × 2 directions = 2 edges (C-D, D-C)
+        // Component 1: 3 pairs × 2 directions = 6 edges (A-B, B-A, A-C, C-A, B-C, C-B)
+        // Component 2: 1 pair × 2 directions = 2 edges (C-D, D-C)
         // Total: 8 edges
         assert_eq!(graph.edge_count(), 8);
 
@@ -518,64 +520,64 @@ mod tests {
         let node_c = manager.find_node(&token_c).unwrap();
         let node_d = manager.find_node(&token_d).unwrap();
 
-        // Pool 1 edges: A-B, B-A, A-C, C-A, B-C, C-B (bidirectional)
+        // Component 1 edges: A-B, B-A, A-C, C-A, B-C, C-B (bidirectional)
         assert_eq!(
             graph
                 .edge_weight(graph.find_edge(node_a, node_b).unwrap())
                 .unwrap()
                 .component_id,
-            "pool1".to_string()
+            "component1".to_string()
         );
         assert_eq!(
             graph
                 .edge_weight(graph.find_edge(node_b, node_a).unwrap())
                 .unwrap()
                 .component_id,
-            "pool1".to_string()
+            "component1".to_string()
         );
         assert_eq!(
             graph
                 .edge_weight(graph.find_edge(node_a, node_c).unwrap())
                 .unwrap()
                 .component_id,
-            "pool1".to_string()
+            "component1".to_string()
         );
         assert_eq!(
             graph
                 .edge_weight(graph.find_edge(node_c, node_a).unwrap())
                 .unwrap()
                 .component_id,
-            "pool1".to_string()
+            "component1".to_string()
         );
         assert_eq!(
             graph
                 .edge_weight(graph.find_edge(node_b, node_c).unwrap())
                 .unwrap()
                 .component_id,
-            "pool1".to_string()
+            "component1".to_string()
         );
         assert_eq!(
             graph
                 .edge_weight(graph.find_edge(node_c, node_b).unwrap())
                 .unwrap()
                 .component_id,
-            "pool1".to_string()
+            "component1".to_string()
         );
 
-        // Pool 2 edges: C-D, D-C (bidirectional)
+        // Component 2 edges: C-D, D-C (bidirectional)
         assert_eq!(
             graph
                 .edge_weight(graph.find_edge(node_c, node_d).unwrap())
                 .unwrap()
                 .component_id,
-            "pool2".to_string()
+            "component2".to_string()
         );
         assert_eq!(
             graph
                 .edge_weight(graph.find_edge(node_d, node_c).unwrap())
                 .unwrap()
                 .component_id,
-            "pool2".to_string()
+            "component2".to_string()
         );
     }
 
@@ -587,9 +589,9 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Multiple components connecting the same token pair
-        topology.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        topology.insert("pool2".to_string(), vec![token_a.clone(), token_b.clone()]);
-        topology.insert("pool3".to_string(), vec![token_a.clone(), token_b.clone()]);
+        topology.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        topology.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()]);
+        topology.insert("component3".to_string(), vec![token_a.clone(), token_b.clone()]);
 
         manager.initialize_graph(&topology);
 
@@ -614,9 +616,9 @@ mod tests {
             .collect();
 
         // Verify all three component IDs are present
-        assert!(component_ids.contains(&&"pool1".to_string()));
-        assert!(component_ids.contains(&&"pool2".to_string()));
-        assert!(component_ids.contains(&&"pool3".to_string()));
+        assert!(component_ids.contains(&&"component1".to_string()));
+        assert!(component_ids.contains(&&"component2".to_string()));
+        assert!(component_ids.contains(&&"component3".to_string()));
     }
 
     #[test]
@@ -627,7 +629,7 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Add first component with token A and B
-        components.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
         manager
             .add_components(&components)
             .unwrap();
@@ -637,7 +639,7 @@ mod tests {
 
         // Add second component with overlapping token A
         components.clear();
-        components.insert("pool2".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()]);
         manager
             .add_components(&components)
             .unwrap();
@@ -654,17 +656,17 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Mix valid and invalid components
-        components.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        components.insert("pool2".to_string(), vec![]);
-        components.insert("pool3".to_string(), vec![]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component2".to_string(), vec![]);
+        components.insert("component3".to_string(), vec![]);
         let result = manager.add_components(&components);
 
         assert!(result.is_err());
         match result.unwrap_err() {
             GraphError::InvalidComponents(ids) => {
                 assert_eq!(ids.len(), 2);
-                assert!(ids.contains(&"pool2".to_string()));
-                assert!(ids.contains(&"pool3".to_string()));
+                assert!(ids.contains(&"component2".to_string()));
+                assert!(ids.contains(&"component3".to_string()));
             }
             _ => panic!("Expected InvalidComponents error"),
         }
@@ -682,30 +684,30 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Add components first
-        components.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        components.insert("pool2".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()]);
         manager
             .add_components(&components)
             .unwrap();
 
         // Try to remove mix of existing and non-existing components
         let result = manager.remove_components(&[
-            "pool1".to_string(),
-            "pool3".to_string(),
-            "pool4".to_string(),
+            "component1".to_string(),
+            "component3".to_string(),
+            "component4".to_string(),
         ]);
 
         assert!(result.is_err());
         match result.unwrap_err() {
             GraphError::ComponentsNotFound(ids) => {
                 assert_eq!(ids.len(), 2, "Expected 2 missing components");
-                assert!(ids.contains(&"pool3".to_string()));
-                assert!(ids.contains(&"pool4".to_string()));
+                assert!(ids.contains(&"component3".to_string()));
+                assert!(ids.contains(&"component4".to_string()));
             }
             _ => panic!("Expected ComponentsNotFound error"),
         }
 
-        // Verify only pool2 edges remain
+        // Verify only component2 edges remain
         for edge in manager.graph().edge_indices() {
             assert_eq!(
                 manager
@@ -713,7 +715,7 @@ mod tests {
                     .edge_weight(edge)
                     .unwrap()
                     .component_id,
-                "pool2".to_string()
+                "component2".to_string()
             );
         }
     }
@@ -726,17 +728,18 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
         let token_c = addr("0x6B175474E89094C44Da98b954EedeAC495271d0F"); // DAI
 
-        // Initialize with pool1 connecting A-B, and pool2 connecting B-C
-        topology.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        topology.insert("pool2".to_string(), vec![token_b.clone(), token_c.clone()]);
+        // Initialize with component1 connecting A-B, and component2 connecting B-C
+        topology.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        topology.insert("component2".to_string(), vec![token_b.clone(), token_c.clone()]);
         manager.initialize_graph(&topology);
 
         // Test 1: Component not found
-        let result = manager.set_edge_weight(&"pool3".to_string(), &token_a, &token_b, (), true);
+        let result =
+            manager.set_edge_weight(&"component3".to_string(), &token_a, &token_b, (), true);
         assert!(result.is_err());
         match result.unwrap_err() {
             GraphError::ComponentsNotFound(ids) => {
-                assert_eq!(ids, vec!["pool3".to_string()]);
+                assert_eq!(ids, vec!["component3".to_string()]);
             }
             _ => panic!("Expected ComponentsNotFound error"),
         }
@@ -744,7 +747,7 @@ mod tests {
         // Test 2: Token not found
         let non_existent_token = addr("0x0000000000000000000000000000000000000000");
         let result = manager.set_edge_weight(
-            &"pool1".to_string(),
+            &"component1".to_string(),
             &token_a,
             &non_existent_token, // Non-existent token
             (),
@@ -760,9 +763,9 @@ mod tests {
 
         // Test 3: Component doesn't connect the specified tokens
         let result = manager.set_edge_weight(
-            &"pool1".to_string(),
+            &"component1".to_string(),
             &token_a,
-            &token_c, // pool1 doesn't connect A-C, only A-B
+            &token_c, // component1 doesn't connect A-C, only A-B
             (),
             true,
         );
@@ -771,7 +774,7 @@ mod tests {
             GraphError::MissingComponentBetweenTokens(in_token, out_token, comp_id) => {
                 assert_eq!(in_token, token_a);
                 assert_eq!(out_token, token_c);
-                assert_eq!(comp_id, "pool1".to_string());
+                assert_eq!(comp_id, "component1".to_string());
             }
             _ => panic!("Expected MissingComponentBetweenTokens error"),
         }
@@ -786,8 +789,8 @@ mod tests {
 
         // Create an event with both add and remove operations that will fail
         let event = MarketEvent::MarketUpdated {
-            added_components: HashMap::from([("pool1".to_string(), vec![])]),
-            removed_components: vec!["pool2".to_string()],
+            added_components: HashMap::from([("component1".to_string(), vec![])]),
+            removed_components: vec!["component2".to_string()],
             updated_components: vec![],
         };
 
@@ -818,7 +821,7 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 
         let mut components = HashMap::new();
-        components.insert("pool1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
 
         manager
             .add_components(&components)
@@ -840,7 +843,7 @@ mod tests {
     #[test]
     fn edge_weight_cleared_on_spot_price_miss() {
         // Regression: when spot price computation fails, stale edge weights must be cleared so the
-        // pool is excluded from path scoring rather than routed with an outdated price.
+        // component is excluded from path scoring rather than routed with an outdated price.
         use num_bigint::BigUint;
         use num_traits::One;
         use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
@@ -852,8 +855,12 @@ mod tests {
 
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
-        let (market, mut manager) =
-            setup_market_weighted(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let (market, mut manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0),
+        )]);
 
         assert!(
             manager
@@ -877,7 +884,7 @@ mod tests {
         }
         let mut derived = DerivedData::new();
         derived.set_spot_prices(Default::default(), vec![], 10, true);
-        derived.set_pool_depths(Default::default(), vec![], 10, true);
+        derived.set_component_depths(Default::default(), vec![], 10, true);
         derived.set_token_prices(token_prices, vec![], 10, true);
 
         manager.update_edge_weights_with_derived(market_read(&market), &derived);

@@ -24,7 +24,7 @@
 /// [`algorithm::BellmanFordAlgorithm`], [`PathFrankWolfeAlgorithm`],
 /// [`algorithm::WaterFillAlgorithm`], and the pluggable [`Algorithm`] trait.
 pub mod algorithm;
-/// Derived data computations: spot prices, pool depths, and gas prices.
+/// Derived data computations: spot prices, component depths, and gas prices.
 pub mod derived;
 /// Encodes solved routes into ABI-encoded on-chain calldata via Tycho's router contracts.
 pub mod encoding;

@@ -144,14 +144,14 @@ async fn wait_for_health(client: &FyndClient, fynd_url: &str) -> anyhow::Result<
                 if tokio::time::Instant::now() >= deadline {
                     bail!(
                         "solver at {fynd_url} not healthy after 30s \
-                         (last update: {}ms ago, {} pools); \
+                         (last update: {}ms ago, {} solver pools); \
                          wait for market data to load",
                         h.last_update_ms(),
                         h.num_solver_pools()
                     );
                 }
                 info!(
-                    "Solver not ready yet ({} pools, last update {}ms ago), retrying...",
+                    "Solver not ready yet ({} solver pools, last update {}ms ago), retrying...",
                     h.num_solver_pools(),
                     h.last_update_ms()
                 );
@@ -430,7 +430,7 @@ async fn main() -> anyhow::Result<()> {
         println!("Route ({} hops):", route.swaps().len());
         for (i, swap) in route.swaps().iter().enumerate() {
             println!(
-                "  {}. 0x{} -> 0x{} via {} (pool: {})",
+                "  {}. 0x{} -> 0x{} via {} (component: {})",
                 i + 1,
                 hex::encode(swap.token_in()),
                 hex::encode(swap.token_out()),

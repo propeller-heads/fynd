@@ -413,7 +413,7 @@ mod tests {
     fn sample_dto_swap() -> dto::Swap {
         serde_json::from_str(
             r#"{
-            "component_id": "pool-1",
+            "component_id": "component-1",
             "protocol": "uniswap-v3",
             "token_in": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "token_out": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -533,7 +533,7 @@ mod tests {
     #[test]
     fn swap_try_from_dto_happy_path() {
         let client_swap = Swap::try_from(sample_dto_swap()).unwrap();
-        assert_eq!(client_swap.component_id(), "pool-1");
+        assert_eq!(client_swap.component_id(), "component-1");
         assert_eq!(client_swap.protocol(), "uniswap-v3");
         assert_eq!(client_swap.token_in(), &Bytes::copy_from_slice(&[0xaa; 20]));
         assert_eq!(client_swap.token_out(), &Bytes::copy_from_slice(&[0xbb; 20]));

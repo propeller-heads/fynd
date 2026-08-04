@@ -307,14 +307,14 @@ mod tests {
         let weth_token = make_token(weth_addr.clone(), "WETH");
         let usdc_token = make_token(usdc_addr.clone(), "USDC");
         Swap::new(
-            "weth-usdc-pool".to_string(),
+            "weth-usdc-component".to_string(),
             "uniswap_v2".to_string(),
             weth_addr,
             usdc_addr,
             BigUint::from(1000u64),
             BigUint::from(950u64),
             BigUint::from(100_000u64),
-            component("weth-usdc-pool", &[weth_token, usdc_token]),
+            component("weth-usdc-component", &[weth_token, usdc_token]),
             Box::new(MockProtocolSim::default()),
         )
     }

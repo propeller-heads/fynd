@@ -111,12 +111,12 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
 
         // Look up pre-computed depth; skip edge if unavailable.
         let raw_depth = match derived
-            .pool_depths()
+            .component_depths()
             .and_then(|d| d.get(&key))
         {
             Some(d) => d.to_f64().unwrap_or(0.0),
             None => {
-                trace!(component_id = %component_id, "pool depth not found, skipping edge");
+                trace!(component_id = %component_id, "component depth not found, skipping edge");
                 return None;
             }
         };
@@ -312,7 +312,7 @@ impl MostLiquidAlgorithm {
     /// Returns `None` if the path cannot be scored (empty path or missing edge weights).
     /// Paths that return `None` are filtered out of simulation.
     ///
-    /// Higher score = better path candidate. Paths through deeper pools rank higher.
+    /// Higher score = better path candidate. Paths through deeper components rank higher.
     pub(crate) fn try_score_path(path: &Path<DepthAndPrice>) -> Option<f64> {
         if path.is_empty() {
             trace!("cannot score empty path");
@@ -335,8 +335,8 @@ impl MostLiquidAlgorithm {
         Some(price * min_depth)
     }
 
-    /// Simulates swaps along a path using each pool's `ProtocolSim::get_amount_out`.
-    /// Tracks intermediate state changes to handle routes that revisit the same pool.
+    /// Simulates swaps along a path using each component's `ProtocolSim::get_amount_out`.
+    /// Tracks intermediate state changes to handle routes that revisit the same component.
     ///
     /// Calculates `net_amount_out` by subtracting gas cost from the output amount.
     /// The result can be negative if gas cost exceeds output (e.g., inaccurate gas estimation).
@@ -357,7 +357,7 @@ impl MostLiquidAlgorithm {
         let mut current_amount = amount_in.clone();
         let mut swaps = Vec::with_capacity(path.len());
 
-        // Track state overrides for pools we've already swapped through.
+        // Track state overrides for components we've already swapped through.
         let mut state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
         let mut tokens: HashMap<Address, Token> = HashMap::new();
 
@@ -724,7 +724,7 @@ impl Algorithm for MostLiquidAlgorithm {
     fn computation_requirements(&self) -> ComputationRequirements {
         // MostLiquidAlgorithm uses token prices for two purposes:
         // 1. Converting gas costs from wei to output token terms (net_amount_out)
-        // 2. Normalizing pool depth to gas token units for path scoring (from_sim_and_derived)
+        // 2. Normalizing component depth to gas token units for path scoring (from_sim_and_derived)
         //
         // Token prices are marked as `allow_stale` since they don't change much
         // block-to-block. Stale prices affect scoring order (not correctness)
@@ -834,7 +834,7 @@ mod tests {
         let (a, b, _, _) = addrs();
         let mut m = linear_graph();
 
-        // Set weights for both directions of the ab pool
+        // Set weights for both directions of the ab component
         // A->B: spot=2.0, depth=1000, fee=0.3%
         // B->A: spot=0.6, depth=800, fee=0.3%
         m.set_edge_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0), false)
@@ -884,13 +884,13 @@ mod tests {
 
     #[test]
     fn test_from_sim_and_derived_failed_spot_price_returns_none() {
-        let key = pair_key("pool1", 0x01, 0x02);
-        let key_str = pair_key_str("pool1", 0x01, 0x02);
+        let key = pair_key("component1", 0x01, 0x02);
+        let key_str = pair_key_str("component1", 0x01, 0x02);
         let tok_in = token(0x01, "A");
         let tok_out = token(0x02, "B");
 
         let mut derived = DerivedData::new();
-        // spot price fails, pool depth not computed
+        // spot price fails, component depth not computed
         derived.set_spot_prices(
             Default::default(),
             vec![FailedItem {
@@ -900,7 +900,7 @@ mod tests {
             10,
             true,
         );
-        derived.set_pool_depths(Default::default(), vec![], 10, true);
+        derived.set_component_depths(Default::default(), vec![], 10, true);
         derived.set_token_prices(
             make_token_prices(&[tok_in.address.clone(), tok_out.address.clone()]),
             vec![],
@@ -918,9 +918,9 @@ mod tests {
     }
 
     #[test]
-    fn test_from_sim_and_derived_failed_pool_depth_returns_none() {
-        let key = pair_key("pool1", 0x01, 0x02);
-        let key_str = pair_key_str("pool1", 0x01, 0x02);
+    fn test_from_sim_and_derived_failed_component_depth_returns_none() {
+        let key = pair_key("component1", 0x01, 0x02);
+        let key_str = pair_key_str("component1", 0x01, 0x02);
         let tok_in = token(0x01, "A");
         let tok_out = token(0x02, "B");
 
@@ -929,8 +929,8 @@ mod tests {
         let mut prices = crate::derived::types::SpotPrices::default();
         prices.insert(key.clone(), 1.5);
         derived.set_spot_prices(prices, vec![], 10, true);
-        // pool depth fails
-        derived.set_pool_depths(
+        // component depth fails
+        derived.set_component_depths(
             Default::default(),
             vec![FailedItem {
                 key: key_str,
@@ -957,8 +957,8 @@ mod tests {
 
     #[test]
     fn test_from_sim_and_derived_both_failed_returns_none() {
-        let key = pair_key("pool1", 0x01, 0x02);
-        let key_str = pair_key_str("pool1", 0x01, 0x02);
+        let key = pair_key("component1", 0x01, 0x02);
+        let key_str = pair_key_str("component1", 0x01, 0x02);
         let tok_in = token(0x01, "A");
         let tok_out = token(0x02, "B");
 
@@ -972,7 +972,7 @@ mod tests {
             10,
             true,
         );
-        derived.set_pool_depths(
+        derived.set_component_depths(
             Default::default(),
             vec![FailedItem {
                 key: key_str,
@@ -999,19 +999,19 @@ mod tests {
 
     #[test]
     fn test_from_sim_and_derived_missing_token_price_returns_none() {
-        let key = pair_key("pool1", 0x01, 0x02);
+        let key = pair_key("component1", 0x01, 0x02);
         let tok_in = token(0x01, "A");
         let tok_out = token(0x02, "B");
 
         let mut derived = DerivedData::new();
-        // Spot price and pool depth both present
+        // Spot price and component depth both present
         let mut prices = crate::derived::types::SpotPrices::default();
         prices.insert(key.clone(), 1.5);
         derived.set_spot_prices(prices, vec![], 10, true);
 
-        let mut depths = crate::derived::types::PoolDepths::default();
+        let mut depths = crate::derived::types::ComponentDepths::default();
         depths.insert(key.clone(), BigUint::from(1000u64));
-        derived.set_pool_depths(depths, vec![], 10, true);
+        derived.set_component_depths(depths, vec![], 10, true);
 
         // No token prices set — normalization should return None
 
@@ -1029,7 +1029,7 @@ mod tests {
 
     #[test]
     fn test_from_sim_and_derived_normalizes_depth_to_eth() {
-        let key = pair_key("pool1", 0x01, 0x02);
+        let key = pair_key("component1", 0x01, 0x02);
         let tok_in = token(0x01, "A");
         let tok_out = token(0x02, "B");
 
@@ -1041,9 +1041,9 @@ mod tests {
         derived.set_spot_prices(spot, vec![], 10, true);
 
         // Raw depth: 2_000_000 token_in units
-        let mut depths = crate::derived::types::PoolDepths::default();
+        let mut depths = crate::derived::types::ComponentDepths::default();
         depths.insert(key.clone(), BigUint::from(2_000_000u64));
-        derived.set_pool_depths(depths, vec![], 10, true);
+        derived.set_component_depths(depths, vec![], 10, true);
 
         // Token price: 2000 token_in per 1 ETH (numerator=2000, denominator=1)
         // So 2_000_000 raw units / 2000 = 1000 ETH
@@ -1072,7 +1072,7 @@ mod tests {
 
     #[test]
     fn test_from_sim_and_derived_normalizes_depth_fractional_price() {
-        let key = pair_key("pool1", 0x01, 0x02);
+        let key = pair_key("component1", 0x01, 0x02);
         let tok_in = token(0x01, "A");
         let tok_out = token(0x02, "B");
 
@@ -1083,9 +1083,9 @@ mod tests {
         derived.set_spot_prices(spot, vec![], 10, true);
 
         // Raw depth: 500 token_in units
-        let mut depths = crate::derived::types::PoolDepths::default();
+        let mut depths = crate::derived::types::ComponentDepths::default();
         depths.insert(key.clone(), BigUint::from(500u64));
-        derived.set_pool_depths(depths, vec![], 10, true);
+        derived.set_component_depths(depths, vec![], 10, true);
 
         // Token price: numerator=3, denominator=2 -> 1.5 tokens per ETH
         // depth_in_eth = 500 * 2 / 3 = 333.333...
@@ -1140,7 +1140,7 @@ mod tests {
         let p = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 3, None).unwrap();
         assert_eq!(all_ids(p), HashSet::from([vec!["ab", "bc", "cd"]]));
 
-        // Reverse: D->A (bidirectional pools)
+        // Reverse: D->A (bidirectional components)
         let p = MostLiquidAlgorithm::find_paths(g, &d, &a, 1, 3, None).unwrap();
         assert_eq!(all_ids(p), HashSet::from([vec!["cd", "bc", "ab"]]));
     }
@@ -1163,16 +1163,16 @@ mod tests {
     }
 
     #[test]
-    fn test_find_paths_parallel_pools() {
+    fn test_find_paths_parallel_components() {
         let (a, b, c, _) = addrs();
         let m = parallel_graph();
         let g = m.graph();
 
-        // A->B: 3 parallel pools = 3 paths
+        // A->B: 3 parallel components = 3 paths
         let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 1, None).unwrap();
         assert_eq!(all_ids(p), HashSet::from([vec!["ab1"], vec!["ab2"], vec!["ab3"]]));
 
-        // A->C: 3 A->B pools × 2 B->C pools = 6 paths
+        // A->C: 3 A->B components × 2 B->C components = 6 paths
         let p = MostLiquidAlgorithm::find_paths(g, &a, &c, 1, 2, None).unwrap();
         assert_eq!(
             all_ids(p),
@@ -1215,12 +1215,12 @@ mod tests {
     #[test]
     fn test_find_paths_cyclic_same_source_dest() {
         let (a, _, _, _) = addrs();
-        // Use parallel_graph with 3 A<->B pools to verify all combinations
+        // Use parallel_graph with 3 A<->B components to verify all combinations
         let m = parallel_graph();
         let g = m.graph();
 
-        // A->A (cyclic path) with 2 hops: should find all 9 combinations (3 pools × 3 pools)
-        // Note: min_hops=2 because cyclic paths require at least 2 hops
+        // A->A (cyclic path) with 2 hops: should find all 9 combinations (3 components × 3
+        // components) Note: min_hops=2 because cyclic paths require at least 2 hops
         let p = MostLiquidAlgorithm::find_paths(g, &a, &a, 2, 2, None).unwrap();
         assert_eq!(
             all_ids(p),
@@ -1302,18 +1302,22 @@ mod tests {
 
     // ==================== simulate_path Tests ====================
     //
-    // Note: These tests use MockProtocolSim which is detected as a "native" pool.
-    // Ideally we should also test VM pool state override behavior (vm_state_override),
+    // Note: These tests use MockProtocolSim which is detected as a "native" component.
+    // Ideally we should also test VM component state override behavior (vm_state_override),
     // which shares state across all VM components. This would require a mock that
-    // downcasts to EVMPoolState<PreCachedDB>, or integration tests with real VM pools.
+    // downcasts to EVMPoolState<PreCachedDB>, or integration tests with real VM components.
 
     #[test]
     fn test_simulate_path_single_hop() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        let (market, manager) =
-            setup_market_weighted(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let (market, manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0),
+        )]);
 
         let paths = MostLiquidAlgorithm::find_paths(
             manager.graph(),
@@ -1337,7 +1341,7 @@ mod tests {
         assert_eq!(result.route().swaps().len(), 1);
         assert_eq!(*result.route().swaps()[0].amount_in(), BigUint::from(100u64));
         assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(200u64)); // 100 * 2
-        assert_eq!(result.route().swaps()[0].component_id(), "pool1");
+        assert_eq!(result.route().swaps()[0].component_id(), "component1");
     }
 
     #[test]
@@ -1347,8 +1351,8 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_weighted(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool2", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component2", &token_b, &token_c, MockProtocolSim::new(3.0)),
         ]);
 
         let paths = MostLiquidAlgorithm::find_paths(
@@ -1379,14 +1383,18 @@ mod tests {
     }
 
     #[test]
-    fn test_simulate_path_same_pool_twice_uses_updated_state() {
-        // Route: A -> B -> A through the same pool
+    fn test_simulate_path_same_component_twice_uses_updated_state() {
+        // Route: A -> B -> A through the same component
         // First swap uses multiplier=2, second should use multiplier=3 (updated state)
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        let (market, manager) =
-            setup_market_weighted(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let (market, manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0),
+        )]);
 
         // A->B->A path requires min_hops=2, max_hops=2
         // Since the graph is bidirectional, we should get A->B->A path
@@ -1425,14 +1433,20 @@ mod tests {
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
 
-        let (market, _) =
-            setup_market_weighted(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let (market, _) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0),
+        )]);
         let market = market_read(&market);
 
         // Add token C to graph but not to market (A->B->C)
         let mut topology = market.component_topology();
-        topology
-            .insert("pool2".to_string(), vec![token_b.address.clone(), token_c.address.clone()]);
+        topology.insert(
+            "component2".to_string(),
+            vec![token_b.address.clone(), token_c.address.clone()],
+        );
         let mut manager = PetgraphStableDiGraphManager::default();
         manager.initialize_graph(&topology);
 
@@ -1455,12 +1469,16 @@ mod tests {
     fn test_simulate_path_missing_component_returns_data_not_found() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
-        let (market, manager) =
-            setup_market_weighted(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let (market, manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0),
+        )]);
 
         // Remove the component but keep tokens and graph
         let mut market_write = market.try_write().unwrap();
-        market_write.remove_components([&"pool1".to_string()]);
+        market_write.remove_components([&"component1".to_string()]);
         drop(market_write);
 
         let graph = manager.graph();
@@ -1533,8 +1551,12 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        let (market, manager) =
-            setup_market_weighted(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let (market, manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0),
+        )]);
 
         let algorithm = MostLiquidAlgorithm::with_config(
             AlgorithmConfig::new(1, 1, Duration::from_millis(100), None).unwrap(),
@@ -1554,11 +1576,11 @@ mod tests {
     #[tokio::test]
     async fn test_find_best_route_ranks_by_net_amount_out() {
         // Tests that route selection is based on net_amount_out (output - gas cost),
-        // not just gross output. Three parallel pools with different spot_price/gas combos:
+        // not just gross output. Three parallel components with different spot_price/gas combos:
         //
         // Gas price = 100 wei/gas (set by setup_market_weighted)
         //
-        // | Pool      | spot_price | gas | Output (1000 in) | Gas Cost (gas*100) | Net   |
+        // | Component      | spot_price | gas | Output (1000 in) | Gas Cost (gas*100) | Net   |
         // |-----------|------------|-----|------------------|-------------------|-------|
         // | best      | 3          | 10  | 3000             | 1000              | 2000  |
         // | low_out   | 2          | 5   | 2000             | 500               | 1500  |
@@ -1586,7 +1608,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Should select "best" pool for highest net_amount_out (2000)
+        // Should select "best" component for highest net_amount_out (2000)
         assert_eq!(result.route().swaps().len(), 1);
         assert_eq!(result.route().swaps()[0].component_id(), "best");
         assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(3000u64));
@@ -1599,8 +1621,12 @@ mod tests {
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C"); // Disconnected
 
-        let (market, manager) =
-            setup_market_weighted(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let (market, manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0),
+        )]);
 
         let algorithm = MostLiquidAlgorithm::new();
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
@@ -1618,8 +1644,8 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_weighted(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool2", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component2", &token_b, &token_c, MockProtocolSim::new(3.0)),
         ]);
 
         let algorithm = MostLiquidAlgorithm::with_config(
@@ -1636,24 +1662,24 @@ mod tests {
         // A->B: ONE_ETH*2, B->C: (ONE_ETH*2)*3
         assert_eq!(result.route().swaps().len(), 2);
         assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(ONE_ETH * 2));
-        assert_eq!(result.route().swaps()[0].component_id(), "pool1".to_string());
+        assert_eq!(result.route().swaps()[0].component_id(), "component1".to_string());
         assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(ONE_ETH * 2 * 3));
-        assert_eq!(result.route().swaps()[1].component_id(), "pool2".to_string());
+        assert_eq!(result.route().swaps()[1].component_id(), "component2".to_string());
     }
 
     #[tokio::test]
     async fn test_find_best_route_skips_paths_without_edge_weights() {
-        // Pool1 has edge weights (scoreable), Pool2 doesn't (filtered out during scoring)
+        // Component1 has edge weights (scoreable), Component2 doesn't (filtered out during scoring)
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        // Set up market with both pools using new API
+        // Set up market with both components using new API
         let mut market = MarketState::new();
-        let pool1_state = MockProtocolSim::new(2.0);
-        let pool2_state = MockProtocolSim::new(3.0); // Higher multiplier but no edge weight
+        let component1_state = MockProtocolSim::new(2.0);
+        let component2_state = MockProtocolSim::new(3.0); // Higher multiplier but no edge weight
 
-        let pool1_comp = component("pool1", &[token_a.clone(), token_b.clone()]);
-        let pool2_comp = component("pool2", &[token_a.clone(), token_b.clone()]);
+        let component1_comp = component("component1", &[token_a.clone(), token_b.clone()]);
+        let component2_comp = component("component2", &[token_a.clone(), token_b.clone()]);
 
         // Set gas price (required for simulation)
         market.update_gas_price(BlockGasPrice {
@@ -1664,26 +1690,27 @@ mod tests {
         });
 
         // Insert components
-        market.upsert_components(vec![pool1_comp, pool2_comp]);
+        market.upsert_components(vec![component1_comp, component2_comp]);
 
         // Insert states
         market.update_states(vec![
-            ("pool1".to_string(), Box::new(pool1_state.clone()) as Box<dyn ProtocolSim>),
-            ("pool2".to_string(), Box::new(pool2_state) as Box<dyn ProtocolSim>),
+            ("component1".to_string(), Box::new(component1_state.clone()) as Box<dyn ProtocolSim>),
+            ("component2".to_string(), Box::new(component2_state) as Box<dyn ProtocolSim>),
         ]);
 
         // Insert tokens
         market.upsert_tokens(vec![token_a.clone(), token_b.clone()]);
 
-        // Initialize graph with both pools
+        // Initialize graph with both components
         let mut manager = PetgraphStableDiGraphManager::default();
         manager.initialize_graph(&market.component_topology());
 
-        // Only set edge weights for pool1, NOT pool2
-        let weight = DepthAndPrice::from_protocol_sim(&pool1_state, &token_a, &token_b).unwrap();
+        // Only set edge weights for component1, NOT component2
+        let weight =
+            DepthAndPrice::from_protocol_sim(&component1_state, &token_a, &token_b).unwrap();
         manager
             .set_edge_weight(
-                &"pool1".to_string(),
+                &"component1".to_string(),
                 &token_a.address,
                 &token_b.address,
                 weight,
@@ -1703,9 +1730,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Should use pool1 (only scoreable path), despite pool2 having better multiplier
+        // Should use component1 (only scoreable path), despite component2 having better multiplier
         assert_eq!(result.route().swaps().len(), 1);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool1");
+        assert_eq!(result.route().swaps()[0].component_id(), "component1");
         assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(ONE_ETH * 2));
     }
 
@@ -1716,8 +1743,8 @@ mod tests {
         let token_b = token(0x02, "B");
 
         let mut market = MarketState::new();
-        let pool_state = MockProtocolSim::new(2.0);
-        let pool_comp = component("pool1", &[token_a.clone(), token_b.clone()]);
+        let component_state = MockProtocolSim::new(2.0);
+        let comp = component("component1", &[token_a.clone(), token_b.clone()]);
 
         // Set gas price (required for simulation)
         market.update_gas_price(BlockGasPrice {
@@ -1730,10 +1757,10 @@ mod tests {
             },
         });
 
-        market.upsert_components(vec![pool_comp]);
+        market.upsert_components(vec![comp]);
         market.update_states(vec![(
-            "pool1".to_string(),
-            Box::new(pool_state) as Box<dyn ProtocolSim>,
+            "component1".to_string(),
+            Box::new(component_state) as Box<dyn ProtocolSim>,
         )]);
         market.upsert_tokens(vec![token_a.clone(), token_b.clone()]);
 
@@ -1759,8 +1786,12 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        let (market, manager) =
-            setup_market_weighted(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let (market, manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0),
+        )]);
         let mut market_write = market.try_write().unwrap();
 
         // Set a non-zero gas price so gas cost exceeds tiny output
@@ -1799,12 +1830,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_best_route_insufficient_liquidity() {
-        // Pool has limited liquidity (1000 wei) but we try to swap ONE_ETH
+        // Component has limited liquidity (1000 wei) but we try to swap ONE_ETH
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
         let (market, manager) = setup_market_weighted(vec![(
-            "pool1",
+            "component1",
             &token_a,
             &token_b,
             MockProtocolSim::new(2.0).with_liquidity(1000),
@@ -1826,24 +1857,25 @@ mod tests {
         let token_b = token(0x02, "B");
 
         let mut market = MarketState::new();
-        let pool_state = MockProtocolSim::new(2.0);
-        let pool_comp = component("pool1", &[token_a.clone(), token_b.clone()]);
+        let component_state = MockProtocolSim::new(2.0);
+        let comp = component("component1", &[token_a.clone(), token_b.clone()]);
 
         // DO NOT set gas price - this is what we're testing
-        market.upsert_components(vec![pool_comp]);
+        market.upsert_components(vec![comp]);
         market.update_states(vec![(
-            "pool1".to_string(),
-            Box::new(pool_state.clone()) as Box<dyn ProtocolSim>,
+            "component1".to_string(),
+            Box::new(component_state.clone()) as Box<dyn ProtocolSim>,
         )]);
         market.upsert_tokens(vec![token_a.clone(), token_b.clone()]);
 
         // Initialize graph and set edge weights
         let mut manager = PetgraphStableDiGraphManager::default();
         manager.initialize_graph(&market.component_topology());
-        let weight = DepthAndPrice::from_protocol_sim(&pool_state, &token_a, &token_b).unwrap();
+        let weight =
+            DepthAndPrice::from_protocol_sim(&component_state, &token_a, &token_b).unwrap();
         manager
             .set_edge_weight(
-                &"pool1".to_string(),
+                &"component1".to_string(),
                 &token_a.address,
                 &token_b.address,
                 weight,
@@ -1870,8 +1902,12 @@ mod tests {
 
         // MockProtocolSim::get_amount_out multiplies by spot_price when token_in < token_out.
         // After the first swap, spot_price increments to 3.
-        let (market, manager) =
-            setup_market_weighted(vec![("pool1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let (market, manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0),
+        )]);
 
         // Use min_hops=2 to require at least 2 hops (circular)
         let algorithm = MostLiquidAlgorithm::with_config(
@@ -1913,10 +1949,11 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_weighted(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(10.0)), /* Direct: 1-hop, high
-                                                                          * output */
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(2.0)), // 2-hop path
-            ("pool_cb", &token_c, &token_b, MockProtocolSim::new(3.0)), // 2-hop path
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(10.0)), /* Direct: 1-hop,
+                                                                               * high
+                                                                               * output */
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(2.0)), // 2-hop path
+            ("component_cb", &token_c, &token_b, MockProtocolSim::new(3.0)), // 2-hop path
         ]);
 
         // min_hops=2 should skip the 1-hop direct path
@@ -1937,8 +1974,8 @@ mod tests {
 
         // Should use 2-hop path (A->C->B), not the direct 1-hop path
         assert_eq!(result.route().swaps().len(), 2, "Should use 2-hop path due to min_hops=2");
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ac");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_cb");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ac");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_cb");
     }
 
     #[tokio::test]
@@ -1950,8 +1987,8 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_weighted(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
         ]);
 
         // max_hops=1 cannot reach C from A (needs 2 hops)
@@ -1978,13 +2015,13 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        // Create many parallel pools to ensure multiple paths need processing
+        // Create many parallel components to ensure multiple paths need processing
         let (market, manager) = setup_market_weighted(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(1.0)),
-            ("pool2", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool3", &token_a, &token_b, MockProtocolSim::new(3.0)),
-            ("pool4", &token_a, &token_b, MockProtocolSim::new(4.0)),
-            ("pool5", &token_a, &token_b, MockProtocolSim::new(5.0)),
+            ("component1", &token_a, &token_b, MockProtocolSim::new(1.0)),
+            ("component2", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component3", &token_a, &token_b, MockProtocolSim::new(3.0)),
+            ("component4", &token_a, &token_b, MockProtocolSim::new(4.0)),
+            ("component5", &token_a, &token_b, MockProtocolSim::new(5.0)),
         ]);
 
         // timeout=0ms should timeout after processing some paths
@@ -2055,26 +2092,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_best_route_respects_max_routes_cap() {
-        // 4 parallel pools. Score = spot_price * min_depth.
+        // 4 parallel components. Score = spot_price * min_depth.
         // In tests, depth comes from get_limits().0 (sell_limit), which is
         // liquidity / (spot_price * (1 - fee)). With fee=0: depth = liquidity / spot_price.
         // We vary liquidity to create a clear score ranking:
-        //   pool4 (score = 1.0 * 4M/1.0 = 4M)
-        //   pool3 (score = 2.0 * 3M/2.0 = 3M)
-        //   pool2 (score = 3.0 * 2M/3.0 = 2M)
-        //   pool1 (score = 4.0 * 1M/4.0 = 1M)
+        //   component4 (score = 1.0 * 4M/1.0 = 4M)
+        //   component3 (score = 2.0 * 3M/2.0 = 3M)
+        //   component2 (score = 3.0 * 2M/3.0 = 2M)
+        //   component1 (score = 4.0 * 1M/4.0 = 1M)
         //
-        // With max_routes=2, only pool4 and pool3 are simulated.
-        // pool1 has the best simulation output (4x) but the lowest score,
+        // With max_routes=2, only component4 and component3 are simulated.
+        // component1 has the best simulation output (4x) but the lowest score,
         // so it's excluded by the cap.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
         let (market, manager) = setup_market_weighted(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(4.0).with_liquidity(1_000_000)),
-            ("pool2", &token_a, &token_b, MockProtocolSim::new(3.0).with_liquidity(2_000_000)),
-            ("pool3", &token_a, &token_b, MockProtocolSim::new(2.0).with_liquidity(3_000_000)),
-            ("pool4", &token_a, &token_b, MockProtocolSim::new(1.0).with_liquidity(4_000_000)),
+            ("component1", &token_a, &token_b, MockProtocolSim::new(4.0).with_liquidity(1_000_000)),
+            ("component2", &token_a, &token_b, MockProtocolSim::new(3.0).with_liquidity(2_000_000)),
+            ("component3", &token_a, &token_b, MockProtocolSim::new(2.0).with_liquidity(3_000_000)),
+            ("component4", &token_a, &token_b, MockProtocolSim::new(1.0).with_liquidity(4_000_000)),
         ]);
 
         // Cap at 2: only the two highest-scored paths are simulated
@@ -2088,25 +2125,25 @@ mod tests {
             .await
             .unwrap();
 
-        // pool1 has the best simulation output (4x) but lowest score, so it's
-        // excluded by the cap. Among the top-2 scored (pool4=4M, pool3=3M),
-        // pool3 gives the best simulation output (2x vs 1x).
+        // component1 has the best simulation output (4x) but lowest score, so it's
+        // excluded by the cap. Among the top-2 scored (component4=4M, component3=3M),
+        // component3 gives the best simulation output (2x vs 1x).
         assert_eq!(result.route().swaps().len(), 1);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool3");
+        assert_eq!(result.route().swaps()[0].component_id(), "component3");
         assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(2000u64));
     }
 
     #[tokio::test]
     async fn test_find_best_route_no_cap_when_max_routes_is_none() {
-        // Same setup but no cap — pool1 (best output) should win.
+        // Same setup but no cap — component1 (best output) should win.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
         let (market, manager) = setup_market_weighted(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(4.0).with_liquidity(1_000_000)),
-            ("pool2", &token_a, &token_b, MockProtocolSim::new(3.0).with_liquidity(2_000_000)),
-            ("pool3", &token_a, &token_b, MockProtocolSim::new(2.0).with_liquidity(3_000_000)),
-            ("pool4", &token_a, &token_b, MockProtocolSim::new(1.0).with_liquidity(4_000_000)),
+            ("component1", &token_a, &token_b, MockProtocolSim::new(4.0).with_liquidity(1_000_000)),
+            ("component2", &token_a, &token_b, MockProtocolSim::new(3.0).with_liquidity(2_000_000)),
+            ("component3", &token_a, &token_b, MockProtocolSim::new(2.0).with_liquidity(3_000_000)),
+            ("component4", &token_a, &token_b, MockProtocolSim::new(1.0).with_liquidity(4_000_000)),
         ]);
 
         let algorithm = MostLiquidAlgorithm::with_config(
@@ -2119,9 +2156,9 @@ mod tests {
             .await
             .unwrap();
 
-        // All 4 paths simulated, pool1 wins with best output (4x)
+        // All 4 paths simulated, component1 wins with best output (4x)
         assert_eq!(result.route().swaps().len(), 1);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool1");
+        assert_eq!(result.route().swaps()[0].component_id(), "component1");
         assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(4000u64));
     }
 

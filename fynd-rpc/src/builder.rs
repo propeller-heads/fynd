@@ -41,8 +41,8 @@ impl FyndRPCBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`SolverBuildError`] if any pool's `connector_tokens` contains a malformed hex
-    /// address.
+    /// Returns [`SolverBuildError`] if any worker pool's `connector_tokens` contains a malformed
+    /// hex address.
     pub fn new(
         chain: Chain,
         pools: HashMap<String, PoolConfig>,
@@ -169,7 +169,7 @@ impl FyndRPCBuilder {
 
     /// Enables partial block (flashblock) updates from the Tycho stream (default: `false`).
     ///
-    /// When enabled, the stream delivers pool state updates mid-block rather than only at
+    /// When enabled, the stream delivers component state updates mid-block rather than only at
     /// finalization, reducing latency. Only supported for on-chain protocols; RFQ streams are
     /// unaffected.
     pub fn partial_blocks(mut self, enabled: bool) -> Self {
