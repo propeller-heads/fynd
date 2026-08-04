@@ -81,6 +81,7 @@ members = [
     "fynd-rpc",
     "fynd-rpc-types",
     "clients/rust",
+    "tools/apex-batch",
     "tools/benchmark",
     "tools/common",
     "tools/erc20-overrides",
@@ -150,6 +151,9 @@ zstd = "0.13"
 
 # Graph algorithms
 petgraph = "0.6"
+
+# Data parallelism
+rayon = "1"
 
 # Utilities
 num-bigint = { version = "0.4", features = ["serde"] }

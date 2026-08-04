@@ -1,0 +1,28 @@
+[package]
+name = "apex-batch"
+version.workspace = true
+edition = "2021"
+description = "Offline APEX batch-clearing surplus analysis over captured hindsight block snapshots"
+publish = false
+
+[dependencies]
+# TODO: swap to git dependency before PR — path dep is machine-local for the analysis sprint
+apex-solver = { path = "/Users/pistomat/Projects/propeller-heads/apex-solver", features = [
+    "serde",
+    "multithread",
+] }
+
+# Market recording replay (raw tycho `Update` messages, zstd-JSON)
+fynd-test-fixtures = { workspace = true }
+tycho-simulation = { workspace = true }
+
+alloy = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+num-bigint = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
