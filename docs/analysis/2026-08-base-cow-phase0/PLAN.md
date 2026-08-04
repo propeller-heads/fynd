@@ -406,3 +406,61 @@ connectivity_precheck.py.
 
 STATUS: focused grill round 3 on this v3 section before the live-stage build; the 0x Settler
 extractor proceeds in parallel (independent of all round-2 findings).
+
+## PHASE 1 v3.1 — after grill round 3 (2026-08-04; supersedes conflicting v3 items)
+
+Grill artifacts: grill-round3/ (12 findings: 2 crit, 5 high; all resolved, none deferred).
+Verdict: NO round 4 — remaining risk is empirical and the build order's own gates (step-0
+property tests, shadow run) are the instruments for it. Component question settled by
+measurement (`component_count.py`, 10d): 41.2% of eligible blocks single-component, 58.8%
+split ≥2; 77.9% of orders in the hub-connected giant component.
+
+A. **Price scale from the overflow bound (1e6 floor RETRACTED).** apex arithmetic WRAPS
+   silently (Signed256/ruint); the objective squares value = amount₁₈×price, so
+   |value| < 2^127.5 must hold, and `increase_precision` multiplies all prices ×10 up to
+   `max_precision_increases` (default 10!). Pin P = max_precision_increases = 2; per batch,
+   with notional cap N_usd, choose S maximal s.t. N_usd·1e18·S·10^P < 2^126; tokens whose
+   scaled price < 1e3 units excluded (price_underflow). Upstream issue: silent wrapping
+   overflow. Property test with a $1e-9 token.
+B. **Price transform pinned (inversion + decimals).** tycho `Price` rationals are tokens-out
+   per gas token INCLUDING decimals; apex needs the inverse orientation in 18-dec space:
+   `apex_price(t) = round(S · 10^(dec_t − 18) · den_t/num_t)`. Property test mirroring
+   fynd-core's ETH=2000-USDC fixture (ratio exact incl. the 1e12 decimals factor).
+C. **Per-component isolation kept, honestly scoped.** Each component call gets ONLY its
+   component's pools/tokens; the SAME partitioning applies to batch and singles cells (the
+   headline is a within-partitioning comparison; per-component ≠ single-call bit-for-bit,
+   stated). Giant-component aborts counted `batch_errored` per block; sample-loss bias
+   reported; upstream ask (per-cluster error isolation) remains the real fix.
+D. **Pacing re-costed.** Budget = 1 s per COMPONENT batch solve; singles use their own
+   component subset, capped 250 ms; batch-eligibility = CONNECTED blocks (~32%/day measured,
+   50% figure corrected); singles only for orders in batch-eligible blocks. All solves consume
+   block-time-cloned inputs → queue delay affects metric latency only, never state parity.
+   Gate: sustained throughput ≥ arrival rate, bounded queue depth, counted skips (not per-block
+   wall p99). Worker pool sized by the shadow run against this full load model.
+E. **Ring buffer DELETED.** Offline replay indexes all orders in advance; the single forward
+   fold, at each chain block b, dispatches every cell anchored at b — window-start cells for
+   [b+1, b+w] filter the current folded state by the KNOWN union of that window's orders;
+   window-end cells likewise. Memory = one folded state + in-flight cell subsets.
+F. **Watchdog contract stated honestly.** Overrunning solves occupy their worker to completion
+   (no cancellation path) — visible via queue depth + apex_overrun; shadow run records
+   search_ms and clearing_ms as SEPARATE series (clearing is O(pools), unguarded by the
+   deadline); the K gate is set against the clearing tail. Upstream ask: deadline checks in
+   the clearing phase.
+G. **Headline pairing rule.** Batch-vs-singles computed over the INTERSECTION of orders whose
+   both cells produced validated results (not deadline_fired/errored/skipped); exclusions
+   counted by reason; all-batch-result sensitivity view alongside. Part of the sign-off
+   package.
+H. **Phase split without a shim.** The composed resolve_block_range is dropped; monitor calls
+   tops/advance/backs phase functions directly; mock tests move to the phases + one
+   monitor-sequencing test.
+I. **Price-coverage gate** beside the extractor gate: shadow run measures pool_unpriced share
+   of the subset; >20% dropped → escalate before the live stage.
+J. Implementation sweep: runner.rs catch_unwind doc rewritten against the real panic sites
+   (`tokens[&addr]` indexes, `get_order` expect); stale panic-validate-result.md reference
+   retired.
+
+USER SIGN-OFFS OUTSTANDING: (1) headline reframing — apex(batch) vs apex(singles) as the
+batching-isolated number, apex_vs_fynd engine-inclusive alongside, with item G's pairing rule;
+(2) escalation thresholds (extractor <50%, price coverage >20% dropped pools).
+
+NEXT: build step 0 (scaling + adapter + prices + limits property tests), then shadow run.
