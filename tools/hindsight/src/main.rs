@@ -1,3 +1,4 @@
+mod capture;
 mod decoder;
 mod report;
 mod resolve;

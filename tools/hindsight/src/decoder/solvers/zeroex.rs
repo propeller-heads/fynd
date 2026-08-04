@@ -43,6 +43,16 @@ impl SolverKnowledge for ZeroEx {
         }
         Some(SolverQuote { amount_out, source: None, timestamp: None })
     }
+
+    /// Extract 0x's slippage floor: `minAmountOut`, the last word of the Settler's
+    /// `BASIC`/`TRANSFER_FROM` terminal action — the floor the module doc notes every Settler
+    /// call carries, as opposed to the quote only surplus-skimming calls declare.
+    ///
+    /// Extraction not implemented yet: `None` means the capture falls back to its synthetic
+    /// limit, which degrades the limit's provenance, never the decode.
+    fn min_amount_out(&self, _input: &[u8], _amount_in: U256) -> Option<U256> {
+        None
+    }
 }
 
 #[cfg(test)]

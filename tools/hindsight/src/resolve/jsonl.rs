@@ -20,29 +20,32 @@ use crate::{
     usd::Prices,
 };
 
-/// Append-only comparisons writer that rotates to a new file at each UTC day boundary —
-/// `comparisons-YYYY-MM-DD.jsonl` inside its directory — so an external sync job (e.g. an S3
+/// Append-only JSONL writer that rotates to a new file at each UTC day boundary —
+/// `<prefix>-YYYY-MM-DD.jsonl` inside its directory — so an external sync job (e.g. an S3
 /// upload `CronJob`) ships closed daily files instead of re-shipping one ever-growing one.
+/// The prefix names the stream, so a run can write several (comparisons, batch snapshots) into
+/// separate files under separate directories without two writer types.
 pub(crate) struct RotatingWriter {
     dir: PathBuf,
+    prefix: &'static str,
     date: String,
     writer: BufWriter<std::fs::File>,
 }
 
 impl RotatingWriter {
     /// Open today's file inside `dir` for appending, creating the directory if needed.
-    pub(crate) fn open(dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
+    pub(crate) fn open(dir: impl Into<PathBuf>, prefix: &'static str) -> anyhow::Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create comparisons directory {}", dir.display()))?;
+            .with_context(|| format!("failed to create {prefix} directory {}", dir.display()))?;
         let date = utc_date();
-        let writer = open_dated(&dir, &date)?;
-        Ok(Self { dir, date, writer })
+        let writer = open_dated(&dir, prefix, &date)?;
+        Ok(Self { dir, prefix, date, writer })
     }
 
     /// The path of the file currently being written.
     pub(crate) fn current_path(&self) -> PathBuf {
-        dated_path(&self.dir, &self.date)
+        dated_path(&self.dir, self.prefix, &self.date)
     }
 
     /// The current file's writer, rotated first when the UTC day has changed.
@@ -59,32 +62,35 @@ impl RotatingWriter {
             return;
         }
         if let Err(e) = self.writer.flush() {
-            warn!(error = %e, "failed to flush comparisons file before rotation");
+            warn!(error = %e, "failed to flush jsonl file before rotation");
         }
-        match open_dated(&self.dir, &date) {
+        match open_dated(&self.dir, self.prefix, &date) {
             Ok(writer) => {
-                info!(path = %dated_path(&self.dir, &date).display(), "rotated comparisons file");
+                info!(
+                    path = %dated_path(&self.dir, self.prefix, &date).display(),
+                    "rotated jsonl file"
+                );
                 self.writer = writer;
                 self.date = date;
             }
             Err(e) => {
-                warn!(error = %e, "failed to rotate comparisons file; keeping the previous day's");
+                warn!(error = %e, "failed to rotate jsonl file; keeping the previous day's");
             }
         }
     }
 }
 
-fn dated_path(dir: &Path, date: &str) -> PathBuf {
-    dir.join(format!("comparisons-{date}.jsonl"))
+fn dated_path(dir: &Path, prefix: &str, date: &str) -> PathBuf {
+    dir.join(format!("{prefix}-{date}.jsonl"))
 }
 
-fn open_dated(dir: &Path, date: &str) -> anyhow::Result<BufWriter<std::fs::File>> {
-    let path = dated_path(dir, date);
+fn open_dated(dir: &Path, prefix: &str, date: &str) -> anyhow::Result<BufWriter<std::fs::File>> {
+    let path = dated_path(dir, prefix, date);
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .with_context(|| format!("failed to open comparisons jsonl {}", path.display()))?;
+        .with_context(|| format!("failed to open {prefix} jsonl {}", path.display()))?;
     Ok(BufWriter::new(file))
 }
 
@@ -304,7 +310,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hindsight-rotate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let mut rotating = RotatingWriter::open(&dir).unwrap();
+        let mut rotating = RotatingWriter::open(&dir, "comparisons").unwrap();
         let today = rotating.current_path();
         writeln!(rotating.writer(), "{{\"day\":1}}").unwrap();
 
@@ -348,6 +354,7 @@ mod tests {
                 source: Some("relay".to_string()),
                 timestamp: Some(1_783_421_726),
             }),
+            min_amount_out: None,
             sandwich: None,
         };
         let range = build_range(
@@ -423,6 +430,7 @@ mod tests {
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
+            min_amount_out: None,
             sandwich: None,
         };
         // quote_json is already the slim projection (what order_quote_to_outcome stores).
@@ -545,6 +553,7 @@ mod tests {
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
+            min_amount_out: None,
             sandwich: None,
         };
         // A coverage gap: Fynd could not solve at either state.
@@ -602,6 +611,7 @@ mod tests {
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
+            min_amount_out: None,
             sandwich: None,
         };
         trade.sandwich = Some(SandwichEvidence {

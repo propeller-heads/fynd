@@ -44,6 +44,15 @@ impl SolverKnowledge for Kyberswap {
             .and_then(serde_json::Value::as_u64);
         Some(SolverQuote { amount_out, source: Some(source), timestamp })
     }
+
+    /// Extract `KyberSwap`'s slippage floor from the router's swap description — `minReturnAmount`
+    /// in the `SwapDescriptionV2` struct that `swap`/`swapGeneric` take.
+    ///
+    /// Extraction not implemented yet: `None` means the capture falls back to its synthetic
+    /// limit, which degrades the limit's provenance, never the decode.
+    fn min_amount_out(&self, _input: &[u8], _amount_in: U256) -> Option<U256> {
+        None
+    }
 }
 
 #[cfg(test)]

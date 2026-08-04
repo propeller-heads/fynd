@@ -48,6 +48,15 @@ impl Prices {
         self.map.get(&token).copied()
     }
 
+    /// Every priced token as `(address, price)`. For callers that persist the whole price view
+    /// instead of valuing one amount — a batch snapshot replays offline, where the solver that
+    /// produced these prices is long gone.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (Address, f64)> + '_ {
+        self.map
+            .iter()
+            .map(|(token, price)| (*token, *price))
+    }
+
     /// Positive, finite price of `token`, treating the native token and its wrapped form as
     /// interchangeable.
     fn price_of(&self, token: Address) -> Option<f64> {

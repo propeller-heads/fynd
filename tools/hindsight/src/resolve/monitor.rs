@@ -122,6 +122,15 @@ pub(crate) struct MonitorArgs {
     /// reason; filter downstream for the improvement or coverage view
     #[arg(long)]
     pub comparisons_dir: Option<std::path::PathBuf>,
+
+    /// Write one JSON line per block into this directory as `batches-YYYY-MM-DD.jsonl` (same
+    /// daily rotation as `--comparisons-dir`): every decoded trade as an APEX batch order, with
+    /// its limit, its Fynd top-of-block counterfactual, and the solver's token-price map at N-1.
+    /// Joined offline against a `record-market` recording by `tools/apex-batch`, which replays
+    /// the batch and measures the surplus batch clearing would have delivered over Fynd's
+    /// per-order baseline
+    #[arg(long)]
+    pub capture_dir: Option<std::path::PathBuf>,
 }
 
 /// Drives the in-process solver, stepping the chain one block per `SteppingSolver::advance`.
@@ -500,8 +509,17 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
 
     let mut comparisons = match cfg.comparisons_dir.as_ref() {
         Some(dir) => {
-            let writer = super::jsonl::RotatingWriter::open(dir)?;
+            let writer = super::jsonl::RotatingWriter::open(dir, "comparisons")?;
             info!(path = %writer.current_path().display(), "appending comparisons to JSONL");
+            Some(writer)
+        }
+        None => None,
+    };
+
+    let mut captures = match cfg.capture_dir.as_ref() {
+        Some(dir) => {
+            let writer = super::jsonl::RotatingWriter::open(dir, "batches")?;
+            info!(path = %writer.current_path().display(), "appending batch snapshots to JSONL");
             Some(writer)
         }
         None => None,
@@ -543,6 +561,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
                 &adapter,
                 &mut decoder,
                 &mut comparisons,
+                &mut captures,
                 &mut totals,
             ) => match end {
                 SessionEnd::Complete => break,
@@ -573,6 +592,7 @@ async fn run_session<P: Provider>(
     adapter: &StepAdapter<'_>,
     decoder: &mut Decoder<P>,
     comparisons: &mut Option<super::jsonl::RotatingWriter>,
+    captures: &mut Option<super::jsonl::RotatingWriter>,
     totals: &mut Totals,
 ) -> SessionEnd {
     // Establish a baseline applied state (N-1) before the first comparison.
@@ -669,6 +689,13 @@ async fn run_session<P: Provider>(
         }
         if let Some(rotating) = comparisons.as_mut() {
             super::jsonl::write_comparisons(rotating.writer(), &ranges, &prices_top, &prices_back);
+        }
+        // Captured at top-of-block prices: the batch is replayed against state N-1, so its
+        // starting price view must be the one Fynd's baseline was solved under, not the
+        // post-block one the back state is valued at.
+        if let Some(rotating) = captures.as_mut() {
+            let snapshot = crate::capture::build_snapshot(target, &trades, &ranges, &prices_top);
+            crate::capture::write_snapshot(rotating.writer(), &snapshot);
         }
         let elapsed_s = start.elapsed().as_secs_f64();
         telemetry::record_block_seconds(elapsed_s);
@@ -817,6 +844,7 @@ mod tests {
             max_blocks: Some(1),
             max_lag_blocks: Some(100),
             comparisons_dir: None,
+            capture_dir: None,
         })
         .await
         .expect("monitor should process one block without error");

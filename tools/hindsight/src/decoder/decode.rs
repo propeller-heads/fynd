@@ -162,6 +162,10 @@ pub(crate) struct TraderFlow {
     /// Solver label asserted by the decoder itself (e.g. `MetaMask` declares its solver in
     /// calldata), overriding trace-based attribution.
     pub solver_override: Option<String>,
+    /// The order's own output floor, when the decoder read it from a signed order rather than
+    /// from the settling router's calldata (`CoW` carries it in the settle call). Takes
+    /// precedence over `solvers::min_amount_out`, which only sees the router's commitment.
+    pub min_amount_out: Option<U256>,
     /// How the settled route's gas is charged against the settled output.
     pub gas_scope: GasScope,
 }
@@ -174,6 +178,7 @@ impl TraderFlow {
             venue_fee_in: None,
             venue_fee_out: None,
             solver_override: None,
+            min_amount_out: None,
             gas_scope: GasScope::NotCharged,
         }
     }

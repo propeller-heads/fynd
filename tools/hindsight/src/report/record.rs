@@ -94,6 +94,7 @@ mod tests {
             venue_fee_out: None,
             settled_gas: None,
             quote: None,
+            min_amount_out: None,
             sandwich: None,
         };
         // Top solved above settled → a win with a positive USD improvement.

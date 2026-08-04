@@ -12,7 +12,7 @@
 //! compares like-for-like — modern `CoW` records a zero on-chain fee (it is priced into the order).
 
 use alloy::{
-    primitives::{address, Address, B256},
+    primitives::{address, Address, B256, U256},
     providers::Provider,
     sol,
     sol_types::{SolCall, SolEvent},
@@ -76,6 +76,24 @@ pub(crate) fn order_app_data(input: &[u8]) -> Option<B256> {
     Some(trade.appData)
 }
 
+/// The settled order's limit output, read from the `settle` calldata's `trades[].buyAmount`.
+///
+/// This is the order's *signed limit*, not the executed amount: the `Trade` event's `buyAmount`
+/// is what the batch delivered, while this is the floor the owner would still have accepted. A
+/// batch-clearing counterfactual has to respect the latter — scoring against the former would
+/// only ever reproduce the settlement.
+///
+/// `None` unless the batch settles exactly one order, the same single-order rule
+/// [`order_app_data`] and [`CowSettlement`] apply: a multi-order batch has no single limit to
+/// pair with the one flow this decoder produces.
+pub(crate) fn order_min_amount_out(input: &[u8]) -> Option<U256> {
+    let call = settleCall::abi_decode(input).ok()?;
+    let [trade] = call.trades.as_slice() else {
+        return None;
+    };
+    Some(trade.buyAmount)
+}
+
 /// `CoW`'s sentinel for native ETH in buy orders, mapped to the zero address like every other flow.
 const COW_NATIVE_ETH: Address = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
 
@@ -118,6 +136,7 @@ impl<P: Provider> TradeDecoder<P> for CowSettlement {
             venue_fee_in: fee,
             venue_fee_out: None,
             solver_override: None,
+            min_amount_out: order_min_amount_out(ctx.input),
             // The solver pays settlement gas and recoups it in the order price, not the trader.
             gas_scope: GasScope::NotCharged,
         })
@@ -137,7 +156,7 @@ mod tests {
     use std::collections::HashMap;
 
     use alloy::{
-        primitives::{address, b256, Bytes, U256},
+        primitives::{address, b256, Bytes},
         providers::RootProvider,
         rpc::{client::RpcClient, types::Log},
         sol_types::SolCall,
@@ -250,12 +269,16 @@ mod tests {
     }
 
     fn settle_trade(app_data: B256) -> SettleTrade {
+        settle_trade_with_limit(app_data, U256::ZERO)
+    }
+
+    fn settle_trade_with_limit(app_data: B256, buy_amount: U256) -> SettleTrade {
         SettleTrade {
             sellTokenIndex: U256::ZERO,
             buyTokenIndex: U256::ZERO,
             receiver: Address::ZERO,
             sellAmount: U256::ZERO,
-            buyAmount: U256::ZERO,
+            buyAmount: buy_amount,
             validTo: 0,
             appData: app_data,
             feeAmount: U256::ZERO,
@@ -290,5 +313,33 @@ mod tests {
     #[test]
     fn test_non_settle_calldata_has_no_app_data() {
         assert!(order_app_data(&[0u8; 4]).is_none());
+    }
+
+    #[test]
+    fn test_single_order_reads_the_limit_buy_amount() {
+        let limit = U256::from(1_950_000_000u64);
+        let calldata = settle_calldata(vec![settle_trade_with_limit(B256::ZERO, limit)]);
+        assert_eq!(order_min_amount_out(&calldata), Some(limit));
+    }
+
+    #[test]
+    fn test_multi_order_batch_has_no_single_limit() {
+        let trades = vec![
+            settle_trade_with_limit(B256::ZERO, U256::from(1u64)),
+            settle_trade_with_limit(B256::ZERO, U256::from(2u64)),
+        ];
+        assert!(order_min_amount_out(&settle_calldata(trades)).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_limit_absent_without_settle_calldata() {
+        // The decoder reads the flow from the event, so a trade still decodes when the calldata
+        // is not a `settle` call — but with no limit, which the capture must not mistake for a
+        // zero floor every batch trivially clears.
+        let flow =
+            decode(vec![trade_log(COW_SETTLEMENT, addr(100), addr(10), addr(11), 1000, 2000, 0)])
+                .await
+                .unwrap();
+        assert!(flow.min_amount_out.is_none());
     }
 }

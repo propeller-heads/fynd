@@ -46,6 +46,16 @@ impl SolverKnowledge for Paraswap {
         }
         None
     }
+
+    /// Extract `ParaSwap`'s slippage floor: `toAmount`, the middle word of the Augustus v6
+    /// `(fromAmount, toAmount, quotedAmount)` triple, located by matching `fromAmount` against
+    /// the decoded input amount the way `embedded_quote` does.
+    ///
+    /// Extraction not implemented yet: `None` means the capture falls back to its synthetic
+    /// limit, which degrades the limit's provenance, never the decode.
+    fn min_amount_out(&self, _input: &[u8], _amount_in: U256) -> Option<U256> {
+        None
+    }
 }
 
 #[cfg(test)]

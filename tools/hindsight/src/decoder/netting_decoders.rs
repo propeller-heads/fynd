@@ -102,6 +102,7 @@ fn back_out_venue_fees(
         venue_fee_in,
         venue_fee_out,
         solver_override: flow.solver_override,
+        min_amount_out: flow.min_amount_out,
         gas_scope: flow.gas_scope,
     }
 }

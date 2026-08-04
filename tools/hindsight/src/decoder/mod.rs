@@ -106,6 +106,12 @@ pub(crate) struct DecodedTrade {
     /// execution delivered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quote: Option<SolverQuote>,
+    /// The output floor this trade committed to on-chain, in `token_out` units: from the signed
+    /// order when the decoder read one (`CoW`), otherwise from the settling router's calldata (see
+    /// `solvers::min_amount_out`). `None` when neither declares one — most routers do, but the
+    /// extraction is per-solver, so absence means "not extractable here", never "no floor".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_amount_out: Option<U256>,
     /// Evidence that a front-run and a back-run bracketed this trade (see
     /// `sandwich::detect`). `None` when no bracket pair was found.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -317,6 +323,13 @@ impl<P: Provider> Decoder<P> {
         let quote = solvers::embedded_quote(&attribution.solver, &root.input, flow.swap.amount_in)
             .filter(|quote| solvers::plausible_quote(quote, flow.swap.amount_out));
 
+        // The order's own floor when the decoder read one, else the settling router's. An order
+        // limit binds the trade wherever it is settled; a router's floor is only that router's
+        // commitment, so it is the fallback rather than the other way round.
+        let min_amount_out = flow.min_amount_out.or_else(|| {
+            solvers::min_amount_out(&attribution.solver, &root.input, flow.swap.amount_in)
+        });
+
         Some(DecodedTrade {
             tx_hash: receipt.transaction_hash,
             block_number,
@@ -334,6 +347,7 @@ impl<P: Provider> Decoder<P> {
             venue_fee_out: flow.venue_fee_out,
             settled_gas,
             quote,
+            min_amount_out,
             // The full receipts slice isn't available here (this fn only sees the one matched
             // transaction); the caller (`decode_block`) fills this in once decoding succeeds.
             sandwich: None,
