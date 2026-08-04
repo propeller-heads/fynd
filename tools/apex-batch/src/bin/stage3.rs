@@ -83,6 +83,9 @@ struct Args {
     /// baseline); orders beyond the cap are sampled evenly and the share is reported.
     #[arg(long, default_value_t = 2500)]
     fynd_quote_cap: usize,
+    /// Worker-pool config for the in-process solver (the fynd-quote baseline needs real pools).
+    #[arg(long, env = "WORKER_POOLS_CONFIG", default_value = "worker_pools.toml")]
+    worker_pools_config: PathBuf,
 }
 
 /// Floor anchoring for a cell (the drift axis): `Original` anchors floors to trade-time
@@ -729,13 +732,11 @@ fn solve_batch(
                         Some(fynd_out) if !fynd_out.is_zero() => {
                             counters.fynd_compared += 1;
                             let fynd_pro_rata = u256_to_f64(fynd_out) * fill_ratio.min(1.0);
-                            fynd_bps
-                                .push(10_000.0 * (bought_raw - fynd_pro_rata) / fynd_pro_rata);
-                            fynd_usd_delta += (bought_raw - fynd_pro_rata) *
-                                day_price
-                                    .get(&order.token_out)
-                                    .copied()
-                                    .unwrap_or(0.0);
+                            let relative_gap = (bought_raw - fynd_pro_rata) / fynd_pro_rata;
+                            fynd_bps.push(10_000.0 * relative_gap);
+                            // Valued against the order's own quarantined USD notional — see the
+                            // stage2 comment.
+                            fynd_usd_delta += relative_gap * order.usd * fill_ratio.min(1.0);
                         }
                         _ => counters.fynd_uncompared += 1,
                     }
@@ -858,6 +859,16 @@ async fn take_snapshot(
     );
     if let Some(key) = api_key.as_deref() {
         builder = builder.tycho_api_key(key);
+    }
+    let pools_config =
+        fynd_rpc::config::WorkerPoolsConfig::load_from_file(&args.worker_pools_config)
+            .with_context(|| {
+                format!("loading worker pools from {}", args.worker_pools_config.display())
+            })?;
+    for (name, pool) in pools_config.pools() {
+        builder = builder
+            .add_pool(name, pool)
+            .map_err(|e| anyhow::anyhow!("failed to add worker pool {name}: {e}"))?;
     }
     eprintln!("building in-process solver (token loading takes minutes)…");
     let solver = builder

@@ -387,10 +387,11 @@ fn solve_batch(
                             counters.fynd_compared += 1;
                             let fynd_pro_rata = u256_to_f64(fynd_out) * fill_ratio.min(1.0);
                             let apex_out = u256_to_f64(clearing.bought_amount);
-                            fynd_bps_samples
-                                .push(10_000.0 * (apex_out - fynd_pro_rata) / fynd_pro_rata);
-                            fynd_usd_delta +=
-                                (apex_out - fynd_pro_rata) * day_price[&order.token_out];
+                            let relative_gap = (apex_out - fynd_pro_rata) / fynd_pro_rata;
+                            fynd_bps_samples.push(10_000.0 * relative_gap);
+                            // Valued against the order's own quarantined USD notional — re-pricing
+                            // raw units lets one wrong-decimals quote dominate the whole sum.
+                            fynd_usd_delta += relative_gap * order.usd * fill_ratio.min(1.0);
                         }
                         _ => counters.fynd_uncompared += 1,
                     }
