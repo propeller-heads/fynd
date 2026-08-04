@@ -351,15 +351,15 @@ pub(crate) async fn solve_tops<S: SteppingSolver + ?Sized>(
     solver: &S,
     trades: &[DecodedTrade],
 ) -> Vec<Outcome> {
-    let mut tops = Vec::with_capacity(trades.len());
-    for trade in trades {
-        tops.push(
-            solver
-                .solve(trade.token_in, trade.token_out, trade.amount_in)
-                .await,
-        );
-    }
-    tops
+    // Concurrent, not sequential: each quote is independent and the fynd worker pool serves
+    // concurrent solves, so wall time is the slowest quote rather than the sum. `join_all`
+    // returns outcomes in trade order regardless of completion order.
+    futures::future::join_all(
+        trades
+            .iter()
+            .map(|trade| solver.solve(trade.token_in, trade.token_out, trade.amount_in)),
+    )
+    .await
 }
 
 /// Measure every trade twice at back-of-block (N) and assemble the [`RangeComparison`]s: each
@@ -372,20 +372,32 @@ pub(crate) async fn solve_backs<S: SteppingSolver + ?Sized>(
     tops: Vec<Outcome>,
     prices: &Prices,
 ) -> Vec<RangeComparison> {
-    let mut ranges = Vec::with_capacity(trades.len());
-    for (trade, top) in trades.iter().zip(tops) {
-        let reexecuted = match &top {
-            Outcome::Solved(solved) => solver.reexecute(solved).await,
-            Outcome::Partial(_) | Outcome::Unsolvable(_) => {
-                Outcome::Unsolvable("no top-of-block route to re-execute".to_string())
-            }
-        };
-        let back = solver
-            .solve(trade.token_in, trade.token_out, trade.amount_in)
-            .await;
-        ranges.push(build_range(trade, prices, top, back, &reexecuted));
-    }
-    ranges
+    // Both back-of-block measurements of a trade are independent of each other and of every
+    // other trade's, so all of them run concurrently; `join_all` keeps trade order.
+    let measurements = futures::future::join_all(trades.iter().zip(&tops).map(
+        |(trade, top)| async move {
+            let reexecute = async {
+                match top {
+                    Outcome::Solved(solved) => solver.reexecute(solved).await,
+                    Outcome::Partial(_) | Outcome::Unsolvable(_) => {
+                        Outcome::Unsolvable("no top-of-block route to re-execute".to_string())
+                    }
+                }
+            };
+            let solve_fresh = solver.solve(trade.token_in, trade.token_out, trade.amount_in);
+            futures::join!(reexecute, solve_fresh)
+        },
+    ))
+    .await;
+
+    trades
+        .iter()
+        .zip(tops)
+        .zip(measurements)
+        .map(|((trade, top), (reexecuted, back))| {
+            build_range(trade, prices, top, back, &reexecuted)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -623,6 +635,65 @@ mod tests {
             assert!(slippage.bps < 0.0, "re-execution below quote must be negative slippage");
             assert_eq!(slippage.quoted_amount_out, U256::from(10_200u64));
             assert_eq!(slippage.reexecuted_amount_out, U256::from(9_900u64));
+        }
+    }
+
+    /// Echo mock for the concurrency tests: `solve` returns the order's own `amount_in` as the
+    /// solved amount, after a delay *inversely* proportional to it — later trades finish first,
+    /// so any completion-order leak into the output order fails the assertions.
+    struct EchoStepping;
+
+    #[async_trait]
+    impl SteppingSolver for EchoStepping {
+        async fn solve(&self, _: Address, _: Address, amount_in: U256) -> Outcome {
+            let amount: u64 = amount_in.to::<u64>();
+            tokio::time::sleep(std::time::Duration::from_millis(60u64.saturating_sub(amount)))
+                .await;
+            Outcome::Solved(SolvedAmount {
+                amount_out: amount_in,
+                amount_out_net_gas: amount_in,
+                gas_estimate: U256::ZERO,
+                algorithm: String::new(),
+                quote_json: None,
+                solved_route: None,
+            })
+        }
+
+        async fn advance(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn reexecute(&self, top: &SolvedAmount) -> Outcome {
+            Outcome::Solved(top.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_solves_keep_trade_order() {
+        // Five trades with distinct amounts; the echo mock completes them in reverse order.
+        // Settled == echoed amount so the coverage-miss reclassification never engages and the
+        // solved outcomes survive into the ranges.
+        let trades: Vec<DecodedTrade> = (0..5u64)
+            .map(|i| {
+                let mut t = trade(10 * (i + 1));
+                t.amount_in = U256::from(10 * (i + 1));
+                t
+            })
+            .collect();
+
+        let tops = solve_tops(&EchoStepping, &trades).await;
+        for (trade, top) in trades.iter().zip(&tops) {
+            let Outcome::Solved(solved) = top else { panic!("echo mock always solves") };
+            assert_eq!(solved.amount_out, trade.amount_in, "tops must be in trade order");
+        }
+
+        let ranges = solve_backs(&EchoStepping, &trades, tops, &empty_prices()).await;
+        for (trade, range) in trades.iter().zip(&ranges) {
+            assert_eq!(range.amount_in, trade.amount_in);
+            let Outcome::Solved(back) = &range.back.outcome else {
+                panic!("echo mock always solves")
+            };
+            assert_eq!(back.amount_out, trade.amount_in, "backs must be in trade order");
         }
     }
 
