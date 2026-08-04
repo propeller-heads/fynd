@@ -21,7 +21,7 @@ use std::{
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 pub use tycho_execution::encoding::models::UserTransferType;
@@ -1327,11 +1327,12 @@ impl Route {
         let first_token = &self.swaps[0].token_in;
         let last_token = &self.swaps[self.swaps.len() - 1].token_out;
 
-        let mut seen = FxHashSet::default();
-        seen.insert(first_token.clone());
+        let mut seen: FxHashSet<&Address> =
+            FxHashSet::with_capacity_and_hasher(self.swaps.len() + 1, FxBuildHasher);
+        seen.insert(first_token);
         let last_idx = self.swaps.len() - 1;
         for (i, swap) in self.swaps.iter().enumerate() {
-            if !seen.insert(swap.token_out.clone()) {
+            if !seen.insert(&swap.token_out) {
                 // Duplicate token — only allowed if it's the last token
                 // matching the first (simple round-trip cycle).
                 if !(i == last_idx && swap.token_out == *first_token) {
@@ -1364,8 +1365,10 @@ impl Route {
         // Collect swaps into branch collections by their input token. Each
         // branch collection represents a split (parallel branches sharing the
         // same token_in), not a sequential path.
-        let mut token_in_to_index: FxHashMap<Address, usize> = FxHashMap::default();
-        let mut swaps_by_token_in: Vec<(Address, Vec<&Swap>)> = Vec::new();
+        let mut token_in_to_index: FxHashMap<Address, usize> =
+            FxHashMap::with_capacity_and_hasher(self.swaps.len(), FxBuildHasher);
+        let mut swaps_by_token_in: Vec<(Address, Vec<&Swap>)> =
+            Vec::with_capacity(self.swaps.len());
         for swap in &self.swaps {
             if let Some(&idx) = token_in_to_index.get(&swap.token_in) {
                 swaps_by_token_in[idx].1.push(swap);

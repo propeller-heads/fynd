@@ -346,8 +346,12 @@ impl BellmanFordAlgorithm {
         // Reconstruct path and build route directly from stored distances/gas
         // (no re-simulation needed since forbid-revisits guarantees relaxation
         // amounts match sequential execution).
-        let path_edges =
-            Self::reconstruct_path(ctx.token_out_node, ctx.token_in_node, &scratch.predecessor)?;
+        let path_edges = Self::reconstruct_path(
+            ctx.token_out_node,
+            ctx.token_in_node,
+            &scratch.predecessor,
+            self.max_hops,
+        )?;
 
         let route = Self::build_route(
             ctx,
@@ -611,7 +615,8 @@ impl BellmanFordAlgorithm {
         overrides: &MarketOverrides,
     ) -> Result<Route, AlgorithmError> {
         let mut swaps = Vec::with_capacity(path_edges.len());
-        let mut tokens: HashMap<Address, Token> = HashMap::new();
+        // One more token than hops: every hop contributes its output, plus the initial input.
+        let mut tokens: HashMap<Address, Token> = HashMap::with_capacity(path_edges.len() + 1);
 
         for (from_node, to_node, component_id) in path_edges {
             let token_in = ctx
@@ -811,8 +816,9 @@ impl BellmanFordAlgorithm {
         token_out: NodeIndex,
         token_in: NodeIndex,
         predecessor: &[Option<(NodeIndex, ComponentId)>],
+        max_hops: usize,
     ) -> Result<Vec<(NodeIndex, NodeIndex, ComponentId)>, AlgorithmError> {
-        let mut path = Vec::new();
+        let mut path = Vec::with_capacity(max_hops);
         let mut current = token_out;
         let mut visited = FxHashSet::default();
 

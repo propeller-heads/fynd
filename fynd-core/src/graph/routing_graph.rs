@@ -311,8 +311,17 @@ impl<D> RoutingGraph<D> {
                 let mut new_path = current_path.clone();
                 new_path.add_hop(current_node, edge.id(), next_node);
 
+                // A path already at the hop limit cannot be extended, so queueing it would only
+                // pay for a copy the next pop discards. Hand it straight to `paths` instead.
+                let extendable = new_path.len() < max_hops;
                 if next_node == target {
+                    if !extendable {
+                        paths.push(new_path);
+                        continue;
+                    }
                     paths.push(new_path.clone());
+                } else if !extendable {
+                    continue;
                 }
 
                 queue.push_back((next_node, new_path));

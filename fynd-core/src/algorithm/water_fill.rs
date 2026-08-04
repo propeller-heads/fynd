@@ -215,13 +215,17 @@ impl WaterFillAlgorithm {
         // A pool touched twice in one path must see its own first swap, which needs an intra-path
         // overlay carried across hops. That reuse is rare, so only pay the per-hop state clone when
         // the path actually repeats a pool; the common case skips the clone entirely.
-        let path_reuses_pool = {
-            let mut seen: HashSet<&ComponentId> = HashSet::with_capacity(path.len());
-            !path
-                .edge_iter()
-                .iter()
-                .all(|e| seen.insert(&e.component_id))
-        };
+        // Paths are at most `max_hops` long, so the pairwise scan beats building a set: it needs
+        // no allocation on what is the hottest simulation entry point.
+        let edges = path.edge_iter();
+        let path_reuses_pool = edges
+            .iter()
+            .enumerate()
+            .any(|(i, edge)| {
+                edges[i + 1..]
+                    .iter()
+                    .any(|other| other.component_id == edge.component_id)
+            });
         let mut intra_path_states: FxHashMap<ComponentId, Box<dyn ProtocolSim>> =
             FxHashMap::default();
         let mut new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)> =
@@ -284,21 +288,17 @@ impl WaterFillAlgorithm {
     /// kept path, skipping it otherwise. Returns the kept paths' indices into `ranked`.
     fn select_disjoint(ranked: &[Path<DepthAndPrice>], max_paths: usize) -> Vec<usize> {
         let mut visited_pools: FxHashSet<&ComponentId> = FxHashSet::default();
-        let mut selected = Vec::new();
+        let mut selected = Vec::with_capacity(max_paths);
         for (idx, path) in ranked.iter().enumerate() {
-            let path_pools: Vec<&ComponentId> = path
-                .edge_iter()
-                .iter()
-                .map(|e| &e.component_id)
-                .collect();
+            let path_pools = path.edge_iter();
             if path_pools
                 .iter()
-                .any(|c| visited_pools.contains(*c))
+                .any(|e| visited_pools.contains(&e.component_id))
             {
                 continue;
             }
-            for c in path_pools {
-                visited_pools.insert(c);
+            for edge in path_pools {
+                visited_pools.insert(&edge.component_id);
             }
             selected.push(idx);
             if selected.len() >= max_paths {
@@ -831,7 +831,7 @@ impl WaterFillAlgorithm {
         alloc: &[BigUint],
     ) -> Option<SplitCandidate> {
         let amount_in = ctx.order.amount().clone();
-        let mut allocations = Vec::new();
+        let mut allocations = Vec::with_capacity(subset.len());
         for (i, &path_idx) in subset.iter().enumerate() {
             if alloc[i].is_zero() {
                 continue;
@@ -962,7 +962,11 @@ impl WaterFillAlgorithm {
         }
         let timeout_ms = self.timeout.as_millis() as u64;
         let empty: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
-        let mut marginal: Vec<(usize, BigInt)> = Vec::new();
+        let mut marginal: Vec<(usize, BigInt)> = Vec::with_capacity(
+            ctx.ordered
+                .len()
+                .min(SHARED_MARGIN_PROBE_PATHS),
+        );
         for (idx, path) in ctx
             .ordered
             .iter()
@@ -1054,11 +1058,13 @@ impl WaterFillAlgorithm {
         // Fill-and-spill shares one overlay, so committing the winner only disturbs paths that
         // touch a pool the winner wrote. A path's written pools are exactly its own hops, so the
         // winner's path pools are the invalidation set.
-        let path_pools: Vec<FxHashSet<ComponentId>> = subset
+        let path_pools: Vec<FxHashSet<&ComponentId>> = subset
             .iter()
             .map(|&path_idx| {
-                path_key(&ctx.ordered[path_idx])
-                    .into_iter()
+                ctx.ordered[path_idx]
+                    .edge_iter()
+                    .iter()
+                    .map(|edge| &edge.component_id)
                     .collect()
             })
             .collect();
@@ -1166,7 +1172,7 @@ impl WaterFillAlgorithm {
         execution_order.sort_by(|&a, &b| cand_in[b].cmp(&cand_in[a]));
 
         let mut overrides: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
-        let mut allocations = Vec::new();
+        let mut allocations = Vec::with_capacity(execution_order.len());
         for i in execution_order {
             let allocation = Self::allocation_commit(
                 &ctx.ordered[active[i]],
@@ -1334,20 +1340,25 @@ fn expand_candidate_state<'a, W>(
         }
         let mut path = state.path.clone();
         path.add_hop(&graph[state.node], candidate.edge, &graph[candidate.target]);
-        let path_state = CandidatePathState {
-            node: candidate.target,
-            path: path.clone(),
-            amount_out: candidate.amount_out,
+        let reached = candidate.target == target && path.len() >= cfg.min_hops;
+        let extendable = path.len() < cfg.max_hops;
+        // Hand the extended path to whichever consumer needs it and copy it only when both do; a
+        // path that is neither complete nor extendable is dropped without ever being duplicated.
+        let amount_out = if reached && extendable {
+            found.push((path.clone(), candidate.amount_out.clone()));
+            candidate.amount_out
+        } else if reached {
+            found.push((path, candidate.amount_out));
+            continue;
+        } else if extendable {
+            candidate.amount_out
+        } else {
+            continue;
         };
-        if candidate.target == target && path.len() >= cfg.min_hops {
-            found.push((path.clone(), path_state.amount_out.clone()));
-        }
-        if path.len() < cfg.max_hops {
-            next_by_node
-                .entry(candidate.target)
-                .or_default()
-                .push(path_state);
-        }
+        next_by_node
+            .entry(candidate.target)
+            .or_default()
+            .push(CandidatePathState { node: candidate.target, path, amount_out });
     }
 }
 
@@ -1485,7 +1496,7 @@ fn select_candidate_edges<W>(
     max_edges: usize,
 ) -> Vec<ScoredEdge<'_, W>> {
     scored.sort_by(compare_scored_edges);
-    let mut selected = Vec::new();
+    let mut selected = Vec::with_capacity(max_edges.min(scored.len()));
     let mut per_target: FxHashMap<NodeIndex, usize> = FxHashMap::default();
     for edge in scored {
         let limit = if edge.priority == 0 {
