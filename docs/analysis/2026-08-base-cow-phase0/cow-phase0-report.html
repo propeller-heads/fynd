@@ -1,0 +1,489 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Batch Settlement on Base — Phase 0 Report</title>
+<style>
+  :root {
+    --bg:#f4f3ef; --card:#fdfcf9; --well:#ebe9e2; --ink:#1c1a14; --ink-2:#55524a;
+    --ink-3:#85816f; --line:#d5d2c6; --line-2:#e3e0d6; --accent:#7a4a12; --good:#33691e;
+    --bad:#9a3b26; --hl:#f3e7d3; --bar:#b98a4e;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: "Avenir Next", Avenir, "Segoe UI", system-ui, sans-serif;
+    --serif: "Charter", "Bitstream Charter", Cambria, Georgia, serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#17150f; --card:#201d15; --well:#14120c; --ink:#e8e4d8; --ink-2:#aaa693;
+      --ink-3:#7d7965; --line:#38341f; --line-2:#2b2818; --accent:#d9a75e; --good:#8bc34a;
+      --bad:#e57356; --hl:#2e2718; --bar:#8a6a3e; }
+  }
+  :root[data-theme="dark"] { --bg:#17150f; --card:#201d15; --well:#14120c; --ink:#e8e4d8;
+    --ink-2:#aaa693; --ink-3:#7d7965; --line:#38341f; --line-2:#2b2818; --accent:#d9a75e;
+    --good:#8bc34a; --bad:#e57356; --hl:#2e2718; --bar:#8a6a3e; }
+  :root[data-theme="light"] { --bg:#f4f3ef; --card:#fdfcf9; --well:#ebe9e2; --ink:#1c1a14;
+    --ink-2:#55524a; --ink-3:#85816f; --line:#d5d2c6; --line-2:#e3e0d6; --accent:#7a4a12;
+    --good:#33691e; --bad:#9a3b26; --hl:#f3e7d3; --bar:#b98a4e; }
+
+  body { background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.65; font-size: 16px; }
+  .wrap { max-width: 54rem; margin: 0 auto; padding: 3rem 1.25rem 6rem; }
+  .kicker { font-family: var(--mono); font-size: .72rem; letter-spacing: .18em; text-transform: uppercase; color: var(--accent); }
+  h1 { font-family: var(--serif); font-size: clamp(2rem,5.5vw,2.9rem); line-height: 1.08; font-weight: 700; letter-spacing: -.015em; text-wrap: balance; margin: .4rem 0 .8rem; }
+  .lede { font-family: var(--serif); font-size: 1.12rem; color: var(--ink-2); max-width: 50ch; }
+  section { margin-top: 3rem; }
+  h2 { font-family: var(--serif); font-size: 1.55rem; font-weight: 700; border-bottom: 2px solid var(--ink); padding-bottom: .3rem; margin-bottom: 1rem; text-wrap: balance; }
+  h3 { font-size: .8rem; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-2); margin: 1.4rem 0 .5rem; }
+  p { max-width: 64ch; margin-bottom: .85rem; }
+  ul, ol { margin: 0 0 .9rem 1.15rem; max-width: 64ch; } li { margin-bottom: .4rem; }
+  code { font-family: var(--mono); font-size: .86em; }
+  p code, li code, td code { background: var(--well); border: 1px solid var(--line-2); border-radius: 2px; padding: .04em .28em; }
+  .scroll { overflow-x: auto; margin-bottom: .9rem; }
+  table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line-2); }
+  thead th { font-family: var(--mono); font-size: .62rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: none; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem,1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); margin: 1.6rem 0 0; }
+  .stat { background: var(--card); padding: .85rem 1rem; }
+  .stat b { display: block; font-family: var(--mono); font-size: 1.45rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat span { font-family: var(--mono); font-size: .62rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+  .stat small { display: block; font-family: var(--mono); font-size: .7rem; color: var(--ink-3); margin-top: .2rem; }
+  .stat .desc { display: block; font-size: .74rem; color: var(--ink-2); margin-top: .15rem; font-family: var(--sans); }
+  .dim { color: var(--ink-3); }
+  .callout { border-left: 3px solid var(--accent); background: var(--hl); padding: .75rem 1rem; margin-bottom: 1rem; font-size: .92rem; max-width: 64ch; }
+  .proxy { color: var(--ink-3); font-style: italic; }
+  .bar { position: relative; height: .8rem; background: var(--well); border: 1px solid var(--line-2); min-width: 7rem; }
+  .bar i { position: absolute; inset: 0 auto 0 0; background: var(--bar); }
+  footer { margin-top: 3.5rem; border-top: 1px solid var(--line); padding-top: .9rem; font-family: var(--mono); font-size: .72rem; color: var(--ink-3); }
+  a { color: var(--accent); }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="kicker">Phase 0 report · batching potential · Base · 10 days of data (Jul 25 – Aug 3)</div>
+    <h1>How much better would trades settle if we batched them?</h1>
+    <p class="lede">We took every solver trade on Base for 10 days — 868,783 of them — and asked: how often could two opposite trades in the same block have been matched directly, and how much better would each trader have done? Each trade also carries Fynd's quote, so we can separate what batching adds from what Fynd already delivers. All weekly dollar figures are normalized per 7 days.</p>
+
+    <div class="stats">
+      <div class="stat"><span>Headline · gain on top of Fynd</span><b>0.02 bps</b><span class="desc">average per trade, matching within one block</span><small>≈ $330/wk · $17k/yr</small></div>
+      <div class="stat"><span>Volume no batch can help</span><b>98.3%</b><span class="desc">of volume cannot be matched within its block by any mechanism, even at the theoretical ceiling (shared routes included)</span><small>99.4% has no direct opposite; direct matches gain 3.9 bps</small></div>
+      <div class="stat"><span>If we waited 1 minute</span><b>0.53 bps</b><span class="desc">average per trade — 11.6% of volume finds a match</span><small>≈ $8.7k/wk · $450k/yr</small></div>
+      <div class="stat"><span>Tokens Fynd can't route</span><b>~$150/wk</b><span class="desc">real matching value, after removing bot self-trading</span><small>bots would have added $101M of fake matches</small></div>
+    </div>
+  </header>
+
+  <section id="summary">
+    <h2>Summary</h2>
+    <ol>
+      <li><strong>Batching one block at a time adds almost nothing on top of Fynd: 0.02 bps per trade on average — because 99.4% of trade volume has no opposite trade in its block to match directly — and even counting shared-route matching at its theoretical ceiling, 98.3% cannot be helped at all.</strong> Fynd's quotes are already close to the best achievable price, and for the vast majority of trades a single-block batch has literally nothing to do. Even the most generous ceiling — every matching mechanism, optimistic pricing — is <span class="proxy">under 1 bps per trade</span>. For scale: users typically set 100 bps of slippage tolerance.</li>
+      <li><strong>Tokens Fynd can't route offer almost no real matching either: ~$150/wk.</strong> This flow (37% of all trades, more on weekends) is mostly people buying brand-new tokens — everyone trades in the same direction at once, so opposite trades rarely exist in the same block. What looks like opposite flow there is almost entirely bots trading with themselves (details in the verification section).</li>
+      <li><strong>Waiting longer changes the picture.</strong> Collect trades for 1 minute and 11.6% of volume finds a match (0.53 bps per trade); at 5 minutes, 21.2% (1.22 bps). Batching value on Base comes from waiting, not from the batch mechanism itself.</li>
+      <li><strong>One mechanism is still unmeasured: matching through shared routes.</strong> Two orders that don't oppose each other directly can still partially cancel out if the batch routes them through a common token (example below). This is 66% of the theoretical matching volume within one block, and simulation is the only way to price it. That is the one concrete question left for the batch-solver simulation phase.</li>
+      <li><strong>The biggest finding is not about batching:</strong> 25% of all Base solver trades are in tokens whose liquidity sits in Uniswap v4 pools with custom hooks (creator coins), which our data feed doesn't index. Supporting those pools would grow Fynd's reachable market by a quarter — worth pursuing regardless of any batching decision.</li>
+    </ol>
+  </section>
+
+  <section id="pervalue">
+    <h2>The gain per trade: prize × odds</h2>
+    <p>When two opposite trades match, both sides win a little: the seller gets more, the buyer pays less. To read the numbers correctly you need exactly two of them, and their product:</p>
+    <div class="callout">
+      <b>The prize</b> — how much better a trade does <em>if</em> it finds an opposite partner in its window.<br>
+      <b>The odds</b> — what share of trade volume finds a partner at all. <b>Within one block, 99.4% of volume has no direct opposite; even counting matching through shared routes at its theoretical ceiling, 98.3% cannot be helped by any batching mechanism.</b><br>
+      <b>Prize × odds = the average gain per trade</b> — what the product actually delivers.<br>
+      <span class="dim">Single block: 3.9 bps prize × 0.6% odds ≈ 0.02 bps average. A lottery with a modest prize and very long odds.</span>
+    </div>
+    <p>The prize can be measured against two baselines: against <strong>Fynd's quote</strong> (what batching adds on top of what we already ship — the number that matters), or against <strong>the price users actually got</strong> (which also includes the improvement Fynd alone would deliver — shown in grey).</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Waiting window</th><th class="n">Odds</th><th class="n">Prize (bps, vs Fynd)</th><th class="n">= Average (bps, vs Fynd)</th></tr></thead>
+      <tbody>
+        <tr><td><strong>1 block · 2 s (chosen scope)</strong></td><td class="n"><strong>0.6%</strong></td><td class="n"><strong>3.9</strong></td><td class="n"><strong>0.02</strong></td></tr>
+        <tr><td>5 blocks · 10 s</td><td class="n">3.3%</td><td class="n">3.9</td><td class="n">0.13</td></tr>
+        <tr><td>15 blocks · 30 s</td><td class="n">7.6%</td><td class="n">4.1</td><td class="n">0.31</td></tr>
+        <tr><td>30 blocks · 1 min</td><td class="n">11.6%</td><td class="n">4.6</td><td class="n">0.53</td></tr>
+        <tr><td>150 blocks · 5 min</td><td class="n">21.2%</td><td class="n">6.1</td><td class="n">1.22</td></tr>
+      </tbody>
+    </table></div>
+    <p class="dim" style="font-size:.85rem">Same rows in dollars, vs Fynd: $330/wk at 1 block → $2.1k → $5.0k → $8.7k → $20.1k/wk at 5 min. Measured against actual executions instead of Fynd's quotes, the prize per matched trade is much larger (43.9 bps at 1 block, 15.8 at 5 min) — but that gap is Fynd's own routing edge, which batching does not add twice.</p>
+    <h3>How the headline number is measured</h3>
+    <p>The baseline is real, per trade: as the trades happened, our monitor solved each one with Fynd at the pre-trade market state and stored the quote. Per block, where a pair traded in both directions, we take each direction's volume-weighted Fynd price; the gap between them is the room left inside Fynd's own spread — the only thing crossing adds that Fynd doesn't already deliver. Matched amount = the smaller side, in exact token units; gain = matched × gap, counted only when positive (a negative gap means crossing helps no one); dollars via Fynd's own price data. Summed over all blocks: ≈ $330/week across ~$164M/week of quoted volume = 0.02 bps. The only modeled step is the dollar conversion — the rest is arithmetic on recorded quotes.</p>
+    <p>Read down the columns and the whole story is visible: <strong>the prize barely moves with the window (3.9 → 6.1 bps); the odds improve 35-fold (0.6% → 21.2%)</strong>. Waiting doesn't make individual matches much more valuable — it makes matches exist. That is why batching value on Base comes from the waiting window, not from the matching mechanism itself. And even the prize is small next to the 100 bps of slippage users routinely accept.</p>
+  </section>
+
+  <section id="categories">
+    <h2>Which pairs match, and which pairs pay</h2>
+    <p>Matching is common in the biggest pairs, but the money is elsewhere. Gains below are measured against actual executions (the categorization signal); "matched" is the trade volume that found a partner.</p>
+    <h3>By pair type</h3>
+    <div class="scroll"><table>
+      <thead><tr><th>Pair type</th><th class="n">Matched /wk (1 block)</th><th class="n">Gain, bps of matched</th><th class="n">Matched /wk (1 min)</th><th class="n">Gain, bps</th></tr></thead>
+      <tbody>
+        <tr><td>Major × major (WETH, USDC, cbBTC…)</td><td class="n">$721k · 75%</td><td class="n">14.0</td><td class="n">$11.7M · 61%</td><td class="n">11.3</td></tr>
+        <tr><td><strong>Major × other token</strong> (typical retail trade)</td><td class="n">$222k · 23%</td><td class="n"><strong>140</strong></td><td class="n">$7.0M · 37%</td><td class="n">18.5</td></tr>
+        <tr><td>Neither side major</td><td class="n">$15k · 2%</td><td class="n">56</td><td class="n">$366k · 2%</td><td class="n">51</td></tr>
+      </tbody>
+    </table></div>
+    <h3>By how much the pair trades per week</h3>
+    <div class="scroll"><table>
+      <thead><tr><th>Pair volume /wk</th><th>Share of matched volume (1 block)</th><th class="n">Gain, bps of matched</th><th class="n">(1 min)</th></tr></thead>
+      <tbody>
+        <tr><td>&gt;$10M</td><td><div class="bar"><i style="width:79%"></i></div></td><td class="n">14.2</td><td class="n">9.1</td></tr>
+        <tr><td>$1M–10M</td><td><div class="bar"><i style="width:5.3%"></i></div></td><td class="n">20.5</td><td class="n">22.4</td></tr>
+        <tr><td><strong>$100k–1M</strong></td><td><div class="bar"><i style="width:14.2%"></i></div></td><td class="n"><strong>217</strong></td><td class="n"><strong>149</strong></td></tr>
+        <tr><td>$10k–100k</td><td><div class="bar"><i style="width:1.5%"></i></div></td><td class="n">56</td><td class="n">51</td></tr>
+        <tr><td>&lt;$10k</td><td><div class="bar"><i style="width:0.05%"></i></div></td><td class="n">77</td><td class="n">42</td></tr>
+      </tbody>
+    </table></div>
+    <p>Four fifths of matching happens in the biggest pairs, where crossing is worth ~14 bps. The sweet spot is pairs trading $100k–1M a week: enough two-way interest to match, thin enough prices to make matching worth ~200 bps. A batch product built for value would aim there.</p>
+  </section>
+
+  <section id="coverage">
+    <h2>Which trades Fynd could quote</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Group</th><th class="n">Trades (10 d)</th><th class="n">Share</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Quoted</strong></td><td class="n">533,849</td><td class="n">61.2%</td><td>Fynd quoted the trade — all "vs Fynd" numbers come from here</td></tr>
+        <tr><td>Routable, but this trade failed</td><td class="n">13,312</td><td class="n">1.5%</td><td>Temporary failures (size, timing); counted, small</td></tr>
+        <tr><td>No route exists</td><td class="n">324,644</td><td class="n">37.2%</td><td>Tokens Fynd can't reach at all — covered separately below</td></tr>
+      </tbody>
+    </table></div>
+    <p>So "0.02 bps on top of Fynd" is a statement about the quoted majority. The unreachable share is larger on weekends (~60% of Saturday/Sunday trades vs ~35% on weekdays) — weekend flow skews toward brand-new tokens.</p>
+  </section>
+
+  <section id="p2p">
+    <h2>The tokens Fynd can't route</h2>
+    <p>37% of trades are in thousands of tokens with no reachable liquidity in our data feed. Direct matching would be the one thing we could offer there — it needs no liquidity at all, just two opposite trades. In practice there is very little to match: <strong>~$150/week of real matching value at one block (~$61k/wk of matched volume at ~25 bps), and a far lower match rate (0.015%) than in normal tokens.</strong> New-token trading is one-directional — everyone buys at the same time — so opposite trades in the same block are rare.</p>
+    <div class="callout"><b>Wash exclusion (verified).</b> One pair of these tokens trades tens of millions per week against itself in perfectly opposite same-block flows — it would have added <b>$101M of fake "matched" volume</b> over the 10 days. We looked up who sent the 200 transactions behind its biggest matches: just <b>10 addresses</b>, nine of them sending 17–29 transactions each. A bot cluster trading with itself, not real user demand. Its matches are excluded from every number in this report.</div>
+    <h3>What this unreachable flow actually is</h3>
+    <ol>
+      <li><strong>Creator-coin pools (67% of these trades — 25% of ALL Base solver trades).</strong> Zora-style creator and launchpad tokens live in Uniswap v4 pools with custom "hooks" (plug-in contracts that change how the pool prices trades). Our data feed indexes only plain v4 pools, so ~218k trades across 1,741 tokens were invisible to Fynd in these 10 days even though their liquidity is on-chain. <em>This is fixable — and it is the single biggest way to grow the solver's reachable market that this analysis found.</em></li>
+      <li><strong>Market-maker-quoted flow (at least 5% of Base aggregator volume).</strong> Some tokens trade only against professional market makers who quote prices privately per request — there is no on-chain pool to index, ever. No data-feed expansion reaches this; only direct matching or a market-maker integration would.</li>
+      <li><strong>Brand-new micro tokens.</strong> Most of the unreachable tokens have only a handful of trades — freshly launched, pools too small to index.</li>
+    </ol>
+  </section>
+
+  <section id="routematching">
+    <h2>The one thing we couldn't measure: matching through shared routes</h2>
+    <p>Two orders don't need to be exact opposites to help each other. Say one user swaps USDC→WETH, and another swaps PEPE→USDC where the PEPE/USDC pool is bad but PEPE/WETH is deep. A batch can route the second order as PEPE→WETH→USDC — and now its WETH→USDC leg is the exact opposite of the first order. Those legs cancel directly; only PEPE→WETH touches a pool, and it's the good pool. Both users win. Only a batch that settles everyone at the same prices can do this.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Window</th><th class="n">Direct opposites</th><th class="n">Cycles (A→B→C→A)</th><th class="n">Through shared routes</th><th class="n">Total possible, % of volume</th></tr></thead>
+      <tbody>
+        <tr><td>1 block</td><td class="n">$1.3M · 34%</td><td class="n">0.3%</td><td class="n">$2.5M · 66%</td><td class="n">1.7%</td></tr>
+        <tr><td>1 min</td><td class="n">$26.1M · 54%</td><td class="n">3.7%</td><td class="n">$20.5M · 42%</td><td class="n">21.5%</td></tr>
+        <tr><td>5 min</td><td class="n">$47.7M · 56%</td><td class="n">5.8%</td><td class="n">$31.9M · 38%</td><td class="n">37.6%</td></tr>
+      </tbody>
+    </table></div>
+    <p>We can measure the <em>volume</em> of this precisely — it is the largest matching mechanism within a single block — but its <em>value</em> depends on which pools the rerouting avoids, and that requires simulating the batch solver against real pool state. <span class="proxy">A rough estimate says up to ~$8k/wk within one block, but treat that as a ceiling, not a measurement.</span> This is the concrete question the simulation phase answers. (Cycles, by contrast, are measurable and negligible — they come free with a batch but never justify one.)</p>
+  </section>
+
+  <section id="method">
+    <h2>How we measured, and what to keep in mind</h2>
+    <p>Input: our own decoder's record of every solver trade on Base for 10 days, each with the price the user actually got and the price Fynd would have quoted at that moment. Trades are cleaned first: multi-step routes collapsed to what the user actually swapped, venue fees removed, ETH and WETH treated as the same asset, obviously mis-sized records excluded (2,855 trades / $30.3M — a known decoder issue with arbitrage trades, fix under way), and the verified bot pair excluded from matching. Matching is computed in exact token amounts; a match only counts as a gain when both sides genuinely improve. Full method with worked examples: <a href="#appendix">methodology page</a>.</p>
+    <ul>
+      <li><span class="dim">Weekly figures are normalized from the 10-day span; yearly figures are the week × 52.</span> We checked against five weeks of an independent dataset: the period's match rate is typical (four of five weeks sit at 0.29–0.39%; one volatile week doubled that — turbulent markets briefly create more matching). The 7-day and 10-day runs agree on every headline ratio.</li>
+      <li>The numbers lean conservative: the period predates several coverage additions (one ~$13M/wk trading venue among them), and gas savings from shared settlement are not counted.</li>
+      <li>All "possible matching" figures assume everyone participates and no one's price limit gets in the way — a ceiling by construction. The simulation phase measures what's actually achievable.</li>
+    </ul>
+  </section>
+
+  <section id="next">
+    <h2>What we recommend next</h2>
+    <ol>
+      <li><strong>Run the batch-solver simulation, one block at a time, to answer one question:</strong> how much of the "shared routes" matching (the unmeasured 66%) turns into real gains? Everything else within one block is now measured at fractions of a basis point. The simulation infrastructure is built and compiling.</li>
+      <li><strong>Separately from batching: index the creator-coin pools.</strong> A quarter of all Base solver trades are currently invisible to Fynd. That's the largest growth lever this analysis found, and it pays off with or without batching.</li>
+      <li>Keep extending the data window (collection began Jul 25; a full month completes ~Aug 24) and re-run after the decoder fix and coverage additions deploy — minutes of work, same script, but segment the series at the deploy date.</li>
+      <li>Longer batching windows stay out of scope for now — the table above is the ready-made cost-benefit input if that ever changes.</li>
+    </ol>
+  </section>
+
+  <footer>
+    Data: hindsight decoder, Base, 2026-07-25 → 08-03 (868,783 trades) · scan: cow_scan.py (wash pair excluded in-pipeline) · sender check: 200 txs → 10 senders · methodology: <a href="#appendix">link</a> · bps = basis points; 100 bps = 1%.
+  </footer>
+</div>
+<div id="appendix" style="max-width:54rem;margin:5rem auto 0;padding:2rem 1.25rem 0;border-top:3px double #8a7a5e"><div style="font-family:ui-monospace,monospace;font-size:.72rem;letter-spacing:.18em;text-transform:uppercase;text-align:center;opacity:.75">Appendix — Full Methodology &amp; Worked Examples</div></div><style>
+  :root {
+    --bg:      #f4f3ef;
+    --card:    #fdfcf9;
+    --well:    #ebe9e2;
+    --ink:     #1c1a14;
+    --ink-2:   #55524a;
+    --ink-3:   #85816f;
+    --line:    #d5d2c6;
+    --line-2:  #e3e0d6;
+    --accent:  #7a4a12;
+    --accent-2:#a8927a;
+    --good:    #33691e;
+    --bad:     #9a3b26;
+    --hl:      #f3e7d3;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: "Avenir Next", Avenir, "Segoe UI", system-ui, sans-serif;
+    --serif: "Charter", "Bitstream Charter", Cambria, Georgia, serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:      #17150f;
+      --card:    #201d15;
+      --well:    #14120c;
+      --ink:     #e8e4d8;
+      --ink-2:   #aaa693;
+      --ink-3:   #7d7965;
+      --line:    #38341f;
+      --line-2:  #2b2818;
+      --accent:  #d9a75e;
+      --accent-2:#8a7a5e;
+      --good:    #8bc34a;
+      --bad:     #e57356;
+      --hl:      #2e2718;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#17150f; --card:#201d15; --well:#14120c; --ink:#e8e4d8; --ink-2:#aaa693;
+    --ink-3:#7d7965; --line:#38341f; --line-2:#2b2818; --accent:#d9a75e; --accent-2:#8a7a5e;
+    --good:#8bc34a; --bad:#e57356; --hl:#2e2718;
+  }
+  :root[data-theme="light"] {
+    --bg:#f4f3ef; --card:#fdfcf9; --well:#ebe9e2; --ink:#1c1a14; --ink-2:#55524a;
+    --ink-3:#85816f; --line:#d5d2c6; --line-2:#e3e0d6; --accent:#7a4a12; --accent-2:#a8927a;
+    --good:#33691e; --bad:#9a3b26; --hl:#f3e7d3;
+  }
+
+  body { background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.62; font-size: 16px; }
+  .wrap { max-width: 55rem; margin: 0 auto; padding: 3rem 1.25rem 6rem; }
+
+  header.mast { margin-bottom: 3rem; }
+  .kicker { font-family: var(--mono); font-size: .72rem; letter-spacing: .18em; text-transform: uppercase; color: var(--accent); }
+  h1 { font-family: var(--serif); font-size: clamp(2rem, 5.5vw, 3rem); line-height: 1.08; font-weight: 700; letter-spacing: -.015em; text-wrap: balance; margin: .4rem 0 .8rem; }
+  .lede { font-family: var(--serif); font-size: 1.15rem; color: var(--ink-2); max-width: 44ch; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); margin: 1.8rem 0 0; }
+  .stat { background: var(--card); padding: .85rem 1rem; }
+  .stat b { display: block; font-family: var(--mono); font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat span { font-family: var(--mono); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+  .stat small { display: block; font-size: .74rem; color: var(--ink-2); margin-top: .15rem; }
+
+  section { margin-top: 3.2rem; scroll-margin-top: 1rem; }
+  h2 { font-family: var(--serif); font-size: 1.6rem; font-weight: 700; letter-spacing: -.01em; text-wrap: balance; border-bottom: 2px solid var(--ink); padding-bottom: .35rem; margin-bottom: 1rem; }
+  h3 { font-size: .8rem; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-2); margin: 1.5rem 0 .5rem; }
+  p { max-width: 66ch; margin-bottom: .85rem; }
+  section > p:last-child { margin-bottom: 0; }
+  strong { font-weight: 650; }
+  a { color: var(--accent); }
+  ul, ol { margin: 0 0 .9rem 1.15rem; max-width: 66ch; }
+  li { margin-bottom: .35rem; }
+
+  code { font-family: var(--mono); font-size: .86em; }
+  p code, li code, td code { background: var(--well); border: 1px solid var(--line-2); border-radius: 2px; padding: .04em .28em; white-space: nowrap; }
+  pre { font-family: var(--mono); font-size: .8rem; line-height: 1.6; background: var(--well); border: 1px solid var(--line-2); padding: .85rem 1rem; overflow-x: auto; margin-bottom: 1rem; }
+  pre code { background: none; border: none; padding: 0; }
+
+  .scroll { overflow-x: auto; margin-bottom: .9rem; }
+  table { border-collapse: collapse; width: 100%; font-size: .87rem; }
+  th, td { text-align: left; padding: .45rem .65rem; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+  thead th { font-family: var(--mono); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  td.m { font-family: var(--mono); font-size: .8rem; white-space: nowrap; }
+  tr.total td { border-top: 1px solid var(--line); font-weight: 650; }
+
+  .ex { background: var(--card); border: 1px solid var(--line); box-shadow: 0 1px 0 var(--line-2); padding: 1.1rem 1.25rem 1.25rem; margin-bottom: 1.3rem; }
+  .ex .tag { font-family: var(--mono); font-size: .64rem; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+  .ex h4 { font-family: var(--serif); font-size: 1.2rem; margin: .2rem 0 .6rem; }
+  .ex p { font-size: .92rem; }
+  .verdictline { border-top: 1px dashed var(--line); margin-top: .8rem; padding-top: .7rem; font-size: .92rem; }
+  .verdictline b { color: var(--accent); }
+
+  .callout { border-left: 3px solid var(--accent); background: var(--hl); padding: .75rem 1rem; margin-bottom: 1rem; font-size: .92rem; }
+  .callout b { color: var(--ink); }
+  .warn { border-left-color: var(--bad); }
+
+  .formula { font-family: var(--mono); font-size: .85rem; background: var(--well); border: 1px solid var(--line-2); padding: .6rem .9rem; margin: .6rem 0 .9rem; overflow-x: auto; }
+
+  .flowline { font-family: var(--mono); font-size: .82rem; line-height: 1.9; }
+  .flowline .sell { color: var(--bad); }
+  .flowline .buy { color: var(--good); }
+  .flowline .dim { color: var(--ink-3); }
+
+  details { border: 1px solid var(--line-2); background: var(--card); margin-bottom: .8rem; }
+  summary { cursor: pointer; padding: .55rem .9rem; font-family: var(--mono); font-size: .78rem; color: var(--ink-2); }
+  details > div { padding: 0 .9rem .8rem; }
+
+  .checklist li { list-style: none; margin-left: -1.15rem; padding-left: 1.6rem; position: relative; }
+  .checklist li::before { content: "☐"; position: absolute; left: 0; color: var(--accent); }
+
+  footer { margin-top: 3.5rem; border-top: 1px solid var(--line); padding-top: .9rem; font-family: var(--mono); font-size: .72rem; color: var(--ink-3); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<div class="wrap">
+  <header class="mast">
+    <div class="kicker">Pre-analysis proposal · Base · 2026-07-31</div>
+    <h1>How much coincidence of wants is inside a Base block?</h1>
+    <p class="lede">Before simulating APEX, measure the one thing only a batcher can capture: opposite trades in the same block that could cross without touching a pool. Methodology, three worked real-block examples, and the scan plan — for greenlight.</p>
+
+    <div class="stats">
+      <div class="stat"><span>Day-0 sample</span><b>105,277</b><small>netted intents · $54.8M · 33,466 blocks (last 24 h)</small></div>
+      <div class="stat"><span>Pairwise CoW cap</span><b>0.43%</b><small>$237k/day matchable A↔B in-block</small></div>
+      <div class="stat"><span>Multilateral cap</span><b>2.0%</b><small>$1.09M/day incl. rings &amp; common-quote netting</small></div>
+      <div class="stat"><span>Blocks with a match</span><b>3.5%</b><small>1,180 of 33,466 blocks had any pairwise CoW</small></div>
+    </div>
+  </header>
+
+  <section id="why">
+    <h2>Why measure this first</h2>
+    <p>An in-sequencer batcher sees the same pools, the same tokens, and the same orders as Fynd does per-order. Its only <em>structural</em> edge is internalization: when user A sells what user B is buying in the same block, the batch can cross them at one clearing price and skip the AMM round trip — its fee, its price impact, and one leg of gas. Everything else APEX might win on, Fynd already delivers.</p>
+    <p>So the coincidence-of-wants density of real Base blocks is the ceiling on batching's unique value. If the ceiling is low, the APEX simulation is measuring noise; if high, this same data tells us where (pairs, venues, block windows) the value concentrates. The day-0 numbers above say: <strong>thin at 2-second granularity (0.4–2% of volume), so the batching-window sweep is a first-class dimension, not a sensitivity check.</strong></p>
+  </section>
+
+  <section id="data">
+    <h2>Data &amp; the two traps the examples exposed</h2>
+    <p>Source: <code>base.dex.aggregator_trades</code> (Allium) — solver/venue-routed flow, one row per decoded trade, with <code>block_number</code>, token amounts, and USD values. No chain access needed; the whole scan is SQL + local compute. This is the same trade universe hindsight decodes and the APEX replay would batch, so the numbers compose.</p>
+    <p>Testing the naive query on real blocks immediately surfaced two traps that define the methodology:</p>
+
+    <div class="callout warn"><b>Trap 1 — multi-hop rows fabricate rings.</b> The "largest 3-ring of the day" (block 49335445: SOL→USDC→cbBTC→SOL, $789) dissolved on inspection: <code>cbBTC→SOL</code> and <code>SOL→USDC</code> were two rows of <em>one user's</em> multi-hop route (same tx <code>0x0eab3dc5…</code>, KyberSwap hop + a 1inch-LOP hop). Rows must be netted per transaction into user intents first, or routing internals masquerade as matchable demand.</div>
+
+    <div class="callout warn"><b>Trap 2 — same-tx opposites are already-captured CoW.</b> The "perfect" WETH/USDC match in block 49325116 ($19.2k vs $19.2k) is one CoW-protocol settlement filling a user order against a 1inch limit order — both legs share tx <code>0x8ccb7287…</code>. That internalization already happened. The sequencer's incremental opportunity is only <em>cross-transaction</em> matches.</div>
+
+    <h3>Intent extraction v2 (fixes both — and the trap the v1 fix created)</h3>
+    <div class="callout warn"><b>Trap 3 — found in self-review: uniform per-tx netting mangles batch settlements.</b> A CoW-protocol settlement carries <em>multiple user orders</em> in one tx (3.8% of settlements); per-tx netting merges distinct users into one fake intent — or nets two users' opposite orders into nothing, silently deleting exactly the flow this study cares most about. ERC-4337 bundler txs bundle unrelated users the same way.</div>
+    <ol>
+      <li><strong>Protocol-aware granularity.</strong> <code>cow_protocol</code> and <code>uniswap_x</code> rows are order-level by construction (verified: one row per CoW <code>Trade</code> event) — <em>each row is one intent</em>. In those txs, other rows (e.g. a 1inch-LOP fill inside a CoW settlement) are the solver's liquidity legs, not intents. All other (router) flow: net per transaction.</li>
+      <li><strong>Net in token units, not USD.</strong> Hop legs cancel exactly in token amounts; a single NULL-<code>usd_amount</code> row would break USD-based cancellation and mis-net the tx. USD enters only at valuation; txs with unvaluable legs are counted, never silently dropped.</li>
+      <li><strong>Canonicalize ETH ≡ WETH</strong> before matching — wrapping is free to a batcher, so a native-ETH sell matches a WETH buy. Stables are <em>not</em> merged (USDC/USDbC/DAI carry real spread).</li>
+      <li>Keep txs netting to one sold + one bought token → one <strong>intent</strong>. Split routes collapse correctly (verified: a 2×$20k dual-aggregator split netted to one $40k intent). Multi-token txs: excluded and counted.</li>
+      <li>Matching is computed <strong>across intents only</strong> (cross-tx for router flow; cross-order for batch settlements — two orders already crossed <em>inside</em> one settlement are realized, not potential).</li>
+      <li><strong>Same-sender guard:</strong> matches where both sides share <code>sender_address</code> (MM rebalancing, arb loops) are not user-value CoW — headline excludes them, reported separately.</li>
+    </ol>
+    <p>Hindsight's netting philosophy transplanted: decline ambiguity, count what you drop, never record a wrong intent.</p>
+  </section>
+
+  <section id="metrics">
+    <h2>Metrics</h2>
+    <p>Per block (and per multi-block window), over the netted intents:</p>
+    <div class="formula">
+      W                = Σ intent USD                       <span style="color:var(--ink-3)"># addressable volume</span><br>
+      pairwise_matched = Σ over pairs 2·min(flow_A→B, flow_B→A)<br>
+      multilateral_cap = W − ½·Σ over tokens |net_demand_t| <span style="color:var(--ink-3)"># rings &amp; chains included</span>
+    </div>
+    <ul>
+      <li><strong>Pairwise matched volume</strong> — trade volume internalizable by direct A↔B crossing. Exact, conservative, and the number closest to what a simple in-sequencer matcher could capture.</li>
+      <li><strong>Multilateral cap</strong> — what a full batch auction with uniform clearing prices could internalize: only each token's <em>net</em> demand must touch AMMs. Crucially, this bound already contains <em>route-mediated</em> netting (below), because re-routing an order never changes any token's endpoint imbalance.</li>
+      <li><strong>Crossing surplus (pairwise, empirical)</strong> — no AMM model needed: both sides' executed prices are in the data. If sellers received <code>p_sell</code> (quote per base) and buyers paid <code>p_buy</code>, crossing at any price between them yields total surplus
+        <div class="formula">surplus = matched_base_qty × max(0, p_buy − p_sell)</div>
+        computed in token units, valued in USD, <strong>floored at zero</strong> — a negative gap (intra-block price move) means crossing helps no one; the negative-gap share is reported as its own statistic, not silently clipped.</li>
+      <li><strong>Window sweep</strong> — every metric at <em>tumbling</em> (non-overlapping) windows of 1, 5, 15, 30, 150 blocks (2 s → 5 min). CoW density grows superlinearly with window; this chart is the report's centerpiece and directly answers "what if the batch waited?"</li>
+      <li><strong>Splits</strong> — by pair tier (bluechip / stable / long-tail), by venue/project, by maker-involvement (intents whose tx contains RFQ/LOP maker fills — <code>1inch_lop</code>, <code>bebop_rfq</code>, <code>native_rfq</code> — matchable liquidity but not retail demand), and by same-sender (excluded from headline).</li>
+    </ul>
+
+    <h3>Decomposing the cap: direct, rings, and route-mediated ("synthetic") CoW</h3>
+    <p>A batch with uniform clearing prices can net more than opposite endpoint pairs. An order's <em>route legs</em> can oppose other orders: with order 1 <code>USDC→WETH</code> and order 2 <code>PEPE→USDC</code> where PEPE/USDC is thin but PEPE/WETH is deep, the batch routes order 2 as <code>PEPE→WETH→USDC</code> — its WETH→USDC leg crosses order 1 peer-to-peer, the thin pool is never touched, and only the deep pool absorbs the residual. This <strong>synthetic CoW by route choice</strong> is unique to batch settlement, and it is why the multilateral cap — not the pairwise number — is the true ceiling.</p>
+    <p>The scan decomposes the multilateral cap into three labeled buckets:</p>
+    <div class="formula">multilateral_cap = pairwise_direct + ring_attributable + route_mediated_residual</div>
+    <ol>
+      <li><strong>Pairwise direct</strong> — as above, with exact empirical surplus.</li>
+      <li><strong>Ring-attributable</strong> — after removing pairwise-matched flow, greedy cycle cancellation on the residual intent-flow graph (3- and 4-cycles, min-edge cancelling). Ring surplus from the price product around the cycle: <code>ring_qty × max(0, 1 − Π p_leg)</code>. Flow decomposition is greedy and non-unique — stated, not hidden.</li>
+      <li><strong>Route-mediated residual</strong> — the remainder: netting achievable only by choosing routes through shared tokens. Its <em>volume</em> is exact (it is a difference of exact quantities); its <em>surplus</em> is valued per netted token-unit by a per-token empirical AMM-cost proxy measured from this same dataset (the distribution of pairwise execution-price gaps per token tier — netted long-tail flow is worth ~100× netted bluechip flow). Labeled proxy, never mixed with exact numbers. The <em>realizable</em> value of this bucket is exactly what the APEX simulation phase prices later — Phase 0 sizes the bucket, APEX prices it.</li>
+    </ol>
+  </section>
+
+  <section id="examples">
+    <h2>Three real examples, worked</h2>
+    <p>All from the last 24 h of Base, found by the netted cross-tx query. They span the three regimes the full scan will quantify.</p>
+
+    <div class="ex">
+      <div class="tag">Example 1 · bluechip, tight — block 49357908</div>
+      <h4>WETH ↔ USDC, one seller vs one buyer, 2.9 bps apart</h4>
+      <div class="flowline">
+        <span class="sell">tx 0xe3f65364… (0x Settler)&nbsp;&nbsp;sells 6.9168 WETH → 12,993.94 USDC</span> <span class="dim">⇒ receives 1,878.61 USDC/WETH</span><br>
+        <span class="buy">tx 0x06f898db… (CoW)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;buys 1.5187 WETH for 2,853.84 USDC</span> <span class="dim">⇒ pays 1,879.15 USDC/WETH</span>
+      </div>
+      <div class="verdictline"><b>Matched:</b> 1.5187 WETH ($2,857 · the buyer fills fully; seller partially). <b>Surplus cap:</b> 1.5187 × (1,879.15 − 1,878.61) = <b>$0.82 total (~2.9 bps round trip)</b>. Bluechip execution on Base is already tight — CoW saves almost nothing on majors. This honesty matters: most matchable <em>volume</em> lives here, most matchable <em>value</em> does not.</div>
+    </div>
+
+    <div class="ex">
+      <div class="tag">Example 2 · thin stable — block 49334803</div>
+      <h4>msUSD ↔ USDC, split-route buyer vs single seller, 26 bps apart</h4>
+      <div class="flowline">
+        <span class="buy">tx 0xbe0c9b5a… (0x + Kyber split route)&nbsp;&nbsp;buys 52,080.6 msUSD for 40,000 USDC</span> <span class="dim">⇒ pays 0.76804 USDC/msUSD</span><br>
+        <span class="sell">tx 0x310c73eb… (KyberSwap)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sells 20,000 msUSD → 15,320.68 USDC</span> <span class="dim">⇒ receives 0.76603 USDC/msUSD</span>
+      </div>
+      <div class="verdictline"><b>Matched:</b> 20,000 msUSD (~$15.3k). <b>Surplus cap:</b> 20,000 × 0.00201 = <b>$40 (~26 bps)</b>. Note the netting at work: the buyer's two same-tx rows (dual-aggregator split) collapsed into one $40k intent instead of two. Thin-liquidity stables are the sweet middle: real volume, real spread.</div>
+    </div>
+
+    <div class="ex">
+      <div class="tag">Example 3 · dislocated long tail — block 49340445</div>
+      <h4>VANA ↔ USDC, one $60k dump vs three opposite fills, 29% apart</h4>
+      <div class="flowline">
+        <span class="sell">tx 0x90e17926… (KyberSwap)&nbsp;&nbsp;sells 106,722.5 VANA → 60,061.92 USDC</span> <span class="dim">⇒ receives 0.5628 USDC/VANA</span><br>
+        <span class="buy">tx 0xffa9a9f8…, 0xec49da3e…, 0xbae740ad… (1inch LOP fills)</span><br>
+        <span class="buy">&nbsp;&nbsp;together buy 22,756.1 VANA for 18,052.38 USDC</span> <span class="dim">⇒ pay 0.7933 USDC/VANA</span>
+      </div>
+      <div class="verdictline"><b>Matched:</b> 22,756 VANA (~$18.0k). <b>Surplus cap:</b> 22,756 × (0.7933 − 0.5628) = <b>$5,246 (~29%)</b>. A thin-liquidity dump crushed the seller's execution while opposite limit orders sat 29% higher <em>in the same block</em>. Caveats owned: the gap partly reflects intra-block price movement and the buyers are maker fills (tagged as such in the scan) — but this is exactly the dislocation a uniform-clearing-price batch monetizes for its users. The long tail is where CoW value concentrates.</div>
+    </div>
+  </section>
+
+  <section id="scan">
+    <h2>The full scan</h2>
+    <h3>Tooling: Python + Polars, not Rust</h3>
+    <p>Data arrives via ~7 per-day Allium extraction queries (intent-level rows: block, tx, sold, bought, USD, protocol tags — ~105k rows/day, ~13 MB/day). All matching math is dataframe group-bys over ≤1M rows — seconds in Polars. Rust buys nothing here; Python buys iteration speed and the plotting for the report. The script is rerunnable and window-parameterized; if this graduates into a recurring monitor, the logic ports into hindsight later.</p>
+
+    <h3>Pipeline</h3>
+    <ol>
+      <li><strong>Extract</strong> — per-day SQL (the netting CTEs above) → intent parquet files, plus excluded-tx counters.</li>
+      <li><strong>Match</strong> — per window (1/5/15/30/150 blocks): pairwise matched volume + exact crossing surplus per pair; multilateral cap per window; maker/venue/pair-tier splits.</li>
+      <li><strong>Report</strong> — self-contained HTML: window-sweep curves, per-pair league table, surplus distribution (p50/p90/max), share of blocks with any match, and the day-0-style headline numbers over the full week.</li>
+    </ol>
+
+    <h3>ETA &amp; cost</h3>
+    <div class="scroll"><table>
+      <thead><tr><th>Scope</th><th class="n">Extraction</th><th class="n">Local compute</th><th class="n">Wall clock</th><th class="n">Allium cost</th></tr></thead>
+      <tbody>
+        <tr><td>3 days</td><td class="n">3 queries</td><td class="n">&lt; 1 min</td><td class="n">~15–20 min</td><td class="n">~1–2 EU</td></tr>
+        <tr><td><strong>7 days (proposed)</strong></td><td class="n">7 queries</td><td class="n">~2 min</td><td class="n"><strong>~30–45 min</strong></td><td class="n">~2–4 EU</td></tr>
+        <tr><td>30 days</td><td class="n">30 queries</td><td class="n">~10 min</td><td class="n">~2–3 h</td><td class="n">~10–15 EU</td></tr>
+      </tbody>
+    </table></div>
+    <p>Wall clock is dominated by Snowflake queue time, not compute — extending to 30 days is cheap if the week looks interesting. Today's methodology development spent ~1.1 EU total.</p>
+  </section>
+
+  <section id="limits">
+    <h2>Known limitations, owned upfront</h2>
+    <ul>
+      <li><strong>Theoretical cap, not achievable capture.</strong> "Everyone participates, no limit prices bind, at one clearing price." Real capture is strictly below; the APEX simulation is what measures the achievable fraction. This analysis bounds whether that simulation is worth building.</li>
+      <li><strong>Aggregator flow only.</strong> Direct DEX-router users (no aggregator) are additional matchable demand not counted here — the cap understates "everyone" in that direction. A follow-up can add single-swap direct-router txs from <code>dex.trades</code>.</li>
+      <li><strong>USD netting tolerance.</strong> Netting uses Allium's <code>usd_amount</code> (99%+ populated); matching/surplus math is done in token units and only valued in USD, so price-column noise cannot fabricate matches.</li>
+      <li><strong>Maker fills are matchable liquidity, not retail demand.</strong> LOP/RFQ-involved intents are tagged and reported as a separate slice, never silently mixed.</li>
+      <li><strong>Volatility inflates dislocation surplus.</strong> Example-3-style gaps partly reflect intra-block moves. The per-pair surplus distribution is reported with medians, not just sums, so one VANA doesn't write the headline.</li>
+      <li><strong>Base has no public mempool</strong> — settled per-block composition is the actual matching opportunity a sequencer sees; no MEV-reordering correction needed. (This cuts in our favor: the measure is clean.)</li>
+      <li><strong>odos_v2 is stale in Allium since 07-28</strong> (indexer gap, both chains) — a small known undercount, footnoted in the report.</li>
+    </ul>
+  </section>
+
+  <section id="greenlight">
+    <h2>Greenlight checklist</h2>
+    <ul class="checklist">
+      <li>Methodology v2: protocol-aware intent extraction (CoW/UniswapX rows = per-order intents; router flow = per-tx token-unit netting; ETH≡WETH canonicalized) → cross-intent matching only → cap decomposed into pairwise direct + rings + route-mediated, each with its surplus method (exact / price-product / per-token proxy), same-sender excluded from headline, negative gaps floored and counted.</li>
+      <li>Scope: 7 days of <code>base.dex.aggregator_trades</code>, tumbling-window sweep 1/5/15/30/150 blocks, maker/venue/pair-tier/sender splits.</li>
+      <li>Tooling: Python + Polars locally, Allium Explorer API extraction, self-contained HTML report.</li>
+      <li>Budget: ~2–4 Explorer Units, ~30–45 min wall clock. Extend to 30 days (~2–3 h) if the week is interesting — say the word and it's the same script.</li>
+    </ul>
+  </section>
+
+  <section id="review">
+    <h2>Self-review log (v2)</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>#</th><th>Trap</th><th>Status</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td class="n">1</td><td>Multi-hop router rows fabricate rings</td><td class="m">fixed v1</td><td>Per-tx netting (token units in v2)</td></tr>
+        <tr><td class="n">2</td><td>Same-tx opposites are realized CoW, not potential</td><td class="m">fixed v1</td><td>Cross-intent matching only</td></tr>
+        <tr><td class="n">3</td><td>Per-tx netting mangles CoW batch settlements &amp; 4337 bundles (merges/deletes real user orders)</td><td class="m">fixed v2</td><td>Protocol-aware granularity: order-level rows are intents; solver legs inside settlements are not</td></tr>
+        <tr><td class="n">4</td><td>NULL-usd rows break USD-based hop cancellation → mis-netted intents</td><td class="m">fixed v2</td><td>Net in token units; USD for valuation only; unvaluable txs counted</td></tr>
+        <tr><td class="n">5</td><td>Native ETH vs WETH treated as unmatchable → pairwise undercount</td><td class="m">fixed v2</td><td>ETH≡WETH canonicalization (wrap is free to a batcher); stables not merged</td></tr>
+        <tr><td class="n">6</td><td>Same-sender opposite flows (MM rebalancing, arb loops) counted as user CoW</td><td class="m">fixed v2</td><td>Same-sender matches excluded from headline, reported separately</td></tr>
+        <tr><td class="n">7</td><td>Negative price gaps summed into surplus, or silently clipped</td><td class="m">fixed v2</td><td>Floor at 0 per match; negative-gap share is its own reported statistic</td></tr>
+        <tr><td class="n">8</td><td>Overlapping windows double-count matches in the sweep</td><td class="m">fixed v2</td><td>Tumbling windows</td></tr>
+        <tr><td class="n">9</td><td>Ring/flow decomposition is non-unique; greedy choice affects bucket split</td><td class="m">accepted</td><td>Greedy min-edge cancelling, declared; bucket totals bounded by the exact cap</td></tr>
+        <tr><td class="n">10</td><td>Day-0 numbers predate fixes 3–6 (uniform per-tx netting, no canonicalization)</td><td class="m">open</td><td>Full scan recomputes everything under v2; day-0 treated as order-of-magnitude only</td></tr>
+      </tbody>
+    </table></div>
+    <p>Open review welcome — this table is meant to grow.</p>
+  </section>
+
+  <footer>
+    Sources: Allium <code>base.dex.aggregator_trades</code>, queried 2026-07-31 (runs: civic-flags-mower, wield-sails-carve, react-beach-puffs, jerks-mouth-manse, bowls-motes-veins, beams-lawns-sedan · ~1.1 EU). Day-0 window: trailing 24 h. All example amounts verbatim from query results; tx hashes shortened for display.
+  </footer>
+</div>
+</body></html>

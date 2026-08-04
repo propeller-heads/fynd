@@ -1,0 +1,1625 @@
+{
+ "days": {
+  "2026-07-25": {
+   "quarantined": 1103,
+   "quarantined_usd": 124305,
+   "unpriced": 101,
+   "sandwiched": 0,
+   "records": 96643,
+   "headline_intents": 65182,
+   "p2p_slice_intents": 30257
+  },
+  "2026-07-26": {
+   "quarantined": 558,
+   "quarantined_usd": 54650,
+   "unpriced": 72,
+   "sandwiched": 0,
+   "records": 93420,
+   "headline_intents": 62327,
+   "p2p_slice_intents": 30463
+  },
+  "2026-07-27": {
+   "quarantined": 296,
+   "quarantined_usd": 24292,
+   "unpriced": 363,
+   "sandwiched": 0,
+   "records": 92487,
+   "headline_intents": 67201,
+   "p2p_slice_intents": 24627
+  },
+  "2026-07-28": {
+   "unpriced": 412,
+   "quarantined": 195,
+   "quarantined_usd": 20806,
+   "sandwiched": 0,
+   "records": 106659,
+   "headline_intents": 75113,
+   "p2p_slice_intents": 30939
+  },
+  "2026-07-29": {
+   "quarantined": 160,
+   "quarantined_usd": 10009611,
+   "unpriced": 103,
+   "sandwiched": 0,
+   "records": 114284,
+   "headline_intents": 76189,
+   "p2p_slice_intents": 37832
+  },
+  "2026-07-30": {
+   "quarantined": 192,
+   "quarantined_usd": 20016599,
+   "unpriced": 744,
+   "sandwiched": 2,
+   "records": 116398,
+   "headline_intents": 74416,
+   "p2p_slice_intents": 41046
+  },
+  "2026-07-31": {
+   "unpriced": 319,
+   "quarantined": 191,
+   "quarantined_usd": 24550,
+   "sandwiched": 0,
+   "records": 102335,
+   "headline_intents": 59695,
+   "p2p_slice_intents": 42130
+  },
+  "2026-08-01": {
+   "unpriced": 149,
+   "quarantined": 116,
+   "quarantined_usd": 17463,
+   "sandwiched": 0,
+   "records": 64000,
+   "headline_intents": 25322,
+   "p2p_slice_intents": 38413
+  },
+  "2026-08-02": {
+   "unpriced": 499,
+   "quarantined": 29,
+   "quarantined_usd": 178,
+   "sandwiched": 0,
+   "records": 54645,
+   "headline_intents": 22048,
+   "p2p_slice_intents": 32069
+  },
+  "2026-08-03": {
+   "unpriced": 104,
+   "quarantined": 15,
+   "quarantined_usd": 1019,
+   "sandwiched": 0,
+   "records": 27912,
+   "headline_intents": 14490,
+   "p2p_slice_intents": 13303
+  }
+ },
+ "counters": {
+  "quarantined": 2855,
+  "quarantined_usd": 30293474,
+  "unpriced": 2866,
+  "sandwiched": 2,
+  "records": 868783,
+  "headline_intents": 541983,
+  "p2p_slice_intents": 321079
+ },
+ "windows": {
+  "1": {
+   "headline": {
+    "intent_usd": 225212722,
+    "pairwise_usd": 1312237,
+    "pairwise_pct": 0.583,
+    "ring_usd": 10287,
+    "multilateral_usd": 3840706,
+    "multilateral_pct": 1.705,
+    "route_mediated_usd": 2518182,
+    "pairwise_surplus_usd": 5760.05,
+    "ring_surplus_usd": 14.23,
+    "route_mediated_surplus_proxy_usd": 10427.98,
+    "median_gap_bps": 41.41,
+    "wash_excluded_usd": 0,
+    "fynd_matched_usd": 1151414,
+    "fynd_baseline_surplus_usd": 451.68,
+    "exec_surplus_on_fynd_subset_usd": 1799.53,
+    "windows": 237743,
+    "windows_with_match_pct": 3.77,
+    "neg_gap_matches": 740,
+    "window_surplus_p50": 0.03,
+    "window_surplus_p90": 0.42,
+    "window_surplus_max": 2968.99,
+    "top_pairs_by_surplus": [
+     [
+      3808.61,
+      73388,
+      "0x7ff7fa94b8b66ef313f7970d4eebd2cb3103a2c0",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      1342.01,
+      881862,
+      "0x4200000000000000000000000000000000000006",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      146.67,
+      10088,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xc52aedec3374422d7510e294cfaa90799595cba3"
+     ],
+     [
+      80.06,
+      39595,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+     ],
+     [
+      79.49,
+      42274,
+      "0x4200000000000000000000000000000000000006",
+      "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+     ],
+     [
+      54.61,
+      6761,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xed664536023d8e4b1640c394777d34abaff1df8f"
+     ],
+     [
+      34.11,
+      46686,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+     ],
+     [
+      27.62,
+      5172,
+      "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      17.1,
+      2986,
+      "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      15.68,
+      3098,
+      "0x4200000000000000000000000000000000000006",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      15.24,
+      3024,
+      "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      15.05,
+      7972,
+      "0x164ffdae2fe3891714bc2968f1875ca4fa1079d0",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      13.58,
+      2429,
+      "0xcb585250f852c6c6bf90434ab21a00f02833a4af",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      10.4,
+      917,
+      "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      10.02,
+      18765,
+      "0x4200000000000000000000000000000000000006",
+      "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+     ],
+     [
+      7.46,
+      1390,
+      "0xbf927b841994731c573bdf09ceb0c6b0aa887cdd",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      7.13,
+      583,
+      "0x4200000000000000000000000000000000000006",
+      "0x5576d6ed9181f2225aff5282ac0ed29f755437ea"
+     ],
+     [
+      6.35,
+      1161,
+      "0x41b481c3d2e3960f8f312212adfeecf6ce7c35ef",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      5.99,
+      1050,
+      "0x63706e401c06ac8513145b7687a14804d17f814b",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      5.76,
+      1110,
+      "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ]
+    ],
+    "by_category": {
+     "blue2": {
+      "matched_usd": 987775,
+      "surplus_usd": 1386.8
+     },
+     "blue1": {
+      "matched_usd": 303904,
+      "surplus_usd": 4258.58
+     },
+     "tail2": {
+      "matched_usd": 20557,
+      "surplus_usd": 114.67
+     }
+    },
+    "by_volume_bucket": {
+     "<$10k": {
+      "matched_usd": 634,
+      "surplus_usd": 4.86
+     },
+     "$10k-100k": {
+      "matched_usd": 19314,
+      "surplus_usd": 108.18
+     },
+     "$100k-1M": {
+      "matched_usd": 186105,
+      "surplus_usd": 4037.28
+     },
+     "$1M-10M": {
+      "matched_usd": 68941,
+      "surplus_usd": 141.21
+     },
+     ">$10M": {
+      "matched_usd": 1037243,
+      "surplus_usd": 1468.52
+     }
+    }
+   },
+   "p2p_slice": {
+    "intent_usd": 569987468,
+    "pairwise_usd": 83339,
+    "pairwise_pct": 0.015,
+    "ring_usd": 0,
+    "multilateral_usd": 103343599,
+    "multilateral_pct": 18.131,
+    "route_mediated_usd": 103260259,
+    "pairwise_surplus_usd": 203.68,
+    "ring_surplus_usd": 0.0,
+    "route_mediated_surplus_proxy_usd": 1082125.63,
+    "median_gap_bps": 104.8,
+    "wash_excluded_usd": 101231515,
+    "fynd_matched_usd": 0,
+    "fynd_baseline_surplus_usd": 0.0,
+    "exec_surplus_on_fynd_subset_usd": 0.0,
+    "windows": 206402,
+    "windows_with_match_pct": 0.37,
+    "neg_gap_matches": 7,
+    "window_surplus_p50": 0.03,
+    "window_surplus_p90": 0.08,
+    "window_surplus_max": 51.83,
+    "top_pairs_by_surplus": [
+     [
+      63.72,
+      51186,
+      "0x526728dbc96689597f85ae4cd716d4f7fccbae9d",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      51.83,
+      1944,
+      "0x4200000000000000000000000000000000000006",
+      "0xbf8e8f0e8866a7052f948c16508644347c57aba3"
+     ],
+     [
+      31.21,
+      2159,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0x940a319b75861014a220d9c6c144d108552b089b"
+     ],
+     [
+      14.6,
+      2504,
+      "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      12.96,
+      1415,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xff8104251e7761163fac3211ef5583fb3f8583d6"
+     ],
+     [
+      10.26,
+      19039,
+      "0x4200000000000000000000000000000000000006",
+      "0x7ba6f01772924a82d9626c126347a28299e98c98"
+     ],
+     [
+      5.7,
+      751,
+      "0xa4a2e2ca3fbfe21aed83471d28b6f65a233c6e00",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      3.48,
+      163,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xbf8e8f0e8866a7052f948c16508644347c57aba3"
+     ],
+     [
+      2.84,
+      1447,
+      "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      1.73,
+      15,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xca73ed1815e5915489570014e024b7ebe65de679"
+     ]
+    ],
+    "by_category": {
+     "blue2": {
+      "matched_usd": 0,
+      "surplus_usd": 0.0
+     },
+     "blue1": {
+      "matched_usd": 79713,
+      "surplus_usd": 181.93
+     },
+     "tail2": {
+      "matched_usd": 3626,
+      "surplus_usd": 21.76
+     }
+    },
+    "by_volume_bucket": {
+     "<$10k": {
+      "matched_usd": 374,
+      "surplus_usd": 1.94
+     },
+     "$10k-100k": {
+      "matched_usd": 5977,
+      "surplus_usd": 55.47
+     },
+     "$100k-1M": {
+      "matched_usd": 6764,
+      "surplus_usd": 72.29
+     },
+     "$1M-10M": {
+      "matched_usd": 19039,
+      "surplus_usd": 10.26
+     },
+     ">$10M": {
+      "matched_usd": 51186,
+      "surplus_usd": 63.72
+     }
+    }
+   }
+  },
+  "5": {
+   "headline": {
+    "intent_usd": 225212722,
+    "pairwise_usd": 7522070,
+    "pairwise_pct": 3.34,
+    "ring_usd": 259730,
+    "multilateral_usd": 16724744,
+    "multilateral_pct": 7.426,
+    "route_mediated_usd": 8942944,
+    "pairwise_surplus_usd": 15137.05,
+    "ring_surplus_usd": 428.91,
+    "route_mediated_surplus_proxy_usd": 41356.12,
+    "median_gap_bps": 46.24,
+    "wash_excluded_usd": 0,
+    "fynd_matched_usd": 7307656,
+    "fynd_baseline_surplus_usd": 2882.59,
+    "exec_surplus_on_fynd_subset_usd": 9443.17,
+    "windows": 76075,
+    "windows_with_match_pct": 28.47,
+    "neg_gap_matches": 1480,
+    "window_surplus_p50": 0.06,
+    "window_surplus_p90": 0.81,
+    "window_surplus_max": 2969.45,
+    "top_pairs_by_surplus": [
+     [
+      5481.19,
+      99132,
+      "0x7ff7fa94b8b66ef313f7970d4eebd2cb3103a2c0",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      5325.07,
+      3652236,
+      "0x4200000000000000000000000000000000000006",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      1325.67,
+      105134,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xed664536023d8e4b1640c394777d34abaff1df8f"
+     ],
+     [
+      1011.19,
+      2369428,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+     ],
+     [
+      381.63,
+      392879,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+     ],
+     [
+      271.6,
+      149065,
+      "0x4200000000000000000000000000000000000006",
+      "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+     ],
+     [
+      147.39,
+      10138,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xc52aedec3374422d7510e294cfaa90799595cba3"
+     ],
+     [
+      146.72,
+      13171,
+      "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      105.88,
+      19710,
+      "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      85.84,
+      8884,
+      "0x4200000000000000000000000000000000000006",
+      "0x6b2504a03ca4d43d0d73776f6ad46dab2f2a4cfd"
+     ],
+     [
+      76.05,
+      219935,
+      "0x4200000000000000000000000000000000000006",
+      "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+     ],
+     [
+      66.35,
+      11709,
+      "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      64.03,
+      4118,
+      "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b",
+      "0x4200000000000000000000000000000000000006"
+     ],
+     [
+      59.86,
+      11829,
+      "0x4200000000000000000000000000000000000006",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      57.27,
+      11358,
+      "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      50.82,
+      9107,
+      "0xcb585250f852c6c6bf90434ab21a00f02833a4af",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      36.14,
+      12344,
+      "0x311935cd80b76769bf2ecc9d8ab7635b2139cf82",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      28.93,
+      5480,
+      "0xbf927b841994731c573bdf09ceb0c6b0aa887cdd",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      27.95,
+      15752,
+      "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
+      "0x4200000000000000000000000000000000000006"
+     ],
+     [
+      26.94,
+      4696,
+      "0x63706e401c06ac8513145b7687a14804d17f814b",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ]
+    ],
+    "by_category": {
+     "blue2": {
+      "matched_usd": 4394684,
+      "surplus_usd": 5796.36
+     },
+     "blue1": {
+      "matched_usd": 3028973,
+      "surplus_usd": 8886.19
+     },
+     "tail2": {
+      "matched_usd": 98413,
+      "surplus_usd": 454.51
+     }
+    },
+    "by_volume_bucket": {
+     "<$10k": {
+      "matched_usd": 2018,
+      "surplus_usd": 13.35
+     },
+     "$10k-100k": {
+      "matched_usd": 87367,
+      "surplus_usd": 442.51
+     },
+     "$100k-1M": {
+      "matched_usd": 306067,
+      "surplus_usd": 6218.65
+     },
+     "$1M-10M": {
+      "matched_usd": 343397,
+      "surplus_usd": 1661.49
+     },
+     ">$10M": {
+      "matched_usd": 6783220,
+      "surplus_usd": 6801.06
+     }
+    }
+   },
+   "p2p_slice": {
+    "intent_usd": 569987468,
+    "pairwise_usd": 481189,
+    "pairwise_pct": 0.084,
+    "ring_usd": 0,
+    "multilateral_usd": 132962204,
+    "multilateral_pct": 23.327,
+    "route_mediated_usd": 132481015,
+    "pairwise_surplus_usd": 986.6,
+    "ring_surplus_usd": 0.0,
+    "route_mediated_surplus_proxy_usd": 793744.6,
+    "median_gap_bps": 59.91,
+    "wash_excluded_usd": 124412422,
+    "fynd_matched_usd": 0,
+    "fynd_baseline_surplus_usd": 0.0,
+    "exec_surplus_on_fynd_subset_usd": 0.0,
+    "windows": 76163,
+    "windows_with_match_pct": 12.74,
+    "neg_gap_matches": 81,
+    "window_surplus_p50": 0.03,
+    "window_surplus_p90": 0.08,
+    "window_surplus_max": 51.83,
+    "top_pairs_by_surplus": [
+     [
+      292.29,
+      224376,
+      "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      275.04,
+      90719,
+      "0x3221baeb0c2745e39a1dba73cd413361b7f5fe13",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      118.66,
+      93168,
+      "0x526728dbc96689597f85ae4cd716d4f7fccbae9d",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      55.03,
+      2277,
+      "0x4200000000000000000000000000000000000006",
+      "0xbf8e8f0e8866a7052f948c16508644347c57aba3"
+     ],
+     [
+      50.44,
+      8701,
+      "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      42.06,
+      3725,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0x940a319b75861014a220d9c6c144d108552b089b"
+     ],
+     [
+      21.89,
+      2406,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xff8104251e7761163fac3211ef5583fb3f8583d6"
+     ],
+     [
+      20.79,
+      2752,
+      "0xa4a2e2ca3fbfe21aed83471d28b6f65a233c6e00",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      16.03,
+      1241,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xbf8e8f0e8866a7052f948c16508644347c57aba3"
+     ],
+     [
+      15.69,
+      3898,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xa4a2e2ca3fbfe21aed83471d28b6f65a233c6e00"
+     ]
+    ],
+    "by_category": {
+     "blue2": {
+      "matched_usd": 0,
+      "surplus_usd": 0.0
+     },
+     "blue1": {
+      "matched_usd": 468231,
+      "surplus_usd": 900.5
+     },
+     "tail2": {
+      "matched_usd": 12959,
+      "surplus_usd": 86.11
+     }
+    },
+    "by_volume_bucket": {
+     "<$10k": {
+      "matched_usd": 2872,
+      "surplus_usd": 24.24
+     },
+     "$10k-100k": {
+      "matched_usd": 18455,
+      "surplus_usd": 136.6
+     },
+     "$100k-1M": {
+      "matched_usd": 343911,
+      "surplus_usd": 693.6
+     },
+     "$1M-10M": {
+      "matched_usd": 22783,
+      "surplus_usd": 13.51
+     },
+     ">$10M": {
+      "matched_usd": 93168,
+      "surplus_usd": 118.66
+     }
+    }
+   }
+  },
+  "15": {
+   "headline": {
+    "intent_usd": 225212722,
+    "pairwise_usd": 17157622,
+    "pairwise_pct": 7.618,
+    "ring_usd": 975954,
+    "multilateral_usd": 34103426,
+    "multilateral_pct": 15.143,
+    "route_mediated_usd": 15969849,
+    "pairwise_surplus_usd": 28328.41,
+    "ring_surplus_usd": 1298.28,
+    "route_mediated_surplus_proxy_usd": 86877.93,
+    "median_gap_bps": 54.4,
+    "wash_excluded_usd": 0,
+    "fynd_matched_usd": 16872163,
+    "fynd_baseline_surplus_usd": 6898.98,
+    "exec_surplus_on_fynd_subset_usd": 20299.22,
+    "windows": 26382,
+    "windows_with_match_pct": 72.65,
+    "neg_gap_matches": 1435,
+    "window_surplus_p50": 0.2,
+    "window_surplus_p90": 2.31,
+    "window_surplus_max": 2969.45,
+    "top_pairs_by_surplus": [
+     [
+      11639.61,
+      8258347,
+      "0x4200000000000000000000000000000000000006",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      7720.04,
+      110289,
+      "0x7ff7fa94b8b66ef313f7970d4eebd2cb3103a2c0",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      2129.94,
+      4620530,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+     ],
+     [
+      1520.43,
+      122410,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xed664536023d8e4b1640c394777d34abaff1df8f"
+     ],
+     [
+      821.51,
+      924743,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+     ],
+     [
+      728.0,
+      383363,
+      "0x4200000000000000000000000000000000000006",
+      "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+     ],
+     [
+      381.22,
+      17737,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0x9b5e262cf9bb04869ab40b19af91d2dc85761722"
+     ],
+     [
+      308.18,
+      28095,
+      "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      292.96,
+      14605,
+      "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b",
+      "0x4200000000000000000000000000000000000006"
+     ],
+     [
+      201.61,
+      37621,
+      "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      197.59,
+      675778,
+      "0x4200000000000000000000000000000000000006",
+      "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+     ],
+     [
+      178.27,
+      19045,
+      "0x4200000000000000000000000000000000000006",
+      "0x6b2504a03ca4d43d0d73776f6ad46dab2f2a4cfd"
+     ],
+     [
+      149.23,
+      124961,
+      "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
+      "0x4200000000000000000000000000000000000006"
+     ],
+     [
+      147.54,
+      10148,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xc52aedec3374422d7510e294cfaa90799595cba3"
+     ],
+     [
+      136.07,
+      24014,
+      "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      114.07,
+      22558,
+      "0x4200000000000000000000000000000000000006",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      109.66,
+      473694,
+      "0x4200000000000000000000000000000000000006",
+      "0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452"
+     ],
+     [
+      107.13,
+      21155,
+      "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      98.66,
+      17788,
+      "0xcb585250f852c6c6bf90434ab21a00f02833a4af",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      93.11,
+      6269,
+      "0x4200000000000000000000000000000000000006",
+      "0x5576d6ed9181f2225aff5282ac0ed29f755437ea"
+     ]
+    ],
+    "by_category": {
+     "blue2": {
+      "matched_usd": 10463844,
+      "surplus_usd": 12699.92
+     },
+     "blue1": {
+      "matched_usd": 6482246,
+      "surplus_usd": 14529.92
+     },
+     "tail2": {
+      "matched_usd": 211532,
+      "surplus_usd": 1098.57
+     }
+    },
+    "by_volume_bucket": {
+     "<$10k": {
+      "matched_usd": 8231,
+      "surplus_usd": 37.14
+     },
+     "$10k-100k": {
+      "matched_usd": 241211,
+      "surplus_usd": 1229.12
+     },
+     "$100k-1M": {
+      "matched_usd": 476721,
+      "surplus_usd": 9622.5
+     },
+     "$1M-10M": {
+      "matched_usd": 1176971,
+      "surplus_usd": 2612.55
+     },
+     ">$10M": {
+      "matched_usd": 15254488,
+      "surplus_usd": 14827.09
+     }
+    }
+   },
+   "p2p_slice": {
+    "intent_usd": 569987468,
+    "pairwise_usd": 37362748,
+    "pairwise_pct": 6.555,
+    "ring_usd": 0,
+    "multilateral_usd": 212374577,
+    "multilateral_pct": 37.26,
+    "route_mediated_usd": 175011829,
+    "pairwise_surplus_usd": 2993.82,
+    "ring_surplus_usd": 0.0,
+    "route_mediated_surplus_proxy_usd": 1036415.36,
+    "median_gap_bps": 59.22,
+    "wash_excluded_usd": 163642851,
+    "fynd_matched_usd": 0,
+    "fynd_baseline_surplus_usd": 0.0,
+    "exec_surplus_on_fynd_subset_usd": 0.0,
+    "windows": 26382,
+    "windows_with_match_pct": 74.35,
+    "neg_gap_matches": 1205,
+    "window_surplus_p50": 0.05,
+    "window_surplus_p90": 0.13,
+    "window_surplus_max": 125.92,
+    "top_pairs_by_surplus": [
+     [
+      958.36,
+      315536,
+      "0x3221baeb0c2745e39a1dba73cd413361b7f5fe13",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      618.25,
+      448020,
+      "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      599.81,
+      549837,
+      "0x526728dbc96689597f85ae4cd716d4f7fccbae9d",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      170.31,
+      250818,
+      "0x4200000000000000000000000000000000000006",
+      "0x7ba6f01772924a82d9626c126347a28299e98c98"
+     ],
+     [
+      103.03,
+      17844,
+      "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      97.94,
+      5455,
+      "0x4200000000000000000000000000000000000006",
+      "0xbf8e8f0e8866a7052f948c16508644347c57aba3"
+     ],
+     [
+      65.21,
+      4432,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xbf8e8f0e8866a7052f948c16508644347c57aba3"
+     ],
+     [
+      53.54,
+      7120,
+      "0xa4a2e2ca3fbfe21aed83471d28b6f65a233c6e00",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      45.86,
+      4723,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0x940a319b75861014a220d9c6c144d108552b089b"
+     ],
+     [
+      41.12,
+      245,
+      "0x03ee11923326d54a580af44ec633f1cdcb414632",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ]
+    ],
+    "by_category": {
+     "blue2": {
+      "matched_usd": 0,
+      "surplus_usd": 0.0
+     },
+     "blue1": {
+      "matched_usd": 37332747,
+      "surplus_usd": 2806.19
+     },
+     "tail2": {
+      "matched_usd": 30001,
+      "surplus_usd": 187.63
+     }
+    },
+    "by_volume_bucket": {
+     "<$10k": {
+      "matched_usd": 11155,
+      "surplus_usd": 113.53
+     },
+     "$10k-100k": {
+      "matched_usd": 47702,
+      "surplus_usd": 276.67
+     },
+     "$100k-1M": {
+      "matched_usd": 821855,
+      "surplus_usd": 1833.5
+     },
+     "$1M-10M": {
+      "matched_usd": 250818,
+      "surplus_usd": 170.31
+     },
+     ">$10M": {
+      "matched_usd": 36231218,
+      "surplus_usd": 599.81
+     }
+    }
+   }
+  },
+  "30": {
+   "headline": {
+    "intent_usd": 225212722,
+    "pairwise_usd": 26129439,
+    "pairwise_pct": 11.602,
+    "ring_usd": 1788244,
+    "multilateral_usd": 48449169,
+    "multilateral_pct": 21.513,
+    "route_mediated_usd": 20531487,
+    "pairwise_surplus_usd": 38485.93,
+    "ring_surplus_usd": 2371.85,
+    "route_mediated_surplus_proxy_usd": 190308.41,
+    "median_gap_bps": 92.69,
+    "wash_excluded_usd": 0,
+    "fynd_matched_usd": 25835393,
+    "fynd_baseline_surplus_usd": 11851.48,
+    "exec_surplus_on_fynd_subset_usd": 30340.76,
+    "windows": 13222,
+    "windows_with_match_pct": 91.64,
+    "neg_gap_matches": 1333,
+    "window_surplus_p50": 0.84,
+    "window_surplus_p90": 5.68,
+    "window_surplus_max": 2969.45,
+    "top_pairs_by_surplus": [
+     [
+      16464.51,
+      12341149,
+      "0x4200000000000000000000000000000000000006",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      7842.52,
+      110108,
+      "0x7ff7fa94b8b66ef313f7970d4eebd2cb3103a2c0",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      3064.07,
+      6831578,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+     ],
+     [
+      1874.35,
+      150821,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xed664536023d8e4b1640c394777d34abaff1df8f"
+     ],
+     [
+      1303.24,
+      669980,
+      "0x4200000000000000000000000000000000000006",
+      "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+     ],
+     [
+      1152.23,
+      1387106,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+     ],
+     [
+      646.82,
+      30472,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0x9b5e262cf9bb04869ab40b19af91d2dc85761722"
+     ],
+     [
+      403.71,
+      42616,
+      "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      368.06,
+      1117529,
+      "0x4200000000000000000000000000000000000006",
+      "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+     ],
+     [
+      351.19,
+      65867,
+      "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      321.29,
+      18490,
+      "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b",
+      "0x4200000000000000000000000000000000000006"
+     ],
+     [
+      296.94,
+      52067,
+      "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      225.57,
+      23707,
+      "0x4200000000000000000000000000000000000006",
+      "0x6b2504a03ca4d43d0d73776f6ad46dab2f2a4cfd"
+     ],
+     [
+      217.8,
+      43068,
+      "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      214.66,
+      42545,
+      "0x4200000000000000000000000000000000000006",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      198.71,
+      36007,
+      "0xcb585250f852c6c6bf90434ab21a00f02833a4af",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      180.13,
+      165004,
+      "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
+      "0x4200000000000000000000000000000000000006"
+     ],
+     [
+      164.32,
+      29400,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0x9d0e8f5b25384c7310cb8c6ae32c8fbeb645d083"
+     ],
+     [
+      160.77,
+      28322,
+      "0x63706e401c06ac8513145b7687a14804d17f814b",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      159.06,
+      25329,
+      "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ]
+    ],
+    "by_category": {
+     "blue2": {
+      "matched_usd": 15971459,
+      "surplus_usd": 18038.82
+     },
+     "blue1": {
+      "matched_usd": 9656355,
+      "surplus_usd": 17873.3
+     },
+     "tail2": {
+      "matched_usd": 501625,
+      "surplus_usd": 2573.81
+     }
+    },
+    "by_volume_bucket": {
+     "<$10k": {
+      "matched_usd": 18572,
+      "surplus_usd": 77.39
+     },
+     "$10k-100k": {
+      "matched_usd": 552655,
+      "surplus_usd": 2816.48
+     },
+     "$100k-1M": {
+      "matched_usd": 719804,
+      "surplus_usd": 10736.94
+     },
+     "$1M-10M": {
+      "matched_usd": 1659032,
+      "surplus_usd": 3716.24
+     },
+     ">$10M": {
+      "matched_usd": 23179375,
+      "surplus_usd": 21138.87
+     }
+    }
+   },
+   "p2p_slice": {
+    "intent_usd": 569987468,
+    "pairwise_usd": 50091308,
+    "pairwise_pct": 8.788,
+    "ring_usd": 114,
+    "multilateral_usd": 242633741,
+    "multilateral_pct": 42.568,
+    "route_mediated_usd": 192542319,
+    "pairwise_surplus_usd": 4096.21,
+    "ring_surplus_usd": 0.73,
+    "route_mediated_surplus_proxy_usd": 1077325.61,
+    "median_gap_bps": 55.95,
+    "wash_excluded_usd": 180544297,
+    "fynd_matched_usd": 0,
+    "fynd_baseline_surplus_usd": 0.0,
+    "exec_surplus_on_fynd_subset_usd": 0.0,
+    "windows": 13217,
+    "windows_with_match_pct": 94.8,
+    "neg_gap_matches": 2041,
+    "window_surplus_p50": 0.11,
+    "window_surplus_p90": 0.31,
+    "window_surplus_max": 116.22,
+    "top_pairs_by_surplus": [
+     [
+      1150.5,
+      380536,
+      "0x3221baeb0c2745e39a1dba73cd413361b7f5fe13",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      893.57,
+      799102,
+      "0x526728dbc96689597f85ae4cd716d4f7fccbae9d",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      679.31,
+      497183,
+      "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      220.17,
+      38169,
+      "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      216.3,
+      401265,
+      "0x4200000000000000000000000000000000000006",
+      "0x7ba6f01772924a82d9626c126347a28299e98c98"
+     ],
+     [
+      128.68,
+      17299,
+      "0xa4a2e2ca3fbfe21aed83471d28b6f65a233c6e00",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      120.73,
+      6682,
+      "0x4200000000000000000000000000000000000006",
+      "0xbf8e8f0e8866a7052f948c16508644347c57aba3"
+     ],
+     [
+      71.9,
+      14141,
+      "0x417ac0e078398c154edfadd9ef675d30be60af93",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      62.32,
+      245,
+      "0x03ee11923326d54a580af44ec633f1cdcb414632",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      58.45,
+      6369,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0x940a319b75861014a220d9c6c144d108552b089b"
+     ]
+    ],
+    "by_category": {
+     "blue2": {
+      "matched_usd": 0,
+      "surplus_usd": 0.0
+     },
+     "blue1": {
+      "matched_usd": 50009238,
+      "surplus_usd": 3605.35
+     },
+     "tail2": {
+      "matched_usd": 82070,
+      "surplus_usd": 490.86
+     }
+    },
+    "by_volume_bucket": {
+     "<$10k": {
+      "matched_usd": 16972,
+      "surplus_usd": 224.78
+     },
+     "$10k-100k": {
+      "matched_usd": 128404,
+      "surplus_usd": 649.04
+     },
+     "$100k-1M": {
+      "matched_usd": 962128,
+      "surplus_usd": 2107.73
+     },
+     "$1M-10M": {
+      "matched_usd": 439814,
+      "surplus_usd": 221.09
+     },
+     ">$10M": {
+      "matched_usd": 48543989,
+      "surplus_usd": 893.57
+     }
+    }
+   }
+  },
+  "150": {
+   "headline": {
+    "intent_usd": 225212722,
+    "pairwise_usd": 47745790,
+    "pairwise_pct": 21.2,
+    "ring_usd": 4932452,
+    "multilateral_usd": 84584666,
+    "multilateral_pct": 37.558,
+    "route_mediated_usd": 31906425,
+    "pairwise_surplus_usd": 75435.0,
+    "ring_surplus_usd": 6445.36,
+    "route_mediated_surplus_proxy_usd": 199838.98,
+    "median_gap_bps": 62.63,
+    "wash_excluded_usd": 0,
+    "fynd_matched_usd": 45067011,
+    "fynd_baseline_surplus_usd": 27531.27,
+    "exec_surplus_on_fynd_subset_usd": 56140.43,
+    "windows": 2676,
+    "windows_with_match_pct": 99.89,
+    "neg_gap_matches": 1540,
+    "window_surplus_p50": 13.3,
+    "window_surplus_p90": 45.33,
+    "window_surplus_max": 5849.34,
+    "top_pairs_by_surplus": [
+     [
+      26420.1,
+      20525677,
+      "0x4200000000000000000000000000000000000006",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      18477.7,
+      239945,
+      "0x7ff7fa94b8b66ef313f7970d4eebd2cb3103a2c0",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      6786.54,
+      11742546,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+     ],
+     [
+      3371.57,
+      1783279,
+      "0x4200000000000000000000000000000000000006",
+      "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
+     ],
+     [
+      2380.27,
+      197233,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xed664536023d8e4b1640c394777d34abaff1df8f"
+     ],
+     [
+      2336.44,
+      3010890,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+     ],
+     [
+      1649.49,
+      3893684,
+      "0x4200000000000000000000000000000000000006",
+      "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+     ],
+     [
+      1401.02,
+      63766,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0x9b5e262cf9bb04869ab40b19af91d2dc85761722"
+     ],
+     [
+      957.33,
+      94665,
+      "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      561.66,
+      105350,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0x9d0e8f5b25384c7310cb8c6ae32c8fbeb645d083"
+     ],
+     [
+      542.6,
+      101651,
+      "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      540.01,
+      45696,
+      "0x22af33fe49fd1fa80c7149773dde5890d3c76f3b",
+      "0x4200000000000000000000000000000000000006"
+     ],
+     [
+      527.3,
+      57981,
+      "0x4200000000000000000000000000000000000006",
+      "0x6b2504a03ca4d43d0d73776f6ad46dab2f2a4cfd"
+     ],
+     [
+      517.69,
+      215548,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf"
+     ],
+     [
+      460.7,
+      80740,
+      "0x88fb150bdc53a65fe94dea0c9ba0a6daf8c6e196",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      358.45,
+      1071476,
+      "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      351.97,
+      69767,
+      "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      340.01,
+      68436,
+      "0x4200000000000000000000000000000000000006",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      316.28,
+      57296,
+      "0xcb585250f852c6c6bf90434ab21a00f02833a4af",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      306.65,
+      53879,
+      "0x63706e401c06ac8513145b7687a14804d17f814b",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ]
+    ],
+    "by_category": {
+     "blue2": {
+      "matched_usd": 28869198,
+      "surplus_usd": 30500.99
+     },
+     "blue1": {
+      "matched_usd": 17909459,
+      "surplus_usd": 39661.08
+     },
+     "tail2": {
+      "matched_usd": 967133,
+      "surplus_usd": 5272.93
+     }
+    },
+    "by_volume_bucket": {
+     "<$10k": {
+      "matched_usd": 51794,
+      "surplus_usd": 394.11
+     },
+     "$10k-100k": {
+      "matched_usd": 1072120,
+      "surplus_usd": 6015.24
+     },
+     "$100k-1M": {
+      "matched_usd": 1555610,
+      "surplus_usd": 24609.09
+     },
+     "$1M-10M": {
+      "matched_usd": 3354142,
+      "surplus_usd": 6865.54
+     },
+     ">$10M": {
+      "matched_usd": 41712124,
+      "surplus_usd": 37551.02
+     }
+    }
+   },
+   "p2p_slice": {
+    "intent_usd": 569987468,
+    "pairwise_usd": 66866027,
+    "pairwise_pct": 11.731,
+    "ring_usd": 365,
+    "multilateral_usd": 277983099,
+    "multilateral_pct": 48.77,
+    "route_mediated_usd": 211116707,
+    "pairwise_surplus_usd": 7010.02,
+    "ring_surplus_usd": 3.65,
+    "route_mediated_surplus_proxy_usd": 1253327.89,
+    "median_gap_bps": 59.37,
+    "wash_excluded_usd": 197717382,
+    "fynd_matched_usd": 0,
+    "fynd_baseline_surplus_usd": 0.0,
+    "exec_surplus_on_fynd_subset_usd": 0.0,
+    "windows": 2675,
+    "windows_with_match_pct": 99.85,
+    "neg_gap_matches": 675,
+    "window_surplus_p50": 1.0,
+    "window_surplus_p90": 2.8,
+    "window_surplus_max": 221.72,
+    "top_pairs_by_surplus": [
+     [
+      1483.22,
+      491821,
+      "0x3221baeb0c2745e39a1dba73cd413361b7f5fe13",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      1406.16,
+      2183617,
+      "0x526728dbc96689597f85ae4cd716d4f7fccbae9d",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      800.75,
+      585857,
+      "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+     ],
+     [
+      469.54,
+      710788,
+      "0x4200000000000000000000000000000000000006",
+      "0x7ba6f01772924a82d9626c126347a28299e98c98"
+     ],
+     [
+      366.8,
+      63879,
+      "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      306.34,
+      13508,
+      "0x4200000000000000000000000000000000000006",
+      "0xbf8e8f0e8866a7052f948c16508644347c57aba3"
+     ],
+     [
+      235.85,
+      31597,
+      "0xa4a2e2ca3fbfe21aed83471d28b6f65a233c6e00",
+      "0xdcf5130274753c8050ab061b1a1dcbf583f5bfd0"
+     ],
+     [
+      215.54,
+      3449,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xff0c532fdb8cd566ae169c1cb157ff2bdc83e105"
+     ],
+     [
+      154.17,
+      7652,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xbf8e8f0e8866a7052f948c16508644347c57aba3"
+     ],
+     [
+      147.65,
+      19219,
+      "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "0xa4a2e2ca3fbfe21aed83471d28b6f65a233c6e00"
+     ]
+    ],
+    "by_category": {
+     "blue2": {
+      "matched_usd": 0,
+      "surplus_usd": 0.0
+     },
+     "blue1": {
+      "matched_usd": 66711498,
+      "surplus_usd": 6118.38
+     },
+     "tail2": {
+      "matched_usd": 154529,
+      "surplus_usd": 891.64
+     }
+    },
+    "by_volume_bucket": {
+     "<$10k": {
+      "matched_usd": 41303,
+      "surplus_usd": 515.71
+     },
+     "$10k-100k": {
+      "matched_usd": 288825,
+      "surplus_usd": 1511.99
+     },
+     "$100k-1M": {
+      "matched_usd": 1341734,
+      "surplus_usd": 3101.76
+     },
+     "$1M-10M": {
+      "matched_usd": 897341,
+      "surplus_usd": 474.33
+     },
+     ">$10M": {
+      "matched_usd": 64296824,
+      "surplus_usd": 1406.23
+     }
+    }
+   }
+  }
+ }
+}
