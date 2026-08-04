@@ -16,6 +16,12 @@ apex-solver = { path = "/Users/pistomat/Projects/propeller-heads/apex-solver", f
 fynd-test-fixtures = { workspace = true }
 tycho-simulation = { workspace = true }
 
+# Stage 3+: live-state snapshot through the in-process fynd solver
+fynd-core = { workspace = true }
+fynd-rpc = { workspace = true }
+tokio = { workspace = true }
+zstd = { workspace = true }
+
 alloy = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }

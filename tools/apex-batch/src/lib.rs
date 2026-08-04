@@ -14,6 +14,9 @@
 
 pub mod adapter;
 pub mod analysis;
+pub mod dataset;
+pub mod prices;
 pub mod runner;
 pub mod scaling;
 pub mod snapshot;
+pub mod subset;

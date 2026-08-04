@@ -281,6 +281,53 @@ pub fn from_apex_address(address: ApexAddress) -> AlloyAddress {
     AlloyAddress::from(address.0)
 }
 
+/// APEX's 20-byte address for a tycho component id.
+///
+/// Most component ids are pool addresses and convert directly. Uniswap v4 (and any singleton
+/// protocol) uses 32-byte pool ids — naive truncation would silently overwrite pools inside
+/// APEX's address-keyed maps, so non-address ids are hashed to a synthetic address instead.
+pub fn apex_pool_address(component_id: &str) -> ApexAddress {
+    let hex = component_id
+        .strip_prefix("0x")
+        .unwrap_or(component_id);
+    if hex.len() == 40 {
+        if let Some(address) = crate::dataset::parse_address(component_id) {
+            return address;
+        }
+    }
+    let digest = alloy::primitives::keccak256(component_id.as_bytes());
+    let mut bytes = [0u8; 20];
+    bytes.copy_from_slice(&digest[..20]);
+    ApexAddress(bytes)
+}
+
+/// Component-id → APEX-address registry that fails fast on a collision instead of letting two
+/// pools silently merge inside APEX.
+#[derive(Debug, Default)]
+pub struct PoolAddressBook {
+    by_address: HashMap<ApexAddress, String>,
+}
+
+impl PoolAddressBook {
+    /// Register a component and return its APEX address, or the colliding component's id.
+    pub fn register(&mut self, component_id: &str) -> Result<ApexAddress, String> {
+        let address = apex_pool_address(component_id);
+        match self.by_address.entry(address) {
+            std::collections::hash_map::Entry::Occupied(existing) => {
+                if existing.get() == component_id {
+                    Ok(address)
+                } else {
+                    Err(existing.get().clone())
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(component_id.to_string());
+                Ok(address)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use apex_solver::core::Token as ApexCoreToken;
@@ -471,6 +518,34 @@ mod tests {
             direct_native,
             "18-dec sell token: lift is identity, so the two answers are equal"
         );
+    }
+
+    #[test]
+    fn test_pool_address_book_direct_and_hashed_ids() {
+        let mut book = PoolAddressBook::default();
+        // A 20-byte id converts directly and re-registers idempotently.
+        let direct = book
+            .register("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
+            .expect("first registration");
+        assert_eq!(
+            direct,
+            ApexAddress(
+                "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+                    .parse::<AlloyAddress>()
+                    .expect("valid address")
+                    .into_array()
+            )
+        );
+        assert_eq!(book.register("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"), Ok(direct));
+        // A v4-style 32-byte id gets a synthetic hashed address, distinct from truncation.
+        let v4_id = "0x1f98431c8ad98523631ae4a59f267346ea31f9840001f4c02aaa39b223fe8d0a";
+        let hashed = book
+            .register(v4_id)
+            .expect("hashed registration");
+        assert_ne!(&hashed.0[..], &alloy::primitives::hex::decode(v4_id).expect("hex")[..20]);
+        // Two distinct v4 ids sharing a 20-byte prefix must NOT collide.
+        let sibling = "0x1f98431c8ad98523631ae4a59f267346ea31f9840001f4c02aaa39b223fe8d0b";
+        assert!(book.register(sibling).is_ok());
     }
 
     #[test]

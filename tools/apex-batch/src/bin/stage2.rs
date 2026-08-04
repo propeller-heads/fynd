@@ -26,6 +26,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use apex_batch::dataset::{load_day_headline, u256_to_f64, Intent};
 use apex_solver::{
     core::{ApexConfig, Fraction, LimitOrder, Token as ApexToken, TradingPair},
     run_apex_with_config,
@@ -35,16 +36,8 @@ use clap::Parser;
 use rayon::prelude::*;
 use serde::Serialize;
 
-const WETH: &str = "0x4200000000000000000000000000000000000006";
-const NATIVE: &str = "0x0000000000000000000000000000000000000000";
 const WINDOWS: [u64; 5] = [1, 5, 15, 30, 150];
 const LIMIT_BPS_CELLS: [u32; 3] = [50, 100, 200];
-const PRICE_DEV_FACTOR: f64 = 5.0;
-const USD_CAP: f64 = 10_000_000.0;
-/// Sender-verified self-trading pair (cow_scan WASH_PAIRS); its orders never enter APEX but the
-/// pair's volume stays in the intent denominator, mirroring the analytic scan.
-const WASH_PAIR: (&str, &str) =
-    ("0x3c5cd672b204ba0fc48e93b98c0922920a87912d", "0x3d66e6fe9a3cf698db5af3d70830b299c9235151");
 /// Overflow bound: S · total_usd · 10^P must stay below 2^126 ≈ 8.5e37, so with P=2 the scale
 /// budget is 8.5e35 per USD of batch notional.
 const SCALE_BUDGET: f64 = 8.5e35;
@@ -70,19 +63,6 @@ struct Args {
     days: Vec<String>,
 }
 
-/// One netted intent from the headline universe, in raw native units.
-#[derive(Clone)]
-struct Intent {
-    block: u64,
-    token_in: ApexAddress,
-    token_out: ApexAddress,
-    amount_in: U256,
-    settled_out: U256,
-    usd: f64,
-    id: String,
-    is_wash: bool,
-}
-
 #[derive(Debug, Default, Clone, Serialize)]
 struct Counters {
     orders_in: u64,
@@ -105,6 +85,11 @@ struct Counters {
     negative_gap_usd: f64,
     components_solved: u64,
     components_multi_order: u64,
+    /// APEX-filled orders with a recorded fynd quote to compare against.
+    fynd_compared: u64,
+    /// APEX-filled orders fynd never quoted (unsolvable / missing) — excluded from the
+    /// engine-inclusive comparison, never silently.
+    fynd_uncompared: u64,
 }
 
 impl Counters {
@@ -132,7 +117,21 @@ impl Counters {
         self.negative_gap_usd += other.negative_gap_usd;
         self.components_solved += other.components_solved;
         self.components_multi_order += other.components_multi_order;
+        self.fynd_compared += other.fynd_compared;
+        self.fynd_uncompared += other.fynd_uncompared;
     }
+}
+
+/// Engine-inclusive comparison: APEX clearings vs the dataset's per-trade fynd N−1 quotes
+/// (`top.fynd_amount_out`), on the subset of APEX-filled orders fynd also quoted. Positive bps
+/// = APEX delivered more than fynd's individual quote (plan item L).
+#[derive(Default, Clone, Serialize)]
+struct FyndComparison {
+    compared_orders: u64,
+    apex_ge_fynd_share: f64,
+    mean_bps: f64,
+    median_bps: f64,
+    usd_delta: f64,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -143,191 +142,9 @@ struct CellResult {
     apex_matched_usd: f64,
     apex_matched_pct: f64,
     apex_surplus_usd: f64,
+    fynd: FyndComparison,
     counters: Counters,
     wall_ms: u128,
-}
-
-fn parse_address(token: &str) -> Option<ApexAddress> {
-    let hex = token.strip_prefix("0x")?;
-    if hex.len() != 40 {
-        return None;
-    }
-    let mut bytes = [0u8; 20];
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
-    }
-    Some(ApexAddress(bytes))
-}
-
-fn parse_u256_decimal(digits: &str) -> Option<U256> {
-    let mut value = U256::ZERO;
-    let ten = U256::from(10u64);
-    for c in digits.bytes() {
-        if !c.is_ascii_digit() {
-            return None;
-        }
-        value = value
-            .checked_mul(ten)?
-            .checked_add(U256::from((c - b'0') as u64))?;
-    }
-    Some(value)
-}
-
-fn u256_to_f64(value: U256) -> f64 {
-    let mut result = 0.0f64;
-    for limb in value.as_limbs().iter().rev() {
-        result = result * 1.8446744073709552e19 + *limb as f64;
-    }
-    result
-}
-
-/// Mirror of cow_scan's `load_day` + `classify`: canonicalize, quarantine, USD-estimate, and
-/// keep the headline (both-tokens-routable) slice. Returns intents plus the day's per-token
-/// median price in USD per RAW UNIT — the same decimals-free price the analytic scan uses.
-fn load_day_headline(path: &std::path::Path) -> Result<(Vec<Intent>, HashMap<ApexAddress, f64>)> {
-    let wash_a = parse_address(WASH_PAIR.0).expect("static wash address parses");
-    let wash_b = parse_address(WASH_PAIR.1).expect("static wash address parses");
-    let weth = parse_address(WETH).expect("static WETH address parses");
-
-    struct Raw {
-        block: u64,
-        token_in: ApexAddress,
-        token_out: ApexAddress,
-        amount_in: U256,
-        settled_out: U256,
-        usd: Option<f64>,
-        routable_pair: bool,
-        id: String,
-    }
-
-    let content =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut raws: Vec<Raw> = Vec::new();
-    let mut price_samples: HashMap<ApexAddress, Vec<f64>> = HashMap::new();
-    let mut routable: std::collections::HashSet<ApexAddress> = Default::default();
-
-    for line in content.lines() {
-        let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        let canon = |t: &str| {
-            if t == NATIVE {
-                weth
-            } else {
-                parse_address(t).unwrap_or(ApexAddress([0xFF; 20]))
-            }
-        };
-        let (Some(tin_s), Some(tout_s)) = (rec["token_in"].as_str(), rec["token_out"].as_str())
-        else {
-            continue;
-        };
-        let (tin, tout) = (canon(tin_s), canon(tout_s));
-        if tin == tout || tin.0 == [0xFF; 20] || tout.0 == [0xFF; 20] {
-            continue;
-        }
-        let (Some(ain), Some(aout)) = (
-            rec["amount_in"]
-                .as_str()
-                .and_then(parse_u256_decimal),
-            rec["settled_amount_out"]
-                .as_str()
-                .and_then(parse_u256_decimal),
-        ) else {
-            continue;
-        };
-        if ain.is_zero() || aout.is_zero() {
-            continue;
-        }
-        let verdict = rec["top"]["verdict"]
-            .as_str()
-            .unwrap_or("");
-        let usd = rec["top"]["settled_value_usd"].as_f64();
-        if verdict == "win" || verdict == "loss" {
-            routable.insert(tin);
-            routable.insert(tout);
-        }
-        if let Some(u) = usd {
-            if u > 0.0 {
-                price_samples
-                    .entry(tout)
-                    .or_default()
-                    .push(u / u256_to_f64(aout));
-                price_samples
-                    .entry(tin)
-                    .or_default()
-                    .push(u / u256_to_f64(ain));
-            }
-        }
-        let (Some(tx), Some(tx_index)) = (rec["settled_tx"].as_str(), rec["tx_index"].as_u64())
-        else {
-            continue;
-        };
-        raws.push(Raw {
-            block: rec["block"].as_u64().unwrap_or(0),
-            token_in: tin,
-            token_out: tout,
-            amount_in: ain,
-            settled_out: aout,
-            usd,
-            routable_pair: false,
-            id: format!("{tx}:{tx_index}"),
-        });
-    }
-
-    let mut day_price: HashMap<ApexAddress, f64> = HashMap::new();
-    for (token, mut samples) in price_samples {
-        samples.sort_by(|a, b| {
-            a.partial_cmp(b)
-                .expect("finite price samples")
-        });
-        day_price.insert(token, samples[samples.len() / 2]);
-    }
-
-    let mut intents = Vec::new();
-    for mut raw in raws {
-        raw.routable_pair = routable.contains(&raw.token_in) && routable.contains(&raw.token_out);
-        let pin = day_price.get(&raw.token_in).copied();
-        let pout = day_price.get(&raw.token_out).copied();
-        let usd_est = raw
-            .usd
-            .or_else(|| pin.map(|p| p * u256_to_f64(raw.amount_in)))
-            .or_else(|| pout.map(|p| p * u256_to_f64(raw.settled_out)));
-        let Some(usd_est) = usd_est else { continue };
-        let mut bad = usd_est > USD_CAP;
-        if !bad {
-            if let Some(pin) = pin {
-                if pin > 0.0 {
-                    let dev = (usd_est / u256_to_f64(raw.amount_in)) / pin;
-                    bad = !(1.0 / PRICE_DEV_FACTOR..=PRICE_DEV_FACTOR).contains(&dev);
-                }
-            }
-        }
-        if !bad {
-            if let Some(pout) = pout {
-                if pout > 0.0 {
-                    let dev = (usd_est / u256_to_f64(raw.settled_out)) / pout;
-                    bad = !(1.0 / PRICE_DEV_FACTOR..=PRICE_DEV_FACTOR).contains(&dev);
-                }
-            }
-        }
-        if bad || !raw.routable_pair {
-            continue;
-        }
-        let pair = if raw.token_in.0 < raw.token_out.0 {
-            (raw.token_in, raw.token_out)
-        } else {
-            (raw.token_out, raw.token_in)
-        };
-        intents.push(Intent {
-            block: raw.block,
-            token_in: raw.token_in,
-            token_out: raw.token_out,
-            amount_in: raw.amount_in,
-            settled_out: raw.settled_out,
-            usd: usd_est,
-            id: raw.id,
-            is_wash: pair == (wash_a, wash_b) || pair == (wash_b, wash_a),
-        });
-    }
-    Ok((intents, day_price))
 }
 
 /// Solve one window batch (one tumbling window's headline intents) through APEX with zero
@@ -336,10 +153,12 @@ fn solve_batch(
     intents: &[Intent],
     day_price: &HashMap<ApexAddress, f64>,
     limit_bps: u32,
-) -> (f64, f64, Counters) {
+) -> (f64, f64, Counters, Vec<f64>, f64) {
     let mut counters = Counters::default();
     let mut matched_usd = 0.0f64;
     let mut surplus_usd = 0.0f64;
+    let mut fynd_bps_samples: Vec<f64> = Vec::new();
+    let mut fynd_usd_delta = 0.0f64;
 
     // Order-level exclusions first: wash, unpriced tokens, dust limits.
     let mut orders: Vec<&Intent> = Vec::with_capacity(intents.len());
@@ -357,7 +176,7 @@ fn solve_batch(
     }
     if orders.len() < 2 {
         counters.singles_skipped += orders.len() as u64;
-        return (0.0, 0.0, counters);
+        return (0.0, 0.0, counters, fynd_bps_samples, fynd_usd_delta);
     }
 
     // Shared-token connected components (no pools, so components ARE apex's clusters).
@@ -561,6 +380,20 @@ fn solve_batch(
                         counters.negative_fill_gaps += 1;
                         counters.negative_gap_usd += -gap_raw * day_price[&order.token_out];
                     }
+                    // Engine-inclusive baseline: the same fill against fynd's own N−1 quote,
+                    // pro-rata for partial fills (plan item L).
+                    match order.fynd_out {
+                        Some(fynd_out) if !fynd_out.is_zero() => {
+                            counters.fynd_compared += 1;
+                            let fynd_pro_rata = u256_to_f64(fynd_out) * fill_ratio.min(1.0);
+                            let apex_out = u256_to_f64(clearing.bought_amount);
+                            fynd_bps_samples
+                                .push(10_000.0 * (apex_out - fynd_pro_rata) / fynd_pro_rata);
+                            fynd_usd_delta +=
+                                (apex_out - fynd_pro_rata) * day_price[&order.token_out];
+                        }
+                        _ => counters.fynd_uncompared += 1,
+                    }
                 }
                 Some(_) => counters.unfilled_at_limit += 1,
                 None if result.deadline_fired => counters.cluster_cut += 1,
@@ -568,7 +401,7 @@ fn solve_batch(
             }
         }
     }
-    (matched_usd, surplus_usd, counters)
+    (matched_usd, surplus_usd, counters, fynd_bps_samples, fynd_usd_delta)
 }
 
 fn main() -> Result<()> {
@@ -611,7 +444,7 @@ fn main() -> Result<()> {
             .sum();
         for limit_bps in LIMIT_BPS_CELLS {
             let started = Instant::now();
-            let batch_results: Vec<(f64, f64, Counters)> = days
+            let batch_results: Vec<(f64, f64, Counters, Vec<f64>, f64)> = days
                 .par_iter()
                 .flat_map(|(intents, day_price)| {
                     let mut by_window: BTreeMap<u64, Vec<Intent>> = BTreeMap::new();
@@ -631,11 +464,39 @@ fn main() -> Result<()> {
             let mut counters = Counters::default();
             let mut matched = 0.0f64;
             let mut surplus = 0.0f64;
-            for (m, s, c) in &batch_results {
+            let mut bps_samples: Vec<f64> = Vec::new();
+            let mut fynd_usd_delta = 0.0f64;
+            for (m, s, c, bps, delta) in &batch_results {
                 matched += m;
                 surplus += s;
                 counters.absorb(c);
+                bps_samples.extend_from_slice(bps);
+                fynd_usd_delta += delta;
             }
+            bps_samples.sort_by(|a, b| a.partial_cmp(b).expect("finite bps"));
+            let fynd = FyndComparison {
+                compared_orders: counters.fynd_compared,
+                apex_ge_fynd_share: if bps_samples.is_empty() {
+                    0.0
+                } else {
+                    bps_samples
+                        .iter()
+                        .filter(|b| **b >= 0.0)
+                        .count() as f64 /
+                        bps_samples.len() as f64
+                },
+                mean_bps: if bps_samples.is_empty() {
+                    0.0
+                } else {
+                    bps_samples.iter().sum::<f64>() / bps_samples.len() as f64
+                },
+                median_bps: if bps_samples.is_empty() {
+                    0.0
+                } else {
+                    bps_samples[bps_samples.len() / 2]
+                },
+                usd_delta: fynd_usd_delta,
+            };
             let wall_ms = started.elapsed().as_millis();
             eprintln!(
                 "w={window:>3} bps={limit_bps:>3}: matched=${matched:>12.0} \
@@ -644,6 +505,15 @@ fn main() -> Result<()> {
                 counters.filled + counters.partially_filled,
                 counters.component_errors,
             );
+            eprintln!(
+                "         fynd baseline: compared={} apex>=fynd {:.1}% median={:+.1}bps \
+                 mean={:+.1}bps delta=${:+.0}",
+                fynd.compared_orders,
+                100.0 * fynd.apex_ge_fynd_share,
+                fynd.median_bps,
+                fynd.mean_bps,
+                fynd.usd_delta,
+            );
             cells.push(CellResult {
                 window_blocks: window,
                 limit_bps,
@@ -651,6 +521,7 @@ fn main() -> Result<()> {
                 apex_matched_usd: matched,
                 apex_matched_pct: 100.0 * matched / intent_usd,
                 apex_surplus_usd: surplus,
+                fynd,
                 counters,
                 wall_ms,
             });
@@ -669,17 +540,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_u256_decimal_round_trips() {
-        assert_eq!(parse_u256_decimal("0"), Some(U256::ZERO));
-        assert_eq!(parse_u256_decimal("123456789"), Some(U256::from(123_456_789u64)));
-        assert_eq!(parse_u256_decimal("12x"), None);
-        let large =
-            "115792089237316195423570985008687907853269984665640564039457584007913129639935";
-        assert_eq!(parse_u256_decimal(large), Some(U256::MAX));
-        assert_eq!(parse_u256_decimal(&format!("{large}0")), None);
-    }
-
-    #[test]
     fn test_two_crossing_orders_fill_through_apex() {
         // A sells 100 A-units for B (settled 200), B sells 200 B-units for A (settled 100) —
         // a perfect cross. With a 100 bps synthetic floor both fill at any clearing price
@@ -696,6 +556,7 @@ mod tests {
                 usd: 100.0,
                 id: "0xaa:1".to_string(),
                 is_wash: false,
+                fynd_out: None,
             },
             Intent {
                 block: 1,
@@ -706,11 +567,12 @@ mod tests {
                 usd: 100.0,
                 id: "0xbb:2".to_string(),
                 is_wash: false,
+                fynd_out: None,
             },
         ];
         let day_price =
             HashMap::from([(token_a, 100.0 / 100_000_000.0), (token_b, 100.0 / 200_000_000.0)]);
-        let (matched, _surplus, counters) = solve_batch(&intents, &day_price, 100);
+        let (matched, _surplus, counters, _bps, _delta) = solve_batch(&intents, &day_price, 100);
         assert_eq!(counters.filled + counters.partially_filled, 2, "{counters:?}");
         assert!(matched > 190.0, "both sides counted: {matched}");
         assert_eq!(counters.component_errored, 0);
@@ -729,6 +591,7 @@ mod tests {
                 usd: 10.0,
                 id: "0xaa:1".to_string(),
                 is_wash: false,
+                fynd_out: None,
             },
             Intent {
                 block: 1,
@@ -739,13 +602,14 @@ mod tests {
                 usd: 10.0,
                 id: "0xbb:2".to_string(),
                 is_wash: false,
+                fynd_out: None,
             },
         ];
         let day_price: HashMap<ApexAddress, f64> = [1u8, 2, 3, 4]
             .into_iter()
             .map(|b| (ApexAddress([b; 20]), 0.1))
             .collect();
-        let (matched, surplus, counters) = solve_batch(&intents, &day_price, 100);
+        let (matched, surplus, counters, _bps, _delta) = solve_batch(&intents, &day_price, 100);
         assert_eq!(matched, 0.0);
         assert_eq!(surplus, 0.0);
         assert_eq!(counters.singles_skipped, 2);
