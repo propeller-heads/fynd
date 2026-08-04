@@ -140,6 +140,13 @@ impl SpfaScratch {
     /// source. `edge_gas` and `spot_product` are only ever read at nodes that improved during the
     /// same relaxation, so they are cleared to keep the scratch a blank slate rather than to fix
     /// a reachable bug — which is a property of the readers, not something the scratch enforces.
+    ///
+    /// Clearing `predecessor` carries more weight than the other two. Its entries are `EdgeIndex`
+    /// values, which carry no tie to the graph they came from: reusing a scratch against a
+    /// different graph would resolve a stale entry to a valid but unrelated edge rather than
+    /// failing. Nothing in the type system prevents that — this reset does, and
+    /// `test_shared_scratch_matches_isolated_relaxations` is what pins it. Do not make it
+    /// conditional.
     fn reset(&mut self, node_count: usize) {
         reset_buffer(&mut self.amount, node_count, BigUint::ZERO);
         reset_buffer(&mut self.predecessor, node_count, None);
@@ -814,6 +821,12 @@ impl BellmanFordAlgorithm {
             }
             match predecessor[current.index()] {
                 Some((prev, edge)) => {
+                    // An unresolvable edge reads as "no conflict" and the walk carries on, where
+                    // route assembly fails loudly on the same condition. Both are unreachable —
+                    // the indices come from `graph.edges(u)` in this same relaxation and the graph
+                    // cannot change mid-solve — but the costs differ if that ever stops holding:
+                    // here it would admit a path, which relaxation re-simulates and scores anyway,
+                    // whereas assembly would emit a swap naming the wrong pool.
                     if graph
                         .edge_weight(edge)
                         .is_some_and(|weight| &weight.component_id == target_pool)
