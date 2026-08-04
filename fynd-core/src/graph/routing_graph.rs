@@ -27,11 +27,14 @@ use crate::types::ComponentId;
 
 /// The part of a graph reachable from one node within a hop budget.
 pub struct Subgraph {
-    /// Outgoing edges of every expanded node, as `(target, component)` pairs.
-    pub adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
+    /// Nodes whose own edges were walked, i.e. those within the hop budget of the source.
+    ///
+    /// The edges themselves are not copied out: a node recorded here has *all* of its outgoing
+    /// edges in scope, so a traversal reads them straight off the graph.
+    pub expanded_nodes: HashSet<NodeIndex>,
     /// Every node touched, the source included.
     pub token_nodes: HashSet<NodeIndex>,
-    /// Every component backing an edge in `adj`.
+    /// Every component backing an edge out of an expanded node.
     pub component_ids: HashSet<ComponentId>,
 }
 
@@ -189,7 +192,7 @@ impl<D> RoutingGraph<D> {
     }
 
     fn build_reachable_subgraph(&self, source: NodeIndex, max_hops: usize) -> Subgraph {
-        let mut adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = HashMap::new();
+        let mut expanded_nodes: HashSet<NodeIndex> = HashSet::new();
         let mut token_nodes: HashSet<NodeIndex> = HashSet::new();
         let mut component_ids: HashSet<ComponentId> = HashSet::new();
         let mut visited_nodes = HashSet::new();
@@ -205,12 +208,13 @@ impl<D> RoutingGraph<D> {
             }
             for edge in self.graph.edges(node) {
                 let target = edge.target();
-                let component_id = edge.weight().component_id.clone();
+                let component_id = &edge.weight().component_id;
 
-                adj.entry(node)
-                    .or_default()
-                    .push((target, component_id.clone()));
-                component_ids.insert(component_id);
+                expanded_nodes.insert(node);
+                // Only the first edge of a component pays for the id; the rest just look it up.
+                if !component_ids.contains(component_id) {
+                    component_ids.insert(component_id.clone());
+                }
                 token_nodes.insert(target);
 
                 if visited_nodes.insert(target) {
@@ -219,7 +223,7 @@ impl<D> RoutingGraph<D> {
             }
         }
 
-        Subgraph { adj, token_nodes, component_ids }
+        Subgraph { expanded_nodes, token_nodes, component_ids }
     }
 
     /// Enumerates every path from `source` to `target` between `min_hops` and `max_hops`, in
@@ -589,15 +593,19 @@ mod tests {
         assert_ne!(graph.most_connected_tokens(1)[0], addr(1));
     }
 
-    /// Flattens a subgraph's adjacency into a comparable, order-independent form.
-    fn adjacency_pairs(subgraph: &Subgraph) -> Vec<(usize, usize, ComponentId)> {
+    /// The adjacency a subgraph stands for: every outgoing edge of every expanded node, read
+    /// off the graph rather than copied into the subgraph.
+    fn adjacency_pairs(
+        graph: &RoutingGraph<()>,
+        subgraph: &Subgraph,
+    ) -> Vec<(usize, usize, ComponentId)> {
         let mut pairs: Vec<(usize, usize, ComponentId)> = subgraph
-            .adj
+            .expanded_nodes
             .iter()
-            .flat_map(|(source, targets)| {
-                targets
-                    .iter()
-                    .map(|(target, component)| (source.index(), target.index(), component.clone()))
+            .flat_map(|&source| {
+                graph.edges(source).map(move |edge| {
+                    (source.index(), edge.target().index(), edge.weight().component_id.clone())
+                })
             })
             .collect();
         pairs.sort();
@@ -615,13 +623,16 @@ mod tests {
         graph.insert_edge(b, c, EdgeData::new("bc".to_string()));
 
         let one_hop = graph.reachable_subgraph(a, 1);
-        assert_eq!(adjacency_pairs(&one_hop), vec![(a.index(), b.index(), "ab".to_string())]);
+        assert_eq!(
+            adjacency_pairs(&graph, &one_hop),
+            vec![(a.index(), b.index(), "ab".to_string())]
+        );
         assert_eq!(one_hop.token_nodes, HashSet::from([a, b]));
         assert_eq!(one_hop.component_ids, HashSet::from(["ab".to_string()]));
 
         let two_hops = graph.reachable_subgraph(a, 2);
         assert_eq!(
-            adjacency_pairs(&two_hops),
+            adjacency_pairs(&graph, &two_hops),
             vec![
                 (a.index(), b.index(), "ab".to_string()),
                 (b.index(), c.index(), "bc".to_string())
@@ -658,7 +669,7 @@ mod tests {
         for (source, max_hops) in [(hub, 1), (hub, 2), (leaf, 1), (hub, 1), (leaf, 1)] {
             let memoised = graph.reachable_subgraph(source, max_hops);
             let fresh = graph.build_reachable_subgraph(source, max_hops);
-            assert_eq!(adjacency_pairs(&memoised), adjacency_pairs(&fresh));
+            assert_eq!(adjacency_pairs(&graph, &memoised), adjacency_pairs(&graph, &fresh));
             assert_eq!(memoised.token_nodes, fresh.token_nodes);
             assert_eq!(memoised.component_ids, fresh.component_ids);
         }
@@ -680,8 +691,8 @@ mod tests {
         assert!(after.component_ids.contains("late"), "a new edge must appear in the subgraph");
         assert!(after.token_nodes.contains(&late));
         assert_eq!(
-            adjacency_pairs(&after),
-            adjacency_pairs(&graph.build_reachable_subgraph(hub, 1))
+            adjacency_pairs(&graph, &after),
+            adjacency_pairs(&graph, &graph.build_reachable_subgraph(hub, 1))
         );
     }
 
@@ -709,8 +720,8 @@ mod tests {
         let after = graph.reachable_subgraph(hub, 1);
         assert_eq!(after.component_ids.len(), 1, "a removed edge must leave the subgraph");
         assert_eq!(
-            adjacency_pairs(&after),
-            adjacency_pairs(&graph.build_reachable_subgraph(hub, 1))
+            adjacency_pairs(&graph, &after),
+            adjacency_pairs(&graph, &graph.build_reachable_subgraph(hub, 1))
         );
     }
 

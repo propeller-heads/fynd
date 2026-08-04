@@ -31,7 +31,7 @@ use std::{
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
-use petgraph::graph::NodeIndex;
+use petgraph::{graph::NodeIndex, visit::EdgeRef};
 use tracing::{debug, instrument, trace, warn};
 use tycho_simulation::{
     tycho_common::models::Address,
@@ -58,7 +58,9 @@ use crate::{
 /// Built once by `build_context`, which acquires the market and derived locks and snapshots all
 /// relevant states. `find_single_route` uses this snapshot directly — no lock re-acquisition — so
 /// all route evaluations within one order see a consistent view of the same block's pool states.
-pub(crate) struct BellmanFordContext {
+pub(crate) struct BellmanFordContext<'a> {
+    /// The graph the subgraph was derived from; relaxation reads adjacency straight off it.
+    pub(crate) graph: &'a RoutingGraph<()>,
     pub(crate) token_in_node: NodeIndex,
     pub(crate) token_out_node: NodeIndex,
     pub(crate) subgraph: Arc<Subgraph>,
@@ -139,14 +141,14 @@ impl BellmanFordAlgorithm {
     /// locks exactly once, and snapshots all state into a [`BellmanFordContext`]. All
     /// subsequent `find_single_route` calls on the returned context use the same block's
     /// pool states.
-    pub(crate) async fn build_context(
+    pub(crate) async fn build_context<'a>(
         &self,
-        graph: &RoutingGraph<()>,
+        graph: &'a RoutingGraph<()>,
         market: MarketData,
         label: Option<StateLabel>,
         derived: Option<SharedDerivedDataRef>,
         order: &Order,
-    ) -> Result<BellmanFordContext, AlgorithmError> {
+    ) -> Result<BellmanFordContext<'a>, AlgorithmError> {
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
@@ -184,7 +186,7 @@ impl BellmanFordAlgorithm {
         // BFS from token_in up to max_hops, building adjacency list and component set. Shared
         // across orders that start from the same token while the topology is unchanged.
         let subgraph = graph.reachable_subgraph(token_in_node, self.max_hops);
-        if subgraph.adj.is_empty() {
+        if subgraph.expanded_nodes.is_empty() {
             return Err(AlgorithmError::NoPath {
                 from: order.token_in().clone(),
                 to: order.token_out().clone(),
@@ -221,7 +223,8 @@ impl BellmanFordAlgorithm {
             .collect();
 
         let max_idx = graph.node_index_bound();
-        let edge_spot = Self::edge_spot_prices(&subgraph, &node_address, spot_prices.as_deref());
+        let edge_spot =
+            Self::edge_spot_prices(graph, &subgraph, &node_address, spot_prices.as_deref());
         let connector_allowed = self.connector_allowed_nodes(&node_address, max_idx, order);
 
         let scoring = if self.gas_aware {
@@ -232,15 +235,16 @@ impl BellmanFordAlgorithm {
 
         debug!(
             edges = subgraph
-                .adj
-                .values()
-                .map(Vec::len)
+                .expanded_nodes
+                .iter()
+                .map(|&node| graph.edges(node).count())
                 .sum::<usize>(),
             tokens = token_map.len(),
             "subgraph extracted"
         );
 
         Ok(BellmanFordContext {
+            graph,
             token_in_node,
             token_out_node,
             subgraph,
@@ -389,18 +393,25 @@ impl BellmanFordAlgorithm {
                 }
 
                 let Some(token_u) = ctx.token_map.get(&u) else { continue };
-                let Some(edges) = ctx.subgraph.adj.get(&u) else { continue };
+                // A node only becomes active within the hop budget, so it is always expanded and
+                // its full edge list is in scope; the check keeps that an assertion, not a
+                // premise.
+                if !ctx.subgraph.expanded_nodes.contains(&u) {
+                    continue;
+                }
                 let edge_spots = ctx
                     .edge_spot
                     .get(&u)
                     .map(Vec::as_slice)
                     .unwrap_or_default();
 
-                for (edge_position, (v, component_id)) in edges.iter().enumerate() {
+                for (edge_position, edge) in ctx.graph.edges(u).enumerate() {
+                    let v = edge.target();
+                    let component_id = &edge.weight().component_id;
                     let v_idx = v.index();
 
                     // Single predecessor walk: skip if target token or pool already in path
-                    if Self::path_has_conflict(u, *v, component_id, &predecessor) {
+                    if Self::path_has_conflict(u, v, component_id, &predecessor) {
                         continue;
                     }
 
@@ -410,7 +421,7 @@ impl BellmanFordAlgorithm {
                         continue;
                     }
 
-                    let Some(token_v) = ctx.token_map.get(v) else { continue };
+                    let Some(token_v) = ctx.token_map.get(&v) else { continue };
 
                     // Overrides market data if passed in options
                     let sim: &dyn tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim =
@@ -450,7 +461,7 @@ impl BellmanFordAlgorithm {
                     // Gas-aware comparison: compare net amounts (gross - gas cost in token terms)
                     let is_better = if gas_aware {
                         let v_price = Self::resolve_token_price(
-                            ctx.node_address.get(v),
+                            ctx.node_address.get(&v),
                             ctx.token_prices.as_deref(),
                             candidate_spot,
                             ctx.node_address.get(&ctx.token_in_node),
@@ -502,7 +513,7 @@ impl BellmanFordAlgorithm {
                         predecessor[v_idx] = Some((u, component_id.clone()));
                         edge_gas[v_idx] = result.gas;
                         cumul_gas[v_idx] = candidate_cumul_gas;
-                        next_active.insert(*v);
+                        next_active.insert(v);
                     }
                 }
             }
@@ -627,33 +638,38 @@ impl BellmanFordAlgorithm {
         }
     }
 
-    /// Resolves the spot price of every subgraph edge, positionally aligned with `subgraph.adj`.
+    /// Resolves the spot price of every edge out of an expanded node, in the graph's own edge
+    /// order so relaxation can index it positionally.
     ///
-    /// Relaxation revisits the same adjacency lists once per round and needs this factor on
-    /// every visit. Looking it up there means building the spot-price key — a component id and
-    /// two addresses, all heap-allocated — per visit, for a value fixed for the whole solve.
-    /// Unavailable or non-positive prices are stored as 0.0, which disables the spot fallback
-    /// for paths through that edge.
+    /// Relaxation revisits the same edges once per round and needs this factor on every visit.
+    /// Looking it up there means building the spot-price key — a component id and two addresses,
+    /// all heap-allocated — per visit, for a value fixed for the whole solve. Unavailable or
+    /// non-positive prices are stored as 0.0, which disables the spot fallback for paths through
+    /// that edge.
     fn edge_spot_prices(
+        graph: &RoutingGraph<()>,
         subgraph: &Subgraph,
         node_address: &HashMap<NodeIndex, Address>,
         spot_prices: Option<&SpotPrices>,
     ) -> HashMap<NodeIndex, Vec<f64>> {
         subgraph
-            .adj
+            .expanded_nodes
             .iter()
-            .map(|(&source, edges)| {
+            .map(|&source| {
                 let source_address = node_address.get(&source);
-                let prices = edges
-                    .iter()
-                    .map(|(target, component_id)| {
+                let prices = graph
+                    .edges(source)
+                    .map(|edge| {
                         let (Some(source_address), Some(target_address), Some(spot_prices)) =
-                            (source_address, node_address.get(target), spot_prices)
+                            (source_address, node_address.get(&edge.target()), spot_prices)
                         else {
                             return 0.0;
                         };
-                        let key =
-                            (component_id.clone(), source_address.clone(), target_address.clone());
+                        let key = (
+                            edge.weight().component_id.clone(),
+                            source_address.clone(),
+                            target_address.clone(),
+                        );
                         match spot_prices.get(&key) {
                             Some(&spot) if spot > 0.0 => spot,
                             _ => 0.0,
