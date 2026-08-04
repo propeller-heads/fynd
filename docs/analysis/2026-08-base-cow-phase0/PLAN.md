@@ -184,3 +184,114 @@ through raw bytes instead.
    1 s budget feasibility, pool-count controls; verify the two unconfirmed Base 0x Settlers via
    registry `ownerOf(2)` once RPC is up.
 9. Capture days of Base blocks → matrix runs → analysis → Friday numbers.
+
+## PHASE 1 REPLAN (2026-08-04): live APEX monitor + multi-block CONFIRMED IN SCOPE
+
+Pivot from capture-once-replay-many to **live-first**: extend the hindsight monitor with an
+in-process APEX stage (TychoApexPool over the monitor's live ProtocolSim states — no
+serialization, VM-safe, perfect state parity with the fynd baseline). Confirmed by user:
+**multi-block batching is required scope**, not an extension.
+
+Build order:
+1. **Shadow run** — apex solve-time on real block batches at live Base state; sets pool-count
+   controls for the 1 s budget.
+2. **Live single-block stage** — batch = block N's decoded trades (skip <2), solved at N−1,
+   ~1 s deadline; JSONL `apex` block per trade; Prometheus: apex_vs_fynd_bps,
+   internalization_share (1 − pool-cleared/order volume = route-mediated REALIZED),
+   apex_solve_ms, fill/skip/panic counters.
+3. **Capture on from day one** — block-batch snapshots (limit_for + extractors to finish) +
+   tycho Update recording (tee from the monitor's own stream preferred; record-market
+   sidecar = acceptable approximation). Base recordings are complete (no vm:* on Base);
+   VM-skip only matters if this moves to Ethereum.
+4. **Multi-block**: two routes, both wanted —
+   a. offline replay sweeps over recordings (windows 1/5/15/30/150, any budget incl. 20 s,
+      config A/B on identical blocks) via the apex-batch crate;
+   b. live window mode (--batch-window-blocks N): accumulate decoded trades N blocks, solve
+      at window-end state with up to ~N×2s−overhead budget.
+   Multi-block semantics: apex clears at window-END state; per-order baseline stays fynd's
+   quote AT TRADE TIME (the real UX alternative); price drift over the window shows up as
+   fill-rate loss against real minAmountOut limits — that IS the cost of waiting, report it,
+   don't hide it.
+5. Headline metrics vs Phase 0 ceilings: apex_vs_fynd bps/order (vs 0.02 measured + ≤0.12
+   route ceiling) and internalization share (vs 1.7% cap @1 block, 23% @1 min).
+
+Open (user): extend-monitor-vs-separate-binary (rec: extend), skip-<2-trades rule,
+headline-metric pair confirmation, deploy path (local → staging k8s beside hindsight).
+
+## PHASE 1 v2 — HARDENED after grill round 1 (2026-08-04, supersedes the v1 replan above)
+
+Grill artifacts: .claude/plans/grill-phase1/ (critic_raw.md, grilling_log.md — 22 findings,
+3 critical, 0% crit/high deferral). Root cause of all criticals: APEX API facts inherited from
+turbine instead of verified against apex-solver. VERIFY EVERY APEX CLAIM AGAINST apex-solver.
+
+Corrected architecture:
+1. **Orders are LimitOrders, not MarketOrders** (MarketOrders are supply; limit-order map is what
+   forms solve clusters — apex algorithm/mod.rs:241). Limit = minAmountOut policy as Fraction.
+2. **APEX solves BEFORE `advance()`**, between fynd top-solves and the step, on a `clone_box()`d
+   filtered pool subset at N−1 (states are Box<dyn ProtocolSim>, replaced wholesale on advance —
+   no borrow survives; clone also yields the Arc the adapter needs and frees the read lock).
+   Clone cost = explicit shadow-run line item.
+3. **Budget parity**: primary cell apex_deadline = n_orders × fynd timeout_ms (equal compute);
+   secondary fixed 1 s (sequencer realism); 20 s offline only, labeled quality-ceiling.
+4. **Gas basis: gross-vs-gross** (hindsight convention); batch gas out of scope, stated.
+5. **internalization_share redefined**: per-token NET pool exposure (not per-hop sums), USD at
+   N−1 map, bounded [0,1], unit-tested on a multi-hop single-order batch (must be ≈0).
+6. **Recordings lose uniswap_v4 on Base** (UniswapV4State is non-serializable — the "Base
+   recordings complete" claim was false). Offline sweeps = config A/B only (shared handicap);
+   live-vs-replay parity not claimed on v4 blocks; upstream serialization ask filed; replay
+   skips stateless components, counted.
+7. **Recording format v2 before capture starts**: hourly append-only segments + periodic
+   checkpoints; replay = checkpoint + ≤1h deltas; crash loses ≤1 segment.
+8. Order id = {tx_hash}:{ordinal}; captured_trades join fixed to composite key.
+9. **0x Settler floor extractor lands BEFORE the live stage** (dominant Base flow); headline
+   gated on extracted-limit subset; synthetic slice separate with 50/100/200 bps sensitivity.
+10. APEX solve in spawn_blocking, max_workers=1 live, AssertUnwindSafe + token-set closure
+    precheck (decline batch, don't panic); SolveMetrics after a caught panic discarded.
+11. **Live multi-block mode CUT** — multi-block is offline-replay-only.
+12. Per-order status {filled, unfilled_at_limit, cluster_cut, excluded_*} via input-vs-clearing
+    reconciliation (deadline drops whole clusters silently otherwise).
+13. ApexConfig fully pinned (two_hops labeled axis, starting_price never engages — unpriced
+    orders pre-excluded), price-map coverage + derived-data freshness stamped per block.
+14. is_partial check on the Base stream is a hard pre-capture gate.
+15. Path dep → git dep with [patch] for local dev before live stage merges into hindsight.
+16. One shared input-builder: hindsight live stage calls apex-batch's lib (no duplicate path).
+
+Corrected build order: 0) adapter property tests (direct-vs-adapter ProtocolSim agreement) →
+0.5) ≥2-connected-trades/day pre-check from existing 10d data (go/no-go for live-stage value
+claims) → 1) shadow run (solve time, clone cost, bytes/day, is_partial) → 2) 0x floor extractor →
+3) live single-block stage → 4) capture (format v2) → 5) offline multi-block sweeps → 6) report.
+
+STATUS: needs grill round 2 (verify LimitOrder construction/limit-price direction + Fraction
+scaling, clone-cost claim, recording v2 replay math) before implementation.
+
+### v2.1 additions (2026-08-04, user-confirmed)
+- **APEX brackets both states, mirroring fynd**: solve batch at N−1 (headline) AND at N (biased
+  bottom, same bias semantics as fynd's `back`). 2× apex budget per block — shadow-run line item.
+- **Window set: {1, 6, 30, 150} blocks = {2s, 12s, 1min, 5min}.** Live = w1 only (v4-complete
+  anchor). w ∈ {6,30,150} offline over recordings; w1 ALSO offline so all offline cells share the
+  v4 handicap (and live-w1 vs offline-w1 measures that handicap directly). Multi-block offline
+  cells solved at both window-start and window-end states.
+- v4 serialization nuance (verified in tycho-simulation 0.345.1 source): UniswapV4State is
+  blanket-non-serializable because of `hook: Option<Box<dyn HookHandler>>`; hookless pools are
+  plain CLMM — upstream fix is small (serialize when hook.is_none()). Frame the ask accordingly.
+
+### v2.2 (2026-08-04, user decision): single 1 s live budget; equal-compute cell dropped
+- Live apex budget = fixed 1 s per batch solve (production realism), both brackets. The
+  equal-compute attribution cell is REMOVED from live (n×100ms can exceed block time and models
+  nothing a sequencer does); compute-asymmetry vs the 100 ms/order fynd baseline is a stated
+  report caveat, and the mechanism-isolation cell lives offline only, if ever needed.
+- Pacing consequence: top+bottom brackets ≈ 2×1 s apex + 2×n×100 ms fynd per eligible block >
+  2 s Base blocks on busy stretches → lag-aware degradation ladder: (1) drop apex BOTTOM solve
+  under lag, (2) skip apex for the block; every skip counted (apex_skipped{reason}). Shadow run
+  measures sustainable coverage at real pacing.
+
+### v2.3 (2026-08-04, user decision): async APEX — solves leave the block loop's critical path
+- The block loop only `clone_box()`es the filtered pool subset (at N−1 and at N) and spawns each
+  1 s solve on a capped blocking-thread pool; results join JSONL/metrics asynchronously.
+- Fynd's per-trade solves parallelize across trades (worker pool already supports concurrent
+  quotes): n×100 ms → ~100–200 ms wall.
+- Critical path per block ≪ 2 s; average APEX load ≈ 0.7 core-s per 2 s block
+  (2×1 s × ~35% eligible blocks) — bursts queue instead of lagging.
+- Guardrails: dedicated APEX thread cap (CPU contention must not silently degrade the
+  timeout-bound Fynd baseline — add a fynd-solve-time drift metric vs APEX-off runs); the lag
+  degradation ladder from v2.2 remains as backstop only.
