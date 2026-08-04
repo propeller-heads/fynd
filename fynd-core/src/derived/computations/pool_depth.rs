@@ -855,6 +855,70 @@ mod tests {
         );
     }
 
+    /// A depth search that fails to converge must be recorded as a failure, not stored as a depth
+    /// of zero. The two are different claims — "no amount meets this price" against "this pool
+    /// holds nothing" — and everything downstream reads a stored depth as a measurement, so a
+    /// fabricated zero silently ranks a healthy pool as empty.
+    #[tokio::test]
+    async fn test_non_converging_depth_search_is_recorded_as_a_failure() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        let (market, _) = setup_market_weighted(vec![(
+            "pool",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(2000.0)
+                .with_liquidity(1_000_000)
+                .with_tokens(&[eth.clone(), usdc.clone()])
+                .with_query_pool_swap_error("search did not converge in 30 iterations"),
+        )]);
+        let derived = DerivedData::new_shared();
+        let changed = ChangedComponents {
+            added: std::collections::HashMap::from([(
+                "pool".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
+        };
+
+        let spot_output = SpotPriceComputation::new()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("spot price computation should succeed");
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(spot_output.data, vec![], 0, true);
+
+        let output = PoolDepthComputation::default()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("computation should succeed overall");
+
+        assert!(
+            output.data.is_empty(),
+            "a non-converging search must leave no depth behind, got {:?}",
+            output.data
+        );
+        for (from, to) in [(&eth, &usdc), (&usdc, &eth)] {
+            let key = format!("pool/{}/{}", from.address, to.address);
+            assert!(
+                output
+                    .failed_items
+                    .iter()
+                    .any(|item| item.key == key &&
+                        matches!(item.error, FailedItemError::SimulationFailed(_))),
+                "{} -> {} should be recorded as a failed item, got {:?}",
+                from.symbol,
+                to.symbol,
+                output.failed_items
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_compute_partial_failure_pool_depth_computation() {
         // Without .with_tokens(), get_limits doesn't scale by decimals,

@@ -55,6 +55,13 @@ pub struct MockProtocolSim {
     /// When empty, get_limits assumes equal decimals (backward-compatible).
     #[serde(default)]
     pub token_decimals: HashMap<Bytes, u32>,
+    /// When set, `query_pool_swap` reports a non-converging search instead of answering.
+    ///
+    /// Depth queries reach this through a numeric search that can fail to find any amount meeting
+    /// the requested price, which is a failure and not a depth of zero. Callers have to keep those
+    /// apart, so tests need a pool that fails that way on demand.
+    #[serde(default)]
+    pub query_pool_swap_error: Option<String>,
 }
 
 impl MockProtocolSim {
@@ -87,6 +94,12 @@ impl MockProtocolSim {
         self
     }
 
+    /// Make `query_pool_swap` report a non-converging search.
+    pub fn with_query_pool_swap_error(mut self, message: impl Into<String>) -> Self {
+        self.query_pool_swap_error = Some(message.into());
+        self
+    }
+
     /// Register token decimals for the given tokens.
     pub fn with_tokens(mut self, tokens: &[Token]) -> Self {
         for token in tokens {
@@ -105,6 +118,7 @@ impl Default for MockProtocolSim {
             liquidity: u128::MAX,
             fee: 0.0,
             token_decimals: HashMap::new(),
+            query_pool_swap_error: None,
         }
     }
 }
@@ -164,6 +178,7 @@ impl ProtocolSim for MockProtocolSim {
             liquidity: self.liquidity,
             fee: self.fee,
             token_decimals: self.token_decimals.clone(),
+            query_pool_swap_error: self.query_pool_swap_error.clone(),
         });
         Ok(GetAmountOutResult::new(amount_out, BigUint::from(self.gas), new_state))
     }
@@ -204,6 +219,9 @@ impl ProtocolSim for MockProtocolSim {
     }
 
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        if let Some(message) = &self.query_pool_swap_error {
+            return Err(SimulationError::RecoverableError(message.clone()));
+        }
         let token_in = params.token_in();
         let token_out = params.token_out();
 
