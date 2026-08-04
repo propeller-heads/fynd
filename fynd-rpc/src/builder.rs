@@ -372,8 +372,7 @@ impl FyndRPC {
                 computation_manager_handle.abort();
             }
             _ = &mut feed_handle => {
-                // Feed handle completed, which means it errored (feed.run() only returns on error)
-                error!("Tycho feed error detected, shutting down solver");
+                error!("Tycho feed stopped, shutting down solver");
                 server_handle.stop(true).await;
                 server_task.await.ok();
                 gas_price_worker_handle.abort();

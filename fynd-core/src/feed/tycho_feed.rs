@@ -7,13 +7,13 @@
 
 use std::{collections::HashSet, time::Instant};
 
-use metrics::{gauge, histogram};
+use metrics::{counter, gauge, histogram};
 use tokio::{
     sync::{broadcast, oneshot},
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
-use tracing::{debug, info, instrument, span, trace, Instrument, Level};
+use tracing::{debug, info, instrument, span, trace, warn, Instrument, Level};
 #[cfg(feature = "experimental")]
 use tycho_simulation::evm::stream::BlockStepController;
 use tycho_simulation::{
@@ -82,14 +82,38 @@ impl TychoFeed {
         self.event_tx.clone()
     }
 
-    /// Runs the indexer event loop until the underlying Tycho stream ends or errors.
+    /// Consecutive protocol-stream errors that end the feed. Skipping leaves the market on the
+    /// last block that decoded, which `/health` reports as stale once it is over 60s old.
+    const MAX_CONSECUTIVE_STREAM_ERRORS: u32 = 10;
+
+    /// Counts a protocol-stream error and returns `Err` on the
+    /// [`MAX_CONSECUTIVE_STREAM_ERRORS`](Self::MAX_CONSECUTIVE_STREAM_ERRORS)th consecutive one.
+    /// The caller resets `consecutive` on the next message that decodes.
+    fn skip_or_fail(
+        consecutive: &mut u32,
+        error: &dyn std::fmt::Display,
+    ) -> Result<(), DataFeedError> {
+        *consecutive += 1;
+        counter!("tycho_feed_stream_errors_total").increment(1);
+        if *consecutive >= Self::MAX_CONSECUTIVE_STREAM_ERRORS {
+            return Err(DataFeedError::StreamError(format!(
+                "{} consecutive protocol stream errors, last: {error}",
+                Self::MAX_CONSECUTIVE_STREAM_ERRORS
+            )));
+        }
+        warn!(consecutive = *consecutive, %error, "skipping protocol stream message after error");
+        Ok(())
+    }
+
+    /// Runs the indexer event loop until the underlying Tycho stream ends or gives up.
     ///
     /// This method does not itself reconnect. Transient transport failures are absorbed
-    /// by tycho-client's internal reconnection, but a hard stream error propagates out as
-    /// an `Err` and a clean stream end returns `Ok(())`. In either case the feed stops,
-    /// which tears down the solver and exits the process (crash-only design — the
-    /// orchestrator is expected to restart it). It is recommended to call this in a
-    /// dedicated tokio task.
+    /// by tycho-client's internal reconnection, and a protocol stream error is skipped until
+    /// [`MAX_CONSECUTIVE_STREAM_ERRORS`](Self::MAX_CONSECUTIVE_STREAM_ERRORS) arrive with
+    /// nothing decoding in between, at which point it propagates out as an `Err`. A clean
+    /// stream end returns `Ok(())`. In either case the feed stops, which tears down the solver
+    /// and exits the process (crash-only design — the orchestrator is expected to restart it).
+    /// It is recommended to call this in a dedicated tokio task.
     pub(crate) async fn run(self) -> Result<(), DataFeedError> {
         info!(
             tycho_url = %self.config.tycho_url,
@@ -195,6 +219,7 @@ impl TychoFeed {
         };
 
         // Loop through block updates from both streams
+        let mut stream_errors: u32 = 0;
         loop {
             tokio::select! {
                 // Handle protocol stream messages
@@ -208,8 +233,13 @@ impl TychoFeed {
                     match msg {
                         Some(msg) => {
                             trace!("Received message from protocol stream: {:?}", msg);
-                            let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                            self.handle_tycho_message(msg).await?;
+                            match msg {
+                                Ok(msg) => {
+                                    stream_errors = 0;
+                                    self.handle_tycho_message(msg).await?;
+                                }
+                                Err(e) => Self::skip_or_fail(&mut stream_errors, &e)?,
+                            }
                         }
                         None => {
                             info!("Protocol stream ended");
@@ -399,14 +429,20 @@ impl TychoFeed {
             (None, None)
         };
 
+        let mut stream_errors: u32 = 0;
         loop {
             tokio::select! {
                 msg = protocol_stream.next() => {
                     match msg {
                         Some(msg) => {
                             trace!("Received message from protocol stream: {:?}", msg);
-                            let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                            self.handle_tycho_message(msg).await?;
+                            match msg {
+                                Ok(msg) => {
+                                    stream_errors = 0;
+                                    self.handle_tycho_message(msg).await?;
+                                }
+                                Err(e) => Self::skip_or_fail(&mut stream_errors, &e)?,
+                            }
                         }
                         None => {
                             info!("Protocol stream ended");
@@ -588,14 +624,20 @@ impl TychoFeed {
             (None, None)
         };
 
+        let mut stream_errors: u32 = 0;
         loop {
             tokio::select! {
                 msg = protocol_stream.next() => {
                     match msg {
                         Some(msg) => {
                             trace!("Received message from protocol stream: {:?}", msg);
-                            let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                            self.handle_tycho_message(msg).await?;
+                            match msg {
+                                Ok(msg) => {
+                                    stream_errors = 0;
+                                    self.handle_tycho_message(msg).await?;
+                                }
+                                Err(e) => Self::skip_or_fail(&mut stream_errors, &e)?,
+                            }
                         }
                         None => {
                             info!("Protocol stream ended");
@@ -918,6 +960,28 @@ mod tests {
                 .unwrap()
                 .naive_utc(),
         )
+    }
+
+    #[test]
+    fn skip_or_fail_survives_errors_below_the_cap() {
+        let mut consecutive = 0;
+        for expected in 1..TychoFeed::MAX_CONSECUTIVE_STREAM_ERRORS {
+            TychoFeed::skip_or_fail(&mut consecutive, &"Missing block!")
+                .expect("an isolated stream error must be survivable");
+            assert_eq!(consecutive, expected);
+        }
+    }
+
+    #[test]
+    fn skip_or_fail_gives_up_on_a_persistently_broken_stream() {
+        let mut consecutive = TychoFeed::MAX_CONSECUTIVE_STREAM_ERRORS - 1;
+        let err = TychoFeed::skip_or_fail(&mut consecutive, &"Missing block!")
+            .expect_err("a stream that only errors must not be skipped forever");
+        assert!(
+            err.to_string()
+                .contains("Missing block!"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
