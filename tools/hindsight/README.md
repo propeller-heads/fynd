@@ -14,8 +14,10 @@ measurable value of adding Fynd to a venue.
 | `decode` | Decode the solver trades in a block or range and print/JSON them |
 | `verify` | Diff decoded trades against Allium's `aggregator_trades` ground truth (dev check) |
 | `monitor` | Live: drive an in-process Fynd solver block-by-block, re-solve every settled trade, emit JSONL + Prometheus metrics |
+| `decay` | Live: quote a sample of trade shapes, replay those routes at the next N blocks, and split the move into market drift vs stale-route loss |
+| `report` | Offline: render a self-contained HTML report from a `monitor` run's comparison JSONL |
 
-All take `--chain` (selects the address book) and `--registry` /
+All except `report` take `--chain` (selects the address book) and `--registry` /
 `HINDSIGHT_REGISTRY` to load a custom address book. See `--help` per subcommand and
 [CLAUDE.md](CLAUDE.md) for environment variables.
 

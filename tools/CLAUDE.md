@@ -55,7 +55,7 @@ See [`docs/guides/swap-cli.md`](../docs/guides/swap-cli.md) for usage instructio
 
 See [`tools/hindsight/CLAUDE.md`](hindsight/CLAUDE.md) for the full module overview.
 
-Four subcommands via `cargo run -p hindsight --release --`:
+Five subcommands via `cargo run -p hindsight --release --`:
 
 - **`decode`** — Fetch block receipts, match and trace solver transactions, emit decoded trades
   (token in/out, amounts, client, solver, settled gas). Accepts `--block N`, `--range START-END`
@@ -65,6 +65,11 @@ Four subcommands via `cargo run -p hindsight --release --`:
 - **`monitor`** — Live mode: drives an in-process `fynd-core` solver block-by-block, solving
   each settled trade at top-of-block (N-1) and again at back-of-block (N), where the top route
   is also re-executed to measure slippage. Emits JSONL and exposes Prometheus metrics.
+- **`decay`** — Live: quote a sample of trade shapes drawn from a `monitor` run's JSONL, then replay
+  those exact routes at each of the next `--offsets` blocks, splitting each move into unavoidable
+  market drift and stale-route loss. The sampled trades never execute, so the measurement is free of
+  the self-impact that contaminates `monitor`'s own `slippage` field.
+
 - **`report`** — Offline: render a self-contained HTML report from a `monitor` run's comparison
   JSONL (`--comparisons-dir`). No chain or network access.
 

@@ -59,6 +59,8 @@ toml = { workspace = true }
 # Test-only route fixtures (resolve::test_support): a throwaway ProtocolComponent's creation
 # timestamp needs a concrete NaiveDateTime.
 chrono = { workspace = true }
+# Throwaway comparison-JSONL directories for the decay sampler's tests.
+tempfile = { workspace = true }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

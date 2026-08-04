@@ -8,10 +8,10 @@ actually settled.
 
 ## Commands
 
-Four subcommands via `cargo run -p hindsight --release --`. The on-chain ones (`decode`,
-`verify`, `monitor`) take `--chain` (default `ethereum`), which selects the decoder's address book,
-and `--registry <path>` / `HINDSIGHT_REGISTRY` to load a custom address book. `report` is offline
-and takes neither.
+Five subcommands via `cargo run -p hindsight --release --`. The on-chain ones (`decode`,
+`verify`, `monitor`, `decay`) take `--chain` (default `ethereum`), which selects the decoder's
+address book, and `--registry <path>` / `HINDSIGHT_REGISTRY` to load a custom address book.
+`report` is offline and takes neither.
 
 Built-in address books: `ethereum`, `base`, `unichain`, `arbitrum`, `bsc`, `polygon`. Any other
 name needs `--registry`.
@@ -33,6 +33,23 @@ name needs `--registry`.
   records. Exposes a Prometheus metrics endpoint (`--metrics-port`). `--max-lag-blocks` (default
   100, ~20 min on mainnet) bounds how far it may fall behind chain head before rebuilding the
   solver.
+
+- **`decay`** — Route decay in non-overlapping rounds: draw a sample of trade shapes, quote them at
+  one block, then replay those exact routes at each of the next `--offsets` blocks (default 5). Each
+  offset records the total move (the route replayed via `fynd_core::replay_route`), the unavoidable
+  market drift (a fresh solve at the same state), and the difference — what holding a stale route
+  cost. Emits `decay-YYYY-MM-DD.jsonl` (`--output-dir`) plus a per-offset summary at exit.
+
+  Trade shapes come from a `monitor` run's `comparisons-*.jsonl` (`--comparisons-dir`), filtered to
+  `--venue` (default `relay`); only each record's token pair and input amount are read. **The
+  sampled trades never execute**, which is the point: `monitor`'s own `slippage` field solves a
+  settled trade at N-1 and replays it at N — a state that already contains that trade's own price
+  impact — so it measures the route eating its own shadow. Re-quoting the shape at unrelated live
+  blocks removes that contamination.
+
+  `--sample-size` (default 25) sets per-block load, since every sampled trade is replayed *and*
+  re-solved at every offset; a run warns when a block's work exceeds half the chain's block time.
+  `--seed` makes the draw reproducible.
 
 - **`report`** — Offline: read the `comparisons-YYYY-MM-DD.jsonl` files a `monitor` run wrote
   (`--comparisons-dir`) and render a single self-contained HTML file (`-o`, defaults to
@@ -95,8 +112,21 @@ their solver in calldata — `solver_aliases`).
 |---|---|
 | `mod.rs` | `SteppingSolver` trait; `resolve_block_range` — solve all trades at top, advance, then re-execute each top route and solve each trade fresh at back |
 | `compare.rs` | `Verdict` / `Deltas` / `Slippage` — bps diff, win/loss/coverage-miss classification, quote-vs-re-execution slippage |
-| `monitor.rs` | Production `monitor` subcommand: in-process solver, block subscription, JSONL emission |
-| `jsonl.rs` | Append-only JSONL writer used by `monitor` |
+| `step.rs` | `StepAdapter`, the live `SteppingSolver`: solve / replay via `fynd_core::replay_route` / step one block. Shared by `monitor` and `decay`; `Encoding` opts calldata generation out for callers that only read `amount_out` |
+| `session.rs` | `SolverArgs` (the solver flags both live commands share) and `Session` — protocol expansion, worker-pool loading, build, and rebuild-with-backoff after a feed death |
+| `monitor.rs` | Production `monitor` subcommand: block subscription, decode, JSONL emission |
+| `jsonl.rs` | Append-only day-rotating JSONL writer, prefixed per record kind (`comparisons` / `decay`) |
+
+### Decay (`src/decay/`)
+
+The `decay` subcommand — route decay over the blocks following a quote, on synthetic trades.
+
+| File | Purpose |
+|---|---|
+| `mod.rs` | `DecayArgs`; the non-overlapping round loop (quote a sample, then replay + re-solve at each offset) and the per-offset run report |
+| `sample.rs` | Loads venue-filtered trade *shapes* from a `monitor` run's comparison JSONL, and the seeded sampler (pinned `SplitMix64`, so `--seed` survives dependency bumps) |
+| `record.rs` | `DecayBps` (total / market drift / stale-route split), `ReplayFailure`, and the per-(trade, offset) JSONL record |
+| `summary.rs` | Per-offset aggregation: mean, winsorized mean, percentiles, degraded and tail shares, market-vs-execution split |
 
 ### Report (`src/report/`)
 
