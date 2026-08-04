@@ -3,10 +3,13 @@
 //!
 //! The `SteppingSolver` trait abstracts the solver so the two-state comparison pipeline is
 //! testable without a live Fynd instance. The production implementation (`monitor`) drives an
-//! in-process `fynd-core` solver one block at a time: each trade is solved at top-of-block (N-1),
-//! then measured twice at back-of-block (N) — the top route is re-executed to isolate the
-//! slippage between quote time and execution time, and the trade is solved fresh to show what
-//! routing at the block's end state would deliver.
+//! in-process `fynd-core` solver one block at a time through three explicit phases —
+//! [`solve_tops`] at top-of-block (N-1), [`SteppingSolver::advance`], then [`solve_backs`] at
+//! back-of-block (N), where the top route is re-executed to isolate the slippage between quote
+//! time and execution time and the trade is solved fresh to show what routing at the block's end
+//! state would deliver. The monitor calls the phases directly, so code that needs the N-1 state
+//! after the tops are known (the APEX batch stage's pool-subset clone) runs between `solve_tops`
+//! and the advance with no callback plumbing.
 
 mod compare;
 pub(crate) mod jsonl;
@@ -336,16 +339,18 @@ pub(crate) fn build_range(
     }
 }
 
-/// Re-solve every trade in a held block at top-of-block, advance to back-of-block, then measure
-/// each trade twice at the new state: re-execute its top route against the pools as the block
-/// left them (for the slippage), and solve it fresh (for the `back` comparison). Solving all
-/// trades at one state before advancing keeps each state's reads consistent and steps the chain
-/// only once per block.
-pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
+/// Solve every trade at the solver's current state — top-of-block (N−1) when called before the
+/// advance. Outcomes come back in trade order.
+///
+/// One phase of the per-block pipeline the monitor drives explicitly:
+/// `solve_tops` → *(pre-advance seam: anything needing the N−1 state — the APEX stage clones its
+/// pool subset here)* → [`SteppingSolver::advance`] → [`solve_backs`]. Solving all trades at one
+/// state before advancing keeps each state's reads consistent and steps the chain only once per
+/// block.
+pub(crate) async fn solve_tops<S: SteppingSolver + ?Sized>(
     solver: &S,
     trades: &[DecodedTrade],
-    prices: &Prices,
-) -> anyhow::Result<Vec<RangeComparison>> {
+) -> Vec<Outcome> {
     let mut tops = Vec::with_capacity(trades.len());
     for trade in trades {
         tops.push(
@@ -354,9 +359,19 @@ pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
                 .await,
         );
     }
+    tops
+}
 
-    solver.advance().await?;
-
+/// Measure every trade twice at back-of-block (N) and assemble the [`RangeComparison`]s: each
+/// trade's top route is re-executed against the pools as the block left them (feeding the
+/// slippage), and the trade is solved fresh (the `back` comparison). Must run after
+/// [`SteppingSolver::advance`]; `tops` are [`solve_tops`]' outcomes for the same `trades`.
+pub(crate) async fn solve_backs<S: SteppingSolver + ?Sized>(
+    solver: &S,
+    trades: &[DecodedTrade],
+    tops: Vec<Outcome>,
+    prices: &Prices,
+) -> Vec<RangeComparison> {
     let mut ranges = Vec::with_capacity(trades.len());
     for (trade, top) in trades.iter().zip(tops) {
         let reexecuted = match &top {
@@ -370,7 +385,7 @@ pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
             .await;
         ranges.push(build_range(trade, prices, top, back, &reexecuted));
     }
-    Ok(ranges)
+    ranges
 }
 
 #[cfg(test)]
@@ -572,8 +587,11 @@ mod tests {
         assert_eq!(range.verdict, Verdict::Win);
     }
 
+    /// The monitor's per-block sequencing, phase by phase: tops at N-1 → (pre-advance seam) →
+    /// advance → backs at N. The mock's `reexecute` asserts it only runs after `advance()`, so a
+    /// phase ordered wrongly fails here rather than silently comparing against the wrong state.
     #[tokio::test]
-    async fn resolve_block_range_pairs_top_back_and_reexecution() {
+    async fn test_phases_run_tops_advance_backs_in_order() {
         // Two trades. The top solve wins; the fresh back solve loses vs settled; the top route
         // re-executed at back-of-block produces less than quoted (negative slippage).
         let solver = MockStepping {
@@ -583,9 +601,18 @@ mod tests {
             reexecuted: solved(9_900, 9_800),
         };
         let trades = [trade(10_000), trade(10_000)];
-        let ranges = resolve_block_range(&solver, &trades, &empty_prices())
-            .await
-            .unwrap();
+
+        let tops = solve_tops(&solver, &trades).await;
+        assert_eq!(tops.len(), 2);
+        // The pre-advance seam: at this point the N-1 state is still live and the tops are known.
+        assert!(
+            !solver
+                .advanced
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the seam must observe the pre-advance state"
+        );
+        solver.advance().await.unwrap();
+        let ranges = solve_backs(&solver, &trades, tops, &empty_prices()).await;
 
         assert_eq!(ranges.len(), 2);
         for range in &ranges {
@@ -600,7 +627,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_block_range_back_solve_without_top_route() {
+    async fn test_solve_backs_without_top_route() {
         // An unsolved top has no route to re-execute, so there is no slippage — but the fresh
         // back-of-block solve does not need a top route: back still carries a real comparison.
         let solver = MockStepping {
@@ -610,9 +637,9 @@ mod tests {
             reexecuted: solved(10_100, 10_000),
         };
         let trades = [trade(10_000)];
-        let ranges = resolve_block_range(&solver, &trades, &empty_prices())
-            .await
-            .unwrap();
+        let tops = solve_tops(&solver, &trades).await;
+        solver.advance().await.unwrap();
+        let ranges = solve_backs(&solver, &trades, tops, &empty_prices()).await;
 
         assert_eq!(ranges[0].top.verdict, Verdict::Unsolvable);
         assert_eq!(ranges[0].back.verdict, Verdict::Win);

@@ -33,7 +33,7 @@ use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
     provider_from,
-    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver},
+    resolve::{solve_backs, solve_tops, Outcome, SolvedAmount, SteppingSolver},
     telemetry,
     usd::Prices,
 };
@@ -659,12 +659,15 @@ async fn run_session<P: Provider>(
         // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
         // USD valuation.
         let prices_top = snapshot_prices(adapter.solver, decoder.registry()).await;
-        let ranges = match resolve_block_range(adapter, &trades, &prices_top).await {
-            Ok(ranges) => ranges,
-            Err(e) => return SessionEnd::Unhealthy(e.to_string()),
-        };
-        // resolve_block_range advanced the solver to back-of-block (N); snapshot again so the
-        // back-of-block improvement is valued against the state it was solved at.
+        let tops = solve_tops(adapter, &trades).await;
+        // Pre-advance seam: the N-1 state is still live and the block's tops are known. The APEX
+        // batch stage clones its filtered pool subset and dispatches its top-bracket solve here.
+        if let Err(e) = adapter.advance().await {
+            return SessionEnd::Unhealthy(e.to_string());
+        }
+        let ranges = solve_backs(adapter, &trades, tops, &prices_top).await;
+        // The solver now holds back-of-block (N); snapshot again so the back-of-block improvement
+        // is valued against the state it was solved at.
         let prices_back = snapshot_prices(adapter.solver, decoder.registry()).await;
         // The back-of-block solve should land on `target`. On a reorg/gap/resync the stream can
         // apply a different block, silently pairing the back state with another block's trades.
