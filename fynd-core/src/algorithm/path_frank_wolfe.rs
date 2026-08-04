@@ -19,7 +19,7 @@ use tracing::{debug, warn};
 use tycho_simulation::tycho_core::models::Address;
 
 use super::{
-    bellman_ford::{BellmanFordContext, FindRouteOptions},
+    bellman_ford::{BellmanFordContext, FindRouteOptions, SpfaScratch},
     split_primitives::{
         build_post_swap_overrides, build_split_route, compute_marginal_price_product,
         evaluate_total_output, golden_section_search, normalize_fractions, simulate_path,
@@ -168,6 +168,7 @@ impl PathFrankWolfeAlgorithm {
         ctx: &BellmanFordContext,
         current_allocations: &[PathAllocation],
         probe_amount: &BigUint,
+        scratch: &mut SpfaScratch,
     ) -> Result<Vec<SimulatedHop>, AlgorithmError> {
         let mut overrides = build_post_swap_overrides(current_allocations, &ctx.market_data)?;
 
@@ -210,9 +211,12 @@ impl PathFrankWolfeAlgorithm {
             Default::default(),
         );
 
-        let result =
-            self.inner
-                .find_single_route(ctx, &probe_order, FindRouteOptions { overrides })?;
+        let result = self.inner.find_single_route(
+            ctx,
+            &probe_order,
+            FindRouteOptions { overrides },
+            scratch,
+        )?;
 
         let route = result.route();
         let tokens = route.tokens();
@@ -511,6 +515,7 @@ impl PathFrankWolfeAlgorithm {
         order: &Order,
         single_path_result: &RouteResult,
         start: Instant,
+        scratch: &mut SpfaScratch,
     ) -> Result<Option<RouteResult>, AlgorithmError> {
         let mut allocations =
             vec![Self::route_to_allocation(single_path_result.route(), order, ctx)?];
@@ -543,17 +548,18 @@ impl PathFrankWolfeAlgorithm {
                 }
             };
 
-            let candidate = match self.find_candidate_path(ctx, &allocations, &probe_amount) {
-                Ok(c) => c,
-                Err(e) => {
-                    debug!(
-                        iteration,
-                        ?e,
-                        "no additional candidate path found, stopping further searches"
-                    );
-                    break;
-                }
-            };
+            let candidate =
+                match self.find_candidate_path(ctx, &allocations, &probe_amount, scratch) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        debug!(
+                            iteration,
+                            ?e,
+                            "no additional candidate path found, stopping further searches"
+                        );
+                        break;
+                    }
+                };
 
             if Self::is_duplicate_path(&candidate, &allocations) {
                 debug!(iteration, "duplicate path, exploration exhausted");
@@ -684,21 +690,26 @@ impl Algorithm for PathFrankWolfeAlgorithm {
             .build_context(graph, market, label, derived, order)
             .await?;
 
+        // One set of relaxation arrays for the whole solve: the split search below relaxes once
+        // per iteration, and each relaxation would otherwise allocate arrays sized by the graph.
+        let mut scratch = SpfaScratch::new();
+
         // Step 1: initial single-path route via BF at full amount.
         let single_path_result =
             self.inner
-                .find_single_route(&ctx, order, FindRouteOptions::default())?;
+                .find_single_route(&ctx, order, FindRouteOptions::default(), &mut scratch)?;
 
         // Step 2: try to improve on it with a split route. A failure here must
         // never lose the valid single-path route — fall back instead of
         // propagating the error.
-        let split_result = match self.optimize_split(&ctx, order, &single_path_result, start) {
-            Ok(result) => result,
-            Err(e) => {
-                debug!(error = ?e, "split optimization failed, falling back to single path");
-                None
-            }
-        };
+        let split_result =
+            match self.optimize_split(&ctx, order, &single_path_result, start, &mut scratch) {
+                Ok(result) => result,
+                Err(e) => {
+                    debug!(error = ?e, "split optimization failed, falling back to single path");
+                    None
+                }
+            };
 
         // Step 3: return whichever route nets more after gas.
         match split_result {
@@ -1282,7 +1293,7 @@ mod tests {
 
         // First candidate: P2 has 1.5x rate vs P3's 1.0x → finds [P1, P2].
         let first_path = algo
-            .find_candidate_path(&ctx, &[], &probe_amount)
+            .find_candidate_path(&ctx, &[], &probe_amount, &mut SpfaScratch::new())
             .unwrap();
         assert_eq!(first_path[0].descriptor.component_id, "P1");
         assert_eq!(first_path[1].descriptor.component_id, "P2");
@@ -1298,7 +1309,12 @@ mod tests {
 
         // After allocating 1000 A on [P1, P2], P2 degrades enough that BF finds [P1, P3].
         let second_path = algo
-            .find_candidate_path(&ctx, std::slice::from_ref(&first_alloc), &probe_amount)
+            .find_candidate_path(
+                &ctx,
+                std::slice::from_ref(&first_alloc),
+                &probe_amount,
+                &mut SpfaScratch::new(),
+            )
             .unwrap();
         assert_eq!(second_path[0].descriptor.component_id, "P1");
         assert_eq!(second_path[1].descriptor.component_id, "P3");
@@ -1365,7 +1381,7 @@ mod tests {
             .unwrap();
 
         let first_path = algo
-            .find_candidate_path(&ctx, &[], &probe_amount)
+            .find_candidate_path(&ctx, &[], &probe_amount, &mut SpfaScratch::new())
             .unwrap();
         assert_eq!(first_path[0].descriptor.component_id, "P1");
 
@@ -1379,7 +1395,12 @@ mod tests {
 
         // P1 is the only pool — BF returns it again.
         let second_path = algo
-            .find_candidate_path(&ctx, std::slice::from_ref(&first_alloc), &probe_amount)
+            .find_candidate_path(
+                &ctx,
+                std::slice::from_ref(&first_alloc),
+                &probe_amount,
+                &mut SpfaScratch::new(),
+            )
             .unwrap();
         assert!(PathFrankWolfeAlgorithm::is_duplicate_path(
             &second_path,

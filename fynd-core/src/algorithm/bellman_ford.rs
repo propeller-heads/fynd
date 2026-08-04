@@ -92,19 +92,67 @@ pub(crate) struct FindRouteOptions {
     pub(crate) overrides: MarketOverrides,
 }
 
-/// Output of the SPFA relaxation pass: per-node best-path arrays.
-struct SPFAResult {
+/// Per-node working arrays for the SPFA relaxation, owned by the caller and reused.
+///
+/// The arrays are indexed by global [`NodeIndex`], so each one is sized by the whole graph even
+/// when a solve reaches only part of it. A caller that relaxes repeatedly — path Frank-Wolfe
+/// probes a fresh candidate every iteration — holds one of these for the whole solve instead of
+/// allocating a set per call.
+///
+/// Indexing densely per subgraph would shrink them, but it would also renumber the nodes that
+/// `active_nodes` is sorted by, and SPFA's result depends on that order (see the module docs), so
+/// the arrays stay globally indexed.
+pub(crate) struct SpfaScratch {
     /// Best gross output amount reachable at each node index.
     amount: Vec<BigUint>,
     /// The (predecessor node, pool) that last improved each node's amount.
     predecessor: Vec<Option<(NodeIndex, ComponentId)>>,
     /// Gas consumed by the edge that last improved each node's amount.
     edge_gas: Vec<BigUint>,
+    /// Total gas along the best path to each node.
+    cumul_gas: Vec<BigUint>,
     /// Cumulative spot-price product from token_in to each node (for gas fallback).
     spot_product: Vec<f64>,
-    /// True if some hop's input couldn't cover that hop's own gas (gas-aware) or a sim
-    /// produced a literal zero output (gas-unaware) — i.e. the amount is dust, not unroutable.
-    input_below_hop_gas: bool,
+}
+
+impl SpfaScratch {
+    pub(crate) fn new() -> Self {
+        Self {
+            amount: Vec::new(),
+            predecessor: Vec::new(),
+            edge_gas: Vec::new(),
+            cumul_gas: Vec::new(),
+            spot_product: Vec::new(),
+        }
+    }
+
+    /// Resizes every array to `node_count` and resets its entries, leaving the scratch exactly as
+    /// a freshly allocated one would start. Retained capacity is what makes reuse worthwhile.
+    ///
+    /// Three of these resets are load-bearing today: relaxation compares against `amount` and
+    /// `cumul_gas` at a node before improving it, and walks `predecessor` from what is now the
+    /// source. `edge_gas` and `spot_product` are only ever read at nodes that improved during the
+    /// same relaxation, so they are cleared to keep the scratch a blank slate rather than to fix
+    /// a reachable bug — which is a property of the readers, not something the scratch enforces.
+    fn reset(&mut self, node_count: usize) {
+        reset_buffer(&mut self.amount, node_count, BigUint::ZERO);
+        reset_buffer(&mut self.predecessor, node_count, None);
+        reset_buffer(&mut self.edge_gas, node_count, BigUint::ZERO);
+        reset_buffer(&mut self.cumul_gas, node_count, BigUint::ZERO);
+        reset_buffer(&mut self.spot_product, node_count, 0.0);
+    }
+}
+
+impl Default for SpfaScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Clears `buffer` and refills it with `len` copies of `value`, keeping its allocation.
+fn reset_buffer<T: Clone>(buffer: &mut Vec<T>, len: usize, value: T) {
+    buffer.clear();
+    buffer.resize(len, value);
 }
 
 /// Bellman-Ford algorithm with SPFA optimisation for simulation-driven DEX routing.
@@ -271,17 +319,18 @@ impl BellmanFordAlgorithm {
         ctx: &BellmanFordContext,
         order: &Order,
         opts: FindRouteOptions,
+        scratch: &mut SpfaScratch,
     ) -> Result<RouteResult, AlgorithmError> {
         let start = Instant::now();
 
-        let spfa = self.run_spfa(ctx, order, &opts.overrides, start);
+        let input_below_hop_gas = self.run_spfa(ctx, order, &opts.overrides, start, scratch);
 
         let out_idx = ctx.token_out_node.index();
-        if spfa.amount[out_idx].is_zero() {
+        if scratch.amount[out_idx].is_zero() {
             // Dust (a hop's input below its own gas) -> AmountTooSmall; everything else
             // (unreachable, filtered, sim error incl. too-large, missing state, timeout)
             // -> NoGraphPath.
-            let reason = if spfa.input_below_hop_gas {
+            let reason = if input_below_hop_gas {
                 NoPathReason::AmountTooSmall
             } else {
                 NoPathReason::NoGraphPath
@@ -297,12 +346,17 @@ impl BellmanFordAlgorithm {
         // (no re-simulation needed since forbid-revisits guarantees relaxation
         // amounts match sequential execution).
         let path_edges =
-            Self::reconstruct_path(ctx.token_out_node, ctx.token_in_node, &spfa.predecessor)?;
+            Self::reconstruct_path(ctx.token_out_node, ctx.token_in_node, &scratch.predecessor)?;
 
-        let route =
-            Self::build_route(ctx, &path_edges, &spfa.amount, &spfa.edge_gas, &opts.overrides)?;
+        let route = Self::build_route(
+            ctx,
+            &path_edges,
+            &scratch.amount,
+            &scratch.edge_gas,
+            &opts.overrides,
+        )?;
 
-        let final_amount_out = spfa.amount[out_idx].clone();
+        let final_amount_out = scratch.amount[out_idx].clone();
         let gas_price = ctx
             .gas_price_wei
             .clone()
@@ -313,7 +367,7 @@ impl BellmanFordAlgorithm {
             &route,
             &gas_price,
             ctx.token_prices.as_deref(),
-            &spfa.spot_product,
+            &scratch.spot_product,
             &ctx.node_address,
             ctx.token_in_node,
             ctx.token_out_node,
@@ -334,10 +388,10 @@ impl BellmanFordAlgorithm {
         Ok(result)
     }
 
-    /// Runs SPFA (Shortest Path Faster Algorithm) relaxation over the subgraph and returns per-node
-    /// best-path arrays.
+    /// Runs SPFA (Shortest Path Faster Algorithm) relaxation over the subgraph, writing the
+    /// per-node best-path arrays into `scratch` and returning whether the order looked like dust.
     ///
-    /// Simulation failures are silently skipped (the edge is dropped). Returns the arrays
+    /// Simulation failures are silently skipped (the edge is dropped). The arrays are written
     /// even if the destination was not reached — callers check `amount[out_idx].is_zero()`.
     fn run_spfa(
         &self,
@@ -345,20 +399,15 @@ impl BellmanFordAlgorithm {
         order: &Order,
         overrides: &MarketOverrides,
         start: Instant,
-    ) -> SPFAResult {
-        // amount[node] = best gross output reachable at that node.
-        // edge_gas[node] = gas for the edge that last improved amount[node].
-        // cumul_gas[node] = total gas along the best path to this node.
-        let mut amount: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
-        let mut predecessor: Vec<Option<(NodeIndex, ComponentId)>> = vec![None; ctx.max_idx];
-        let mut edge_gas: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
-        let mut cumul_gas: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
+        scratch: &mut SpfaScratch,
+    ) -> bool {
+        scratch.reset(ctx.max_idx);
+        let SpfaScratch { amount, predecessor, edge_gas, cumul_gas, spot_product } = scratch;
 
         amount[ctx.token_in_node.index()] = order.amount().clone();
 
         // Track cumulative spot price product from token_in for fallback gas estimation.
         // spot_product[v] = product of spot prices along the path from token_in to v.
-        let mut spot_product: Vec<f64> = vec![0.0; ctx.max_idx];
         spot_product[ctx.token_in_node.index()] = 1.0;
 
         let mut input_below_hop_gas = false;
@@ -411,7 +460,7 @@ impl BellmanFordAlgorithm {
                     let v_idx = v.index();
 
                     // Single predecessor walk: skip if target token or pool already in path
-                    if Self::path_has_conflict(u, v, component_id, &predecessor) {
+                    if Self::path_has_conflict(u, v, component_id, predecessor) {
                         continue;
                     }
 
@@ -526,7 +575,7 @@ impl BellmanFordAlgorithm {
             active_nodes.sort_unstable();
         }
 
-        SPFAResult { amount, predecessor, edge_gas, spot_product, input_below_hop_gas }
+        input_below_hop_gas
     }
 
     /// Marks, per node, whether the connector-token allowlist permits routing *into* it.
@@ -869,7 +918,7 @@ impl Algorithm for BellmanFordAlgorithm {
         let ctx = self
             .build_context(graph, market, label, derived, order)
             .await?;
-        self.find_single_route(&ctx, order, FindRouteOptions::default())
+        self.find_single_route(&ctx, order, FindRouteOptions::default(), &mut SpfaScratch::new())
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {
@@ -2049,6 +2098,187 @@ mod tests {
         ));
     }
 
+    /// Path Frank-Wolfe relaxes many times per solve through one shared scratch, so a stale
+    /// entry left by an earlier relaxation would silently corrupt a later one. Interleaving
+    /// through a shared scratch must match solving each in isolation, byte for byte.
+    #[tokio::test]
+    async fn test_shared_scratch_matches_isolated_relaxations() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market_bf(vec![
+            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(10.0)),
+        ]);
+
+        let algo = bf_algorithm(3, 1000);
+        let big = order(&token_a, &token_c, 1_000_000, OrderSide::Sell);
+        let small = order(&token_a, &token_c, 7, OrderSide::Sell);
+        let degraded = FindRouteOptions {
+            overrides: MarketOverrides::empty()
+                .with_override("pool_ac".to_string(), Box::new(MockProtocolSim::new(1.0))),
+        };
+
+        let market_b = market.clone();
+        let ctx = algo
+            .build_context(manager.graph(), market, None, None, &big)
+            .await
+            .unwrap();
+
+        let summarise = |result: RouteResult| {
+            let components: Vec<String> = result
+                .route()
+                .swaps()
+                .iter()
+                .map(|swap| swap.component_id().to_string())
+                .collect();
+            (
+                components,
+                result
+                    .route()
+                    .swaps()
+                    .last()
+                    .unwrap()
+                    .amount_out()
+                    .clone(),
+            )
+        };
+
+        // Each relaxation solved on a scratch of its own.
+        let isolated_big = summarise(
+            algo.find_single_route(
+                &ctx,
+                &big,
+                FindRouteOptions::default(),
+                &mut SpfaScratch::new(),
+            )
+            .unwrap(),
+        );
+        let isolated_small = summarise(
+            algo.find_single_route(
+                &ctx,
+                &small,
+                FindRouteOptions::default(),
+                &mut SpfaScratch::new(),
+            )
+            .unwrap(),
+        );
+        let isolated_degraded = summarise(
+            algo.find_single_route(&ctx, &big, degraded, &mut SpfaScratch::new())
+                .unwrap(),
+        );
+        assert_ne!(isolated_big, isolated_small, "the orders must differ to be a test");
+        assert_ne!(isolated_big, isolated_degraded, "the overrides must bite to be a test");
+
+        // The same relaxations interleaved through one scratch, each repeated after the others
+        // have written over it.
+        // A scratch is also reusable across contexts, where a predecessor left at what is now the
+        // source would send `path_has_conflict` walking past it into another solve's entries.
+        let from_b = order(&token_b, &token_c, 1_000_000, OrderSide::Sell);
+        let ctx_from_b = algo
+            .build_context(manager.graph(), market_b, None, None, &from_b)
+            .await
+            .unwrap();
+        let isolated_from_b = summarise(
+            algo.find_single_route(
+                &ctx_from_b,
+                &from_b,
+                FindRouteOptions::default(),
+                &mut SpfaScratch::new(),
+            )
+            .unwrap(),
+        );
+
+        let mut scratch = SpfaScratch::new();
+        for _ in 0..2 {
+            let shared_from_b = summarise(
+                algo.find_single_route(
+                    &ctx_from_b,
+                    &from_b,
+                    FindRouteOptions::default(),
+                    &mut scratch,
+                )
+                .unwrap(),
+            );
+            assert_eq!(shared_from_b, isolated_from_b);
+
+            let shared_small = summarise(
+                algo.find_single_route(&ctx, &small, FindRouteOptions::default(), &mut scratch)
+                    .unwrap(),
+            );
+            assert_eq!(shared_small, isolated_small);
+
+            let shared_degraded = summarise(
+                algo.find_single_route(
+                    &ctx,
+                    &big,
+                    FindRouteOptions {
+                        overrides: MarketOverrides::empty().with_override(
+                            "pool_ac".to_string(),
+                            Box::new(MockProtocolSim::new(1.0)),
+                        ),
+                    },
+                    &mut scratch,
+                )
+                .unwrap(),
+            );
+            assert_eq!(shared_degraded, isolated_degraded);
+
+            let shared_big = summarise(
+                algo.find_single_route(&ctx, &big, FindRouteOptions::default(), &mut scratch)
+                    .unwrap(),
+            );
+            assert_eq!(shared_big, isolated_big);
+        }
+    }
+
+    /// The gas-aware comparison reads `cumul_gas` for the node it is relaxing *into*, before
+    /// that node has been improved this relaxation. That read is not covered by resetting
+    /// amounts, so a shared scratch must clear it too: a leftover gas total makes the incumbent
+    /// look negative and lets an uneconomic hop win.
+    #[tokio::test]
+    async fn test_shared_scratch_does_not_carry_gas_totals_between_relaxations() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_bf(vec![(
+            "pool_ab",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0).with_gas(10),
+        )]);
+
+        let algo = bf_algorithm(2, 1000);
+        let healthy = order(&token_a, &token_b, 1_000_000, OrderSide::Sell);
+        // One unit is worth far less than the hop's own gas, so this must not route.
+        let dust = order(&token_a, &token_b, 1, OrderSide::Sell);
+        let derived =
+            setup_derived_with_token_prices(&[token_a.address.clone(), token_b.address.clone()]);
+
+        let ctx = algo
+            .build_context(manager.graph(), market, None, Some(derived), &healthy)
+            .await
+            .unwrap();
+
+        let mut scratch = SpfaScratch::new();
+        // The healthy order first, so B carries a gas total into the next relaxation.
+        assert!(algo
+            .find_single_route(&ctx, &healthy, FindRouteOptions::default(), &mut scratch)
+            .is_ok());
+
+        let dust_result =
+            algo.find_single_route(&ctx, &dust, FindRouteOptions::default(), &mut scratch);
+        assert!(
+            matches!(
+                dust_result,
+                Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+            ),
+            "dust must stay unroutable on a reused scratch, got {dust_result:?}",
+        );
+    }
+
     #[tokio::test]
     async fn test_find_single_route_with_state_overrides() {
         let token_a = token(0x01, "A");
@@ -2067,7 +2297,7 @@ mod tests {
 
         // Without overrides: 1000 * 2.0 = 2000
         let normal = algo
-            .find_single_route(&ctx, &ord, FindRouteOptions::default())
+            .find_single_route(&ctx, &ord, FindRouteOptions::default(), &mut SpfaScratch::new())
             .unwrap();
         assert_eq!(normal.route().swaps()[0].amount_out(), &BigUint::from(2000u64));
 
@@ -2077,7 +2307,7 @@ mod tests {
                 .with_override("pool_ab".to_string(), Box::new(MockProtocolSim::new(1.0))),
         };
         let overridden = algo
-            .find_single_route(&ctx, &ord, opts)
+            .find_single_route(&ctx, &ord, opts, &mut SpfaScratch::new())
             .unwrap();
         assert_eq!(overridden.route().swaps()[0].amount_out(), &BigUint::from(1000u64));
 
@@ -2105,10 +2335,15 @@ mod tests {
             .unwrap();
 
         let with_default = algo
-            .find_single_route(&ctx, &ord, FindRouteOptions::default())
+            .find_single_route(&ctx, &ord, FindRouteOptions::default(), &mut SpfaScratch::new())
             .unwrap();
         let with_empty = algo
-            .find_single_route(&ctx, &ord, FindRouteOptions { overrides: MarketOverrides::empty() })
+            .find_single_route(
+                &ctx,
+                &ord,
+                FindRouteOptions { overrides: MarketOverrides::empty() },
+                &mut SpfaScratch::new(),
+            )
             .unwrap();
 
         assert_eq!(
