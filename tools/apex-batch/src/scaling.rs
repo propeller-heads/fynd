@@ -125,7 +125,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: enable with the batch runner"]
     fn test_scale_up_round_trips_through_floor() {
         // Round-trip identity: a native amount scaled up and floored back is itself, for every
         // decimal count APEX can represent. The batch must not lose a unit just by entering it.
@@ -141,7 +140,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: enable with the batch runner"]
     fn test_scale_down_floor_never_exceeds_ceil() {
         let usdc = TokenScale::new(6).expect("6 decimals is within APEX precision");
         // One sub-unit of dust below a whole USDC unit: the two roundings must straddle it, or
@@ -159,7 +157,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: enable with the batch runner"]
     fn test_decimals_above_18_are_declined() {
         // Turbine's equivalent asserts here, which aborts the whole batch. A 24-decimal token
         // must cost its own order and nothing else.
@@ -173,7 +170,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: enable with the batch runner"]
     fn test_overflowing_scale_up_is_declined() {
         let usdc = TokenScale::new(6).expect("6 decimals is within APEX precision");
         // U256::MAX cannot survive a 10^12 multiply. The result must be an error, not a wrapped
@@ -189,7 +185,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "scaffold: enable with the batch runner"]
     fn test_18_decimal_scaling_is_identity() {
         let weth = TokenScale::new(18).expect("18 decimals is APEX's own precision");
         let amount = units(7, 18) + U256::from(3);

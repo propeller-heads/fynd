@@ -11,7 +11,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use alloy::primitives::Address as AlloyAddress;
+use alloy::primitives::{Address as AlloyAddress, U256};
 use apex_solver::{
     core::{
         pools::custom::ApexPool, Fraction, MarketOrder, PairAddresses, Token as ApexToken,
@@ -19,9 +19,16 @@ use apex_solver::{
     },
     types::{Address as ApexAddress, U256 as ApexU256},
 };
-use tycho_simulation::tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim};
+use num_bigint::BigUint;
+use tycho_simulation::tycho_common::{
+    models::token::Token,
+    simulation::protocol_sim::{Price, ProtocolSim, QueryPoolSwapParams, SwapConstraint},
+};
 
-use crate::snapshot::BlockBatchSnapshot;
+use crate::{
+    scaling::{Scaled18, TokenScale},
+    snapshot::BlockBatchSnapshot,
+};
 
 /// A Tycho `ProtocolSim` presented to APEX as a pool.
 ///
@@ -55,10 +62,62 @@ impl ApexPool for TychoApexPool {
     ///    fewer decimals has a counter-intuitively *larger* price (one unit of USDC is worth 10^12
     ///    atomic units of DAI). Each side of the price is lifted by its own token's scale before
     ///    Tycho sees it, and the returned amount is lifted back on the sell token's.
-    fn query_supply(&self, _pair: TradingPair, _swap_price: Fraction) -> ApexU256 {
-        todo!(
-            "invert the price direction, rescale both sides, and call ProtocolSim::query_pool_swap"
-        )
+    fn query_supply(&self, pair: TradingPair, swap_price: Fraction) -> ApexU256 {
+        let Some(sell_token) = self
+            .tokens
+            .get(&pair.sell_token.address)
+        else {
+            return ApexU256::ZERO;
+        };
+        let Some(buy_token) = self.tokens.get(&pair.buy_token.address) else {
+            return ApexU256::ZERO;
+        };
+        let Some(sell_scale) = token_scale(sell_token) else {
+            return ApexU256::ZERO;
+        };
+
+        // Tycho's `Price` is token_out/token_in with the pool selling `pair.sell_token`, so the
+        // APEX fraction is inverted AND each side is lifted by its own token's precision — the
+        // counter-intuitive direction: in 18-decimal space one unit of a 6-decimal token is worth
+        // 10^12 atomic units of an 18-decimal one, so the low-decimal side's price is the larger
+        // number. `Price::new` panics on zero, so zero components decline instead.
+        let Some(target_numerator) =
+            precision_lift(from_apex_u256(swap_price.denominator), buy_token.decimals)
+        else {
+            return ApexU256::ZERO;
+        };
+        let Some(target_denominator) =
+            precision_lift(from_apex_u256(swap_price.numerator), sell_token.decimals)
+        else {
+            return ApexU256::ZERO;
+        };
+        if target_numerator.is_zero() || target_denominator.is_zero() {
+            return ApexU256::ZERO;
+        }
+
+        let params = QueryPoolSwapParams::new(
+            buy_token.clone(),
+            sell_token.clone(),
+            SwapConstraint::PoolTargetPrice {
+                target: Price::new(
+                    u256_to_biguint(target_numerator),
+                    u256_to_biguint(target_denominator),
+                ),
+                tolerance: 0.0,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        );
+        let Ok(swap) = self.pool.query_pool_swap(&params) else {
+            return ApexU256::ZERO;
+        };
+        let Some(native_supply) = biguint_to_u256(swap.amount_out()) else {
+            return ApexU256::ZERO;
+        };
+        match sell_scale.scale_up(native_supply) {
+            Ok(scaled) => to_apex_u256(scaled.0),
+            Err(_) => ApexU256::ZERO,
+        }
     }
 
     /// The output for `amount_in`, wrapping `ProtocolSim::get_amount_out`.
@@ -70,13 +129,88 @@ impl ApexPool for TychoApexPool {
     /// `ApexPool` signals "this pool cannot serve this swap".
     fn get_amount_out(
         &self,
-        _token_in: ApexAddress,
-        _token_out: ApexAddress,
-        _amount_in: ApexU256,
-        _min_amount_out: ApexU256,
+        token_in: ApexAddress,
+        token_out: ApexAddress,
+        amount_in: ApexU256,
+        min_amount_out: ApexU256,
     ) -> ApexU256 {
-        todo!("descale the input, simulate, rescale the output, and floor it at min_amount_out")
+        let Some(token_in) = self.tokens.get(&token_in) else {
+            return ApexU256::ZERO;
+        };
+        let Some(token_out) = self.tokens.get(&token_out) else {
+            return ApexU256::ZERO;
+        };
+        let (Some(scale_in), Some(scale_out)) = (token_scale(token_in), token_scale(token_out))
+        else {
+            return ApexU256::ZERO;
+        };
+
+        // Flooring the input can only simulate a smaller trade than APEX asked for, never a
+        // larger one — the conservative direction for a supply answer.
+        let native_in = scale_in.scale_down_floor(Scaled18(from_apex_u256(amount_in)));
+        if native_in.is_zero() {
+            return ApexU256::ZERO;
+        }
+        let Ok(result) = self
+            .pool
+            .get_amount_out(u256_to_biguint(native_in), token_in, token_out)
+        else {
+            return ApexU256::ZERO;
+        };
+        let Some(native_out) = biguint_to_u256(&result.amount) else {
+            return ApexU256::ZERO;
+        };
+        let Ok(scaled_out) = scale_out.scale_up(native_out) else {
+            return ApexU256::ZERO;
+        };
+        let amount_out = to_apex_u256(scaled_out.0);
+        if amount_out >= min_amount_out {
+            amount_out
+        } else {
+            ApexU256::ZERO
+        }
     }
+}
+
+/// A tycho token's scaling rule, when APEX can represent it (≤ 18 decimals).
+fn token_scale(token: &Token) -> Option<TokenScale> {
+    let decimals = u8::try_from(token.decimals).ok()?;
+    TokenScale::new(decimals).ok()
+}
+
+/// `value · 10^(18 − decimals)`, checked. Used on *price components*, where the lift direction is
+/// counter-intuitive (see [`TychoApexPool::query_supply`]); amounts go through
+/// [`TokenScale`] instead.
+fn precision_lift(value: U256, decimals: u32) -> Option<U256> {
+    let decimals = u8::try_from(decimals).ok()?;
+    let scale = TokenScale::new(decimals).ok()?;
+    scale
+        .scale_up(value)
+        .ok()
+        .map(|scaled| scaled.0)
+}
+
+/// An alloy `U256` as APEX's `U256`. The two are the same ruint shape but may come from
+/// different crate versions, so the conversion goes through the little-endian bytes.
+fn to_apex_u256(value: U256) -> ApexU256 {
+    ApexU256::from_le_bytes(value.to_le_bytes::<32>())
+}
+
+/// An APEX `U256` as alloy's `U256`.
+fn from_apex_u256(value: ApexU256) -> U256 {
+    U256::from_le_bytes(value.to_le_bytes::<32>())
+}
+
+/// An alloy `U256` as the `BigUint` tycho simulations take.
+fn u256_to_biguint(value: U256) -> BigUint {
+    BigUint::from_bytes_le(&value.to_le_bytes::<32>())
+}
+
+/// A simulation-returned `BigUint` as alloy `U256`. `None` when the value exceeds 256 bits —
+/// a nonsensical pool output that declines the swap rather than truncating it.
+fn biguint_to_u256(value: &BigUint) -> Option<U256> {
+    let bytes = value.to_bytes_le();
+    (bytes.len() <= 32).then(|| U256::from_le_slice(&bytes))
 }
 
 /// APEX's tâtonnement starting prices, from Fynd's derived per-token price map.
@@ -149,10 +283,197 @@ pub fn from_apex_address(address: ApexAddress) -> AlloyAddress {
 
 #[cfg(test)]
 mod tests {
+    use apex_solver::core::Token as ApexCoreToken;
+    use tycho_simulation::{
+        evm::protocol::uniswap_v2::state::UniswapV2State,
+        tycho_common::{models::Chain, Bytes},
+    };
+
     use super::*;
 
+    const USDC_DECIMALS: u32 = 6;
+    const WETH_DECIMALS: u32 = 18;
+
+    /// A tycho token at a deterministic address; low `index` sorts as token0.
+    fn tycho_token(index: u8, symbol: &str, decimals: u32) -> Token {
+        let mut bytes = [0u8; 20];
+        bytes[19] = index;
+        Token::new(
+            &Bytes::from(bytes.to_vec()),
+            symbol,
+            decimals,
+            0,
+            &[Some(60_000)],
+            Chain::Base,
+            100,
+        )
+    }
+
+    fn apex_address(token: &Token) -> ApexAddress {
+        let mut bytes = [0u8; 20];
+        bytes.copy_from_slice(token.address.as_ref());
+        ApexAddress(bytes)
+    }
+
+    fn units(value: u64, decimals: u32) -> U256 {
+        U256::from(value) * U256::from(10u64).pow(U256::from(decimals))
+    }
+
+    /// A USDC/WETH v2 pool (USDC = token0) at ~4000 USDC/WETH, wrapped for APEX.
+    fn usdc_weth_pool() -> (TychoApexPool, Token, Token) {
+        let usdc = tycho_token(1, "USDC", USDC_DECIMALS);
+        let weth = tycho_token(2, "WETH", WETH_DECIMALS);
+        let state = UniswapV2State::new(
+            to_apex_u256(units(4_000_000, USDC_DECIMALS)),
+            to_apex_u256(units(1_000, WETH_DECIMALS)),
+        );
+        let pool = TychoApexPool {
+            protocol: "uniswap_v2".to_string(),
+            tokens: HashMap::from([
+                (apex_address(&usdc), usdc.clone()),
+                (apex_address(&weth), weth.clone()),
+            ]),
+            pool: Arc::new(state),
+        };
+        (pool, usdc, weth)
+    }
+
+    /// The agreement property that step 0 exists to prove: an amount pushed through the adapter
+    /// in APEX's 18-decimal space equals the direct `ProtocolSim` result lifted by the output
+    /// token's scale — in both directions across a mixed-decimal pair. A silent 10^12 error in
+    /// either conversion fails this test.
     #[test]
-    #[ignore = "scaffold: enable with the batch runner"]
+    fn test_direct_vs_adapter_agreement_mixed_decimals() {
+        let (adapter, usdc, weth) = usdc_weth_pool();
+
+        // USDC -> WETH: 1000 USDC in, WETH (18-dec output, lift is identity).
+        let direct = adapter
+            .pool
+            .get_amount_out(u256_to_biguint(units(1_000, USDC_DECIMALS)), &usdc, &weth)
+            .expect("v2 swap within reserves simulates");
+        let through_adapter = adapter.get_amount_out(
+            apex_address(&usdc),
+            apex_address(&weth),
+            to_apex_u256(units(1_000, 18)),
+            ApexU256::ZERO,
+        );
+        let direct_native = biguint_to_u256(&direct.amount).expect("v2 output fits U256");
+        assert!(!through_adapter.is_zero(), "the pool serves this trade");
+        assert_eq!(
+            from_apex_u256(through_adapter),
+            direct_native,
+            "18-dec output lift is identity"
+        );
+
+        // WETH -> USDC: 1 WETH in, USDC output must come back lifted by 10^12.
+        let direct = adapter
+            .pool
+            .get_amount_out(u256_to_biguint(units(1, WETH_DECIMALS)), &weth, &usdc)
+            .expect("v2 swap within reserves simulates");
+        let through_adapter = adapter.get_amount_out(
+            apex_address(&weth),
+            apex_address(&usdc),
+            to_apex_u256(units(1, 18)),
+            ApexU256::ZERO,
+        );
+        let direct_native = biguint_to_u256(&direct.amount).expect("v2 output fits U256");
+        assert_eq!(
+            from_apex_u256(through_adapter),
+            direct_native * U256::from(10u64).pow(U256::from(12u8)),
+            "6-dec output is lifted by 10^12 into APEX space"
+        );
+    }
+
+    /// `min_amount_out` is the trait's decline signal: an unmet floor returns zero, not the
+    /// smaller amount.
+    #[test]
+    fn test_unmet_floor_declines() {
+        let (adapter, usdc, weth) = usdc_weth_pool();
+        let served = adapter.get_amount_out(
+            apex_address(&usdc),
+            apex_address(&weth),
+            to_apex_u256(units(1_000, 18)),
+            ApexU256::ZERO,
+        );
+        assert!(!served.is_zero());
+        let declined = adapter.get_amount_out(
+            apex_address(&usdc),
+            apex_address(&weth),
+            to_apex_u256(units(1_000, 18)),
+            served + ApexU256::from(1u64),
+        );
+        assert!(declined.is_zero());
+    }
+
+    /// A token missing from the adapter's map declines instead of panicking — the runner's
+    /// closure precondition should make this unreachable, and the adapter must not turn a
+    /// precondition bug into a process abort.
+    #[test]
+    fn test_unknown_token_declines() {
+        let (adapter, usdc, _) = usdc_weth_pool();
+        let stranger = ApexAddress([0xAB; 20]);
+        assert!(adapter
+            .get_amount_out(
+                apex_address(&usdc),
+                stranger,
+                to_apex_u256(units(1, 18)),
+                ApexU256::ZERO
+            )
+            .is_zero());
+        let ghost_pair = TradingPair::new(
+            ApexCoreToken::new(stranger, "GHOST", 18),
+            ApexCoreToken::new(apex_address(&usdc), "USDC", 6),
+        );
+        assert!(adapter
+            .query_supply(ghost_pair, Fraction::new(ApexU256::from(1u64), ApexU256::from(1u64)))
+            .is_zero());
+    }
+
+    /// `query_supply` agreement: the adapter's answer equals the direct `query_pool_swap` call
+    /// with the price hand-converted per the documented rule (inverted, each side lifted by its
+    /// own token), lifted to the sell token's 18-dec scale.
+    #[test]
+    fn test_query_supply_matches_direct_target_price_query() {
+        let (adapter, usdc, weth) = usdc_weth_pool();
+        // Pool sells WETH for USDC. Spot is 4000 USDC/WETH; ask it to move to 4100 (WETH leaves
+        // until it costs 4100). APEX's fraction relates 18-dec AMOUNTS, so 4100 USDC-per-WETH is
+        // 4100e18 / 1e18 — no per-token lift here; the adapter applies those in the conversion.
+        let apex_price = Fraction::new(to_apex_u256(units(4_100, 18)), to_apex_u256(units(1, 18)));
+        let pair = TradingPair::new(
+            ApexCoreToken::new(apex_address(&weth), "WETH", 18),
+            ApexCoreToken::new(apex_address(&usdc), "USDC", 6),
+        );
+        let through_adapter = adapter.query_supply(pair, apex_price);
+        assert!(!through_adapter.is_zero(), "a 2.5% price move has supply behind it");
+
+        // Direct: token_out/token_in with the pool selling WETH means the target is
+        // WETH-per-USDC in native units, i.e. the inverse with each side in its own decimals.
+        let direct_params = QueryPoolSwapParams::new(
+            usdc.clone(),
+            weth.clone(),
+            SwapConstraint::PoolTargetPrice {
+                target: Price::new(
+                    u256_to_biguint(units(1, WETH_DECIMALS)),
+                    u256_to_biguint(units(4_100, USDC_DECIMALS)),
+                ),
+                tolerance: 0.0,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        );
+        let direct = adapter
+            .pool
+            .query_pool_swap(&direct_params)
+            .expect("v2 implements target-price queries");
+        let direct_native = biguint_to_u256(direct.amount_out()).expect("fits U256");
+        assert_eq!(
+            from_apex_u256(through_adapter),
+            direct_native,
+            "18-dec sell token: lift is identity, so the two answers are equal"
+        );
+    }
+
+    #[test]
     fn test_address_conversion_round_trips() {
         // APEX's `Address: From<&str>` returns the zero address on any parse failure, so a
         // string-based conversion would turn a typo into a real-looking token. Round-tripping
