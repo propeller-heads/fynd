@@ -83,17 +83,13 @@ pub(crate) enum Verdict {
 /// loss. Without this cut, a single un-fillable whale trade dominates the USD aggregate.
 const MIN_FILL_RATIO: f64 = 0.5;
 
-/// Settled USD notional below which a trade is left out of the unweighted views — the win rate and
-/// the bps quantiles, in both the Prometheus metrics and the offline report.
+/// Settled USD notional below which a trade is left out of the unweighted views: the win rate and
+/// the bps quantiles. USD-weighted views keep every trade, as does a trade too small to price.
 ///
-/// On a dust trade a few wei of rounding is tens to thousands of bps, so dust dominates an
-/// unweighted median or win count while contributing nothing real. USD-weighted views keep every
-/// trade — a $5 win adds $5 — so total savings and volume stay complete, and a trade whose
-/// notional cannot be priced is kept: we do not drop what we cannot measure.
-///
-/// It lives here, beside `MIN_FILL_RATIO`, because both are scoring policy: every surface that
-/// reports a verdict reads them from one place rather than each choosing its own cut-off.
-pub(crate) const MIN_NOTIONAL_USD: f64 = 100.0;
+/// Below a dollar a few wei of rounding is thousands of bps, which carries an unweighted median.
+/// Above it the spread is real — small trades are genuinely easier to beat — so the floor sits
+/// just past the rounding noise rather than where the win rate stops moving.
+pub(crate) const MIN_NOTIONAL_USD: f64 = 10.0;
 
 /// Reclassify a Fynd quote that covers far less than the settled amount as a coverage miss.
 ///

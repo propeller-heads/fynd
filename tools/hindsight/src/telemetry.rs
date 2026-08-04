@@ -106,7 +106,7 @@ pub(crate) fn describe() {
         "Re-solved trades above the dust floor, labeled by venue / solver / chain / outcome / \
          algorithm / state (top|back). `algorithm` is the worker pool whose route won the quote, \
          so a per-venue split answers which algorithm serves that venue's flow best; it is \
-         \"none\" when Fynd did not solve. Sub-$100-notional trades are excluded so the win-rate \
+         \"none\" when Fynd did not solve. Trades below the notional floor are excluded so the win-rate \
          reflects trades that matter; total volume stays complete in VOLUME_USD. Per-pair detail \
          lives in the JSONL comparison output; a token-pair label here is unbounded on mainnet and \
          would explode Prometheus series cardinality over a long run."
@@ -115,7 +115,7 @@ pub(crate) fn describe() {
         SAVINGS_BPS,
         Unit::Count,
         "Gross bps delta of Fynd vs settled (positive = Fynd better), labeled by venue / solver / \
-         chain / outcome / algorithm / state (top|back). Sub-$100-notional trades are excluded — a \
+         chain / outcome / algorithm / state (top|back). Trades below the notional floor are excluded — a \
          few wei of rounding is thousands of bps on dust and would swamp the quantiles."
     );
     describe_histogram!(
