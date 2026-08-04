@@ -25,11 +25,12 @@ use crate::{
     },
     feed::{
         events::{MarketEvent, MarketEventHandler},
-        exclusivity::ExclusivityPolicy,
+        exclusivity::{remove_exclusive_components, scope_event},
         market_data::MarketData,
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::internal::SolveTask,
+    worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
 
@@ -69,13 +70,8 @@ where
     worker_id: usize,
     /// Worker pool name (used as the `pool` metric label).
     pool_name: String,
-    /// When set, exclusive components are filtered out of this worker's local graph
-    /// (workers of public worker pools). `None` means the worker ingests everything.
-    ///
-    /// `All` (the default) preserves the original non-filtered behaviour. A public worker
-    /// is configured with `PublicOnly(policy)` so exclusive components never enter its graph; an
-    /// exclusive-access worker uses `All`.
-    exclusivity_policy: Option<ExclusivityPolicy>,
+    /// Which liquidity this worker ingests.
+    liquidity_scope: LiquidityScope,
 }
 
 impl<A> SolverWorker<A>
@@ -113,15 +109,13 @@ where
             initialized: false,
             worker_id,
             pool_name,
-            exclusivity_policy: None,
+            liquidity_scope: LiquidityScope::default(),
         }
     }
 
-    /// Configures the policy that filters exclusive components out of this worker's graph.
-    ///
-    /// Public workers use `PublicOnly(policy)`; exclusive-access workers use `All`.
-    pub(crate) fn with_exclusivity_policy(mut self, policy: Option<ExclusivityPolicy>) -> Self {
-        self.exclusivity_policy = policy;
+    /// Sets which liquidity this worker ingests.
+    pub(crate) fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
+        self.liquidity_scope = scope;
         self
     }
 
@@ -134,9 +128,11 @@ where
             // read lock on market data
             let market = self.market_data.read().await;
             let topology = market.component_topology().clone(); // clone to avoid holding the lock
-            match &self.exclusivity_policy {
-                Some(policy) => policy.filter_topology(market.base_market_state(), topology),
-                None => topology,
+            match self.liquidity_scope {
+                LiquidityScope::PublicOnly => {
+                    remove_exclusive_components(market.base_market_state(), topology)
+                }
+                LiquidityScope::IncludeExclusive => topology,
             }
         };
 
@@ -149,9 +145,9 @@ where
     pub async fn process_event(&mut self, event: MarketEvent) {
         let event = {
             let market = self.market_data.read().await;
-            match &self.exclusivity_policy {
-                Some(policy) => policy.scope_event(market.base_market_state(), event),
-                None => event,
+            match self.liquidity_scope {
+                LiquidityScope::PublicOnly => scope_event(market.base_market_state(), event),
+                LiquidityScope::IncludeExclusive => event,
             }
         };
         match event {

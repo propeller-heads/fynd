@@ -12,16 +12,15 @@ task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 500
 
-# Example: an exclusive-access worker pool. `liquidity_scope = "all"` lets this worker pool route
-# through exclusive components (in addition to all public liquidity) to capture surplus above the
-# best public rate. Public worker pools (liquidity_scope omitted; defaults to "public_only") never
-# see exclusive components.
+# Example: an exclusive-access worker pool whose workers also route through exclusive components
+# to capture surplus above the committed public reference. Worker pools with the key omitted
+# default to "public_only": their workers drop exclusive components.
 # [pools.exclusive_access]
 # algorithm = "bellman_ford"
 # num_workers = 3
 # max_hops = 2
 # timeout_ms = 500
-# liquidity_scope = "all"
+# liquidity_scope = "include_exclusive"
 
 # Example: connector_tokens restricts intermediate hops to trusted, liquid tokens,
 # reducing on-chain reversion risk. Absent = all tokens reachable (default behaviour).

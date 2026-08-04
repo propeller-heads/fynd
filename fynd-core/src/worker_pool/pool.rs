@@ -18,7 +18,6 @@ use crate::{
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{
         events::{MarketEvent, MarketEventHandler},
-        exclusivity::ExclusivityPolicy,
         market_data::MarketData,
     },
     graph::EdgeWeightUpdaterWithDerived,
@@ -30,6 +29,7 @@ use crate::{
         },
         task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle},
     },
+    worker_pool_router::LiquidityScope,
 };
 
 /// Configuration for the worker pool.
@@ -47,15 +47,8 @@ pub struct WorkerPoolConfig {
     algorithm_config: AlgorithmConfig,
     /// Task queue capacity (maximum number of pending tasks).
     task_queue_capacity: usize,
-    /// When set, exclusive components are filtered out of this worker pool's workers' graphs
-    /// (default: `None`, no filtering).
-    ///
-    /// `All` is safe as the default because it only applies when no `ExclusivityPolicy` is
-    /// configured — meaning no exclusive components exist to exclude. When a policy is set,
-    /// `FyndBuilder::assemble_components` always constructs
-    /// `Some(policy)` for `Public`-scoped worker pools, so this default is never relied on in
-    /// that path.
-    exclusivity_policy: Option<ExclusivityPolicy>,
+    /// Which liquidity this worker pool's workers ingest.
+    liquidity_scope: LiquidityScope,
 }
 
 impl WorkerPoolConfig {
@@ -73,7 +66,7 @@ impl Default for WorkerPoolConfig {
             num_workers: num_cpus::get(),
             algorithm_config: AlgorithmConfig::default(),
             task_queue_capacity: 1000,
-            exclusivity_policy: None,
+            liquidity_scope: LiquidityScope::default(),
         }
     }
 }
@@ -124,7 +117,7 @@ impl WorkerPool {
             .to_string();
 
         // Spawn workers
-        let exclusivity_policy = config.exclusivity_policy.clone();
+        let liquidity_scope = config.liquidity_scope;
         let params = SpawnWorkersParams {
             algorithm: algorithm.clone(),
             pool_name: name.clone(),
@@ -136,7 +129,7 @@ impl WorkerPool {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
-            exclusivity_policy,
+            liquidity_scope,
         };
         let workers = config.spawner.spawn(params)?;
 
@@ -268,12 +261,9 @@ impl WorkerPoolBuilder {
         self
     }
 
-    /// Sets the policy that filters exclusive components out of each worker's graph.
-    ///
-    /// Public worker pools receive `Some(policy)`; exclusive-access worker pools (and deployments
-    /// with no exclusive components configured) receive `None` and keep every component.
-    pub fn exclusivity_policy(mut self, policy: Option<ExclusivityPolicy>) -> Self {
-        self.config.exclusivity_policy = policy;
+    /// Sets which liquidity this pool's workers ingest.
+    pub fn liquidity_scope(mut self, scope: LiquidityScope) -> Self {
+        self.config.liquidity_scope = scope;
         self
     }
 
