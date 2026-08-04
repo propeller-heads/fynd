@@ -499,11 +499,13 @@ impl Algorithm for MostLiquidAlgorithm {
             })
             .collect();
 
-        scored_paths.sort_by(|(_, a_score), (_, b_score)| {
-            // Flip the comparison to get descending order
+        scored_paths.sort_by(|(a_path, a_score), (b_path, b_score)| {
+            // Flip the comparison to get descending order, then break score ties on path identity
+            // so the truncation below keeps the same candidates regardless of discovery order.
             b_score
                 .partial_cmp(a_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a_path.cmp_identity(b_path))
         });
 
         if let Some(max_routes) = self.max_routes {

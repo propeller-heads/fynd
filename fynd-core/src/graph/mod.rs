@@ -8,7 +8,7 @@ mod generation_cache;
 pub mod petgraph;
 pub mod routing_graph;
 
-use std::collections::HashMap;
+use std::{cmp::Ordering, collections::HashMap};
 
 pub use petgraph::{EdgeData, PetgraphStableDiGraphManager, StableDiGraph};
 pub use routing_graph::RoutingGraph;
@@ -36,6 +36,29 @@ impl<'a, D> Path<'a, D> {
     /// Creates a new empty Path.
     pub fn new() -> Self {
         Self { tokens: Vec::new(), edge_data: Vec::new() }
+    }
+
+    /// Total order on path identity: pool sequence first, then token sequence.
+    ///
+    /// Two paths compare equal only if they traverse the same pools in the same direction, so
+    /// score-ranking passes can use this to break ties into a total order and stop depending on
+    /// the order candidates happened to be discovered in. Compares the sequences in place — a
+    /// path key would have to clone every `ComponentId`.
+    pub(crate) fn cmp_identity(&self, other: &Self) -> Ordering {
+        self.edge_data
+            .iter()
+            .map(|edge| &edge.component_id)
+            .cmp(
+                other
+                    .edge_data
+                    .iter()
+                    .map(|edge| &edge.component_id),
+            )
+            .then_with(|| {
+                self.tokens
+                    .iter()
+                    .cmp(other.tokens.iter())
+            })
     }
 
     /// Adds a hop to the path.

@@ -30,7 +30,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     time::{Duration, Instant},
 };
 
@@ -353,9 +353,10 @@ impl WaterFillAlgorithm {
                 (p, s)
             })
             .collect();
-        scored.sort_by(|(_, a), (_, b)| {
+        scored.sort_by(|(a_path, a), (b_path, b)| {
             b.partial_cmp(a)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a_path.cmp_identity(b_path))
         });
         scored.truncate(self.max_candidates);
         let mut paths: Vec<Path<DepthAndPrice>> = scored
@@ -1286,7 +1287,8 @@ where
         if timed_out(cfg.start, cfg.timeout_ms) || frontier.is_empty() {
             break;
         }
-        let mut next_by_node: HashMap<NodeIndex, Vec<CandidatePathState<'a, W>>> = HashMap::new();
+        let mut next_by_node: FxHashMap<NodeIndex, Vec<CandidatePathState<'a, W>>> =
+            FxHashMap::default();
         for state in frontier {
             if state.node == to_idx && from_idx != to_idx {
                 continue;
@@ -1329,7 +1331,7 @@ fn expand_candidate_state<'a, W>(
     target: NodeIndex,
     state: CandidatePathState<'a, W>,
     found: &mut Vec<(Path<'a, W>, BigUint)>,
-    next_by_node: &mut HashMap<NodeIndex, Vec<CandidatePathState<'a, W>>>,
+    next_by_node: &mut FxHashMap<NodeIndex, Vec<CandidatePathState<'a, W>>>,
 ) where
     W: Clone,
 {
@@ -1526,12 +1528,16 @@ fn compare_scored_edges<W>(a: &ScoredEdge<'_, W>, b: &ScoredEdge<'_, W>) -> Orde
 }
 
 fn prune_candidate_frontier<W>(
-    by_node: HashMap<NodeIndex, Vec<CandidatePathState<'_, W>>>,
+    by_node: FxHashMap<NodeIndex, Vec<CandidatePathState<'_, W>>>,
 ) -> Vec<CandidatePathState<'_, W>> {
     by_node
         .into_values()
         .flat_map(|mut states| {
-            states.sort_by(|a, b| b.amount_out.cmp(&a.amount_out));
+            states.sort_by(|a, b| {
+                b.amount_out
+                    .cmp(&a.amount_out)
+                    .then_with(|| a.path.cmp_identity(&b.path))
+            });
             states.truncate(CANDIDATE_STATES_PER_NODE);
             states
         })
@@ -1543,7 +1549,10 @@ fn rank_found_candidate_paths<'a, W>(
     max_candidates: usize,
     order: &Order,
 ) -> Result<CandidatePathSet<'a, W>, AlgorithmError> {
-    found.sort_by(|(_, a), (_, b)| b.cmp(a));
+    found.sort_by(|(path_a, a), (path_b, b)| {
+        b.cmp(a)
+            .then_with(|| path_a.cmp_identity(path_b))
+    });
     let mut keys = FxHashSet::default();
     let mut paths = Vec::new();
     let mut scores = Vec::new();
