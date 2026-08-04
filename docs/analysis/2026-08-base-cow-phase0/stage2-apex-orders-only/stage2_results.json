@@ -1,0 +1,472 @@
+[
+  {
+    "window_blocks": 1,
+    "limit_bps": 50,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 1240231.8719995336,
+    "apex_matched_pct": 0.550693037988283,
+    "apex_surplus_usd": 10054.599538255487,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 10912,
+      "partially_filled": 10034,
+      "unfilled_at_limit": 315087,
+      "cluster_cut": 0,
+      "component_errored": 1092,
+      "component_errors": {
+        "clearing_under_limit": 343
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 204159,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 691,
+      "negative_fill_gaps": 7957,
+      "negative_gap_usd": 1297.1314569242702,
+      "components_solved": 104758,
+      "components_multi_order": 105199
+    },
+    "wall_ms": 324
+  },
+  {
+    "window_blocks": 1,
+    "limit_bps": 100,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 1243263.5441944625,
+    "apex_matched_pct": 0.5520391739882539,
+    "apex_surplus_usd": 12937.281254363295,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 11201,
+      "partially_filled": 9731,
+      "unfilled_at_limit": 315046,
+      "cluster_cut": 0,
+      "component_errored": 1147,
+      "component_errors": {
+        "clearing_under_limit": 358
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 204159,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 691,
+      "negative_fill_gaps": 10152,
+      "negative_gap_usd": 4123.057879047152,
+      "components_solved": 104758,
+      "components_multi_order": 105199
+    },
+    "wall_ms": 306
+  },
+  {
+    "window_blocks": 1,
+    "limit_bps": 200,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 1254284.2154037287,
+    "apex_matched_pct": 0.5569326193559465,
+    "apex_surplus_usd": 19310.578018152926,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 11244,
+      "partially_filled": 9662,
+      "unfilled_at_limit": 315033,
+      "cluster_cut": 0,
+      "component_errored": 1186,
+      "component_errors": {
+        "clearing_under_limit": 369
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 204159,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 691,
+      "negative_fill_gaps": 10153,
+      "negative_gap_usd": 10428.79045262248,
+      "components_solved": 104758,
+      "components_multi_order": 105199
+    },
+    "wall_ms": 304
+  },
+  {
+    "window_blocks": 5,
+    "limit_bps": 50,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 7702246.886909831,
+    "apex_matched_pct": 3.419984466815706,
+    "apex_surplus_usd": 31567.84622625331,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 42717,
+      "partially_filled": 31046,
+      "unfilled_at_limit": 389116,
+      "cluster_cut": 0,
+      "component_errored": 8888,
+      "component_errors": {
+        "clearing_under_limit": 974
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 68842,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 1366,
+      "negative_fill_gaps": 27214,
+      "negative_gap_usd": 5857.4106125790795,
+      "components_solved": 80190,
+      "components_multi_order": 80400
+    },
+    "wall_ms": 1258
+  },
+  {
+    "window_blocks": 5,
+    "limit_bps": 100,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 7703216.368473271,
+    "apex_matched_pct": 3.420414940148554,
+    "apex_surplus_usd": 47347.70241337614,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 43626,
+      "partially_filled": 30299,
+      "unfilled_at_limit": 389176,
+      "cluster_cut": 0,
+      "component_errored": 8666,
+      "component_errors": {
+        "clearing_under_limit": 972
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 68842,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 1366,
+      "negative_fill_gaps": 34871,
+      "negative_gap_usd": 21537.996192818977,
+      "components_solved": 80190,
+      "components_multi_order": 80400
+    },
+    "wall_ms": 1643
+  },
+  {
+    "window_blocks": 5,
+    "limit_bps": 200,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 7767814.71226734,
+    "apex_matched_pct": 3.4490981718861926,
+    "apex_surplus_usd": 86245.87744830872,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 43758,
+      "partially_filled": 30034,
+      "unfilled_at_limit": 389162,
+      "cluster_cut": 0,
+      "component_errored": 8813,
+      "component_errors": {
+        "clearing_under_limit": 979
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 68842,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 1366,
+      "negative_fill_gaps": 35084,
+      "negative_gap_usd": 60259.97050616397,
+      "components_solved": 80190,
+      "components_multi_order": 80400
+    },
+    "wall_ms": 1466
+  },
+  {
+    "window_blocks": 15,
+    "limit_bps": 50,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 17539199.15852141,
+    "apex_matched_pct": 7.78782991031803,
+    "apex_surplus_usd": 56596.19636800579,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 91930,
+      "partially_filled": 45990,
+      "unfilled_at_limit": 341201,
+      "cluster_cut": 0,
+      "component_errored": 17690,
+      "component_errors": {
+        "clearing_under_limit": 748
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 43640,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 1524,
+      "negative_fill_gaps": 46837,
+      "negative_gap_usd": 12794.489000468977,
+      "components_solved": 33620,
+      "components_multi_order": 33639
+    },
+    "wall_ms": 3576
+  },
+  {
+    "window_blocks": 15,
+    "limit_bps": 100,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 17438492.740120485,
+    "apex_matched_pct": 7.743113817508132,
+    "apex_surplus_usd": 92422.46835602542,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 93418,
+      "partially_filled": 44938,
+      "unfilled_at_limit": 341564,
+      "cluster_cut": 0,
+      "component_errored": 16891,
+      "component_errors": {
+        "clearing_under_limit": 742
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 43640,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 1524,
+      "negative_fill_gaps": 62499,
+      "negative_gap_usd": 48456.61096854382,
+      "components_solved": 33620,
+      "components_multi_order": 33639
+    },
+    "wall_ms": 3822
+  },
+  {
+    "window_blocks": 15,
+    "limit_bps": 200,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 17527004.800942216,
+    "apex_matched_pct": 7.782415319729599,
+    "apex_surplus_usd": 178431.3791144147,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 93738,
+      "partially_filled": 44559,
+      "unfilled_at_limit": 342401,
+      "cluster_cut": 0,
+      "component_errored": 16113,
+      "component_errors": {
+        "clearing_under_limit": 702
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 43640,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 1524,
+      "negative_fill_gaps": 63547,
+      "negative_gap_usd": 134345.14551919856,
+      "components_solved": 33620,
+      "components_multi_order": 33639
+    },
+    "wall_ms": 4306
+  },
+  {
+    "window_blocks": 30,
+    "limit_bps": 50,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 27369303.550203573,
+    "apex_matched_pct": 12.152634729008778,
+    "apex_surplus_usd": 78738.91398535293,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 150135,
+      "partially_filled": 54913,
+      "unfilled_at_limit": 277823,
+      "cluster_cut": 0,
+      "component_errored": 21929,
+      "component_errors": {
+        "clearing_under_limit": 484,
+        "trade_solver": 2
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 35646,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 1529,
+      "negative_fill_gaps": 56403,
+      "negative_gap_usd": 18571.730480640486,
+      "components_solved": 20174,
+      "components_multi_order": 20175
+    },
+    "wall_ms": 5963
+  },
+  {
+    "window_blocks": 30,
+    "limit_bps": 100,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 27649507.1567474,
+    "apex_matched_pct": 12.277051927781551,
+    "apex_surplus_usd": 133974.15258353052,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 151898,
+      "partially_filled": 53005,
+      "unfilled_at_limit": 277580,
+      "cluster_cut": 0,
+      "component_errored": 22317,
+      "component_errors": {
+        "clearing_under_limit": 504
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 35646,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 1529,
+      "negative_fill_gaps": 85855,
+      "negative_gap_usd": 73915.15668649596,
+      "components_solved": 20174,
+      "components_multi_order": 20175
+    },
+    "wall_ms": 8918
+  },
+  {
+    "window_blocks": 30,
+    "limit_bps": 200,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 27811849.075168766,
+    "apex_matched_pct": 12.349135677817886,
+    "apex_surplus_usd": 270752.70734177745,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 152699,
+      "partially_filled": 52777,
+      "unfilled_at_limit": 279444,
+      "cluster_cut": 0,
+      "component_errored": 19880,
+      "component_errors": {
+        "clearing_under_limit": 454,
+        "trade_solver": 3
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 35646,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 0,
+      "zero_limit_excluded": 1529,
+      "negative_fill_gaps": 88607,
+      "negative_gap_usd": 210311.04813058296,
+      "components_solved": 20174,
+      "components_multi_order": 20175
+    },
+    "wall_ms": 8684
+  },
+  {
+    "window_blocks": 150,
+    "limit_bps": 50,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 51200256.12922877,
+    "apex_matched_pct": 22.73415578985685,
+    "apex_surplus_usd": 152456.9620062225,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 243025,
+      "partially_filled": 31842,
+      "unfilled_at_limit": 219490,
+      "cluster_cut": 0,
+      "component_errored": 32572,
+      "component_errors": {
+        "clearing_under_limit": 101,
+        "trade_solver": 41
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 13516,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 1,
+      "zero_limit_excluded": 1529,
+      "negative_fill_gaps": 52905,
+      "negative_gap_usd": 30678.224145630436,
+      "components_solved": 10593,
+      "components_multi_order": 10593
+    },
+    "wall_ms": 4305
+  },
+  {
+    "window_blocks": 150,
+    "limit_bps": 100,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 52045926.973464884,
+    "apex_matched_pct": 23.1096541598509,
+    "apex_surplus_usd": 254713.2330711573,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 250923,
+      "partially_filled": 32331,
+      "unfilled_at_limit": 222291,
+      "cluster_cut": 0,
+      "component_errored": 21384,
+      "component_errors": {
+        "clearing_under_limit": 82,
+        "trade_solver": 23
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 13516,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 1,
+      "zero_limit_excluded": 1529,
+      "negative_fill_gaps": 103323,
+      "negative_gap_usd": 131333.1071130245,
+      "components_solved": 10593,
+      "components_multi_order": 10593
+    },
+    "wall_ms": 3656
+  },
+  {
+    "window_blocks": 150,
+    "limit_bps": 200,
+    "intent_usd": 225212920.16513962,
+    "apex_matched_usd": 51481283.383164056,
+    "apex_matched_pct": 22.858938708052314,
+    "apex_surplus_usd": 499528.4585302662,
+    "counters": {
+      "orders_in": 541983,
+      "filled": 251224,
+      "partially_filled": 32387,
+      "unfilled_at_limit": 228818,
+      "cluster_cut": 0,
+      "component_errored": 14500,
+      "component_errors": {
+        "clearing_under_limit": 68,
+        "trade_solver": 11
+      },
+      "solver_panics": 0,
+      "deadline_fired_batches": 0,
+      "singles_skipped": 13516,
+      "wash_orders_excluded": 0,
+      "token_unpriced": 8,
+      "price_underflow": 1,
+      "zero_limit_excluded": 1529,
+      "negative_fill_gaps": 111898,
+      "negative_gap_usd": 374264.76371388027,
+      "components_solved": 10593,
+      "components_multi_order": 10593
+    },
+    "wall_ms": 3977
+  }
+]
