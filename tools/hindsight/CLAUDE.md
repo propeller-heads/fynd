@@ -93,7 +93,8 @@ their solver in calldata — `solver_aliases`).
 
 | File | Purpose |
 |---|---|
-| `mod.rs` | `SteppingSolver` trait; `resolve_block_range` — solve all trades at top, advance, then re-execute each top route and solve each trade fresh at back |
+| `mod.rs` | `SteppingSolver` trait; the per-block phases the monitor drives explicitly — `solve_tops` (all trades at N-1, concurrently), the advance, then `solve_backs` (each top route re-executed + each trade solved fresh at N, concurrently). The gap between `solve_tops` and the advance is the pre-advance seam: code that needs the N-1 state with the block's trades known (the APEX stage's pool-subset clone) runs there |
+| `apex_stage.rs` | APEX batch-solve worker pool: two dedicated OS threads behind a bounded `try_send` queue, solve deadlines stamped at worker pickup (never enqueue), overrun results discarded and counted. Skeleton — the apex-batch solve call plugs in at the wiring step |
 | `compare.rs` | `Verdict` / `Deltas` / `Slippage` — bps diff, win/loss/coverage-miss classification, quote-vs-re-execution slippage |
 | `monitor.rs` | Production `monitor` subcommand: in-process solver, block subscription, JSONL emission |
 | `jsonl.rs` | Append-only JSONL writer used by `monitor` |
