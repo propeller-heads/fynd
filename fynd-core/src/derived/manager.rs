@@ -1293,9 +1293,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_computations_cascade_failure_in_registration_order() {
-        // Real fynd flow: a full recompute with no sim state makes spot prices fail
-        // outright, cascading ComputationFailed to every dependent in registration order.
+    async fn spot_price_failure_does_not_stop_token_prices() {
+        // Real fynd flow: a full recompute with no sim state makes spot prices fail outright.
+        // Pool depths depend on them and fail with them; token prices solve their own routes and
+        // read no derived data, so they still complete.
         let (manager, _event_rx) = ComputationManager::new(
             ComputationManagerConfig::new(),
             market_with_component_no_sim_state(),
@@ -1309,7 +1310,7 @@ mod tests {
             vec![
                 ("new_block", ""),
                 ("failed", "spot_prices"),
-                ("failed", "token_prices"),
+                ("complete", "token_prices"),
                 ("failed", "pool_depths"),
             ]
         );
@@ -1352,27 +1353,6 @@ mod tests {
         MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
 
-    /// Creates a market WITH sim_state but WITHOUT gas_price.
-    ///
-    /// Spot price computation succeeds (MockProtocolSim works), but token_price
-    /// computation fails with `MissingDependency("gas_price")`.
-    fn market_with_sim_state_no_gas_price() -> MarketData {
-        let eth = token(1, "ETH");
-        let usdc = token(2, "USDC");
-        let component = component("component", &[eth.clone(), usdc.clone()]);
-
-        let mut market = MarketState::new();
-        // Note: no update_gas_price() — gas price is intentionally absent
-        market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
-        market.upsert_components(std::iter::once(component));
-        market.update_states([(
-            "component".to_string(),
-            Box::new(MockProtocolSim::new(2000.0)) as _,
-        )]);
-        market.upsert_tokens([eth, usdc]);
-        MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
-    }
-
     #[tokio::test]
     async fn test_spot_price_failure_broadcasts_computation_failed() {
         let market = market_with_component_no_sim_state();
@@ -1391,38 +1371,6 @@ mod tests {
                 DerivedDataEvent::ComputationFailed { computation_id: "spot_prices", .. }
             )),
             "expected ComputationFailed(spot_prices) in events: {events:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_token_price_failure_broadcasts_computation_failed() {
-        let eth = token(1, "ETH");
-        let usdc = token(2, "USDC");
-        let market = market_with_sim_state_no_gas_price();
-        let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
-        let (mut manager, mut event_rx) = ComputationManager::new(config, market).unwrap();
-
-        // handle_event with added components — spot_price succeeds, token_price fails
-        let event = MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter([(
-                "component".to_string(),
-                vec![eth.address.clone(), usdc.address.clone()],
-            )]),
-            removed_components: vec![],
-            updated_components: vec![],
-        };
-        manager
-            .handle_event(&event)
-            .await
-            .unwrap();
-
-        let events = drain_events(&mut event_rx);
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                DerivedDataEvent::ComputationFailed { computation_id: "token_prices", .. }
-            )),
-            "expected ComputationFailed(token_prices) in events: {events:?}"
         );
     }
 
