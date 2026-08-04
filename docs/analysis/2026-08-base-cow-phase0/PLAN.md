@@ -295,3 +295,114 @@ scaling, clone-cost claim, recording v2 replay math) before implementation.
 - Guardrails: dedicated APEX thread cap (CPU contention must not silently degrade the
   timeout-bound Fynd baseline — add a fynd-solve-time drift metric vs APEX-off runs); the lag
   degradation ladder from v2.2 remains as backstop only.
+
+## PHASE 1 v3 — HARDENED after grill round 2 (2026-08-04, supersedes conflicting v2/v2.x items)
+
+Grill artifacts: grill-round2/ (21 findings: 4 critical, 9 high; all resolved, 0 deferred).
+Root causes this round: (a) APEX's input contract (pricing + token closure) was under-specified;
+(b) the v2.3 async pacing spec assumed capabilities that don't exist (hard deadline cap, fynd
+per-trade parallelism, per-stage tokio thread caps); (c) the headline conflated batching value
+with a routing-engine gap.
+
+**Study design:**
+1. APEX clears ≤1 pool per pair, never splits, ≤2 hops (pool_liquidity.rs takes max over a
+   pair's pools) while the fynd baseline splits and multi-hops → apex_vs_fynd includes a
+   routing-engine gap. New control cell: every order is ALSO solved through APEX as a
+   single-order batch (same config/subset/budget). **Batching-isolated headline =
+   apex(batch) vs apex(singles)**; apex_vs_fynd reported alongside, labeled engine-inclusive.
+   [NEEDS USER/ALAN SIGN-OFF on the reframed headline before the report ships.]
+2. Live budget: 1 s per batch solve with the deadline `Instant` computed AT SOLVE START inside
+   the worker (never at enqueue — an already-expired absolute deadline returns a silently EMPTY
+   result, not an error). `queue_wait_ms` + the solver's `deadline_fired` flag recorded per
+   solve; bounded dispatch queue, overflow counted `apex_skipped{reason="queue_full"}`.
+3. The 1 s deadline is a SEARCH budget, not a wall cap (checked only between clusters, in the
+   price-search loop, and once post-search; the clearing phase — demand oracle, simplex,
+   clear_amount, validation — is unbounded). Outer watchdog discards results older than 3×
+   budget (`apex_overrun`); shadow run gates on measured TOTAL wall p99 < 2 s, else shrink the
+   pool subset.
+4. Pacing: APEX-stage-OWNED fixed worker pool (2 OS threads) fed by a bounded channel — NOT a
+   tokio `spawn_blocking` cap (runtime-wide, shared with JSONL IO, caps nothing per-stage).
+   apex-solver built WITHOUT the `multithread` feature live (`max_workers=1`; with it, every
+   cluster builds a fresh rayon pool outside any cap). Fynd per-trade solves in
+   `resolve_block_range` are SEQUENTIAL today (mod.rs:349) — parallelizing them is a named
+   build item (join_all + mock-test update); until it lands the v2.2 lag ladder is the primary
+   pacing mechanism. Load estimate corrected by the connectivity pre-check: ≥2-trade blocks
+   ≈50%/day (not 35%), so ≈1 core-s average per 2 s block for both brackets, bursty.
+
+**APEX input contract (adapter preconditions — panics become counted declines):**
+5. Token closure includes EVERY pool token: with `two_hops=true`, apex prices
+   `get_market_tokens()` = all tokens of all pools, and any unpriced one silently gets
+   `starting_price` (mod.rs:299-311). Precondition: every token of every included pool priced
+   from the N−1 map, else the POOL is dropped (`pool_unpriced` counter). Retracts v2 item 13's
+   "starting_price never engages" claim.
+6. Price scale pinned: per-batch normalization so min price ≥ 1e6 units, overflow headroom
+   asserted; tokens whose price rounds to zero excluded with their orders/pools
+   (`price_underflow`); zero-price hard precondition (zero divisors panic inside apex —
+   clearing.rs:66). Price SOURCE pinned (user, 2026-08-04): fynd's derived token prices —
+   `Solver::derived_data().token_prices()`, the same data the experimental `GET /v1/prices`
+   endpoint serves — consumed as EXACT rationals (numerator/denominator vs the gas token),
+   normalized to the apex U256 scale per batch; NOT the lossy f64 path
+   `snapshot_prices` uses for USD reporting (monitor.rs:719).
+7. Limit scaling contract:
+   `limit_price = Fraction::new(lift18(min_amount_out, buy_dec), lift18(sell_amount, sell_dec))`
+   — BOTH legs in 18-dec space (direction verified: limit = min-buy-per-sell,
+   limit_order.rs:19-21). Property tests: mixed-decimal pairs both directions, exact rational
+   equality; at-limit order (limit == clearing price) does not error.
+8. Per-order uniqueness asserted at build — equal `(pair, limit_price, id)` orders silently
+   collapse in the BTreeSet (pair.rs:37); reconciliation reads the PRE-map trade list.
+9. `sell_amount > 0`, nonzero prices, nonzero limit denominators asserted pre-call with
+   actionable messages; `catch_unwind` only as last resort (SolveMetrics discarded after).
+   panic-validate-result.md is stale (that unwrap is gone); fresh upstream issue for the
+   `tokens[&addr]` index-panic sites.
+10. v4 pool identity: apex `Address` = `keccak256(component_id)[0..20]` for non-address
+    component ids (v4's 32-byte ids truncated naively collide and silently overwrite pools);
+    build-time address→component-id collision assertion.
+11. Per-component isolation: the adapter partitions orders+pools into connected components and
+    calls APEX once per component — one cluster `Err` (`ClearingUnderLimitPrice`,
+    `PostTruncateImbalance`, …) aborts only its component (`component_error{kind}` counter;
+    apex's `?` at mod.rs:258 aborts the whole call otherwise). Per-order status gains
+    `component_errored`. Limits are NOT epsilon-fudged; the truncating-fill vs exact-validation
+    rounding mismatch goes upstream.
+12. Headline config pinned: `two_hops=ON` with the full-pool-pricing precondition. Pool subset
+    filter: pools adjacent to order tokens ∪ pools linking two order-adjacent tokens (2-hop
+    closure), TVL-capped at K, K tuned by the shadow run. `two_hops=OFF` = offline secondary
+    cell only.
+
+**Integration seam (named refactor, build step 3):**
+13. `advance()` lives inside `resolve_block_range` and `SteppingSolver` exposes no state
+    accessor — split `resolve_block_range` into tops/advance/backs phases driven from the
+    monitor's concrete-`Solver` path (`market_data()`), keeping `SteppingSolver` mock tests on
+    the composed function.
+14. Clone cost model corrected: subset `clone_box` (copy 1) + `Arc::from(Box)` (copy 2, full
+    memcpy of unsized values) = 2 copies per state per bracket, 4 per block. Shadow run
+    measures both terms.
+
+**Recording/replay v2 (redesigned):**
+15. Replay = ONE forward fold per day per config (checkpoint+delta per block is O(n²): ~39 M
+    update applications/day/pass, and conflicts with run_matrix's block-parallel contract —
+    that contract is replaced). APEX solves fan out to rayon from cloned filtered subsets at
+    eligible blocks; window-start states for w∈{6,30,150} from a ring buffer of retained
+    subset clones (eligible blocks only, ≤150 deep).
+16. Segments-only format ships first: append-only hourly zstd segments, incremental flush,
+    per-block gas price in-stream (metadata's single start-of-run `gas_price_wei` retired).
+    Checkpoints deferred to a crash-recovery follow-up (fold-once replay needs no random
+    access).
+17. `is_partial` policy: capture DROPS partial updates at ingestion (counted); fold key =
+    confirmed updates only (partials share the block number with the confirmed update that
+    follows; a partial-only state change must never linger in a fold). Shadow run verifies the
+    Base stream's actual partial behavior and fynd-core feed equivalence.
+
+**Coverage gates:**
+18. 0x floor extractor coverage measured on a sample day at build step 2: <50% of eligible
+    orders with extracted limits → escalate before the live stage (add kyber/paraswap or
+    reframe synthetic-primary).
+19. live-w1 vs offline-w1 relabeled: combined live/replay divergence upper bound (v4 + gas +
+    partials + subset diffs), not "the v4 handicap". Optional isolation cell (live with v4
+    dropped) if the bound is large.
+
+Connectivity pre-check (build 0.5) RAN 2026-08-04: GO — ~14k connected blocks/day (32%),
+~9.3k/day on fynd-solvable trades; 08-03 is a partial capture day. Script:
+connectivity_precheck.py.
+
+STATUS: focused grill round 3 on this v3 section before the live-stage build; the 0x Settler
+extractor proceeds in parallel (independent of all round-2 findings).
