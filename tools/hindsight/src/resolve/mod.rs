@@ -681,19 +681,28 @@ mod tests {
             })
             .collect();
 
+        // The echo of `amount_in`, as `SolvedAmount`'s `PartialEq` sees it (algorithm and route
+        // are excluded from equality).
+        let echoed = |amount_in: U256| {
+            Outcome::Solved(SolvedAmount {
+                amount_out: amount_in,
+                amount_out_net_gas: amount_in,
+                gas_estimate: U256::ZERO,
+                algorithm: String::new(),
+                quote_json: None,
+                solved_route: None,
+            })
+        };
+
         let tops = solve_tops(&EchoStepping, &trades).await;
         for (trade, top) in trades.iter().zip(&tops) {
-            let Outcome::Solved(solved) = top else { panic!("echo mock always solves") };
-            assert_eq!(solved.amount_out, trade.amount_in, "tops must be in trade order");
+            assert_eq!(top, &echoed(trade.amount_in), "tops must be in trade order");
         }
 
         let ranges = solve_backs(&EchoStepping, &trades, tops, &empty_prices()).await;
         for (trade, range) in trades.iter().zip(&ranges) {
             assert_eq!(range.amount_in, trade.amount_in);
-            let Outcome::Solved(back) = &range.back.outcome else {
-                panic!("echo mock always solves")
-            };
-            assert_eq!(back.amount_out, trade.amount_in, "backs must be in trade order");
+            assert_eq!(range.back.outcome, echoed(trade.amount_in), "backs must be in trade order");
         }
     }
 
