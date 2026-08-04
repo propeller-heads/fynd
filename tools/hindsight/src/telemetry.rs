@@ -30,6 +30,14 @@ const RPC_INDEX_WAIT: &str = "hindsight_rpc_index_wait_seconds";
 const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
 const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
 const UNTRACED_TRANSACTIONS: &str = "hindsight_untraced_transactions_total";
+const APEX_SKIPPED: &str = "hindsight_apex_skipped_total";
+const APEX_OVERRUNS: &str = "hindsight_apex_overruns_total";
+const APEX_QUEUE_WAIT_SECONDS: &str = "hindsight_apex_queue_wait_seconds";
+const APEX_SOLVE_SECONDS: &str = "hindsight_apex_solve_seconds";
+const APEX_DEADLINE_FIRED: &str = "hindsight_apex_deadline_fired_total";
+const APEX_BATCH_ERRORED: &str = "hindsight_apex_batch_errored_total";
+const APEX_COMPONENT_ERRORS: &str = "hindsight_apex_component_errors_total";
+const APEX_ORDERS: &str = "hindsight_apex_orders_total";
 
 /// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
@@ -200,6 +208,105 @@ pub(crate) fn describe() {
          still contributes its other trades, so this counts trades missing from the aggregates \
          rather than blocks"
     );
+    describe_apex();
+}
+
+/// Register the APEX batch stage's metric descriptions — split from [`describe`] so neither
+/// function outgrows the line budget as metrics accumulate.
+fn describe_apex() {
+    describe_counter!(
+        APEX_SKIPPED,
+        "APEX batch solves shed without running, labeled by reason (queue_full). Every skip is \
+         counted so a saturated stage degrades visibly instead of silently thinning the sample"
+    );
+    describe_counter!(
+        APEX_OVERRUNS,
+        "APEX solves whose wall time exceeded the overrun factor times the budget: the result \
+         was discarded as too stale to compare. The worker was occupied for the whole overrun — \
+         sustained overruns surface as queue_full skips"
+    );
+    describe_histogram!(
+        APEX_QUEUE_WAIT_SECONDS,
+        Unit::Seconds,
+        "Time an APEX batch job sat in the stage's bounded queue before a worker picked it up. \
+         The solve budget starts at pickup, so queue wait delays metrics without shrinking the \
+         budget"
+    );
+    describe_histogram!(
+        APEX_SOLVE_SECONDS,
+        Unit::Seconds,
+        "Wall time of one APEX batch solve, search and clearing phases both — the deadline only \
+         bounds the search, so this histogram is the honest solve-cost measurement the pacing \
+         model uses"
+    );
+    describe_counter!(
+        APEX_DEADLINE_FIRED,
+        "APEX solves whose in-solver deadline fired, truncating the batch at a cluster boundary. \
+         Distinct from overruns: the solver returned in time but with clusters dropped"
+    );
+    describe_counter!(
+        APEX_BATCH_ERRORED,
+        "Blocks whose APEX batch (a whole connected component, or the hub giant component) was \
+         lost to a solver error — the sample-loss bias counter for whole-component aborts"
+    );
+    describe_counter!(
+        APEX_COMPONENT_ERRORS,
+        "APEX component solve errors by kind (clearing_under_limit, trade_solver, …): one \
+         component lost, the block's other components survive"
+    );
+    describe_counter!(
+        APEX_ORDERS,
+        "Orders entering the APEX stage, labeled by final status (filled, unfilled_at_limit, \
+         cluster_cut, component_errored, excluded_*) from reconciling clearings against the \
+         pre-map input list"
+    );
+}
+
+/// Record an APEX stage shed, labeled by [`SkipReason`].
+#[expect(dead_code, reason = "wired in at the APEX integration step")]
+pub(crate) fn record_apex_skipped(reason: crate::resolve::apex_stage::SkipReason) {
+    let reason = match reason {
+        crate::resolve::apex_stage::SkipReason::QueueFull => "queue_full",
+    };
+    counter!(APEX_SKIPPED, "reason" => reason).increment(1);
+}
+
+/// Record a delivered APEX solve's stage timing.
+#[expect(dead_code, reason = "wired in at the APEX integration step")]
+pub(crate) fn record_apex_delivery(timing: &crate::resolve::apex_stage::SolveTiming) {
+    histogram!(APEX_QUEUE_WAIT_SECONDS).record(timing.queue_wait.as_secs_f64());
+    histogram!(APEX_SOLVE_SECONDS).record(timing.solve_wall.as_secs_f64());
+}
+
+/// Record a discarded overrun solve.
+#[expect(dead_code, reason = "wired in at the APEX integration step")]
+pub(crate) fn record_apex_overrun() {
+    counter!(APEX_OVERRUNS).increment(1);
+}
+
+/// Record a solve whose in-solver deadline truncated the batch.
+#[expect(dead_code, reason = "wired in at the APEX integration step")]
+pub(crate) fn record_apex_deadline_fired() {
+    counter!(APEX_DEADLINE_FIRED).increment(1);
+}
+
+/// Record a whole-component abort.
+#[expect(dead_code, reason = "wired in at the APEX integration step")]
+pub(crate) fn record_apex_batch_errored() {
+    counter!(APEX_BATCH_ERRORED).increment(1);
+}
+
+/// Record one component solve error by kind (a short static-ish label such as
+/// `clearing_under_limit`; unbounded strings would explode series cardinality).
+#[expect(dead_code, reason = "wired in at the APEX integration step")]
+pub(crate) fn record_apex_component_error(kind: &'static str) {
+    counter!(APEX_COMPONENT_ERRORS, "kind" => kind).increment(1);
+}
+
+/// Record `count` orders reaching `status` in the per-order reconciliation.
+#[expect(dead_code, reason = "wired in at the APEX integration step")]
+pub(crate) fn record_apex_orders(status: &'static str, count: u64) {
+    counter!(APEX_ORDERS, "status" => status).increment(count);
 }
 
 /// Record a two-state range: the top-of-block (N-1) and back-of-block (N) outcomes, each tagged
