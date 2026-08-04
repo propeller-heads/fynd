@@ -6,7 +6,7 @@
 //! amount tells us what the user got; the quote tells us what the solver promised at decision
 //! time, which is the number a venue like Relay actually compared against ours.
 
-use alloy::primitives::U256;
+use alloy::primitives::{Address, U256};
 
 use crate::decoder::solvers::{SolverKnowledge, SolverQuote};
 
@@ -50,7 +50,7 @@ impl SolverKnowledge for Kyberswap {
     ///
     /// Extraction not implemented yet: `None` means the capture falls back to its synthetic
     /// limit, which degrades the limit's provenance, never the decode.
-    fn min_amount_out(&self, _input: &[u8], _amount_in: U256) -> Option<U256> {
+    fn min_amount_out(&self, _input: &[u8], _amount_in: U256, _token_out: Address) -> Option<U256> {
         None
     }
 }

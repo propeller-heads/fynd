@@ -327,7 +327,12 @@ impl<P: Provider> Decoder<P> {
         // limit binds the trade wherever it is settled; a router's floor is only that router's
         // commitment, so it is the fallback rather than the other way round.
         let min_amount_out = flow.min_amount_out.or_else(|| {
-            solvers::min_amount_out(&attribution.solver, &root.input, flow.swap.amount_in)
+            solvers::min_amount_out(
+                &attribution.solver,
+                &root.input,
+                flow.swap.amount_in,
+                flow.swap.token_out,
+            )
         });
 
         Some(DecodedTrade {

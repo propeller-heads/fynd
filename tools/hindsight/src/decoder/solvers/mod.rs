@@ -54,8 +54,10 @@ pub(crate) trait SolverKnowledge: Send + Sync {
     /// floor is what the order would still have accepted, so it — not the quote, and not the
     /// executed amount — is the limit price a batch-clearing counterfactual must respect.
     /// `amount_in` anchors word-layout searches, as in `embedded_quote` (`ParaSwap` locates its
-    /// calldata triple by matching the input amount).
-    fn min_amount_out(&self, _input: &[u8], _amount_in: U256) -> Option<U256> {
+    /// calldata triple by matching the input amount). `token_out` lets a solver whose calldata
+    /// names the settlement token (0x's `AllowedSlippage.buyToken`) reject a floor denominated
+    /// in a different token than the decoded trade delivers.
+    fn min_amount_out(&self, _input: &[u8], _amount_in: U256, _token_out: Address) -> Option<U256> {
         None
     }
 
@@ -128,11 +130,16 @@ pub(crate) fn embedded_quote(solver: &str, input: &[u8], amount_in: U256) -> Opt
 ///
 /// Dispatched on the attributed solver for the same reason `embedded_quote` is: a word that
 /// happens to look like a floor in another router's calldata is not this solver's commitment.
-pub(crate) fn min_amount_out(solver: &str, input: &[u8], amount_in: U256) -> Option<U256> {
+pub(crate) fn min_amount_out(
+    solver: &str,
+    input: &[u8],
+    amount_in: U256,
+    token_out: Address,
+) -> Option<U256> {
     let (_, knowledge) = IMPLEMENTATIONS
         .iter()
         .find(|(name, _)| *name == solver)?;
-    knowledge.min_amount_out(input, amount_in)
+    knowledge.min_amount_out(input, amount_in, token_out)
 }
 
 /// Whether a quoted output is in the same units as the settled one.
