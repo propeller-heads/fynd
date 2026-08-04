@@ -32,6 +32,7 @@ use std::{
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
 use petgraph::{graph::NodeIndex, visit::EdgeRef};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace, warn};
 use tycho_simulation::{
     tycho_common::models::Address,
@@ -64,13 +65,13 @@ pub(crate) struct BellmanFordContext<'a> {
     pub(crate) token_in_node: NodeIndex,
     pub(crate) token_out_node: NodeIndex,
     pub(crate) subgraph: Arc<Subgraph>,
-    pub(crate) token_map: HashMap<NodeIndex, Token>,
+    pub(crate) token_map: FxHashMap<NodeIndex, Token>,
     pub(crate) market_data: MarketState,
     pub(crate) gas_price_wei: Option<BigUint>,
     pub(crate) token_prices: Option<Arc<TokenGasPrices>>,
-    pub(crate) node_address: HashMap<NodeIndex, Address>,
+    pub(crate) node_address: FxHashMap<NodeIndex, Address>,
     /// Spot price of each subgraph edge, positionally aligned with `subgraph.adj`.
-    pub(crate) edge_spot: HashMap<NodeIndex, Vec<f64>>,
+    pub(crate) edge_spot: FxHashMap<NodeIndex, Vec<f64>>,
     /// Which nodes the connector allowlist permits routing into, indexed by node.
     pub(crate) connector_allowed: Vec<bool>,
     pub(crate) max_idx: usize,
@@ -249,7 +250,7 @@ impl BellmanFordAlgorithm {
                 .map_err(|e| AlgorithmError::Other(e.to_string()))?,
             None => market.read().await,
         };
-        let token_map: HashMap<NodeIndex, Token> = subgraph
+        let token_map: FxHashMap<NodeIndex, Token> = subgraph
             .token_nodes
             .iter()
             .filter_map(|&node| {
@@ -265,7 +266,7 @@ impl BellmanFordAlgorithm {
             .map(|gp| gp.effective_gas_price().clone());
         drop(market_view);
 
-        let node_address: HashMap<NodeIndex, Address> = token_map
+        let node_address: FxHashMap<NodeIndex, Address> = token_map
             .iter()
             .map(|(&node, token)| (node, token.address.clone()))
             .collect();
@@ -433,7 +434,7 @@ impl BellmanFordAlgorithm {
                 break;
             }
 
-            let mut next_active: HashSet<NodeIndex> = HashSet::new();
+            let mut next_active: FxHashSet<NodeIndex> = FxHashSet::default();
 
             for &u in &active_nodes {
                 let u_idx = u.index();
@@ -585,7 +586,7 @@ impl BellmanFordAlgorithm {
     /// Relaxation tests this on every edge visit, so it is resolved once per solve.
     fn connector_allowed_nodes(
         &self,
-        node_address: &HashMap<NodeIndex, Address>,
+        node_address: &FxHashMap<NodeIndex, Address>,
         node_index_bound: usize,
         order: &Order,
     ) -> Vec<bool> {
@@ -698,9 +699,9 @@ impl BellmanFordAlgorithm {
     fn edge_spot_prices(
         graph: &RoutingGraph<()>,
         subgraph: &Subgraph,
-        node_address: &HashMap<NodeIndex, Address>,
+        node_address: &FxHashMap<NodeIndex, Address>,
         spot_prices: Option<&SpotPrices>,
-    ) -> HashMap<NodeIndex, Vec<f64>> {
+    ) -> FxHashMap<NodeIndex, Vec<f64>> {
         subgraph
             .expanded_nodes
             .iter()
@@ -813,7 +814,7 @@ impl BellmanFordAlgorithm {
     ) -> Result<Vec<(NodeIndex, NodeIndex, ComponentId)>, AlgorithmError> {
         let mut path = Vec::new();
         let mut current = token_out;
-        let mut visited = HashSet::new();
+        let mut visited = FxHashSet::default();
 
         while current != token_in {
             if !visited.insert(current) {
@@ -853,7 +854,7 @@ impl BellmanFordAlgorithm {
         gas_price: &BigUint,
         token_prices: Option<&TokenGasPrices>,
         spot_product: &[f64],
-        node_address: &HashMap<NodeIndex, Address>,
+        node_address: &FxHashMap<NodeIndex, Address>,
         token_in_node: NodeIndex,
         token_out_node: NodeIndex,
     ) -> Result<BigInt, AlgorithmError> {

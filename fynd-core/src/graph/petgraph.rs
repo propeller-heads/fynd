@@ -8,11 +8,12 @@
 //! useful for optimising the graph manager's performance by allowing for O(1) edge and node
 //! lookups.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 pub use petgraph::graph::EdgeIndex;
 use petgraph::{graph::NodeIndex, stable_graph};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, trace};
 use tycho_simulation::tycho_common::models::Address;
 
@@ -79,13 +80,13 @@ pub struct PetgraphStableDiGraphManager<D: Clone> {
     // remain valid after removals, making edge_map viable.
     graph: RoutingGraph<D>,
     // Map from ComponentId to edge indices for fast removal and weight updates.
-    edge_map: HashMap<ComponentId, Vec<EdgeIndex>>,
+    edge_map: FxHashMap<ComponentId, Vec<EdgeIndex>>,
 }
 
 impl<D: Clone> PetgraphStableDiGraphManager<D> {
     /// Creates a new empty graph manager.
     pub fn new() -> Self {
-        Self { graph: RoutingGraph::new(), edge_map: HashMap::new() }
+        Self { graph: RoutingGraph::new(), edge_map: FxHashMap::default() }
     }
 
     /// Helper function to find a node index by address
@@ -387,7 +388,7 @@ impl<D: Clone + Send + Sync> GraphManager<RoutingGraph<D>> for PetgraphStableDiG
             .values()
             .flat_map(|v| v.iter())
             .cloned()
-            .collect::<HashSet<_>>()
+            .collect::<FxHashSet<_>>()
             .into_iter()
             .collect();
         unique_tokens.sort();

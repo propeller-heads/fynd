@@ -19,6 +19,7 @@ use std::{
     sync::Arc,
 };
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
 use tycho_simulation::{
     tycho_client::feed::SynchronizerState,
@@ -313,13 +314,13 @@ pub struct MarketState {
     ///
     /// Like `simulation_states`, components are `Arc`-shared and never mutated in
     /// place: `upsert_components` replaces whole entries.
-    components: HashMap<ComponentId, Arc<ProtocolComponent>>,
+    components: FxHashMap<ComponentId, Arc<ProtocolComponent>>,
     /// All states indexed by their component ID.
     ///
     /// States are `Arc`-shared, never mutated in place: block updates replace whole
     /// entries via [`MarketState::update_states`], so `extract_subset` can hand out
     /// cheap shared references instead of deep-copying every pool state.
-    simulation_states: HashMap<ComponentId, Arc<dyn ProtocolSim>>,
+    simulation_states: FxHashMap<ComponentId, Arc<dyn ProtocolSim>>,
     /// All tokens indexed by their address.
     tokens: HashMap<Address, Token>,
     /// Current gas price. None if not fetched yet.
@@ -339,8 +340,8 @@ impl MarketState {
     pub fn new() -> Self {
         Self {
             label: String::new(),
-            components: HashMap::new(),
-            simulation_states: HashMap::new(),
+            components: FxHashMap::default(),
+            simulation_states: FxHashMap::default(),
             tokens: HashMap::new(),
             gas_price: None,
             protocol_sync_status: HashMap::new(),
@@ -514,7 +515,7 @@ impl MarketState {
     /// - Tokens referenced by those components
     /// - Gas price and block info
     pub fn extract_subset(&self, component_ids: &HashSet<ComponentId>) -> MarketState {
-        let components: HashMap<ComponentId, Arc<ProtocolComponent>> = self
+        let components: FxHashMap<ComponentId, Arc<ProtocolComponent>> = self
             .components
             .iter()
             .filter(|(id, _)| component_ids.contains(*id))
@@ -522,7 +523,7 @@ impl MarketState {
             .collect();
 
         // Collect all token addresses from the filtered components
-        let token_addresses: HashSet<&Address> = components
+        let token_addresses: FxHashSet<&Address> = components
             .values()
             .flat_map(|c| &c.tokens)
             .collect();
@@ -534,7 +535,7 @@ impl MarketState {
             .map(|(addr, token)| (addr.clone(), token.clone()))
             .collect();
 
-        let simulation_states: HashMap<ComponentId, Arc<dyn ProtocolSim>> = self
+        let simulation_states: FxHashMap<ComponentId, Arc<dyn ProtocolSim>> = self
             .simulation_states
             .iter()
             .filter(|(id, _)| component_ids.contains(*id))

@@ -26,6 +26,7 @@ num_cpus.workspace = true
 async-channel.workspace = true
 async-trait.workspace = true
 itertools.workspace = true
+rustc-hash.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true

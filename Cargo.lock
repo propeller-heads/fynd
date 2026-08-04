@@ -3519,6 +3519,7 @@ dependencies = [
  "petgraph",
  "reqwest 0.12.28",
  "rstest",
+ "rustc-hash",
  "serde",
  "serde_json",
  "serde_with",

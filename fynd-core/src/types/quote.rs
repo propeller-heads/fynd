@@ -15,12 +15,13 @@
 //! - [`Swap`] - A single swap on a specific protocol
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::Arc,
 };
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 pub use tycho_execution::encoding::models::UserTransferType;
@@ -1326,7 +1327,7 @@ impl Route {
         let first_token = &self.swaps[0].token_in;
         let last_token = &self.swaps[self.swaps.len() - 1].token_out;
 
-        let mut seen = HashSet::new();
+        let mut seen = FxHashSet::default();
         seen.insert(first_token.clone());
         let last_idx = self.swaps.len() - 1;
         for (i, swap) in self.swaps.iter().enumerate() {
@@ -1363,7 +1364,7 @@ impl Route {
         // Collect swaps into branch collections by their input token. Each
         // branch collection represents a split (parallel branches sharing the
         // same token_in), not a sequential path.
-        let mut token_in_to_index: HashMap<Address, usize> = HashMap::new();
+        let mut token_in_to_index: FxHashMap<Address, usize> = FxHashMap::default();
         let mut swaps_by_token_in: Vec<(Address, Vec<&Swap>)> = Vec::new();
         for swap in &self.swaps {
             if let Some(&idx) = token_in_to_index.get(&swap.token_in) {
@@ -1443,10 +1444,10 @@ fn validate_split_amounts(
 /// reachable.
 fn validate_bfs_connectivity(
     swaps_by_token_in: &[(Address, Vec<&Swap>)],
-    token_in_to_index: &HashMap<Address, usize>,
+    token_in_to_index: &FxHashMap<Address, usize>,
 ) -> Result<(), RouteValidationError> {
     let first_token = &swaps_by_token_in[0].0;
-    let mut reachable: HashSet<&Address> = HashSet::new();
+    let mut reachable: FxHashSet<&Address> = FxHashSet::default();
     reachable.insert(first_token);
     let mut tokens_to_visit: VecDeque<&Address> = VecDeque::new();
     tokens_to_visit.push_back(first_token);
@@ -1480,7 +1481,7 @@ fn validate_dead_ends(
         .last()
         .ok_or(RouteValidationError::EmptyRoute)?
         .token_out;
-    let non_first_input_tokens: HashSet<&Address> = swaps_by_token_in
+    let non_first_input_tokens: FxHashSet<&Address> = swaps_by_token_in
         .iter()
         .skip(1)
         .map(|(token_in, _)| token_in)
@@ -1520,7 +1521,7 @@ fn validate_cycles(
             last: terminal_token.clone(),
         });
     }
-    let mut earlier_inputs: HashSet<&Address> = HashSet::new();
+    let mut earlier_inputs: FxHashSet<&Address> = FxHashSet::default();
     for (token_in, branch_collection) in swaps_by_token_in {
         earlier_inputs.insert(token_in);
         for swap in branch_collection {

@@ -6,7 +6,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque},
+    collections::{hash_map::DefaultHasher, HashSet, VecDeque},
     hash::{Hash, Hasher},
     ops::Deref,
     sync::{Arc, Mutex, PoisonError},
@@ -16,6 +16,7 @@ use petgraph::{
     graph::{EdgeIndex, NodeIndex},
     visit::EdgeRef,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
@@ -87,7 +88,7 @@ fn connector_tokens_key(connector_tokens: Option<&HashSet<Address>>) -> u64 {
 /// methods, which keep the derived structures in sync; there is deliberately no `DerefMut`.
 pub struct RoutingGraph<D> {
     graph: StableDiGraph<D>,
-    node_map: HashMap<Address, NodeIndex>,
+    node_map: FxHashMap<Address, NodeIndex>,
     node_index_bound: usize,
     generation: u64,
     /// Tokens ranked by out-edge degree, keyed by how many were asked for. Rebuilt lazily
@@ -112,7 +113,7 @@ impl<D> RoutingGraph<D> {
     pub fn new() -> Self {
         Self {
             graph: StableDiGraph::default(),
-            node_map: HashMap::new(),
+            node_map: FxHashMap::default(),
             node_index_bound: 0,
             generation: 0,
             most_connected: Mutex::new(GenerationCache::new()),
@@ -195,7 +196,7 @@ impl<D> RoutingGraph<D> {
         let mut expanded_nodes: HashSet<NodeIndex> = HashSet::new();
         let mut token_nodes: HashSet<NodeIndex> = HashSet::new();
         let mut component_ids: HashSet<ComponentId> = HashSet::new();
-        let mut visited_nodes = HashSet::new();
+        let mut visited_nodes = FxHashSet::default();
         let mut queued_nodes = VecDeque::new();
 
         visited_nodes.insert(source);

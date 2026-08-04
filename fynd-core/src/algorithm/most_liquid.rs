@@ -16,6 +16,7 @@ use std::{
 use metrics::{counter, histogram};
 use num_bigint::{BigInt, BigUint};
 use num_traits::ToPrimitive;
+use rustc_hash::FxHashMap;
 use tracing::{debug, instrument, trace};
 use tycho_simulation::{
     tycho_common::simulation::protocol_sim::ProtocolSim,
@@ -317,7 +318,8 @@ impl MostLiquidAlgorithm {
         let mut swaps = Vec::with_capacity(path.len());
 
         // Track state overrides for pools we've already swapped through.
-        let mut state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut state_overrides: FxHashMap<&ComponentId, Box<dyn ProtocolSim>> =
+            FxHashMap::default();
         let mut tokens: HashMap<Address, Token> = HashMap::new();
 
         for (address_in, edge_data, address_out) in path.iter() {
