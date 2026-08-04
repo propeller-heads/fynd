@@ -259,10 +259,8 @@ fn net_positive(
     net
 }
 
-/// A leg is residue when it is under this fraction of its token's gross transaction flow:
-/// `leg * RESIDUE_GROSS_RATIO < gross` (1%). A trade moves the bulk of its token's flow; a fee or
-/// a refund moves a sliver. Netting adds two more conditions before pruning a leg (see
-/// `drop_residue_legs`); decoders that only need the size test use the ratio directly.
+/// A net leg is residue when its token routed between third parties and the leg is under this
+/// fraction of the token's gross transaction flow: `net * RESIDUE_GROSS_RATIO < gross` (1%).
 pub(crate) const RESIDUE_GROSS_RATIO: u64 = 100;
 
 /// Net the per-token amounts into a single swap (see `TransferLedger::net_swap`).
