@@ -31,7 +31,10 @@ use std::{
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
-use petgraph::{graph::NodeIndex, visit::EdgeRef};
+use petgraph::{
+    graph::{EdgeIndex, NodeIndex},
+    visit::EdgeRef,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace, warn};
 use tycho_simulation::{
@@ -106,8 +109,10 @@ pub(crate) struct FindRouteOptions {
 pub(crate) struct SpfaScratch {
     /// Best gross output amount reachable at each node index.
     amount: Vec<BigUint>,
-    /// The (predecessor node, pool) that last improved each node's amount.
-    predecessor: Vec<Option<(NodeIndex, ComponentId)>>,
+    /// The (predecessor node, edge) that last improved each node's amount. The edge is stored as
+    /// an index rather than its pool id: the id is a 42- to 66-character hex string that would be
+    /// copied on every improvement, and the graph resolves the index back to it for free.
+    predecessor: Vec<Option<(NodeIndex, EdgeIndex)>>,
     /// Gas consumed by the edge that last improved each node's amount.
     edge_gas: Vec<BigUint>,
     /// Total gas along the best path to each node.
@@ -465,7 +470,7 @@ impl BellmanFordAlgorithm {
                     let v_idx = v.index();
 
                     // Single predecessor walk: skip if target token or pool already in path
-                    if Self::path_has_conflict(u, v, component_id, predecessor) {
+                    if Self::path_has_conflict(ctx.graph, u, v, component_id, predecessor) {
                         continue;
                     }
 
@@ -564,7 +569,7 @@ impl BellmanFordAlgorithm {
                     if is_better {
                         spot_product[v_idx] = candidate_spot;
                         amount[v_idx] = result.amount;
-                        predecessor[v_idx] = Some((u, component_id.clone()));
+                        predecessor[v_idx] = Some((u, edge.id()));
                         edge_gas[v_idx] = result.gas;
                         cumul_gas[v_idx] = candidate_cumul_gas;
                         next_active.insert(v);
@@ -609,7 +614,7 @@ impl BellmanFordAlgorithm {
     /// Constructs a [`Route`] from a reconstructed path and SPFA output arrays.
     fn build_route(
         ctx: &BellmanFordContext,
-        path_edges: &[(NodeIndex, NodeIndex, ComponentId)],
+        path_edges: &[(NodeIndex, NodeIndex, EdgeIndex)],
         amount: &[BigUint],
         edge_gas: &[BigUint],
         overrides: &MarketOverrides,
@@ -618,7 +623,15 @@ impl BellmanFordAlgorithm {
         // One more token than hops: every hop contributes its output, plus the initial input.
         let mut tokens: HashMap<Address, Token> = HashMap::with_capacity(path_edges.len() + 1);
 
-        for (from_node, to_node, component_id) in path_edges {
+        for (from_node, to_node, edge) in path_edges {
+            let component_id = &ctx
+                .graph
+                .edge_weight(*edge)
+                .ok_or_else(|| AlgorithmError::DataNotFound {
+                    kind: "edge",
+                    id: Some(format!("{edge:?}")),
+                })?
+                .component_id;
             let token_in = ctx
                 .token_map
                 .get(from_node)
@@ -788,22 +801,26 @@ impl BellmanFordAlgorithm {
     /// Checks whether the target node or pool conflicts with the existing path to `from`.
     /// Walks the predecessor chain once, checking both conditions simultaneously.
     pub(crate) fn path_has_conflict(
+        graph: &RoutingGraph<()>,
         from: NodeIndex,
         target_node: NodeIndex,
         target_pool: &ComponentId,
-        predecessor: &[Option<(NodeIndex, ComponentId)>],
+        predecessor: &[Option<(NodeIndex, EdgeIndex)>],
     ) -> bool {
         let mut current = from;
         loop {
             if current == target_node {
                 return true;
             }
-            match &predecessor[current.index()] {
-                Some((prev, cid)) => {
-                    if cid == target_pool {
+            match predecessor[current.index()] {
+                Some((prev, edge)) => {
+                    if graph
+                        .edge_weight(edge)
+                        .is_some_and(|weight| &weight.component_id == target_pool)
+                    {
                         return true;
                     }
-                    current = *prev;
+                    current = prev;
                 }
                 None => return false,
             }
@@ -815,9 +832,9 @@ impl BellmanFordAlgorithm {
     pub(crate) fn reconstruct_path(
         token_out: NodeIndex,
         token_in: NodeIndex,
-        predecessor: &[Option<(NodeIndex, ComponentId)>],
+        predecessor: &[Option<(NodeIndex, EdgeIndex)>],
         max_hops: usize,
-    ) -> Result<Vec<(NodeIndex, NodeIndex, ComponentId)>, AlgorithmError> {
+    ) -> Result<Vec<(NodeIndex, NodeIndex, EdgeIndex)>, AlgorithmError> {
         let mut path = Vec::with_capacity(max_hops);
         let mut current = token_out;
         let mut visited = FxHashSet::default();
@@ -828,13 +845,10 @@ impl BellmanFordAlgorithm {
             }
 
             let idx = current.index();
-            match &predecessor
-                .get(idx)
-                .and_then(|p| p.as_ref())
-            {
-                Some((prev_node, component_id)) => {
-                    path.push((*prev_node, current, component_id.clone()));
-                    current = *prev_node;
+            match predecessor.get(idx).copied().flatten() {
+                Some((prev_node, edge)) => {
+                    path.push((prev_node, current, edge));
+                    current = prev_node;
                 }
                 None => {
                     return Err(AlgorithmError::Other(format!(
@@ -960,7 +974,7 @@ mod tests {
         algorithm::test_utils::{component, order, token, MockProtocolSim},
         derived::{types::TokenGasPrices, DerivedData},
         feed::market_data::{MarketData, MarketState},
-        graph::GraphManager,
+        graph::{EdgeData, GraphManager},
         types::quote::OrderSide,
     };
 
@@ -2058,19 +2072,28 @@ mod tests {
 
     #[test]
     fn test_path_has_conflict_detects_node_and_pool() {
-        // Path: 0 -[pool_a]-> 1 -[pool_b]-> 2
-        let mut pred: Vec<Option<(NodeIndex, ComponentId)>> = vec![None; 4];
-        pred[1] = Some((NodeIndex::new(0), "pool_a".into()));
-        pred[2] = Some((NodeIndex::new(1), "pool_b".into()));
+        // Path: 0 -[pool_a]-> 1 -[pool_b]-> 2. The predecessor chain stores edge indices, so the
+        // pools have to exist on a real graph for the walk to resolve them.
+        let mut graph: RoutingGraph<()> = RoutingGraph::new();
+        let nodes: Vec<NodeIndex> = (0..4)
+            .map(|i| graph.insert_node(&token(0x01 + i as u8, "T").address))
+            .collect();
+        let pool_a = graph.insert_edge(nodes[0], nodes[1], EdgeData::new("pool_a".into()));
+        let pool_b = graph.insert_edge(nodes[1], nodes[2], EdgeData::new("pool_b".into()));
+        let mut pred: Vec<Option<(NodeIndex, EdgeIndex)>> = vec![None; 4];
+        pred[1] = Some((nodes[0], pool_a));
+        pred[2] = Some((nodes[1], pool_b));
 
         // Node conflicts: node 0 is in path, node 3 is not
         assert!(BellmanFordAlgorithm::path_has_conflict(
+            &graph,
             NodeIndex::new(2),
             NodeIndex::new(0),
             &"any".into(),
             &pred
         ));
         assert!(!BellmanFordAlgorithm::path_has_conflict(
+            &graph,
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"any".into(),
@@ -2078,6 +2101,7 @@ mod tests {
         ));
         // Self-check: node 2 is itself in the "path from 2"
         assert!(BellmanFordAlgorithm::path_has_conflict(
+            &graph,
             NodeIndex::new(2),
             NodeIndex::new(2),
             &"any".into(),
@@ -2086,18 +2110,21 @@ mod tests {
 
         // Pool conflicts: pool_a and pool_b are used, pool_c is not
         assert!(BellmanFordAlgorithm::path_has_conflict(
+            &graph,
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"pool_a".into(),
             &pred
         ));
         assert!(BellmanFordAlgorithm::path_has_conflict(
+            &graph,
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"pool_b".into(),
             &pred
         ));
         assert!(!BellmanFordAlgorithm::path_has_conflict(
+            &graph,
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"pool_c".into(),
