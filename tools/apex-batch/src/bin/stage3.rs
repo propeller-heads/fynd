@@ -41,7 +41,6 @@ use tycho_simulation::tycho_common::{
 };
 
 const WINDOWS: [u64; 5] = [1, 5, 15, 30, 150];
-const SOLVE_DEADLINE: Duration = Duration::from_secs(3);
 
 #[derive(Parser)]
 #[command(about = "APEX on decoded Base trades against current live AMM state (stage 3)")]
@@ -67,6 +66,10 @@ struct Args {
     /// Limit cells in basis points below the settled amount.
     #[arg(long, default_values_t = vec![50u32, 100, 200])]
     limit_bps: Vec<u32>,
+    /// APEX search deadline per batch solve, in milliseconds. 3000 is the quality-leaning
+    /// offline default; 1000 matches the live budget.
+    #[arg(long, default_value_t = 3_000)]
+    solve_deadline_ms: u64,
     /// How long to wait for the first complete market + derived-price computation.
     #[arg(long, default_value_t = 900)]
     ready_timeout_secs: u64,
@@ -374,6 +377,7 @@ fn solve_batch(
     serializable_only: bool,
     current_quotes: &HashMap<String, alloy::primitives::U256>,
     solve_times: &mut Vec<u128>,
+    solve_deadline: Duration,
 ) -> BatchOutcome {
     let mut counters = Counters::default();
     let mut matched_usd = 0.0f64;
@@ -659,7 +663,7 @@ fn solve_batch(
             enable_two_hops: with_pools,
             max_workers: 1,
             collect_metrics: false,
-            deadline: Some(Instant::now() + SOLVE_DEADLINE),
+            deadline: Some(Instant::now() + solve_deadline),
             ..ApexConfig::default()
         };
         config
@@ -1527,6 +1531,7 @@ async fn main() -> Result<()> {
                                     serializable_only,
                                     &scope_quotes[&serializable_only],
                                     &mut solve_times,
+                                    Duration::from_millis(args.solve_deadline_ms),
                                 );
                                 matched += outcome.matched_usd;
                                 surplus += outcome.surplus_usd;
