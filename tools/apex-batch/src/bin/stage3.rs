@@ -77,8 +77,9 @@ struct Args {
     #[arg(long, default_value = "data/apex-snapshots")]
     snapshot_out: PathBuf,
     /// Cap on per-order fynd quotes taken at the live state before disconnecting (cell-b
-    /// baseline); orders beyond the cap are sampled evenly and the share is reported.
-    #[arg(long, default_value_t = 2500)]
+    /// baseline). 0 = auto: probe the quote rate on the first 100, then take the highest even
+    /// coverage that fits the 20-minute budget.
+    #[arg(long, default_value_t = 0)]
     fynd_quote_cap: usize,
     /// Worker-pool config for the in-process solver (the fynd-quote baseline needs real pools).
     #[arg(long, env = "WORKER_POOLS_CONFIG", default_value = "worker_pools.toml")]
@@ -1161,6 +1162,39 @@ async fn take_snapshot(
     };
     persist_snapshot(&snapshot, &args.snapshot_out)?;
     Ok(snapshot)
+}
+
+/// Take one fynd quote at the live state, recording it under the order's id when the solver
+/// answers within its timeout.
+async fn take_fynd_quote(
+    solver: &fynd_core::solver::Solver,
+    order: &Intent,
+    fynd_quotes: &mut HashMap<String, alloy::primitives::U256>,
+) {
+    use fynd_core::types::{
+        EncodingOptions, Order as FyndOrder, OrderSide, QuoteOptions, QuoteRequest,
+    };
+    let request = QuoteRequest::new(
+        vec![FyndOrder::new(
+            tycho_simulation::tycho_core::models::Address::from(order.token_in.0),
+            tycho_simulation::tycho_core::models::Address::from(order.token_out.0),
+            num_bigint::BigUint::from_bytes_le(&alloy_u256(order.amount_in).to_le_bytes::<32>()),
+            OrderSide::Sell,
+            tycho_simulation::tycho_core::models::Address::from([0x11u8; 20]),
+        )],
+        QuoteOptions::default()
+            .with_timeout_ms(500)
+            .with_encoding_options(EncodingOptions::new(0.005)),
+    );
+    if let Ok(quote) = solver.quote(request).await {
+        if let Some(order_quote) = quote.orders().first() {
+            let bytes = order_quote.amount_out().to_bytes_le();
+            if bytes.len() <= 32 {
+                fynd_quotes
+                    .insert(order.id.clone(), alloy::primitives::U256::from_le_slice(&bytes));
+            }
+        }
+    }
 }
 
 /// Persist the snapshot as zstd JSON: serializable pool states verbatim (typetag-encoded),
