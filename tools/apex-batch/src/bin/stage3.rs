@@ -34,6 +34,7 @@ use apex_solver::{
 };
 use clap::Parser;
 use num_bigint::BigUint;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_simulation::tycho_common::{
     models::{token::Token as TychoToken, Chain},
@@ -1636,7 +1637,11 @@ async fn main() -> Result<()> {
     }
     eprintln!("quote pass took {}ms", quote_started.elapsed().as_millis());
 
-    let mut cells: Vec<CellResult> = Vec::new();
+    // Cells are independent given the read-only snapshot and quote maps, and every APEX solve
+    // runs single-threaded (max_workers = 1), so the grid solves in parallel and wall time is
+    // the slowest cell rather than the sum. Deadlines are wall-clock: oversubscribing the
+    // cores inflates the solve percentiles, so read p50 against the budget.
+    let mut cell_configs: Vec<(u64, u32, Anchor, bool, bool)> = Vec::new();
     for window in WINDOWS {
         for &limit_bps in &args.limit_bps {
             for anchor in [Anchor::Original, Anchor::Current] {
@@ -1648,163 +1653,173 @@ async fn main() -> Result<()> {
                             // The no-pools cell is scope-invariant; run it once per anchor.
                             continue;
                         }
-                        let started = Instant::now();
-                        let mut counters = Counters::default();
-                        let mut matched = 0.0f64;
-                        let mut surplus = 0.0f64;
-                        let mut surplus_ex_drift = 0.0f64;
-                        let mut order_surpluses: Vec<f64> = Vec::new();
-                        let mut pool_wei = 0.0f64;
-                        let mut notional_wei = 0.0f64;
-                        let mut filled_wei = 0.0f64;
-                        let mut fynd_bps: Vec<f64> = Vec::new();
-                        let mut fynd_usd_delta = 0.0f64;
-                        let mut solve_times: Vec<u128> = Vec::new();
-                        for (intents, day_price) in &days {
-                            let mut by_window: BTreeMap<u64, Vec<Intent>> = BTreeMap::new();
-                            for intent in intents {
-                                by_window
-                                    .entry(intent.block / window)
-                                    .or_default()
-                                    .push(intent.clone());
-                            }
-                            for batch in by_window.into_values() {
-                                let outcome = solve_batch(
-                                    &batch,
-                                    &snapshot,
-                                    day_price,
-                                    limit_bps,
-                                    with_pools,
-                                    anchor,
-                                    serializable_only,
-                                    &scope_quotes[&serializable_only],
-                                    &mut solve_times,
-                                    Duration::from_millis(args.solve_deadline_ms),
-                                );
-                                matched += outcome.matched_usd;
-                                surplus += outcome.surplus_usd;
-                                surplus_ex_drift += outcome.surplus_ex_drift_usd;
-                                order_surpluses.extend(outcome.order_surpluses_usd);
-                                pool_wei += outcome.pool_cleared_wei;
-                                notional_wei += outcome.order_notional_wei;
-                                filled_wei += outcome.filled_notional_wei;
-                                fynd_bps.extend(outcome.fynd_bps);
-                                fynd_usd_delta += outcome.fynd_usd_delta;
-                                counters.absorb(&outcome.counters);
-                            }
-                        }
-                        solve_times.sort_unstable();
-                        fynd_bps.sort_by(|a, b| a.partial_cmp(b).expect("finite bps"));
-                        let percentile = |p: f64| -> u128 {
-                            if solve_times.is_empty() {
-                                0
-                            } else {
-                                solve_times[((solve_times.len() - 1) as f64 * p) as usize]
-                            }
-                        };
-                        // Denominator = REALIZED notional (forensics 2026-08-05): with the
-                        // submitted notional the share collapses into a fill-rate proxy —
-                        // every skip path must drop out of both sides symmetrically.
-                        let internalization = (filled_wei > 0.0 && with_pools)
-                            .then(|| (1.0 - pool_wei / (2.0 * filled_wei)).clamp(0.0, 1.0));
-                        let realized_share =
-                            (notional_wei > 0.0).then(|| filled_wei / notional_wei);
-                        order_surpluses.sort_by(|a, b| {
-                            b.partial_cmp(a)
-                                .expect("finite surplus")
-                        });
-                        let surplus_top1 = order_surpluses
-                            .first()
-                            .copied()
-                            .unwrap_or(0.0);
-                        let surplus_top5_share = if surplus > 0.0 {
-                            order_surpluses
-                                .iter()
-                                .take(5)
-                                .sum::<f64>() /
-                                surplus
-                        } else {
-                            0.0
-                        };
-                        let cell = CellResult {
-                            window_blocks: window,
+                        cell_configs.push((
+                            window,
                             limit_bps,
-                            cell: if with_pools { "pools" } else { "no_pools" }.to_string(),
-                            anchor: match anchor {
-                                Anchor::Original => "original",
-                                Anchor::Current => "current",
-                            }
-                            .to_string(),
-                            pool_scope: if serializable_only { "serializable" } else { "full" }
-                                .to_string(),
-                            intent_usd,
-                            apex_matched_usd: matched,
-                            apex_matched_pct: 100.0 * matched / intent_usd,
-                            apex_surplus_usd: surplus,
-                            apex_surplus_ex_drift_usd: surplus_ex_drift,
-                            apex_surplus_net_usd: surplus - counters.negative_gap_usd,
-                            surplus_top1_usd: surplus_top1,
-                            surplus_top5_share,
-                            pool_cleared_wei: pool_wei,
-                            order_notional_wei: notional_wei,
-                            filled_notional_wei: filled_wei,
-                            realized_share,
-                            internalization_share: internalization,
-                            solve_ms_p50: percentile(0.5),
-                            solve_ms_p90: percentile(0.9),
-                            solve_ms_max: percentile(1.0),
-                            fynd_compared: counters.fynd_compared,
-                            fynd_median_bps: if fynd_bps.is_empty() {
-                                0.0
-                            } else {
-                                fynd_bps[fynd_bps.len() / 2]
-                            },
-                            fynd_mean_bps: if fynd_bps.is_empty() {
-                                0.0
-                            } else {
-                                fynd_bps.iter().sum::<f64>() / fynd_bps.len() as f64
-                            },
-                            fynd_apex_ge_share: if fynd_bps.is_empty() {
-                                0.0
-                            } else {
-                                fynd_bps
-                                    .iter()
-                                    .filter(|b| **b >= 0.0)
-                                    .count() as f64 /
-                                    fynd_bps.len() as f64
-                            },
-                            fynd_usd_delta,
-                            counters,
-                            wall_ms: started.elapsed().as_millis(),
-                        };
-                        eprintln!(
-                            "w={window:>3} bps={limit_bps:>3} {}/{}/{}: matched=${:>11.0} \
-                             ({:.3}%) surplus=${:>9.2} exdrift=${:>9.2} top5={:.0}% \
-                             intern={:?} realized={:?} fallback={} fynd(n={} med={:+.1}bps) \
-                             solves p50/p90/max={}/{}/{}ms",
-                            cell.anchor,
-                            cell.cell,
-                            cell.pool_scope,
-                            cell.apex_matched_usd,
-                            cell.apex_matched_pct,
-                            cell.apex_surplus_usd,
-                            cell.apex_surplus_ex_drift_usd,
-                            100.0 * cell.surplus_top5_share,
-                            cell.internalization_share,
-                            cell.realized_share,
-                            cell.counters.pools_fallback_components,
-                            cell.fynd_compared,
-                            cell.fynd_median_bps,
-                            cell.solve_ms_p50,
-                            cell.solve_ms_p90,
-                            cell.solve_ms_max,
-                        );
-                        cells.push(cell);
+                            anchor,
+                            serializable_only,
+                            with_pools,
+                        ));
                     }
                 }
             }
         }
     }
+    let cells: Vec<CellResult> = cell_configs
+        .into_par_iter()
+        .map(|(window, limit_bps, anchor, serializable_only, with_pools)| {
+            let started = Instant::now();
+            let mut counters = Counters::default();
+            let mut matched = 0.0f64;
+            let mut surplus = 0.0f64;
+            let mut surplus_ex_drift = 0.0f64;
+            let mut order_surpluses: Vec<f64> = Vec::new();
+            let mut pool_wei = 0.0f64;
+            let mut notional_wei = 0.0f64;
+            let mut filled_wei = 0.0f64;
+            let mut fynd_bps: Vec<f64> = Vec::new();
+            let mut fynd_usd_delta = 0.0f64;
+            let mut solve_times: Vec<u128> = Vec::new();
+            for (intents, day_price) in &days {
+                let mut by_window: BTreeMap<u64, Vec<Intent>> = BTreeMap::new();
+                for intent in intents {
+                    by_window
+                        .entry(intent.block / window)
+                        .or_default()
+                        .push(intent.clone());
+                }
+                for batch in by_window.into_values() {
+                    let outcome = solve_batch(
+                        &batch,
+                        &snapshot,
+                        day_price,
+                        limit_bps,
+                        with_pools,
+                        anchor,
+                        serializable_only,
+                        &scope_quotes[&serializable_only],
+                        &mut solve_times,
+                        Duration::from_millis(args.solve_deadline_ms),
+                    );
+                    matched += outcome.matched_usd;
+                    surplus += outcome.surplus_usd;
+                    surplus_ex_drift += outcome.surplus_ex_drift_usd;
+                    order_surpluses.extend(outcome.order_surpluses_usd);
+                    pool_wei += outcome.pool_cleared_wei;
+                    notional_wei += outcome.order_notional_wei;
+                    filled_wei += outcome.filled_notional_wei;
+                    fynd_bps.extend(outcome.fynd_bps);
+                    fynd_usd_delta += outcome.fynd_usd_delta;
+                    counters.absorb(&outcome.counters);
+                }
+            }
+            solve_times.sort_unstable();
+            fynd_bps.sort_by(|a, b| a.partial_cmp(b).expect("finite bps"));
+            let percentile = |p: f64| -> u128 {
+                if solve_times.is_empty() {
+                    0
+                } else {
+                    solve_times[((solve_times.len() - 1) as f64 * p) as usize]
+                }
+            };
+            // Denominator = REALIZED notional (forensics 2026-08-05): with the
+            // submitted notional the share collapses into a fill-rate proxy —
+            // every skip path must drop out of both sides symmetrically.
+            let internalization = (filled_wei > 0.0 && with_pools)
+                .then(|| (1.0 - pool_wei / (2.0 * filled_wei)).clamp(0.0, 1.0));
+            let realized_share = (notional_wei > 0.0).then(|| filled_wei / notional_wei);
+            order_surpluses.sort_by(|a, b| {
+                b.partial_cmp(a)
+                    .expect("finite surplus")
+            });
+            let surplus_top1 = order_surpluses
+                .first()
+                .copied()
+                .unwrap_or(0.0);
+            let surplus_top5_share = if surplus > 0.0 {
+                order_surpluses
+                    .iter()
+                    .take(5)
+                    .sum::<f64>() /
+                    surplus
+            } else {
+                0.0
+            };
+            let cell = CellResult {
+                window_blocks: window,
+                limit_bps,
+                cell: if with_pools { "pools" } else { "no_pools" }.to_string(),
+                anchor: match anchor {
+                    Anchor::Original => "original",
+                    Anchor::Current => "current",
+                }
+                .to_string(),
+                pool_scope: if serializable_only { "serializable" } else { "full" }.to_string(),
+                intent_usd,
+                apex_matched_usd: matched,
+                apex_matched_pct: 100.0 * matched / intent_usd,
+                apex_surplus_usd: surplus,
+                apex_surplus_ex_drift_usd: surplus_ex_drift,
+                apex_surplus_net_usd: surplus - counters.negative_gap_usd,
+                surplus_top1_usd: surplus_top1,
+                surplus_top5_share,
+                pool_cleared_wei: pool_wei,
+                order_notional_wei: notional_wei,
+                filled_notional_wei: filled_wei,
+                realized_share,
+                internalization_share: internalization,
+                solve_ms_p50: percentile(0.5),
+                solve_ms_p90: percentile(0.9),
+                solve_ms_max: percentile(1.0),
+                fynd_compared: counters.fynd_compared,
+                fynd_median_bps: if fynd_bps.is_empty() {
+                    0.0
+                } else {
+                    fynd_bps[fynd_bps.len() / 2]
+                },
+                fynd_mean_bps: if fynd_bps.is_empty() {
+                    0.0
+                } else {
+                    fynd_bps.iter().sum::<f64>() / fynd_bps.len() as f64
+                },
+                fynd_apex_ge_share: if fynd_bps.is_empty() {
+                    0.0
+                } else {
+                    fynd_bps
+                        .iter()
+                        .filter(|b| **b >= 0.0)
+                        .count() as f64 /
+                        fynd_bps.len() as f64
+                },
+                fynd_usd_delta,
+                counters,
+                wall_ms: started.elapsed().as_millis(),
+            };
+            eprintln!(
+                "w={window:>3} bps={limit_bps:>3} {}/{}/{}: matched=${:>11.0} \
+                             ({:.3}%) surplus=${:>9.2} exdrift=${:>9.2} top5={:.0}% \
+                             intern={:?} realized={:?} fallback={} fynd(n={} med={:+.1}bps) \
+                             solves p50/p90/max={}/{}/{}ms",
+                cell.anchor,
+                cell.cell,
+                cell.pool_scope,
+                cell.apex_matched_usd,
+                cell.apex_matched_pct,
+                cell.apex_surplus_usd,
+                cell.apex_surplus_ex_drift_usd,
+                100.0 * cell.surplus_top5_share,
+                cell.internalization_share,
+                cell.realized_share,
+                cell.counters.pools_fallback_components,
+                cell.fynd_compared,
+                cell.fynd_median_bps,
+                cell.solve_ms_p50,
+                cell.solve_ms_p90,
+                cell.solve_ms_max,
+            );
+            cell
+        })
+        .collect();
 
     std::fs::create_dir_all(&args.out_dir)?;
     let meta = SnapshotMeta {
