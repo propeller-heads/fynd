@@ -472,6 +472,94 @@ mod tests {
         assert!(should_dispatch(&connected));
     }
 
+    /// Two 18-dec tokens priced 1:1, one crossing pair with permissive floors — fills poollessly.
+    fn crossing_input() -> apex_batch::live::LiveBatchInput {
+        let token_a = ApexAddress([1u8; 20]);
+        let token_b = ApexAddress([2u8; 20]);
+        let one_to_one = || TokenPriceInput {
+            numerator: num_bigint::BigUint::from(10u128.pow(18)),
+            denominator: num_bigint::BigUint::from(10u128.pow(18)),
+            decimals: 18,
+        };
+        let amount_in = U256::from(10u128.pow(18));
+        let floor = U256::from(9 * 10u128.pow(17));
+        let order = |id: &str, token_in, token_out| LiveOrder {
+            id: id.to_string(),
+            token_in,
+            token_out,
+            amount_in_raw: amount_in,
+            min_out_raw: floor,
+        };
+        LiveBatchInput {
+            orders: vec![order("a:0", token_a, token_b), order("b:0", token_b, token_a)],
+            pools: Vec::new(),
+            price_inputs: HashMap::from([(token_a, one_to_one()), (token_b, one_to_one())]),
+            token_meta: HashMap::from([
+                (token_a, ("AAA".to_string(), 18)),
+                (token_b, ("BBB".to_string(), 18)),
+            ]),
+        }
+    }
+
+    #[test]
+    fn test_runtime_lands_one_jsonl_line_per_bracket() {
+        // The monitor's contract with the offline join: every dispatched bracket becomes exactly
+        // one JSONL line carrying its block, bracket label, and per-order reconciled statuses.
+        // `shutdown` joins the workers before the tail drain, so both lines must have landed.
+        let dir = std::env::temp_dir().join(format!("apex-live-runtime-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let runtime =
+            ApexRuntime::spawn(&dir, 1, 4, Duration::from_secs(2), Duration::from_millis(250), 400)
+                .expect("spawn runtime");
+
+        let input = crossing_input();
+        runtime.dispatch(LiveJob { block: 42, bracket: Bracket::Top, input: input.clone() });
+        runtime.dispatch(LiveJob { block: 42, bracket: Bracket::Bottom, input });
+        runtime.shutdown();
+
+        let mut lines: Vec<serde_json::Value> = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("read temp dir") {
+            let path = entry.expect("dir entry").path();
+            if path
+                .extension()
+                .is_some_and(|ext| ext == "jsonl")
+            {
+                let content = std::fs::read_to_string(&path).expect("read jsonl");
+                lines.extend(
+                    content
+                        .lines()
+                        .map(|line| serde_json::from_str(line).expect("valid json line")),
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(lines.len(), 2, "one line per bracket: {lines:?}");
+        let mut brackets: Vec<&str> = lines
+            .iter()
+            .map(|line| {
+                line["bracket"]
+                    .as_str()
+                    .expect("bracket label")
+            })
+            .collect();
+        brackets.sort_unstable();
+        assert_eq!(brackets, vec!["bottom", "top"]);
+        for line in &lines {
+            assert_eq!(line["block"].as_u64(), Some(42));
+            let orders = line["orders"]
+                .as_array()
+                .expect("orders array");
+            assert_eq!(orders.len(), 2, "{line}");
+            assert!(
+                orders
+                    .iter()
+                    .all(|order| order["status"] == "filled"),
+                "the crossing pair reconciles as filled in both brackets: {line}"
+            );
+        }
+    }
+
     #[test]
     fn test_live_orders_carry_extracted_or_synthetic_floors() {
         // The order builder is exercised through build_live_input's order loop; here the floor

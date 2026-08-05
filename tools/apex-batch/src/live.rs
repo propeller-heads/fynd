@@ -330,16 +330,18 @@ pub fn solve_live_batch(
         );
 
         if run_singles {
+            let mut singled_ids: HashSet<&str> = HashSet::new();
             for order in &component_orders {
                 // Singles only for orders the batch cell admitted — the pairing rule needs both
-                // cells' verdicts on the same order set.
+                // cells' verdicts on the same order set. The admission lookup is by id, so a
+                // duplicate instance of an admitted id must not earn a second control solve.
                 let admitted_to_batch = report
                     .statuses
                     .iter()
                     .any(|(id, status)| {
                         id == &order.id && !matches!(status, OrderStatus::Excluded(_))
                     });
-                if !admitted_to_batch {
+                if !admitted_to_batch || !singled_ids.insert(order.id.as_str()) {
                     continue;
                 }
                 let mut single_statuses = Vec::new();
@@ -742,6 +744,89 @@ mod tests {
             1
         );
         assert_eq!(report.counters.filled, 2, "the first two orders still cross: {report:?}");
+    }
+
+    #[test]
+    fn test_unreachable_limit_reconciles_without_fills() {
+        // A→B demands 2.0 out per 1.0 in at 1:1 prices; B→A is permissive. The limits cannot
+        // cross (2.0 × 0.9 > 1), so no order fills — and the reconciliation must still hand
+        // every order exactly one non-fill status rather than dropping either.
+        let input = two_token_input(
+            vec![
+                order("a:0", token(1), token(2), raw(2, 18)),
+                order("b:0", token(2), token(1), raw(9, 17)),
+            ],
+            Vec::new(),
+        );
+        let report = solve_live_batch(&input, BUDGET, BUDGET, false);
+        assert_eq!(report.counters.filled + report.counters.partially_filled, 0, "{report:?}");
+        assert_eq!(report.statuses.len(), 2);
+        for (id, status) in &report.statuses {
+            assert!(
+                matches!(status, OrderStatus::UnfilledAtLimit | OrderStatus::ComponentErrored),
+                "{id} ended as {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_admission_exclusions_report_one_status_each() {
+        // c has no metadata (unknown_decimals), d has metadata but no price (token_unpriced),
+        // e's zero floor declines inside the solve (zero_amount_or_limit); a and b still cross.
+        // Reconciliation invariant: every order id appears exactly once in the statuses.
+        let mut input = two_token_input(
+            vec![
+                order("a:0", token(1), token(2), raw(9, 17)),
+                order("b:0", token(2), token(1), raw(9, 17)),
+                order("c:0", token(3), token(2), raw(9, 17)),
+                order("d:0", token(4), token(2), raw(9, 17)),
+                order("e:0", token(1), token(2), U256::ZERO),
+            ],
+            Vec::new(),
+        );
+        input
+            .token_meta
+            .insert(token(4), ("DDD".to_string(), 18));
+        let report = solve_live_batch(&input, BUDGET, BUDGET, false);
+
+        let status_for = |wanted: &str| {
+            let matches: Vec<&OrderStatus> = report
+                .statuses
+                .iter()
+                .filter(|(id, _)| id == wanted)
+                .map(|(_, status)| status)
+                .collect();
+            assert_eq!(matches.len(), 1, "{wanted} must appear exactly once: {matches:?}");
+            matches[0].clone()
+        };
+        assert_eq!(status_for("c:0"), OrderStatus::Excluded("unknown_decimals"));
+        assert_eq!(status_for("d:0"), OrderStatus::Excluded("token_unpriced"));
+        assert_eq!(status_for("e:0"), OrderStatus::Excluded("zero_amount_or_limit"));
+        assert!(matches!(status_for("a:0"), OrderStatus::Filled { .. }), "{report:?}");
+        assert!(matches!(status_for("b:0"), OrderStatus::Filled { .. }), "{report:?}");
+        assert_eq!(report.statuses.len(), 5);
+    }
+
+    #[test]
+    fn test_singles_control_runs_once_per_admitted_id() {
+        // The duplicate a:0 is excluded from the batch cell, so the singles control must not
+        // solve it either — one single per admitted id, or the pairing rule double-counts.
+        let input = two_token_input(
+            vec![
+                order("a:0", token(1), token(2), raw(9, 17)),
+                order("b:0", token(2), token(1), raw(9, 17)),
+                order("a:0", token(1), token(2), raw(9, 17)),
+            ],
+            Vec::new(),
+        );
+        let report = solve_live_batch(&input, BUDGET, BUDGET, true);
+        let mut single_ids: Vec<&str> = report
+            .singles
+            .iter()
+            .map(|single| single.id.as_str())
+            .collect();
+        single_ids.sort_unstable();
+        assert_eq!(single_ids, vec!["a:0", "b:0"], "{:?}", report.singles);
     }
 
     #[test]
