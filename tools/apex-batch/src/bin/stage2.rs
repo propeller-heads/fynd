@@ -50,10 +50,7 @@ const SOLVE_DEADLINE: Duration = Duration::from_secs(10);
 #[command(about = "APEX orders-only (zero AMM) run over hindsight comparison JSONL")]
 struct Args {
     /// Directory of comparisons-YYYY-MM-DD.jsonl files.
-    #[arg(
-        long,
-        default_value = "/Users/pistomat/Projects/propeller-heads/fynd/data/hindsight/base-comparisons"
-    )]
+    #[arg(long, default_value = "data/hindsight/base-comparisons")]
     data_dir: PathBuf,
     /// Output directory for results JSON.
     #[arg(long, default_value = "docs/analysis/2026-08-base-cow-phase0/stage2-apex-orders-only")]
@@ -85,6 +82,8 @@ struct Counters {
     negative_gap_usd: f64,
     components_solved: u64,
     components_multi_order: u64,
+    /// Orders declined because their id collided with another order in the same batch.
+    duplicate_order_id: u64,
     /// APEX-filled orders with a recorded fynd quote to compare against.
     fynd_compared: u64,
     /// APEX-filled orders fynd never quoted (unsolvable / missing) — excluded from the
@@ -117,6 +116,7 @@ impl Counters {
         self.negative_gap_usd += other.negative_gap_usd;
         self.components_solved += other.components_solved;
         self.components_multi_order += other.components_multi_order;
+        self.duplicate_order_id += other.duplicate_order_id;
         self.fynd_compared += other.fynd_compared;
         self.fynd_uncompared += other.fynd_uncompared;
     }
@@ -203,7 +203,7 @@ fn solve_batch(
             }
         }
     }
-    let mut components: HashMap<usize, Vec<&Intent>> = HashMap::new();
+    let mut components: BTreeMap<usize, Vec<&Intent>> = BTreeMap::new();
     for (index, order) in orders.iter().enumerate() {
         components
             .entry(find(&mut parent, index))
@@ -213,7 +213,7 @@ fn solve_batch(
 
     for component in components.into_values() {
         if component.len() < 2 {
-            counters.singles_skipped += 1;
+            counters.singles_skipped += component.len() as u64;
             continue;
         }
         counters.components_multi_order += 1;
@@ -268,13 +268,11 @@ fn solve_batch(
                 counters.zero_limit_excluded += 1;
                 continue;
             }
-            assert!(
-                order_inputs
-                    .insert(order.id.clone(), order)
-                    .is_none(),
-                "duplicate order id {} in one batch",
-                order.id
-            );
+            if order_inputs.contains_key(&order.id) {
+                counters.duplicate_order_id += 1;
+                continue;
+            }
+            order_inputs.insert(order.id.clone(), order);
             let pair = TradingPair::new(
                 component_tokens[&order.token_in],
                 component_tokens[&order.token_out],
@@ -294,10 +292,11 @@ fn solve_batch(
             continue;
         }
 
-        let tokens: Vec<ApexToken> = component_tokens
+        let mut tokens: Vec<ApexToken> = component_tokens
             .values()
             .copied()
             .collect();
+        tokens.sort_by_key(|token| token.address.0);
         // PriceSearchConfig is not re-exported, so the nested field is set by mutation.
         let mut config = ApexConfig {
             enable_two_hops: false,
@@ -359,7 +358,10 @@ fn solve_batch(
             .iter()
             .map(|c| (c.id.as_str(), c))
             .collect();
-        for (id, order) in &order_inputs {
+        let mut order_ids: Vec<&String> = order_inputs.keys().collect();
+        order_ids.sort();
+        for id in order_ids {
+            let order = &order_inputs[id];
             match clearings.get(id.as_str()) {
                 Some(clearing) if !clearing.sold_amount.is_zero() => {
                     let fill_ratio =
@@ -474,7 +476,7 @@ fn main() -> Result<()> {
                 bps_samples.extend_from_slice(bps);
                 fynd_usd_delta += delta;
             }
-            bps_samples.sort_by(|a, b| a.partial_cmp(b).expect("finite bps"));
+            bps_samples.sort_by(f64::total_cmp);
             let fynd = FyndComparison {
                 compared_orders: counters.fynd_compared,
                 apex_ge_fynd_share: if bps_samples.is_empty() {
