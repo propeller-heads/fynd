@@ -11,7 +11,6 @@
 //! after the tops are known (the APEX batch stage's pool-subset clone) runs between `solve_tops`
 //! and the advance with no callback plumbing.
 
-#[expect(dead_code, reason = "wired into the monitor at the APEX integration step")]
 pub(crate) mod apex_live;
 pub(crate) mod apex_stage;
 mod compare;

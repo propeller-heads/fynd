@@ -510,23 +510,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("failed to resolve protocols: {e}"))?;
 
-    // Load worker pools like `fynd serve`: the default path falls back to the built-in default
-    // pools when absent; custom paths that don't exist fail fast.
-    let default_path = std::path::Path::new("worker_pools.toml");
-    let pools_config =
-        if cfg.worker_pools_config.as_path() == default_path && !default_path.exists() {
-            info!("worker_pools.toml not found; using Fynd's built-in default pools");
-            fynd_rpc::config::WorkerPoolsConfig::builtin_default()
-        } else {
-            fynd_rpc::config::WorkerPoolsConfig::load_from_file(&cfg.worker_pools_config).map_err(
-                |e| {
-                    anyhow::anyhow!(
-                        "failed to load worker pools config {}: {e}",
-                        cfg.worker_pools_config.display()
-                    )
-                },
-            )?
-        };
+    let pools_config = load_pools_config(&cfg)?;
 
     let mut decoder = Decoder::new(provider_from(&cfg.chain.rpc_url)?, cfg.chain.load_registry()?);
 
@@ -535,25 +519,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         info!(port, "serving Prometheus metrics at /metrics");
     }
 
-    let mut comparisons = match cfg.comparisons_dir.as_ref() {
-        Some(dir) => {
-            let writer = super::jsonl::RotatingWriter::open(dir, "comparisons")?;
-            info!(path = %writer.current_path().display(), "appending comparisons to JSONL");
-            Some(writer)
-        }
-        None => None,
-    };
-
-    let mut captures = match cfg.capture_dir.as_ref() {
-        Some(dir) => {
-            let writer = super::jsonl::RotatingWriter::open(dir, "batches")?;
-            info!(path = %writer.current_path().display(), "appending batch snapshots to JSONL");
-            Some(writer)
-        }
-        None => None,
-    };
-
-    let mut apex = super::apex_live::ApexRuntime::from_args(&cfg)?;
+    let mut sinks = Sinks::from_args(&cfg)?;
 
     let mut totals = Totals::default();
     let pacing = Pacing::for_chain(chain, cfg.max_lag_blocks);
@@ -590,9 +556,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
                 &pacing,
                 &adapter,
                 &mut decoder,
-                &mut comparisons,
-                &mut captures,
-                &mut apex,
+                &mut sinks,
                 &mut totals,
             ) => match end {
                 SessionEnd::Complete => break,
@@ -611,24 +575,68 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         };
         (solver, controller) = built;
     }
-    if let Some(runtime) = apex {
+    if let Some(runtime) = sinks.apex {
         runtime.shutdown();
     }
     solver.shutdown();
     Ok(())
 }
 
+/// Load worker pools like `fynd serve`: the default path falls back to the built-in default
+/// pools when absent; custom paths that don't exist fail fast.
+fn load_pools_config(cfg: &MonitorArgs) -> anyhow::Result<fynd_rpc::config::WorkerPoolsConfig> {
+    let default_path = std::path::Path::new("worker_pools.toml");
+    if cfg.worker_pools_config.as_path() == default_path && !default_path.exists() {
+        info!("worker_pools.toml not found; using Fynd's built-in default pools");
+        return Ok(fynd_rpc::config::WorkerPoolsConfig::builtin_default());
+    }
+    fynd_rpc::config::WorkerPoolsConfig::load_from_file(&cfg.worker_pools_config).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to load worker pools config {}: {e}",
+            cfg.worker_pools_config.display()
+        )
+    })
+}
+
+/// The session's output sinks — everything a resolved block lands in besides Prometheus: the
+/// comparisons JSONL, the batch-capture JSONL, and the APEX batch stage.
+struct Sinks {
+    comparisons: Option<super::jsonl::RotatingWriter>,
+    captures: Option<super::jsonl::RotatingWriter>,
+    apex: Option<super::apex_live::ApexRuntime>,
+}
+
+impl Sinks {
+    fn from_args(cfg: &MonitorArgs) -> anyhow::Result<Self> {
+        let comparisons = match cfg.comparisons_dir.as_ref() {
+            Some(dir) => {
+                let writer = super::jsonl::RotatingWriter::open(dir, "comparisons")?;
+                info!(path = %writer.current_path().display(), "appending comparisons to JSONL");
+                Some(writer)
+            }
+            None => None,
+        };
+        let captures = match cfg.capture_dir.as_ref() {
+            Some(dir) => {
+                let writer = super::jsonl::RotatingWriter::open(dir, "batches")?;
+                info!(path = %writer.current_path().display(), "appending batch snapshots to JSONL");
+                Some(writer)
+            }
+            None => None,
+        };
+        let apex = super::apex_live::ApexRuntime::from_args(cfg)?;
+        Ok(Self { comparisons, captures, apex })
+    }
+}
+
 /// Drive one solver session: step blocks and re-solve each block's settled trades until the run
 /// completes or the feed dies.
-#[expect(clippy::too_many_arguments, reason = "the session owns every writer the loop feeds")]
 async fn run_session<P: Provider>(
     cfg: &MonitorArgs,
     pacing: &Pacing,
     adapter: &StepAdapter<'_>,
     decoder: &mut Decoder<P>,
-    comparisons: &mut Option<super::jsonl::RotatingWriter>,
-    captures: &mut Option<super::jsonl::RotatingWriter>,
-    apex: &mut Option<super::apex_live::ApexRuntime>,
+    sinks: &mut Sinks,
     totals: &mut Totals,
 ) -> SessionEnd {
     // Establish a baseline applied state (N-1) before the first comparison.
@@ -691,81 +699,9 @@ async fn run_session<P: Provider>(
             }
         };
 
-        let start = Instant::now();
-        // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
-        // USD valuation.
-        let prices_top = snapshot_prices(adapter.solver, decoder.registry()).await;
-        let tops = solve_tops(adapter, &trades).await;
-        // Pre-advance seam: the N-1 state is still live and the block's tops are known. The APEX
-        // batch stage clones its filtered pool subset here and solves off the critical path.
-        let apex_eligible = apex.is_some() && super::apex_live::should_dispatch(&trades);
-        if apex_eligible {
-            super::apex_live::dispatch_bracket(
-                apex.as_ref(),
-                adapter.solver,
-                &trades,
-                target,
-                super::apex_live::Bracket::Top,
-            )
-            .await;
+        if let Err(reason) = resolve_block(cfg, adapter, decoder, sinks, &trades, target).await {
+            return SessionEnd::Unhealthy(reason);
         }
-        if let Err(e) = adapter.advance().await {
-            return SessionEnd::Unhealthy(e.to_string());
-        }
-        let ranges = solve_backs(adapter, &trades, tops, &prices_top).await;
-        // Bottom bracket: the solver now holds N, the biased-bottom state (mirrors fynd's back).
-        if apex_eligible {
-            super::apex_live::dispatch_bracket(
-                apex.as_ref(),
-                adapter.solver,
-                &trades,
-                target,
-                super::apex_live::Bracket::Bottom,
-            )
-            .await;
-        }
-        if let Some(runtime) = apex.as_mut() {
-            runtime.drain();
-        }
-        // The solver now holds back-of-block (N); snapshot again so the back-of-block improvement
-        // is valued against the state it was solved at.
-        let prices_back = snapshot_prices(adapter.solver, decoder.registry()).await;
-        // The back-of-block solve should land on `target`. On a reorg/gap/resync the stream can
-        // apply a different block, silently pairing the back state with another block's trades.
-        // The top-of-block (N-1) headline is unaffected; warn so the mispaired back state is
-        // visible.
-        let applied = adapter.current_block().await;
-        if applied != Some(target) {
-            warn!(
-                target,
-                applied = ?applied,
-                "back-of-block state is not the target block; back comparison may be off"
-            );
-        }
-        for range in &ranges {
-            telemetry::record_range(
-                range,
-                &cfg.chain.name,
-                &prices_top,
-                &prices_back,
-                decoder.registry(),
-            );
-        }
-        if let Some(rotating) = comparisons.as_mut() {
-            super::jsonl::write_comparisons(rotating.writer(), &ranges, &prices_top, &prices_back);
-        }
-        // Captured at top-of-block prices: the batch is replayed against state N-1, so its
-        // starting price view must be the one Fynd's baseline was solved under, not the
-        // post-block one the back state is valued at.
-        if let Some(rotating) = captures.as_mut() {
-            let snapshot = crate::capture::build_snapshot(target, &trades, &ranges, &prices_top);
-            crate::capture::write_snapshot(rotating.writer(), &snapshot);
-        }
-        let elapsed_s = start.elapsed().as_secs_f64();
-        telemetry::record_block_seconds(elapsed_s);
-
-        info!(block = target, trades = ranges.len(), elapsed_s, "re-solved block (top/back)");
-
         totals.processed += 1;
         if cfg
             .max_blocks
@@ -775,6 +711,95 @@ async fn run_session<P: Provider>(
             return SessionEnd::Complete;
         }
     }
+}
+
+/// Re-solve one decoded block through the three phases — tops at N-1, the advance, backs at N —
+/// and land the results in every sink. The APEX brackets dispatch at their seams: top on the
+/// still-live N-1 state after the tops are known, bottom once the solver holds N. `Err` carries
+/// the unhealthy-session reason when the advance fails.
+async fn resolve_block<P: Provider>(
+    cfg: &MonitorArgs,
+    adapter: &StepAdapter<'_>,
+    decoder: &Decoder<P>,
+    sinks: &mut Sinks,
+    trades: &[DecodedTrade],
+    target: u64,
+) -> Result<(), String> {
+    let start = Instant::now();
+    // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
+    // USD valuation.
+    let prices_top = snapshot_prices(adapter.solver, decoder.registry()).await;
+    let tops = solve_tops(adapter, trades).await;
+    // Pre-advance seam: the N-1 state is still live and the block's tops are known. The APEX
+    // batch stage clones its filtered pool subset here and solves off the critical path.
+    let apex_eligible = sinks.apex.is_some() && super::apex_live::should_dispatch(trades);
+    if apex_eligible {
+        super::apex_live::dispatch_bracket(
+            sinks.apex.as_ref(),
+            adapter.solver,
+            trades,
+            target,
+            super::apex_live::Bracket::Top,
+        )
+        .await;
+    }
+    if let Err(e) = adapter.advance().await {
+        return Err(e.to_string());
+    }
+    let ranges = solve_backs(adapter, trades, tops, &prices_top).await;
+    // Bottom bracket: the solver now holds N, the biased-bottom state (mirrors fynd's back).
+    if apex_eligible {
+        super::apex_live::dispatch_bracket(
+            sinks.apex.as_ref(),
+            adapter.solver,
+            trades,
+            target,
+            super::apex_live::Bracket::Bottom,
+        )
+        .await;
+    }
+    if let Some(runtime) = sinks.apex.as_mut() {
+        runtime.drain();
+    }
+    // The solver now holds back-of-block (N); snapshot again so the back-of-block improvement
+    // is valued against the state it was solved at.
+    let prices_back = snapshot_prices(adapter.solver, decoder.registry()).await;
+    // The back-of-block solve should land on `target`. On a reorg/gap/resync the stream can
+    // apply a different block, silently pairing the back state with another block's trades.
+    // The top-of-block (N-1) headline is unaffected; warn so the mispaired back state is
+    // visible.
+    let applied = adapter.current_block().await;
+    if applied != Some(target) {
+        warn!(
+            target,
+            applied = ?applied,
+            "back-of-block state is not the target block; back comparison may be off"
+        );
+    }
+    for range in &ranges {
+        telemetry::record_range(
+            range,
+            &cfg.chain.name,
+            &prices_top,
+            &prices_back,
+            decoder.registry(),
+        );
+    }
+    if let Some(rotating) = sinks.comparisons.as_mut() {
+        super::jsonl::write_comparisons(rotating.writer(), &ranges, &prices_top, &prices_back);
+    }
+    // Captured at top-of-block prices: the batch is replayed against state N-1, so its
+    // starting price view must be the one Fynd's baseline was solved under, not the
+    // post-block one the back state is valued at.
+    if let Some(rotating) = sinks.captures.as_mut() {
+        let snapshot = crate::capture::build_snapshot(target, trades, &ranges, &prices_top);
+        crate::capture::write_snapshot(rotating.writer(), &snapshot);
+    }
+    let elapsed_s = start.elapsed().as_secs_f64();
+    telemetry::record_block_seconds(elapsed_s);
+
+    info!(block = target, trades = ranges.len(), elapsed_s, "re-solved block (top/back)");
+    Ok(())
 }
 
 /// Snapshot the solver's current token prices as `Prices` (token native-units per wei of
