@@ -1,4 +1,23 @@
 
+## [0.98.0](https://github.com/propeller-heads/fynd/compare/0.97.14...0.98.0) (2026-08-05)
+
+### Features
+
+* **monitoring:** add per-pool solve p95 panel to the local dashboard ([e73cd4d](https://github.com/propeller-heads/fynd/commit/e73cd4da76b0a2f88f75146d52cbf0b4488430e3))
+* replace ExclusivityPolicy with scope based filtering ([c011dc6](https://github.com/propeller-heads/fynd/commit/c011dc62631ae4f093d185de44f609000df6e5d0))
+* rename pool_depths and poolId in /v1/prices and TS client ([8eb73c8](https://github.com/propeller-heads/fynd/commit/8eb73c895b9ff361f128cf6ed43ca10d6bd5ee1d))
+* quote exclusive routes when no public route exists ([2930167](https://github.com/propeller-heads/fynd/commit/2930167b896a6b7aa4ee3c288eea4da17bc69a87))
+* **metrics:** add per-pool solve duration histogram ([bd59b68](https://github.com/propeller-heads/fynd/commit/bd59b6803058cb37082f0332948730f7e184c563))
+* default to PublicOnly scope and rename All to IncludeExclusive ([aad3886](https://github.com/propeller-heads/fynd/commit/aad38864b90ecdf3ac9339f4710f7a301eb2b39e))
+* give the user a share of the exclusive route improvement ([7beabb1](https://github.com/propeller-heads/fynd/commit/7beabb1bfb90e19b2ae43e72731dc0311ca6a097))
+* require exclusive routes to beat public by 1 bps ([5fde9ba](https://github.com/propeller-heads/fynd/commit/5fde9baea7afc51ae92abee3ffaa4b47939f15f4))
+
+### Bug Fixes
+
+* use imported path ([6c07c5a](https://github.com/propeller-heads/fynd/commit/6c07c5aa3d938794fb8821a1c388387414ff1fe8))
+* fix terminal-leg check in has_valid_exclusive_route ([4d10c88](https://github.com/propeller-heads/fynd/commit/4d10c88922db9a2446831252300336b1b8dd4b66))
+
+
 ## [0.97.14](https://github.com/propeller-heads/fynd/compare/0.97.13...0.97.14) (2026-08-03)
 
 ### Features
