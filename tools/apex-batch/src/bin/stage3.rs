@@ -118,8 +118,13 @@ struct StateSnapshot {
 struct PersistedSnapshot {
     state_label: String,
     price_block: Option<u64>,
+    /// Absent in pre-fix snapshots (persisted before provenance was carried); zeros there mean
+    /// "unrecorded", not "instant".
+    #[serde(default)]
     subset_dropped_by_cap: u64,
+    #[serde(default)]
     clone_box_ms: u128,
+    #[serde(default)]
     arc_from_ms: u128,
     pools: Vec<PersistedPool>,
     v4_dropped: Vec<String>,
@@ -133,8 +138,34 @@ struct PersistedSnapshot {
 struct PersistedPool {
     component_id: String,
     protocol: String,
-    tokens: Vec<PersistedToken>,
+    tokens: Vec<PersistedTokenCompat>,
     state: serde_json::Value,
+}
+
+/// Legacy pre-fix snapshots persisted tokens as `(address, symbol, decimals)` tuples; their
+/// tax/gas/quality are unrecoverable and reload with neutral defaults. New snapshots persist
+/// the full identity.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum PersistedTokenCompat {
+    Full(PersistedToken),
+    Legacy(String, String, u8),
+}
+
+impl PersistedTokenCompat {
+    fn into_token(self) -> PersistedToken {
+        match self {
+            PersistedTokenCompat::Full(token) => token,
+            PersistedTokenCompat::Legacy(address, symbol, decimals) => PersistedToken {
+                address,
+                symbol,
+                decimals: decimals as u32,
+                tax: 0,
+                gas: vec![Some(60_000)],
+                quality: 100,
+            },
+        }
+    }
 }
 
 /// A tycho token's full identity, persisted verbatim so a reload rebuilds the exact token the
@@ -1154,13 +1185,15 @@ fn persist_snapshot(snapshot: &StateSnapshot, out_dir: &std::path::Path) -> Resu
                         .adapter
                         .tokens
                         .iter()
-                        .map(|(address, token)| PersistedToken {
-                            address: hex_addr(*address),
-                            symbol: token.symbol.clone(),
-                            decimals: token.decimals,
-                            tax: token.tax,
-                            gas: token.gas.clone(),
-                            quality: token.quality,
+                        .map(|(address, token)| {
+                            PersistedTokenCompat::Full(PersistedToken {
+                                address: hex_addr(*address),
+                                symbol: token.symbol.clone(),
+                                decimals: token.decimals,
+                                tax: token.tax,
+                                gas: token.gas.clone(),
+                                quality: token.quality,
+                            })
                         })
                         .collect(),
                     state,
@@ -1224,7 +1257,8 @@ fn load_snapshot(path: &std::path::Path) -> Result<StateSnapshot> {
             })?;
         let mut token_map: HashMap<ApexAddress, TychoToken> = HashMap::new();
         let mut token_addresses = Vec::new();
-        for token in &pool.tokens {
+        for token in pool.tokens {
+            let token = token.into_token();
             let Some(address) = apex_batch::dataset::parse_address(&token.address) else {
                 continue;
             };
