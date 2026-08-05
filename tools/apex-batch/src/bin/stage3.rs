@@ -183,7 +183,11 @@ struct PersistedPool {
     component_id: String,
     protocol: String,
     tokens: Vec<PersistedTokenCompat>,
-    state: serde_json::Value,
+    /// Raw JSON text, not a `Value`: `serde_json::Value` cannot hold `u128` above `u64::MAX`
+    /// (no `arbitrary_precision`), which silently dropped every lunarbase pool — their Q96
+    /// anchor prices exceed 2^64. Raw text round-trips digits verbatim and still reads any
+    /// legacy snapshot's object-typed field.
+    state: Box<serde_json::value::RawValue>,
 }
 
 /// Legacy pre-fix snapshots persisted tokens as `(address, symbol, decimals)` tuples; their
@@ -1230,7 +1234,9 @@ async fn take_snapshot(
         let started = Instant::now();
         let boxed = simulation.clone_box();
         clone_box_ms += started.elapsed().as_millis();
-        let persisted = serde_json::to_value(&*boxed as &dyn ProtocolSim).is_ok();
+        // Probe with to_string, NOT to_value: `Value` cannot hold u128 > u64::MAX, so a
+        // to_value probe wrongly rejects states with wide integer fields (lunarbase).
+        let persisted = serde_json::to_string(&*boxed as &dyn ProtocolSim).is_ok();
         let started = Instant::now();
         let arc: Arc<dyn ProtocolSim> = Arc::from(boxed);
         arc_from_ms += started.elapsed().as_millis();
@@ -1289,6 +1295,16 @@ async fn take_snapshot(
             Vec::new()
         }
     };
+    // Raw-persisted pools ARE recoverable from disk, so the live run's serializable-scope
+    // filter must agree with what a from-disk rerun will see.
+    for pool in &mut pools {
+        if v4_raw
+            .iter()
+            .any(|raw| raw.component_id == pool.component_id)
+        {
+            pool.persisted = true;
+        }
+    }
 
     // Price rationals + token metadata for every token the run can touch.
     let mut price_inputs = HashMap::new();
@@ -1455,7 +1471,9 @@ fn persist_snapshot(snapshot: &StateSnapshot, out_dir: &std::path::Path) -> Resu
             .iter()
             .filter(|pool| pool.persisted)
             .filter_map(|pool| {
-                let state = serde_json::to_value(&*pool.adapter.pool as &dyn ProtocolSim).ok()?;
+                let state = serde_json::to_string(&*pool.adapter.pool as &dyn ProtocolSim)
+                    .ok()
+                    .and_then(|json| serde_json::value::RawValue::from_string(json).ok())?;
                 Some(PersistedPool {
                     component_id: pool.component_id.clone(),
                     protocol: pool.adapter.protocol.clone(),
@@ -1665,7 +1683,7 @@ async fn load_snapshot(path: &std::path::Path) -> Result<StateSnapshot> {
     let mut address_book = PoolAddressBook::default();
     let mut pools = Vec::new();
     for pool in persisted.pools {
-        let state: Box<dyn ProtocolSim> = serde_json::from_value(pool.state)
+        let state: Box<dyn ProtocolSim> = serde_json::from_str(pool.state.get())
             .map_err(|e| anyhow::anyhow!("deserializing pool {}: {e}", pool.component_id))?;
         let apex_address = address_book
             .register(&pool.component_id)
