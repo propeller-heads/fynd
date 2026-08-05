@@ -12,6 +12,10 @@
 //!
 //! Everything here is offline: no chain, no Tycho, no Fynd. Both inputs are files.
 
+// Re-exported so lib consumers (the hindsight monitor) name APEX types without carrying the
+// machine-local apex-solver dependency edge themselves.
+pub use apex_solver;
+
 pub mod adapter;
 pub mod analysis;
 pub mod dataset;

@@ -181,6 +181,7 @@ erc20-overrides = { path = "tools/erc20-overrides", version = "0.97.1" }
 # version requirement -- release.config.js bumps the workspace version without bumping
 # requirements it does not know about, and a stale requirement sends cargo to crates.io.
 fynd-tools-common = { path = "tools/common" }
+apex-batch = { path = "tools/apex-batch" }
 fynd-test-fixtures = { path = "test-fixtures" }
 
 # Dev dependencies

@@ -263,7 +263,6 @@ fn describe_apex() {
 }
 
 /// Record an APEX stage shed, labeled by [`SkipReason`].
-#[expect(dead_code, reason = "wired in at the APEX integration step")]
 pub(crate) fn record_apex_skipped(reason: crate::resolve::apex_stage::SkipReason) {
     let reason = match reason {
         crate::resolve::apex_stage::SkipReason::QueueFull => "queue_full",
@@ -273,39 +272,33 @@ pub(crate) fn record_apex_skipped(reason: crate::resolve::apex_stage::SkipReason
 }
 
 /// Record a delivered APEX solve's stage timing.
-#[expect(dead_code, reason = "wired in at the APEX integration step")]
 pub(crate) fn record_apex_delivery(timing: &crate::resolve::apex_stage::SolveTiming) {
     histogram!(APEX_QUEUE_WAIT_SECONDS).record(timing.queue_wait.as_secs_f64());
     histogram!(APEX_SOLVE_SECONDS).record(timing.solve_wall.as_secs_f64());
 }
 
 /// Record a discarded overrun solve.
-#[expect(dead_code, reason = "wired in at the APEX integration step")]
 pub(crate) fn record_apex_overrun() {
     counter!(APEX_OVERRUNS).increment(1);
 }
 
 /// Record a solve whose in-solver deadline truncated the batch.
-#[expect(dead_code, reason = "wired in at the APEX integration step")]
 pub(crate) fn record_apex_deadline_fired() {
     counter!(APEX_DEADLINE_FIRED).increment(1);
 }
 
 /// Record a whole-component abort.
-#[expect(dead_code, reason = "wired in at the APEX integration step")]
 pub(crate) fn record_apex_batch_errored() {
     counter!(APEX_BATCH_ERRORED).increment(1);
 }
 
 /// Record one component solve error by kind (a short static-ish label such as
 /// `clearing_under_limit`; unbounded strings would explode series cardinality).
-#[expect(dead_code, reason = "wired in at the APEX integration step")]
 pub(crate) fn record_apex_component_error(kind: &'static str) {
     counter!(APEX_COMPONENT_ERRORS, "kind" => kind).increment(1);
 }
 
 /// Record `count` orders reaching `status` in the per-order reconciliation.
-#[expect(dead_code, reason = "wired in at the APEX integration step")]
 pub(crate) fn record_apex_orders(status: &'static str, count: u64) {
     counter!(APEX_ORDERS, "status" => status).increment(count);
 }

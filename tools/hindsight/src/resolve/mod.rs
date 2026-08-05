@@ -12,6 +12,7 @@
 //! and the advance with no callback plumbing.
 
 #[expect(dead_code, reason = "wired into the monitor at the APEX integration step")]
+pub(crate) mod apex_live;
 pub(crate) mod apex_stage;
 mod compare;
 pub(crate) mod jsonl;
@@ -901,7 +902,38 @@ mod tests {
 pub(crate) mod test_support {
     use std::collections::HashMap;
 
-    use alloy::primitives::U256;
+    use alloy::primitives::{Address, TxHash, U256};
+
+    use crate::decoder::{AttributionSource, DecodedTrade};
+
+    /// A decoded trade between two tokens, distinguished by `tx_index` — the minimal fixture the
+    /// APEX eligibility and floor tests need.
+    pub(crate) fn trade_between(
+        token_in: Address,
+        token_out: Address,
+        tx_index: u64,
+    ) -> DecodedTrade {
+        DecodedTrade {
+            tx_hash: TxHash::default(),
+            block_number: 21_000_000,
+            tx_index,
+            venue: "relay".into(),
+            solver: "tycho".into(),
+            solver_source: AttributionSource::TraceMatch,
+            decoder: "sender-netting",
+            sender: Address::ZERO,
+            token_in,
+            token_out,
+            amount_in: U256::from(1_000u64),
+            amount_out: U256::from(1_000u64),
+            venue_fee_in: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            quote: None,
+            min_amount_out: None,
+            sandwich: None,
+        }
+    }
     use chrono::NaiveDateTime;
     use fynd_core::types::{Route, Swap};
     use num_bigint::BigUint;

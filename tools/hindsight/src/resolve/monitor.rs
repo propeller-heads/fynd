@@ -131,6 +131,34 @@ pub(crate) struct MonitorArgs {
     /// per-order baseline
     #[arg(long)]
     pub capture_dir: Option<std::path::PathBuf>,
+
+    /// Solve each eligible block's trades as an APEX batch, at both bracket states (N-1 and N),
+    /// off the block loop's critical path. Results land as `apex-YYYY-MM-DD.jsonl` in this
+    /// directory (same daily rotation as the other writers), joinable against the comparisons
+    /// records on `{tx_hash}:{tx_index}`
+    #[arg(long)]
+    pub apex_dir: Option<std::path::PathBuf>,
+
+    /// APEX worker threads (the stage's whole CPU ceiling — dedicated OS threads, not tokio's
+    /// blocking pool)
+    #[arg(long, default_value_t = 2)]
+    pub apex_workers: usize,
+
+    /// Bounded APEX job queue; a full queue sheds the block's job (counted) instead of stalling
+    #[arg(long, default_value_t = 8)]
+    pub apex_queue_capacity: usize,
+
+    /// APEX search budget per component solve, in milliseconds (the study's live budget)
+    #[arg(long, default_value_t = 1_000)]
+    pub apex_budget_ms: u64,
+
+    /// Search budget per single-order control solve, in milliseconds
+    #[arg(long, default_value_t = 250)]
+    pub apex_single_budget_ms: u64,
+
+    /// Pool-subset cap per batch (native-only 2-hop closure, class-ordered)
+    #[arg(long, default_value_t = 400)]
+    pub apex_max_pools: usize,
 }
 
 /// Drives the in-process solver, stepping the chain one block per `SteppingSolver::advance`.
@@ -525,6 +553,8 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         None => None,
     };
 
+    let mut apex = super::apex_live::ApexRuntime::from_args(&cfg)?;
+
     let mut totals = Totals::default();
     let pacing = Pacing::for_chain(chain, cfg.max_lag_blocks);
     info!(
@@ -562,6 +592,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
                 &mut decoder,
                 &mut comparisons,
                 &mut captures,
+                &mut apex,
                 &mut totals,
             ) => match end {
                 SessionEnd::Complete => break,
@@ -580,12 +611,16 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         };
         (solver, controller) = built;
     }
+    if let Some(runtime) = apex {
+        runtime.shutdown();
+    }
     solver.shutdown();
     Ok(())
 }
 
 /// Drive one solver session: step blocks and re-solve each block's settled trades until the run
 /// completes or the feed dies.
+#[expect(clippy::too_many_arguments, reason = "the session owns every writer the loop feeds")]
 async fn run_session<P: Provider>(
     cfg: &MonitorArgs,
     pacing: &Pacing,
@@ -593,6 +628,7 @@ async fn run_session<P: Provider>(
     decoder: &mut Decoder<P>,
     comparisons: &mut Option<super::jsonl::RotatingWriter>,
     captures: &mut Option<super::jsonl::RotatingWriter>,
+    apex: &mut Option<super::apex_live::ApexRuntime>,
     totals: &mut Totals,
 ) -> SessionEnd {
     // Establish a baseline applied state (N-1) before the first comparison.
@@ -661,11 +697,36 @@ async fn run_session<P: Provider>(
         let prices_top = snapshot_prices(adapter.solver, decoder.registry()).await;
         let tops = solve_tops(adapter, &trades).await;
         // Pre-advance seam: the N-1 state is still live and the block's tops are known. The APEX
-        // batch stage clones its filtered pool subset and dispatches its top-bracket solve here.
+        // batch stage clones its filtered pool subset here and solves off the critical path.
+        let apex_eligible = apex.is_some() && super::apex_live::should_dispatch(&trades);
+        if apex_eligible {
+            super::apex_live::dispatch_bracket(
+                apex.as_ref(),
+                adapter.solver,
+                &trades,
+                target,
+                super::apex_live::Bracket::Top,
+            )
+            .await;
+        }
         if let Err(e) = adapter.advance().await {
             return SessionEnd::Unhealthy(e.to_string());
         }
         let ranges = solve_backs(adapter, &trades, tops, &prices_top).await;
+        // Bottom bracket: the solver now holds N, the biased-bottom state (mirrors fynd's back).
+        if apex_eligible {
+            super::apex_live::dispatch_bracket(
+                apex.as_ref(),
+                adapter.solver,
+                &trades,
+                target,
+                super::apex_live::Bracket::Bottom,
+            )
+            .await;
+        }
+        if let Some(runtime) = apex.as_mut() {
+            runtime.drain();
+        }
         // The solver now holds back-of-block (N); snapshot again so the back-of-block improvement
         // is valued against the state it was solved at.
         let prices_back = snapshot_prices(adapter.solver, decoder.registry()).await;
@@ -848,6 +909,12 @@ mod tests {
             max_lag_blocks: Some(100),
             comparisons_dir: None,
             capture_dir: None,
+            apex_dir: None,
+            apex_workers: 2,
+            apex_queue_capacity: 8,
+            apex_budget_ms: 1_000,
+            apex_single_budget_ms: 250,
+            apex_max_pools: 400,
         })
         .await
         .expect("monitor should process one block without error");

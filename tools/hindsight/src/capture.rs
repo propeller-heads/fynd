@@ -178,7 +178,7 @@ fn captured_trades(trades: &[DecodedTrade], ranges: &[RangeComparison]) -> Vec<C
 /// Prefers the trade's extracted `min_amount_out` (decoded from the settling solver's calldata);
 /// when absent, falls back to the synthetic limit — the executed output less
 /// [`SYNTHETIC_LIMIT_BPS`] — and labels it as such.
-fn limit_for(trade: &DecodedTrade) -> (Option<U256>, Option<LimitSource>) {
+pub(crate) fn limit_for(trade: &DecodedTrade) -> (Option<U256>, Option<LimitSource>) {
     if let Some(min_amount_out) = trade.min_amount_out {
         return (Some(min_amount_out), Some(LimitSource::Extracted));
     }

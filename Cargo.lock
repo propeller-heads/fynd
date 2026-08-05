@@ -3883,6 +3883,7 @@ dependencies = [
  "actix-web",
  "alloy",
  "anyhow",
+ "apex-batch",
  "async-trait",
  "chrono",
  "clap",

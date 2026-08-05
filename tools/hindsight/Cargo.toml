@@ -17,6 +17,9 @@ fynd-rpc = { workspace = true }
 tycho-simulation = { workspace = true }
 # Shared tooling (BPS comparison math, FyndAggregator wrapper)
 fynd-tools-common = { workspace = true }
+# APEX live batch stage: the shared input-builder + per-component solve (machine-local
+# apex-solver path dep behind it — the git-dep swap is the gate before any main merge)
+apex-batch = { workspace = true }
 num-bigint = { workspace = true }
 
 # Async runtime
