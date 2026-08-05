@@ -141,8 +141,10 @@ metrics-exporter-prometheus = "0.16"
 metrics-util = "0.20"
 
 # Tycho
-tycho-execution = ">=0.349.0"
-tycho-simulation = ">=0.349.0"
+# TEMPORARY: pinned to propeller-heads/tycho for the unreleased wrap-injection fix
+# (no bridge swaps into split solutions whose ETH/WETH balance is not dangling).
+tycho-execution = { git = "https://github.com/propeller-heads/tycho", rev = "41178af22ae4221d4ed757da260f2639024c4a4d" }
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho", rev = "41178af22ae4221d4ed757da260f2639024c4a4d" }
 typetag = "0.2"
 
 # Compression
