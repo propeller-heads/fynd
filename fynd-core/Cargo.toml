@@ -54,6 +54,7 @@ experimental = []
 
 [dev-dependencies]
 clap.workspace = true
+proptest.workspace = true
 rstest.workspace = true
 tempfile.workspace = true
 toml.workspace = true

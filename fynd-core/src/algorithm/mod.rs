@@ -19,6 +19,7 @@
 //! 3. Register it in `registry.rs`
 
 pub mod bellman_ford;
+pub mod decomposition;
 pub mod most_liquid;
 pub mod path_frank_wolfe;
 pub(crate) mod paths;
@@ -35,6 +36,7 @@ pub mod test_utils;
 use std::time::Duration;
 
 pub use bellman_ford::BellmanFordAlgorithm;
+pub use decomposition::DecompositionAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 pub use path_frank_wolfe::PathFrankWolfeAlgorithm;
 use rustc_hash::FxHashSet;

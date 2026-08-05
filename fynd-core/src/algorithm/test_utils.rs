@@ -25,7 +25,7 @@ use crate::{
     algorithm::most_liquid::DepthAndPrice,
     feed::market_data::{MarketData, MarketState},
     graph::{petgraph::PetgraphStableDiGraphManager, GraphManager, TopologyGraphManager},
-    types::{quote::OrderSide, BlockInfo, Order},
+    types::{quote::OrderSide, BlockInfo, ComponentId, Order},
 };
 
 /// Use amounts in wei scale (10^18) to exceed gas costs in tests.
@@ -533,8 +533,67 @@ pub fn setup_market_weighted(
 pub fn setup_market_weighted_boxed(
     components: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
 ) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
+    let (market, component_weights) = weighted_market(components);
+
+    let mut graph_manager = TopologyGraphManager::default();
+    graph_manager.initialize_graph(&market.component_topology());
+
+    for (component_id, token_in, token_out, weight_to, weight_from) in component_weights {
+        graph_manager
+            .set_pool_weight(&component_id, &token_in.address, &token_out.address, weight_to, false)
+            .unwrap();
+        graph_manager
+            .set_pool_weight(
+                &component_id,
+                &token_out.address,
+                &token_in.address,
+                weight_from,
+                false,
+            )
+            .unwrap();
+    }
+
+    (MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market))), graph_manager)
+}
+
+/// Like [`setup_market_weighted_boxed`] but builds the one-edge-per-component graph, for
+/// algorithms that route over components rather than over token pairs.
+pub fn setup_market_weighted_petgraph(
+    components: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
+) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+    let (market, component_weights) = weighted_market(components);
+
+    let mut graph_manager = PetgraphStableDiGraphManager::default();
+    graph_manager.initialize_graph(&market.component_topology());
+
+    for (component_id, token_in, token_out, weight_to, weight_from) in component_weights {
+        graph_manager
+            .set_edge_weight(&component_id, &token_in.address, &token_out.address, weight_to, false)
+            .unwrap();
+        graph_manager
+            .set_edge_weight(
+                &component_id,
+                &token_out.address,
+                &token_in.address,
+                weight_from,
+                false,
+            )
+            .unwrap();
+    }
+
+    (MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market))), graph_manager)
+}
+
+/// One component's two directional edge weights, with the token pair they belong to.
+type WeightedComponent<'a> = (ComponentId, &'a Token, &'a Token, DepthAndPrice, DepthAndPrice);
+
+/// Builds the market half of the weighted fixtures, together with each component's two
+/// directional edge weights, ready for whichever graph manager the caller wants.
+fn weighted_market<'a>(
+    components: Vec<(&str, &'a Token, &'a Token, Box<dyn ProtocolSim>)>,
+) -> (MarketState, Vec<WeightedComponent<'a>>) {
     let mut market = MarketState::new();
-    let mut component_weights = FxHashMap::default();
+    let mut component_weights = Vec::with_capacity(components.len());
 
     // Set gas_price = 1 wei/gas for simple calculations
     market.update_gas_price(BlockGasPrice {
@@ -558,34 +617,16 @@ pub fn setup_market_weighted_boxed(
         market.update_states([(component_id.to_string(), state)]);
         market.upsert_tokens(tokens);
 
-        component_weights.insert(component_id, (token_in, token_out, weight_to, weight_from));
+        component_weights.push((
+            component_id.to_string(),
+            token_in,
+            token_out,
+            weight_to,
+            weight_from,
+        ));
     }
 
-    let mut graph_manager = TopologyGraphManager::default();
-    graph_manager.initialize_graph(&market.component_topology());
-
-    for (component_id, (token_in, token_out, weight_to, weight_from)) in component_weights {
-        graph_manager
-            .set_pool_weight(
-                &component_id.to_string(),
-                &token_in.address,
-                &token_out.address,
-                weight_to,
-                false,
-            )
-            .unwrap();
-        graph_manager
-            .set_pool_weight(
-                &component_id.to_string(),
-                &token_out.address,
-                &token_in.address,
-                weight_from,
-                false,
-            )
-            .unwrap();
-    }
-
-    (MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market))), graph_manager)
+    (market, component_weights)
 }
 
 /// Builds the market half of the unweighted fixtures, without a graph.

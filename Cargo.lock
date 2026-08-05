@@ -3526,6 +3526,7 @@ dependencies = [
  "num-traits",
  "num_cpus",
  "petgraph",
+ "proptest",
  "rayon",
  "reqwest 0.12.28",
  "rstest",
