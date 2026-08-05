@@ -73,10 +73,11 @@ const SHARED_FULL_PATHS: usize = 8;
 const SHARED_MARGIN_PROBE_PATHS: usize = 32;
 /// Number of marginal-probe winners added to the fill-and-spill candidate set.
 const SHARED_MARGIN_PATHS: usize = 8;
-/// Number of limit-capped paths (best capped output first) always added to the fill-and-spill
-/// marginal probe, wherever they rank. An inventory-limited path's capped output sinks below
-/// every pool deep enough to absorb the whole order once the order is a small multiple of its
-/// inventory, but its price can still win the probe.
+/// Number of full-amount-failing paths given an honest limit-capped ranking simulation and
+/// always added to the fill-and-spill marginal probe, wherever they rank. An inventory-limited
+/// path's capped output sinks below every pool deep enough to absorb the whole order once the
+/// order is a small multiple of its inventory, but its price can still win the probe. Selection
+/// deduplicates by bottleneck component and ranks by spot price (`select_capped_probes`).
 const CAPPED_PROBE_PATHS: usize = 16;
 /// Upper bound on fill-and-spill candidate paths.
 const SHARED_MAX_CANDIDATES: usize = 12;
@@ -149,6 +150,112 @@ struct StepResult {
     amount_out: BigUint,
     gas: BigUint,
     new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
+    /// Exact input each hop swapped, keyed like [`LimitsCache`], for component-budget tracking.
+    hop_inputs: Vec<((ComponentId, Address, Address), BigUint)>,
+}
+
+/// Sell-limit lookups memoized for one solve, keyed by component and swap direction. `get_limits`
+/// on VM-backed pools executes EVM code, and at three hops the candidate paths cross the same
+/// component pair thousands of times — the cache collapses that to one call per direction.
+/// A `None` value records that the state or its limits are unavailable, so failures are not
+/// retried either.
+type LimitsCache = HashMap<(ComponentId, Address, Address), Option<BigUint>>;
+
+/// Cumulative component usage across every path of one allocation pass, checked against each
+/// component's `get_limits` sell limit.
+///
+/// Chunked simulations can overshoot a component's real capacity: some states (propAMM balance
+/// overrides in particular) only reject a single swap larger than the balance, so per-chunk swaps
+/// all succeed while the rebuilt single leg at the summed amount reverts and the whole candidate
+/// is lost. Per-path caps are not enough — fill-and-spill paths share components, and their
+/// combined allocation must also stay a valid single swap. The chunk loops therefore refuse any
+/// chunk that would push a component's summed input past its sell limit. A component without an
+/// available limit stays bounded by chunk simulation failures alone.
+struct ComponentBudget {
+    limits: LimitsCache,
+    used: HashMap<(ComponentId, Address, Address), BigUint>,
+}
+
+impl ComponentBudget {
+    fn new() -> Self {
+        Self { limits: LimitsCache::new(), used: HashMap::new() }
+    }
+
+    /// Whether every component the step swapped through stays within its sell limit after
+    /// adding the step's hop inputs.
+    fn allows(&mut self, market: &MarketState, step: &StepResult) -> bool {
+        // A path may traverse a component twice, so tentative additions accumulate per key
+        // before comparing against the limit.
+        let mut additions: HashMap<&(ComponentId, Address, Address), BigUint> = HashMap::new();
+        for (key, amount_in) in &step.hop_inputs {
+            let Some(limit) = WaterFillAlgorithm::cached_sell_limit(
+                &mut self.limits,
+                market,
+                &key.0,
+                &key.1,
+                &key.2,
+            ) else {
+                continue;
+            };
+            let added = additions.entry(key).or_default();
+            *added += amount_in;
+            let used = self
+                .used
+                .get(key)
+                .cloned()
+                .unwrap_or_default();
+            if used + &*added > limit {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether any component of `path` has already consumed its whole sell limit — a cheap
+    /// pre-simulation skip for saturated paths; `allows` stays the exact check.
+    fn path_saturated(&mut self, market: &MarketState, path: &Path<DepthAndPrice>) -> bool {
+        for (address_in, edge, address_out) in path.iter() {
+            let Some(limit) = WaterFillAlgorithm::cached_sell_limit(
+                &mut self.limits,
+                market,
+                &edge.component_id,
+                address_in,
+                address_out,
+            ) else {
+                continue;
+            };
+            let key = (edge.component_id.clone(), address_in.clone(), address_out.clone());
+            if self
+                .used
+                .get(&key)
+                .is_some_and(|used| *used >= limit)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Records the step's hop inputs as consumed.
+    fn commit(&mut self, step: &StepResult) {
+        for (key, amount_in) in &step.hop_inputs {
+            *self
+                .used
+                .entry(key.clone())
+                .or_default() += amount_in;
+        }
+    }
+}
+
+/// A path's input cap from `max_fillable_input`, with the data capped-probe selection needs.
+struct PathCap {
+    /// Largest path input within every hop's sell limit, in path-input token units.
+    input_cap: BigUint,
+    /// Component whose sell limit set the cap.
+    bottleneck: ComponentId,
+    /// Product of every edge's spot price (path output per input at zero size); `None` when any
+    /// edge's derived data is missing.
+    spot_product: Option<f64>,
 }
 
 /// Shared inputs threaded through every split-allocation pass: the ranked candidate paths, the
@@ -221,6 +328,8 @@ impl WaterFillAlgorithm {
         let mut intra_path_states: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
         let mut new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)> =
             Vec::with_capacity(path.len());
+        let mut hop_inputs: Vec<((ComponentId, Address, Address), BigUint)> =
+            Vec::with_capacity(path.len());
 
         for (address_in, edge, address_out) in path.iter() {
             let token_in = market.get_token(address_in)?;
@@ -243,9 +352,13 @@ impl WaterFillAlgorithm {
                 intra_path_states.insert(component_id.clone(), result.new_state.clone_box());
             }
             new_states.push((component_id.clone(), result.new_state));
+            hop_inputs.push((
+                (component_id.clone(), address_in.clone(), address_out.clone()),
+                current.clone(),
+            ));
             current = result.amount;
         }
-        Some(StepResult { amount_out: current, gas: total_gas, new_states })
+        Some(StepResult { amount_out: current, gas: total_gas, new_states, hop_inputs })
     }
 
     /// Converts a gas amount to output-token terms. Returns `None` if no price is available.
@@ -303,8 +416,32 @@ impl WaterFillAlgorithm {
         selected
     }
 
+    /// One hop's `get_limits` sell limit through the solve-scoped cache.
+    fn cached_sell_limit(
+        limits: &mut LimitsCache,
+        market: &MarketState,
+        component_id: &ComponentId,
+        address_in: &Address,
+        address_out: &Address,
+    ) -> Option<BigUint> {
+        let key = (component_id.clone(), address_in.clone(), address_out.clone());
+        if let Some(cached) = limits.get(&key) {
+            return cached.clone();
+        }
+        let limit = market
+            .get_simulation_state(component_id)
+            .and_then(|state| {
+                state
+                    .get_limits_guarded(address_in.clone(), address_out.clone())
+                    .ok()
+            })
+            .map(|(max_in, _max_out)| max_in);
+        limits.insert(key, limit.clone());
+        limit
+    }
+
     /// Largest input the path can accept according to each hop's `get_limits` sell limit, in
-    /// path-input token units.
+    /// path-input token units, with the component that set it and the path's spot price.
     ///
     /// A downstream hop's limit is back-converted to path-input units through the product of the
     /// preceding edges' spot prices. Output is concave in input for every pool type
@@ -312,19 +449,27 @@ impl WaterFillAlgorithm {
     /// at the returned amount stays within every hop's limit. The first hop's limit is already in
     /// path-input units and needs no conversion.
     ///
-    /// Returns `None` when a hop's simulation state, limit, or edge spot price is unavailable,
-    /// or when the resulting cap is zero.
-    fn max_fillable_input(path: &Path<DepthAndPrice>, market: &MarketState) -> Option<BigUint> {
-        let mut cap: Option<BigUint> = None;
+    /// Returns `None` when a hop's simulation state, limit, or a non-final edge spot price is
+    /// unavailable, or when the resulting cap is zero.
+    fn max_fillable_input(
+        path: &Path<DepthAndPrice>,
+        market: &MarketState,
+        limits: &mut LimitsCache,
+    ) -> Option<PathCap> {
+        let mut cap: Option<(BigUint, ComponentId)> = None;
         // Path-input units per current hop-input unit: the product of preceding edges' spot
         // prices (each token_out per token_in).
         let mut path_input_price = 1.0_f64;
+        let mut spot_product = Some(1.0_f64);
         let hop_count = path.len();
         for (hop, (address_in, edge, address_out)) in path.iter().enumerate() {
-            let state = market.get_simulation_state(&edge.component_id)?;
-            let (max_in, _max_out) = state
-                .get_limits_guarded(address_in.clone(), address_out.clone())
-                .ok()?;
+            let max_in = Self::cached_sell_limit(
+                limits,
+                market,
+                &edge.component_id,
+                address_in,
+                address_out,
+            )?;
             let hop_cap = if hop == 0 {
                 max_in
             } else {
@@ -332,39 +477,95 @@ impl WaterFillAlgorithm {
             };
             if cap
                 .as_ref()
-                .is_none_or(|current| hop_cap < *current)
+                .is_none_or(|(current, _)| hop_cap < *current)
             {
-                cap = Some(hop_cap);
+                cap = Some((hop_cap, edge.component_id.clone()));
             }
-            if hop + 1 < hop_count {
-                let spot = edge.data.as_ref()?.spot_price;
-                if spot <= 0.0 || !spot.is_finite() {
-                    return None;
+            match edge
+                .data
+                .as_ref()
+                .map(|data| data.spot_price)
+            {
+                Some(spot) if spot > 0.0 && spot.is_finite() => {
+                    if hop + 1 < hop_count {
+                        path_input_price *= spot;
+                    }
+                    spot_product = spot_product.map(|product| product * spot);
                 }
-                path_input_price *= spot;
+                // A final hop's missing spot price does not affect the cap, only the proxy.
+                _ if hop + 1 == hop_count => spot_product = None,
+                _ => return None,
             }
         }
-        cap.filter(|cap| !cap.is_zero())
+        let (input_cap, bottleneck) = cap?;
+        if input_cap.is_zero() {
+            return None;
+        }
+        Some(PathCap { input_cap, bottleneck, spot_product })
     }
 
-    /// Gross output used to rank a path that failed simulation at the full order amount: its
-    /// output at the limit-capped input.
+    /// Chooses which full-amount-failing paths get an honest limit-capped ranking simulation,
+    /// returning `(path index, cap)` pairs.
     ///
-    /// Returns `None` when the limits don't explain the failure (the cap covers the full order,
-    /// so the failure has another cause) or when the capped simulation fails as well. The limit
-    /// itself is a valid `get_amount_out` input per the `get_limits` contract; a single retry at
-    /// 99% covers a marginally stale limit. No further search is done.
-    fn capped_rank_output(
+    /// Computing a cap is cheap (cached `get_limits` lookups), but the capped simulation is not,
+    /// and at three hops most candidate paths fail once the order is large — simulating every
+    /// one dominated solve time. All failing paths keep gross 0 except the strongest probes:
+    /// paths are deduplicated by bottleneck component (paths sharing a bottleneck cannot
+    /// contribute its inventory twice), then the best [`CAPPED_PROBE_PATHS`] by spot price are
+    /// kept — the fill-and-spill marginal probe these paths are retained for is itself
+    /// price-driven. Paths whose cap covers the full order (the failure has another cause) or
+    /// cannot absorb one fine chunk are dropped.
+    fn select_capped_probes(
+        paths: &[Path<DepthAndPrice>],
+        failing: &[usize],
+        market: &MarketState,
+        order_amount: &BigUint,
+        limits: &mut LimitsCache,
+    ) -> Vec<(usize, BigUint)> {
+        let chunk_floor = order_amount / FINE_CHUNKS;
+        let mut best_per_bottleneck: HashMap<ComponentId, (usize, BigUint, f64)> = HashMap::new();
+        for &idx in failing {
+            let Some(path_cap) = Self::max_fillable_input(&paths[idx], market, limits) else {
+                continue;
+            };
+            if path_cap.input_cap >= *order_amount || path_cap.input_cap < chunk_floor {
+                continue;
+            }
+            let Some(spot) = path_cap.spot_product else {
+                continue;
+            };
+            let keep = best_per_bottleneck
+                .get(&path_cap.bottleneck)
+                .is_none_or(|(_, _, existing)| spot > *existing);
+            if keep {
+                best_per_bottleneck.insert(path_cap.bottleneck, (idx, path_cap.input_cap, spot));
+            }
+        }
+        let mut probes: Vec<(usize, BigUint, f64)> = best_per_bottleneck
+            .into_values()
+            .collect();
+        probes.sort_by(|(_, _, a), (_, _, b)| {
+            b.partial_cmp(a)
+                .unwrap_or(Ordering::Equal)
+        });
+        probes.truncate(CAPPED_PROBE_PATHS);
+        probes
+            .into_iter()
+            .map(|(idx, cap, _)| (idx, cap))
+            .collect()
+    }
+
+    /// Gross output of a path simulated at its limit cap, used to rank it honestly.
+    ///
+    /// The cap itself is a valid `get_amount_out` input per the `get_limits` contract; a single
+    /// retry at 99% covers a marginally stale limit. No further search is done.
+    fn simulate_at_cap(
         path: &Path<DepthAndPrice>,
         market: &MarketState,
         token_prices: Option<&TokenGasPrices>,
-        order_amount: &BigUint,
+        cap: &BigUint,
     ) -> Option<BigUint> {
-        let cap = Self::max_fillable_input(path, market)?;
-        if cap >= *order_amount {
-            return None;
-        }
-        for amount in [cap.clone(), &cap * 99u32 / 100u32] {
+        for amount in [cap.clone(), cap * 99u32 / 100u32] {
             if amount.is_zero() {
                 continue;
             }
@@ -509,7 +710,7 @@ impl WaterFillAlgorithm {
         let amount_in = order.amount().clone();
         let mut best_single: Option<RouteResult> = None;
         let mut full_outputs: Vec<(usize, BigUint)> = Vec::new();
-        let mut capped_paths: HashSet<usize> = HashSet::new();
+        let mut failing: Vec<usize> = Vec::new();
 
         for (idx, path) in paths.iter().enumerate() {
             if start.elapsed().as_millis() as u64 > timeout_ms {
@@ -537,23 +738,39 @@ impl WaterFillAlgorithm {
                         best_single = Some(result);
                     }
                 }
-                // A path that can't take the whole order (e.g. a propAMM whose inventory is
-                // below the order, or concentrated liquidity exhausted at the full amount) may
-                // still be worth a fraction in a split. Rank it by its output at the
-                // limit-capped amount so it stays inside the split candidate windows
-                // (`select_disjoint`, `select_shared_candidates`); the allocation passes cap its
-                // share chunk by chunk. It never becomes the single-path baseline, and a path
-                // whose failure the limits don't explain keeps gross 0 (ranked last).
-                Err(_) => {
-                    match Self::capped_rank_output(path, &market, token_prices.as_ref(), &amount_in)
-                    {
-                        Some(capped_gross) => {
-                            capped_paths.insert(idx);
-                            full_outputs.push((idx, capped_gross));
-                        }
-                        None => full_outputs.push((idx, BigUint::zero())),
-                    }
+                Err(_) => failing.push(idx),
+            }
+        }
+
+        // A path that can't take the whole order (e.g. a propAMM whose inventory is below the
+        // order, or concentrated liquidity exhausted at the full amount) may still be worth a
+        // fraction in a split. The selected probes are ranked by their output at the
+        // limit-capped amount so they stay inside the split candidate windows
+        // (`select_disjoint`, `select_shared_candidates`); the allocation passes cap their share
+        // chunk by chunk. They never become the single-path baseline. Every other failing path
+        // keeps gross 0 (ranked last).
+        let mut limits = LimitsCache::new();
+        let mut capped_paths: HashSet<usize> = HashSet::new();
+        let mut capped_grosses: HashMap<usize, BigUint> = HashMap::new();
+        for (idx, cap) in
+            Self::select_capped_probes(&paths, &failing, &market, &amount_in, &mut limits)
+        {
+            if start.elapsed().as_millis() as u64 > timeout_ms {
+                break;
+            }
+            if let Some(gross) =
+                Self::simulate_at_cap(&paths[idx], &market, token_prices.as_ref(), &cap)
+            {
+                capped_grosses.insert(idx, gross);
+            }
+        }
+        for idx in failing {
+            match capped_grosses.remove(&idx) {
+                Some(gross) => {
+                    capped_paths.insert(idx);
+                    full_outputs.push((idx, gross));
                 }
+                None => full_outputs.push((idx, BigUint::zero())),
             }
         }
 
@@ -946,21 +1163,6 @@ impl WaterFillAlgorithm {
         Self::candidate_from_allocations(ctx, &allocations)
     }
 
-    /// Per-path allocation caps from `get_limits`, aligned with `subset`.
-    ///
-    /// Chunked simulations can overshoot a component's real capacity: some states (propAMM
-    /// balance overrides in particular) only reject a single swap larger than the balance, so
-    /// per-chunk swaps all succeed while the rebuilt single leg at the summed amount reverts and
-    /// the whole candidate is lost. The chunk loops therefore stop allocating to a path at its
-    /// limit cap. `None` means no cap could be computed (missing state or limits) — the path
-    /// stays bounded by chunk simulation failures alone, as before.
-    fn allocation_caps(ctx: &SplitContext, subset: &[usize]) -> Vec<Option<BigUint>> {
-        subset
-            .iter()
-            .map(|&path_idx| Self::max_fillable_input(&ctx.ordered[path_idx], ctx.market))
-            .collect()
-    }
-
     /// Incremental water-fill over a set of component-disjoint paths. Returns the amount allocated
     /// to each path in `subset` order. With `gate`, a path only activates when its first chunk
     /// covers its gas; without it, every path is eligible (used once the active set is fixed).
@@ -981,7 +1183,7 @@ impl WaterFillAlgorithm {
         let timeout_ms = self.timeout.as_millis() as u64;
         let path_count = subset.len();
 
-        let caps = Self::allocation_caps(ctx, subset);
+        let mut budget = ComponentBudget::new();
         let mut committed: Vec<HashMap<ComponentId, Box<dyn ProtocolSim>>> = (0..path_count)
             .map(|_| HashMap::new())
             .collect();
@@ -996,10 +1198,7 @@ impl WaterFillAlgorithm {
 
             let mut best: Option<(usize, BigInt, StepResult)> = None;
             for (i, &path_idx) in subset.iter().enumerate() {
-                if caps[i]
-                    .as_ref()
-                    .is_some_and(|cap| &cum_in[i] + &chunk > *cap)
-                {
+                if budget.path_saturated(ctx.market, &ctx.ordered[path_idx]) {
                     continue;
                 }
                 let Some(step) = Self::simulate_step(
@@ -1010,6 +1209,9 @@ impl WaterFillAlgorithm {
                 ) else {
                     continue;
                 };
+                if !budget.allows(ctx.market, &step) {
+                    continue;
+                }
                 let gross_marginal = BigInt::from(step.amount_out.clone());
                 let net_marginal = if activated[i] {
                     gross_marginal
@@ -1029,6 +1231,7 @@ impl WaterFillAlgorithm {
             let Some((best_i, _, step)) = best else {
                 break;
             };
+            budget.commit(&step);
             for (id, state) in step.new_states {
                 committed[best_i].insert(id, state);
             }
@@ -1044,11 +1247,29 @@ impl WaterFillAlgorithm {
     /// are probed wherever they rank, for the same reason: an inventory-limited path's capped
     /// output sinks below every order-absorbing pool as the order grows, but its price can still
     /// win the probe.
+    ///
+    /// Probe winners that cannot take the whole order are deduplicated by bottleneck component:
+    /// near-identical variants of one limited pool would win several probe slots on the same
+    /// price, burn the gated activation slots (`max_paths`), and all saturate together — leaving
+    /// the order under-filled. Paths that can absorb the full order are never deduplicated, so
+    /// tree routes sharing a deep component are unaffected.
     fn select_shared_candidates(&self, ctx: &SplitContext) -> Vec<usize> {
         let mut candidates: Vec<usize> = (0..ctx.ordered.len().min(SHARED_FULL_PATHS)).collect();
         let first_chunk = ctx.order.amount() / COARSE_CHUNKS;
         if first_chunk.is_zero() {
             return candidates;
+        }
+        let mut limits = LimitsCache::new();
+        let mut limited_bottlenecks: HashSet<ComponentId> = HashSet::new();
+        let bottleneck_of_limited = |idx: usize, limits: &mut LimitsCache| {
+            Self::max_fillable_input(&ctx.ordered[idx], ctx.market, limits)
+                .filter(|path_cap| path_cap.input_cap < *ctx.order.amount())
+                .map(|path_cap| path_cap.bottleneck)
+        };
+        for &idx in &candidates {
+            if let Some(bottleneck) = bottleneck_of_limited(idx, &mut limits) {
+                limited_bottlenecks.insert(bottleneck);
+            }
         }
         let timeout_ms = self.timeout.as_millis() as u64;
         let empty: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
@@ -1077,19 +1298,21 @@ impl WaterFillAlgorithm {
             marginal.push((idx, BigInt::from(step.amount_out) - activation));
         }
         marginal.sort_by(|(_, a), (_, b)| b.cmp(a));
-        for (idx, net) in marginal
-            .into_iter()
-            .take(SHARED_MARGIN_PATHS)
-        {
-            if net <= BigInt::zero() {
-                continue;
-            }
-            if !candidates.contains(&idx) {
-                candidates.push(idx);
-            }
-            if candidates.len() >= SHARED_MAX_CANDIDATES {
+        let mut winners = 0usize;
+        for (idx, net) in marginal {
+            if winners >= SHARED_MARGIN_PATHS || candidates.len() >= SHARED_MAX_CANDIDATES {
                 break;
             }
+            if net <= BigInt::zero() || candidates.contains(&idx) {
+                continue;
+            }
+            if let Some(bottleneck) = bottleneck_of_limited(idx, &mut limits) {
+                if !limited_bottlenecks.insert(bottleneck) {
+                    continue;
+                }
+            }
+            candidates.push(idx);
+            winners += 1;
         }
         candidates
     }
@@ -1142,12 +1365,20 @@ impl WaterFillAlgorithm {
         let remainder = &amount_in - &base_chunk * num_chunks;
         let timeout_ms = self.timeout.as_millis() as u64;
 
-        let caps = Self::allocation_caps(ctx, subset);
+        let mut budget = ComponentBudget::new();
         let mut overlay: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
         let mut activated: Vec<bool> = vec![!gate; subset.len()];
         let mut active_count = if gate { 0 } else { subset.len() };
+        // The gated pass anchors the top-ranked candidate in the active set: probe winners are
+        // picked by marginal price, so several inventory-limited paths can win every `max_paths`
+        // activation slot, saturate their shared budgets together, and leave the order
+        // unfillable — the rebuilt route then scales the deficit onto the over-committed legs
+        // and is discarded. The best-ranked path can absorb the remainder, so it keeps a slot.
+        if gate && !activated.is_empty() {
+            activated[0] = true;
+            active_count = 1;
+        }
         let mut counts: Vec<usize> = vec![0; subset.len()];
-        let mut cum_in: Vec<BigUint> = vec![BigUint::zero(); subset.len()];
         let mut schedule: Vec<(usize, BigUint)> = Vec::with_capacity(num_chunks);
 
         for chunk_idx in 0..num_chunks {
@@ -1161,10 +1392,7 @@ impl WaterFillAlgorithm {
                 if !activated[i] && active_count >= self.max_paths {
                     continue;
                 }
-                if caps[i]
-                    .as_ref()
-                    .is_some_and(|cap| &cum_in[i] + &chunk > *cap)
-                {
+                if budget.path_saturated(ctx.market, &ctx.ordered[path_idx]) {
                     continue;
                 }
                 let Some(step) = Self::simulate_step(
@@ -1175,6 +1403,9 @@ impl WaterFillAlgorithm {
                 ) else {
                     continue;
                 };
+                if !budget.allows(ctx.market, &step) {
+                    continue;
+                }
                 let gross_marginal = BigInt::from(step.amount_out.clone());
                 let net_marginal = if activated[i] {
                     gross_marginal
@@ -1194,6 +1425,7 @@ impl WaterFillAlgorithm {
             let Some((best_i, _, step)) = best else {
                 break;
             };
+            budget.commit(&step);
             for (id, state) in step.new_states {
                 overlay.insert(id, state);
             }
@@ -1202,7 +1434,6 @@ impl WaterFillAlgorithm {
                 active_count += 1;
             }
             counts[best_i] += 1;
-            cum_in[best_i] += &chunk;
             schedule.push((best_i, chunk));
         }
         Some((counts, schedule))
@@ -1927,6 +2158,107 @@ mod tests {
         assert!(result.route().validate().is_ok(), "route validation failed");
     }
 
+    /// Capped-probe slots are deduplicated by bottleneck component: many failing paths sharing
+    /// one limited pool must not crowd a distinct limited pool out of the probe set. 20 two-hop
+    /// paths all bottlenecked by the same B->C pool rank above the direct limited pool by capped
+    /// output; without dedup they fill all [`CAPPED_PROBE_PATHS`] slots and the direct pool is
+    /// dropped from the split even though its price (the market's best) wins a probe.
+    #[tokio::test]
+    async fn test_capped_probe_slots_deduped_by_bottleneck() {
+        let a = token_with_decimals(0x01, "A", 18);
+        let b = token_with_decimals(0x02, "B", 18);
+        let c = token_with_decimals(0x03, "C", 18);
+        let unit = BigUint::from(10u64).pow(18);
+
+        // Direct A->C, best price in the market (1000 C/A) but only 800 A of input reserve:
+        // fails the 2000 A order, capped at 400 A (~267k C).
+        let limited_direct = Box::new(ConstantProductSim {
+            reserve_0: BigUint::from(800u64) * &unit,
+            reserve_1: BigUint::from(800_000u64) * &unit,
+            gas: 50_000,
+        }) as Box<dyn ProtocolSim>;
+        // 20 deep A->B bridges (rate 1.0) into one limited B->C pool (rate 950, 1,200 B input
+        // reserve): 20 failing two-hop paths (the bridges pass ~1,666 B at the full order),
+        // every one bottlenecked by the same component, each with capped output ~365k C —
+        // above the direct limited pool's 267k, but at a worse spot price than its 1000.
+        let bridge = || {
+            Box::new(ConstantProductSim {
+                reserve_0: BigUint::from(10_000u64) * &unit,
+                reserve_1: BigUint::from(10_000u64) * &unit,
+                gas: 50_000,
+            }) as Box<dyn ProtocolSim>
+        };
+        let bottleneck_bc = Box::new(ConstantProductSim {
+            reserve_0: BigUint::from(1_200u64) * &unit,
+            reserve_1: BigUint::from(1_140_000u64) * &unit,
+            gas: 50_000,
+        }) as Box<dyn ProtocolSim>;
+        // Direct pools that absorb the full order, ranking between the two-hop capped outputs
+        // and the direct limited pool: one deep (833k C) and 15 shallow (571k C each), pushing
+        // the direct limited pool below the top-32 marginal-probe window.
+        let deep = Box::new(ConstantProductSim {
+            reserve_0: BigUint::from(10_000u64) * &unit,
+            reserve_1: BigUint::from(5_000_000u64) * &unit,
+            gas: 50_000,
+        }) as Box<dyn ProtocolSim>;
+        let shallow = || {
+            Box::new(ConstantProductSim {
+                reserve_0: BigUint::from(5_000u64) * &unit,
+                reserve_1: BigUint::from(2_000_000u64) * &unit,
+                gas: 50_000,
+            }) as Box<dyn ProtocolSim>
+        };
+
+        let bridge_names: Vec<String> = (0..20)
+            .map(|i| format!("bridge_{i}"))
+            .collect();
+        let shallow_names: Vec<String> = (0..15)
+            .map(|i| format!("shallow_{i}"))
+            .collect();
+        let mut components = vec![
+            ("limited_direct", &a, &c, limited_direct),
+            ("bottleneck_bc", &b, &c, bottleneck_bc),
+            ("deep", &a, &c, deep),
+        ];
+        for name in &bridge_names {
+            components.push((name.as_str(), &a, &b, bridge()));
+        }
+        for name in &shallow_names {
+            components.push((name.as_str(), &a, &c, shallow()));
+        }
+        let (market, gm) = setup_market_weighted_boxed(components);
+
+        let order = Order::new(
+            a.address.clone(),
+            c.address.clone(),
+            BigUint::from(2_000u64) * &unit,
+            OrderSide::Sell,
+            addr(0xFF),
+        );
+        let result = WaterFillAlgorithm::with_config(config())
+            .unwrap()
+            .find_best_route(gm.graph(), market.clone(), None, None, &order)
+            .await
+            .expect("order fills across the direct components");
+
+        let limited_amount_in: BigUint = result
+            .route()
+            .swaps()
+            .iter()
+            .filter(|swap| swap.component_id() == "limited_direct")
+            .map(|swap| swap.amount_in().clone())
+            .sum();
+        assert!(
+            !limited_amount_in.is_zero(),
+            "the direct limited component must keep a probe slot despite 20 same-bottleneck paths",
+        );
+        assert!(
+            limited_amount_in <= BigUint::from(400u64) * &unit,
+            "allocation must respect the 400 A cap, got {limited_amount_in}",
+        );
+        assert!(result.route().validate().is_ok(), "route validation failed");
+    }
+
     /// The single-hop cap is the first hop's `get_limits` sell limit, exact and unconverted.
     #[tokio::test]
     async fn test_max_fillable_input_single_hop_uses_exact_limit() {
@@ -1949,10 +2281,11 @@ mod tests {
             .extract_subset_with_overlay(&HashSet::from(["limited".to_string()]));
 
         // ConstantProductSim's sell limit is half the input reserve: 400 A.
-        assert_eq!(
-            WaterFillAlgorithm::max_fillable_input(&paths[0], &subset),
-            Some(BigUint::from(400u64) * &unit),
-        );
+        let cap =
+            WaterFillAlgorithm::max_fillable_input(&paths[0], &subset, &mut LimitsCache::new())
+                .expect("cap must be computable");
+        assert_eq!(cap.input_cap, BigUint::from(400u64) * &unit);
+        assert_eq!(cap.bottleneck, "limited".to_string());
     }
 
     /// A downstream hop's limit is back-converted to path-input units through the preceding
@@ -1989,13 +2322,20 @@ mod tests {
 
         // Hop 2's sell limit is 400 B; through hop 1's 2.0 spot that is 200 A of path input,
         // tighter than hop 1's own 5,000 A limit. f64 conversion may be off by a rounding ulp.
-        let cap = WaterFillAlgorithm::max_fillable_input(&paths[0], &subset)
-            .expect("cap must be computable");
+        let cap =
+            WaterFillAlgorithm::max_fillable_input(&paths[0], &subset, &mut LimitsCache::new())
+                .expect("cap must be computable");
+        assert_eq!(cap.bottleneck, "second".to_string());
         let expected = BigUint::from(200u64) * &unit;
-        let diff = if cap > expected { &cap - &expected } else { &expected - &cap };
+        let diff = if cap.input_cap > expected {
+            &cap.input_cap - &expected
+        } else {
+            &expected - &cap.input_cap
+        };
         assert!(
             diff <= BigUint::from(1_000_000u64),
-            "cap {cap} should be within rounding error of {expected}",
+            "cap {} should be within rounding error of {expected}",
+            cap.input_cap,
         );
     }
 
