@@ -220,6 +220,19 @@ struct Counters {
     pools_in_scope: u64,
     negative_fill_gaps: u64,
     negative_gap_usd: f64,
+    /// USD notional of orders lost to a deadline-cut cluster / an errored component / an
+    /// unfilled limit — closes the cell's books so the pools-vs-no_pools gap decomposes.
+    cluster_cut_usd: f64,
+    component_errored_usd: f64,
+    unfilled_usd: f64,
+    /// Orders whose snapshot-vs-trade-day price ratio moved >100 bps (either token) — their
+    /// Original-anchor surplus is drift, not batching edge.
+    drift_flagged_orders: u64,
+    /// Pooled components whose solve errored or came back empty at the deadline and were
+    /// re-solved without pools (the fair-comparison fallback). The matched USD those fallback
+    /// solves recovered.
+    pools_fallback_components: u64,
+    pools_fallback_matched_usd: f64,
     components_solved: u64,
     components_multi_order: u64,
     /// Orders with no snapshot-state quote to anchor a Current floor to.
@@ -257,6 +270,12 @@ impl Counters {
         self.pools_in_scope += other.pools_in_scope;
         self.negative_fill_gaps += other.negative_fill_gaps;
         self.negative_gap_usd += other.negative_gap_usd;
+        self.cluster_cut_usd += other.cluster_cut_usd;
+        self.component_errored_usd += other.component_errored_usd;
+        self.unfilled_usd += other.unfilled_usd;
+        self.drift_flagged_orders += other.drift_flagged_orders;
+        self.pools_fallback_components += other.pools_fallback_components;
+        self.pools_fallback_matched_usd += other.pools_fallback_matched_usd;
         self.components_solved += other.components_solved;
         self.components_multi_order += other.components_multi_order;
         self.no_current_quote += other.no_current_quote;
@@ -277,8 +296,20 @@ struct CellResult {
     apex_matched_usd: f64,
     apex_matched_pct: f64,
     apex_surplus_usd: f64,
+    /// Surplus minus the drift-flagged orders' share — the honest Original-anchor column.
+    apex_surplus_ex_drift_usd: f64,
+    /// Positive surplus minus negative fill gaps (the stage-2 net definition).
+    apex_surplus_net_usd: f64,
+    /// Largest single-order surplus and the top-5 share — a 90%+ share means the cell's
+    /// surplus is a handful of orders, not a distributed edge.
+    surplus_top1_usd: f64,
+    surplus_top5_share: f64,
     pool_cleared_wei: f64,
     order_notional_wei: f64,
+    filled_notional_wei: f64,
+    /// filled / submitted notional. When `1 − realized_share ≈ internalization_share` the
+    /// internalization number carries no signal (it is the fill rate in disguise).
+    realized_share: Option<f64>,
     internalization_share: Option<f64>,
     solve_ms_p50: u128,
     solve_ms_p90: u128,
@@ -356,11 +387,19 @@ fn biguint_f64(value: &BigUint) -> f64 {
     value.to_string().parse().unwrap_or(0.0)
 }
 
+#[derive(Default)]
 struct BatchOutcome {
     matched_usd: f64,
     surplus_usd: f64,
+    /// Surplus excluding drift-flagged orders — the Original anchor's honest column.
+    surplus_ex_drift_usd: f64,
+    /// Each filled order's positive surplus, for cell-level concentration stats.
+    order_surpluses_usd: Vec<f64>,
     pool_cleared_wei: f64,
     order_notional_wei: f64,
+    /// Notional actually sold into clearings — the internalization denominator (the submitted
+    /// notional turns the share into a fill-rate proxy; forensics 2026-08-05).
+    filled_notional_wei: f64,
     counters: Counters,
     fynd_bps: Vec<f64>,
     fynd_usd_delta: f64,
@@ -382,8 +421,11 @@ fn solve_batch(
     let mut counters = Counters::default();
     let mut matched_usd = 0.0f64;
     let mut surplus_usd = 0.0f64;
+    let mut surplus_ex_drift_usd = 0.0f64;
+    let mut order_surpluses_usd: Vec<f64> = Vec::new();
     let mut pool_cleared_wei = 0.0f64;
     let mut order_notional_wei = 0.0f64;
+    let mut filled_notional_wei = 0.0f64;
     let mut fynd_bps: Vec<f64> = Vec::new();
     let mut fynd_usd_delta = 0.0f64;
 
@@ -417,15 +459,7 @@ fn solve_batch(
         orders.push(intent);
     }
     if orders.is_empty() {
-        return BatchOutcome {
-            matched_usd,
-            surplus_usd,
-            pool_cleared_wei,
-            order_notional_wei,
-            counters,
-            fynd_bps,
-            fynd_usd_delta,
-        };
+        return BatchOutcome { counters, ..BatchOutcome::default() };
     }
 
     // Union-find over orders ∪ subset pools: a pool edge merges its two tokens' components, so
@@ -453,11 +487,33 @@ fn solve_batch(
         let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
         parent[ra] = rb;
     }
+    // Priced-ness is scope-invariant, so filtering here keeps unpriced pools from fusing
+    // components they could never serve (they'd only raise deadline pressure). The
+    // `serializable_only` filter must NOT move here — it varies per pool-scope cell and would
+    // break the shared partition.
     let relevant_pools: Vec<&SnapshotPool> = snapshot
         .pools
         .iter()
         .filter(|pool| {
             token_index.contains_key(&pool.token_0) || token_index.contains_key(&pool.token_1)
+        })
+        .filter(|pool| {
+            let priced = snapshot
+                .price_inputs
+                .contains_key(&pool.token_0) &&
+                snapshot
+                    .price_inputs
+                    .contains_key(&pool.token_1) &&
+                snapshot
+                    .token_meta
+                    .contains_key(&pool.token_0) &&
+                snapshot
+                    .token_meta
+                    .contains_key(&pool.token_1);
+            if !priced {
+                counters.pool_unpriced += 1;
+            }
+            priced
         })
         .collect();
     for pool in &relevant_pools {
@@ -491,7 +547,8 @@ fn solve_batch(
         counters.components_multi_order += u64::from(component_orders.len() >= 2);
 
         // The component's pools: both tokens in this component (or one token shared and the
-        // other joining the closure). Skipped pools with an unpriced token drop out counted.
+        // other joining the closure). Unpriced pools were already dropped (counted) before the
+        // union-find merge.
         let mut component_pools: Vec<&SnapshotPool> = Vec::new();
         if with_pools {
             for pool in &relevant_pools {
@@ -502,26 +559,9 @@ fn solve_batch(
                             .get(t)
                             .is_some_and(|&i| find(&mut parent, i) == root)
                     });
-                if !in_component {
-                    continue;
+                if in_component {
+                    component_pools.push(pool);
                 }
-                let priced = snapshot
-                    .price_inputs
-                    .contains_key(&pool.token_0) &&
-                    snapshot
-                        .price_inputs
-                        .contains_key(&pool.token_1) &&
-                    snapshot
-                        .token_meta
-                        .contains_key(&pool.token_0) &&
-                    snapshot
-                        .token_meta
-                        .contains_key(&pool.token_1);
-                if !priced {
-                    counters.pool_unpriced += 1;
-                    continue;
-                }
-                component_pools.push(pool);
             }
             counters.pools_in_scope += component_pools.len() as u64;
         }
@@ -659,39 +699,52 @@ fn solve_batch(
             })
             .collect();
 
-        let mut config = ApexConfig {
-            enable_two_hops: with_pools,
-            max_workers: 1,
-            collect_metrics: false,
-            deadline: Some(Instant::now() + solve_deadline),
-            ..ApexConfig::default()
+        let tokens: Vec<ApexToken> = apex_tokens.values().copied().collect();
+        let apex_prices: HashMap<ApexAddress, _> = price_map
+            .prices
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        let run_solve = |solve_pools: Vec<Pool>, two_hops: bool| {
+            let mut config = ApexConfig {
+                enable_two_hops: two_hops,
+                max_workers: 1,
+                collect_metrics: false,
+                deadline: Some(Instant::now() + solve_deadline),
+                ..ApexConfig::default()
+            };
+            config
+                .price_search_config
+                .max_precision_increases = MAX_PRECISION_INCREASES;
+            catch_unwind(AssertUnwindSafe(|| {
+                run_apex_with_config(
+                    tokens.clone(),
+                    apex_prices.clone(),
+                    limit_orders.clone(),
+                    HashMap::new(),
+                    solve_pools,
+                    config,
+                )
+            }))
         };
-        config
-            .price_search_config
-            .max_precision_increases = MAX_PRECISION_INCREASES;
 
         counters.components_solved += 1;
-        let tokens: Vec<ApexToken> = apex_tokens.values().copied().collect();
         let solve_started = Instant::now();
-        let solve = catch_unwind(AssertUnwindSafe(|| {
-            run_apex_with_config(
-                tokens,
-                price_map
-                    .prices
-                    .iter()
-                    .map(|(k, v)| (*k, *v))
-                    .collect(),
-                limit_orders.clone(),
-                HashMap::new(),
-                pools,
-                config,
-            )
-        }));
+        let solve = run_solve(pools, with_pools);
         solve_times.push(solve_started.elapsed().as_millis());
-        let result = match solve {
-            Ok(Ok(result)) => result,
+
+        let component_usd: f64 = order_inputs
+            .values()
+            .map(|(order, _)| order.usd)
+            .sum();
+        let primary = match solve {
+            Ok(Ok(result)) => {
+                if result.deadline_fired {
+                    counters.deadline_fired_batches += 1;
+                }
+                Ok(result)
+            }
             Ok(Err(error)) => {
-                counters.component_errored += order_inputs.len() as u64;
                 let kind = match &error {
                     apex_solver::core::ApexError::InvalidInput(_) => "invalid_input",
                     apex_solver::core::ApexError::MetricsCollectionError(_) => "metrics",
@@ -709,17 +762,48 @@ fn solve_batch(
                     .component_errors
                     .entry(kind.to_string())
                     .or_default() += 1;
-                continue;
+                Err(())
             }
             Err(_) => {
                 counters.solver_panics += 1;
-                counters.component_errored += order_inputs.len() as u64;
-                continue;
+                Err(())
             }
         };
-        if result.deadline_fired {
-            counters.deadline_fired_batches += 1;
-        }
+        // Fair-comparison fallback (forensics 2026-08-05): when the POOLED solve errors, panics,
+        // or hits its deadline having cleared nothing, re-solve the identical order set without
+        // pools — exactly the no_pools cell's solve. Pools must never lose matches that pure
+        // crossing would have found; the fallback counters measure how often the pooled search
+        // failed its budget.
+        let needs_fallback = with_pools &&
+            match &primary {
+                Ok(result) => result.deadline_fired && result.limit_order_clearings.is_empty(),
+                Err(()) => true,
+            };
+        let mut used_fallback = false;
+        let result = if needs_fallback {
+            counters.pools_fallback_components += 1;
+            used_fallback = true;
+            let fallback_started = Instant::now();
+            let fallback = run_solve(Vec::new(), false);
+            solve_times.push(fallback_started.elapsed().as_millis());
+            match fallback {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) | Err(_) => {
+                    counters.component_errored += order_inputs.len() as u64;
+                    counters.component_errored_usd += component_usd;
+                    continue;
+                }
+            }
+        } else {
+            match primary {
+                Ok(result) => result,
+                Err(()) => {
+                    counters.component_errored += order_inputs.len() as u64;
+                    counters.component_errored_usd += component_usd;
+                    continue;
+                }
+            }
+        };
 
         pool_cleared_wei += net_pool_exposure_wei(
             result.pool_clearings.iter().map(|c| {
@@ -752,27 +836,85 @@ fn solve_batch(
                         counters.filled += 1;
                     }
                     matched_usd += order.usd * fill_ratio.min(1.0);
+                    if used_fallback {
+                        counters.pools_fallback_matched_usd += order.usd * fill_ratio.min(1.0);
+                    }
+                    filled_notional_wei += u256_to_f64(alloy_u256(clearing.sold_amount)) *
+                        wei_prices
+                            .get(&order.token_in)
+                            .copied()
+                            .unwrap_or(0.0);
                     let scale_out = TokenScale::new(snapshot.token_meta[&order.token_out].1)
                         .expect("token_meta only holds ≤18-dec tokens");
                     let bought_raw =
                         scale_out.scale_down_floor(Scaled18(alloy_u256(clearing.bought_amount)));
-                    let settled_pro_rata =
-                        u256_to_f64(alloy_u256(order.settled_out)) * fill_ratio.min(1.0);
-                    let gap_raw = u256_to_f64(bought_raw) - settled_pro_rata;
+                    // Surplus baseline is anchor-consistent (forensics 2026-08-05): Original
+                    // measures against the trade-time settled amount (drift included, by
+                    // design); Current against the snapshot-state pool-implied quote the floor
+                    // was anchored to — drift-free, so Original − Current is the drift cost.
+                    let baseline_out = match anchor {
+                        Anchor::Original => alloy_u256(order.settled_out),
+                        Anchor::Current => current_quotes
+                            .get(&order.id)
+                            .copied()
+                            .expect("Current admission requires a snapshot-state quote"),
+                    };
+                    let baseline_pro_rata = u256_to_f64(baseline_out) * fill_ratio.min(1.0);
+                    let gap_raw = u256_to_f64(bought_raw) - baseline_pro_rata;
                     let usd_per_raw = day_price
                         .get(&order.token_out)
                         .copied()
                         .unwrap_or(0.0);
+                    // Snapshot-vs-trade-day price movement of the pair; >100 bps flags the
+                    // order's surplus as drift, not batching edge. Zero prices mean the ratio
+                    // is unmeasurable — not flagged.
+                    let wei_per_raw = |token: &ApexAddress| {
+                        let decimals = i32::from(snapshot.token_meta[token].1);
+                        wei_prices
+                            .get(token)
+                            .copied()
+                            .unwrap_or(0.0) *
+                            10f64.powi(18 - decimals)
+                    };
+                    let day_in = day_price
+                        .get(&order.token_in)
+                        .copied()
+                        .unwrap_or(0.0);
+                    let (snap_in, snap_out) =
+                        (wei_per_raw(&order.token_in), wei_per_raw(&order.token_out));
+                    let drift_measurable =
+                        day_in > 0.0 && usd_per_raw > 0.0 && snap_in > 0.0 && snap_out > 0.0;
+                    let drift_flagged = drift_measurable && {
+                        let ratio = (snap_in / day_in) / (snap_out / usd_per_raw);
+                        (ratio - 1.0).abs() > 0.01
+                    };
+                    if drift_flagged {
+                        counters.drift_flagged_orders += 1;
+                    }
                     if gap_raw > 0.0 {
-                        surplus_usd += gap_raw * usd_per_raw;
+                        let gap_usd = gap_raw * usd_per_raw;
+                        surplus_usd += gap_usd;
+                        if !drift_flagged {
+                            surplus_ex_drift_usd += gap_usd;
+                        }
+                        order_surpluses_usd.push(gap_usd);
                     } else if gap_raw < 0.0 {
                         counters.negative_fill_gaps += 1;
                         counters.negative_gap_usd += -gap_raw * usd_per_raw;
                     }
                 }
-                Some(_) => counters.unfilled_at_limit += 1,
-                None if result.deadline_fired => counters.cluster_cut += 1,
-                None => counters.unfilled_at_limit += 1,
+                Some(_) => {
+                    counters.unfilled_at_limit += 1;
+                    counters.unfilled_usd += order.usd;
+                }
+                None if result.deadline_fired => {
+                    counters.cluster_cut += 1;
+                    counters.cluster_cut_usd += order.usd;
+                }
+                None => {
+                    counters.unfilled_at_limit += 1;
+                    counters.unfilled_usd += order.usd;
+                }
             }
             // Engine-inclusive fynd baseline, state-consistent per anchor: Original compares
             // against the dataset's trade-time fynd quote; Current against the fynd quote taken
@@ -814,8 +956,11 @@ fn solve_batch(
     BatchOutcome {
         matched_usd,
         surplus_usd,
+        surplus_ex_drift_usd,
+        order_surpluses_usd,
         pool_cleared_wei,
         order_notional_wei,
+        filled_notional_wei,
         counters,
         fynd_bps,
         fynd_usd_delta,
@@ -1507,8 +1652,11 @@ async fn main() -> Result<()> {
                         let mut counters = Counters::default();
                         let mut matched = 0.0f64;
                         let mut surplus = 0.0f64;
+                        let mut surplus_ex_drift = 0.0f64;
+                        let mut order_surpluses: Vec<f64> = Vec::new();
                         let mut pool_wei = 0.0f64;
                         let mut notional_wei = 0.0f64;
+                        let mut filled_wei = 0.0f64;
                         let mut fynd_bps: Vec<f64> = Vec::new();
                         let mut fynd_usd_delta = 0.0f64;
                         let mut solve_times: Vec<u128> = Vec::new();
@@ -1535,8 +1683,11 @@ async fn main() -> Result<()> {
                                 );
                                 matched += outcome.matched_usd;
                                 surplus += outcome.surplus_usd;
+                                surplus_ex_drift += outcome.surplus_ex_drift_usd;
+                                order_surpluses.extend(outcome.order_surpluses_usd);
                                 pool_wei += outcome.pool_cleared_wei;
                                 notional_wei += outcome.order_notional_wei;
+                                filled_wei += outcome.filled_notional_wei;
                                 fynd_bps.extend(outcome.fynd_bps);
                                 fynd_usd_delta += outcome.fynd_usd_delta;
                                 counters.absorb(&outcome.counters);
@@ -1551,8 +1702,30 @@ async fn main() -> Result<()> {
                                 solve_times[((solve_times.len() - 1) as f64 * p) as usize]
                             }
                         };
-                        let internalization = (notional_wei > 0.0 && with_pools)
-                            .then(|| (1.0 - pool_wei / (2.0 * notional_wei)).clamp(0.0, 1.0));
+                        // Denominator = REALIZED notional (forensics 2026-08-05): with the
+                        // submitted notional the share collapses into a fill-rate proxy —
+                        // every skip path must drop out of both sides symmetrically.
+                        let internalization = (filled_wei > 0.0 && with_pools)
+                            .then(|| (1.0 - pool_wei / (2.0 * filled_wei)).clamp(0.0, 1.0));
+                        let realized_share =
+                            (notional_wei > 0.0).then(|| filled_wei / notional_wei);
+                        order_surpluses.sort_by(|a, b| {
+                            b.partial_cmp(a)
+                                .expect("finite surplus")
+                        });
+                        let surplus_top1 = order_surpluses
+                            .first()
+                            .copied()
+                            .unwrap_or(0.0);
+                        let surplus_top5_share = if surplus > 0.0 {
+                            order_surpluses
+                                .iter()
+                                .take(5)
+                                .sum::<f64>() /
+                                surplus
+                        } else {
+                            0.0
+                        };
                         let cell = CellResult {
                             window_blocks: window,
                             limit_bps,
@@ -1568,8 +1741,14 @@ async fn main() -> Result<()> {
                             apex_matched_usd: matched,
                             apex_matched_pct: 100.0 * matched / intent_usd,
                             apex_surplus_usd: surplus,
+                            apex_surplus_ex_drift_usd: surplus_ex_drift,
+                            apex_surplus_net_usd: surplus - counters.negative_gap_usd,
+                            surplus_top1_usd: surplus_top1,
+                            surplus_top5_share,
                             pool_cleared_wei: pool_wei,
                             order_notional_wei: notional_wei,
+                            filled_notional_wei: filled_wei,
+                            realized_share,
                             internalization_share: internalization,
                             solve_ms_p50: percentile(0.5),
                             solve_ms_p90: percentile(0.9),
@@ -1600,7 +1779,8 @@ async fn main() -> Result<()> {
                         };
                         eprintln!(
                             "w={window:>3} bps={limit_bps:>3} {}/{}/{}: matched=${:>11.0} \
-                             ({:.3}%) surplus=${:>9.2} intern={:?} fynd(n={} med={:+.1}bps) \
+                             ({:.3}%) surplus=${:>9.2} exdrift=${:>9.2} top5={:.0}% \
+                             intern={:?} realized={:?} fallback={} fynd(n={} med={:+.1}bps) \
                              solves p50/p90/max={}/{}/{}ms",
                             cell.anchor,
                             cell.cell,
@@ -1608,7 +1788,11 @@ async fn main() -> Result<()> {
                             cell.apex_matched_usd,
                             cell.apex_matched_pct,
                             cell.apex_surplus_usd,
+                            cell.apex_surplus_ex_drift_usd,
+                            100.0 * cell.surplus_top5_share,
                             cell.internalization_share,
+                            cell.realized_share,
+                            cell.counters.pools_fallback_components,
                             cell.fynd_compared,
                             cell.fynd_median_bps,
                             cell.solve_ms_p50,
