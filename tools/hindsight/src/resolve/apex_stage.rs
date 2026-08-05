@@ -21,6 +21,7 @@
 //! and knows nothing about APEX itself. The apex-batch library call plugs in at the wiring step.
 
 use std::{
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
@@ -29,6 +30,8 @@ use std::{
     thread::JoinHandle,
     time::{Duration, Instant},
 };
+
+use tracing::warn;
 
 /// A solve result is discarded (and counted) when its wall time exceeded this multiple of the
 /// budget — it describes a state too stale to compare against, and letting it through would bias
@@ -49,6 +52,10 @@ pub(crate) enum SkipReason {
     /// The bounded queue was full — the workers are saturated and this block's job is shed
     /// rather than delaying every later block's.
     QueueFull,
+    /// The job channel is disconnected — every worker has exited (or none was spawned) — so no
+    /// amount of waiting would ever drain this job. Distinct from `QueueFull` because it signals
+    /// the pool itself is gone, not merely busy.
+    PoolGone,
 }
 
 /// Stage timing for one delivered solve.
@@ -74,8 +81,11 @@ pub(crate) struct StageDelivery<R> {
 pub(crate) struct StageCounters {
     pub dispatched: AtomicU64,
     pub skipped_queue_full: AtomicU64,
+    pub skipped_pool_gone: AtomicU64,
     pub delivered: AtomicU64,
     pub overruns: AtomicU64,
+    /// Solves that panicked. The job is dropped and the worker keeps running — see `worker_loop`.
+    pub panics: AtomicU64,
 }
 
 struct QueuedJob<J> {
@@ -109,7 +119,27 @@ fn worker_loop<J, R, F>(
         let queue_wait = picked_up.saturating_duration_since(job.enqueued_at);
         // The deadline starts NOW — a job that waited in the queue keeps its full solve budget.
         let deadline = picked_up + budget;
-        let result = solve(job.payload, deadline);
+        // A panicking solve (APEX's own price search, or pool math it calls into) must not take
+        // the worker thread down with it — that would permanently shrink the pool by one, silently.
+        let result = match catch_unwind(AssertUnwindSafe(|| solve(job.payload, deadline))) {
+            Ok(result) => result,
+            Err(panic_payload) => {
+                let message = panic_payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| {
+                        panic_payload
+                            .downcast_ref::<String>()
+                            .map(String::as_str)
+                    })
+                    .unwrap_or("<non-string panic payload>");
+                warn!(panic = message, "APEX solve panicked; job dropped, worker continues");
+                counters
+                    .panics
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+        };
         let solve_wall = picked_up.elapsed();
         if solve_wall > budget * OVERRUN_FACTOR {
             counters
@@ -117,15 +147,15 @@ fn worker_loop<J, R, F>(
                 .fetch_add(1, Ordering::Relaxed);
             continue;
         }
-        counters
-            .delivered
-            .fetch_add(1, Ordering::Relaxed);
         if deliveries
             .send(StageDelivery { result, timing: SolveTiming { queue_wait, solve_wall } })
             .is_err()
         {
             return; // nobody is draining anymore
         }
+        counters
+            .delivered
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -190,11 +220,17 @@ impl<J: Send + 'static> ApexStage<J> {
                     .fetch_add(1, Ordering::Relaxed);
                 DispatchOutcome::Queued
             }
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+            Err(TrySendError::Full(_)) => {
                 self.counters
                     .skipped_queue_full
                     .fetch_add(1, Ordering::Relaxed);
                 DispatchOutcome::Skipped(SkipReason::QueueFull)
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.counters
+                    .skipped_pool_gone
+                    .fetch_add(1, Ordering::Relaxed);
+                DispatchOutcome::Skipped(SkipReason::PoolGone)
             }
         }
     }
@@ -208,8 +244,9 @@ impl<J: Send + 'static> ApexStage<J> {
     pub(crate) fn shutdown(self) {
         drop(self.jobs);
         for worker in self.workers {
-            // A panicked worker already surfaced through the missing deliveries and counters;
-            // shutdown only reaps the thread.
+            // `worker_loop` catches solve panics itself (counted in `panics`), so the thread
+            // returns normally even after one; a join `Err` here would mean a panic outside that
+            // boundary, which shutdown can only reap, not recover from.
             let _ = worker.join();
         }
     }
@@ -339,6 +376,47 @@ mod tests {
             stage
                 .counters()
                 .delivered
+                .load(Ordering::Relaxed),
+            1
+        );
+        stage.shutdown();
+    }
+
+    #[test]
+    fn test_panicking_solve_does_not_kill_worker() {
+        // Job 0 panics; job 1 must still be picked up and delivered by the same worker thread.
+        let (stage, deliveries) = ApexStage::spawn(1, 2, BUDGET, |job: u32, _deadline| {
+            assert!(job != 0, "simulated solve panic");
+            job
+        });
+        stage.dispatch(0);
+        stage.dispatch(1);
+
+        let delivered = deliveries
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the surviving job still delivers");
+        assert_eq!(delivered.result, 1, "the panicking job must not deliver a result");
+        assert_eq!(
+            stage
+                .counters()
+                .panics
+                .load(Ordering::Relaxed),
+            1
+        );
+        stage.shutdown();
+    }
+
+    #[test]
+    fn test_disconnected_queue_counts_pool_gone() {
+        // No workers spawned: the job receiver's only `Arc` reference lives inside `spawn`'s
+        // local variable, so it drops as soon as `spawn` returns — before any dispatch — leaving
+        // the channel disconnected rather than merely full.
+        let (stage, _deliveries) = ApexStage::spawn(0, 1, BUDGET, |job: u32, _deadline| job);
+        assert_eq!(stage.dispatch(0), DispatchOutcome::Skipped(SkipReason::PoolGone));
+        assert_eq!(
+            stage
+                .counters()
+                .skipped_pool_gone
                 .load(Ordering::Relaxed),
             1
         );

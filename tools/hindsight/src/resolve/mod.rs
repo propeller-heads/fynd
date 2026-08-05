@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use alloy::primitives::{Address, TxHash, U256};
 use async_trait::async_trait;
 pub(crate) use compare::{Deltas, Slippage, Verdict};
+use futures::{stream, StreamExt};
 use fynd_core::types::{Route, Swap};
 use serde::Serialize;
 use tycho_simulation::tycho_common::models::Address as CoreAddress;
@@ -341,6 +342,19 @@ pub(crate) fn build_range(
     }
 }
 
+/// Trades solved concurrently within one phase of [`solve_tops`]/[`solve_backs`].
+///
+/// Each request carries its own `with_timeout_ms` deadline, so fanning every trade out at once
+/// (as `join_all` did) lets a busy block's later requests sit queued behind earlier ones,
+/// burning their timeout budget before a worker ever picks them up — they then return
+/// `Unsolvable` on exactly the blocks that matter most. Bounding fan-out keeps each in-flight
+/// request's wait small enough that its deadline still means something.
+///
+/// No source in this generic solving layer cleanly maps to "the worker pool size" — production
+/// configures several pools, each with its own worker count, and this bound is over trades, not
+/// pools — so this is a conservative constant rather than a value threaded from the monitor.
+const MAX_CONCURRENT_SOLVES: usize = 8;
+
 /// Solve every trade at the solver's current state — top-of-block (N−1) when called before the
 /// advance. Outcomes come back in trade order.
 ///
@@ -353,14 +367,16 @@ pub(crate) async fn solve_tops<S: SteppingSolver + ?Sized>(
     solver: &S,
     trades: &[DecodedTrade],
 ) -> Vec<Outcome> {
-    // Concurrent, not sequential: each quote is independent and the fynd worker pool serves
-    // concurrent solves, so wall time is the slowest quote rather than the sum. `join_all`
-    // returns outcomes in trade order regardless of completion order.
-    futures::future::join_all(
+    // Concurrent, not sequential — each quote is independent and the fynd worker pool serves
+    // concurrent solves — but bounded via `buffered` rather than fully fanned out; see
+    // `MAX_CONCURRENT_SOLVES`. Outcomes come back in trade order regardless of completion order.
+    stream::iter(
         trades
             .iter()
             .map(|trade| solver.solve(trade.token_in, trade.token_out, trade.amount_in)),
     )
+    .buffered(MAX_CONCURRENT_SOLVES)
+    .collect()
     .await
 }
 
@@ -375,8 +391,9 @@ pub(crate) async fn solve_backs<S: SteppingSolver + ?Sized>(
     prices: &Prices,
 ) -> Vec<RangeComparison> {
     // Both back-of-block measurements of a trade are independent of each other and of every
-    // other trade's, so all of them run concurrently; `join_all` keeps trade order.
-    let measurements = futures::future::join_all(trades.iter().zip(&tops).map(
+    // other trade's, so they run concurrently, bounded the same way as `solve_tops`; `buffered`
+    // keeps trade order.
+    let measurements: Vec<(Outcome, Outcome)> = stream::iter(trades.iter().zip(&tops).map(
         |(trade, top)| async move {
             let reexecute = async {
                 match top {
@@ -390,6 +407,8 @@ pub(crate) async fn solve_backs<S: SteppingSolver + ?Sized>(
             futures::join!(reexecute, solve_fresh)
         },
     ))
+    .buffered(MAX_CONCURRENT_SOLVES)
+    .collect()
     .await;
 
     trades

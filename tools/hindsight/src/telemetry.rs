@@ -267,6 +267,7 @@ fn describe_apex() {
 pub(crate) fn record_apex_skipped(reason: crate::resolve::apex_stage::SkipReason) {
     let reason = match reason {
         crate::resolve::apex_stage::SkipReason::QueueFull => "queue_full",
+        crate::resolve::apex_stage::SkipReason::PoolGone => "pool_gone",
     };
     counter!(APEX_SKIPPED, "reason" => reason).increment(1);
 }
