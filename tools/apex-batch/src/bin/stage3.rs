@@ -41,8 +41,6 @@ use tycho_simulation::tycho_common::{
     simulation::protocol_sim::ProtocolSim,
 };
 
-const WINDOWS: [u64; 5] = [1, 5, 15, 30, 150];
-
 #[derive(Parser)]
 #[command(about = "APEX on decoded Base trades against current live AMM state (stage 3)")]
 struct Args {
@@ -79,6 +77,10 @@ struct Args {
     /// must be reproducible.
     #[arg(long, default_value_t = 0)]
     parallel_cells: usize,
+    /// Batch windows in blocks. Fewer windows shrink the grid — e.g. a big-deadline budget
+    /// experiment on `--windows 1 --windows 5` alone.
+    #[arg(long, default_values_t = vec![1u64, 5, 15, 30, 150])]
+    windows: Vec<u64>,
     /// How long to wait for the first complete market + derived-price computation.
     #[arg(long, default_value_t = 900)]
     ready_timeout_secs: u64,
@@ -355,8 +357,10 @@ struct CellResult {
     /// internalization number carries no signal (it is the fill rate in disguise).
     realized_share: Option<f64>,
     internalization_share: Option<f64>,
+    solve_ms_mean: f64,
     solve_ms_p50: u128,
     solve_ms_p90: u128,
+    solve_ms_p99: u128,
     solve_ms_max: u128,
     fynd_compared: u64,
     fynd_median_bps: f64,
@@ -1993,7 +1997,7 @@ async fn main() -> Result<()> {
     // the slowest cell rather than the sum. Deadlines are wall-clock: oversubscribing the
     // cores inflates the solve percentiles, so read p50 against the budget.
     let mut cell_configs: Vec<(u64, u32, Anchor, bool, bool)> = Vec::new();
-    for window in WINDOWS {
+    for &window in &args.windows {
         for &limit_bps in &args.limit_bps {
             for anchor in [Anchor::Original, Anchor::Current] {
                 for &serializable_only in &pool_scopes {
@@ -2119,8 +2123,14 @@ async fn main() -> Result<()> {
                 filled_notional_wei: filled_wei,
                 realized_share,
                 internalization_share: internalization,
+                solve_ms_mean: if solve_times.is_empty() {
+                    0.0
+                } else {
+                    solve_times.iter().sum::<u128>() as f64 / solve_times.len() as f64
+                },
                 solve_ms_p50: percentile(0.5),
                 solve_ms_p90: percentile(0.9),
+                solve_ms_p99: percentile(0.99),
                 solve_ms_max: percentile(1.0),
                 fynd_compared: counters.fynd_compared,
                 fynd_median_bps: if fynd_bps.is_empty() {
@@ -2150,7 +2160,7 @@ async fn main() -> Result<()> {
                 "w={window:>3} bps={limit_bps:>3} {}/{}/{}: matched=${:>11.0} \
                              ({:.3}%) surplus=${:>9.2} exdrift=${:>9.2} top5={:.0}% \
                              intern={:?} realized={:?} fallback={} fynd(n={} med={:+.1}bps) \
-                             solves p50/p90/max={}/{}/{}ms",
+                             solves mean/p50/p90/p99/max={:.0}/{}/{}/{}/{}ms",
                 cell.anchor,
                 cell.cell,
                 cell.pool_scope,
@@ -2164,8 +2174,10 @@ async fn main() -> Result<()> {
                 cell.counters.pools_fallback_components,
                 cell.fynd_compared,
                 cell.fynd_median_bps,
+                cell.solve_ms_mean,
                 cell.solve_ms_p50,
                 cell.solve_ms_p90,
+                cell.solve_ms_p99,
                 cell.solve_ms_max,
             );
             cell
