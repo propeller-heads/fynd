@@ -89,11 +89,11 @@ fn hero_section(savings: &Savings, summary: &Summary, filter: Option<&str>) -> S
            <div class=\"herofoot\">{}{}{}</div>\
          </section>",
         big(&fmt_usd(savings.won_usd), "Fynd savings (wins uplift)", "pos big"),
-        big(&pct(savings.wins, savings.scored), "win rate", "pos"),
-        big(&fmt_bps_signed(savings.median_win_bps), "median savings bps (wins)", "pos"),
+        big(&pct(savings.wins, savings.scored), "win rate (non-dust)", "pos"),
+        big(&fmt_bps_signed(savings.median_win_bps), "median savings bps (wins, non-dust)", "pos"),
         mini(&fmt_count(summary.distinct_blocks), "blocks"),
         mini(&fmt_count(summary.total), "comparisons"),
-        mini(&fmt_count(savings.scored), "scored"),
+        mini(&fmt_count(savings.scored), "scored (non-dust)"),
     )
 }
 
@@ -516,7 +516,7 @@ mod tests {
     fn test_render_states_the_run_size_as_counts() {
         let html = render(&sample_report(), None);
         // Two records over two blocks, one of them scored — plain counts, no sentence.
-        for (value, label) in [("2", "blocks"), ("2", "comparisons"), ("1", "scored")] {
+        for (value, label) in [("2", "blocks"), ("2", "comparisons"), ("1", "scored (non-dust)")] {
             assert!(
                 html.contains(&format!(">{value}</div><div class=\"minilab\">{label}<")),
                 "{label}"

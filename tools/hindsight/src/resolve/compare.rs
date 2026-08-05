@@ -83,6 +83,14 @@ pub(crate) enum Verdict {
 /// loss. Without this cut, a single un-fillable whale trade dominates the USD aggregate.
 const MIN_FILL_RATIO: f64 = 0.5;
 
+/// Settled USD notional below which a trade is left out of the unweighted views: the win rate and
+/// the bps quantiles. USD-weighted views keep every trade, as does a trade too small to price.
+///
+/// Below a dollar a few wei of rounding is thousands of bps, which carries an unweighted median.
+/// Above it the spread is real — small trades are genuinely easier to beat — so the floor sits
+/// just past the rounding noise rather than where the win rate stops moving.
+pub(crate) const MIN_NOTIONAL_USD: f64 = 10.0;
+
 /// Reclassify a Fynd quote that covers far less than the settled amount as a coverage miss.
 ///
 /// Fynd does not do price-constrained partial fills, but when liquidity is thin it can return a

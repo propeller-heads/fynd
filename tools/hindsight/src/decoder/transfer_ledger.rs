@@ -210,6 +210,18 @@ impl TransferLedger {
             .collect()
     }
 
+    /// Gross flow of one token through the transaction, counting every transfer of it in either
+    /// direction. The denominator of the residue test.
+    pub(crate) fn token_gross(&self, token: Address) -> U256 {
+        let mut gross = U256::ZERO;
+        for &(transferred, _, _, value) in &self.transfers {
+            if transferred == token {
+                gross = gross.saturating_add(value);
+            }
+        }
+        gross
+    }
+
     /// Gross sent and received per token, summed across the group.
     fn group_totals(
         &self,
@@ -249,7 +261,7 @@ fn net_positive(
 
 /// A net leg is residue when its token routed between third parties and the leg is under this
 /// fraction of the token's gross transaction flow: `net * RESIDUE_GROSS_RATIO < gross` (1%).
-const RESIDUE_GROSS_RATIO: u64 = 100;
+pub(crate) const RESIDUE_GROSS_RATIO: u64 = 100;
 
 /// Net the per-token amounts into a single swap (see `TransferLedger::net_swap`).
 fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwap> {

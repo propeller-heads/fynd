@@ -12,12 +12,14 @@ pub(crate) mod lifi;
 pub(crate) mod paraswap;
 pub(crate) mod zeroex;
 
+use std::collections::HashSet;
+
 use alloy::{
     primitives::{Address, U256},
     rpc::types::Log,
 };
 
-use crate::decoder::{registry::Registry, veto::Veto};
+use crate::decoder::{registry::Registry, transfer_ledger::TransferLedger, veto::Veto};
 
 /// A solver's own off-chain quote for the swap, recovered from calldata.
 ///
@@ -60,6 +62,12 @@ pub(crate) trait SolverKnowledge: Send + Sync {
     /// `crate::decoder::venue_attribution`).
     fn integrator(&self, _logs: &[Log]) -> Option<String> {
         None
+    }
+
+    /// The fee recipients this solver's calldata names, for routers that let an integrator take a
+    /// cut of the swap. Only who is paid — `declared_output_fee` reads how much off the ledger.
+    fn fee_recipients(&self, _input: &[u8]) -> Vec<Address> {
+        Vec::new()
     }
 }
 
@@ -109,6 +117,36 @@ pub(crate) fn embedded_quote(solver: &str, input: &[u8], amount_in: U256) -> Opt
         .iter()
         .find(|(name, _)| *name == solver)?;
     knowledge.embedded_quote(input, amount_in)
+}
+
+/// The output-token fee the solver's declared fee recipients were paid, when its calldata names
+/// any and they received some of the bought token.
+///
+/// The calldata says who is paid; the ledger says how much they got. Taking the amount from the
+/// ledger keeps this clear of each router's fee encoding — `KyberSwap` declares a bps rate, not an
+/// amount — and of whether the router paid the cut in the swap token or unwrapped it first.
+///
+/// A frontend's cut is not visible to the address book unless its wallet is registered, so without
+/// this every such trade reports the settled output short by exactly the fee, and Fynd — re-solved
+/// gross — appears to win by that much.
+pub(crate) fn declared_output_fee(
+    solver: &str,
+    input: &[u8],
+    ledger: &TransferLedger,
+    token_out: Address,
+) -> Option<U256> {
+    let (_, knowledge) = IMPLEMENTATIONS
+        .iter()
+        .find(|(name, _)| *name == solver)?;
+    let recipients: HashSet<Address> = knowledge
+        .fee_recipients(input)
+        .into_iter()
+        .collect();
+    ledger
+        .received_by(&recipients)
+        .get(&token_out)
+        .copied()
+        .filter(|fee| !fee.is_zero())
 }
 
 /// Whether a quoted output is in the same units as the settled one.
@@ -198,6 +236,52 @@ mod tests {
             &quote(120_001_117_253_254_637_416_284),
             U256::from(120_000_000_000u64)
         ));
+    }
+
+    #[test]
+    fn test_declared_output_fee_reads_the_integrator_cut() {
+        // Base tx 0x78c70ca6…: KyberSwap's calldata names a frontend's wallet, which took 10% of
+        // the ETH the trader bought. Without backing it out the settled output is 10% short and
+        // Fynd, re-solved gross, wins by 1111 bps on every one of that frontend's trades.
+        let collector = addr(41);
+        let trader = addr(1);
+        let router = addr(50);
+        let token_out = Address::ZERO;
+        let native = [
+            (router, trader, U256::from(45_157_884_343_657_075u64)),
+            (router, collector, U256::from(5_017_542_704_850_786u64)),
+        ];
+        let ledger = TransferLedger::from_transaction(&[], &native);
+        let input = kyberswap::swap_calldata(vec![collector]);
+
+        assert_eq!(
+            declared_output_fee("kyberswap", &input, &ledger, token_out),
+            Some(U256::from(5_017_542_704_850_786u64))
+        );
+        // Dispatched on the attributed solver: the same calldata under another solver's name
+        // declares nothing.
+        assert_eq!(declared_output_fee("1inch", &input, &ledger, token_out), None);
+        // A swap that names no fee recipient has no fee to back out.
+        assert_eq!(
+            declared_output_fee(
+                "kyberswap",
+                &kyberswap::swap_calldata(Vec::new()),
+                &ledger,
+                token_out
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_declared_output_fee_ignores_other_tokens() {
+        // The recipient was paid, but in a token the trade did not buy — that is not this swap's
+        // output fee.
+        let collector = addr(41);
+        let logs = vec![make_transfer_log(addr(10), addr(50), collector, U256::from(85))];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let input = kyberswap::swap_calldata(vec![collector]);
+        assert_eq!(declared_output_fee("kyberswap", &input, &ledger, addr(11)), None);
     }
 
     #[test]

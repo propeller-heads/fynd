@@ -5,7 +5,20 @@
 
 use std::collections::HashMap;
 
-use crate::report::record::Comparison;
+use crate::{
+    report::record::{Comparison, State},
+    resolve::MIN_NOTIONAL_USD,
+};
+
+/// Whether a state's settled notional clears the dust floor the routing-quality views apply.
+///
+/// A trade too small to price is kept, matching `telemetry`: we do not drop what we cannot
+/// measure.
+fn above_dust_floor(state: &State) -> bool {
+    state
+        .settled_value_usd
+        .is_none_or(|usd| usd >= MIN_NOTIONAL_USD)
+}
 
 /// Number of trades listed in the biggest-wins and biggest-losses tables.
 const TOP_TRADES: usize = 10;
@@ -52,13 +65,20 @@ pub(crate) struct VerdictStat {
 
 /// Routing-quality view over scored (win/loss) trades. The losses are not summarised here — the
 /// report lists each one instead, so a single bad-liquidity snapshot cannot pass for a trend.
+///
+/// The win rate and the median are taken over trades above `MIN_NOTIONAL_USD` only, as the
+/// equivalent Prometheus metrics are: a sub-dollar trade wins by thousands of bps on rounding
+/// alone and would carry the unweighted median. `won_usd` keeps every trade, so the headline
+/// savings stays the run's true total.
 pub(crate) struct Savings {
+    /// Scored trades above the dust floor — the denominator of `wins`.
     pub scored: usize,
     pub wins: usize,
-    /// Median net bps over winning trades — the typical savings when Fynd wins.
+    /// Median net bps over winning trades above the dust floor — the typical savings when Fynd
+    /// wins.
     pub median_win_bps: Option<f64>,
     /// USD gained on winning trades, the signed gross Fynd-vs-settled delta on wins (the
-    /// `hindsight_savings_usd` metric).
+    /// `hindsight_savings_usd` metric). Every trade counts, dust included.
     pub won_usd: f64,
 }
 
@@ -134,9 +154,14 @@ fn verdict_stats(records: &[Comparison]) -> Vec<VerdictStat> {
 }
 
 fn savings(records: &[Comparison]) -> Savings {
+    let won_usd: f64 = records
+        .iter()
+        .filter(|r| r.top.verdict == "win")
+        .filter_map(|r| r.top.improvement_usd)
+        .sum();
     let scored: Vec<&Comparison> = records
         .iter()
-        .filter(|r| r.top.is_scored())
+        .filter(|r| r.top.is_scored() && above_dust_floor(&r.top))
         .collect();
     // The savings-bps headline is over wins only — how much better Fynd was when it won, not
     // diluted by the losses.
@@ -152,11 +177,7 @@ fn savings(records: &[Comparison]) -> Savings {
             .filter(|r| r.top.verdict == "win")
             .count(),
         median_win_bps: median(&mut win_bps),
-        won_usd: scored
-            .iter()
-            .filter(|r| r.top.verdict == "win")
-            .filter_map(|r| r.top.improvement_usd)
-            .sum(),
+        won_usd,
     }
 }
 
@@ -173,7 +194,7 @@ fn group_stats(records: &[Comparison], key: impl Fn(&Comparison) -> &String) -> 
         .map(|(name, group)| {
             let mut net_bps: Vec<f64> = group
                 .iter()
-                .filter(|r| r.top.is_scored())
+                .filter(|r| r.top.is_scored() && above_dust_floor(&r.top))
                 .filter_map(|r| r.top.net_bps)
                 .collect();
             GroupStats {
@@ -312,6 +333,57 @@ mod tests {
             },
         }))
         .unwrap()
+    }
+
+    /// A record whose settled notional is set explicitly, for the dust floor.
+    fn record_worth(
+        block: u64,
+        verdict: &str,
+        bps: f64,
+        settled_value_usd: Option<f64>,
+    ) -> Comparison {
+        let mut comparison = record(block, "venue", "solver", verdict, Some(bps));
+        comparison.top.settled_value_usd = settled_value_usd;
+        comparison
+    }
+
+    #[test]
+    fn test_savings_leaves_dust_out_of_the_win_rate_and_median() {
+        // One real $1000 win at 10 bps, one 50-cent win at 9000 bps: dust wins by thousands of bps
+        // on rounding alone, and unfiltered it would carry both the median and the win rate.
+        let records = vec![
+            record_worth(1, "win", 10.0, Some(1000.0)),
+            record_worth(2, "win", 9000.0, Some(0.5)),
+            record_worth(3, "loss", -5.0, Some(1000.0)),
+        ];
+        let savings = savings(&records);
+        assert_eq!(savings.scored, 2);
+        assert_eq!(savings.wins, 1);
+        assert_eq!(savings.median_win_bps, Some(10.0));
+        // Every win's uplift still counts, dust included: 10/10 + 9000/10.
+        assert!((savings.won_usd - 901.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_savings_keeps_a_trade_it_cannot_price() {
+        // An unpriced trade is not provably dust, so it is scored rather than dropped.
+        let records = vec![record_worth(1, "win", 25.0, None)];
+        let savings = savings(&records);
+        assert_eq!(savings.scored, 1);
+        assert_eq!(savings.median_win_bps, Some(25.0));
+    }
+
+    #[test]
+    fn test_group_median_leaves_dust_out() {
+        let records = vec![
+            record_worth(1, "win", 10.0, Some(1000.0)),
+            record_worth(2, "win", 9000.0, Some(0.5)),
+        ];
+        let groups = group_stats(&records, |r| &r.venue);
+        assert_eq!(groups[0].median_net_bps, Some(10.0));
+        // The verdict counts still describe every trade in the group.
+        assert_eq!(groups[0].count, 2);
+        assert_eq!(groups[0].wins, 2);
     }
 
     #[test]

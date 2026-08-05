@@ -159,7 +159,10 @@ the swap. `MetaMaskNetting` backs the fee out to 991.
 
 What a solver's transactions reveal beyond its address — a calldata quote (KyberSwap's
 `clientData`, ParaSwap's word layout, 0x's positive-slippage action), a match-time veto (LiFi's
-bridge orders), or the integrator tag a frontend records in the solver's event (LiFi's Diamond).
+bridge orders), the integrator tag a frontend records in the solver's event (LiFi's Diamond), or
+the fee recipients its calldata names (KyberSwap's `feeReceivers`). A fee recipient read this way
+covers a frontend that has no address-book entry: the calldata says who is paid, and the transfer
+ledger says how much, so the cut is added back and the settled output stays gross.
 Every method defaults to "nothing to add", so most solvers are a single address-book line with no
 code; those with code are registered in `solvers::IMPLEMENTATIONS`.
 
@@ -173,6 +176,10 @@ trait SolverKnowledge {
 
     /// The order-flow integrator tag this solver records in its logs, when it exposes one.
     fn integrator(&self, logs: &[Log]) -> Option<String> { None }
+
+    /// The fee recipients this solver's calldata names, for routers that let an integrator
+    /// take a cut of the swap.
+    fn fee_recipients(&self, input: &[u8]) -> Vec<Address> { Vec::new() }
 }
 ```
 
