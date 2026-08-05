@@ -1113,15 +1113,19 @@ dependencies = [
  "anyhow",
  "apex-solver",
  "clap",
+ "fynd-core",
+ "fynd-rpc",
  "fynd-test-fixtures",
  "num-bigint",
  "rayon",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
  "tracing-subscriber 0.3.23",
  "tycho-simulation",
+ "zstd",
 ]
 
 [[package]]
