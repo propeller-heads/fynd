@@ -77,8 +77,12 @@ const SHARED_MARGIN_PATHS: usize = 8;
 /// always added to the fill-and-spill marginal probe, wherever they rank. An inventory-limited
 /// path's capped output sinks below every pool deep enough to absorb the whole order once the
 /// order is a small multiple of its inventory, but its price can still win the probe. Selection
-/// deduplicates by bottleneck component and ranks by spot price (`select_capped_probes`).
+/// deduplicates by bottleneck component and ranks by input cap (`select_capped_probes`).
 const CAPPED_PROBE_PATHS: usize = 16;
+/// Upper bound on capped ranking simulation attempts while filling the [`CAPPED_PROBE_PATHS`]
+/// slots. A failed capped simulation (broken pool, stale limit) does not consume a slot, so the
+/// attempt bound keeps a pathological block from burning solve time on junk paths.
+const CAPPED_PROBE_ATTEMPTS: usize = 48;
 /// Upper bound on fill-and-spill candidate paths.
 const SHARED_MAX_CANDIDATES: usize = 12;
 /// Candidate states retained per intermediate token during bounded discovery expansion.
@@ -253,9 +257,6 @@ struct PathCap {
     input_cap: BigUint,
     /// Component whose sell limit set the cap.
     bottleneck: ComponentId,
-    /// Product of every edge's spot price (path output per input at zero size); `None` when any
-    /// edge's derived data is missing.
-    spot_product: Option<f64>,
 }
 
 /// Shared inputs threaded through every split-allocation pass: the ranked candidate paths, the
@@ -460,7 +461,6 @@ impl WaterFillAlgorithm {
         // Path-input units per current hop-input unit: the product of preceding edges' spot
         // prices (each token_out per token_in).
         let mut path_input_price = 1.0_f64;
-        let mut spot_product = Some(1.0_f64);
         let hop_count = path.len();
         for (hop, (address_in, edge, address_out)) in path.iter().enumerate() {
             let max_in = Self::cached_sell_limit(
@@ -481,40 +481,37 @@ impl WaterFillAlgorithm {
             {
                 cap = Some((hop_cap, edge.component_id.clone()));
             }
-            match edge
-                .data
-                .as_ref()
-                .map(|data| data.spot_price)
-            {
-                Some(spot) if spot > 0.0 && spot.is_finite() => {
-                    if hop + 1 < hop_count {
-                        path_input_price *= spot;
-                    }
-                    spot_product = spot_product.map(|product| product * spot);
+            if hop + 1 < hop_count {
+                let spot = edge.data.as_ref()?.spot_price;
+                if spot <= 0.0 || !spot.is_finite() {
+                    return None;
                 }
-                // A final hop's missing spot price does not affect the cap, only the proxy.
-                _ if hop + 1 == hop_count => spot_product = None,
-                _ => return None,
+                path_input_price *= spot;
             }
         }
         let (input_cap, bottleneck) = cap?;
         if input_cap.is_zero() {
             return None;
         }
-        Some(PathCap { input_cap, bottleneck, spot_product })
+        Some(PathCap { input_cap, bottleneck })
     }
 
-    /// Chooses which full-amount-failing paths get an honest limit-capped ranking simulation,
-    /// returning `(path index, cap)` pairs.
+    /// Orders the full-amount-failing paths for the honest limit-capped ranking simulations,
+    /// returning `(path index, cap)` attempt pairs, largest cap first.
     ///
     /// Computing a cap is cheap (cached `get_limits` lookups), but the capped simulation is not,
     /// and at three hops most candidate paths fail once the order is large — simulating every
-    /// one dominated solve time. All failing paths keep gross 0 except the strongest probes:
-    /// paths are deduplicated by bottleneck component (paths sharing a bottleneck cannot
-    /// contribute its inventory twice), then the best [`CAPPED_PROBE_PATHS`] by spot price are
-    /// kept — the fill-and-spill marginal probe these paths are retained for is itself
-    /// price-driven. Paths whose cap covers the full order (the failure has another cause) or
-    /// cannot absorb one fine chunk are dropped.
+    /// one dominated solve time. All failing paths keep gross 0 except the winners of the
+    /// [`CAPPED_PROBE_PATHS`] slots: paths are deduplicated by bottleneck component (paths
+    /// sharing a bottleneck cannot contribute its inventory twice) and ranked by input cap —
+    /// the path's real fillable notional, from the same `get_limits` oracle the allocation
+    /// budgets trust, comparable across paths because every cap is in path-input token units.
+    /// Spot prices are deliberately not the ranking key: broken pools advertise fantasy spots
+    /// and crowd out honest inventory. The list is bounded by [`CAPPED_PROBE_ATTEMPTS`] since a
+    /// failed capped simulation does not consume a probe slot.
+    ///
+    /// Paths whose cap covers the full order (the failure has another cause) or cannot absorb
+    /// one fine chunk are dropped.
     fn select_capped_probes(
         paths: &[Path<DepthAndPrice>],
         failing: &[usize],
@@ -523,7 +520,7 @@ impl WaterFillAlgorithm {
         limits: &mut LimitsCache,
     ) -> Vec<(usize, BigUint)> {
         let chunk_floor = order_amount / FINE_CHUNKS;
-        let mut best_per_bottleneck: HashMap<ComponentId, (usize, BigUint, f64)> = HashMap::new();
+        let mut best_per_bottleneck: HashMap<ComponentId, (usize, BigUint)> = HashMap::new();
         for &idx in failing {
             let Some(path_cap) = Self::max_fillable_input(&paths[idx], market, limits) else {
                 continue;
@@ -531,28 +528,36 @@ impl WaterFillAlgorithm {
             if path_cap.input_cap >= *order_amount || path_cap.input_cap < chunk_floor {
                 continue;
             }
-            let Some(spot) = path_cap.spot_product else {
-                continue;
-            };
             let keep = best_per_bottleneck
                 .get(&path_cap.bottleneck)
-                .is_none_or(|(_, _, existing)| spot > *existing);
+                .is_none_or(|(_, existing)| path_cap.input_cap > *existing);
             if keep {
-                best_per_bottleneck.insert(path_cap.bottleneck, (idx, path_cap.input_cap, spot));
+                best_per_bottleneck.insert(path_cap.bottleneck, (idx, path_cap.input_cap));
             }
         }
-        let mut probes: Vec<(usize, BigUint, f64)> = best_per_bottleneck
+        let mut probes: Vec<(usize, BigUint)> = best_per_bottleneck
             .into_values()
             .collect();
-        probes.sort_by(|(_, _, a), (_, _, b)| {
-            b.partial_cmp(a)
-                .unwrap_or(Ordering::Equal)
-        });
-        probes.truncate(CAPPED_PROBE_PATHS);
+        probes.sort_by(|(_, a), (_, b)| b.cmp(a));
+        probes.truncate(CAPPED_PROBE_ATTEMPTS);
+        debug!(
+            failing = failing.len(),
+            attempts = probes.len(),
+            probes = ?probes
+                .iter()
+                .take(CAPPED_PROBE_PATHS)
+                .map(|(idx, cap)| {
+                    let components: Vec<ComponentId> = paths[*idx]
+                        .edge_iter()
+                        .iter()
+                        .map(|edge| edge.component_id.clone())
+                        .collect();
+                    (components, cap.to_string())
+                })
+                .collect::<Vec<_>>(),
+            "water-fill capped probe selection"
+        );
         probes
-            .into_iter()
-            .map(|(idx, cap, _)| (idx, cap))
-            .collect()
     }
 
     /// Gross output of a path simulated at its limit cap, used to rank it honestly.
@@ -755,7 +760,9 @@ impl WaterFillAlgorithm {
         for (idx, cap) in
             Self::select_capped_probes(&paths, &failing, &market, &amount_in, &mut limits)
         {
-            if start.elapsed().as_millis() as u64 > timeout_ms {
+            if capped_grosses.len() >= CAPPED_PROBE_PATHS ||
+                start.elapsed().as_millis() as u64 > timeout_ms
+            {
                 break;
             }
             if let Some(gross) =
@@ -869,6 +876,16 @@ impl Algorithm for WaterFillAlgorithm {
         let mut best: Option<(BigInt, SplitCandidate)> = None;
         for cand in candidates {
             let net = cand.net(&gas_price, token_prices.as_ref(), token_out);
+            debug!(
+                %net,
+                legs = ?cand
+                    .route
+                    .swaps()
+                    .iter()
+                    .map(|swap| (swap.protocol(), swap.amount_in().to_string()))
+                    .collect::<Vec<_>>(),
+                "water-fill split candidate"
+            );
             let beats = match (&best, &baseline_net) {
                 (Some((current, _)), _) => net > *current,
                 (None, Some(base)) => net > *base,
@@ -1314,6 +1331,11 @@ impl WaterFillAlgorithm {
             candidates.push(idx);
             winners += 1;
         }
+        debug!(
+            ?candidates,
+            capped_positions = ?ctx.capped_positions,
+            "water-fill fill-and-spill candidate selection"
+        );
         candidates
     }
 
