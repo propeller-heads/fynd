@@ -41,7 +41,7 @@ use tycho_simulation::tycho_common::{
 };
 
 const WINDOWS: [u64; 5] = [1, 5, 15, 30, 150];
-const SOLVE_DEADLINE: Duration = Duration::from_secs(10);
+const SOLVE_DEADLINE: Duration = Duration::from_secs(3);
 
 #[derive(Parser)]
 #[command(about = "APEX on decoded Base trades against current live AMM state (stage 3)")]
@@ -475,7 +475,12 @@ fn solve_batch(
     }
 
     for (root, component_orders) in components {
-        if component_orders.len() < 2 && !with_pools {
+        // Singleton components skip the full APEX solve in BOTH cells: with pools attached
+        // every lone order becomes solvable and the sweep degenerates into ~36k heavy two-hop
+        // solves per cell — while the information (what a single order gets from pools at this
+        // state) is exactly what the pool-implied quote pass measures for a fraction of the
+        // cost. Batch-vs-singles attribution stays with the stage-2 control design.
+        if component_orders.len() < 2 {
             counters.singles_skipped += component_orders.len() as u64;
             continue;
         }
@@ -626,7 +631,7 @@ fn solve_batch(
                     .copied()
                     .unwrap_or(0.0);
         }
-        if order_inputs.is_empty() || (order_inputs.len() < 2 && component_pools.is_empty()) {
+        if order_inputs.len() < 2 {
             counters.singles_skipped += order_inputs.len() as u64;
             continue;
         }
