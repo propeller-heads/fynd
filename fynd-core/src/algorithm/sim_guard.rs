@@ -16,6 +16,7 @@ use tycho_simulation::tycho_common::{
         errors::SimulationError,
         protocol_sim::{GetAmountOutResult, ProtocolSim},
     },
+    Bytes,
 };
 
 /// Extension trait adding panic-guarded simulation calls to every [`ProtocolSim`].
@@ -33,6 +34,29 @@ pub(crate) trait GuardedProtocolSim {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError>;
+
+    /// Calls `get_limits`, converting a panic into a `SimulationError::FatalError`.
+    ///
+    /// On a contained panic, logs the token pair so the offending component/quote can be
+    /// tracked down from the logs.
+    fn get_limits_guarded(
+        &self,
+        sell_token: Bytes,
+        buy_token: Bytes,
+    ) -> Result<(BigUint, BigUint), SimulationError>;
+}
+
+/// Best-effort extraction of a human-readable message from a contained panic payload.
+fn panic_message(panic_payload: &(dyn std::any::Any + Send)) -> &str {
+    panic_payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| {
+            panic_payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+        })
+        .unwrap_or("<non-string panic payload>")
 }
 
 impl<T: ProtocolSim + ?Sized> GuardedProtocolSim for T {
@@ -48,15 +72,7 @@ impl<T: ProtocolSim + ?Sized> GuardedProtocolSim for T {
         }));
 
         outcome.unwrap_or_else(|panic_payload| {
-            let message = panic_payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| {
-                    panic_payload
-                        .downcast_ref::<String>()
-                        .map(String::as_str)
-                })
-                .unwrap_or("<non-string panic payload>");
+            let message = panic_message(panic_payload.as_ref());
             warn!(
                 %amount_in,
                 token_in = %token_in.address,
@@ -67,6 +83,28 @@ impl<T: ProtocolSim + ?Sized> GuardedProtocolSim for T {
                 "component simulation panicked; skipping component"
             );
             Err(SimulationError::FatalError(format!("get_amount_out panicked: {message}")))
+        })
+    }
+
+    fn get_limits_guarded(
+        &self,
+        sell_token: Bytes,
+        buy_token: Bytes,
+    ) -> Result<(BigUint, BigUint), SimulationError> {
+        // Tokens are cloned into the call so the originals stay available for the panic log.
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            self.get_limits(sell_token.clone(), buy_token.clone())
+        }));
+
+        outcome.unwrap_or_else(|panic_payload| {
+            let message = panic_message(panic_payload.as_ref());
+            warn!(
+                %sell_token,
+                %buy_token,
+                panic = message,
+                "component get_limits panicked; skipping component"
+            );
+            Err(SimulationError::FatalError(format!("get_limits panicked: {message}")))
         })
     }
 }
