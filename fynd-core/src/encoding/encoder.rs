@@ -910,6 +910,55 @@ mod tests {
         encoder
     }
 
+    /// Regression test: a split route where one branch hops through WETH and a parallel branch
+    /// hops through native ETH. The route itself is valid (per-token remainder splits are last),
+    /// but tycho-execution 0.349.0's `add_native_wrap_swaps` treats the adjacency between the
+    /// USDT→ETH branch and the WETH→USDC branch as a sequential ETH→WETH gap and injects a
+    /// 0%-split wrap swap mid-list, which then fails split validation with
+    /// "The 0% split for token ... must be the last swap".
+    #[tokio::test]
+    async fn test_encode_split_route_with_native_and_wrapped_intermediates() {
+        let usdt: Address = "0xdac17f958d2ee523a2206206994597c13d831ec7"
+            .parse()
+            .unwrap();
+        let usdc: Address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            .parse()
+            .unwrap();
+        let weth: Address = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            .parse()
+            .unwrap();
+        let eth = Address::from([0u8; 20]);
+
+        let split_swap = |tin: &Address, tout: &Address, split: f64| {
+            make_route_swap_addrs(tin.clone(), tout.clone()).with_split(split)
+        };
+        // Topological emission order from build_split_route: the USDT batch (remainder last),
+        // then one batch per intermediate token.
+        let swaps = vec![
+            split_swap(&usdt, &weth, 0.7),
+            split_swap(&usdt, &eth, 0.0),
+            split_swap(&weth, &usdc, 0.0),
+            split_swap(&eth, &usdc, 0.0),
+        ];
+        let tokens = [&usdt, &usdc, &weth, &eth]
+            .into_iter()
+            .map(|a| (a.clone(), make_token(a.clone())))
+            .collect();
+        let route = crate::types::Route::new(swaps, tokens).expect("non-empty route");
+        assert!(route.validate().is_ok(), "the solver-side route is valid");
+
+        let quote = make_order_quote(990).with_route(route);
+        let result = real_encoder()
+            .encode(vec![quote], EncodingOptions::new(0.01))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "split route mixing WETH and native ETH branches must encode, got: {:?}",
+            result.err()
+        );
+    }
+
     #[tokio::test]
     async fn test_encode_sets_transaction_on_successful_solution() {
         let encoder = real_encoder();
