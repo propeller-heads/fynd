@@ -703,11 +703,12 @@ impl WorkerPoolRouter {
 /// use exclusive components).
 ///
 /// There are two ways to set the commitment:
-/// - **Matched**: the head of `public_ranked` is a successful quote. The commitment follows that
-///   quote, as shown below.
-/// - **Default fee**: no public quote succeeded in the solve timeout, so there is no reference
-///   price. The commitment is the route output minus `NO_PUBLIC_ROUTE_FEE_BPS` of the exclusive
-///   leg. The candidate is skipped if the fee leaves the user with nothing after gas.
+/// - **Matched**: `public_ranked` starts with a successful public quote, and the commitment follows
+///   that quote, as shown below.
+/// - **Default fee**: no public quote succeeded in the solve timeout, so `public_ranked` holds only
+///   the `NoRouteFound` placeholder. The commitment is the route output minus
+///   `NO_PUBLIC_ROUTE_FEE_BPS` of the exclusive leg. The candidate is skipped if the fee leaves the
+///   user with nothing after gas.
 ///
 /// In matched mode a candidate must at least match the public reference net of gas; what it
 /// produces on top, `improvement = exclusive_net − public_net`, is then split. The user's net
@@ -731,18 +732,20 @@ impl WorkerPoolRouter {
 ///   more, but it is below `public_amount_out` — quoting less than the public market is ruled out,
 ///   so the gas difference stays with the user.
 ///
-/// If there is a commitment, this returns a new list. The head is the pinned surplus quote. The
-/// public candidates follow as price-guard fallbacks. In default-fee mode the fallback is the
-/// `NoRouteFound` placeholder, so a rejected exclusive quote still answers "no route". The pinned
-/// quote is the winning candidate with:
+/// If there is a commitment, this returns a new list. The head is the pinned surplus quote, and the
+/// entries of `public_ranked` follow it as price-guard fallbacks. The pinned quote is the winning
+/// candidate with:
 /// - `amount_out` set to the committed amount,
 /// - `Swap::committed_amount_out` set on each exclusive leg, and
 /// - an order-level `SurplusInfo`.
 ///
-/// If there is no commitment, this returns `public_ranked` unchanged. In matched mode the user is
-/// never worse off than the public market, in quoted `amount_out` and net of gas. A candidate that
-/// equals the public reference is quoted with zero surplus. The trade then executes on exclusive
-/// liquidity at the public price.
+/// If there is no commitment, this returns `public_ranked` unchanged. In default-fee mode the
+/// placeholder is the only fallback, so the order answers "no route" if there is no commitment or
+/// the price guard rejects the exclusive quote.
+///
+/// In matched mode the user is never worse off than the public market, in quoted `amount_out` and
+/// net of gas. A candidate that equals the public reference is quoted with zero surplus, and
+/// executes on exclusive liquidity at the public price.
 ///
 /// Per-leg attribution: the route's surplus over the committed amount (`realized − committed`)
 /// is deducted from the exclusive legs — each leg absorbs what it can, capped at its own output,
