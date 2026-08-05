@@ -881,16 +881,16 @@ fn default_fee_commitment(exclusive_candidate: &OrderQuote) -> Option<BigUint> {
     Some(committed_amount_out)
 }
 
-/// Pins `candidate` to `committed_amount_out`: stamps the per-leg committed amounts the encoder
-/// consumes, pins `amount_out` and `amount_out_net_gas`, and attaches the [`SurplusInfo`].
+/// Pins `exclusive_candidate` to `committed_amount_out`: stamps the per-leg committed amounts the
+/// encoder consumes, pins `amount_out` and `amount_out_net_gas`, and attaches the [`SurplusInfo`].
 ///
 /// Everything the route produces above the commitment is what the exclusive components capture.
-fn pin_commitment(candidate: &OrderQuote, committed_amount_out: BigUint) -> OrderQuote {
-    let exclusive_route_amount_out = candidate.amount_out();
-    let exclusive_gas_cost = exclusive_route_amount_out - candidate.amount_out_net_gas();
+fn pin_commitment(exclusive_candidate: &OrderQuote, committed_amount_out: BigUint) -> OrderQuote {
+    let exclusive_route_amount_out = exclusive_candidate.amount_out();
+    let exclusive_gas_cost = exclusive_route_amount_out - exclusive_candidate.amount_out_net_gas();
     let surplus_amount = exclusive_route_amount_out - &committed_amount_out;
 
-    let mut surplus_quote = candidate.clone();
+    let mut surplus_quote = exclusive_candidate.clone();
 
     // Final output of each swap's path, walked backwards (a path's terminal output propagates
     // to its chained predecessors). Converting captured surplus into a leg's token needs the
