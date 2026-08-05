@@ -57,10 +57,7 @@ struct Args {
     /// Cap on the pool subset (class-priority order: direct > adjacent > linking).
     #[arg(long, default_value_t = 400)]
     max_pools: usize,
-    #[arg(
-        long,
-        default_value = "/Users/pistomat/Projects/propeller-heads/fynd/data/hindsight/base-comparisons"
-    )]
+    #[arg(long, default_value = "data/hindsight/base-comparisons")]
     data_dir: PathBuf,
     #[arg(long, default_value = "docs/analysis/2026-08-base-cow-phase0/stage3-apex-with-amms")]
     out_dir: PathBuf,
@@ -77,7 +74,7 @@ struct Args {
     #[arg(long)]
     snapshot: Option<PathBuf>,
     /// Where the live run persists its snapshot (zstd JSON).
-    #[arg(long, default_value = "/Users/pistomat/Projects/propeller-heads/fynd/data/apex-snapshots")]
+    #[arg(long, default_value = "data/apex-snapshots")]
     snapshot_out: PathBuf,
     /// Cap on per-order fynd quotes taken at the live state before disconnecting (cell-b
     /// baseline); orders beyond the cap are sampled evenly and the share is reported.
@@ -121,6 +118,9 @@ struct StateSnapshot {
 struct PersistedSnapshot {
     state_label: String,
     price_block: Option<u64>,
+    subset_dropped_by_cap: u64,
+    clone_box_ms: u128,
+    arc_from_ms: u128,
     pools: Vec<PersistedPool>,
     v4_dropped: Vec<String>,
     price_rationals: Vec<(String, String, String, u8)>,
@@ -133,8 +133,20 @@ struct PersistedSnapshot {
 struct PersistedPool {
     component_id: String,
     protocol: String,
-    tokens: Vec<(String, String, u8)>,
+    tokens: Vec<PersistedToken>,
     state: serde_json::Value,
+}
+
+/// A tycho token's full identity, persisted verbatim so a reload rebuilds the exact token the
+/// live run saw instead of inventing tax/gas/quality constants.
+#[derive(Serialize, Deserialize)]
+struct PersistedToken {
+    address: String,
+    symbol: String,
+    decimals: u32,
+    tax: u64,
+    gas: Vec<Option<u64>>,
+    quality: u32,
 }
 
 fn hex_addr(address: ApexAddress) -> String {
@@ -177,6 +189,8 @@ struct Counters {
     components_multi_order: u64,
     /// Orders with no snapshot-state quote to anchor a Current floor to.
     no_current_quote: u64,
+    /// Orders declined because their id collided with another order in the same batch.
+    duplicate_order_id: u64,
     fynd_compared: u64,
     fynd_uncompared: u64,
 }
@@ -211,6 +225,7 @@ impl Counters {
         self.components_solved += other.components_solved;
         self.components_multi_order += other.components_multi_order;
         self.no_current_quote += other.no_current_quote;
+        self.duplicate_order_id += other.duplicate_order_id;
         self.fynd_compared += other.fynd_compared;
         self.fynd_uncompared += other.fynd_uncompared;
     }
@@ -273,6 +288,8 @@ fn net_pool_exposure_wei(
         *net.entry(sell_token).or_default() -= u256_to_f64(alloy_u256(sold));
         *net.entry(buy_token).or_default() += u256_to_f64(alloy_u256(bought));
     }
+    let mut net: Vec<(ApexAddress, f64)> = net.into_iter().collect();
+    net.sort_by_key(|(token, _)| token.0);
     net.into_iter()
         .filter_map(|(token, amount18)| Some(amount18.abs() * wei_per_unit18.get(&token)?))
         .sum()
@@ -341,13 +358,13 @@ fn solve_batch(
             counters.wash_orders_excluded += 1;
             continue;
         }
-        let known = snapshot
-            .token_meta
-            .contains_key(&intent.token_in) &&
+        let representable = |token: &ApexAddress| {
             snapshot
                 .token_meta
-                .contains_key(&intent.token_out);
-        if !known {
+                .get(token)
+                .is_some_and(|(_, decimals)| TokenScale::new(*decimals).is_ok())
+        };
+        if !representable(&intent.token_in) || !representable(&intent.token_out) {
             counters.unknown_decimals += 1;
             continue;
         }
@@ -427,7 +444,7 @@ fn solve_batch(
 
     for (root, component_orders) in components {
         if component_orders.len() < 2 && !with_pools {
-            counters.singles_skipped += 1;
+            counters.singles_skipped += component_orders.len() as u64;
             continue;
         }
         counters.components_multi_order += u64::from(component_orders.len() >= 2);
@@ -525,10 +542,13 @@ fn solve_batch(
                 counters.price_underflow += 1;
                 continue;
             }
-            let scale_in = TokenScale::new(snapshot.token_meta[&order.token_in].1)
-                .expect("token_meta only holds ≤18-dec tokens");
-            let scale_out = TokenScale::new(snapshot.token_meta[&order.token_out].1)
-                .expect("token_meta only holds ≤18-dec tokens");
+            let (Ok(scale_in), Ok(scale_out)) = (
+                TokenScale::new(snapshot.token_meta[&order.token_in].1),
+                TokenScale::new(snapshot.token_meta[&order.token_out].1),
+            ) else {
+                counters.unknown_decimals += 1;
+                continue;
+            };
             let floor_basis = match anchor {
                 Anchor::Original => alloy_u256(order.settled_out),
                 Anchor::Current => match current_quotes.get(&order.id) {
@@ -552,13 +572,11 @@ fn solve_batch(
                 counters.zero_limit_excluded += 1;
                 continue;
             }
-            assert!(
-                order_inputs
-                    .insert(order.id.clone(), (order, u256_to_f64(amount18.0)))
-                    .is_none(),
-                "duplicate order id {} in one batch",
-                order.id
-            );
+            if order_inputs.contains_key(&order.id) {
+                counters.duplicate_order_id += 1;
+                continue;
+            }
+            order_inputs.insert(order.id.clone(), (order, u256_to_f64(amount18.0)));
             let pair =
                 TradingPair::new(apex_tokens[&order.token_in], apex_tokens[&order.token_out]);
             limit_orders
@@ -679,7 +697,10 @@ fn solve_batch(
             .iter()
             .map(|c| (c.id.as_str(), c))
             .collect();
-        for (id, (order, amount18)) in &order_inputs {
+        let mut reconcile_ids: Vec<&String> = order_inputs.keys().collect();
+        reconcile_ids.sort();
+        for id in reconcile_ids {
+            let (order, amount18) = &order_inputs[id];
             match clearings.get(id.as_str()) {
                 Some(clearing) if !clearing.sold_amount.is_zero() => {
                     let fill_ratio =
@@ -719,14 +740,19 @@ fn solve_batch(
                 if !clearing.sold_amount.is_zero() {
                     let fill_ratio =
                         u256_to_f64(alloy_u256(clearing.sold_amount)) / amount18.max(1.0);
-                    let scale_out = TokenScale::new(snapshot.token_meta[&order.token_out].1)
-                        .expect("token_meta only holds ≤18-dec tokens");
+                    let Ok(scale_out) = TokenScale::new(snapshot.token_meta[&order.token_out].1)
+                    else {
+                        continue;
+                    };
                     let bought_raw = u256_to_f64(
                         scale_out.scale_down_floor(Scaled18(alloy_u256(clearing.bought_amount))),
                     );
                     let baseline_raw = match anchor {
                         Anchor::Original => order.fynd_out.map(alloy_u256),
-                        Anchor::Current => snapshot.fynd_quotes.get(&order.id).copied(),
+                        Anchor::Current => snapshot
+                            .fynd_quotes
+                            .get(&order.id)
+                            .copied(),
                     };
                     match baseline_raw {
                         Some(fynd_out) if !fynd_out.is_zero() => {
@@ -761,9 +787,22 @@ fn pool_implied_quote(
     order: &Intent,
     snapshot: &StateSnapshot,
     pools_by_token: &HashMap<ApexAddress, Vec<usize>>,
+    serializable_only: bool,
 ) -> Option<alloy::primitives::U256> {
-    let scale_in = TokenScale::new(snapshot.token_meta.get(&order.token_in)?.1).ok()?;
-    let scale_out = TokenScale::new(snapshot.token_meta.get(&order.token_out)?.1).ok()?;
+    let scale_in = TokenScale::new(
+        snapshot
+            .token_meta
+            .get(&order.token_in)?
+            .1,
+    )
+    .ok()?;
+    let scale_out = TokenScale::new(
+        snapshot
+            .token_meta
+            .get(&order.token_out)?
+            .1,
+    )
+    .ok()?;
     let amount18 = scale_in
         .scale_up(alloy_u256(order.amount_in))
         .ok()?;
@@ -776,8 +815,10 @@ fn pool_implied_quote(
     // Direct pools.
     for &index in in_pools {
         let pool = &snapshot.pools[index];
-        let other =
-            if pool.token_0 == order.token_in { pool.token_1 } else { pool.token_0 };
+        if serializable_only && !pool.persisted {
+            continue;
+        }
+        let other = if pool.token_0 == order.token_in { pool.token_1 } else { pool.token_0 };
         if other != order.token_out {
             continue;
         }
@@ -792,6 +833,9 @@ fn pool_implied_quote(
     // Two hops through any shared intermediate.
     for &first_index in in_pools {
         let first = &snapshot.pools[first_index];
+        if serializable_only && !first.persisted {
+            continue;
+        }
         let mid = if first.token_0 == order.token_in { first.token_1 } else { first.token_0 };
         if mid == order.token_out {
             continue;
@@ -805,16 +849,18 @@ fn pool_implied_quote(
         if mid_out.is_zero() {
             continue;
         }
-        for &second_index in pools_by_token.get(&mid).unwrap_or(&empty) {
+        for &second_index in pools_by_token
+            .get(&mid)
+            .unwrap_or(&empty)
+        {
             let second = &snapshot.pools[second_index];
             let far = if second.token_0 == mid { second.token_1 } else { second.token_0 };
             if far != order.token_out {
                 continue;
             }
-            let out =
-                second
-                    .adapter
-                    .get_amount_out(mid, order.token_out, mid_out, ApexU256::ZERO);
+            let out = second
+                .adapter
+                .get_amount_out(mid, order.token_out, mid_out, ApexU256::ZERO);
             best18 = best18.max(out);
         }
     }
@@ -1021,8 +1067,13 @@ async fn take_snapshot(
     use fynd_core::types::{
         EncodingOptions, Order as FyndOrder, OrderSide, QuoteOptions, QuoteRequest,
     };
-    let stride = orders.len().div_ceil(args.fynd_quote_cap.max(1));
-    let sampled: Vec<&Intent> = orders.iter().step_by(stride.max(1)).collect();
+    let stride = orders
+        .len()
+        .div_ceil(args.fynd_quote_cap.max(1));
+    let sampled: Vec<&Intent> = orders
+        .iter()
+        .step_by(stride.max(1))
+        .collect();
     let sample_share = sampled.len() as f64 / orders.len().max(1) as f64;
     eprintln!(
         "taking {} fynd quotes at the snapshot state (stride {stride}, {:.0}% of orders)…",
@@ -1035,7 +1086,9 @@ async fn take_snapshot(
             vec![FyndOrder::new(
                 tycho_simulation::tycho_core::models::Address::from(order.token_in.0),
                 tycho_simulation::tycho_core::models::Address::from(order.token_out.0),
-                num_bigint::BigUint::from_bytes_le(&alloy_u256(order.amount_in).to_le_bytes::<32>()),
+                num_bigint::BigUint::from_bytes_le(
+                    &alloy_u256(order.amount_in).to_le_bytes::<32>(),
+                ),
                 OrderSide::Sell,
                 tycho_simulation::tycho_core::models::Address::from([0x11u8; 20]),
             )],
@@ -1085,6 +1138,9 @@ fn persist_snapshot(snapshot: &StateSnapshot, out_dir: &std::path::Path) -> Resu
     let persisted = PersistedSnapshot {
         state_label: snapshot.state_label.clone(),
         price_block: snapshot.price_block,
+        subset_dropped_by_cap: snapshot.subset_dropped_by_cap,
+        clone_box_ms: snapshot.clone_box_ms,
+        arc_from_ms: snapshot.arc_from_ms,
         pools: snapshot
             .pools
             .iter()
@@ -1098,12 +1154,13 @@ fn persist_snapshot(snapshot: &StateSnapshot, out_dir: &std::path::Path) -> Resu
                         .adapter
                         .tokens
                         .iter()
-                        .map(|(address, token)| {
-                            (
-                                hex_addr(*address),
-                                token.symbol.clone(),
-                                u8::try_from(token.decimals).unwrap_or(0),
-                            )
+                        .map(|(address, token)| PersistedToken {
+                            address: hex_addr(*address),
+                            symbol: token.symbol.clone(),
+                            decimals: token.decimals,
+                            tax: token.tax,
+                            gas: token.gas.clone(),
+                            quality: token.quality,
                         })
                         .collect(),
                     state,
@@ -1167,19 +1224,21 @@ fn load_snapshot(path: &std::path::Path) -> Result<StateSnapshot> {
             })?;
         let mut token_map: HashMap<ApexAddress, TychoToken> = HashMap::new();
         let mut token_addresses = Vec::new();
-        for (address_hex, symbol, decimals) in &pool.tokens {
-            let Some(address) = apex_batch::dataset::parse_address(address_hex) else { continue };
+        for token in &pool.tokens {
+            let Some(address) = apex_batch::dataset::parse_address(&token.address) else {
+                continue;
+            };
             token_addresses.push(address);
             token_map.insert(
                 address,
                 TychoToken::new(
                     &tycho_simulation::tycho_common::Bytes::from(address.0.to_vec()),
-                    symbol,
-                    *decimals as u32,
-                    0,
-                    &[Some(60_000)],
+                    &token.symbol,
+                    token.decimals,
+                    token.tax,
+                    &token.gas,
                     Chain::Base,
-                    100,
+                    token.quality,
                 ),
             );
         }
@@ -1224,9 +1283,9 @@ fn load_snapshot(path: &std::path::Path) -> Result<StateSnapshot> {
         pools,
         price_inputs,
         token_meta,
-        subset_dropped_by_cap: 0,
-        clone_box_ms: 0,
-        arc_from_ms: 0,
+        subset_dropped_by_cap: persisted.subset_dropped_by_cap,
+        clone_box_ms: persisted.clone_box_ms,
+        arc_from_ms: persisted.arc_from_ms,
         v4_dropped: persisted.v4_dropped,
         fynd_quotes,
         fynd_quote_sample_share: persisted.fynd_quote_sample_share,
@@ -1314,20 +1373,6 @@ async fn main() -> Result<()> {
             .or_default()
             .push(index);
     }
-    let quote_started = Instant::now();
-    let current_quotes: HashMap<String, alloy::primitives::U256> = all_orders
-        .iter()
-        .filter_map(|order| {
-            pool_implied_quote(order, &snapshot, &pools_by_token).map(|q| (order.id.clone(), q))
-        })
-        .collect();
-    eprintln!(
-        "pool-implied current quotes: {} of {} orders ({}ms)",
-        current_quotes.len(),
-        all_orders.len(),
-        quote_started.elapsed().as_millis()
-    );
-
     // v4-inclusion delta: a live run solves each cell twice — full in-memory subset vs the
     // serializable-only subset a from-disk rerun would see. From-disk runs only have the latter.
     let pool_scopes: Vec<bool> = if snapshot.v4_dropped.is_empty() || args.snapshot.is_some() {
@@ -1336,13 +1381,36 @@ async fn main() -> Result<()> {
         vec![false, true]
     };
 
+    // Current-anchor floors are pool-implied quotes, computed PER SCOPE: the serializable cell
+    // must not anchor its floors to routes through v4 pools it cannot clear against, or the
+    // v4-inclusion delta is biased by construction.
+    let quote_started = Instant::now();
+    let mut scope_quotes: HashMap<bool, HashMap<String, alloy::primitives::U256>> = HashMap::new();
+    for &serializable_only in &pool_scopes {
+        let quotes: HashMap<String, alloy::primitives::U256> = all_orders
+            .iter()
+            .filter_map(|order| {
+                pool_implied_quote(order, &snapshot, &pools_by_token, serializable_only)
+                    .map(|q| (order.id.clone(), q))
+            })
+            .collect();
+        eprintln!(
+            "pool-implied current quotes (serializable_only={serializable_only}): {} of {} orders",
+            quotes.len(),
+            all_orders.len(),
+        );
+        scope_quotes.insert(serializable_only, quotes);
+    }
+    eprintln!("quote pass took {}ms", quote_started.elapsed().as_millis());
+
     let mut cells: Vec<CellResult> = Vec::new();
     for window in WINDOWS {
         for &limit_bps in &args.limit_bps {
             for anchor in [Anchor::Original, Anchor::Current] {
                 for &serializable_only in &pool_scopes {
                     for with_pools in [true, false] {
-                        if !with_pools && serializable_only != *pool_scopes.last().expect("nonempty")
+                        if !with_pools &&
+                            serializable_only != *pool_scopes.last().expect("nonempty")
                         {
                             // The no-pools cell is scope-invariant; run it once per anchor.
                             continue;
@@ -1373,7 +1441,7 @@ async fn main() -> Result<()> {
                                     with_pools,
                                     anchor,
                                     serializable_only,
-                                    &current_quotes,
+                                    &scope_quotes[&serializable_only],
                                     &mut solve_times,
                                 );
                                 matched += outcome.matched_usd;
@@ -1386,10 +1454,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         solve_times.sort_unstable();
-                        fynd_bps.sort_by(|a, b| {
-                            a.partial_cmp(b)
-                                .expect("finite bps")
-                        });
+                        fynd_bps.sort_by(|a, b| a.partial_cmp(b).expect("finite bps"));
                         let percentile = |p: f64| -> u128 {
                             if solve_times.is_empty() {
                                 0
@@ -1480,7 +1545,11 @@ async fn main() -> Result<()> {
         v4_dropped: snapshot.v4_dropped.clone(),
         fynd_quotes_taken: snapshot.fynd_quotes.len(),
         fynd_quote_sample_share: snapshot.fynd_quote_sample_share,
-        current_quotes: current_quotes.len(),
+        current_quotes: scope_quotes
+            .values()
+            .map(HashMap::len)
+            .max()
+            .unwrap_or(0),
     };
     std::fs::write(
         args.out_dir.join("stage3_results.json"),
