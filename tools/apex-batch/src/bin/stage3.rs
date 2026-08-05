@@ -1095,52 +1095,63 @@ async fn take_snapshot(
     drop(derived_guard);
     drop(view);
 
-    // Per-order fynd quotes at this exact state (cell-b baseline), evenly sampled to the cap.
-    use fynd_core::types::{
-        EncodingOptions, Order as FyndOrder, OrderSide, QuoteOptions, QuoteRequest,
+    // Per-order fynd quotes at this exact state (cell-b baseline).
+    // Probe the quote rate, then take the densest even stride that fits the time budget (these
+    // quotes are the cell-b baseline; coverage is worth minutes, not hours). A nonzero
+    // --fynd-quote-cap keeps the fixed-cap behavior.
+    const QUOTE_BUDGET: Duration = Duration::from_secs(20 * 60);
+    const PROBE: usize = 100;
+    let mut fynd_quotes: HashMap<String, alloy::primitives::U256> = HashMap::new();
+    let target = if args.fynd_quote_cap > 0 {
+        args.fynd_quote_cap.min(orders.len())
+    } else {
+        let probe_stride = (orders.len() / PROBE.min(orders.len()).max(1)).max(1);
+        let probe_started = Instant::now();
+        let mut probed = 0usize;
+        for order in orders
+            .iter()
+            .step_by(probe_stride)
+            .take(PROBE)
+        {
+            take_fynd_quote(&solver, order, &mut fynd_quotes).await;
+            probed += 1;
+        }
+        let per_quote = probe_started.elapsed() / probed.max(1) as u32;
+        let capacity = (QUOTE_BUDGET.as_secs_f64() / per_quote.as_secs_f64().max(1e-6)) as usize;
+        eprintln!(
+            "quote probe: {probed} quotes at {per_quote:?} each → capacity {capacity} of {} \
+             orders ({})",
+            orders.len(),
+            if capacity >= orders.len() { "FULL coverage fits" } else { "20-min time bound" },
+        );
+        capacity.min(orders.len()).max(PROBE)
     };
-    let stride = orders
-        .len()
-        .div_ceil(args.fynd_quote_cap.max(1));
+    let stride = orders.len().div_ceil(target.max(1));
     let sampled: Vec<&Intent> = orders
         .iter()
         .step_by(stride.max(1))
         .collect();
     let sample_share = sampled.len() as f64 / orders.len().max(1) as f64;
     eprintln!(
-        "taking {} fynd quotes at the snapshot state (stride {stride}, {:.0}% of orders)…",
+        "taking {} fynd quotes at the snapshot state (stride {stride}, {:.1}% of orders)…",
         sampled.len(),
         100.0 * sample_share
     );
-    let mut fynd_quotes: HashMap<String, alloy::primitives::U256> = HashMap::new();
+    let quote_pass_started = Instant::now();
     for (index, order) in sampled.iter().enumerate() {
-        let request = QuoteRequest::new(
-            vec![FyndOrder::new(
-                tycho_simulation::tycho_core::models::Address::from(order.token_in.0),
-                tycho_simulation::tycho_core::models::Address::from(order.token_out.0),
-                num_bigint::BigUint::from_bytes_le(
-                    &alloy_u256(order.amount_in).to_le_bytes::<32>(),
-                ),
-                OrderSide::Sell,
-                tycho_simulation::tycho_core::models::Address::from([0x11u8; 20]),
-            )],
-            QuoteOptions::default()
-                .with_timeout_ms(500)
-                .with_encoding_options(EncodingOptions::new(0.005)),
-        );
-        if let Ok(quote) = solver.quote(request).await {
-            if let Some(order_quote) = quote.orders().first() {
-                let bytes = order_quote.amount_out().to_bytes_le();
-                if bytes.len() <= 32 {
-                    fynd_quotes
-                        .insert(order.id.clone(), alloy::primitives::U256::from_le_slice(&bytes));
-                }
-            }
+        if fynd_quotes.contains_key(&order.id) {
+            continue;
         }
-        if index % 250 == 0 {
-            eprintln!("  fynd quotes: {index}/{}", sampled.len());
+        take_fynd_quote(&solver, order, &mut fynd_quotes).await;
+        if index % 500 == 0 {
+            eprintln!(
+                "  fynd quotes: {index}/{} ({:?} elapsed)",
+                sampled.len(),
+                quote_pass_started.elapsed()
+            );
         }
     }
+    eprintln!("quote pass took {:?}", quote_pass_started.elapsed());
     solver.shutdown();
 
     let snapshot = StateSnapshot {
