@@ -100,14 +100,12 @@ fn user_margin(improvement: &BigUint, user_share_bps: u32) -> BigUint {
     (improvement * BigUint::from(user_share_bps) + (&denominator - 1u32)) / denominator
 }
 
-/// Fee taken from an exclusive leg's output, in basis points, when the public worker pools returned
-/// no route within the solve timeout.
+/// The fee in basis points that the protocol takes from an exclusive leg. It applies when the
+/// public worker pools find no route in the solve timeout.
 ///
-/// Without a public quote there is no reference price to pin the commitment to, so the protocol
-/// takes this cut of the exclusive leg's output and the user receives the rest — a price instead
-/// of no price at all. Only the exclusive leg is charged: the public branches of a split route
-/// pay out in full. Set to the fee Ekubo charges on its most traded ETH/USDC pool, so a quote
-/// priced this way stays competitive with the other solvers our API clients compare us against.
+/// Without a public quote there is no reference price. The protocol takes this fee and the user
+/// gets the rest. The value is the fee of Ekubo's most used ETH/USDC pool. This keeps the quote
+/// competitive with the other solvers.
 const NO_PUBLIC_ROUTE_FEE_BPS: u32 = 5;
 
 /// Which liquidity a solver pool (a group of workers) routes through, and therefore what its
@@ -312,9 +310,8 @@ impl WorkerPoolRouter {
         // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
         // fallback chain. When both scopes are configured, the winning exclusive-access
         // candidate is overlaid onto that ranked list (prepended) by `combine_with_surplus`, so
-        // the fallbacks are preserved. When the public worker pools found nothing, that ranking is
-        // the `NoRouteFound` placeholder and the exclusive candidate is committed against a
-        // default fee instead.
+        // the fallbacks are preserved. If the public worker pools find nothing, that ranking is
+        // the `NoRouteFound` placeholder. The exclusive candidate then uses a default fee.
         let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
             .into_iter()
             .map(|responses| {
@@ -705,14 +702,12 @@ impl WorkerPoolRouter {
 /// additionally holds the candidates from `ExclusiveAccess`-scoped worker pools (routes that may
 /// use exclusive components).
 ///
-/// The commitment is derived in one of two ways, depending on whether the public worker pools found
-/// a route:
-/// - **Matched** — the head of `public_ranked` is a successful quote, and the commitment tracks it
-///   as described below.
-/// - **Default fee** — no public candidate succeeded within the solve timeout, so there is no
-///   reference price. The commitment is the route's output minus `NO_PUBLIC_ROUTE_FEE_BPS` of the
-///   exclusive leg's output (`default_fee_commitment`), giving the user a price instead of no price
-///   at all. The candidate is skipped when that fee would leave the user with nothing after gas.
+/// There are two ways to set the commitment:
+/// - **Matched**: the head of `public_ranked` is a successful quote. The commitment follows that
+///   quote, as shown below.
+/// - **Default fee**: no public quote succeeded in the solve timeout, so there is no reference
+///   price. The commitment is the route output minus `NO_PUBLIC_ROUTE_FEE_BPS` of the exclusive
+///   leg. The candidate is skipped if the fee leaves the user with nothing after gas.
 ///
 /// In matched mode a candidate must at least match the public reference net of gas; what it
 /// produces on top, `improvement = exclusive_net − public_net`, is then split. The user's net
@@ -736,17 +731,17 @@ impl WorkerPoolRouter {
 ///   more, but it is below `public_amount_out` — quoting less than the public market is ruled out,
 ///   so the gas difference stays with the user.
 ///
-/// If a commitment is reached, this returns a new list whose head is the pinned surplus quote,
-/// followed by every public candidate as price-guard fallbacks. In default-fee mode that fallback
-/// is the `NoRouteFound` placeholder, so a rejected exclusive quote still answers "no route". The
-/// pinned quote is the winning candidate with:
-/// - `amount_out` pinned to the committed amount,
-/// - `Swap::committed_amount_out` set on each exclusive leg (consumed by the encoder), and
-/// - an order-level [`SurplusInfo`] attached (observability).
+/// If there is a commitment, this returns a new list. The head is the pinned surplus quote. The
+/// public candidates follow as price-guard fallbacks. In default-fee mode the fallback is the
+/// `NoRouteFound` placeholder, so a rejected exclusive quote still answers "no route". The pinned
+/// quote is the winning candidate with:
+/// - `amount_out` set to the committed amount,
+/// - `Swap::committed_amount_out` set on each exclusive leg, and
+/// - an order-level `SurplusInfo`.
 ///
-/// Otherwise `public_ranked` is returned unchanged. In matched mode the user is never worse off
-/// than the public market — neither in quoted `amount_out` nor net of gas — and a candidate that
-/// ties the public reference is quoted with zero surplus: the trade then executes on exclusive
+/// If there is no commitment, this returns `public_ranked` unchanged. In matched mode the user is
+/// never worse off than the public market, in quoted `amount_out` and net of gas. A candidate that
+/// equals the public reference is quoted with zero surplus. The trade then executes on exclusive
 /// liquidity at the public price.
 ///
 /// Per-leg attribution: the route's surplus over the committed amount (`realized − committed`)
@@ -790,8 +785,8 @@ fn combine_with_surplus(
     result
 }
 
-/// Returns the exclusive-access candidate with the highest output net of gas, respecting the
-/// request's `max_gas` and the route shape constraints of `has_valid_exclusive_route`.
+/// Returns the exclusive-access candidate with the highest output net of gas. The candidate must
+/// obey the request `max_gas` and the route shape rules of `has_valid_exclusive_route`.
 fn best_exclusive_candidate<'a>(
     responses: &'a OrderResponses,
     pool_scopes: &HashMap<String, LiquidityScope>,
@@ -819,8 +814,9 @@ fn best_exclusive_candidate<'a>(
 /// Returns the amount to commit against a successful public quote:
 /// `max(public_amount_out, required_net + gas)`.
 ///
-/// Returns `None` when the candidate fails a gate — it must match the public output net-of-gas and
-/// produce at least the public output. `combine_with_surplus` documents why each bound is there.
+/// Returns `None` if the candidate fails a gate. The candidate must match the public output net of
+/// gas, and it must produce at least the public output. `combine_with_surplus` gives the reason for
+/// each bound.
 fn matched_commitment(
     public_reference: &OrderQuote,
     exclusive_candidate: &OrderQuote,
@@ -849,18 +845,14 @@ fn matched_commitment(
     Some((required_net_amount_out + gas_cost).max(public_amount_out.clone()))
 }
 
-/// Returns the amount to commit when the public worker pools returned no route: the candidate's
-/// output minus `NO_PUBLIC_ROUTE_FEE_BPS` of the exclusive leg's output, rounded in the user's
-/// favour.
+/// Returns the amount to commit if the public worker pools find no route. The amount is the
+/// candidate output minus `NO_PUBLIC_ROUTE_FEE_BPS` of the exclusive leg output.
 ///
-/// The fee base is the exclusive leg, not the whole route. On a split route the public branches
-/// are priced by the public market and there is nothing to take from them; only the exclusive
-/// leg's output is unpriced. Charging the whole route would also make the fee exceed what the leg
-/// can withhold, leaving `pin_commitment` unable to attribute it.
+/// The fee applies to the exclusive leg only, not to the whole route. The public market prices the
+/// public branches of a split route, so the protocol takes nothing from them.
 ///
-/// Returns `None` when the commitment would not cover the route's gas — quoting a route the user
-/// nets nothing on is worse than reporting no route — or when the route carries no exclusive leg,
-/// which `best_exclusive_candidate` already rules out.
+/// Returns `None` if the commitment does not cover the route gas, or if the route has no exclusive
+/// leg.
 fn default_fee_commitment(exclusive_candidate: &OrderQuote) -> Option<BigUint> {
     let exclusive_leg_amount_out = exclusive_candidate
         .route()?
@@ -881,10 +873,10 @@ fn default_fee_commitment(exclusive_candidate: &OrderQuote) -> Option<BigUint> {
     Some(committed_amount_out)
 }
 
-/// Pins `exclusive_candidate` to `committed_amount_out`: stamps the per-leg committed amounts the
-/// encoder consumes, pins `amount_out` and `amount_out_net_gas`, and attaches the [`SurplusInfo`].
+/// Sets `exclusive_candidate` to `committed_amount_out`. This sets the committed amount on each
+/// leg, sets `amount_out` and `amount_out_net_gas`, and attaches the `SurplusInfo`.
 ///
-/// Everything the route produces above the commitment is what the exclusive components capture.
+/// The exclusive components capture all output above the commitment.
 fn pin_commitment(exclusive_candidate: &OrderQuote, committed_amount_out: BigUint) -> OrderQuote {
     let exclusive_route_amount_out = exclusive_candidate.amount_out();
     let exclusive_gas_cost = exclusive_route_amount_out - exclusive_candidate.amount_out_net_gas();
