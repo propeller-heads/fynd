@@ -140,19 +140,6 @@ pub enum FailedItemError {
     #[error("missing spot price")]
     MissingSpotPrice,
 
-    /// The decimal difference between two tokens is too large for a meaningful price.
-    #[error("extreme decimal mismatch ({from}\u{2192}{to})")]
-    ExtremeDecimalMismatch {
-        /// Source token decimals.
-        from: u32,
-        /// Target token decimals.
-        to: u32,
-    },
-
-    /// The computed spot price is below the minimum threshold.
-    #[error("spot price too small: {0}")]
-    SpotPriceTooSmall(f64),
-
     /// Protocol simulation returned an error.
     #[error("simulation failed: {0}")]
     SimulationFailed(String),

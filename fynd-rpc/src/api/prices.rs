@@ -130,7 +130,9 @@ pub struct ComponentDepthEntry {
     /// Output token address.
     #[schema(value_type = String, example = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
     pub token_out: Address,
-    /// Maximum input amount before hitting the slippage threshold (decimal string).
+    /// Input amount at which the execution price falls the slippage threshold below the price the
+    /// component starts executing at, or the component's own limit when the threshold is never
+    /// reached within it (decimal string).
     pub depth: String,
 }
 

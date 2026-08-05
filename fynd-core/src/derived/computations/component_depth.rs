@@ -1,9 +1,9 @@
 //! Component depth computation.
 //!
 //! Computes liquidity depths for all components using `query_pool_swap`, falling back to
-//! the generic Brent solver from tycho-simulation when the component doesn't implement it natively.
-//! Depth represents the maximum input amount before reaching the configured slippage
-//! threshold from the spot price.
+//! the generic Brent solver from tycho-simulation when the component doesn't implement it
+//! natively. Depth represents the maximum input amount a component absorbs before its execution
+//! price falls the configured slippage threshold below the price it starts executing at.
 //!
 //! # Dependencies
 //!
@@ -20,8 +20,10 @@ use num_traits::Zero;
 use tracing::{debug, instrument, warn, Span};
 use tycho_simulation::{
     evm::query_pool_swap::query_pool_swap,
-    tycho_common::simulation::errors::SimulationError,
-    tycho_core::simulation::protocol_sim::{Price, QueryPoolSwapParams, SwapConstraint},
+    tycho_common::{models::token::Token, simulation::errors::SimulationError},
+    tycho_core::simulation::protocol_sim::{
+        Price, ProtocolSim, QueryPoolSwapParams, SwapConstraint,
+    },
 };
 
 use crate::{
@@ -41,19 +43,24 @@ use crate::{
     types::ComponentId,
 };
 
+const DEFAULT_SLIPPAGE_THRESHOLD: f64 = 0.01;
+
+const RETAINED_PRICE_SCALE: u128 = 1_000_000_000_000_000_000;
+
 /// Computes component depths for all components in all directions.
 ///
 /// For each component and token pair, uses `query_pool_swap` (with Brent solver fallback)
-/// to find the maximum input amount that results in at most the configured slippage
-/// from spot price.
+/// to find the maximum input amount that still executes within the configured slippage
+/// of the component's own executable start price.
 #[derive(Debug)]
 pub struct ComponentDepthComputation {
-    slippage_threshold: f64,
+    retained_price_numerator: u128,
 }
 
 impl Default for ComponentDepthComputation {
     fn default() -> Self {
-        Self { slippage_threshold: 0.01 }
+        Self::new(DEFAULT_SLIPPAGE_THRESHOLD)
+            .expect("the default slippage threshold is a valid configuration")
     }
 }
 
@@ -71,8 +78,130 @@ impl ComponentDepthComputation {
                 "slippage_threshold must be between 0 and 1 exclusive, got {slippage_threshold}"
             )));
         }
-        Ok(Self { slippage_threshold })
+        let retained_price_numerator =
+            ((1.0 - slippage_threshold) * RETAINED_PRICE_SCALE as f64).round() as u128;
+        Ok(Self { retained_price_numerator })
     }
+
+    // A spot-anchored target `spot * (1 - slippage)` is reachable only when
+    // `(1 - f)^2 >= 1 - slippage`, which at a 1% threshold excludes every pool over ~0.5013%.
+    fn plan_depth_search(
+        &self,
+        sim_state: &dyn ProtocolSim,
+        token_in: &Token,
+        token_out: &Token,
+        spot_price: f64,
+    ) -> Result<DepthSearch, FailedItemError> {
+        let (max_amount_in, _) = sim_state
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .map_err(|e| FailedItemError::SimulationFailed(format!("get_limits failed: {e}")))?;
+
+        let start =
+            probe_execution_start(sim_state, token_in, token_out, spot_price, &max_amount_in)
+                .map_err(|e| {
+                    FailedItemError::SimulationFailed(format!(
+                        "no executable start price (max_in={max_amount_in}): {e}"
+                    ))
+                })?;
+
+        let target = Price::new(
+            start.amount_out * BigUint::from(self.retained_price_numerator),
+            start.amount_in * BigUint::from(RETAINED_PRICE_SCALE),
+        );
+
+        // `query_pool_swap` rejects a target the component holds across its whole range, so
+        // its limit is the answer.
+        let holds_target_at_limit = sim_state
+            .get_amount_out_guarded(max_amount_in.clone(), token_in, token_out)
+            .is_ok_and(|capacity| executes_at_or_above(&max_amount_in, &capacity.amount, &target));
+        if holds_target_at_limit {
+            return Ok(DepthSearch::LimitedByComponentCapacity(max_amount_in));
+        }
+
+        Ok(DepthSearch::Target(target))
+    }
+}
+
+#[derive(Debug)]
+enum DepthSearch {
+    LimitedByComponentCapacity(BigUint),
+    Target(Price),
+}
+
+// Cross-multiplied rather than divided, so the comparison of raw amounts is exact.
+fn executes_at_or_above(amount_in: &BigUint, amount_out: &BigUint, price: &Price) -> bool {
+    amount_out * &price.denominator >= &price.numerator * amount_in
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionStart {
+    amount_in: BigUint,
+    amount_out: BigUint,
+}
+
+impl ExecutionStart {
+    fn prices_above(&self, other: &Self) -> bool {
+        &self.amount_out * &other.amount_in > &other.amount_out * &self.amount_in
+    }
+}
+
+// Dust trades understate the execution rate protocol-specifically (outputs floor, integer fees
+// round up, VM adapters carry fixed-point error), so measured prices rise with size until the
+// true, decreasing curve takes over. Probing takes the peak rather than trusting one size.
+fn probe_execution_start(
+    sim_state: &dyn ProtocolSim,
+    token_in: &Token,
+    token_out: &Token,
+    spot_price: f64,
+    max_amount_in: &BigUint,
+) -> Result<ExecutionStart, SimulationError> {
+    // Clamped: `10^bits` already exceeds the limit, and seeding above it would report a
+    // direction untradeable when its limit may still buy a whole output unit.
+    let seed_exponent =
+        first_nonzero_output_exponent(spot_price, token_in.decimals, token_out.decimals)
+            .min(u32::try_from(max_amount_in.bits()).unwrap_or(u32::MAX));
+    let mut amount_in = BigUint::from(10u64)
+        .pow(seed_exponent)
+        .min(max_amount_in.clone())
+        .max(BigUint::from(1u32));
+    let mut peak: Option<ExecutionStart> = None;
+    let mut last_rejection: Option<SimulationError> = None;
+
+    while &amount_in <= max_amount_in {
+        match sim_state.get_amount_out_guarded(amount_in.clone(), token_in, token_out) {
+            Ok(result) if !result.amount.is_zero() => {
+                let probe =
+                    ExecutionStart { amount_in: amount_in.clone(), amount_out: result.amount };
+                if let Some(best) = &peak {
+                    if !probe.prices_above(best) {
+                        break;
+                    }
+                }
+                peak = Some(probe);
+            }
+            Ok(_) => {}
+            // A rejection below an adapter's minimum describes the probe, not the pool: step up.
+            Err(error) => last_rejection = Some(error),
+        }
+        amount_in *= 10u32;
+    }
+
+    peak.ok_or_else(|| {
+        last_rejection.unwrap_or_else(|| {
+            SimulationError::RecoverableError(
+                "no trade size within the pool's limit returns any output".to_string(),
+            )
+        })
+    })
+}
+
+// `amount_in = 10^(decimals_in - decimals_out) / spot` yields one raw unit of the output token.
+fn first_nonzero_output_exponent(spot_price: f64, decimals_in: u32, decimals_out: u32) -> u32 {
+    if spot_price <= 0.0 || !spot_price.is_finite() {
+        return 0;
+    }
+    let exponent = (decimals_in as f64 - decimals_out as f64 - spot_price.log10()).ceil();
+    exponent.max(0.0) as u32
 }
 
 #[async_trait]
@@ -220,54 +349,38 @@ impl DerivedComputation for ComponentDepthComputation {
                     continue;
                 };
 
-                let min_price = spot_price * (1.0 - self.slippage_threshold);
+                let search =
+                    match self.plan_depth_search(sim_state, token_in, token_out, *spot_price) {
+                        Ok(search) => search,
+                        Err(error) => {
+                            debug!(
+                                component_id,
+                                token_in = %token_in.address,
+                                token_out = %token_out.address,
+                                spot_price,
+                                %error,
+                                "cannot anchor a depth target, skipping pair"
+                            );
+                            component_depths.remove(&key);
+                            failed_items.push(FailedItem {
+                                key: format!(
+                                    "{}/{}/{}",
+                                    component_id, token_in.address, token_out.address
+                                ),
+                                error,
+                            });
+                            continue;
+                        }
+                    };
 
-                // Price is a raw fraction (numerator/denominator) that query_pool_swap
-                // converts back to f64 by multiplying by 10^(dec_in - dec_out). We keep
-                // the f64→u128 multiply at a fixed precision scale and absorb the decimal
-                // adjustment into the BigUint denominator.
-                const SCALE_EXP: i32 = 18;
-                let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
-                let denominator_exp = SCALE_EXP + decimal_diff;
-                if denominator_exp < 0 {
-                    warn!(
-                        component_id,
-                        token_in = %token_in.address,
-                        token_out = %token_out.address,
-                        "extreme decimal mismatch ({}→{}), skipping pair",
-                        token_in.decimals, token_out.decimals
-                    );
-                    component_depths.remove(&key);
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: FailedItemError::ExtremeDecimalMismatch {
-                            from: token_in.decimals,
-                            to: token_out.decimals,
-                        },
-                    });
-                    continue;
-                }
-
-                let numerator = BigUint::from((min_price * 10_f64.powi(SCALE_EXP)) as u128);
-                let denominator = BigUint::from(10u64).pow(denominator_exp as u32);
-
-                if numerator.is_zero() {
-                    debug!(
-                        component_id,
-                        token_in = %token_in.address,
-                        token_out = %token_out.address,
-                        spot_price,
-                        "spot price too small to compute depth, skipping pair"
-                    );
-                    component_depths.remove(&key);
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: FailedItemError::SpotPriceTooSmall(*spot_price),
-                    });
-                    continue;
-                }
-
-                let limit_price = Price::new(numerator, denominator);
+                let limit_price = match search {
+                    DepthSearch::LimitedByComponentCapacity(max_amount_in) => {
+                        component_depths.insert(key, max_amount_in);
+                        succeeded += 1;
+                        continue;
+                    }
+                    DepthSearch::Target(limit_price) => limit_price,
+                };
 
                 let params = QueryPoolSwapParams::new(
                     token_in.clone(),
@@ -324,7 +437,6 @@ impl DerivedComputation for ComponentDepthComputation {
                             token_in = %token_in.address,
                             token_out = %token_out.address,
                             spot_price,
-                            min_price,
                             probe_info,
                             limits_info,
                             error = %e,
@@ -359,15 +471,231 @@ impl DerivedComputation for ComponentDepthComputation {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use num_traits::ToPrimitive;
     use rstest::rstest;
-    use tycho_simulation::{
-        tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::token::Token,
+    use tycho_simulation::tycho_common::{
+        dto::ProtocolStateDelta,
+        simulation::{
+            errors::TransitionError,
+            protocol_sim::{Balances, GetAmountOutResult},
+        },
+        Bytes,
     };
 
     use super::*;
+
+    /// Constant-product pool double with an explicit fee, integer math and no rounding mercy.
+    ///
+    /// Reproduces the two properties the depth target depends on: `spot_price` follows the
+    /// contract-compliant convention of the mid price grossed up by the fee, and
+    /// `get_amount_out` floors, so small trades execute far below the pool's real rate.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct FeeCurveSim {
+        /// Reserve of the token whose address sorts first.
+        reserve_low: BigUint,
+        /// Reserve of the token whose address sorts second.
+        reserve_high: BigUint,
+        /// Swap fee in hundredths of a basis point, so 0.3% is 3_000.
+        fee_hundredth_bps: u32,
+        /// `get_limits` reports the sell-side reserve divided by this, the way real adapters cap
+        /// a swap well below the reserve that backs it.
+        limit_divisor: u32,
+    }
+
+    const FEE_DENOMINATOR: u32 = 1_000_000;
+
+    impl FeeCurveSim {
+        fn new(reserve_low: u128, reserve_high: u128, fee_hundredth_bps: u32) -> Self {
+            Self {
+                reserve_low: BigUint::from(reserve_low),
+                reserve_high: BigUint::from(reserve_high),
+                fee_hundredth_bps,
+                limit_divisor: 1,
+            }
+        }
+
+        fn with_limit_divisor(mut self, limit_divisor: u32) -> Self {
+            self.limit_divisor = limit_divisor;
+            self
+        }
+
+        fn reserves_for(&self, token_in: &Token, token_out: &Token) -> (&BigUint, &BigUint) {
+            if token_in.address < token_out.address {
+                (&self.reserve_low, &self.reserve_high)
+            } else {
+                (&self.reserve_high, &self.reserve_low)
+            }
+        }
+    }
+
+    #[typetag::serde]
+    impl ProtocolSim for FeeCurveSim {
+        fn fee(&self) -> f64 {
+            self.fee_hundredth_bps as f64 / FEE_DENOMINATOR as f64
+        }
+
+        fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+            let (reserve_in, reserve_out) = self.reserves_for(base, quote);
+            let mid = reserve_out
+                .to_f64()
+                .expect("reserve fits f64") /
+                reserve_in
+                    .to_f64()
+                    .expect("reserve fits f64");
+            let decimal_scale = 10_f64.powi(base.decimals as i32 - quote.decimals as i32);
+            Ok(mid * decimal_scale / (1.0 - self.fee()))
+        }
+
+        fn get_amount_out(
+            &self,
+            amount_in: BigUint,
+            token_in: &Token,
+            token_out: &Token,
+        ) -> Result<GetAmountOutResult, SimulationError> {
+            let (reserve_in, reserve_out) = self.reserves_for(token_in, token_out);
+            let net_in = amount_in * BigUint::from(FEE_DENOMINATOR - self.fee_hundredth_bps);
+            let amount_out =
+                (&net_in * reserve_out) / (reserve_in * BigUint::from(FEE_DENOMINATOR) + &net_in);
+            Ok(GetAmountOutResult::new(amount_out, BigUint::from(100_000u32), self.clone_box()))
+        }
+
+        fn get_limits(
+            &self,
+            sell_token: Bytes,
+            buy_token: Bytes,
+        ) -> Result<(BigUint, BigUint), SimulationError> {
+            let (reserve_in, reserve_out) = if sell_token < buy_token {
+                (&self.reserve_low, &self.reserve_high)
+            } else {
+                (&self.reserve_high, &self.reserve_low)
+            };
+            Ok((reserve_in / BigUint::from(self.limit_divisor), reserve_out.clone()))
+        }
+
+        fn delta_transition(
+            &mut self,
+            _delta: ProtocolStateDelta,
+            _tokens: &HashMap<Bytes, Token>,
+            _balances: &Balances,
+        ) -> Result<(), TransitionError> {
+            unimplemented!("delta_transition not implemented in FeeCurveSim")
+        }
+
+        fn clone_box(&self) -> Box<dyn ProtocolSim> {
+            Box::new(self.clone())
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+
+        fn eq(&self, other: &dyn ProtocolSim) -> bool {
+            other
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|other| {
+                    other.reserve_low == self.reserve_low &&
+                        other.reserve_high == self.reserve_high &&
+                        other.fee_hundredth_bps == self.fee_hundredth_bps &&
+                        other.limit_divisor == self.limit_divisor
+                })
+        }
+    }
+
+    /// Pool double that answers a fixed script of probe outcomes, one per power of ten from one
+    /// wei up. `None` is an adapter rejecting the probe outright.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct ScriptedProbeSim {
+        outputs: Vec<Option<u64>>,
+    }
+
+    #[typetag::serde]
+    impl ProtocolSim for ScriptedProbeSim {
+        fn fee(&self) -> f64 {
+            0.0
+        }
+
+        fn spot_price(&self, _base: &Token, _quote: &Token) -> Result<f64, SimulationError> {
+            Ok(1.0)
+        }
+
+        fn get_amount_out(
+            &self,
+            amount_in: BigUint,
+            _token_in: &Token,
+            _token_out: &Token,
+        ) -> Result<GetAmountOutResult, SimulationError> {
+            let probe_index = amount_in.to_string().len() - 1;
+            match self.outputs.get(probe_index) {
+                Some(Some(amount_out)) => Ok(GetAmountOutResult::new(
+                    BigUint::from(*amount_out),
+                    BigUint::zero(),
+                    self.clone_box(),
+                )),
+                Some(None) => Err(SimulationError::RecoverableError(
+                    "InvalidAmountIn: Amount too low".to_string(),
+                )),
+                None => panic!("probing walked past index {probe_index}, past the pool limit"),
+            }
+        }
+
+        fn get_limits(
+            &self,
+            _sell_token: Bytes,
+            _buy_token: Bytes,
+        ) -> Result<(BigUint, BigUint), SimulationError> {
+            Ok((BigUint::from(10u64).pow(self.outputs.len() as u32 - 1), BigUint::from(u64::MAX)))
+        }
+
+        fn delta_transition(
+            &mut self,
+            _delta: ProtocolStateDelta,
+            _tokens: &HashMap<Bytes, Token>,
+            _balances: &Balances,
+        ) -> Result<(), TransitionError> {
+            unimplemented!("delta_transition not implemented in ScriptedProbeSim")
+        }
+
+        fn clone_box(&self) -> Box<dyn ProtocolSim> {
+            Box::new(self.clone())
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+
+        fn eq(&self, other: &dyn ProtocolSim) -> bool {
+            other
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|other| other.outputs == self.outputs)
+        }
+    }
+
+    /// Runs the probing over a script whose probes run from one wei up.
+    fn walk(outputs: Vec<Option<u64>>) -> Result<ExecutionStart, SimulationError> {
+        let sim = ScriptedProbeSim { outputs };
+        let token_in = token_with_decimals(0x01, "IN", 18);
+        let token_out = token_with_decimals(0x02, "OUT", 18);
+        let (max_amount_in, _) = sim
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .expect("scripted limits");
+        probe_execution_start(&sim, &token_in, &token_out, 1.0, &max_amount_in)
+    }
+
     use crate::{
         algorithm::test_utils::{
-            setup_market_weighted, token, token_with_decimals, MockProtocolSim,
+            setup_market_weighted, token, token_with_decimals, MockProtocolSim, ONE_ETH,
         },
         derived::{
             computation::FailedItemError,
@@ -385,17 +713,18 @@ mod tests {
     #[test]
     fn default_slippage_is_one_percent() {
         let comp = ComponentDepthComputation::default();
-        assert!((comp.slippage_threshold - 0.01).abs() < f64::EPSILON);
+        assert_eq!(comp.retained_price_numerator, 990_000_000_000_000_000);
     }
 
     #[rstest]
-    #[case(0.001)]
-    #[case(0.01)]
-    #[case(0.5)]
-    #[case(0.99)]
-    fn new_with_valid_slippage(#[case] threshold: f64) {
+    #[case(0.001, 999_000_000_000_000_000)]
+    #[case(0.01, 990_000_000_000_000_000)]
+    #[case(0.5, 500_000_000_000_000_000)]
+    // `1.0 - 0.99` is not exact in binary; the numerator carries that error and nothing more.
+    #[case(0.99, 10_000_000_000_000_008)]
+    fn new_with_valid_slippage(#[case] threshold: f64, #[case] expected_numerator: u128) {
         let comp = ComponentDepthComputation::new(threshold).unwrap();
-        assert!((comp.slippage_threshold - threshold).abs() < f64::EPSILON);
+        assert_eq!(comp.retained_price_numerator, expected_numerator);
     }
 
     #[rstest]
@@ -411,6 +740,169 @@ mod tests {
             matches!(result, Err(ComputationError::InvalidConfiguration(_))),
             "expected InvalidConfiguration for {_desc}, got {result:?}"
         );
+    }
+
+    #[rstest]
+    #[case::equal_decimals_unit_price(18, 18, 1.0, 0)]
+    #[case::equal_decimals_expensive_out(18, 18, 0.0005, 4)]
+    #[case::equal_decimals_cheap_out(18, 18, 2000.0, 0)]
+    #[case::in_has_more_decimals(18, 6, 2000.0, 9)]
+    #[case::out_has_more_decimals(6, 18, 0.0005, 0)]
+    #[case::wbtc_style(18, 8, 0.00006, 15)]
+    fn test_first_nonzero_output_exponent(
+        #[case] decimals_in: u32,
+        #[case] decimals_out: u32,
+        #[case] spot_price: f64,
+        #[case] expected: u32,
+    ) {
+        assert_eq!(first_nonzero_output_exponent(spot_price, decimals_in, decimals_out), expected);
+    }
+
+    #[rstest]
+    #[case::zero(0.0)]
+    #[case::negative(-1.0)]
+    #[case::nan(f64::NAN)]
+    #[case::infinite(f64::INFINITY)]
+    fn test_first_nonzero_output_exponent_falls_back_to_one_wei(#[case] spot_price: f64) {
+        assert_eq!(first_nonzero_output_exponent(spot_price, 18, 6), 0);
+    }
+
+    /// Measured prices rise while dust distortion dominates and fall once the real curve takes
+    /// over. The probing must take the peak and stop there, not the first or the last probe.
+    #[test]
+    fn test_probe_execution_start_takes_the_peak() {
+        // Prices per probe, from one wei up: nothing, 0.5, 0.8, 0.95, 0.94, 0.00001.
+        let start = walk(vec![Some(0), Some(5), Some(80), Some(950), Some(9400), Some(1)])
+            .expect("a priced probe exists");
+
+        assert_eq!(start.amount_in, BigUint::from(1_000u32));
+        assert_eq!(start.amount_out, BigUint::from(950u32));
+    }
+
+    /// A probe that only ties its predecessor is already off the rising branch.
+    #[test]
+    fn test_probe_execution_start_stops_on_a_flat_probe() {
+        let start =
+            walk(vec![Some(5), Some(80), Some(800), Some(80_000)]).expect("a priced probe exists");
+
+        assert_eq!(start.amount_in, BigUint::from(10u32));
+        assert_eq!(start.amount_out, BigUint::from(80u32));
+    }
+
+    #[test]
+    fn test_probe_execution_start_steps_over_unpriceable_probes() {
+        let start =
+            walk(vec![None, Some(0), None, Some(950), Some(9400)]).expect("a priced probe exists");
+
+        assert_eq!(start.amount_in, BigUint::from(1000u32));
+        assert_eq!(start.amount_out, BigUint::from(950u32));
+    }
+
+    /// A pool that buys nothing at any size must surface as an error, not a depth of zero.
+    #[rstest]
+    #[case::always_floors_to_zero(vec![Some(0), Some(0), Some(0)])]
+    #[case::always_rejected(vec![None, None, None])]
+    fn test_probe_execution_start_without_output_is_an_error(#[case] outputs: Vec<Option<u64>>) {
+        let error = walk(outputs).expect_err("a pool that buys nothing has no start price");
+
+        assert!(
+            matches!(error, SimulationError::RecoverableError(_)),
+            "expected a recoverable error, got {error:?}"
+        );
+    }
+
+    /// The depth target must sit exactly `1 - slippage` below the price the pool starts executing
+    /// at, whatever the fee.
+    #[rstest]
+    #[case::five_hundredths_bp(500)]
+    #[case::five_bps(5_000)]
+    #[case::thirty_bps(3_000)]
+    #[case::one_percent(10_000)]
+    #[case::two_percent(20_000)]
+    fn test_depth_target_is_fee_independent(#[case] fee_hundredth_bps: u32) {
+        let token_in = token_with_decimals(0x01, "IN", 18);
+        let token_out = token_with_decimals(0x02, "OUT", 18);
+        let sim = FeeCurveSim::new(5_000 * ONE_ETH, 10_000_000 * ONE_ETH, fee_hundredth_bps);
+        let computation = ComponentDepthComputation::default();
+
+        let spot_price = sim
+            .spot_price(&token_in, &token_out)
+            .expect("spot price");
+        let (max_amount_in, _) = sim
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .expect("limits");
+        let start = probe_execution_start(&sim, &token_in, &token_out, spot_price, &max_amount_in)
+            .expect("a curved pool prices some probe");
+
+        let search = computation
+            .plan_depth_search(&sim, &token_in, &token_out, spot_price)
+            .expect("target");
+        let DepthSearch::Target(target) = search else {
+            panic!("a pool this deep relative to its limit reaches the target inside its range");
+        };
+
+        // target / exec_start == 99/100 exactly, with no fee term on either side.
+        assert_eq!(
+            &target.numerator * &start.amount_in * BigUint::from(100u32),
+            &target.denominator * &start.amount_out * BigUint::from(99u32),
+            "fee {fee_hundredth_bps}: target is not exactly 1% below the executable start price"
+        );
+
+        // The start price clears the target it anchors, at every fee.
+        assert!(
+            executes_at_or_above(&start.amount_in, &start.amount_out, &target),
+            "fee {fee_hundredth_bps}: the pool cannot execute at its own depth target"
+        );
+    }
+
+    // `>` instead of `>=` in `executes_at_or_above` would search for a depth the component
+    // already reaches at its limit.
+    #[test]
+    fn test_component_priced_exactly_at_the_target_is_capped_at_its_limit() {
+        let token_in = token_with_decimals(0x01, "IN", 18);
+        let token_out = token_with_decimals(0x02, "OUT", 18);
+        let sim = FeeCurveSim::new(5_000 * ONE_ETH, 10_000_000 * ONE_ETH, 3_000)
+            .with_limit_divisor(1_000);
+        let spot_price = sim
+            .spot_price(&token_in, &token_out)
+            .expect("spot price");
+        let (max_amount_in, _) = sim
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .expect("limits");
+        let capacity = sim
+            .get_amount_out(max_amount_in.clone(), &token_in, &token_out)
+            .expect("limit prices");
+
+        // The exact rate at the limit, so the comparison lands on equality rather than near it.
+        let target = Price::new(capacity.amount.clone(), max_amount_in.clone());
+        assert!(executes_at_or_above(&max_amount_in, &capacity.amount, &target));
+
+        let search = ComponentDepthComputation::default()
+            .plan_depth_search(&sim, &token_in, &token_out, spot_price)
+            .expect("plan");
+        assert!(matches!(search, DepthSearch::LimitedByComponentCapacity(_)), "got {search:?}");
+    }
+
+    #[test]
+    fn test_pool_that_never_reaches_the_target_is_capped_at_its_limit() {
+        let token_in = token_with_decimals(0x01, "IN", 18);
+        let token_out = token_with_decimals(0x02, "OUT", 18);
+        // A limit one thousandth of the reserve backing it moves the price by about 0.1%, far
+        // less than the slippage threshold, so no size inside the range crosses the target.
+        let sim = FeeCurveSim::new(5_000 * ONE_ETH, 10_000_000 * ONE_ETH, 3_000)
+            .with_limit_divisor(1_000);
+
+        let spot_price = sim
+            .spot_price(&token_in, &token_out)
+            .expect("spot price");
+        let search = ComponentDepthComputation::default()
+            .plan_depth_search(&sim, &token_in, &token_out, spot_price)
+            .expect("plan");
+
+        let DepthSearch::LimitedByComponentCapacity(depth) = search else {
+            panic!("expected the pool's own limit to be the answer, got {search:?}");
+        };
+        assert_eq!(depth, BigUint::from(5 * ONE_ETH));
     }
 
     #[tokio::test]
@@ -501,41 +993,47 @@ mod tests {
             .expect("computation should succeed");
         let component_depths = component_depths_output.data;
 
-        assert_eq!(component_depths.len(), 2, "should have depths for both directions");
+        // The mock prices every size at the same rate, so each direction is worth what the
+        // component lets through, except where its limit truncates to nothing.
+        let market_guard = market.read().await;
+        let sim_state = market_guard
+            .get_simulation_state("component")
+            .expect("component simulation state");
 
-        let key_eth_usdc: ComponentDepthKey =
-            ("component".into(), eth.address.clone(), usdc.address.clone());
-        let key_usdc_eth: ComponentDepthKey =
-            ("component".into(), usdc.address.clone(), eth.address.clone());
+        for (sell, buy) in [(&eth, &usdc), (&usdc, &eth)] {
+            let key: ComponentDepthKey =
+                ("component".into(), sell.address.clone(), buy.address.clone());
+            let (sell_limit, _) = sim_state
+                .get_limits(sell.address.clone(), buy.address.clone())
+                .expect("mock limits");
 
-        assert!(component_depths.contains_key(&key_eth_usdc), "should have depth for ETH→USDC");
-        assert!(component_depths.contains_key(&key_usdc_eth), "should have depth for USDC→ETH");
-
-        let expected_depth = |sell_token: &Token, buy_token: &Token| -> BigUint {
-            let effective_price =
-                if sell_token.address < buy_token.address { spot_price } else { 1.0 / spot_price };
-            let base = BigUint::from((1_000_000.0 / effective_price) as u64);
-            let decimal_diff = sell_token.decimals as i32 - buy_token.decimals as i32;
-            if decimal_diff >= 0 {
-                base * BigUint::from(10u64).pow(decimal_diff as u32)
+            if sell_limit.is_zero() {
+                assert!(
+                    !component_depths.contains_key(&key),
+                    "{}→{}: a direction the component cannot trade must not carry a depth",
+                    sell.symbol,
+                    buy.symbol
+                );
+                assert!(
+                    component_depths_output
+                        .failed_items
+                        .iter()
+                        .any(|item| item.key ==
+                            format!("component/{}/{}", sell.address, buy.address)),
+                    "{}→{}: an untradeable direction must be recorded as a failure",
+                    sell.symbol,
+                    buy.symbol
+                );
             } else {
-                base / BigUint::from(10u64).pow((-decimal_diff) as u32)
+                assert_eq!(
+                    component_depths.get(&key),
+                    Some(&sell_limit),
+                    "{}→{}: a pool that never crosses the target is worth its whole limit",
+                    sell.symbol,
+                    buy.symbol
+                );
             }
-        };
-        assert_eq!(
-            component_depths
-                .get(&key_eth_usdc)
-                .unwrap(),
-            &expected_depth(&eth, &usdc),
-            "ETH→USDC depth"
-        );
-        assert_eq!(
-            component_depths
-                .get(&key_usdc_eth)
-                .unwrap(),
-            &expected_depth(&usdc, &eth),
-            "USDC→ETH depth"
-        );
+        }
     }
 
     /// Verify that Price construction in compute() correctly handles decimal scaling

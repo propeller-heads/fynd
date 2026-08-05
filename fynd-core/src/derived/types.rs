@@ -32,9 +32,11 @@ pub type SpotPrices = HashMap<SpotPriceKey, f64>;
 /// Uniquely identifies a directional liquidity depth within a specific component.
 pub type ComponentDepthKey = (ComponentId, Address, Address);
 
-/// Component depths map: key -> maximum input amount at the configured slippage threshold.
+/// Component depths map: key -> input amount at which the execution price falls the configured
+/// slippage threshold below the price the component starts executing at.
 ///
-/// Represents how much can be traded before the specified price impact.
+/// A component whose execution price never falls that far within its own limit carries that
+/// limit instead, so the value is the smaller of the threshold amount and the tradable capacity.
 pub type ComponentDepths = HashMap<ComponentDepthKey, BigUint>;
 
 // =============================================================================

@@ -6,7 +6,7 @@
     "fynd_version": "0.77.0",
     "derived_data": {
       "components_with_spot_prices": 1372,
-      "components_with_depths": 1308,
+      "components_with_depths": 1350,
       "token_prices": 1125
     }
   },
