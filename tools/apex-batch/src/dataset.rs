@@ -38,14 +38,27 @@ pub struct Intent {
     pub fynd_out: Option<U256>,
 }
 
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Operates on bytes, not `str` indices: a `&str` byte length can equal 40 while containing a
+/// multi-byte UTF-8 char, and slicing at a non-boundary byte index panics.
 pub fn parse_address(token: &str) -> Option<ApexAddress> {
-    let hex = token.strip_prefix("0x")?;
+    let hex = token.strip_prefix("0x")?.as_bytes();
     if hex.len() != 40 {
         return None;
     }
     let mut bytes = [0u8; 20];
     for (i, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+        let high = hex_digit(hex[2 * i])?;
+        let low = hex_digit(hex[2 * i + 1])?;
+        *byte = (high << 4) | low;
     }
     Some(ApexAddress(bytes))
 }
@@ -169,10 +182,7 @@ pub fn load_day_headline(path: &Path) -> Result<(Vec<Intent>, HashMap<ApexAddres
 
     let mut day_price: HashMap<ApexAddress, f64> = HashMap::new();
     for (token, mut samples) in price_samples {
-        samples.sort_by(|a, b| {
-            a.partial_cmp(b)
-                .expect("finite price samples")
-        });
+        samples.sort_by(f64::total_cmp);
         day_price.insert(token, samples[samples.len() / 2]);
     }
 
@@ -224,4 +234,339 @@ pub fn load_day_headline(path: &Path) -> Result<(Vec<Intent>, HashMap<ApexAddres
         });
     }
     Ok((intents, day_price))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    fn token_hex(byte: u8) -> String {
+        format!("0x{}", format!("{byte:02x}").repeat(20))
+    }
+
+    fn token_addr(byte: u8) -> ApexAddress {
+        ApexAddress([byte; 20])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_line(
+        block: u64,
+        token_in: &str,
+        token_out: &str,
+        amount_in: &str,
+        settled_out: &str,
+        tx: &str,
+        tx_index: u64,
+        verdict: &str,
+        usd: Option<f64>,
+    ) -> String {
+        let mut top = serde_json::json!({
+            "verdict": verdict,
+            "fynd_amount_out": settled_out,
+        });
+        if let Some(usd) = usd {
+            top["settled_value_usd"] = serde_json::json!(usd);
+        }
+        serde_json::json!({
+            "block": block,
+            "token_in": token_in,
+            "token_out": token_out,
+            "amount_in": amount_in,
+            "settled_amount_out": settled_out,
+            "settled_tx": tx,
+            "tx_index": tx_index,
+            "top": top,
+        })
+        .to_string()
+    }
+
+    static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// A JSONL fixture in the OS temp dir, removed on drop. No `tempfile` dev-dependency exists
+    /// in this crate yet, so the uniqueness (pid + counter + nanos) is hand-rolled.
+    struct TempJsonl(std::path::PathBuf);
+
+    impl TempJsonl {
+        fn new(name: &str, lines: &[String]) -> Self {
+            let n = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "apex_batch_dataset_test_{name}_{}_{n}_{nanos}.jsonl",
+                std::process::id()
+            ));
+            std::fs::write(&path, lines.join("\n")).expect("write temp jsonl fixture");
+            Self(path)
+        }
+    }
+
+    impl std::ops::Deref for TempJsonl {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempJsonl {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_load_day_headline_skips_malformed_json_line() {
+        let valid1 = record_line(
+            100,
+            &token_hex(0x01),
+            &token_hex(0x02),
+            "1000000000000000000",
+            "2000000000",
+            "0xaaa",
+            0,
+            "win",
+            Some(2000.0),
+        );
+        let valid2 = record_line(
+            101,
+            &token_hex(0x03),
+            &token_hex(0x04),
+            "1000000000000000000",
+            "3000000000",
+            "0xbbb",
+            1,
+            "win",
+            Some(3000.0),
+        );
+        let fixture = TempJsonl::new("malformed", &[valid1, "not valid json".to_string(), valid2]);
+
+        let (intents, _) = load_day_headline(&fixture).expect("load succeeds");
+
+        assert_eq!(intents.len(), 2, "malformed line must be skipped, both valids kept");
+        let ids: Vec<_> = intents
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect();
+        assert!(ids.contains(&"0xaaa:0"));
+        assert!(ids.contains(&"0xbbb:1"));
+    }
+
+    #[test]
+    fn test_load_day_headline_wash_pair_flagged_both_orders() {
+        let forward = record_line(
+            100,
+            WASH_PAIR.0,
+            WASH_PAIR.1,
+            "1000000000000000000",
+            "1000000000000000000",
+            "0xw1",
+            0,
+            "win",
+            Some(100.0),
+        );
+        let reverse = record_line(
+            101,
+            WASH_PAIR.1,
+            WASH_PAIR.0,
+            "1000000000000000000",
+            "1000000000000000000",
+            "0xw2",
+            1,
+            "win",
+            Some(100.0),
+        );
+        let fixture = TempJsonl::new("wash_pair", &[forward, reverse]);
+
+        let (intents, _) = load_day_headline(&fixture).expect("load succeeds");
+
+        assert_eq!(intents.len(), 2);
+        assert!(intents.iter().all(|i| i.is_wash), "both address orders must flag as wash");
+    }
+
+    #[test]
+    fn test_parse_address_valid() {
+        let addr = parse_address("0x1234567890123456789012345678901234567890").unwrap();
+        assert_eq!(
+            addr.0,
+            [
+                0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0x34, 0x56, 0x78,
+                0x90, 0x12, 0x34, 0x56, 0x78, 0x90
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_address_rejects_empty() {
+        assert_eq!(parse_address(""), None);
+    }
+
+    #[test]
+    fn test_parse_address_rejects_non_hex() {
+        let non_hex = format!("0x{}", "zz".repeat(20));
+        assert_eq!(parse_address(&non_hex), None);
+    }
+
+    #[test]
+    fn test_parse_address_rejects_wrong_length() {
+        assert_eq!(parse_address(&format!("0x{}", "ab".repeat(19))), None);
+        assert_eq!(parse_address(&format!("0x{}", "ab".repeat(21))), None);
+    }
+
+    #[test]
+    fn test_parse_address_rejects_multibyte_utf8_without_panic() {
+        // 19 ASCII bytes + 2-byte 'é' + 19 ASCII bytes = 40 bytes, but only 39 chars: a
+        // byte-length check alone would let this through, and str-indexing at the wrong byte
+        // offset panics on the char boundary. Must return None, not panic.
+        let hex_with_multibyte = format!("0x{}é{}", "0".repeat(19), "0".repeat(19));
+        assert_eq!(parse_address(&hex_with_multibyte), None);
+    }
+
+    #[test]
+    fn test_parse_u256_decimal_valid() {
+        assert_eq!(parse_u256_decimal("12345"), Some(U256::from(12345u64)));
+    }
+
+    #[test]
+    fn test_parse_u256_decimal_empty() {
+        assert_eq!(parse_u256_decimal(""), Some(U256::ZERO));
+    }
+
+    #[test]
+    fn test_parse_u256_decimal_rejects_non_digit() {
+        assert_eq!(parse_u256_decimal("12a45"), None);
+        assert_eq!(parse_u256_decimal("-123"), None);
+    }
+
+    #[test]
+    fn test_load_day_headline_canonicalizes_native_to_weth() {
+        let line = record_line(
+            100,
+            NATIVE,
+            &token_hex(0x05),
+            "1000000000000000000",
+            "500000000",
+            "0xnat",
+            0,
+            "win",
+            Some(1000.0),
+        );
+        let fixture = TempJsonl::new("native_canon", &[line]);
+
+        let (intents, _) = load_day_headline(&fixture).expect("load succeeds");
+
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].token_in, parse_address(WETH).unwrap());
+    }
+
+    #[test]
+    fn test_load_day_headline_price_deviation_boundary_kept_at_factor() {
+        // Two baseline trades pin token_x's day-median price at exactly 100.0 (two identical
+        // samples keep the median stable no matter where the boundary trade's own sample lands).
+        // The boundary trade's usd/amount_in ratio is exactly PRICE_DEV_FACTOR × 100.0, which
+        // the inclusive `..=` range keeps.
+        let baseline1 = record_line(
+            100,
+            &token_hex(0x07),
+            &token_hex(0x08),
+            "1",
+            "1",
+            "0xbase1",
+            0,
+            "win",
+            Some(100.0),
+        );
+        let baseline2 = record_line(
+            101,
+            &token_hex(0x07),
+            &token_hex(0x09),
+            "1",
+            "1",
+            "0xbase2",
+            1,
+            "win",
+            Some(100.0),
+        );
+        let boundary = record_line(
+            102,
+            &token_hex(0x07),
+            &token_hex(0x0a),
+            "1",
+            "1",
+            "0xk",
+            2,
+            "win",
+            Some(100.0 * PRICE_DEV_FACTOR),
+        );
+        let fixture = TempJsonl::new("dev_kept", &[baseline1, baseline2, boundary]);
+
+        let (intents, day_price) = load_day_headline(&fixture).expect("load succeeds");
+
+        assert_eq!(day_price[&token_addr(0x07)], 100.0);
+        let ids: Vec<_> = intents
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect();
+        assert!(ids.contains(&"0xk:2"), "exactly at the factor must be kept: {ids:?}");
+    }
+
+    #[test]
+    fn test_load_day_headline_price_deviation_boundary_excluded_beyond_factor() {
+        let baseline1 = record_line(
+            100,
+            &token_hex(0x07),
+            &token_hex(0x08),
+            "1",
+            "1",
+            "0xbase1",
+            0,
+            "win",
+            Some(100.0),
+        );
+        let baseline2 = record_line(
+            101,
+            &token_hex(0x07),
+            &token_hex(0x09),
+            "1",
+            "1",
+            "0xbase2",
+            1,
+            "win",
+            Some(100.0),
+        );
+        let boundary = record_line(
+            102,
+            &token_hex(0x07),
+            &token_hex(0x0a),
+            "1",
+            "1",
+            "0xe",
+            2,
+            "win",
+            Some(100.0 * PRICE_DEV_FACTOR + 1.0),
+        );
+        let fixture = TempJsonl::new("dev_excluded", &[baseline1, baseline2, boundary]);
+
+        let (intents, day_price) = load_day_headline(&fixture).expect("load succeeds");
+
+        assert_eq!(day_price[&token_addr(0x07)], 100.0);
+        let ids: Vec<_> = intents
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect();
+        assert!(!ids.contains(&"0xe:2"), "just beyond the factor must be excluded: {ids:?}");
+        assert_eq!(intents.len(), 2, "only the two baseline trades survive");
+    }
+
+    #[test]
+    fn test_u256_to_f64_large_value_rounds_without_panic() {
+        let value = U256::from(u64::MAX);
+        let result = u256_to_f64(value);
+        assert!(result.is_finite());
+        let expected = u64::MAX as f64;
+        assert!((result - expected).abs() / expected < 1e-9);
+    }
 }

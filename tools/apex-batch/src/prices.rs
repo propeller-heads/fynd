@@ -215,6 +215,84 @@ mod tests {
         assert_eq!(map.unpriced, vec![token]);
     }
 
+    /// Derives `batch_value_wei` from `build_apex_prices`'s own scale formula (`scale = budget /
+    /// (batch_value_wei.max(1) × inflation)`) so the resulting scaled price lands exactly on
+    /// `MIN_PRICE_UNITS`. With `num = den = 1, decimals = 18`, `price_scaled` reduces to the
+    /// scale itself, so hitting the threshold on the price is the same as hitting it on the
+    /// scale.
+    #[test]
+    fn test_min_price_units_boundary_kept_at_exact_threshold() {
+        let token = ApexAddress([5u8; 20]);
+        let inputs = HashMap::from([(
+            token,
+            TokenPriceInput {
+                numerator: BigUint::from(1u8),
+                denominator: BigUint::from(1u8),
+                decimals: 18,
+            },
+        )]);
+        let budget = BigUint::from(1u8) << 126;
+        let inflation = BigUint::from(10u32).pow(MAX_PRECISION_INCREASES);
+        let denom = &inflation * BigUint::from(MIN_PRICE_UNITS);
+        let batch_value_wei = &budget / &denom;
+
+        let map = build_apex_prices(&inputs, &batch_value_wei);
+
+        assert!(map.price_underflow.is_empty(), "{map:?}");
+        assert_eq!(map.prices[&token], U256::from(MIN_PRICE_UNITS));
+    }
+
+    #[test]
+    fn test_min_price_units_boundary_excluded_just_below_threshold() {
+        let token = ApexAddress([5u8; 20]);
+        let inputs = HashMap::from([(
+            token,
+            TokenPriceInput {
+                numerator: BigUint::from(1u8),
+                denominator: BigUint::from(1u8),
+                decimals: 18,
+            },
+        )]);
+        let budget = BigUint::from(1u8) << 126;
+        let inflation = BigUint::from(10u32).pow(MAX_PRECISION_INCREASES);
+        let denom = &inflation * BigUint::from(MIN_PRICE_UNITS - 1);
+        let batch_value_wei = &budget / &denom;
+
+        let map = build_apex_prices(&inputs, &batch_value_wei);
+
+        assert!(map.prices.is_empty(), "{map:?}");
+        assert_eq!(map.price_underflow, vec![token]);
+    }
+
+    /// `scale` floors to zero once `batch_value_wei × inflation` alone exceeds the overflow
+    /// budget: every token underflows and the caller declines the batch outright.
+    #[test]
+    fn test_batch_too_large_for_any_scale_underflows_every_token() {
+        let weth = ApexAddress([1u8; 20]);
+        let usdc = ApexAddress([2u8; 20]);
+        let inputs = HashMap::from([
+            (
+                weth,
+                TokenPriceInput { numerator: wei(1, 18), denominator: wei(1, 18), decimals: 18 },
+            ),
+            (
+                usdc,
+                TokenPriceInput { numerator: wei(2000, 6), denominator: wei(1, 18), decimals: 6 },
+            ),
+        ]);
+        let batch_value_wei = BigUint::from(1u8) << 126;
+
+        let map = build_apex_prices(&inputs, &batch_value_wei);
+
+        assert!(map.prices.is_empty(), "{map:?}");
+        assert!(map.unpriced.is_empty(), "{map:?}");
+        let mut underflowed = map.price_underflow.clone();
+        underflowed.sort_by_key(|a| a.0);
+        let mut expected = vec![weth, usdc];
+        expected.sort_by_key(|a| a.0);
+        assert_eq!(underflowed, expected);
+    }
+
     #[test]
     fn test_batch_value_sums_in_wei() {
         let usdc = ApexAddress([2u8; 20]);
