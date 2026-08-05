@@ -52,7 +52,10 @@ struct Args {
     /// heavily.
     #[arg(long, env = "RPC_URL", default_value = "https://mainnet.base.org")]
     rpc_url: String,
-    #[arg(long, default_value_t = 100.0)]
+    /// Minimum pool TVL, denominated in the chain's NATIVE token (1.0 = 1 ETH-equivalent) —
+    /// tycho's ComponentFilter convention, NOT USD. The old 100.0 default silently meant
+    /// ~$360k minimum and starved the pool universe.
+    #[arg(long, default_value_t = 1.0)]
     min_tvl: f64,
     /// Cap on the pool subset (class-priority order: direct > adjacent > linking).
     #[arg(long, default_value_t = 400)]
@@ -116,6 +119,9 @@ struct StateSnapshot {
     /// persisted with the snapshot so from-disk reruns keep the cell-b baseline.
     fynd_quotes: HashMap<String, alloy::primitives::U256>,
     fynd_quote_sample_share: f64,
+    /// Raw tycho snapshots for hookless uniswap_v4 components (see [`PersistedV4Raw`]); filled
+    /// on live capture, empty after a from-disk load (their pools are already rebuilt).
+    v4_raw: Vec<PersistedV4Raw>,
 }
 
 /// The persisted snapshot file: everything a from-disk rerun needs, states typetag-encoded.
@@ -137,6 +143,34 @@ struct PersistedSnapshot {
     token_meta: Vec<(String, String, u8)>,
     fynd_quotes: Vec<(String, String)>,
     fynd_quote_sample_share: f64,
+    /// Absent in snapshots captured before hookless-v4 persistence landed.
+    #[serde(default)]
+    v4_raw: Vec<PersistedV4Raw>,
+}
+
+/// A hookless uniswap_v4 component's raw tycho state, persisted verbatim as the dto JSON the
+/// RPC returned. `UniswapV4State` cannot typetag-serialize (its hook field is a hard upstream
+/// error even when `None`), so a from-disk rerun rebuilds the state through tycho-simulation's
+/// own snapshot decoder instead. Hooked pools stay live-only: their hook handlers need a VM
+/// setup a from-disk rerun does not have.
+#[derive(Serialize, Deserialize)]
+struct PersistedV4Raw {
+    component_id: String,
+    tokens: Vec<PersistedTokenCompat>,
+    /// [`PersistedV4StateFields`] — the model `ProtocolComponentState` field by field (the
+    /// model itself is not serde).
+    state: serde_json::Value,
+    /// `tycho_common::models::protocol::ProtocolComponent`, verbatim.
+    component: serde_json::Value,
+}
+
+/// `ProtocolComponentState`'s fields, mirrored because the model does not implement serde while
+/// each field is a plain serde type.
+#[derive(Serialize, Deserialize)]
+struct PersistedV4StateFields {
+    component_id: String,
+    attributes: HashMap<String, tycho_simulation::tycho_common::Bytes>,
+    balances: HashMap<tycho_simulation::tycho_common::Bytes, tycho_simulation::tycho_common::Bytes>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1219,6 +1253,38 @@ async fn take_snapshot(
         });
     }
 
+    // Hookless uniswap_v4 states cannot typetag-serialize, but their raw tycho snapshots can be
+    // persisted and re-decoded on load. Fetch them now, while the state is still current; a
+    // fetch failure only costs from-disk reruns their v4 pools, so it degrades instead of
+    // failing the capture.
+    let unpersistable_v4: Vec<String> = pools
+        .iter()
+        .filter(|pool| !pool.persisted && pool.adapter.protocol == "uniswap_v4")
+        .map(|pool| pool.component_id.clone())
+        .collect();
+    let v4_raw = match fetch_v4_raw(
+        &args.tycho_url,
+        api_key.as_deref(),
+        &unpersistable_v4,
+        price_block,
+        state,
+    )
+    .await
+    {
+        Ok(raw) => {
+            eprintln!(
+                "v4 raw snapshots: {} hookless of {} unpersistable",
+                raw.len(),
+                unpersistable_v4.len()
+            );
+            raw
+        }
+        Err(error) => {
+            eprintln!("v4 raw fetch failed ({error}); hookless v4 pools stay live-only");
+            Vec::new()
+        }
+    };
+
     // Price rationals + token metadata for every token the run can touch.
     let mut price_inputs = HashMap::new();
     let mut token_meta = HashMap::new();
@@ -1312,11 +1378,18 @@ async fn take_snapshot(
     let snapshot = StateSnapshot {
         state_label,
         price_block,
+        // Dropped = unpersistable AND not recoverable from a raw snapshot (hooked v4).
         v4_dropped: pools
             .iter()
             .filter(|pool| !pool.persisted)
+            .filter(|pool| {
+                v4_raw
+                    .iter()
+                    .all(|raw| raw.component_id != pool.component_id)
+            })
             .map(|pool| pool.component_id.clone())
             .collect(),
+        v4_raw,
         pools,
         price_inputs,
         token_meta,
@@ -1424,6 +1497,35 @@ fn persist_snapshot(snapshot: &StateSnapshot, out_dir: &std::path::Path) -> Resu
             .map(|(id, out)| (id.clone(), out.to_string()))
             .collect(),
         fynd_quote_sample_share: snapshot.fynd_quote_sample_share,
+        v4_raw: snapshot
+            .v4_raw
+            .iter()
+            .map(|raw| PersistedV4Raw {
+                component_id: raw.component_id.clone(),
+                tokens: raw
+                    .tokens
+                    .iter()
+                    .map(|token| {
+                        let token = match token {
+                            PersistedTokenCompat::Full(full) => full,
+                            PersistedTokenCompat::Legacy(..) => {
+                                unreachable!("capture builds full identities")
+                            }
+                        };
+                        PersistedTokenCompat::Full(PersistedToken {
+                            address: token.address.clone(),
+                            symbol: token.symbol.clone(),
+                            decimals: token.decimals,
+                            tax: token.tax,
+                            gas: token.gas.clone(),
+                            quality: token.quality,
+                        })
+                    })
+                    .collect(),
+                state: raw.state.clone(),
+                component: raw.component.clone(),
+            })
+            .collect(),
     };
     std::fs::create_dir_all(out_dir)?;
     let label = snapshot
@@ -1438,9 +1540,119 @@ fn persist_snapshot(snapshot: &StateSnapshot, out_dir: &std::path::Path) -> Resu
     Ok(())
 }
 
-/// Rebuild a `StateSnapshot` from a persisted file — no live connection, v4 pools absent (their
-/// ids are in the manifest), fynd quotes carried over.
-fn load_snapshot(path: &std::path::Path) -> Result<StateSnapshot> {
+/// Fetch raw dto state+component JSON for the given uniswap_v4 component ids, keeping only
+/// hookless pools. An all-zero `hooks` attribute is removed so the snapshot decoder takes its
+/// plain path; hooked pools are skipped — their handlers need a VM setup a from-disk rerun
+/// does not have.
+async fn fetch_v4_raw(
+    tycho_url: &str,
+    api_key: Option<&str>,
+    component_ids: &[String],
+    price_block: Option<u64>,
+    state: &fynd_core::feed::market_data::MarketState,
+) -> Result<Vec<PersistedV4Raw>> {
+    use tycho_simulation::tycho_client::rpc::{
+        HttpRPCClient, HttpRPCClientOptions, ProtocolComponentsParams, ProtocolStatesParams,
+        RPCClient,
+    };
+
+    if component_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = HttpRPCClient::new(
+        &format!("https://{tycho_url}"),
+        HttpRPCClientOptions::new().with_auth_key(api_key.map(str::to_string)),
+    )?;
+    let chain = tycho_simulation::tycho_common::models::Chain::Base;
+
+    let mut raw = Vec::new();
+    for chunk in component_ids.chunks(100) {
+        let mut states_params = ProtocolStatesParams::new(chain, "uniswap_v4")
+            .with_protocol_ids(chunk.to_vec())
+            .with_include_balances(true);
+        if let Some(block) = price_block {
+            states_params = states_params.with_block_number(block);
+        }
+        let states = client
+            .get_protocol_states(states_params)
+            .await?
+            .into_data();
+        let components = client
+            .get_protocol_components(
+                ProtocolComponentsParams::new(chain, "uniswap_v4")
+                    .with_component_ids(chunk.to_vec()),
+            )
+            .await?
+            .into_data();
+        let component_by_id: HashMap<&str, _> = components
+            .iter()
+            .map(|component| (component.id.as_str(), component))
+            .collect();
+
+        for state_model in &states {
+            let Some(component_model) = component_by_id.get(state_model.component_id.as_str())
+            else {
+                continue;
+            };
+            let hooked = component_model
+                .static_attributes
+                .get("hooks")
+                .is_some_and(|address| {
+                    address
+                        .as_ref()
+                        .iter()
+                        .any(|byte| *byte != 0)
+                });
+            if hooked {
+                continue;
+            }
+            let mut tokens = Vec::new();
+            for token_bytes in &component_model.tokens {
+                let Some(token) = state.get_token(token_bytes) else { break };
+                let bytes: &[u8] = token_bytes.as_ref();
+                if bytes.len() != 20 {
+                    break;
+                }
+                let mut address = [0u8; 20];
+                address.copy_from_slice(bytes);
+                tokens.push(PersistedTokenCompat::Full(PersistedToken {
+                    address: hex_addr(ApexAddress(address)),
+                    symbol: token.symbol.clone(),
+                    decimals: token.decimals,
+                    tax: token.tax,
+                    gas: token.gas.clone(),
+                    quality: token.quality,
+                }));
+            }
+            if tokens.len() != component_model.tokens.len() || tokens.len() != 2 {
+                continue;
+            }
+            let mut component_json = serde_json::to_value(component_model)?;
+            if let Some(attributes) = component_json
+                .get_mut("static_attributes")
+                .and_then(|value| value.as_object_mut())
+            {
+                attributes.remove("hooks");
+            }
+            raw.push(PersistedV4Raw {
+                component_id: state_model.component_id.clone(),
+                tokens,
+                state: serde_json::to_value(PersistedV4StateFields {
+                    component_id: state_model.component_id.clone(),
+                    attributes: state_model.attributes.clone(),
+                    balances: state_model.balances.clone(),
+                })?,
+                component: component_json,
+            });
+        }
+    }
+    Ok(raw)
+}
+
+/// Rebuild a `StateSnapshot` from a persisted file — no live connection; hookless v4 pools are
+/// re-decoded from their raw tycho snapshots, hooked v4 stays absent (ids in the manifest),
+/// fynd quotes carried over.
+async fn load_snapshot(path: &std::path::Path) -> Result<StateSnapshot> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("opening snapshot {}", path.display()))?;
     let persisted: PersistedSnapshot = serde_json::from_reader(zstd::Decoder::new(file)?)?;
@@ -1505,6 +1717,114 @@ fn load_snapshot(path: &std::path::Path) -> Result<StateSnapshot> {
         let Some(address) = apex_batch::dataset::parse_address(&address_hex) else { continue };
         token_meta.insert(address, (symbol, decimals));
     }
+    // Hookless v4 pools: re-decode the raw tycho snapshots through tycho-simulation's own
+    // decoder — the states enter as serializable-scope pools (they round-trip via the raw JSON).
+    let mut v4_rebuilt = 0usize;
+    let mut v4_failed = 0usize;
+    for raw in persisted.v4_raw {
+        use tycho_simulation::{
+            evm::protocol::uniswap_v4::state::UniswapV4State,
+            protocol::models::{DecoderContext, TryFromWithBlock},
+            tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader},
+        };
+        let (Ok(state_fields), Ok(component_model)) = (
+            serde_json::from_value::<PersistedV4StateFields>(raw.state),
+            serde_json::from_value::<
+                tycho_simulation::tycho_common::models::protocol::ProtocolComponent,
+            >(raw.component),
+        ) else {
+            v4_failed += 1;
+            continue;
+        };
+        let state_model =
+            tycho_simulation::tycho_common::models::protocol::ProtocolComponentState {
+                component_id: state_fields.component_id,
+                attributes: state_fields.attributes,
+                balances: state_fields.balances,
+            };
+        let component_id = raw.component_id;
+        let mut token_map: HashMap<ApexAddress, TychoToken> = HashMap::new();
+        let mut all_tokens: HashMap<tycho_simulation::tycho_common::Bytes, TychoToken> =
+            HashMap::new();
+        let mut token_addresses = Vec::new();
+        for token in raw.tokens {
+            let token = token.into_token();
+            let Some(address) = apex_batch::dataset::parse_address(&token.address) else {
+                continue;
+            };
+            let tycho_token = TychoToken::new(
+                &tycho_simulation::tycho_common::Bytes::from(address.0.to_vec()),
+                &token.symbol,
+                token.decimals,
+                token.tax,
+                &token.gas,
+                Chain::Base,
+                token.quality,
+            );
+            token_addresses.push(address);
+            all_tokens.insert(
+                tycho_simulation::tycho_common::Bytes::from(address.0.to_vec()),
+                tycho_token.clone(),
+            );
+            token_map.insert(address, tycho_token);
+        }
+        if token_addresses.len() != 2 {
+            v4_failed += 1;
+            continue;
+        }
+        let component_with_state = ComponentWithState {
+            state: state_model,
+            component: component_model,
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+        let header = BlockHeader {
+            hash: Default::default(),
+            number: persisted.price_block.unwrap_or(0),
+            parent_hash: Default::default(),
+            revert: false,
+            timestamp: 0,
+            partial_block_index: None,
+        };
+        let state = match UniswapV4State::try_from_with_header(
+            component_with_state,
+            header,
+            &HashMap::new(),
+            &all_tokens,
+            &DecoderContext::new(),
+        )
+        .await
+        {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("v4 rebuild failed for {component_id}: {error}");
+                v4_failed += 1;
+                continue;
+            }
+        };
+        let apex_address = address_book
+            .register(&component_id)
+            .map_err(|other| {
+                anyhow::anyhow!("pool address collision: {component_id} vs {other}")
+            })?;
+        pools.push(SnapshotPool {
+            component_id,
+            apex_address,
+            token_0: token_addresses[0],
+            token_1: token_addresses[1],
+            adapter: Arc::new(TychoApexPool {
+                protocol: "uniswap_v4".to_string(),
+                tokens: token_map,
+                pool: Arc::new(state),
+            }),
+            persisted: true,
+        });
+        v4_rebuilt += 1;
+    }
+    if v4_rebuilt + v4_failed > 0 {
+        eprintln!("v4 raw rebuild: {v4_rebuilt} ok, {v4_failed} failed");
+    }
+
     let mut fynd_quotes = HashMap::new();
     for (id, amount) in persisted.fynd_quotes {
         if let Ok(amount) = amount.parse() {
@@ -1514,6 +1834,7 @@ fn load_snapshot(path: &std::path::Path) -> Result<StateSnapshot> {
     Ok(StateSnapshot {
         state_label: persisted.state_label,
         price_block: persisted.price_block,
+        v4_raw: Vec::new(),
         pools,
         price_inputs,
         token_meta,
@@ -1571,7 +1892,7 @@ async fn main() -> Result<()> {
         .collect();
     let snapshot = match &args.snapshot {
         Some(path) => {
-            let snapshot = load_snapshot(path)?;
+            let snapshot = load_snapshot(path).await?;
             eprintln!(
                 "loaded persisted snapshot {} ({} pools, v4 dropped: {})",
                 path.display(),
