@@ -34,7 +34,6 @@ use crate::{
 /// is how that bias is bounded rather than assumed away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[expect(dead_code, reason = "scaffold: constructed once limit_for lands")]
 pub(crate) enum LimitSource {
     /// Decoded from the settled transaction's own calldata (`CoW`'s order `buyAmount`, a router's
     /// `minReturnAmount`).
@@ -176,13 +175,19 @@ fn captured_trades(trades: &[DecodedTrade], ranges: &[RangeComparison]) -> Vec<C
 
 /// The order's floor and where it came from.
 ///
-/// Should: prefer the trade's extracted `min_amount_out` (decoded from the settling solver's
-/// calldata); when absent, fall back to the synthetic limit — the executed output less
-/// [`SYNTHETIC_LIMIT_BPS`] — and label it as such. Returns `(None, None)` only when neither is
-/// derivable, which is what the runner counts as an unextractable limit.
-#[expect(clippy::todo, reason = "scaffold: the limit policy lands with the capture implementation")]
-fn limit_for(_trade: &DecodedTrade) -> (Option<U256>, Option<LimitSource>) {
-    todo!("return the extracted limit, else the synthetic executed-output-minus-slippage floor")
+/// Prefers the trade's extracted `min_amount_out` (decoded from the settling solver's calldata);
+/// when absent, falls back to the synthetic limit — the executed output less
+/// [`SYNTHETIC_LIMIT_BPS`] — and labels it as such.
+fn limit_for(trade: &DecodedTrade) -> (Option<U256>, Option<LimitSource>) {
+    if let Some(min_amount_out) = trade.min_amount_out {
+        return (Some(min_amount_out), Some(LimitSource::Extracted));
+    }
+    let retained_bps = U256::from(10_000 - SYNTHETIC_LIMIT_BPS);
+    let synthetic = trade
+        .amount_out
+        .saturating_mul(retained_bps) /
+        U256::from(10_000);
+    (Some(synthetic), Some(LimitSource::Synthetic))
 }
 
 /// Slippage assumed for the synthetic fallback limit, in basis points below the executed output.
@@ -191,7 +196,6 @@ fn limit_for(_trade: &DecodedTrade) -> (Option<U256>, Option<LimitSource>) {
 /// ~83 bps, unoswap ~200, `KyberSwap` ~151; pooled p50 ≈ 120). Deliberately on the tight side of
 /// the pooled median: a too-loose limit lets the batch claim surplus the real order would never
 /// have accepted, which is the one error direction that flatters APEX.
-#[expect(dead_code, reason = "scaffold: read once limit_for lands")]
 pub(crate) const SYNTHETIC_LIMIT_BPS: u32 = 100;
 
 /// Flatten a re-solved state's outcome into the captured counterfactual.
@@ -240,8 +244,65 @@ pub(crate) fn write_snapshot<W: std::io::Write>(writer: &mut W, snapshot: &Block
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::{Address, TxHash};
+
     use super::*;
-    use crate::{decoder::Registry, resolve::SolvedAmount};
+    use crate::{
+        decoder::{AttributionSource, Registry},
+        resolve::SolvedAmount,
+    };
+
+    fn trade(amount_out: u64, min_amount_out: Option<u64>) -> DecodedTrade {
+        DecodedTrade {
+            tx_hash: TxHash::default(),
+            block_number: 21_000_000,
+            tx_index: 0,
+            venue: "relay".into(),
+            solver: "tycho".into(),
+            solver_source: AttributionSource::TraceMatch,
+            decoder: "sender-netting",
+            sender: Address::ZERO,
+            token_in: Address::repeat_byte(0x11),
+            token_out: Address::repeat_byte(0x22),
+            amount_in: U256::from(1_000u64),
+            amount_out: U256::from(amount_out),
+            venue_fee_in: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            quote: None,
+            min_amount_out: min_amount_out.map(U256::from),
+            sandwich: None,
+        }
+    }
+
+    #[test]
+    fn test_limit_for_prefers_extracted_limit_verbatim() {
+        let (limit, source) = limit_for(&trade(1_000_000, Some(950_123)));
+        assert_eq!(limit, Some(U256::from(950_123u64)));
+        assert_eq!(source, Some(LimitSource::Extracted));
+    }
+
+    #[test]
+    fn test_limit_for_falls_back_to_synthetic_floor_on_clean_division() {
+        let (limit, source) = limit_for(&trade(1_000_000, None));
+        assert_eq!(limit, Some(U256::from(990_000u64)));
+        assert_eq!(source, Some(LimitSource::Synthetic));
+    }
+
+    #[test]
+    fn test_limit_for_synthetic_floor_rounds_down() {
+        // 999 * 9_900 / 10_000 = 989.01 -> must floor to 989, never round up to 990.
+        let (limit, source) = limit_for(&trade(999, None));
+        assert_eq!(limit, Some(U256::from(989u64)));
+        assert_eq!(source, Some(LimitSource::Synthetic));
+    }
+
+    #[test]
+    fn test_limit_for_zero_amount_out_yields_zero_floor_without_panic() {
+        let (limit, source) = limit_for(&trade(0, None));
+        assert_eq!(limit, Some(U256::ZERO));
+        assert_eq!(source, Some(LimitSource::Synthetic));
+    }
 
     #[test]
     fn test_counterfactual_distinguishes_unsolved_from_zero() {
