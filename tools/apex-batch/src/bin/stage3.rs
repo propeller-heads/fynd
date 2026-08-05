@@ -74,6 +74,11 @@ struct Args {
     /// offline default; 1000 matches the live budget.
     #[arg(long, default_value_t = 3_000)]
     solve_deadline_ms: u64,
+    /// Cells solved concurrently (0 = one per core). Deadlines are wall-clock, so keep this
+    /// at or below the free core count when solve-time percentiles or deadline-bound results
+    /// must be reproducible.
+    #[arg(long, default_value_t = 0)]
+    parallel_cells: usize,
     /// How long to wait for the first complete market + derived-price computation.
     #[arg(long, default_value_t = 900)]
     ready_timeout_secs: u64,
@@ -1850,6 +1855,13 @@ async fn load_snapshot(path: &std::path::Path) -> Result<StateSnapshot> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.parallel_cells > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.parallel_cells)
+            .build_global()
+            .context("configuring the cell thread pool")?;
+    }
 
     let mut day_files: Vec<PathBuf> = std::fs::read_dir(&args.data_dir)
         .with_context(|| format!("listing {}", args.data_dir.display()))?
