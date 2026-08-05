@@ -1,5 +1,11 @@
 # Stage 3 — APEX batch clearing with AMM pools, offline sweep
 
+> **Two sweeps live here.** Sweep 1 (`stage3_results-49562643.json`, table below) ran from-disk
+> against the legacy 122-pool snapshot. Sweep 2 (`stage3_results-49575430.json`) ran LIVE at
+> block 49,575,430 after the TVL-unit and v4 fixes: 400-pool subset (of 2,702 candidates ≥1 ETH
+> TVL), full+serializable scope cells, and full-coverage fynd quotes (14,490). See "Sweep 2"
+> below — it revises one finding and hardens the rest.
+
 One partial day of decoded Base solver trades (2026-08-03, 00:00–13:15 UTC, 14,490 intents,
 $9.17M) replayed against a persisted AMM snapshot (block 49,562,643; 122 serializable native
 pools of a 230-pool subset — 108 uniswap_v4 dropped), batched into non-overlapping windows and
@@ -77,6 +83,34 @@ current — clean but small n).
    bps at w=15/30/150, n=130/167/224). More orders per batch → better internal price
    discovery. Same caveat as everything above: gross of gas, majors-only universe, one
    partial day.
+
+## Sweep 2 — widened universe, live state, honest fynd baseline (49575430)
+
+Same day and grid plus a full-pool-scope axis (30 cells), captured live: 400-pool subset
+(min_tvl = 1 ETH; 220 serializable + 34 hookless-v4 raw + 146 lunarbase live-only), snapshot
+state block 49,575,430, full-coverage snapshot-state fynd quotes. Full table in
+`stage3_results-49575430.json`. What changed vs sweep 1:
+
+1. **The fynd head-to-head FLIPS on the clean anchor.** With a full-coverage, richer-universe
+   fynd baseline, APEX crossing loses to fynd routing at EVERY window: median −119 bps (w=1,
+   n=305) → −118 (w=5) → −110 (w=15) → −101 (w=30) → −60 (w=150, n=3,480). Sweep 1's "+39..+66
+   bps APEX win at w≥15" was an artifact of the 6.7%-sampled, 122-pool fynd baseline. The
+   deficit shrinking with window size is real (more counterparties → better clearing prices),
+   but crossing at synthetic 100 bps floors clears roughly one limit-width worse than routing.
+   Original-anchor comparisons still show +30..+51 bps — that column is drift-inflated
+   (trade-time baseline vs snapshot clearing) and must not be quoted as a win.
+2. **The 1 s budget still nullifies the pools axis.** 98–99% of pooled component solves
+   deadline-fire with ZERO clearings and fall back to crossing-only (sweep-1 exact count:
+   12,086 empty of 12,242; sweep 2 is the same shape with an even bigger search space).
+   Full-vs-serializable scope differs by ≤0.5% matched — the 180 live-only pools are
+   unreachable within budget. Where pooled solves DO complete (w=1: intern 0.80, w=5: 0.91),
+   pools add +9–14% matched on the clean anchor — the only cells measuring pool economics.
+3. **Drift columns work under pressure**: the widened universe lets stale-priced orders fill
+   through more pools at the Original anchor (raw surplus up to $19k/cell), and ex-drift
+   collapses every such cell to $30–$663 with top5 ≥ 74%. Clean-anchor ex-drift surplus is
+   stable across both sweeps (~$23 at w=1 → ~$3.5k at w=150 per half-day).
+4. **Matched volume is unchanged** (0.13% → 15.2% of day USD by window) — batching's addressable
+   volume is set by order-flow connectivity, not by the pool universe.
 
 ## Provenance
 
