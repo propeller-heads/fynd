@@ -192,23 +192,23 @@ fn precision_lift(value: U256, decimals: u32) -> Option<U256> {
 
 /// An alloy `U256` as APEX's `U256`. The two are the same ruint shape but may come from
 /// different crate versions, so the conversion goes through the little-endian bytes.
-fn to_apex_u256(value: U256) -> ApexU256 {
+pub(crate) fn to_apex_u256(value: U256) -> ApexU256 {
     ApexU256::from_le_bytes(value.to_le_bytes::<32>())
 }
 
 /// An APEX `U256` as alloy's `U256`.
-fn from_apex_u256(value: ApexU256) -> U256 {
+pub(crate) fn from_apex_u256(value: ApexU256) -> U256 {
     U256::from_le_bytes(value.to_le_bytes::<32>())
 }
 
 /// An alloy `U256` as the `BigUint` tycho simulations take.
-fn u256_to_biguint(value: U256) -> BigUint {
+pub(crate) fn u256_to_biguint(value: U256) -> BigUint {
     BigUint::from_bytes_le(&value.to_le_bytes::<32>())
 }
 
 /// A simulation-returned `BigUint` as alloy `U256`. `None` when the value exceeds 256 bits —
 /// a nonsensical pool output that declines the swap rather than truncating it.
-fn biguint_to_u256(value: &BigUint) -> Option<U256> {
+pub(crate) fn biguint_to_u256(value: &BigUint) -> Option<U256> {
     let bytes = value.to_bytes_le();
     (bytes.len() <= 32).then(|| U256::from_le_slice(&bytes))
 }

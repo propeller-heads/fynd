@@ -1,0 +1,795 @@
+//! The live batch solve the hindsight monitor dispatches at its pre-advance seam.
+//!
+//! This is the plan's "one shared input-builder": the monitor maps its decoded trades and cloned
+//! pool states into [`LiveBatchInput`] and every APEX-facing decision — component partitioning,
+//! admission preconditions, price scaling, limit construction, per-component solving, and
+//! reconciliation — lives here, in the same crate the offline runners use. One code path, two
+//! state sources.
+//!
+//! The solve contract mirrors the offline reference (`bin/stage3.rs::solve_batch`), with the
+//! reporting inverted: offline aggregates dollars, live reports per-order statuses and raw
+//! amounts and leaves economics to the offline join against the comparisons JSONL (which already
+//! carries each order's Fynd quote at the same two block states — the comparability invariant).
+//!
+//! Every precondition failure is a counted decline, never a panic: APEX indexes its token maps
+//! directly and divides by prices, so the input contract (full token closure priced, nonzero
+//! amounts and limits, unique ids) is enforced before the call. The per-component `catch_unwind`
+//! is the last resort the plan allows, and the stage's worker-level catch above it is the backstop.
+
+use std::{
+    collections::{HashMap, HashSet},
+    panic::{catch_unwind, AssertUnwindSafe},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use alloy::primitives::U256;
+use apex_solver::{
+    core::{
+        pools::{custom::ApexPool, Pool, PoolMetadata},
+        ApexConfig, Fraction, LimitOrder, Token as ApexToken, TradingPair,
+    },
+    run_apex_with_config,
+    types::Address as ApexAddress,
+};
+use num_bigint::BigUint;
+
+use crate::{
+    adapter::{from_apex_u256, to_apex_u256, TychoApexPool},
+    prices::{batch_value_wei, build_apex_prices, TokenPriceInput, MAX_PRECISION_INCREASES},
+    scaling::{Scaled18, TokenScale},
+};
+
+/// One decoded trade as a live batch order. Amounts are raw (native-decimal) units; the lift into
+/// APEX's 18-decimal space happens inside the solve, through the declining scaling module.
+#[derive(Debug, Clone)]
+pub struct LiveOrder {
+    /// `{tx_hash}:{tx_index}` — joins the result back to the comparisons JSONL record.
+    pub id: String,
+    pub token_in: ApexAddress,
+    pub token_out: ApexAddress,
+    pub amount_in_raw: U256,
+    /// The order's floor: the extracted on-chain limit where the decoder found one, else the
+    /// capture module's synthetic fallback. Zero declines the order (`zero_limit`).
+    pub min_out_raw: U256,
+}
+
+/// One cloned pool state, already wrapped for APEX. The monitor clones at block time, so queue
+/// delay never changes what state a solve sees.
+#[derive(Clone)]
+pub struct LivePool {
+    pub apex_address: ApexAddress,
+    pub token_0: ApexAddress,
+    pub token_1: ApexAddress,
+    pub adapter: Arc<TychoApexPool>,
+}
+
+impl std::fmt::Debug for LivePool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LivePool")
+            .field("apex_address", &self.apex_address)
+            .field("token_0", &self.token_0)
+            .field("token_1", &self.token_1)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Everything one bracket's solve needs, cloned from live state at dispatch time.
+#[derive(Debug, Clone, Default)]
+pub struct LiveBatchInput {
+    pub orders: Vec<LiveOrder>,
+    pub pools: Vec<LivePool>,
+    /// Exact price rationals for (at least) the token closure, from the solver's derived data.
+    pub price_inputs: HashMap<ApexAddress, TokenPriceInput>,
+    /// Symbol and decimals per token, from the solver's token metadata.
+    pub token_meta: HashMap<ApexAddress, (String, u8)>,
+}
+
+/// Where one order ended up, per the input-vs-clearing reconciliation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OrderStatus {
+    Filled {
+        bought_raw: U256,
+        fill_ratio: f64,
+    },
+    PartiallyFilled {
+        bought_raw: U256,
+        fill_ratio: f64,
+    },
+    /// APEX returned a clearing with zero sold amount, or none while the deadline never fired —
+    /// the limit was the binding constraint.
+    UnfilledAtLimit,
+    /// Absent from the result of a solve whose deadline fired: the whole cluster was cut.
+    ClusterCut,
+    /// The order's component errored or panicked inside APEX; nothing about this order's own
+    /// economics can be concluded.
+    ComponentErrored,
+    /// Declined before the solve; the reason names the admission counter it incremented.
+    Excluded(&'static str),
+}
+
+/// A single-order control solve (same partitioning, same pools, own budget).
+#[derive(Debug, Clone)]
+pub struct SingleResult {
+    pub id: String,
+    /// Raw bought amount when the single-order solve filled; `None` when it did not (unfilled,
+    /// errored, or the component had no pools to fill against).
+    pub bought_raw: Option<U256>,
+}
+
+/// Admission and solve counters for one bracket solve — mirrors the offline runner's taxonomy.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LiveCounters {
+    pub orders_in: u64,
+    pub unknown_decimals: u64,
+    pub token_unpriced: u64,
+    pub price_underflow: u64,
+    pub scale_overflow: u64,
+    pub zero_limit_excluded: u64,
+    pub duplicate_order_id: u64,
+    pub singles_skipped: u64,
+    pub pool_unpriced: u64,
+    pub pools_in_scope: u64,
+    pub components_solved: u64,
+    pub component_errored_orders: u64,
+    pub component_errors: HashMap<String, u64>,
+    pub solver_panics: u64,
+    pub deadline_fired_components: u64,
+    pub filled: u64,
+    pub partially_filled: u64,
+    pub unfilled_at_limit: u64,
+    pub cluster_cut: u64,
+}
+
+/// One bracket's outcome: per-order statuses, the singles control, counters, and per-component
+/// solve wall times (the shadow run's primary series).
+#[derive(Debug, Default)]
+pub struct LiveBatchReport {
+    pub statuses: Vec<(String, OrderStatus)>,
+    pub singles: Vec<SingleResult>,
+    pub counters: LiveCounters,
+    pub component_solve_ms: Vec<u128>,
+}
+
+/// Whether a block's decoded trades can form a batch worth dispatching: at least two orders
+/// sharing a token (the connectivity pre-check's definition of an eligible block). Pool-mediated
+/// linking is deliberately not consulted here — it would make nearly every block eligible and
+/// the study's eligibility notion is order connectivity.
+pub fn batch_eligible(order_token_pairs: &[(ApexAddress, ApexAddress)]) -> bool {
+    if order_token_pairs.len() < 2 {
+        return false;
+    }
+    let mut token_order_counts: HashMap<ApexAddress, usize> = HashMap::new();
+    for (token_in, token_out) in order_token_pairs {
+        // A token appearing twice inside ONE order (in == out) must not make the block eligible.
+        for token in HashSet::from([*token_in, *token_out]) {
+            *token_order_counts
+                .entry(token)
+                .or_default() += 1;
+        }
+    }
+    token_order_counts
+        .values()
+        .any(|&count| count >= 2)
+}
+
+/// Solve one bracket: partition, admit, solve per component, reconcile.
+///
+/// `component_budget` is APEX's search deadline per component solve, stamped at each component's
+/// solve start (the plan's 1 s live budget). `single_budget` caps each single-order control solve.
+/// The worker-level stage budget above this call is an occupancy envelope, not the solve budget.
+pub fn solve_live_batch(
+    input: &LiveBatchInput,
+    component_budget: Duration,
+    single_budget: Duration,
+    run_singles: bool,
+) -> LiveBatchReport {
+    let mut report = LiveBatchReport::default();
+    let counters = &mut report.counters;
+
+    // Admission: representable decimals and priced tokens, before any partitioning.
+    let mut admitted: Vec<&LiveOrder> = Vec::with_capacity(input.orders.len());
+    for order in &input.orders {
+        counters.orders_in += 1;
+        let representable = |token: &ApexAddress| {
+            input
+                .token_meta
+                .get(token)
+                .is_some_and(|(_, decimals)| TokenScale::new(*decimals).is_ok())
+        };
+        if !representable(&order.token_in) || !representable(&order.token_out) {
+            counters.unknown_decimals += 1;
+            report
+                .statuses
+                .push((order.id.clone(), OrderStatus::Excluded("unknown_decimals")));
+            continue;
+        }
+        if !input
+            .price_inputs
+            .contains_key(&order.token_in) ||
+            !input
+                .price_inputs
+                .contains_key(&order.token_out)
+        {
+            counters.token_unpriced += 1;
+            report
+                .statuses
+                .push((order.id.clone(), OrderStatus::Excluded("token_unpriced")));
+            continue;
+        }
+        admitted.push(order);
+    }
+    if admitted.is_empty() {
+        return report;
+    }
+
+    // Union-find over order tokens ∪ pool edges: identical partitioning for the batch and the
+    // singles control (comparability invariant, plan v3.1 item C).
+    let mut token_index: HashMap<ApexAddress, usize> = HashMap::new();
+    for order in &admitted {
+        for token in [order.token_in, order.token_out] {
+            let next = token_index.len();
+            token_index.entry(token).or_insert(next);
+        }
+    }
+    let mut parent: Vec<usize> = (0..token_index.len()).collect();
+    fn find(parent: &mut [usize], mut index: usize) -> usize {
+        while parent[index] != index {
+            parent[index] = parent[parent[index]];
+            index = parent[index];
+        }
+        index
+    }
+    for order in &admitted {
+        let in_index = token_index[&order.token_in];
+        let out_index = token_index[&order.token_out];
+        let (in_root, out_root) = (find(&mut parent, in_index), find(&mut parent, out_index));
+        parent[in_root] = out_root;
+    }
+    let relevant_pools: Vec<&LivePool> = input
+        .pools
+        .iter()
+        .filter(|pool| {
+            token_index.contains_key(&pool.token_0) || token_index.contains_key(&pool.token_1)
+        })
+        .collect();
+    for pool in &relevant_pools {
+        if let (Some(&token_0_index), Some(&token_1_index)) =
+            (token_index.get(&pool.token_0), token_index.get(&pool.token_1))
+        {
+            let (root_0, root_1) =
+                (find(&mut parent, token_0_index), find(&mut parent, token_1_index));
+            parent[root_0] = root_1;
+        }
+    }
+
+    let mut components: std::collections::BTreeMap<usize, Vec<&LiveOrder>> =
+        std::collections::BTreeMap::new();
+    for order in &admitted {
+        let root = find(&mut parent, token_index[&order.token_in]);
+        components
+            .entry(root)
+            .or_default()
+            .push(order);
+    }
+
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    for (root, component_orders) in components {
+        let component_pools: Vec<&LivePool> = relevant_pools
+            .iter()
+            .filter(|pool| {
+                [pool.token_0, pool.token_1]
+                    .iter()
+                    .any(|t| {
+                        token_index
+                            .get(t)
+                            .is_some_and(|&i| find(&mut parent, i) == root)
+                    })
+            })
+            .filter(|pool| {
+                let priced = input
+                    .price_inputs
+                    .contains_key(&pool.token_0) &&
+                    input
+                        .price_inputs
+                        .contains_key(&pool.token_1) &&
+                    input
+                        .token_meta
+                        .contains_key(&pool.token_0) &&
+                    input
+                        .token_meta
+                        .contains_key(&pool.token_1);
+                if !priced {
+                    counters.pool_unpriced += 1;
+                }
+                priced
+            })
+            .copied()
+            .collect();
+        counters.pools_in_scope += component_pools.len() as u64;
+
+        if component_orders.len() < 2 && component_pools.is_empty() {
+            counters.singles_skipped += component_orders.len() as u64;
+            for order in &component_orders {
+                report
+                    .statuses
+                    .push((order.id.clone(), OrderStatus::Excluded("single_component")));
+            }
+            continue;
+        }
+
+        solve_component(
+            &component_orders,
+            &component_pools,
+            input,
+            component_budget,
+            &mut seen_ids,
+            &mut report.statuses,
+            counters,
+            &mut report.component_solve_ms,
+        );
+
+        if run_singles {
+            for order in &component_orders {
+                // Singles only for orders the batch cell admitted — the pairing rule needs both
+                // cells' verdicts on the same order set.
+                let admitted_to_batch = report
+                    .statuses
+                    .iter()
+                    .any(|(id, status)| {
+                        id == &order.id && !matches!(status, OrderStatus::Excluded(_))
+                    });
+                if !admitted_to_batch {
+                    continue;
+                }
+                let mut single_statuses = Vec::new();
+                let mut single_counters = LiveCounters::default();
+                let mut single_times = Vec::new();
+                solve_component(
+                    &[order],
+                    &component_pools,
+                    input,
+                    single_budget,
+                    &mut HashSet::new(),
+                    &mut single_statuses,
+                    &mut single_counters,
+                    &mut single_times,
+                );
+                let bought_raw = single_statuses
+                    .into_iter()
+                    .find(|(id, _)| id == &order.id)
+                    .and_then(|(_, status)| match status {
+                        OrderStatus::Filled { bought_raw, .. } |
+                        OrderStatus::PartiallyFilled { bought_raw, .. } => Some(bought_raw),
+                        _ => None,
+                    });
+                report
+                    .singles
+                    .push(SingleResult { id: order.id.clone(), bought_raw });
+            }
+        }
+    }
+    report
+}
+
+/// Build and run one APEX call for one component; push per-order statuses.
+#[allow(clippy::too_many_arguments)]
+fn solve_component(
+    component_orders: &[&LiveOrder],
+    component_pools: &[&LivePool],
+    input: &LiveBatchInput,
+    budget: Duration,
+    seen_ids: &mut HashSet<String>,
+    statuses: &mut Vec<(String, OrderStatus)>,
+    counters: &mut LiveCounters,
+    solve_ms: &mut Vec<u128>,
+) {
+    // Token closure = order tokens ∪ pool tokens, all priced (the two_hops precondition).
+    let mut closure: HashSet<ApexAddress> = HashSet::new();
+    for order in component_orders {
+        closure.insert(order.token_in);
+        closure.insert(order.token_out);
+    }
+    for pool in component_pools {
+        closure.insert(pool.token_0);
+        closure.insert(pool.token_1);
+    }
+    let price_inputs: HashMap<ApexAddress, TokenPriceInput> = closure
+        .iter()
+        .filter_map(|token| {
+            input
+                .price_inputs
+                .get(token)
+                .map(|price| (*token, price.clone()))
+        })
+        .collect();
+    let batch_wei = batch_value_wei(
+        component_orders.iter().map(|order| {
+            (order.token_in, BigUint::from_bytes_le(&order.amount_in_raw.to_le_bytes::<32>()))
+        }),
+        &price_inputs,
+    );
+    let price_map = build_apex_prices(&price_inputs, &batch_wei);
+    let unpriced_or_underflow: HashSet<ApexAddress> = price_map
+        .price_underflow
+        .iter()
+        .chain(price_map.unpriced.iter())
+        .copied()
+        .collect();
+
+    let mut apex_tokens: HashMap<ApexAddress, ApexToken> = HashMap::new();
+    for token in &closure {
+        if unpriced_or_underflow.contains(token) {
+            continue;
+        }
+        let Some((symbol, decimals)) = input.token_meta.get(token) else { continue };
+        apex_tokens.insert(*token, ApexToken::new(*token, symbol, *decimals));
+    }
+
+    let mut limit_orders: HashMap<(ApexAddress, ApexAddress), Vec<LimitOrder>> = HashMap::new();
+    let mut order_amount18: Vec<(&LiveOrder, f64)> = Vec::new();
+    for order in component_orders {
+        if unpriced_or_underflow.contains(&order.token_in) ||
+            unpriced_or_underflow.contains(&order.token_out)
+        {
+            counters.price_underflow += 1;
+            statuses.push((order.id.clone(), OrderStatus::Excluded("price_underflow")));
+            continue;
+        }
+        // Admission already proved these constructible; a failure here is a race with nothing,
+        // so decline defensively rather than unwrap.
+        let (Ok(scale_in), Ok(scale_out)) = (
+            TokenScale::new(input.token_meta[&order.token_in].1),
+            TokenScale::new(input.token_meta[&order.token_out].1),
+        ) else {
+            counters.unknown_decimals += 1;
+            statuses.push((order.id.clone(), OrderStatus::Excluded("unknown_decimals")));
+            continue;
+        };
+        let (Ok(amount18), Ok(min_out18)) =
+            (scale_in.scale_up(order.amount_in_raw), scale_out.scale_up(order.min_out_raw))
+        else {
+            counters.scale_overflow += 1;
+            statuses.push((order.id.clone(), OrderStatus::Excluded("scale_overflow")));
+            continue;
+        };
+        if amount18.0.is_zero() || min_out18.0.is_zero() {
+            counters.zero_limit_excluded += 1;
+            statuses.push((order.id.clone(), OrderStatus::Excluded("zero_amount_or_limit")));
+            continue;
+        }
+        if !seen_ids.insert(order.id.clone()) {
+            counters.duplicate_order_id += 1;
+            statuses.push((order.id.clone(), OrderStatus::Excluded("duplicate_order_id")));
+            continue;
+        }
+        let pair = TradingPair::new(apex_tokens[&order.token_in], apex_tokens[&order.token_out]);
+        limit_orders
+            .entry(pair.addresses())
+            .or_default()
+            .push(LimitOrder::new(
+                to_apex_u256(amount18.0),
+                Fraction::new(to_apex_u256(min_out18.0), to_apex_u256(amount18.0)),
+                order.id.clone(),
+                ApexAddress([0u8; 20]),
+            ));
+        order_amount18.push((order, u256_to_f64(amount18.0)));
+    }
+    if order_amount18.is_empty() {
+        return;
+    }
+
+    let pools: Vec<Pool> = component_pools
+        .iter()
+        .filter(|pool| {
+            !unpriced_or_underflow.contains(&pool.token_0) &&
+                !unpriced_or_underflow.contains(&pool.token_1)
+        })
+        .map(|pool| {
+            Pool::Apex(
+                PoolMetadata {
+                    address: pool.apex_address,
+                    token_0: pool.token_0,
+                    token_1: pool.token_1,
+                },
+                pool.adapter.clone() as Arc<dyn ApexPool>,
+            )
+        })
+        .collect();
+
+    let mut config = ApexConfig {
+        enable_two_hops: !pools.is_empty(),
+        max_workers: 1,
+        collect_metrics: false,
+        // The search deadline starts at THIS component's solve start, never earlier — an
+        // already-expired absolute deadline makes APEX return silently empty.
+        deadline: Some(Instant::now() + budget),
+        ..ApexConfig::default()
+    };
+    config
+        .price_search_config
+        .max_precision_increases = MAX_PRECISION_INCREASES;
+
+    counters.components_solved += 1;
+    let tokens: Vec<ApexToken> = apex_tokens.values().copied().collect();
+    let solve_started = Instant::now();
+    let solve = catch_unwind(AssertUnwindSafe(|| {
+        run_apex_with_config(
+            tokens,
+            price_map
+                .prices
+                .iter()
+                .map(|(token, price)| (*token, *price))
+                .collect(),
+            limit_orders.clone(),
+            HashMap::new(),
+            pools,
+            config,
+        )
+    }));
+    solve_ms.push(solve_started.elapsed().as_millis());
+    let result = match solve {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            counters.component_errored_orders += order_amount18.len() as u64;
+            let kind = component_error_kind(&error);
+            *counters
+                .component_errors
+                .entry(kind.to_string())
+                .or_default() += 1;
+            for (order, _) in &order_amount18 {
+                statuses.push((order.id.clone(), OrderStatus::ComponentErrored));
+            }
+            return;
+        }
+        Err(_) => {
+            counters.solver_panics += 1;
+            counters.component_errored_orders += order_amount18.len() as u64;
+            for (order, _) in &order_amount18 {
+                statuses.push((order.id.clone(), OrderStatus::ComponentErrored));
+            }
+            return;
+        }
+    };
+    if result.deadline_fired {
+        counters.deadline_fired_components += 1;
+    }
+
+    let clearings: HashMap<&str, _> = result
+        .limit_order_clearings
+        .iter()
+        .map(|clearing| (clearing.id.as_str(), clearing))
+        .collect();
+    for (order, amount18) in &order_amount18 {
+        let status = match clearings.get(order.id.as_str()) {
+            Some(clearing) if !clearing.sold_amount.is_zero() => {
+                let fill_ratio =
+                    u256_to_f64(from_apex_u256(clearing.sold_amount)) / amount18.max(1.0);
+                let Ok(scale_out) = TokenScale::new(input.token_meta[&order.token_out].1) else {
+                    counters.unknown_decimals += 1;
+                    statuses.push((order.id.clone(), OrderStatus::Excluded("unknown_decimals")));
+                    continue;
+                };
+                let bought_raw =
+                    scale_out.scale_down_floor(Scaled18(from_apex_u256(clearing.bought_amount)));
+                if fill_ratio < 1.0 - 1e-9 {
+                    counters.partially_filled += 1;
+                    OrderStatus::PartiallyFilled { bought_raw, fill_ratio }
+                } else {
+                    counters.filled += 1;
+                    OrderStatus::Filled { bought_raw, fill_ratio: fill_ratio.min(1.0) }
+                }
+            }
+            Some(_) => {
+                counters.unfilled_at_limit += 1;
+                OrderStatus::UnfilledAtLimit
+            }
+            None if result.deadline_fired => {
+                counters.cluster_cut += 1;
+                OrderStatus::ClusterCut
+            }
+            None => {
+                counters.unfilled_at_limit += 1;
+                OrderStatus::UnfilledAtLimit
+            }
+        };
+        statuses.push((order.id.clone(), status));
+    }
+}
+
+fn component_error_kind(error: &apex_solver::core::ApexError) -> &'static str {
+    match error {
+        apex_solver::core::ApexError::InvalidInput(_) => "invalid_input",
+        apex_solver::core::ApexError::MetricsCollectionError(_) => "metrics",
+        apex_solver::core::ApexError::TradeSolverError(_) => "trade_solver",
+        apex_solver::core::ApexError::MarketRouterError(_) => "market_router",
+        apex_solver::core::ApexError::ClearingUnderLimitPrice(_, _) => "clearing_under_limit",
+        apex_solver::core::ApexError::NegativeBalanceDelta(_, _) => "negative_balance_delta",
+        _ => "other",
+    }
+}
+
+/// Lossy above 2^53, used only for fill-ratio classification — the raw amounts in the statuses
+/// stay exact.
+fn u256_to_f64(value: U256) -> f64 {
+    crate::dataset::u256_to_f64(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use tycho_simulation::{
+        evm::protocol::uniswap_v2::state::UniswapV2State,
+        tycho_common::{
+            models::{token::Token as TychoToken, Chain},
+            Bytes,
+        },
+    };
+
+    use super::*;
+
+    fn token(index: u8) -> ApexAddress {
+        ApexAddress([index; 20])
+    }
+
+    fn wei(value: u64, exp: u32) -> BigUint {
+        BigUint::from(value) * BigUint::from(10u32).pow(exp)
+    }
+
+    fn raw(value: u64, exp: u32) -> U256 {
+        U256::from(value) * U256::from(10u64).pow(U256::from(exp))
+    }
+
+    /// An input holding 18-dec tokens A=1, B=2 priced 1:1 against the gas token.
+    fn two_token_input(orders: Vec<LiveOrder>, pools: Vec<LivePool>) -> LiveBatchInput {
+        let one_to_one =
+            || TokenPriceInput { numerator: wei(1, 18), denominator: wei(1, 18), decimals: 18 };
+        LiveBatchInput {
+            orders,
+            pools,
+            price_inputs: HashMap::from([(token(1), one_to_one()), (token(2), one_to_one())]),
+            token_meta: HashMap::from([
+                (token(1), ("AAA".to_string(), 18)),
+                (token(2), ("BBB".to_string(), 18)),
+            ]),
+        }
+    }
+
+    fn order(id: &str, token_in: ApexAddress, token_out: ApexAddress, min_out: U256) -> LiveOrder {
+        LiveOrder {
+            id: id.to_string(),
+            token_in,
+            token_out,
+            amount_in_raw: raw(1, 18),
+            min_out_raw: min_out,
+        }
+    }
+
+    const BUDGET: Duration = Duration::from_secs(2);
+
+    #[test]
+    fn test_batch_eligible_requires_two_orders_sharing_a_token() {
+        assert!(!batch_eligible(&[(token(1), token(2))]), "one trade is never a batch");
+        assert!(
+            !batch_eligible(&[(token(1), token(2)), (token(3), token(4))]),
+            "disjoint trades share nothing"
+        );
+        assert!(batch_eligible(&[(token(1), token(2)), (token(2), token(3))]));
+        assert!(
+            !batch_eligible(&[(token(1), token(1)), (token(3), token(4))]),
+            "a token twice within one order is not shared across orders"
+        );
+    }
+
+    #[test]
+    fn test_crossing_orders_fill_and_singles_cannot() {
+        // A→B and B→A at 1:1 prices with permissive limits: the batch crosses; each single,
+        // having no pools, has no counterparty.
+        let input = two_token_input(
+            vec![
+                order("a:0", token(1), token(2), raw(9, 17)),
+                order("b:0", token(2), token(1), raw(9, 17)),
+            ],
+            Vec::new(),
+        );
+        let report = solve_live_batch(&input, BUDGET, BUDGET, true);
+        assert_eq!(report.counters.filled, 2, "{report:?}");
+        assert!(report
+            .statuses
+            .iter()
+            .all(|(_, status)| matches!(status, OrderStatus::Filled { .. })));
+        assert_eq!(report.singles.len(), 2);
+        assert!(
+            report
+                .singles
+                .iter()
+                .all(|single| single.bought_raw.is_none()),
+            "poolless singles have no counterparty: {:?}",
+            report.singles
+        );
+        assert_eq!(report.component_solve_ms.len(), 1, "one component, one batch solve");
+    }
+
+    #[test]
+    fn test_single_order_component_without_pools_is_excluded() {
+        let input = two_token_input(vec![order("a:0", token(1), token(2), raw(9, 17))], Vec::new());
+        let report = solve_live_batch(&input, BUDGET, BUDGET, true);
+        assert_eq!(report.counters.singles_skipped, 1);
+        assert_eq!(
+            report.statuses,
+            vec![("a:0".to_string(), OrderStatus::Excluded("single_component"))]
+        );
+        assert!(report.singles.is_empty(), "excluded orders get no singles control");
+    }
+
+    #[test]
+    fn test_duplicate_order_id_declined_not_fatal() {
+        let input = two_token_input(
+            vec![
+                order("a:0", token(1), token(2), raw(9, 17)),
+                order("b:0", token(2), token(1), raw(9, 17)),
+                order("a:0", token(1), token(2), raw(9, 17)),
+            ],
+            Vec::new(),
+        );
+        let report = solve_live_batch(&input, BUDGET, BUDGET, false);
+        assert_eq!(report.counters.duplicate_order_id, 1);
+        assert_eq!(
+            report
+                .statuses
+                .iter()
+                .filter(|(_, s)| *s == OrderStatus::Excluded("duplicate_order_id"))
+                .count(),
+            1
+        );
+        assert_eq!(report.counters.filled, 2, "the first two orders still cross: {report:?}");
+    }
+
+    #[test]
+    fn test_single_order_fills_through_a_pool() {
+        // One order, one deep 1:1 v2 pool covering the pair: the single-order component keeps its
+        // pool, so the order fills against pool supply instead of being skipped.
+        let tycho_a = TychoToken::new(
+            &Bytes::from([1u8; 20].to_vec()),
+            "AAA",
+            18,
+            0,
+            &[Some(60_000)],
+            Chain::Base,
+            100,
+        );
+        let tycho_b = TychoToken::new(
+            &Bytes::from([2u8; 20].to_vec()),
+            "BBB",
+            18,
+            0,
+            &[Some(60_000)],
+            Chain::Base,
+            100,
+        );
+        let state =
+            UniswapV2State::new(to_apex_u256(raw(1_000_000, 18)), to_apex_u256(raw(1_000_000, 18)));
+        let pool = LivePool {
+            apex_address: token(9),
+            token_0: token(1),
+            token_1: token(2),
+            adapter: Arc::new(TychoApexPool {
+                protocol: "uniswap_v2".to_string(),
+                tokens: HashMap::from([(token(1), tycho_a), (token(2), tycho_b)]),
+                pool: Arc::new(state),
+            }),
+        };
+        let input = two_token_input(vec![order("a:0", token(1), token(2), raw(9, 17))], vec![pool]);
+        let report = solve_live_batch(&input, BUDGET, BUDGET, true);
+        assert_eq!(
+            report.counters.filled + report.counters.partially_filled,
+            1,
+            "the pool serves the order: {report:?}"
+        );
+        assert_eq!(report.singles.len(), 1);
+        assert!(
+            report.singles[0].bought_raw.is_some(),
+            "the singles control fills through the same pool: {:?}",
+            report.singles
+        );
+    }
+}
