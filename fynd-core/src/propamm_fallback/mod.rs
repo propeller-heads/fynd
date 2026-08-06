@@ -20,7 +20,7 @@ use tycho_simulation::tycho_common::{models::Address, simulation::protocol_sim::
 
 use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
-    feed::market_data::MarketDataView,
+    feed::{events::MarketEvent, market_data::MarketDataView},
     types::{ComponentId, Swap},
 };
 
@@ -99,33 +99,74 @@ impl SharedFallbackFees {
 }
 
 /// Fallback pools by token pair and fee tier, so finding one is a lookup, not a market scan.
-#[derive(Debug, Default)]
+///
+/// A pool qualifies on its component alone — protocol system, token pair and `fee` attribute — so
+/// the index only changes when the market adds or removes a component, not when a pool's state
+/// changes. `apply_event` keeps it current from `MarketEvent::MarketUpdated`, which costs one
+/// lookup per added component instead of a full rebuild.
+#[derive(Debug, Default, Clone)]
 pub struct FallbackPoolIndex {
     pools: HashMap<(Address, Address, u32), ComponentId>,
+    /// Reverse map, so a removed component can be found without scanning `pools`.
+    keys: HashMap<ComponentId, (Address, Address, u32)>,
 }
 
 impl FallbackPoolIndex {
-    /// Skips components that are not two-token or carry no `fee` attribute. The router's fallback
-    /// is a single-hop `exactInputSingle`, so nothing else can serve it.
+    /// Indexes every qualifying component in the market. Call once, then keep current with
+    /// `apply_event`.
     pub fn build(market: &MarketDataView<'_>) -> Self {
-        let mut pools = HashMap::new();
-        for (component_id, tokens) in market.component_topology() {
-            let Some(component) = market.get_component(&component_id) else { continue };
-            if component.protocol_system != FALLBACK_PROTOCOL_SYSTEM {
-                continue;
-            }
-            let [token_a, token_b] = tokens.as_slice() else { continue };
-            let Some(fee) = component
-                .static_attributes
-                .get(FEE_ATTRIBUTE)
-                .and_then(parse_fee)
-            else {
-                continue;
-            };
-            let (low, high) = sorted_pair(token_a, token_b);
-            pools.insert((low, high, fee), component_id);
+        let mut index = Self::default();
+        for component_id in market.component_topology().into_keys() {
+            index.insert(market, component_id);
         }
-        Self { pools }
+        index
+    }
+
+    /// Adds the components in `event` and drops the removed ones.
+    ///
+    /// `updated_components` are state changes, which cannot alter whether a component qualifies,
+    /// so they are ignored.
+    pub fn apply_event(&mut self, market: &MarketDataView<'_>, event: &MarketEvent) {
+        let MarketEvent::MarketUpdated { added_components, removed_components, .. } = event;
+        for component_id in removed_components {
+            self.remove(component_id);
+        }
+        for component_id in added_components.keys() {
+            self.insert(market, component_id.clone());
+        }
+    }
+
+    /// Indexes `component_id` if it can serve the router's fallback.
+    ///
+    /// Skips components that are not `uniswap_v3`, do not have exactly two tokens, or carry no
+    /// `fee` attribute. The router's fallback is a single-hop `exactInputSingle`, so nothing else
+    /// can serve it.
+    fn insert(&mut self, market: &MarketDataView<'_>, component_id: ComponentId) {
+        let Some(component) = market.get_component(&component_id) else { return };
+        if component.protocol_system != FALLBACK_PROTOCOL_SYSTEM {
+            return;
+        }
+        let [token_a, token_b] = component.tokens.as_slice() else { return };
+        let Some(fee) = component
+            .static_attributes
+            .get(FEE_ATTRIBUTE)
+            .and_then(parse_fee)
+        else {
+            return;
+        };
+        let (low, high) = sorted_pair(token_a, token_b);
+        self.keys
+            .insert(component_id.clone(), (low.clone(), high.clone(), fee));
+        self.pools
+            .insert((low, high, fee), component_id);
+    }
+
+    /// Drops `component_id`, leaving any pool that took over its key in place.
+    fn remove(&mut self, component_id: &ComponentId) {
+        let Some(key) = self.keys.remove(component_id) else { return };
+        if self.pools.get(&key) == Some(component_id) {
+            self.pools.remove(&key);
+        }
     }
 
     /// The component the router would fall back to.
@@ -305,6 +346,67 @@ mod tests {
         assert!(index
             .pool_for(&addr(3), &addr(9), 3000)
             .is_none());
+    }
+
+    /// The index tracks the component set, so an added pool becomes usable and a removed one
+    /// stops being usable without a rebuild.
+    #[test]
+    fn test_apply_event_adds_and_removes_pools() {
+        let market = market_with_fallback_pool(500);
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
+        let mut index = FallbackPoolIndex::build(&view);
+        assert_eq!(index.pools.len(), 1);
+
+        index.apply_event(
+            &view,
+            &MarketEvent::MarketUpdated {
+                added_components: HashMap::new(),
+                removed_components: vec![FALLBACK_POOL.to_string()],
+                updated_components: Vec::new(),
+            },
+        );
+        assert!(index.pools.is_empty());
+        assert!(index
+            .pool_for(&addr(1), &addr(2), 500)
+            .is_none());
+
+        index.apply_event(
+            &view,
+            &MarketEvent::MarketUpdated {
+                added_components: HashMap::from([(FALLBACK_POOL.to_string(), Vec::new())]),
+                removed_components: Vec::new(),
+                updated_components: Vec::new(),
+            },
+        );
+        assert_eq!(
+            index
+                .pool_for(&addr(1), &addr(2), 500)
+                .map(String::as_str),
+            Some(FALLBACK_POOL)
+        );
+    }
+
+    /// A state change cannot alter whether a component qualifies, so it must not touch the index.
+    #[test]
+    fn test_apply_event_ignores_state_updates() {
+        let market = market_with_fallback_pool(500);
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
+        let mut index = FallbackPoolIndex::build(&view);
+
+        index.apply_event(
+            &view,
+            &MarketEvent::MarketUpdated {
+                added_components: HashMap::new(),
+                removed_components: Vec::new(),
+                updated_components: vec![FALLBACK_POOL.to_string()],
+            },
+        );
+
+        assert_eq!(index.pools.len(), 1);
     }
 
     /// A pAMM quoting 2x and a fallback pool quoting 1x, so the result is visibly the fallback.

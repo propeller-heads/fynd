@@ -29,6 +29,7 @@ use crate::{
         market_data::MarketData,
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
+    propamm_fallback::FallbackPoolIndex,
     types::internal::SolveTask,
     worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
@@ -83,6 +84,8 @@ where
     pool_name: String,
     /// Which liquidity this worker ingests.
     liquidity_scope: LiquidityScope,
+    /// Uniswap V3 pools the PropAMMRouter can fall back to, kept current from market events.
+    fallback_pools: FallbackPoolIndex,
 }
 
 impl<A> SolverWorker<A>
@@ -121,6 +124,7 @@ where
             worker_id,
             pool_name,
             liquidity_scope: LiquidityScope::default(),
+            fallback_pools: FallbackPoolIndex::default(),
         }
     }
 
@@ -149,6 +153,10 @@ where
 
         self.graph_manager
             .initialize_graph(&topology);
+        {
+            let market = self.market_data.read().await;
+            self.fallback_pools = FallbackPoolIndex::build(&market);
+        }
         self.initialized = true;
     }
 
@@ -163,6 +171,11 @@ where
         };
         match event {
             MarketEvent::MarketUpdated { .. } => {
+                {
+                    let market = self.market_data.read().await;
+                    self.fallback_pools
+                        .apply_event(&market, &event);
+                }
                 if let Err(e) = self
                     .graph_manager
                     .handle_event(&event)
