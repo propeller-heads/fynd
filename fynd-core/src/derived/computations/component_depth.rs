@@ -11,12 +11,11 @@
 //! available in the [`DerivedData`](crate::derived::store::DerivedData).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
-use std::collections::HashSet;
-
 use async_trait::async_trait;
 use itertools::Itertools;
 use num_bigint::BigUint;
 use num_traits::Zero;
+use rustc_hash::FxHashSet;
 use tracing::{debug, instrument, warn, Span};
 use tycho_simulation::{
     evm::query_pool_swap::query_pool_swap,
@@ -113,7 +112,7 @@ impl DerivedComputation for ComponentDepthComputation {
                 .clone();
             // Start with existing depths (or empty for full recompute).
             let component_depths = if changed.is_full_recompute {
-                ComponentDepths::new()
+                ComponentDepths::default()
             } else {
                 store_guard
                     .component_depths()
@@ -145,7 +144,7 @@ impl DerivedComputation for ComponentDepthComputation {
                     .collect()
             };
 
-            let component_ids: HashSet<ComponentId> = components_to_compute
+            let component_ids: FxHashSet<ComponentId> = components_to_compute
                 .iter()
                 .cloned()
                 .collect();
@@ -420,7 +419,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(SpotPrices::new(), vec![], 0, true);
+            .set_spot_prices(SpotPrices::default(), vec![], 0, true);
         let changed = ChangedComponents::default();
 
         let output = ComponentDepthComputation::default()
@@ -478,7 +477,7 @@ mod tests {
         let derived = DerivedData::new_shared();
         let spot_comp = SpotPriceComputation::new();
         let changed = ChangedComponents {
-            added: std::collections::HashMap::from([(
+            added: rustc_hash::FxHashMap::from_iter([(
                 "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
@@ -772,7 +771,7 @@ mod tests {
         let derived = DerivedData::new_shared();
 
         // Provide spot price for only one direction so the other becomes a FailedItem
-        let mut partial_spot = SpotPrices::new();
+        let mut partial_spot = SpotPrices::default();
         let key_eth_usdc = ("component".to_string(), eth.address.clone(), usdc.address.clone());
         partial_spot.insert(key_eth_usdc, 2000.0);
         derived
@@ -781,7 +780,7 @@ mod tests {
             .set_spot_prices(partial_spot, vec![], 0, true);
 
         let changed = ChangedComponents {
-            added: std::collections::HashMap::from([(
+            added: rustc_hash::FxHashMap::from_iter([(
                 "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
@@ -825,10 +824,10 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(SpotPrices::new(), vec![], 0, true);
+            .set_spot_prices(SpotPrices::default(), vec![], 0, true);
 
         let changed = ChangedComponents {
-            added: std::collections::HashMap::from([(
+            added: rustc_hash::FxHashMap::from_iter([(
                 "phantom_component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
@@ -880,7 +879,7 @@ mod tests {
         let derived = DerivedData::new_shared();
 
         let changed = ChangedComponents {
-            added: std::collections::HashMap::from([(
+            added: rustc_hash::FxHashMap::from_iter([(
                 "component".to_string(),
                 vec![token_in.address.clone(), token_out.address.clone()],
             )]),

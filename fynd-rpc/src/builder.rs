@@ -163,7 +163,7 @@ impl FyndRPCBuilder {
     pub fn blocklist(mut self, blocklist: HashSet<String>) -> Self {
         self.fynd_builder = self
             .fynd_builder
-            .blocklisted_components(blocklist);
+            .blocklisted_components(blocklist.into_iter().collect());
         self
     }
 

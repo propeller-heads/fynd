@@ -30,12 +30,11 @@
 //! available in the [`DerivedData`](crate::derived::store::DerivedData).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
-use std::collections::{HashMap, HashSet};
-
 use async_trait::async_trait;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace, Span};
 use tycho_simulation::{
     tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
@@ -112,15 +111,15 @@ impl TokenGasPriceComputation {
         &self,
         graph_manager: &'a PetgraphStableDiGraphManager<()>,
         spot_prices: &SpotPrices,
-    ) -> Result<HashMap<Address, Vec<CandidatePath<'a>>>, ComputationError> {
+    ) -> Result<FxHashMap<Address, Vec<CandidatePath<'a>>>, ComputationError> {
         let graph = graph_manager.graph();
 
         // If gas token has no components, it won't be in the graph → no paths to discover
         let Ok(entry_node) = graph_manager.find_node(&self.gas_token) else {
-            return Ok(HashMap::new());
+            return Ok(FxHashMap::default());
         };
 
-        let mut paths_by_token: HashMap<Address, Vec<CandidatePath>> = HashMap::new();
+        let mut paths_by_token: FxHashMap<Address, Vec<CandidatePath>> = FxHashMap::default();
 
         // DFS state
         struct DfsFrame<'a> {
@@ -211,9 +210,9 @@ impl TokenGasPriceComputation {
         path: Path<()>,
         market: &MarketState,
         gas_price: &BigUint,
-    ) -> Result<(f64, Price, HashSet<ComponentId>), ComputationError> {
+    ) -> Result<(f64, Price, FxHashSet<ComponentId>), ComputationError> {
         // Extract component IDs from path edges for dependency tracking
-        let path_components: HashSet<ComponentId> = path
+        let path_components: FxHashSet<ComponentId> = path
             .edge_data
             .iter()
             .map(|edge| edge.component_id.clone())
@@ -327,9 +326,9 @@ impl TokenGasPriceComputation {
         &self,
         market: &MarketData,
         spot_prices: &SpotPrices,
-        filter_tokens: Option<&HashSet<Address>>,
+        filter_tokens: Option<&FxHashSet<Address>>,
     ) -> Result<
-        (HashMap<Address, (f64, Price, HashSet<ComponentId>)>, u64, Vec<FailedItem>),
+        (FxHashMap<Address, (f64, Price, FxHashSet<ComponentId>)>, u64, Vec<FailedItem>),
         ComputationError,
     > {
         // Brief lock 1: topology + gas_price + block (all cheap clones)
@@ -364,7 +363,7 @@ impl TokenGasPriceComputation {
                         .iter()
                         .map(|e| e.component_id.clone())
                 })
-                .collect::<HashSet<ComponentId>>()
+                .collect::<FxHashSet<ComponentId>>()
         };
 
         // Brief lock 2: extract only the simulation states we need
@@ -388,7 +387,7 @@ impl TokenGasPriceComputation {
         // Collect all component IDs from every candidate path per token.
         // This ensures path_components captures any component that could flip which path is best,
         // not just components on the currently-selected path.
-        let all_candidate_components: HashMap<Address, HashSet<ComponentId>> = paths_by_token
+        let all_candidate_components: FxHashMap<Address, FxHashSet<ComponentId>> = paths_by_token
             .iter()
             .map(|(token, candidates)| {
                 let components = candidates
@@ -399,7 +398,7 @@ impl TokenGasPriceComputation {
                             .iter()
                             .map(|e| e.component_id.clone())
                     })
-                    .collect::<HashSet<_>>();
+                    .collect::<FxHashSet<_>>();
                 (token.clone(), components)
             })
             .collect();
@@ -413,7 +412,8 @@ impl TokenGasPriceComputation {
         }
 
         // Round-robin: pop one candidate per token each round, keep best by spread
-        let mut best_prices: HashMap<Address, (f64, Price, HashSet<ComponentId>)> = HashMap::new();
+        let mut best_prices: FxHashMap<Address, (f64, Price, FxHashSet<ComponentId>)> =
+            FxHashMap::default();
         let mut candidates_exhausted = false;
 
         while !candidates_exhausted {
@@ -500,7 +500,7 @@ impl TokenGasPriceComputation {
         let changed_components = changed.all_changed_ids();
 
         // Find tokens whose paths intersect with changed components.
-        let tokens_to_recompute: HashSet<Address> = existing_deps
+        let tokens_to_recompute: FxHashSet<Address> = existing_deps
             .iter()
             .filter(|(_, entry)| {
                 !entry
@@ -608,8 +608,8 @@ impl DerivedComputation for TokenGasPriceComputation {
             .await?;
 
         // Build token prices with dependencies for incremental computation
-        let mut token_prices_with_deps = TokenPricesWithDeps::new();
-        let mut token_prices = TokenGasPrices::new();
+        let mut token_prices_with_deps = TokenPricesWithDeps::default();
+        let mut token_prices = TokenGasPrices::default();
 
         for (token, (_, price, path_components)) in best_prices {
             token_prices_with_deps
@@ -624,7 +624,10 @@ impl DerivedComputation for TokenGasPriceComputation {
         };
         token_prices_with_deps.insert(
             self.gas_token.clone(),
-            TokenPriceEntry { price: gas_token_price.clone(), path_components: HashSet::new() },
+            TokenPriceEntry {
+                price: gas_token_price.clone(),
+                path_components: FxHashSet::default(),
+            },
         );
         token_prices.insert(self.gas_token.clone(), gas_token_price);
 
@@ -1282,7 +1285,7 @@ mod tests {
 
         // Incremental change: only component_indirect_1 updated
         let incremental_changed = ChangedComponents {
-            added: HashMap::new(),
+            added: FxHashMap::default(),
             removed: vec![],
             updated: vec!["component_indirect_1".to_string()],
             is_full_recompute: false,
@@ -1294,7 +1297,7 @@ mod tests {
             .expect("deps should be stored");
         let changed_ids = incremental_changed.all_changed_ids();
 
-        let tokens_to_recompute: HashSet<Address> = deps
+        let tokens_to_recompute: FxHashSet<Address> = deps
             .iter()
             .filter(|(_, entry)| {
                 !entry
@@ -1333,7 +1336,7 @@ mod tests {
         // Compute spot prices
         let derived = DerivedData::new_shared();
         let changed = ChangedComponents {
-            added: std::collections::HashMap::from([(
+            added: rustc_hash::FxHashMap::from_iter([(
                 "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),

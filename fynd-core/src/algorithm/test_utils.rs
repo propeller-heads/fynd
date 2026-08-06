@@ -1,11 +1,10 @@
 //! Shared test utilities for algorithm tests.
 
-use std::collections::HashMap;
-
 use chrono::NaiveDateTime;
 use num_bigint::BigUint;
 use num_rational::BigRational;
 use num_traits::{ToPrimitive, Zero};
+use rustc_hash::FxHashMap;
 use tycho_simulation::{
     tycho_core::{
         dto::ProtocolStateDelta,
@@ -54,7 +53,7 @@ pub struct MockProtocolSim {
     /// Token decimals by address, used for decimal-aware get_limits scaling.
     /// When empty, get_limits assumes equal decimals (backward-compatible).
     #[serde(default)]
-    pub token_decimals: HashMap<Bytes, u32>,
+    pub token_decimals: FxHashMap<Bytes, u32>,
 }
 
 impl MockProtocolSim {
@@ -104,7 +103,7 @@ impl Default for MockProtocolSim {
             gas: 50_000,
             liquidity: u128::MAX,
             fee: 0.0,
-            token_decimals: HashMap::new(),
+            token_decimals: FxHashMap::default(),
         }
     }
 }
@@ -224,7 +223,7 @@ impl ProtocolSim for MockProtocolSim {
     fn delta_transition(
         &mut self,
         _delta: ProtocolStateDelta,
-        _tokens: &HashMap<Bytes, Token>,
+        _tokens: &std::collections::HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
         unimplemented!("delta_transition not implemented in MockProtocolSim")
@@ -296,7 +295,7 @@ impl ProtocolSim for DivByZeroSim {
     fn delta_transition(
         &mut self,
         _delta: ProtocolStateDelta,
-        _tokens: &HashMap<Bytes, Token>,
+        _tokens: &std::collections::HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
         unimplemented!("delta_transition not implemented in DivByZeroSim")
@@ -417,7 +416,7 @@ impl ProtocolSim for ConstantProductSim {
     fn delta_transition(
         &mut self,
         _delta: ProtocolStateDelta,
-        _tokens: &HashMap<Bytes, Token>,
+        _tokens: &std::collections::HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
         unimplemented!("delta_transition not implemented in ConstantProductSim")
@@ -495,7 +494,7 @@ pub fn component_with_protocol(
             .map(|t| t.address.clone())
             .collect(),
         vec![],
-        HashMap::new(),
+        std::collections::HashMap::new(),
         Default::default(),
         Default::default(),
         NaiveDateTime::default(),
@@ -535,7 +534,7 @@ pub fn setup_market_weighted_boxed(
     components: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
 ) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
     let mut market = MarketState::new();
-    let mut component_weights = HashMap::new();
+    let mut component_weights = FxHashMap::default();
 
     // Set gas_price = 1 wei/gas for simple calculations
     market.update_gas_price(BlockGasPrice {
@@ -637,7 +636,7 @@ pub mod fixtures {
     pub(crate) fn linear_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
         let (a, b, c, d) = addrs();
         let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
-        let mut t = HashMap::new();
+        let mut t = FxHashMap::default();
         t.insert("ab".into(), vec![a.clone(), b.clone()]);
         t.insert("bc".into(), vec![b.clone(), c.clone()]);
         t.insert("cd".into(), vec![c, d]);
@@ -649,7 +648,7 @@ pub mod fixtures {
     pub(crate) fn parallel_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
         let (a, b, c, _) = addrs();
         let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
-        let mut t = HashMap::new();
+        let mut t = FxHashMap::default();
         t.insert("ab1".into(), vec![a.clone(), b.clone()]);
         t.insert("ab2".into(), vec![a.clone(), b.clone()]);
         t.insert("ab3".into(), vec![a, b.clone()]);
@@ -663,7 +662,7 @@ pub mod fixtures {
     pub(crate) fn diamond_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
         let (a, b, c, d) = addrs();
         let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
-        let mut t = HashMap::new();
+        let mut t = FxHashMap::default();
         t.insert("ab".into(), vec![a.clone(), b.clone()]);
         t.insert("ac".into(), vec![a, c.clone()]);
         t.insert("bd".into(), vec![b, d.clone()]);

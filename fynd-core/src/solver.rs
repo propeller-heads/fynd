@@ -10,9 +10,10 @@
 //!     .algorithm("most_liquid")
 //!     .build()?;
 //! ```
-use std::{collections::HashSet, str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use num_cpus;
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::broadcast, task::JoinHandle};
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
@@ -118,11 +119,11 @@ fn default_algo_timeout_ms() -> u64 {
 
 fn parse_connector_tokens(
     raw: Option<&[String]>,
-) -> Result<Option<HashSet<Address>>, SolverBuildError> {
+) -> Result<Option<FxHashSet<Address>>, SolverBuildError> {
     let Some(strings) = raw else {
         return Ok(None);
     };
-    let mut set = HashSet::with_capacity(strings.len());
+    let mut set = FxHashSet::with_capacity_and_hasher(strings.len(), Default::default());
     for s in strings {
         let addr = Address::from_str(s).map_err(|e| AlgorithmError::InvalidConfiguration {
             reason: format!("connector_tokens: invalid address {s:?}: {e}"),
@@ -352,7 +353,7 @@ enum PoolEntry {
         max_hops: usize,
         timeout_ms: u64,
         max_routes: Option<usize>,
-        connector_tokens: Option<HashSet<Address>>,
+        connector_tokens: Option<FxHashSet<Address>>,
         liquidity_scope: Option<LiquidityScope>,
     },
     Custom(CustomPoolEntry),
@@ -421,7 +422,7 @@ pub struct FyndBuilder {
     tvl_buffer_ratio: f64,
     gas_refresh_interval: Duration,
     reconnect_delay: Duration,
-    blocklisted_components: HashSet<String>,
+    blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
     router_timeout: Duration,
     router_min_responses: usize,
@@ -454,7 +455,7 @@ impl FyndBuilder {
             tvl_buffer_ratio: defaults::TVL_BUFFER_RATIO,
             gas_refresh_interval: defaults::GAS_REFRESH_INTERVAL,
             reconnect_delay: defaults::RECONNECT_DELAY,
-            blocklisted_components: HashSet::new(),
+            blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
@@ -521,7 +522,7 @@ impl FyndBuilder {
     }
 
     /// Sets component IDs to exclude from the Tycho stream.
-    pub fn blocklisted_components(mut self, components: HashSet<String>) -> Self {
+    pub fn blocklisted_components(mut self, components: FxHashSet<String>) -> Self {
         self.blocklisted_components = components;
         self
     }
@@ -1322,7 +1323,7 @@ impl Solver {
             100_000_000,
             0,
             0,
-            std::collections::HashMap::new(),
+            rustc_hash::FxHashMap::default(),
         ));
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(Duration::from_millis(max_timeout_ms.max(5000)))

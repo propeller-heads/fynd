@@ -6,8 +6,6 @@
 
 pub mod petgraph;
 
-use std::collections::HashMap;
-
 pub use petgraph::{EdgeData, PetgraphStableDiGraphManager, StableDiGraph};
 use thiserror::Error;
 use tycho_simulation::{
@@ -114,11 +112,13 @@ where
     ///
     /// Arguments:
     /// - components: A map of component IDs to their tokens addresses.
-    fn initialize_graph(&mut self, components: &HashMap<ComponentId, Vec<Address>>);
+    fn initialize_graph(&mut self, components: &FxHashMap<ComponentId, Vec<Address>>);
 
     /// Returns a reference to the managed graph.
     fn graph(&self) -> &G;
 }
+
+use rustc_hash::FxHashMap;
 
 use crate::{derived::DerivedData, feed::market_data::MarketDataView};
 

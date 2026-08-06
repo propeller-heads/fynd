@@ -1,9 +1,10 @@
 //! Test helpers for split-routing algorithm split_scenarios.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
+use rustc_hash::FxHashMap;
 use tokio::sync::RwLock;
 use tycho_simulation::{
     tycho_core::{
@@ -132,7 +133,7 @@ pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
     }
 
     let unit_price = Price::new(BigUint::from(1u64), BigUint::from(1u64));
-    let mut token_prices = HashMap::new();
+    let mut token_prices = FxHashMap::default();
     token_prices.insert(weth.address.clone(), unit_price.clone());
     token_prices.insert(usdc.address.clone(), unit_price);
     let mut derived = DerivedData::new();
@@ -269,7 +270,7 @@ impl TestScenario {
     /// BF's `compute_net_amount_out` deduct gas costs.
     pub(crate) fn build_derived_data(&self) -> SharedDerivedDataRef {
         let unit_price = Price::new(BigUint::from(1u64), BigUint::from(1u64));
-        let mut token_prices = HashMap::new();
+        let mut token_prices = FxHashMap::default();
 
         token_prices.insert(self.token_in.address.clone(), unit_price.clone());
         token_prices.insert(self.token_out.address.clone(), unit_price.clone());

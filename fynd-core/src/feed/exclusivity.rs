@@ -12,8 +12,7 @@
 //! A component is classified from its own data via `is_exclusive`, applied generically to every
 //! ingested component.
 
-use std::collections::HashMap;
-
+use rustc_hash::FxHashMap;
 use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
 
 use crate::{
@@ -33,8 +32,8 @@ pub(crate) fn is_exclusive(component: &ProtocolComponent) -> bool {
 /// Removes exclusive components from a full topology map.
 pub(crate) fn remove_exclusive_components(
     market: &MarketState,
-    topology: HashMap<ComponentId, Vec<Address>>,
-) -> HashMap<ComponentId, Vec<Address>> {
+    topology: FxHashMap<ComponentId, Vec<Address>>,
+) -> FxHashMap<ComponentId, Vec<Address>> {
     topology
         .into_iter()
         .filter(|(id, _)| {
@@ -132,7 +131,7 @@ mod tests {
     fn test_scope_event() {
         let market = market_with(vec![public_component("pub-1"), exclusive_component("excl-1")]);
         let event = MarketEvent::MarketUpdated {
-            added_components: HashMap::from([
+            added_components: FxHashMap::from_iter([
                 ("pub-1".to_string(), vec![]),
                 ("excl-1".to_string(), vec![]),
             ]),

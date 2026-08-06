@@ -7,7 +7,6 @@
 //! - Provides read access to workers via shared store reference
 
 use std::{
-    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -15,6 +14,7 @@ use std::{
 use async_trait::async_trait;
 use futures::future::join_all;
 use metrics::{counter, gauge, histogram};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info, trace, warn};
 use tycho_simulation::tycho_common::models::Address;
@@ -28,7 +28,7 @@ use crate::types::ComponentId;
 #[derive(Debug, Clone, Default)]
 pub struct ChangedComponents {
     /// Newly added components with their token addresses.
-    pub added: HashMap<ComponentId, Vec<Address>>,
+    pub added: FxHashMap<ComponentId, Vec<Address>>,
     /// Components that were removed.
     pub removed: Vec<ComponentId>,
     /// Components whose state was updated (but not added/removed).
@@ -44,8 +44,8 @@ impl ChangedComponents {
     }
 
     /// Returns a HashSet of all changed component IDs.
-    pub fn all_changed_ids(&self) -> HashSet<ComponentId> {
-        let mut all = HashSet::new();
+    pub fn all_changed_ids(&self) -> FxHashSet<ComponentId> {
+        let mut all = FxHashSet::default();
         all.extend(self.added.keys().cloned());
         all.extend(self.removed.iter().cloned());
         all.extend(self.updated.iter().cloned());
@@ -62,9 +62,9 @@ impl ChangedComponents {
 /// `is_full_recompute: false` — this is the bounded lag-recovery path, never a
 /// whole-topology recompute.
 fn coalesce_market_events(events: &[MarketEvent]) -> Option<ChangedComponents> {
-    let mut added: HashMap<ComponentId, Vec<Address>> = HashMap::new();
-    let mut removed: HashSet<ComponentId> = HashSet::new();
-    let mut updated: HashSet<ComponentId> = HashSet::new();
+    let mut added: FxHashMap<ComponentId, Vec<Address>> = FxHashMap::default();
+    let mut removed: FxHashSet<ComponentId> = FxHashSet::default();
+    let mut updated: FxHashSet<ComponentId> = FxHashSet::default();
 
     for event in events {
         match event {
@@ -364,7 +364,7 @@ impl ComputationManager {
                 .send(DerivedDataEvent::ComputationFailed { computation_id, block });
         }
 
-        let mut succeeded: HashSet<ComputationId> = HashSet::new();
+        let mut succeeded: FxHashSet<ComputationId> = FxHashSet::default();
         for stage in &schedule.stages {
             // Split the stage into runnable computations and ones whose requirements did
             // not hold this block; the latter are skipped and reported as failed.
@@ -611,12 +611,9 @@ impl MarketEventHandler for ComputationManager {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap,
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc,
-        },
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
     };
 
     use tokio::sync::broadcast;
@@ -655,7 +652,7 @@ mod tests {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
         let e1 = MarketEvent::MarketUpdated {
-            added_components: HashMap::from([(
+            added_components: FxHashMap::from_iter([(
                 "eth_usdc".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
@@ -663,7 +660,7 @@ mod tests {
             updated_components: vec![],
         };
         let e2 = MarketEvent::MarketUpdated {
-            added_components: HashMap::new(),
+            added_components: FxHashMap::default(),
             removed_components: vec![],
             updated_components: vec!["eth_usdc".to_string(), "dai_usdc".to_string()],
         };
@@ -685,7 +682,7 @@ mod tests {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
         let add = MarketEvent::MarketUpdated {
-            added_components: HashMap::from([(
+            added_components: FxHashMap::from_iter([(
                 "eth_usdc".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
@@ -693,7 +690,7 @@ mod tests {
             updated_components: vec![],
         };
         let remove = MarketEvent::MarketUpdated {
-            added_components: HashMap::new(),
+            added_components: FxHashMap::default(),
             removed_components: vec!["eth_usdc".to_string()],
             updated_components: vec![],
         };
@@ -724,7 +721,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel::<MarketEvent>(2);
         for _ in 0..5 {
             tx.send(MarketEvent::MarketUpdated {
-                added_components: HashMap::from([(
+                added_components: FxHashMap::from_iter([(
                     "eth_usdc".to_string(),
                     vec![eth.address.clone(), usdc.address.clone()],
                 )]),
@@ -877,7 +874,7 @@ mod tests {
         let (mut manager, _event_rx) = ComputationManager::new(config, market).unwrap();
 
         let event = MarketEvent::MarketUpdated {
-            added_components: HashMap::from([(
+            added_components: FxHashMap::from_iter([(
                 "eth_usdc".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
@@ -903,7 +900,7 @@ mod tests {
         let (mut manager, _event_rx) = ComputationManager::new(config, market).unwrap();
 
         let event = MarketEvent::MarketUpdated {
-            added_components: HashMap::new(),
+            added_components: FxHashMap::default(),
             removed_components: vec![],
             updated_components: vec![],
         };
@@ -1407,7 +1404,7 @@ mod tests {
 
         // handle_event with added components — spot_price succeeds, token_price fails
         let event = MarketEvent::MarketUpdated {
-            added_components: HashMap::from([(
+            added_components: FxHashMap::from_iter([(
                 "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),

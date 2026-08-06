@@ -24,13 +24,14 @@
 //! snapshot amounts between rounds or use a priority-based processing order.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
     time::{Duration, Instant},
 };
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace, warn};
 use tycho_simulation::{
     tycho_common::models::Address,
@@ -53,8 +54,11 @@ use crate::{
 };
 
 /// BFS subgraph: adjacency list, token node set, and component ID set.
-type Subgraph =
-    (HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>, HashSet<NodeIndex>, HashSet<ComponentId>);
+type Subgraph = (
+    FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
+    FxHashSet<NodeIndex>,
+    FxHashSet<ComponentId>,
+);
 
 /// Everything needed to call `find_single_route` repeatedly without redoing setup.
 ///
@@ -65,13 +69,13 @@ type Subgraph =
 pub(crate) struct BellmanFordContext {
     pub(crate) token_in_node: NodeIndex,
     pub(crate) token_out_node: NodeIndex,
-    pub(crate) adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
-    pub(crate) token_map: HashMap<NodeIndex, Token>,
+    pub(crate) adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
+    pub(crate) token_map: FxHashMap<NodeIndex, Token>,
     pub(crate) market_data: MarketState,
     pub(crate) gas_price_wei: Option<BigUint>,
     pub(crate) token_prices: Option<TokenGasPrices>,
     pub(crate) spot_prices: Option<SpotPrices>,
-    pub(crate) node_address: HashMap<NodeIndex, Address>,
+    pub(crate) node_address: FxHashMap<NodeIndex, Address>,
     pub(crate) max_idx: usize,
     pub(crate) scoring: RouteScoringMode,
 }
@@ -116,7 +120,7 @@ pub struct BellmanFordAlgorithm {
     max_hops: usize,
     timeout: Duration,
     gas_aware: bool,
-    connector_tokens: Option<HashSet<Address>>,
+    connector_tokens: Option<FxHashSet<Address>>,
 }
 
 impl Default for BellmanFordAlgorithm {
@@ -196,7 +200,7 @@ impl BellmanFordAlgorithm {
                 .map_err(|e| AlgorithmError::Other(e.to_string()))?,
             None => market.read().await,
         };
-        let token_map: HashMap<NodeIndex, Token> = token_nodes
+        let token_map: FxHashMap<NodeIndex, Token> = token_nodes
             .iter()
             .filter_map(|&node| {
                 market_view
@@ -211,7 +215,7 @@ impl BellmanFordAlgorithm {
             .map(|gp| gp.effective_gas_price().clone());
         drop(market_view);
 
-        let node_address: HashMap<NodeIndex, Address> = token_map
+        let node_address: FxHashMap<NodeIndex, Address> = token_map
             .iter()
             .map(|(&node, token)| (node, token.address.clone()))
             .collect();
@@ -376,7 +380,7 @@ impl BellmanFordAlgorithm {
                 break;
             }
 
-            let mut next_active: HashSet<NodeIndex> = HashSet::new();
+            let mut next_active: FxHashSet<NodeIndex> = FxHashSet::default();
 
             for &u in &active_nodes {
                 let u_idx = u.index();
@@ -528,7 +532,7 @@ impl BellmanFordAlgorithm {
         overrides: &MarketOverrides,
     ) -> Result<Route, AlgorithmError> {
         let mut swaps = Vec::with_capacity(path_edges.len());
-        let mut tokens: HashMap<Address, Token> = HashMap::new();
+        let mut tokens: FxHashMap<Address, Token> = FxHashMap::default();
 
         for (from_node, to_node, component_id) in path_edges {
             let token_in = ctx
@@ -703,7 +707,7 @@ impl BellmanFordAlgorithm {
     ) -> Result<Vec<(NodeIndex, NodeIndex, ComponentId)>, AlgorithmError> {
         let mut path = Vec::new();
         let mut current = token_out;
-        let mut visited = HashSet::new();
+        let mut visited = FxHashSet::default();
 
         while current != token_in {
             if !visited.insert(current) {
@@ -741,10 +745,10 @@ impl BellmanFordAlgorithm {
         max_hops: usize,
         order: &Order,
     ) -> Result<Subgraph, AlgorithmError> {
-        let mut adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = HashMap::new();
-        let mut token_nodes: HashSet<NodeIndex> = HashSet::new();
-        let mut component_ids: HashSet<ComponentId> = HashSet::new();
-        let mut visited_nodes = HashSet::new();
+        let mut adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = FxHashMap::default();
+        let mut token_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
+        let mut component_ids: FxHashSet<ComponentId> = FxHashSet::default();
+        let mut visited_nodes = FxHashSet::default();
         let mut queued_nodes = VecDeque::new();
 
         visited_nodes.insert(token_in_node);
@@ -794,7 +798,7 @@ impl BellmanFordAlgorithm {
         gas_price: &BigUint,
         token_prices: Option<&TokenGasPrices>,
         spot_product: &[f64],
-        node_address: &HashMap<NodeIndex, Address>,
+        node_address: &FxHashMap<NodeIndex, Address>,
         token_in_node: NodeIndex,
     ) -> Result<BigInt, AlgorithmError> {
         let last_swap = route.swaps().last().ok_or_else(|| {
@@ -935,7 +939,7 @@ mod tests {
     ) -> crate::derived::SharedDerivedDataRef {
         use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
-        let mut token_prices: TokenGasPrices = HashMap::new();
+        let mut token_prices: TokenGasPrices = FxHashMap::default();
         for address in token_addresses {
             token_prices.insert(
                 address.clone(),
@@ -1188,7 +1192,7 @@ mod tests {
         let algo = BellmanFordAlgorithm::with_config(
             AlgorithmConfig::new(1, 3, Duration::from_millis(1000), None)
                 .unwrap()
-                .with_connector_tokens(HashSet::new()),
+                .with_connector_tokens(FxHashSet::default()),
         );
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
@@ -1706,7 +1710,7 @@ mod tests {
     fn bf_algorithm_with_connectors(
         max_hops: usize,
         timeout_ms: u64,
-        connector_tokens: HashSet<Address>,
+        connector_tokens: FxHashSet<Address>,
     ) -> BellmanFordAlgorithm {
         BellmanFordAlgorithm::with_config(
             AlgorithmConfig::new(1, max_hops, Duration::from_millis(timeout_ms), None)
@@ -1735,7 +1739,7 @@ mod tests {
             ("component_cd", &token_c, &token_d, MockProtocolSim::new(3.0)),
         ]);
 
-        let connectors: HashSet<Address> = [token_c.address.clone()].into();
+        let connectors: FxHashSet<Address> = FxHashSet::from_iter([token_c.address.clone()]);
         let algo = bf_algorithm_with_connectors(3, 1000, connectors);
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
@@ -1760,7 +1764,7 @@ mod tests {
             setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         // Empty allowlist — no intermediate tokens allowed, but direct hop A->B should work.
-        let algo = bf_algorithm_with_connectors(1, 1000, HashSet::new());
+        let algo = bf_algorithm_with_connectors(1, 1000, FxHashSet::default());
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algo

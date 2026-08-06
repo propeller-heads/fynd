@@ -25,7 +25,6 @@ mod allocation;
 pub mod config;
 
 use std::{
-    collections::{HashMap, HashSet},
     sync::LazyLock,
     time::{Duration, Instant},
 };
@@ -36,6 +35,7 @@ use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
+use rustc_hash::{FxHashMap, FxHashSet};
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -198,7 +198,7 @@ impl OrderResponses {
     /// consumed by the price guard); exclusive-access candidates are overlaid separately by
     /// `combine_with_surplus`. `failed_solvers` is retained so placeholder construction is
     /// unchanged.
-    fn public_only(&self, pool_scopes: &HashMap<String, LiquidityScope>) -> OrderResponses {
+    fn public_only(&self, pool_scopes: &FxHashMap<String, LiquidityScope>) -> OrderResponses {
         let quotes = self
             .quotes
             .iter()
@@ -459,7 +459,7 @@ impl WorkerPoolRouter {
 
         let mut quotes = Vec::new();
         let mut failed_solvers: Vec<(String, SolveError)> = Vec::new();
-        let mut remaining_worker_pools: HashSet<String> = allocation
+        let mut remaining_worker_pools: FxHashSet<String> = allocation
             .worker_pools()
             .iter()
             .map(|p| p.name().to_string())
@@ -788,7 +788,7 @@ impl WorkerPoolRouter {
 /// on the input side — and needs its own treatment here.
 fn combine_with_surplus(
     responses: &OrderResponses,
-    pool_scopes: &HashMap<String, LiquidityScope>,
+    pool_scopes: &FxHashMap<String, LiquidityScope>,
     options: &QuoteOptions,
     public_ranked: Vec<OrderQuote>,
     user_share_bps: u32,
@@ -830,7 +830,7 @@ fn combine_with_surplus(
 /// obey the request `max_gas` and the route shape rules of `has_valid_exclusive_route`.
 fn best_exclusive_candidate<'a>(
     responses: &'a OrderResponses,
-    pool_scopes: &HashMap<String, LiquidityScope>,
+    pool_scopes: &FxHashMap<String, LiquidityScope>,
     options: &QuoteOptions,
 ) -> Option<&'a OrderQuote> {
     responses
@@ -1117,7 +1117,6 @@ fn derive_strategy(quote: &OrderQuote) -> Strategy {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -1155,7 +1154,7 @@ mod tests {
                 100_000_000,
                 100_000,
                 20_000_000,
-                std::collections::HashMap::new(),
+                rustc_hash::FxHashMap::default(),
             ));
         encoder
     }
@@ -1203,7 +1202,7 @@ mod tests {
             ),
             Box::new(MockProtocolSim::default()),
         );
-        let mut tokens = HashMap::new();
+        let mut tokens = FxHashMap::default();
         tokens.insert(tin, tin_token);
         tokens.insert(tout, tout_token);
         let quote = OrderQuote::new(
@@ -1934,7 +1933,7 @@ mod tests {
             comp,
             Box::new(MockProtocolSim::default()),
         );
-        let mut tokens = HashMap::new();
+        let mut tokens = FxHashMap::default();
         tokens.insert(tin, tin_token);
         tokens.insert(tout, tout_token);
         let quote = OrderQuote::new(
@@ -2005,7 +2004,7 @@ mod tests {
             exclusive_comp,
             Box::new(MockProtocolSim::default()),
         );
-        let mut tokens = HashMap::new();
+        let mut tokens = FxHashMap::default();
         tokens.insert(tin, tin_token);
         tokens.insert(tout, tout_token);
         let total = public_leg_out + exclusive_leg_out;
@@ -2058,7 +2057,7 @@ mod tests {
             ),
             Box::new(MockProtocolSim::default()),
         );
-        let mut tokens = HashMap::new();
+        let mut tokens = FxHashMap::default();
         tokens.insert(tin, tin_token);
         tokens.insert(tout, tout_token);
         let quote = OrderQuote::new(
@@ -2101,8 +2100,8 @@ mod tests {
         }
     }
 
-    fn exclusive_access_pool_scopes() -> HashMap<String, LiquidityScope> {
-        HashMap::from([
+    fn exclusive_access_pool_scopes() -> FxHashMap<String, LiquidityScope> {
+        FxHashMap::from_iter([
             ("public_pool".to_string(), LiquidityScope::PublicOnly),
             ("exclusive_access_pool".to_string(), LiquidityScope::IncludeExclusive),
         ])
@@ -2526,7 +2525,7 @@ mod tests {
             chain: SimChain::Ethereum,
             quality: 100,
         };
-        let mut tokens = HashMap::new();
+        let mut tokens = FxHashMap::default();
         let mut swaps = Vec::new();
         for (protocol_system, tin_byte, tout_byte) in legs {
             let tin = make_address(*tin_byte);

@@ -8,7 +8,7 @@
 //! 5. Returning the best route with stats recorded to the tracing span
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
     time::{Duration, Instant},
 };
 
@@ -16,6 +16,7 @@ use metrics::{counter, histogram};
 use num_bigint::{BigInt, BigUint};
 use num_traits::ToPrimitive;
 use petgraph::prelude::EdgeRef;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace};
 use tycho_simulation::{
     tycho_common::simulation::protocol_sim::ProtocolSim,
@@ -37,7 +38,7 @@ pub struct MostLiquidAlgorithm {
     max_hops: usize,
     timeout: Duration,
     max_routes: Option<usize>,
-    connector_tokens: Option<HashSet<Address>>,
+    connector_tokens: Option<FxHashSet<Address>>,
 }
 
 /// Algorithm-specific edge data for liquidity-based routing.
@@ -224,7 +225,7 @@ impl MostLiquidAlgorithm {
         to: &Address,
         min_hops: usize,
         max_hops: usize,
-        connector_tokens: Option<&HashSet<Address>>,
+        connector_tokens: Option<&FxHashSet<Address>>,
     ) -> Result<Vec<Path<'a, DepthAndPrice>>, AlgorithmError> {
         if min_hops == 0 || min_hops > max_hops {
             return Err(AlgorithmError::InvalidConfiguration {
@@ -358,8 +359,8 @@ impl MostLiquidAlgorithm {
         let mut swaps = Vec::with_capacity(path.len());
 
         // Track state overrides for components we've already swapped through.
-        let mut state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
-        let mut tokens: HashMap<Address, Token> = HashMap::new();
+        let mut state_overrides: FxHashMap<&ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
+        let mut tokens: FxHashMap<Address, Token> = FxHashMap::default();
 
         for (address_in, edge_data, address_out) in path.iter() {
             // Get token and component data for the simulation call
@@ -561,7 +562,7 @@ impl Algorithm for MostLiquidAlgorithm {
         }
 
         // Step 3: Extract component IDs from all paths we'll simulate
-        let component_ids: HashSet<ComponentId> = scored_paths
+        let component_ids: FxHashSet<ComponentId> = scored_paths
             .iter()
             .flat_map(|(path, _)| {
                 path.edge_iter()
@@ -741,7 +742,6 @@ impl Algorithm for MostLiquidAlgorithm {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
 
     use rstest::rstest;
     use tycho_simulation::{
@@ -774,7 +774,7 @@ mod tests {
     /// The price is set to numerator=1, denominator=1, which means:
     /// gas_cost_in_token = gas_cost_wei * 1 / 1 = gas_cost_wei
     fn setup_derived_with_token_prices(token_addresses: &[Address]) -> SharedDerivedDataRef {
-        let mut token_prices: TokenGasPrices = HashMap::new();
+        let mut token_prices: TokenGasPrices = FxHashMap::default();
         for addr in token_addresses {
             // Price where 1 wei of gas = 1 unit of token
             token_prices.insert(
@@ -871,7 +871,7 @@ mod tests {
     }
 
     fn make_token_prices(addresses: &[Address]) -> TokenGasPrices {
-        let mut prices = TokenGasPrices::new();
+        let mut prices = TokenGasPrices::default();
         for addr in addresses {
             // 1:1 price (1 token unit = 1 gas token unit)
             prices.insert(
@@ -1047,7 +1047,7 @@ mod tests {
 
         // Token price: 2000 token_in per 1 ETH (numerator=2000, denominator=1)
         // So 2_000_000 raw units / 2000 = 1000 ETH
-        let mut token_prices = TokenGasPrices::new();
+        let mut token_prices = TokenGasPrices::default();
         token_prices.insert(
             tok_in.address.clone(),
             Price { numerator: BigUint::from(2000u64), denominator: BigUint::from(1u64) },
@@ -1089,7 +1089,7 @@ mod tests {
 
         // Token price: numerator=3, denominator=2 -> 1.5 tokens per ETH
         // depth_in_eth = 500 * 2 / 3 = 333.333...
-        let mut token_prices = TokenGasPrices::new();
+        let mut token_prices = TokenGasPrices::default();
         token_prices.insert(
             tok_in.address.clone(),
             Price { numerator: BigUint::from(3u64), denominator: BigUint::from(2u64) },
@@ -1113,7 +1113,7 @@ mod tests {
 
     // ==================== find_paths Tests ====================
 
-    fn all_ids(paths: Vec<Path<'_, DepthAndPrice>>) -> HashSet<Vec<&str>> {
+    fn all_ids(paths: Vec<Path<'_, DepthAndPrice>>) -> FxHashSet<Vec<&str>> {
         paths
             .iter()
             .map(|p| {
@@ -1132,17 +1132,17 @@ mod tests {
 
         // Forward: A->B (1 hop), A->C (2 hops), A->D (3 hops)
         let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 1, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab"]]));
+        assert_eq!(all_ids(p), FxHashSet::from_iter([vec!["ab"]]));
 
         let p = MostLiquidAlgorithm::find_paths(g, &a, &c, 1, 2, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab", "bc"]]));
+        assert_eq!(all_ids(p), FxHashSet::from_iter([vec!["ab", "bc"]]));
 
         let p = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 3, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab", "bc", "cd"]]));
+        assert_eq!(all_ids(p), FxHashSet::from_iter([vec!["ab", "bc", "cd"]]));
 
         // Reverse: D->A (bidirectional components)
         let p = MostLiquidAlgorithm::find_paths(g, &d, &a, 1, 3, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["cd", "bc", "ab"]]));
+        assert_eq!(all_ids(p), FxHashSet::from_iter([vec!["cd", "bc", "ab"]]));
     }
 
     #[test]
@@ -1170,13 +1170,13 @@ mod tests {
 
         // A->B: 3 parallel components = 3 paths
         let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 1, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab1"], vec!["ab2"], vec!["ab3"]]));
+        assert_eq!(all_ids(p), FxHashSet::from_iter([vec!["ab1"], vec!["ab2"], vec!["ab3"]]));
 
         // A->C: 3 A->B components × 2 B->C components = 6 paths
         let p = MostLiquidAlgorithm::find_paths(g, &a, &c, 1, 2, None).unwrap();
         assert_eq!(
             all_ids(p),
-            HashSet::from([
+            FxHashSet::from_iter([
                 vec!["ab1", "bc1"],
                 vec!["ab1", "bc2"],
                 vec!["ab2", "bc1"],
@@ -1195,7 +1195,7 @@ mod tests {
 
         // A->D: two 2-hop paths
         let p = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 2, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab", "bd"], vec!["ac", "cd"]]));
+        assert_eq!(all_ids(p), FxHashSet::from_iter([vec!["ab", "bd"], vec!["ac", "cd"]]));
     }
 
     #[test]
@@ -1209,7 +1209,7 @@ mod tests {
         // they create intermediate cycles unsupported by Tycho execution
         // (only first == last cycles are allowed, i.e. from == to).
         let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 3, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab"]]));
+        assert_eq!(all_ids(p), FxHashSet::from_iter([vec!["ab"]]));
     }
 
     #[test]
@@ -1224,7 +1224,7 @@ mod tests {
         let p = MostLiquidAlgorithm::find_paths(g, &a, &a, 2, 2, None).unwrap();
         assert_eq!(
             all_ids(p),
-            HashSet::from([
+            FxHashSet::from_iter([
                 vec!["ab1", "ab1"],
                 vec!["ab1", "ab2"],
                 vec!["ab1", "ab3"],
@@ -1281,7 +1281,7 @@ mod tests {
         let (a, b, c, d) = addrs();
         let e = addr(0x0E);
         let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
-        let mut t = HashMap::new();
+        let mut t = FxHashMap::default();
         t.insert("ae".into(), vec![a.clone(), e.clone()]);
         t.insert("ab".into(), vec![a.clone(), b.clone()]);
         t.insert("be".into(), vec![b, e.clone()]);
@@ -1504,9 +1504,9 @@ mod tests {
         let (a, b, c, d) = addrs();
         let m = diamond_graph();
         let g = m.graph();
-        let allowed: HashSet<Address> = [c.clone()].into();
+        let allowed: FxHashSet<Address> = FxHashSet::from_iter([c.clone()]);
         let paths = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 2, Some(&allowed)).unwrap();
-        let intermediates: HashSet<&Address> = paths
+        let intermediates: FxHashSet<&Address> = paths
             .iter()
             .flat_map(|p| p.iter().map(|(node, _, _)| node))
             .filter(|addr| *addr != &a && *addr != &d)
@@ -1522,8 +1522,8 @@ mod tests {
         let (a, b, _, _) = addrs();
         let m = linear_graph();
         let g = m.graph();
-        let allowed: HashSet<Address> = HashSet::new(); // empty — no intermediates
-                                                        // 1-hop A->B: destination is reached directly, no intermediate check
+        let allowed: FxHashSet<Address> = FxHashSet::default(); // empty — no intermediates
+                                                                // 1-hop A->B: destination is reached directly, no intermediate check
         let paths = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 1, Some(&allowed)).unwrap();
         assert!(!paths.is_empty(), "1-hop direct route should survive empty allowlist");
     }
@@ -1535,7 +1535,7 @@ mod tests {
         let m = diamond_graph();
         let g = m.graph();
         let paths = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 2, None).unwrap();
-        let intermediates: HashSet<&Address> = paths
+        let intermediates: FxHashSet<&Address> = paths
             .iter()
             .flat_map(|p| p.iter().map(|(node, _, _)| node))
             .filter(|addr| *addr != &a && *addr != &d)

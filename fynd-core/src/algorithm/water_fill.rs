@@ -30,13 +30,13 @@
 
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument};
 use tycho_simulation::{
     tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::Address,
@@ -124,7 +124,7 @@ pub struct WaterFillAlgorithm {
     timeout: Duration,
     max_candidates: usize,
     max_paths: usize,
-    connector_tokens: Option<HashSet<Address>>,
+    connector_tokens: Option<FxHashSet<Address>>,
 }
 
 /// A candidate reallocation in the exchange-refinement pass: shift one `delta` of input from the
@@ -191,7 +191,7 @@ impl WaterFillAlgorithm {
     fn simulate_step(
         path: &Path<DepthAndPrice>,
         market: &MarketState,
-        overlay: &HashMap<ComponentId, Box<dyn ProtocolSim>>,
+        overlay: &FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
         amount: BigUint,
     ) -> Option<StepResult> {
         let mut current = amount;
@@ -201,13 +201,14 @@ impl WaterFillAlgorithm {
         // per-hop state clone when the path actually repeats a component; the common case
         // skips the clone entirely.
         let path_reuses_component = {
-            let mut seen: HashSet<&ComponentId> = HashSet::with_capacity(path.len());
+            let mut seen: FxHashSet<&ComponentId> = FxHashSet::with_capacity_and_hasher(path.len(), Default::default());
             !path
                 .edge_iter()
                 .iter()
                 .all(|e| seen.insert(&e.component_id))
         };
-        let mut intra_path_states: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut intra_path_states: FxHashMap<ComponentId, Box<dyn ProtocolSim>> =
+            FxHashMap::default();
         let mut new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)> =
             Vec::with_capacity(path.len());
 
@@ -267,7 +268,7 @@ impl WaterFillAlgorithm {
     /// Walks `ranked` best first and keeps a path only if none of its components are already used
     /// by a kept path, skipping it otherwise. Returns the kept paths' indices into `ranked`.
     fn select_disjoint(ranked: &[Path<DepthAndPrice>], max_paths: usize) -> Vec<usize> {
-        let mut visited_components: HashSet<&ComponentId> = HashSet::new();
+        let mut visited_components: FxHashSet<&ComponentId> = FxHashSet::default();
         let mut selected = Vec::new();
         for (idx, path) in ranked.iter().enumerate() {
             let path_components: Vec<&ComponentId> = path
@@ -381,7 +382,8 @@ impl WaterFillAlgorithm {
             );
             match bounded {
                 Ok((bounded_paths, _)) => {
-                    let mut keys: HashSet<Vec<ComponentId>> = paths.iter().map(path_key).collect();
+                    let mut keys: FxHashSet<Vec<ComponentId>> =
+                        paths.iter().map(path_key).collect();
                     let mut union = Vec::with_capacity(bounded_paths.len() + paths.len());
                     for path in bounded_paths {
                         if keys.insert(path_key(&path)) {
@@ -398,7 +400,7 @@ impl WaterFillAlgorithm {
                     debug!(error = %e, "water-fill bounded discovery failed; using exhaustive candidates only")
                 }
             }
-            let component_ids: HashSet<ComponentId> = paths
+            let component_ids: FxHashSet<ComponentId> = paths
                 .iter()
                 .flat_map(|p| {
                     p.edge_iter()
@@ -626,7 +628,7 @@ impl WaterFillAlgorithm {
         if amount.is_zero() {
             return Some(BigInt::zero());
         }
-        let empty: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let empty: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
         let step = Self::simulate_step(path, ctx.market, &empty, amount.clone())?;
         let activation = Self::activation_cost(ctx, &step.gas);
         Some(BigInt::from(step.amount_out) - activation)
@@ -742,7 +744,7 @@ impl WaterFillAlgorithm {
     fn allocation_commit(
         path: &Path<DepthAndPrice>,
         market: &MarketState,
-        overrides: &mut HashMap<ComponentId, Box<dyn ProtocolSim>>,
+        overrides: &mut FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
         amount: BigUint,
         flow_fraction: f64,
     ) -> Option<PathAllocation> {
@@ -821,7 +823,7 @@ impl WaterFillAlgorithm {
             }
             // Fresh overrides per leg: legs are component-disjoint, but a component reused within
             // one path must still see its own first swap.
-            let mut overrides: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+            let mut overrides: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
             let allocation = Self::allocation_commit(
                 &ctx.ordered[path_idx],
                 ctx.market,
@@ -857,8 +859,8 @@ impl WaterFillAlgorithm {
         let timeout_ms = self.timeout.as_millis() as u64;
         let path_count = subset.len();
 
-        let mut committed: Vec<HashMap<ComponentId, Box<dyn ProtocolSim>>> = (0..path_count)
-            .map(|_| HashMap::new())
+        let mut committed: Vec<FxHashMap<ComponentId, Box<dyn ProtocolSim>>> = (0..path_count)
+            .map(|_| FxHashMap::default())
             .collect();
         let mut cum_in: Vec<BigUint> = vec![BigUint::zero(); path_count];
         let mut activated: Vec<bool> = vec![!gate; path_count];
@@ -917,7 +919,7 @@ impl WaterFillAlgorithm {
             return candidates;
         }
         let timeout_ms = self.timeout.as_millis() as u64;
-        let empty: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let empty: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
         let mut marginal: Vec<(usize, BigInt)> = Vec::new();
         for (idx, path) in ctx
             .ordered
@@ -1001,7 +1003,7 @@ impl WaterFillAlgorithm {
         let remainder = &amount_in - &base_chunk * num_chunks;
         let timeout_ms = self.timeout.as_millis() as u64;
 
-        let mut overlay: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut overlay: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
         let mut activated: Vec<bool> = vec![!gate; subset.len()];
         let mut active_count = if gate { 0 } else { subset.len() };
         let mut counts: Vec<usize> = vec![0; subset.len()];
@@ -1080,7 +1082,7 @@ impl WaterFillAlgorithm {
         }
         execution_order.sort_by(|&a, &b| cand_in[b].cmp(&cand_in[a]));
 
-        let mut overrides: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut overrides: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
         let mut allocations = Vec::new();
         for i in execution_order {
             let allocation = Self::allocation_commit(
@@ -1149,8 +1151,8 @@ struct CandidateSearchConfig<'a> {
     min_hops: usize,
     max_hops: usize,
     max_candidates: usize,
-    connector_tokens: Option<&'a HashSet<Address>>,
-    anchor_tokens: &'a HashSet<Address>,
+    connector_tokens: Option<&'a FxHashSet<Address>>,
+    anchor_tokens: &'a FxHashSet<Address>,
     source_token: &'a Address,
     start: &'a Instant,
     timeout_ms: u64,
@@ -1195,7 +1197,8 @@ where
         if timed_out(cfg.start, cfg.timeout_ms) || frontier.is_empty() {
             break;
         }
-        let mut next_by_node: HashMap<NodeIndex, Vec<CandidatePathState<'a, W>>> = HashMap::new();
+        let mut next_by_node: FxHashMap<NodeIndex, Vec<CandidatePathState<'a, W>>> =
+            FxHashMap::default();
         for state in frontier {
             if state.node == to_idx && from_idx != to_idx {
                 continue;
@@ -1239,7 +1242,7 @@ fn expand_candidate_state<'a, W>(
     target: NodeIndex,
     state: CandidatePathState<'a, W>,
     found: &mut Vec<(Path<'a, W>, BigUint)>,
-    next_by_node: &mut HashMap<NodeIndex, Vec<CandidatePathState<'a, W>>>,
+    next_by_node: &mut FxHashMap<NodeIndex, Vec<CandidatePathState<'a, W>>>,
 ) where
     W: Clone,
 {
@@ -1320,13 +1323,13 @@ fn score_candidate_edges<'a, W>(
 /// any chain without a hardcoded per-chain list. The native-ETH zero address carries near-zero
 /// degree but is load-bearing for `WETH → ETH → token` routes where Tycho models native ETH as
 /// `0x0`, so it is anchored explicitly.
-fn derive_anchor_tokens<W>(graph: &StableDiGraph<W>) -> HashSet<Address> {
+fn derive_anchor_tokens<W>(graph: &StableDiGraph<W>) -> FxHashSet<Address> {
     let mut by_degree: Vec<(NodeIndex, usize)> = graph
         .node_indices()
         .map(|node| (node, graph.edges(node).count()))
         .collect();
     by_degree.sort_unstable_by_key(|(_, degree)| Reverse(*degree));
-    let mut anchors: HashSet<Address> = by_degree
+    let mut anchors: FxHashSet<Address> = by_degree
         .into_iter()
         .take(DERIVED_ANCHOR_COUNT)
         .map(|(node, _)| graph[node].clone())
@@ -1407,7 +1410,7 @@ fn select_candidate_edges<W>(
 ) -> Vec<ScoredEdge<'_, W>> {
     scored.sort_by(compare_scored_edges);
     let mut selected = Vec::new();
-    let mut per_target: HashMap<NodeIndex, usize> = HashMap::new();
+    let mut per_target: FxHashMap<NodeIndex, usize> = FxHashMap::default();
     for edge in scored {
         let limit = if edge.priority == 0 {
             CANDIDATE_DIRECT_EDGES_PER_TOKEN
@@ -1436,7 +1439,7 @@ fn compare_scored_edges<W>(a: &ScoredEdge<'_, W>, b: &ScoredEdge<'_, W>) -> Orde
 }
 
 fn prune_candidate_frontier<W>(
-    by_node: HashMap<NodeIndex, Vec<CandidatePathState<'_, W>>>,
+    by_node: FxHashMap<NodeIndex, Vec<CandidatePathState<'_, W>>>,
 ) -> Vec<CandidatePathState<'_, W>> {
     by_node
         .into_values()
@@ -1454,7 +1457,7 @@ fn rank_found_candidate_paths<'a, W>(
     order: &Order,
 ) -> Result<CandidatePathSet<'a, W>, AlgorithmError> {
     found.sort_by(|(_, a), (_, b)| b.cmp(a));
-    let mut keys = HashSet::new();
+    let mut keys = FxHashSet::default();
     let mut paths = Vec::new();
     let mut scores = Vec::new();
 
@@ -1794,7 +1797,7 @@ mod tests {
                 max_hops: 3,
                 max_candidates: 128,
                 connector_tokens: None,
-                anchor_tokens: &HashSet::new(),
+                anchor_tokens: &FxHashSet::default(),
                 source_token: order.token_in(),
                 start: &start,
                 timeout_ms: 2000,
@@ -1842,7 +1845,7 @@ mod tests {
                 max_hops: 3,
                 max_candidates: 128,
                 connector_tokens: None,
-                anchor_tokens: &HashSet::new(),
+                anchor_tokens: &FxHashSet::default(),
                 source_token: order.token_in(),
                 start: &start,
                 timeout_ms: 2000,
