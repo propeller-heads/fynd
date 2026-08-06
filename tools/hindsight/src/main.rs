@@ -52,8 +52,13 @@ pub(crate) struct ChainArgs {
     pub name: String,
 
     /// Chain RPC URL
-    #[arg(long, env = "RPC_URL")]
-    pub rpc_url: String,
+    #[arg(long, env = "RPC_URL", required_unless_present = "rpc_url_file")]
+    pub rpc_url: Option<String>,
+
+    /// Read the chain RPC URL from this file's first line instead — keeps the endpoint (and
+    /// any embedded key) out of command lines, shell history, and process listings
+    #[arg(long, conflicts_with = "rpc_url")]
+    pub rpc_url_file: Option<std::path::PathBuf>,
 
     /// Decoder address-book TOML (defaults to the chain's built-in book)
     #[arg(long, env = "HINDSIGHT_REGISTRY")]
@@ -61,6 +66,26 @@ pub(crate) struct ChainArgs {
 }
 
 impl ChainArgs {
+    /// The RPC URL, from `--rpc-url-file` when given (first line, trimmed), else `--rpc-url`.
+    pub(crate) fn rpc_url(&self) -> anyhow::Result<String> {
+        if let Some(path) = self.rpc_url_file.as_deref() {
+            let contents = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("reading --rpc-url-file {}: {e}", path.display()))?;
+            let url = contents
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim();
+            if url.is_empty() {
+                anyhow::bail!("--rpc-url-file {} is empty", path.display());
+            }
+            return Ok(url.to_string());
+        }
+        self.rpc_url
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no RPC URL: pass --rpc-url or --rpc-url-file"))
+    }
+
     /// The decoder address book for this run: `--registry`'s file when given, otherwise the book
     /// built in for `--chain`.
     ///
@@ -174,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[expect(clippy::print_stdout)]
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
-    let provider = provider_from(&args.chain.rpc_url)?;
+    let provider = provider_from(&args.chain.rpc_url()?)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
     let registry = args.chain.load_registry()?;
     let mut decoder = Decoder::new(provider, registry);
@@ -213,7 +238,7 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
 
 #[expect(clippy::print_stdout)]
 async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
-    let provider = provider_from(&args.chain.rpc_url)?;
+    let provider = provider_from(&args.chain.rpc_url()?)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
     let allium = AlliumClient::new(args.allium_key, args.allium_query_id);
     let registry = args.chain.load_registry()?;

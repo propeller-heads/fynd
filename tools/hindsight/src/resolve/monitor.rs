@@ -399,13 +399,9 @@ async fn build_solver(
         protocols = protocols.len(),
         "building in-process solver (loading tokens may take minutes)…"
     );
-    let mut builder = FyndBuilder::new(
-        chain,
-        &cfg.tycho_url,
-        &cfg.chain.rpc_url,
-        protocols.to_vec(),
-        cfg.min_tvl,
-    );
+    let rpc_url = cfg.chain.rpc_url()?;
+    let mut builder =
+        FyndBuilder::new(chain, &cfg.tycho_url, &rpc_url, protocols.to_vec(), cfg.min_tvl);
     if let Some(key) = cfg.tycho_api_key.as_deref() {
         builder = builder.tycho_api_key(key);
     }
@@ -512,7 +508,8 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
 
     let pools_config = load_pools_config(&cfg)?;
 
-    let mut decoder = Decoder::new(provider_from(&cfg.chain.rpc_url)?, cfg.chain.load_registry()?);
+    let mut decoder =
+        Decoder::new(provider_from(&cfg.chain.rpc_url()?)?, cfg.chain.load_registry()?);
 
     if let Some(port) = cfg.metrics_port {
         telemetry::install_exporter(port)?;
@@ -921,7 +918,12 @@ mod tests {
         let tycho_url = std::env::var("TYCHO_URL").expect("set TYCHO_URL");
         let api_key = std::env::var("TYCHO_API_KEY").ok();
         run(MonitorArgs {
-            chain: crate::ChainArgs { name: "ethereum".to_string(), rpc_url, registry: None },
+            chain: crate::ChainArgs {
+                name: "ethereum".to_string(),
+                rpc_url: Some(rpc_url),
+                rpc_url_file: None,
+                registry: None,
+            },
             tycho_url,
             protocols: vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
             // High TVL floor → fewer pools → faster load for a smoke test.
