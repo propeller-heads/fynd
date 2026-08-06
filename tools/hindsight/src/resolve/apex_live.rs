@@ -50,6 +50,9 @@ impl Bracket {
 pub(crate) struct LiveJob {
     pub block: u64,
     pub bracket: Bracket,
+    /// How many blocks of trades this batch covers. 1 is the in-block case; larger windows
+    /// accumulate across blocks and clear at the window's closing state.
+    pub window_blocks: u64,
     pub input: LiveBatchInput,
 }
 
@@ -57,7 +60,53 @@ pub(crate) struct LiveJob {
 pub(crate) struct LiveDelivery {
     pub block: u64,
     pub bracket: Bracket,
+    pub window_blocks: u64,
     pub report: LiveBatchReport,
+}
+
+/// Trades waiting for their window to close. One buffer per configured window size; the 1-block
+/// window keeps no buffer since every block closes it immediately.
+#[derive(Default)]
+pub(crate) struct WindowBuffers {
+    /// window size in blocks -> (block the window opened at, trades collected so far)
+    pending: HashMap<u64, (u64, Vec<DecodedTrade>)>,
+}
+
+impl WindowBuffers {
+    /// Add this block's trades to every window, and return the windows that just closed with
+    /// their accumulated trades. A window of N closes when the block number is a multiple of N,
+    /// so windows are aligned to absolute block numbers and never straddle a restart.
+    pub(crate) fn absorb(
+        &mut self,
+        windows: &[u64],
+        block: u64,
+        trades: &[DecodedTrade],
+    ) -> Vec<(u64, Vec<DecodedTrade>)> {
+        let mut closed = Vec::new();
+        for &window in windows {
+            if window <= 1 {
+                if !trades.is_empty() {
+                    closed.push((window, trades.to_vec()));
+                }
+                continue;
+            }
+            let entry = self
+                .pending
+                .entry(window)
+                .or_insert_with(|| (block, Vec::new()));
+            entry.1.extend_from_slice(trades);
+            if block.is_multiple_of(window) {
+                let (_, collected) = self
+                    .pending
+                    .remove(&window)
+                    .expect("just inserted");
+                if !collected.is_empty() {
+                    closed.push((window, collected));
+                }
+            }
+        }
+        closed
+    }
 }
 
 /// The monitor's handle on the APEX stage: workers, delivery stream, JSONL sink, and budgets.
@@ -119,7 +168,12 @@ impl ApexRuntime {
                 // Per-component deadlines are stamped inside the solve at each component's own
                 // start; the stage deadline only shapes the overrun-discard envelope.
                 let report = solve_live_batch(&job.input, component_budget, single_budget, true);
-                LiveDelivery { block: job.block, bracket: job.bracket, report }
+                LiveDelivery {
+                    block: job.block,
+                    bracket: job.bracket,
+                    window_blocks: job.window_blocks,
+                    report,
+                }
             },
         );
         Ok(Self {
@@ -182,7 +236,7 @@ impl ApexRuntime {
     fn record_delivery(&mut self, delivery: &StageDelivery<LiveDelivery>) {
         {
             telemetry::record_apex_delivery(&delivery.timing);
-            let LiveDelivery { block, bracket, report } = &delivery.result;
+            let LiveDelivery { block, bracket, window_blocks, report } = &delivery.result;
             for _ in 0..report
                 .counters
                 .deadline_fired_components
@@ -246,6 +300,7 @@ impl ApexRuntime {
             let line = serde_json::json!({
                 "block": block,
                 "bracket": bracket.label(),
+                "window_blocks": window_blocks,
                 "queue_wait_ms": u128_ms(delivery.timing.queue_wait.as_millis()),
                 "solve_wall_ms": u128_ms(delivery.timing.solve_wall.as_millis()),
                 "component_solve_ms": report.component_solve_ms,
@@ -304,10 +359,11 @@ pub(crate) async fn dispatch_bracket(
     trades: &[DecodedTrade],
     block: u64,
     bracket: Bracket,
+    window_blocks: u64,
 ) {
     let Some(runtime) = apex else { return };
     let input = build_live_input(solver, trades, runtime.max_pools).await;
-    runtime.dispatch(LiveJob { block, bracket, input });
+    runtime.dispatch(LiveJob { block, bracket, window_blocks, input });
 }
 
 /// Whether this block's trades justify a batch dispatch: at least two orders sharing a token.
@@ -465,6 +521,44 @@ mod tests {
     use crate::resolve::test_support::trade_between;
 
     #[test]
+    fn test_windows_accumulate_until_their_block_boundary() {
+        let weth = Address::repeat_byte(1);
+        let usdc = Address::repeat_byte(2);
+        let mut buffers = WindowBuffers::default();
+        let windows = vec![1u64, 4];
+
+        // Blocks 101..103 close the 1-block window every time and never the 4-block one.
+        for block in 101..=103 {
+            let closed = buffers.absorb(&windows, block, &[trade_between(weth, usdc, 0)]);
+            assert_eq!(closed.len(), 1, "only the 1-block window closes at {block}");
+            assert_eq!(closed[0].0, 1);
+            assert_eq!(closed[0].1.len(), 1);
+        }
+
+        // 104 is divisible by 4: the long window closes carrying every trade since it opened.
+        let closed = buffers.absorb(&windows, 104, &[trade_between(weth, usdc, 0)]);
+        let long = closed
+            .iter()
+            .find(|(window, _)| *window == 4)
+            .expect("4-block window closed");
+        assert_eq!(long.1.len(), 4, "three buffered blocks plus the closing one");
+
+        // ...and it starts empty again rather than replaying what it already dispatched.
+        let closed = buffers.absorb(&windows, 105, &[trade_between(weth, usdc, 0)]);
+        assert!(closed
+            .iter()
+            .all(|(window, _)| *window == 1));
+    }
+
+    #[test]
+    fn test_empty_blocks_never_dispatch() {
+        let mut buffers = WindowBuffers::default();
+        assert!(buffers
+            .absorb(&[1, 4], 104, &[])
+            .is_empty());
+    }
+
+    #[test]
     fn test_should_dispatch_needs_two_trades_sharing_a_token() {
         let weth = Address::repeat_byte(1);
         let usdc = Address::repeat_byte(2);
@@ -522,8 +616,13 @@ mod tests {
                 .expect("spawn runtime");
 
         let input = crossing_input();
-        runtime.dispatch(LiveJob { block: 42, bracket: Bracket::Top, input: input.clone() });
-        runtime.dispatch(LiveJob { block: 42, bracket: Bracket::Bottom, input });
+        runtime.dispatch(LiveJob {
+            block: 42,
+            bracket: Bracket::Top,
+            window_blocks: 1,
+            input: input.clone(),
+        });
+        runtime.dispatch(LiveJob { block: 42, bracket: Bracket::Bottom, window_blocks: 1, input });
         runtime.shutdown();
 
         let mut lines: Vec<serde_json::Value> = Vec::new();

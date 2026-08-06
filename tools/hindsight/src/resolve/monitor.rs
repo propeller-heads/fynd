@@ -163,6 +163,13 @@ pub(crate) struct MonitorArgs {
     /// Pool-subset cap per batch (native-only 2-hop closure, class-ordered)
     #[arg(long, default_value_t = 400)]
     pub apex_max_pools: usize,
+
+    /// Batch window lengths in blocks, repeatable. Each window runs independently over the same
+    /// flow, so `--apex-window-blocks 1 --apex-window-blocks 30` measures in-block batching and
+    /// 30-block (≈60 s on Base) batching side by side in one run. Windows close on block numbers
+    /// divisible by their length, so a restart re-aligns rather than drifting.
+    #[arg(long, default_values_t = vec![1u64])]
+    pub apex_window_blocks: Vec<u64>,
 }
 
 /// Drives the in-process solver, stepping the chain one block per `SteppingSolver::advance`.
@@ -605,6 +612,8 @@ struct Sinks {
     comparisons: Option<super::jsonl::RotatingWriter>,
     captures: Option<super::jsonl::RotatingWriter>,
     apex: Option<super::apex_live::ApexRuntime>,
+    /// Trades accumulating toward each multi-block window's close.
+    windows: super::apex_live::WindowBuffers,
 }
 
 impl Sinks {
@@ -626,7 +635,12 @@ impl Sinks {
             None => None,
         };
         let apex = super::apex_live::ApexRuntime::from_args(cfg)?;
-        Ok(Self { comparisons, captures, apex })
+        Ok(Self {
+            comparisons,
+            captures,
+            apex,
+            windows: super::apex_live::WindowBuffers::default(),
+        })
     }
 }
 
@@ -733,29 +747,43 @@ async fn resolve_block<P: Provider>(
     let tops = solve_tops(adapter, trades).await;
     // Pre-advance seam: the N-1 state is still live and the block's tops are known. The APEX
     // batch stage clones its filtered pool subset here and solves off the critical path.
-    let apex_eligible = sinks.apex.is_some() && super::apex_live::should_dispatch(trades);
-    if apex_eligible {
+    //
+    // Multi-block windows accumulate trades and clear at the closing block's state, so a window
+    // of N dispatches once every N blocks carrying N blocks of orders — the same seam, a longer
+    // order book. Every order's Fynd baseline still comes from its own block via the comparisons
+    // stream, so the offline join stays state-consistent per order regardless of window length.
+    let closed_windows = sinks
+        .windows
+        .absorb(&cfg.apex_window_blocks, target, trades);
+    let mut dispatched: Vec<(u64, Vec<crate::decoder::DecodedTrade>)> = Vec::new();
+    for (window, window_trades) in closed_windows {
+        if sinks.apex.is_none() || !super::apex_live::should_dispatch(&window_trades) {
+            continue;
+        }
         super::apex_live::dispatch_bracket(
             sinks.apex.as_ref(),
             adapter.solver,
-            trades,
+            &window_trades,
             target,
             super::apex_live::Bracket::Top,
+            window,
         )
         .await;
+        dispatched.push((window, window_trades));
     }
     if let Err(e) = adapter.advance().await {
         return Err(e.to_string());
     }
     let ranges = solve_backs(adapter, trades, tops, &prices_top).await;
     // Bottom bracket: the solver now holds N, the biased-bottom state (mirrors fynd's back).
-    if apex_eligible {
+    for (window, window_trades) in &dispatched {
         super::apex_live::dispatch_bracket(
             sinks.apex.as_ref(),
             adapter.solver,
-            trades,
+            window_trades,
             target,
             super::apex_live::Bracket::Bottom,
+            *window,
         )
         .await;
     }
@@ -946,6 +974,7 @@ mod tests {
             apex_budget_ms: 1_000,
             apex_single_budget_ms: 250,
             apex_max_pools: 400,
+            apex_window_blocks: vec![1],
         })
         .await
         .expect("monitor should process one block without error");
