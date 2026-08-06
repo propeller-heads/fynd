@@ -77,8 +77,12 @@ pub(crate) struct MonitorArgs {
     #[arg(long, value_delimiter = ',', default_value = "native_onchain")]
     pub protocols: Vec<String>,
 
-    /// Minimum pool TVL filter for the solver
-    #[arg(long, default_value_t = 100.0)]
+    /// Minimum pool TVL, denominated in the chain's NATIVE token (10 = 10 ETH-equivalent) —
+    /// tycho's `ComponentFilter` convention, NOT USD. The old 100.0 default silently meant a
+    /// ~$360k floor, which starved the market to a few hundred whale pools. This floor is
+    /// deliberately higher than the offline tools' 1.0: the monitor has to keep pace with the
+    /// chain, and every extra pool costs token-loading time at startup and CPU per block.
+    #[arg(long, default_value_t = 10.0)]
     pub min_tvl: f64,
 
     /// Tycho API key (if the endpoint requires one)
