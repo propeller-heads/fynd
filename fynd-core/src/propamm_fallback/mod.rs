@@ -8,6 +8,8 @@
 //! pays less than the pAMM quote, so a `min_amount_out` derived from that quote still reverts the
 //! route. Deriving it from this number does not.
 
+pub mod fee_fetcher;
+
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
@@ -75,7 +77,26 @@ impl FallbackFees {
 }
 
 /// Shared with the task that refreshes it from the router.
-pub type SharedFallbackFees = Arc<RwLock<FallbackFees>>;
+#[derive(Debug, Clone, Default)]
+pub struct SharedFallbackFees(Arc<RwLock<FallbackFees>>);
+
+impl SharedFallbackFees {
+    /// Returns a copy of the current fee tiers.
+    pub fn snapshot(&self) -> FallbackFees {
+        self.0
+            .read()
+            .expect("fallback fees lock poisoned")
+            .clone()
+    }
+
+    /// Replaces the fee tiers with freshly fetched on-chain values.
+    pub fn set(&self, fees: FallbackFees) {
+        *self
+            .0
+            .write()
+            .expect("fallback fees lock poisoned") = fees;
+    }
+}
 
 /// Fallback pools by token pair and fee tier, so finding one is a lookup, not a market scan.
 #[derive(Debug, Default)]
