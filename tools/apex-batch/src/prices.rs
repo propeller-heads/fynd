@@ -119,6 +119,44 @@ pub fn batch_value_wei(
     total
 }
 
+/// Wei per 18-dec unit of `token`, from its tycho rational: `10^(dec−18) · den/num` as f64 —
+/// reporting precision only, never fed back into APEX.
+pub fn wei_per_unit18(input: &TokenPriceInput) -> f64 {
+    let numerator = biguint_f64(&input.numerator);
+    if numerator == 0.0 {
+        return 0.0;
+    }
+    biguint_f64(&input.denominator) / numerator * 10f64.powi(i32::from(input.decimals) - 18)
+}
+
+fn biguint_f64(value: &BigUint) -> f64 {
+    value.to_string().parse().unwrap_or(0.0)
+}
+
+/// Per-token NET pool exposure valued in wei, over one solve's pool clearings.
+///
+/// A pool clearing's `sold_amount` leaves the pool in `pair.sell_token`; `bought_amount` enters it
+/// in `pair.buy_token`, both in 18-dec space. `internalization = 1 − Σ|net| / (2 × filled
+/// notional)`: a batch cleared purely order-against-order nets to zero pool exposure (share 1),
+/// while an order routed entirely through pools has |net| = 2 × its notional (share 0).
+/// Per-token netting is what keeps multi-hop intermediates out of the sum — the clearings are
+/// per-hop per-pair, so summing them raw would double-count a two-hop route.
+pub fn net_pool_exposure_wei(
+    clearings: impl Iterator<Item = (ApexAddress, ApexAddress, U256, U256)>,
+    wei_per_unit18: &HashMap<ApexAddress, f64>,
+) -> f64 {
+    let mut net: HashMap<ApexAddress, f64> = HashMap::new();
+    for (sell_token, buy_token, sold, bought) in clearings {
+        *net.entry(sell_token).or_default() -= crate::dataset::u256_to_f64(sold);
+        *net.entry(buy_token).or_default() += crate::dataset::u256_to_f64(bought);
+    }
+    let mut net: Vec<(ApexAddress, f64)> = net.into_iter().collect();
+    net.sort_by_key(|(token, _)| token.0);
+    net.into_iter()
+        .filter_map(|(token, amount18)| Some(amount18.abs() * wei_per_unit18.get(&token)?))
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

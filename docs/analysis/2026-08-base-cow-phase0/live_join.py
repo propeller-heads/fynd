@@ -63,12 +63,20 @@ def summarize(directory: Path) -> dict:
     solve_ms: list[int] = []
     queue_ms: list[int] = []
     counters: Counter[str] = Counter()
-    # Per bracket: the signed APEX-vs-Fynd gap of every order the batch filled, plus the
-    # batch-vs-singles gap where the singles control also filled.
-    gaps: dict[str, list[float]] = defaultdict(list)
-    gaps_usd: dict[str, float] = defaultdict(float)
+    # Per bracket, per baseline: the SIGNED gap of every order the batch filled — winners and
+    # losers together, because a uniform clearing price can leave a fill worse off than routing it
+    # alone would have. `fynd` = Fynd's quote at the same block state; `executed` = what the trade
+    # actually settled for on-chain.
+    gaps: dict[tuple[str, str], list[float]] = defaultdict(list)
+    gaps_usd: dict[tuple[str, str], float] = defaultdict(float)
+    losses_usd: dict[tuple[str, str], float] = defaultdict(float)
+    loss_count: dict[tuple[str, str], int] = defaultdict(int)
     notional_usd: dict[str, float] = defaultdict(float)
     vs_singles: dict[str, list[float]] = defaultdict(list)
+    # Internalization is per bracket-solve; weight each by its filled notional so a tiny solve
+    # cannot swing the average.
+    pool_cleared_wei: dict[str, float] = defaultdict(float)
+    filled_notional_wei: dict[str, float] = defaultdict(float)
     unmatched_ids = 0
     no_fynd_quote = 0
     filled_orders: dict[str, int] = defaultdict(int)
@@ -82,6 +90,8 @@ def summarize(directory: Path) -> dict:
             for key, value in (record.get("counters") or {}).items():
                 if isinstance(value, (int, float)):
                     counters[key] += value
+            pool_cleared_wei[bracket] += record.get("pool_cleared_wei") or 0.0
+            filled_notional_wei[bracket] += record.get("filled_notional_wei") or 0.0
             singles = {
                 single["id"]: single.get("bought_raw")
                 for single in record.get("singles") or []
@@ -98,21 +108,33 @@ def summarize(directory: Path) -> dict:
                     continue
                 # Fynd's quote at the SAME state as this bracket: top = N-1, bottom = N.
                 state = comparison.get("top" if bracket == "top" else "back") or {}
-                fynd_out = state.get("fynd_amount_out")
                 apex_out = order.get("bought_raw")
-                if fynd_out is None or apex_out is None:
+                if apex_out is None:
                     no_fynd_quote += 1
                     continue
                 fill_ratio = min(1.0, order.get("fill_ratio") or 1.0)
-                # Pro-rata the baseline: the batch may have filled only part of the order.
-                gap = bps(float(apex_out), float(fynd_out) * fill_ratio)
-                if gap is None:
-                    no_fynd_quote += 1
-                    continue
-                gaps[bracket].append(gap)
                 usd = state.get("settled_value_usd") or 0.0
                 notional_usd[bracket] += usd * fill_ratio
-                gaps_usd[bracket] += gap / 10_000.0 * usd * fill_ratio
+                # Two baselines, both pro-rated to what the batch actually filled: Fynd's quote at
+                # this bracket's state, and the amount the trade really settled for on-chain.
+                baselines = {
+                    "fynd": state.get("fynd_amount_out"),
+                    "executed": comparison.get("settled_amount_out"),
+                }
+                for baseline_name, baseline_out in baselines.items():
+                    if baseline_out is None:
+                        if baseline_name == "fynd":
+                            no_fynd_quote += 1
+                        continue
+                    gap = bps(float(apex_out), float(baseline_out) * fill_ratio)
+                    if gap is None:
+                        continue
+                    key = (bracket, baseline_name)
+                    gaps[key].append(gap)
+                    gaps_usd[key] += gap / 10_000.0 * usd * fill_ratio
+                    if gap < 0:
+                        loss_count[key] += 1
+                        losses_usd[key] += -gap / 10_000.0 * usd * fill_ratio
                 single_out = singles.get(order["id"])
                 if single_out is not None:
                     single_gap = bps(float(apex_out), float(single_out) * fill_ratio)
@@ -156,12 +178,30 @@ def summarize(directory: Path) -> dict:
         "queue_ms_max": max(queue_ms, default=0),
         "apex_counters": dict(sorted(counters.items())),
         "join_losses": {"ids_without_comparison": unmatched_ids, "no_fynd_quote": no_fynd_quote},
-        "apex_vs_fynd_same_state": {
-            bracket: stats(values) | {
-                "notional_usd": round(notional_usd[bracket], 2),
-                "surplus_usd": round(gaps_usd[bracket], 2),
+        # Signed, so `net_surplus_usd` already carries the losing side; `negative_*` breaks that
+        # out so gross and net can both be reported.
+        "apex_vs_baseline_same_state": {
+            f"{bracket}_vs_{baseline}": stats(values) | {
+                "filled_notional_usd": round(notional_usd[bracket], 2),
+                "net_surplus_usd": round(gaps_usd[(bracket, baseline)], 2),
+                "negative_fill_gaps": loss_count[(bracket, baseline)],
+                "negative_gap_usd": round(losses_usd[(bracket, baseline)], 2),
+                "gross_surplus_usd": round(
+                    gaps_usd[(bracket, baseline)] + losses_usd[(bracket, baseline)], 2
+                ),
             }
-            for bracket, values in sorted(gaps.items())
+            for (bracket, baseline), values in sorted(gaps.items())
+        },
+        "internalization": {
+            bracket: {
+                "share": round(
+                    max(0.0, min(1.0, 1.0 - pool_cleared_wei[bracket] / (2.0 * filled))), 4
+                ),
+                "pool_cleared_wei": round(pool_cleared_wei[bracket], 2),
+                "filled_notional_wei": round(filled, 2),
+            }
+            for bracket, filled in sorted(filled_notional_wei.items())
+            if filled > 0
         },
         "batch_vs_singles": {
             bracket: stats(values) for bracket, values in sorted(vs_singles.items())

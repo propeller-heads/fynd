@@ -386,29 +386,6 @@ struct SnapshotMeta {
     current_quotes: usize,
 }
 
-/// Per-token NET pool exposure valued in wei, over one solve's pool clearings.
-///
-/// A pool clearing's `sold_amount` leaves the pool in `pair.sell_token`; `bought_amount` enters
-/// it in `pair.buy_token`, both in 18-dec space. `internalization = 1 − Σ|net| / (2 × order
-/// notional)`: a batch cleared purely order-against-order nets to zero pool exposure (share 1),
-/// while a single order routed entirely through pools has |net| = 2 × its notional (share 0) —
-/// per-token netting keeps multi-hop intermediates out of the sum (grill r2 F5).
-fn net_pool_exposure_wei(
-    clearings: impl Iterator<Item = (ApexAddress, ApexAddress, ApexU256, ApexU256)>,
-    wei_per_unit18: &HashMap<ApexAddress, f64>,
-) -> f64 {
-    let mut net: HashMap<ApexAddress, f64> = HashMap::new();
-    for (sell_token, buy_token, sold, bought) in clearings {
-        *net.entry(sell_token).or_default() -= u256_to_f64(alloy_u256(sold));
-        *net.entry(buy_token).or_default() += u256_to_f64(alloy_u256(bought));
-    }
-    let mut net: Vec<(ApexAddress, f64)> = net.into_iter().collect();
-    net.sort_by_key(|(token, _)| token.0);
-    net.into_iter()
-        .filter_map(|(token, amount18)| Some(amount18.abs() * wei_per_unit18.get(&token)?))
-        .sum()
-}
-
 fn alloy_u256(value: ApexU256) -> alloy::primitives::U256 {
     alloy::primitives::U256::from_le_bytes(value.to_le_bytes::<32>())
 }
@@ -419,20 +396,6 @@ fn to_apex_u256(value: alloy::primitives::U256) -> ApexU256 {
 
 fn biguint_from_apex(value: ApexU256) -> BigUint {
     BigUint::from_bytes_le(&value.to_le_bytes::<32>())
-}
-
-/// Wei per 18-dec unit of `token`, from its tycho rational: `10^(dec−18) · den/num` as f64 —
-/// reporting-precision only, never fed back into APEX.
-fn wei_per_unit18(input: &TokenPriceInput) -> f64 {
-    let num = biguint_f64(&input.numerator);
-    if num == 0.0 {
-        return 0.0;
-    }
-    biguint_f64(&input.denominator) / num * 10f64.powi(input.decimals as i32 - 18)
-}
-
-fn biguint_f64(value: &BigUint) -> f64 {
-    value.to_string().parse().unwrap_or(0.0)
 }
 
 #[derive(Default)]
@@ -650,7 +613,7 @@ fn solve_batch(
 
         let wei_prices: HashMap<ApexAddress, f64> = price_inputs
             .iter()
-            .map(|(t, p)| (*t, wei_per_unit18(p)))
+            .map(|(t, p)| (*t, apex_batch::prices::wei_per_unit18(p)))
             .collect();
 
         let mut apex_tokens: HashMap<ApexAddress, ApexToken> = HashMap::new();
@@ -853,7 +816,7 @@ fn solve_batch(
             }
         };
 
-        pool_cleared_wei += net_pool_exposure_wei(
+        pool_cleared_wei += apex_batch::prices::net_pool_exposure_wei(
             result.pool_clearings.iter().map(|c| {
                 (
                     c.pair.sell_token.address,
@@ -2247,7 +2210,8 @@ mod tests {
             (c, b, ApexU256::from(50u64), ApexU256::from(200u64)),
         ];
         let wei_prices = HashMap::from([(a, 1.0f64), (b, 0.5), (c, 2.0)]);
-        let exposure = net_pool_exposure_wei(clearings.into_iter(), &wei_prices);
+        let exposure =
+            apex_batch::prices::net_pool_exposure_wei(clearings.into_iter(), &wei_prices);
         // Net B = +200 − 200 = 0; net A = +100 (into pools); net C = −50 (out of pools).
         // |100|·1.0 + |50|·2.0 = 200 wei = 2 × the order's 100-wei notional.
         assert!((exposure - 200.0).abs() < 1e-9, "{exposure}");
@@ -2258,7 +2222,8 @@ mod tests {
     /// Two perfectly crossing orders never touch pools: exposure 0, internalization 1.
     #[test]
     fn test_pure_cross_internalization_is_one() {
-        let exposure = net_pool_exposure_wei(std::iter::empty(), &HashMap::new());
+        let exposure =
+            apex_batch::prices::net_pool_exposure_wei(std::iter::empty(), &HashMap::new());
         assert_eq!(exposure, 0.0);
         let internalization = (1.0f64 - exposure / (2.0 * 100.0)).clamp(0.0, 1.0);
         assert!((internalization - 1.0).abs() < 1e-9);

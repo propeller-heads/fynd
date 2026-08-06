@@ -237,6 +237,12 @@ impl ApexRuntime {
                     })
                 })
                 .collect();
+            // Internalization on FILLED notional: 1 = the bracket cleared purely order-against-
+            // order, 0 = everything routed through pools. `None` when nothing filled, so a
+            // fill-free bracket cannot masquerade as fully internalized.
+            let internalization = (report.filled_notional_wei > 0.0).then(|| {
+                (1.0 - report.pool_cleared_wei / (2.0 * report.filled_notional_wei)).clamp(0.0, 1.0)
+            });
             let line = serde_json::json!({
                 "block": block,
                 "bracket": bracket.label(),
@@ -244,6 +250,9 @@ impl ApexRuntime {
                 "solve_wall_ms": u128_ms(delivery.timing.solve_wall.as_millis()),
                 "component_solve_ms": report.component_solve_ms,
                 "counters": report.counters,
+                "pool_cleared_wei": report.pool_cleared_wei,
+                "filled_notional_wei": report.filled_notional_wei,
+                "internalization_share": internalization,
                 "orders": orders,
                 "singles": singles,
             });

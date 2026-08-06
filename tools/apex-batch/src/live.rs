@@ -149,6 +149,14 @@ pub struct LiveBatchReport {
     pub singles: Vec<SingleResult>,
     pub counters: LiveCounters,
     pub component_solve_ms: Vec<u128>,
+    /// Σ|per-token net pool exposure| in wei, and the notional actually sold into clearings, both
+    /// summed over this bracket's components. Their ratio is the internalization share:
+    /// `1 − pool_cleared_wei / (2 × filled_notional_wei)`. The denominator is the REALIZED
+    /// notional, not the submitted one — with submitted notional the share degrades into a
+    /// fill-rate proxy, since every skipped or cut component would sit in the denominator with no
+    /// pool flow able to reach the numerator.
+    pub pool_cleared_wei: f64,
+    pub filled_notional_wei: f64,
 }
 
 /// Whether a block's decoded trades can form a batch worth dispatching: at least two orders
@@ -318,7 +326,7 @@ pub fn solve_live_batch(
             continue;
         }
 
-        solve_component(
+        let exposure = solve_component(
             &component_orders,
             &component_pools,
             input,
@@ -328,6 +336,8 @@ pub fn solve_live_batch(
             counters,
             &mut report.component_solve_ms,
         );
+        report.pool_cleared_wei += exposure.pool_cleared_wei;
+        report.filled_notional_wei += exposure.filled_notional_wei;
 
         if run_singles {
             let mut singled_ids: HashSet<&str> = HashSet::new();
@@ -347,7 +357,8 @@ pub fn solve_live_batch(
                 let mut single_statuses = Vec::new();
                 let mut single_counters = LiveCounters::default();
                 let mut single_times = Vec::new();
-                solve_component(
+                // The singles control's own exposure is not part of the batch's internalization.
+                let _ = solve_component(
                     &[order],
                     &component_pools,
                     input,
@@ -374,6 +385,13 @@ pub fn solve_live_batch(
     report
 }
 
+/// One component's contribution to the bracket's internalization accounting.
+#[derive(Debug, Default, Clone, Copy)]
+struct ComponentExposure {
+    pool_cleared_wei: f64,
+    filled_notional_wei: f64,
+}
+
 /// Build and run one APEX call for one component; push per-order statuses.
 #[allow(clippy::too_many_arguments)]
 fn solve_component(
@@ -385,7 +403,8 @@ fn solve_component(
     statuses: &mut Vec<(String, OrderStatus)>,
     counters: &mut LiveCounters,
     solve_ms: &mut Vec<u128>,
-) {
+) -> ComponentExposure {
+    let mut exposure = ComponentExposure::default();
     // Token closure = order tokens ∪ pool tokens, all priced (the two_hops precondition).
     let mut closure: HashSet<ApexAddress> = HashSet::new();
     for order in component_orders {
@@ -478,7 +497,7 @@ fn solve_component(
         order_amount18.push((order, u256_to_f64(amount18.0)));
     }
     if order_amount18.is_empty() {
-        return;
+        return exposure;
     }
 
     let pools: Vec<Pool> = component_pools
@@ -542,7 +561,7 @@ fn solve_component(
             for (order, _) in &order_amount18 {
                 statuses.push((order.id.clone(), OrderStatus::ComponentErrored));
             }
-            return;
+            return exposure;
         }
         Err(_) => {
             counters.solver_panics += 1;
@@ -550,12 +569,33 @@ fn solve_component(
             for (order, _) in &order_amount18 {
                 statuses.push((order.id.clone(), OrderStatus::ComponentErrored));
             }
-            return;
+            return exposure;
         }
     };
     if result.deadline_fired {
         counters.deadline_fired_components += 1;
     }
+
+    // Internalization inputs: net pool exposure over this solve's per-hop clearings, valued in
+    // wei, against the notional the orders actually sold (accumulated in the fill arm below).
+    let wei_prices: HashMap<ApexAddress, f64> = price_inputs
+        .iter()
+        .map(|(token, price)| (*token, crate::prices::wei_per_unit18(price)))
+        .collect();
+    exposure.pool_cleared_wei += crate::prices::net_pool_exposure_wei(
+        result
+            .pool_clearings
+            .iter()
+            .map(|clearing| {
+                (
+                    clearing.pair.sell_token.address,
+                    clearing.pair.buy_token.address,
+                    clearing.sold_amount,
+                    clearing.bought_amount,
+                )
+            }),
+        &wei_prices,
+    );
 
     let clearings: HashMap<&str, _> = result
         .limit_order_clearings
@@ -574,6 +614,11 @@ fn solve_component(
                 };
                 let bought_raw =
                     scale_out.scale_down_floor(Scaled18(from_apex_u256(clearing.bought_amount)));
+                exposure.filled_notional_wei += u256_to_f64(from_apex_u256(clearing.sold_amount)) *
+                    wei_prices
+                        .get(&order.token_in)
+                        .copied()
+                        .unwrap_or(0.0);
                 if fill_ratio < 1.0 - 1e-9 {
                     counters.partially_filled += 1;
                     OrderStatus::PartiallyFilled { bought_raw, fill_ratio }
@@ -597,6 +642,7 @@ fn solve_component(
         };
         statuses.push((order.id.clone(), status));
     }
+    exposure
 }
 
 fn component_error_kind(error: &apex_solver::core::ApexError) -> &'static str {
