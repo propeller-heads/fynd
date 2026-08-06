@@ -51,8 +51,11 @@ pub(crate) struct ChainArgs {
     #[arg(long = "chain", value_name = "CHAIN", default_value = "ethereum")]
     pub name: String,
 
-    /// Chain RPC URL
-    #[arg(long, env = "RPC_URL", required_unless_present = "rpc_url_file")]
+    /// Chain RPC URL. When neither this nor --rpc-url-file is given, the environment is
+    /// consulted: first the chain-specific `<CHAIN>_RPC_URL` (e.g. `BASE_RPC_URL` for
+    /// --chain base), then plain `RPC_URL` — the specific name wins so a multi-chain shell
+    /// profile cannot point a Base run at another chain's endpoint.
+    #[arg(long)]
     pub rpc_url: Option<String>,
 
     /// Read the chain RPC URL from this file's first line instead — keeps the endpoint (and
@@ -66,7 +69,8 @@ pub(crate) struct ChainArgs {
 }
 
 impl ChainArgs {
-    /// The RPC URL, from `--rpc-url-file` when given (first line, trimmed), else `--rpc-url`.
+    /// The RPC URL: `--rpc-url-file` (first line, trimmed) > `--rpc-url` > env
+    /// `<CHAIN>_RPC_URL` > env `RPC_URL`.
     pub(crate) fn rpc_url(&self) -> anyhow::Result<String> {
         if let Some(path) = self.rpc_url_file.as_deref() {
             let contents = std::fs::read_to_string(path)
@@ -81,9 +85,21 @@ impl ChainArgs {
             }
             return Ok(url.to_string());
         }
-        self.rpc_url
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("no RPC URL: pass --rpc-url or --rpc-url-file"))
+        if let Some(url) = self.rpc_url.clone() {
+            return Ok(url);
+        }
+        let chain_var = format!("{}_RPC_URL", self.name.to_uppercase());
+        if let Ok(url) = std::env::var(&chain_var) {
+            if !url.trim().is_empty() {
+                return Ok(url.trim().to_string());
+            }
+        }
+        if let Ok(url) = std::env::var("RPC_URL") {
+            if !url.trim().is_empty() {
+                return Ok(url.trim().to_string());
+            }
+        }
+        anyhow::bail!("no RPC URL: pass --rpc-url/--rpc-url-file or set {chain_var} or RPC_URL")
     }
 
     /// The decoder address book for this run: `--registry`'s file when given, otherwise the book
