@@ -3505,6 +3505,7 @@ dependencies = [
  "async-channel",
  "async-trait",
  "chrono",
+ "clap",
  "futures 0.3.32",
  "fynd-test-fixtures",
  "itertools 0.14.0",

@@ -183,3 +183,8 @@ fynd-test-fixtures = { path = "test-fixtures" }
 # Dev dependencies
 rstest = "0.18"
 tempfile = "3"
+
+# Release code with the symbols a profiler needs. Used by the benchmark
+[profile.profiling]
+inherits = "release"
+debug = true
