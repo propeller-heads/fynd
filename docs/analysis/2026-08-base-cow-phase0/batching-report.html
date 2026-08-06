@@ -55,10 +55,12 @@ attributes across ~30 venue/solver books, fee-adjusted, wash-filtered (14,490 or
 or through pools). Components with at least two orders go to the APEX batch solver with the
 400 deepest native pools around the order tokens (min TVL 1 ETH); singleton orders are not
 batchable and score zero.</li>
-<li>Every order gets a limit: 100 bps below its baseline. The baseline is the <b>per-order
-routing quote at the exact same market state</b> the batch clears at (Base block 49,575,430),
-so the batch and the alternative see identical prices — no time-drift enters the
-comparison.</li>
+<li>Every order gets a limit: 100 bps below its baseline. The baseline is a <b>reference
+route computed at the exact same market state</b> the batch clears at (Base block
+49,575,430): the best single route of at most two hops through the same pool subset, no
+splits. Same-state on both sides means no time-drift enters the comparison — but note this
+reference is deliberately simple and <b>weaker than Fynd's production router</b>; the
+comparison against the full router is reported separately below.</li>
 <li>An order's gain is <code>max(0, batch output − routing baseline)</code>, pro-rata for
 partial fills, valued in USD at day prices. Orders whose token-pair price moved more than
 100&nbsp;bps between trade day and measurement state are excluded from gain (drift guard).</li>
@@ -75,10 +77,10 @@ That side is reported separately in the net column rather than hidden.</div>
 <h2>Results</h2>
 <div class="tiles">
   <div class="tile"><div class="big">+0.025 bps</div>
-    <div class="lbl">Avg gain per flow-dollar, 1-block batches</div>
+    <div class="lbl">Avg gain per flow-dollar vs the reference route, 1-block batches</div>
     <div class="note">0.13% of flow batched</div></div>
   <div class="tile"><div class="big">+3.38 bps</div>
-    <div class="lbl">Avg gain per flow-dollar, 5-minute batches</div>
+    <div class="lbl">Avg gain per flow-dollar vs the reference route, 5-minute batches</div>
     <div class="note">15.2% of flow batched &middot; +1.94 net of counterparty losses</div></div>
   <div class="tile"><div class="big">&minus;118 / &minus;42 bps</div>
     <div class="lbl">Batch clearing price vs routing the same order (median, w=1 &rarr; w=150)</div>
@@ -105,10 +107,13 @@ entirely from the <i>frequency</i> side: the share of flow that finds a counterp
 order's counterparty can do worse than its own routing baseline — at w=5 the counterparty
 losses fully consume the gains.</p>
 
-<h2>What routing the same orders costs</h2>
-<p>The gain above floors each order at 100 bps below its routing baseline. The sharper
-question: for the orders the batch <i>did</i> fill, did the clearing price beat what Fynd's
-routing would deliver at the identical state?</p>
+<h2>What the full router delivers on the same orders</h2>
+<p>The gain above is measured against the simple reference route. The sharper question: for
+the orders the batch <i>did</i> fill, did the clearing price beat what <b>Fynd's production
+router</b> — splits, multi-hop, every pool class — would deliver at the identical state?
+These are different baselines, and the answers differ in sign: gain is a positive-only sum
+against the weak reference, while the table below is the signed median against the strong
+router, including the majority of orders where routing wins.</p>
 
 <table>
 <tr><th>window</th><th>orders<br>compared</th><th>clearing beats<br>routing</th>
