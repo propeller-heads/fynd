@@ -25,6 +25,18 @@ from pathlib import Path
 FILLED = ("filled", "partially_filled")
 
 
+
+def window_filter() -> int | None:
+    """`--window N` restricts to batches of that window length. Records written before
+    multi-window support carry no tag and count as the 1-block case."""
+    if "--window" in sys.argv:
+        return int(sys.argv[sys.argv.index("--window") + 1])
+    return None
+
+
+def wrong_window(record: dict, wanted: int | None) -> bool:
+    return wanted is not None and (record.get("window_blocks") or 1) != wanted
+
 def read_jsonl(path: Path):
     with path.open() as handle:
         for line in handle:
@@ -57,6 +69,7 @@ def bps(apex_out: float, fynd_out: float) -> float | None:
 
 def summarize(directory: Path) -> dict:
     comparisons = load_comparisons(directory)
+    wanted_window = window_filter()
 
     blocks_dispatched: set[int] = set()
     status_counts: Counter[str] = Counter()
@@ -83,6 +96,8 @@ def summarize(directory: Path) -> dict:
 
     for path in sorted(directory.glob("apex-*.jsonl")):
         for record in read_jsonl(path):
+            if wrong_window(record, wanted_window):
+                continue
             bracket = record.get("bracket", "?")
             blocks_dispatched.add(record.get("block", -1))
             solve_ms.append(record.get("solve_wall_ms", 0))
@@ -213,6 +228,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=None,
+        help="only batches of this window length in blocks (1 = in-block)",
+    )
     args = parser.parse_args()
 
     if not args.directory.is_dir():

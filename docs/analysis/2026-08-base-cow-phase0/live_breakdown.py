@@ -29,6 +29,18 @@ BUCKETS = [
 ]
 
 
+
+def window_filter() -> int | None:
+    """`--window N` restricts to batches of that window length. Records written before
+    multi-window support carry no tag and count as the 1-block case."""
+    if "--window" in sys.argv:
+        return int(sys.argv[sys.argv.index("--window") + 1])
+    return None
+
+
+def wrong_window(record: dict, wanted: int | None) -> bool:
+    return wanted is not None and (record.get("window_blocks") or 1) != wanted
+
 def read_jsonl(path: Path):
     with path.open() as handle:
         for line in handle:
@@ -75,13 +87,14 @@ def main() -> int:
             if tx is not None and index is not None:
                 comparisons[f"{tx}:{index}"] = record
 
+    wanted_window = window_filter()
     by_bucket: dict[tuple[str, str], list[tuple[float, float]]] = defaultdict(list)
     by_fill: dict[tuple[str, str], list[tuple[float, float]]] = defaultdict(list)
     seen: set[str] = set()
 
     for path in sorted(directory.glob("apex-*.jsonl")):
         for record in read_jsonl(path):
-            if record.get("bracket") != bracket_wanted:
+            if record.get("bracket") != bracket_wanted or wrong_window(record, wanted_window):
                 continue
             for order in record.get("orders") or []:
                 status = order.get("status")
