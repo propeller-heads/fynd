@@ -1116,6 +1116,14 @@ pub struct Route {
     /// encoding path consumes it.
     #[serde(skip, default)]
     tokens: FxHashMap<Bytes, Token>,
+    /// Amount out this route delivers if its pAMM legs fall back to Uniswap V3.
+    ///
+    /// Set by the worker for routes that contain a `propammrouter:` leg; `None` for every other
+    /// route. The encoder derives `min_amount_out` from it, because a value derived from the pAMM
+    /// quote is too high for the fallback to clear. In-process only — `#[serde(skip)]`, so it
+    /// never enters the wire format.
+    #[serde(skip, default)]
+    fallback_amount_out: Option<BigUint>,
 }
 
 impl Route {
@@ -1134,7 +1142,18 @@ impl Route {
         if swaps.is_empty() {
             return Err(RouteValidationError::EmptyRoute);
         }
-        Ok(Self { swaps, tokens: tokens.into_iter().collect() })
+        Ok(Self { swaps, tokens: tokens.into_iter().collect(), fallback_amount_out: None })
+    }
+
+    /// Sets the amount out this route delivers if its pAMM legs fall back to Uniswap V3.
+    pub(crate) fn set_fallback_amount_out(&mut self, amount_out: BigUint) {
+        self.fallback_amount_out = Some(amount_out);
+    }
+
+    /// Amount out this route delivers if its pAMM legs fall back to Uniswap V3. `None` unless the
+    /// worker computed one, which it does only for routes with a `propammfallback:` leg.
+    pub fn fallback_amount_out(&self) -> Option<&BigUint> {
+        self.fallback_amount_out.as_ref()
     }
 
     /// Returns the swaps in this route.
@@ -2042,7 +2061,8 @@ mod tests {
         let swaps: Vec<Swap> = (0..num_swaps)
             .map(|i| make_swap(i as u8, (i + 1) as u8, 1000, 990))
             .collect();
-        let route = Route { swaps, tokens: FxHashMap::default() };
+        let route =
+            Route { swaps, tokens: FxHashMap::default(), fallback_amount_out: None };
         assert_eq!(route.total_gas(), BigUint::from(expected_gas));
     }
 

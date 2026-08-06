@@ -44,6 +44,9 @@ use crate::{
     price_guard::{
         guard::PriceGuard, provider::PriceProvider, provider_registry::PriceProviderRegistry,
     },
+    propamm_fallback::{
+        fee_fetcher::FallbackFeeFetcher, SharedFallbackFees, PROPAMM_ROUTER_ADDRESS, PROPAMM_VENUES,
+    },
     types::constants::native_token,
     worker_pool::{
         pool::{WorkerPool, WorkerPoolBuilder},
@@ -77,6 +80,9 @@ pub mod defaults {
     pub const METRICS_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
     /// How often router fees are refreshed from the on-chain FeeCalculator contract.
     pub const ROUTER_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+    /// How often the PropAMMRouter's Uniswap V3 fee tiers are refreshed. Governance changes them
+    /// rarely, so this is deliberately slower than a block.
+    pub const FALLBACK_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
     /// Delay before reconnecting to the Tycho feed after a disconnect.
     pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
     /// Minimum number of solver pool responses required before returning a quote (`0` = wait for
@@ -389,6 +395,7 @@ struct BuiltComponents {
     tycho_feed: TychoFeed,
     gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
     router_fee_fetcher: Option<RouterFeeFetcher>,
+    fallback_fee_fetcher: Option<FallbackFeeFetcher>,
     computation_manager: ComputationManager,
     computation_event_rx: broadcast::Receiver<MarketEvent>,
     computation_shutdown_tx: broadcast::Sender<()>,
@@ -756,6 +763,8 @@ impl FyndBuilder {
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
+        // Created before the pools so every worker reads the same tiers the fetcher refreshes.
+        let fallback_fees = SharedFallbackFees::default();
 
         let pools = std::mem::take(&mut self.pools);
 
@@ -795,7 +804,8 @@ impl FyndBuilder {
                         .algorithm_config(algo_cfg)
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
-                        .liquidity_scope(pool_scope);
+                        .liquidity_scope(pool_scope)
+                        .fallback_fees(fallback_fees.clone());
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),
@@ -815,7 +825,8 @@ impl FyndBuilder {
                         .algorithm_config(algo_cfg)
                         .num_workers(custom.num_workers)
                         .task_queue_capacity(custom.task_queue_capacity)
-                        .liquidity_scope(pool_scope);
+                        .liquidity_scope(pool_scope)
+                        .fallback_fees(fallback_fees.clone());
                     let builder = (custom.configure)(builder);
                     builder.build(
                         market_data.clone(),
@@ -871,6 +882,33 @@ impl FyndBuilder {
             }
         };
 
+        // The PropAMMRouter is an Ethereum mainnet deployment, so no other chain has fee tiers
+        // to read. Without the fetcher every pair resolves through the compiled-in default.
+        let fallback_fee_fetcher = if chain == Chain::Ethereum {
+            let venues: Vec<Bytes> = PROPAMM_VENUES
+                .iter()
+                .filter_map(|venue| Bytes::from_str(venue).ok())
+                .collect();
+            match Bytes::from_str(PROPAMM_ROUTER_ADDRESS) {
+                Ok(router) => Some(
+                    FallbackFeeFetcher::new(
+                        self.rpc_url.as_str(),
+                        &router,
+                        &venues,
+                        fallback_fees.clone(),
+                        defaults::FALLBACK_FEE_REFRESH_INTERVAL,
+                    )
+                    .map_err(|e| SolverBuildError::RouterFeeFetcher(e.to_string()))?,
+                ),
+                Err(e) => {
+                    tracing::warn!(error = %e, "invalid PropAMMRouter address; fee tiers stay at their defaults");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Only start price providers when the guard is enabled.
         // When disabled, per-request attempts to enable the guard return an error.
         let router_config = WorkerPoolRouterConfig::default()
@@ -893,6 +931,7 @@ impl FyndBuilder {
             tycho_feed,
             gas_price_fetcher,
             router_fee_fetcher,
+            fallback_fee_fetcher,
             computation_manager,
             computation_event_rx,
             computation_shutdown_tx,
@@ -933,6 +972,9 @@ impl FyndBuilder {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
+        if let Some(fetcher) = c.fallback_fee_fetcher {
+            tokio::spawn(async move { fetcher.run().await });
+        }
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -997,6 +1039,9 @@ impl FyndBuilder {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
+        if let Some(fetcher) = c.fallback_fee_fetcher {
+            tokio::spawn(async move { fetcher.run().await });
+        }
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -1071,6 +1116,9 @@ impl FyndBuilder {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
+        if let Some(fetcher) = c.fallback_fee_fetcher {
+            tokio::spawn(async move { fetcher.run().await });
+        }
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)

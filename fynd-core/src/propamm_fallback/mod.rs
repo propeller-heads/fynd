@@ -27,6 +27,24 @@ use crate::{
 /// Must match `tycho-execution`'s `PROPAMM_ROUTER_PREFIX`.
 pub const PROPAMM_ROUTER_PREFIX: &str = "propammrouter:";
 
+/// PropAMMRouter deployment on Ethereum mainnet.
+///
+/// <https://github.com/lambdaclass/propamm-router-contracts>
+pub const PROPAMM_ROUTER_ADDRESS: &str = "0x4DdF368080CD7946db5b459aD591c350158175e1";
+
+/// pAMM venues on the router's whitelist that Fynd routes through.
+///
+/// Only whitelisted venues may use `PROPAMM_ROUTER_PREFIX`. The router reverts `UnknownVenue` for
+/// any other address, which fires the catch arm and executes every swap on Uniswap V3 at a worse
+/// price than the pAMM gives. `FallbackFeeFetcher` reads each venue's pairs to learn which pairs
+/// need a fee tier.
+pub const PROPAMM_VENUES: &[&str] = &[
+    // Fermi (FermiSwapper)
+    "0x5979458912F80B96d30D4220af8E2e4925A33320",
+    // Kipseli
+    "0x71e790dd841c8A9061487cb3E78C288E75cE0B3d",
+];
+
 /// Protocol system whose pools the PropAMMRouter falls back to.
 const FALLBACK_PROTOCOL_SYSTEM: &str = "uniswap_v3";
 

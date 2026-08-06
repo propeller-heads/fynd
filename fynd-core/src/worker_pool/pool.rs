@@ -21,6 +21,7 @@ use crate::{
         market_data::MarketData,
     },
     graph::EdgeWeightUpdaterWithDerived,
+    propamm_fallback::SharedFallbackFees,
     types::internal::SolveTask,
     worker_pool::{
         registry::{
@@ -49,6 +50,8 @@ pub struct WorkerPoolConfig {
     task_queue_capacity: usize,
     /// Which liquidity this worker pool's workers ingest.
     liquidity_scope: LiquidityScope,
+    /// PropAMMRouter fee tiers, shared with the fetcher that refreshes them.
+    fallback_fees: SharedFallbackFees,
 }
 
 impl WorkerPoolConfig {
@@ -67,6 +70,7 @@ impl Default for WorkerPoolConfig {
             algorithm_config: AlgorithmConfig::default(),
             task_queue_capacity: 1000,
             liquidity_scope: LiquidityScope::default(),
+            fallback_fees: SharedFallbackFees::default(),
         }
     }
 }
@@ -118,6 +122,7 @@ impl WorkerPool {
 
         // Spawn workers
         let liquidity_scope = config.liquidity_scope;
+        let fallback_fees = config.fallback_fees.clone();
         let params = SpawnWorkersParams {
             algorithm: algorithm.clone(),
             pool_name: name.clone(),
@@ -130,6 +135,7 @@ impl WorkerPool {
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
             liquidity_scope,
+            fallback_fees,
         };
         let workers = config.spawner.spawn(params)?;
 
@@ -264,6 +270,12 @@ impl WorkerPoolBuilder {
     /// Sets which liquidity this pool's workers ingest.
     pub fn liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.config.liquidity_scope = scope;
+        self
+    }
+
+    /// Sets the PropAMMRouter fee tiers this pool's workers read.
+    pub fn fallback_fees(mut self, fallback_fees: SharedFallbackFees) -> Self {
+        self.config.fallback_fees = fallback_fees;
         self
     }
 

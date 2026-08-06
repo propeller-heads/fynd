@@ -29,7 +29,9 @@ use crate::{
         market_data::MarketData,
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
-    propamm_fallback::FallbackPoolIndex,
+    propamm_fallback::{
+        fallback_amount_out, FallbackAmountOut, FallbackPoolIndex, SharedFallbackFees,
+    },
     types::internal::SolveTask,
     worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
@@ -86,6 +88,8 @@ where
     liquidity_scope: LiquidityScope,
     /// Uniswap V3 pools the PropAMMRouter can fall back to, kept current from market events.
     fallback_pools: FallbackPoolIndex,
+    /// Fee tiers the PropAMMRouter falls back on, refreshed from chain by `FallbackFeeFetcher`.
+    fallback_fees: SharedFallbackFees,
 }
 
 impl<A> SolverWorker<A>
@@ -125,7 +129,14 @@ where
             pool_name,
             liquidity_scope: LiquidityScope::default(),
             fallback_pools: FallbackPoolIndex::default(),
+            fallback_fees: SharedFallbackFees::default(),
         }
+    }
+
+    /// Sets the fee tiers used to locate a pAMM leg's Uniswap V3 fallback pool.
+    pub(crate) fn with_fallback_fees(mut self, fallback_fees: SharedFallbackFees) -> Self {
+        self.fallback_fees = fallback_fees;
+        self
     }
 
     /// Sets which liquidity this worker ingests.
@@ -278,7 +289,7 @@ where
                     .unwrap_or(BigUint::ZERO);
                 let gas_price = result.gas_price().clone();
                 let algo_price_impact = result.price_impact();
-                let route = result.into_route();
+                let mut route = result.into_route();
 
                 if let Err(err) = route.validate() {
                     error!(
@@ -291,6 +302,40 @@ where
                         "{} produced an invalid route: {err}",
                         self.algorithm.name()
                     )));
+                }
+
+                // A route with a pAMM leg needs the amount out its Uniswap V3 fallback would
+                // deliver, because `min_amount_out` derived from the pAMM quote is too high for
+                // the fallback to clear. A route whose fallback cannot be priced is dropped: we
+                // would have no justifiable `min_amount_out` for it.
+                let fallback = {
+                    let market = self.market_data.read().await;
+                    fallback_amount_out(
+                        route.swaps(),
+                        &market,
+                        &self.fallback_fees.snapshot(),
+                        &self.fallback_pools,
+                    )
+                };
+                match fallback {
+                    FallbackAmountOut::NoPropAmmLeg => {}
+                    FallbackAmountOut::AmountOut(amount) => route.set_fallback_amount_out(amount),
+                    FallbackAmountOut::NoFallbackPool { component_id, fee } => {
+                        debug!(
+                            order_id = %order.id(),
+                            %component_id,
+                            fee,
+                            "dropping pAMM route: no Uniswap V3 pool at the router's fee tier"
+                        );
+                        return Err(SolveError::no_route_found(order.id()));
+                    }
+                    FallbackAmountOut::SplitNotSupported => {
+                        debug!(
+                            order_id = %order.id(),
+                            "dropping pAMM route: split routes are not supported yet"
+                        );
+                        return Err(SolveError::no_route_found(order.id()));
+                    }
                 }
 
                 // This is a first naive approach to getting the total gas of this quote
@@ -659,6 +704,7 @@ mod tests {
             DerivedData,
         },
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+        propamm_fallback::PROPAMM_ROUTER_PREFIX,
         types::{OrderSide, Route, RouteResult, Swap},
         AlgorithmError,
     };
@@ -793,6 +839,76 @@ mod tests {
             }
             other => panic!("expected AlgorithmError for invalid route, got {other:?}"),
         }
+    }
+
+    /// Mock algorithm that returns a single-leg route through a pAMM executed via the
+    /// PropAMMRouter. The market holds no Uniswap V3 pool for the pair, so the router's fallback
+    /// would revert and the worker must drop the route.
+    struct PropAMMRouteAlgorithm;
+
+    impl Algorithm for PropAMMRouteAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "propamm_route_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            _graph: &Self::GraphType,
+            _market: MarketData,
+            _label: Option<crate::feed::market_data::StateLabel>,
+            _derived: Option<SharedDerivedDataRef>,
+            _order: &Order,
+        ) -> Result<RouteResult, AlgorithmError> {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let swap = Swap::new(
+                "pamm".to_string(),
+                format!("{PROPAMM_ROUTER_PREFIX}fermiswap"),
+                token_a.address.clone(),
+                token_b.address.clone(),
+                BigUint::from(100u64),
+                BigUint::from(200u64),
+                BigUint::from(1u64),
+                component("pamm", &[token_a.clone(), token_b.clone()]),
+                Box::new(MockProtocolSim::new(2.0)),
+            );
+            let route = Route::new(vec![swap], HashMap::new()).expect("non-empty route");
+            Ok(RouteResult::new(route, num_bigint::BigInt::from(200), BigUint::from(1u64)))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    /// Without a Uniswap V3 pool at the router's fee tier the fallback reverts too, so quoting the
+    /// route would produce calldata with no justifiable `min_amount_out`.
+    #[tokio::test]
+    async fn test_quote_drops_pamm_route_without_a_fallback_pool() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let derived = DerivedData::new_shared();
+        let mut worker =
+            SolverWorker::new(market, derived, PropAMMRouteAlgorithm, 0, "test_pool".to_string());
+
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let result = worker
+            .quote(&ord, SolveParams::default())
+            .await;
+
+        assert!(
+            matches!(result, Err(SolveError::NoRouteFound { .. })),
+            "expected the unbacked pAMM route to be dropped, got {result:?}"
+        );
     }
 
     // ==================== wait_until_ready Tests ====================
