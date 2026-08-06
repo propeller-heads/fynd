@@ -72,9 +72,9 @@ struct Args {
     /// offline default; 1000 matches the live budget.
     #[arg(long, default_value_t = 3_000)]
     solve_deadline_ms: u64,
-    /// Cells solved concurrently (0 = one per core). Deadlines are wall-clock, so keep this
-    /// at or below the free core count when solve-time percentiles or deadline-bound results
-    /// must be reproducible.
+    /// Rayon thread budget for the whole sweep — cells AND their batches share one
+    /// work-stealing pool (0 = one thread per core). Deadlines are wall-clock, so keep this
+    /// at or below the free core count when solve-time distributions must be reproducible.
     #[arg(long, default_value_t = 0)]
     parallel_cells: usize,
     /// Batch windows in blocks. Fewer windows shrink the grid — e.g. a big-deadline budget
@@ -2035,6 +2035,11 @@ async fn main() -> Result<()> {
             let mut fynd_bps: Vec<f64> = Vec::new();
             let mut fynd_usd_delta = 0.0f64;
             let mut solve_times: Vec<u128> = Vec::new();
+            // Batches are independent solves, so they fan out over the SAME rayon pool the
+            // cells run on — work-stealing keeps every thread busy even when few cells remain.
+            // Collect preserves batch order, so the f64 accumulation order (and thus the
+            // output) is identical to the sequential loop.
+            let mut cell_batches: Vec<(&HashMap<ApexAddress, f64>, Vec<Intent>)> = Vec::new();
             for (intents, day_price) in &days {
                 let mut by_window: BTreeMap<u64, Vec<Intent>> = BTreeMap::new();
                 for intent in intents {
@@ -2044,6 +2049,13 @@ async fn main() -> Result<()> {
                         .push(intent.clone());
                 }
                 for batch in by_window.into_values() {
+                    cell_batches.push((day_price, batch));
+                }
+            }
+            let batch_results: Vec<(BatchOutcome, Vec<u128>)> = cell_batches
+                .into_par_iter()
+                .map(|(day_price, batch)| {
+                    let mut batch_solve_times = Vec::new();
                     let outcome = solve_batch(
                         &batch,
                         &snapshot,
@@ -2053,20 +2065,24 @@ async fn main() -> Result<()> {
                         anchor,
                         serializable_only,
                         &scope_quotes[&serializable_only],
-                        &mut solve_times,
+                        &mut batch_solve_times,
                         Duration::from_millis(args.solve_deadline_ms),
                     );
-                    matched += outcome.matched_usd;
-                    surplus += outcome.surplus_usd;
-                    surplus_ex_drift += outcome.surplus_ex_drift_usd;
-                    order_surpluses.extend(outcome.order_surpluses_usd);
-                    pool_wei += outcome.pool_cleared_wei;
-                    notional_wei += outcome.order_notional_wei;
-                    filled_wei += outcome.filled_notional_wei;
-                    fynd_bps.extend(outcome.fynd_bps);
-                    fynd_usd_delta += outcome.fynd_usd_delta;
-                    counters.absorb(&outcome.counters);
-                }
+                    (outcome, batch_solve_times)
+                })
+                .collect();
+            for (outcome, batch_solve_times) in batch_results {
+                solve_times.extend(batch_solve_times);
+                matched += outcome.matched_usd;
+                surplus += outcome.surplus_usd;
+                surplus_ex_drift += outcome.surplus_ex_drift_usd;
+                order_surpluses.extend(outcome.order_surpluses_usd);
+                pool_wei += outcome.pool_cleared_wei;
+                notional_wei += outcome.order_notional_wei;
+                filled_wei += outcome.filled_notional_wei;
+                fynd_bps.extend(outcome.fynd_bps);
+                fynd_usd_delta += outcome.fynd_usd_delta;
+                counters.absorb(&outcome.counters);
             }
             solve_times.sort_unstable();
             fynd_bps.sort_by(|a, b| a.partial_cmp(b).expect("finite bps"));
