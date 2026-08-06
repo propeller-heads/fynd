@@ -112,6 +112,35 @@ state block 49,575,430, full-coverage snapshot-state fynd quotes. Full table in
 4. **Matched volume is unchanged** (0.13% → 15.2% of day USD by window) — batching's addressable
    volume is set by order-flow connectivity, not by the pool universe.
 
+## Budget experiment — 4 s deadline, w ∈ {1, 5} (`budget-4s/`)
+
+Deliberately unrealistic budget (the live budget is 1 s) to separate search truncation from
+economics. From-disk on snapshot 49575430 (254 pools: 220 serializable + 34 v4 rebuilt from raw
+— first production use of the raw path, 34/34 ok), `--parallel-cells 4` for clean timing.
+APEX pooled-solve wall times (ms):
+
+| cell | mean | p50 | p90 | p99 | max | empty-rate 4s (1s) | matched 4s vs 1s vs no_pools |
+|---|---|---|---|---|---|---|---|
+| w=1 current/pools | 2,439 | 3,170 | 4,020 | 4,037 | 4,091 | 44% (117%*) | $20,278 / $11,988 / $10,545 |
+| w=1 original/pools | 2,331 | 3,000 | 4,015 | 4,034 | 4,091 | 49% (163%*) | $22,820 / $22,958 / $10,551 |
+| w=5 current/pools | 2,370 | 3,277 | 4,024 | 4,040 | 4,132 | 55% (109%*) | $92,147 / $85,755 / $78,831 |
+| w=5 original/pools | 2,321 | 3,136 | 4,021 | 4,037 | 4,123 | 56% (125%*) | $84,446 / $85,269 / $78,846 |
+
+\* 1 s empty-rates over 100% because pool edges merged more components under contention; read as
+"essentially all". No-pools solves: 0–1 ms in every cell (the deterministic control reproduced
+across all three runs).
+
+Findings:
+1. **4x budget converts the pools axis from noise to signal, but the search still truncates**:
+   empty-return rate falls 99% → 44–56%, yet p50 sits at 3.0–3.3 s and p99 stays pinned at the
+   ceiling — most solves are still cut. Budget alone will not finish this search; the upstream
+   partial-credit-at-deadline change is the structural fix.
+2. **Pool participation becomes real**: internalization drops to 0.34–0.86 (pool routing carries
+   real flow) and matched rises to +69% over 1 s at w=1 current, +17% over no_pools at w=5.
+3. **The fynd verdict is budget-invariant**: −110.8 bps (w=1) and −114.3 bps (w=5) on the clean
+   anchor with pools fully participating — more budget lets APEX match more volume; it does not
+   make batch clearing beat per-order routing prices on this flow.
+
 ## Provenance
 
 - Snapshot meta in `stage3_results.json` (`.snapshot`): 122 pools, 146 priced tokens, 2,436
