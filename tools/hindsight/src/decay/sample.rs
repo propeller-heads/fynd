@@ -32,10 +32,10 @@ pub(crate) struct TradeShape {
 /// The fields of a comparison record this module reads. Everything else in the record is ignored by
 /// omission, so no settled-outcome field can leak into the sample.
 ///
-/// All three trade fields are optional because `monitor` also records **reverted** transactions
-/// (`"status": "reverted"`), where they are explicitly `null` — a revert settles no amounts, so
-/// there is nothing to decode. Those rows are well-formed and expected, not corrupt, so they must
-/// parse and then be dropped for having no shape rather than counted as malformed.
+/// All three trade fields are optional so that a row with no shape to extract — whichever
+/// producer wrote it, and whatever the reason — still parses cleanly. Such a row is well-formed
+/// and expected, not corrupt, so it must parse and then be dropped for having no shape rather than
+/// counted as malformed.
 #[derive(Deserialize)]
 struct ComparisonRow {
     venue: Option<String>,
@@ -256,13 +256,13 @@ mod tests {
     }
 
     #[test]
-    fn reverted_records_are_dropped_without_counting_as_malformed() {
-        // A revert settles no amounts, so `monitor` writes nulls. Real Base data carries ~8k of
-        // these per few days; counting them as unparseable would bury a genuinely corrupt file.
-        let reverted = r#"{"block":49396056,"status":"reverted","cause":"out_of_gas","venue":"relay","solver":"0x","decoder":"reverted","token_in":null,"token_out":null,"amount_in":null,"settled_amount_out":null}"#;
-        let dir = write_dir(&[reverted.to_string(), row("relay", "1000")]);
+    fn null_trade_fields_are_dropped_without_counting_as_malformed() {
+        // A record with no shape to extract is well-formed, not corrupt: it must parse and then
+        // be dropped for lacking a shape, rather than counted among the skipped/malformed lines.
+        let no_shape = r#"{"venue":"relay","token_in":null,"token_out":null,"amount_in":null}"#;
+        let dir = write_dir(&[no_shape.to_string(), row("relay", "1000")]);
         let shapes = load_shapes(dir.path(), RELAY_VENUE).expect("load");
-        assert_eq!(shapes.len(), 1, "only the settled trade has a shape");
+        assert_eq!(shapes.len(), 1, "only the row with a shape survives");
         assert_eq!(shapes[0].amount_in, U256::from(1000));
     }
 

@@ -7,6 +7,8 @@
 
 use std::{future::Future, path::Path, pin::Pin, time::Duration};
 
+use alloy::providers::Provider;
+use async_trait::async_trait;
 use fynd_core::{BlockStepController, FyndBuilder, Solver};
 use tracing::{info, warn};
 use tycho_simulation::tycho_common::models::Chain;
@@ -195,6 +197,66 @@ impl Session {
     }
 }
 
+/// A source of the current chain head, abstracted so a lag check stays testable without a live
+/// RPC connection.
+#[async_trait]
+pub(crate) trait HeadSource: Send + Sync {
+    /// The chain's current head block, or `None` when it could not be determined — treated as
+    /// "skip this check" rather than as a lag, since a flaky RPC call is not evidence the session
+    /// fell behind.
+    async fn head(&self) -> Option<u64>;
+}
+
+/// Reads the chain head from a live JSON-RPC provider.
+pub(crate) struct RpcHead<P>(P);
+
+impl<P> RpcHead<P> {
+    pub(crate) fn new(provider: P) -> Self {
+        Self(provider)
+    }
+}
+
+#[async_trait]
+impl<P: Provider + Send + Sync> HeadSource for RpcHead<P> {
+    async fn head(&self) -> Option<u64> {
+        self.0.get_block_number().await.ok()
+    }
+}
+
+/// Chain-head lag guard: how far behind head a session may fall before it is considered unhealthy
+/// and its solver rebuilt. `monitor` has its own inline version of this check, folded into its
+/// per-block `Pacing`; this one is `decay`'s (see `decay::run_session`), kept here so neither
+/// reinvents the head-polling and telemetry plumbing.
+pub(crate) struct LagGuard {
+    source: Box<dyn HeadSource>,
+    budget: u64,
+}
+
+impl LagGuard {
+    /// `max_lag_blocks`, or the chain's ~20-minute default when omitted.
+    pub(crate) fn new(
+        source: impl HeadSource + 'static,
+        chain: Chain,
+        max_lag_blocks: Option<u64>,
+    ) -> Self {
+        Self {
+            source: Box::new(source),
+            budget: max_lag_blocks.unwrap_or_else(|| default_lag_blocks(chain)),
+        }
+    }
+
+    /// `target`'s lag behind the current chain head, recorded to telemetry regardless of whether
+    /// it trips the budget. `Some((head, lag))` only when the lag exceeds the budget — the
+    /// trigger to consider the session unhealthy. `None` on a transient head-lookup failure too:
+    /// a confirmed lag is worth a solver rebuild, a flaky lookup is not.
+    pub(crate) async fn exceeded(&self, target: u64) -> Option<(u64, u64)> {
+        let head = self.source.head().await?;
+        let lag = head.saturating_sub(target);
+        crate::telemetry::record_head_lag_blocks(lag);
+        (lag > self.budget).then_some((head, lag))
+    }
+}
+
 /// Load worker pools like `fynd serve`: the default path falls back to the built-in default pools
 /// when absent; a custom path that does not exist fails fast.
 fn load_pools_config(path: &Path) -> anyhow::Result<fynd_rpc::config::WorkerPoolsConfig> {
@@ -228,5 +290,44 @@ mod tests {
     fn test_missing_default_pools_config_falls_back_to_builtin() {
         // A non-default path that does not exist must fail fast rather than silently defaulting.
         assert!(load_pools_config(Path::new("definitely-not-here.toml")).is_err());
+    }
+
+    struct FixedHead(Option<u64>);
+
+    #[async_trait]
+    impl HeadSource for FixedHead {
+        async fn head(&self) -> Option<u64> {
+            self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lag_guard_is_quiet_within_budget() {
+        let guard = LagGuard::new(FixedHead(Some(105)), Chain::Ethereum, Some(10));
+        assert_eq!(guard.exceeded(100).await, None);
+    }
+
+    #[tokio::test]
+    async fn test_lag_guard_trips_past_budget() {
+        let guard = LagGuard::new(FixedHead(Some(120)), Chain::Ethereum, Some(10));
+        assert_eq!(guard.exceeded(100).await, Some((120, 20)));
+    }
+
+    #[tokio::test]
+    async fn test_lag_guard_defaults_to_the_chain_budget_when_unset() {
+        // Ethereum's default is 100 blocks (~20 minutes at 12s blocks): 90 blocks behind is
+        // within it, 110 is not.
+        let guard = LagGuard::new(FixedHead(Some(1_090)), Chain::Ethereum, None);
+        assert_eq!(guard.exceeded(1_000).await, None);
+        let guard = LagGuard::new(FixedHead(Some(1_110)), Chain::Ethereum, None);
+        assert_eq!(guard.exceeded(1_000).await, Some((1_110, 110)));
+    }
+
+    #[tokio::test]
+    async fn test_lag_guard_treats_an_unknown_head_as_not_exceeded() {
+        // A transient head-lookup failure is not evidence of a lag — only a confirmed one is
+        // worth the cost of a solver rebuild.
+        let guard = LagGuard::new(FixedHead(None), Chain::Ethereum, Some(0));
+        assert_eq!(guard.exceeded(100).await, None);
     }
 }

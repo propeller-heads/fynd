@@ -1,7 +1,12 @@
 //! Per-offset aggregation of a decay run's measurements.
 //!
 //! Accumulates every measurement in memory, which a run of any realistic length affords: at the
-//! default sample size a day of Base produces ~1.1M measurements, or ~1.7 MB of `f64` per offset.
+//! default sample size a day of Base produces ~1.1M measurements. Each pushes three `f64`s (route,
+//! market, execution) into one of the 5 default offset buckets, so that day is ~26 MB across all
+//! offsets and vectors, ~550 MB over three weeks — all of it live, since `stats()` needs the full
+//! sorted slice for percentiles. Fine for the runs this tool is built for; a streaming quantile
+//! sketch (t-digest / P²) or a periodic flush-and-reset would remove the ceiling if a run needs to
+//! go unattended for longer.
 
 use serde::Serialize;
 
@@ -221,6 +226,7 @@ mod tests {
             route_slippage_bps: route,
             market_movement_bps: market,
             execution_slippage_bps: route - market,
+            execution_slippage_clamped: false,
         }
     }
 

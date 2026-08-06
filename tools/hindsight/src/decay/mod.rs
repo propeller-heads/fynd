@@ -35,7 +35,7 @@ use crate::{
     },
     resolve::{
         jsonl::RotatingWriter,
-        session::{self, Session, SolverArgs},
+        session::{self, LagGuard, RpcHead, Session, SolverArgs},
         step::{Encoding, StepAdapter},
         Outcome, SteppingSolver,
     },
@@ -97,17 +97,30 @@ enum SessionEnd {
 /// Counters that survive feed rebuilds, so `--max-blocks` and the final tally span the whole run.
 #[derive(Default)]
 struct Totals {
-    /// Blocks whose measurement work completed, the unit `--max-blocks` counts.
+    /// Blocks whose work is accounted for — every offset measured or skipped, and every block
+    /// burned by an all-unquotable round — the unit `--max-blocks` counts. Not counted: the very
+    /// first bootstrap block (there is nothing to measure before a baseline exists) and the one
+    /// block a round's quote lands on between rounds. Both carry no measurement of their own, so
+    /// `--max-blocks` bounds measurement work exactly, even though the chain advances a little
+    /// further than the count alone suggests.
     blocks: u64,
     rounds: u64,
     /// Rounds abandoned because the feed died before their last offset.
     abandoned_rounds: u64,
+    /// Offsets skipped because the measured block did not land on `quote_block + offset` — a feed
+    /// gap or reorg moved the state further than that offset's worth. See [`measure_round`].
+    gapped_offsets: u64,
     records: u64,
     /// Sampled shapes the solver could not quote at all, so they never entered a round.
     unquotable: u64,
     pool_gone: u64,
     simulation_failed: u64,
     no_market_reference: u64,
+    zero_amount: u64,
+    /// Records whose `execution_slippage_bps` was clamped from a positive raw value to zero — the
+    /// fresh solve failing to reproduce a route it had itself found a few blocks earlier. The
+    /// solver-inconsistency rate; see [`record::DecayBps::execution_slippage_clamped`].
+    execution_slippage_clamped: u64,
 }
 
 impl Totals {
@@ -116,6 +129,7 @@ impl Totals {
             ReplayFailure::PoolGone => self.pool_gone += 1,
             ReplayFailure::SimulationFailed => self.simulation_failed += 1,
             ReplayFailure::NoMarketReference => self.no_market_reference += 1,
+            ReplayFailure::ZeroAmount => self.zero_amount += 1,
         }
     }
 }
@@ -134,14 +148,21 @@ pub(crate) async fn run(cfg: DecayArgs) -> anyhow::Result<()> {
         offsets: cfg.offsets,
         max_blocks: cfg.solver.max_blocks,
     };
+    // A separate provider from the one the solver builds internally: decay has no decoder of its
+    // own to hang a lag check off, unlike `monitor`, so it polls chain head directly.
+    let head_provider = crate::provider_from(&cfg.solver.chain.rpc_url)?;
+    let max_lag_blocks = cfg.solver.max_lag_blocks;
     let session = Session::prepare(cfg.solver).await?;
-    let block_budget = session::block_time(session.chain()).mul_f64(PACING_WARN_FRACTION);
+    let chain = session.chain();
+    let lag_guard = LagGuard::new(RpcHead::new(head_provider), chain, max_lag_blocks);
+    let block_budget = session::block_time(chain).mul_f64(PACING_WARN_FRACTION);
     info!(
         sample_size = cfg.sample_size,
         offsets = cfg.offsets,
         pool = shapes.len(),
         seed = cfg.seed,
         block_budget_ms = block_budget.as_millis(),
+        max_lag_blocks = max_lag_blocks.unwrap_or_else(|| session::default_lag_blocks(chain)),
         "measuring route decay in rounds"
     );
 
@@ -191,7 +212,7 @@ pub(crate) async fn run(cfg: DecayArgs) -> anyhow::Result<()> {
                 info!("received Ctrl-C; shutting down");
                 break;
             }
-            end = run_session(&adapter, &rounds, &shapes, &mut state) => match end {
+            end = run_session(&adapter, &rounds, &shapes, &mut state, Some(&lag_guard)) => match end {
                 SessionEnd::Complete => break,
                 SessionEnd::Unhealthy(reason) => reason,
             },
@@ -231,11 +252,15 @@ struct RunState {
 
 /// Drive one solver session: draw a sample, quote it, measure it across the configured offsets, and
 /// repeat until the run completes or the feed dies.
+///
+/// `lag_guard` is `None` in tests, which drive a mock with no chain head to poll against; the live
+/// run always passes one.
 async fn run_session<S: SteppingSolver + ?Sized>(
     adapter: &S,
     cfg: &RoundConfig,
     shapes: &[TradeShape],
     state: &mut RunState,
+    lag_guard: Option<&LagGuard>,
 ) -> SessionEnd {
     // A quote needs an applied state to be quoted against.
     if adapter.current_block().await.is_none() {
@@ -254,12 +279,24 @@ async fn run_session<S: SteppingSolver + ?Sized>(
             continue;
         };
 
-        let quoted = quote_round(adapter, cfg, shapes, state, quote_block).await;
+        if let Some(guard) = lag_guard {
+            if let Some((head, lag)) = guard.exceeded(quote_block).await {
+                return SessionEnd::Unhealthy(format!(
+                    "decay is {lag} blocks behind head {head}; presuming an unhealthy session"
+                ));
+            }
+        }
+
         state.totals.rounds += 1;
         let round_id = state.totals.rounds;
+        let quote_started = Instant::now();
+        let quoted = quote_round(adapter, cfg, shapes, state, quote_block).await;
+        warn_if_over_budget(state, quote_started.elapsed(), round_id, None, quoted.len());
+
         if quoted.is_empty() {
             // Nothing to replay, but the offsets must still elapse — otherwise the next round would
-            // quote against the very state this one did.
+            // quote against the very state this one did. Counted toward --max-blocks too: an
+            // unquotable sample pool would otherwise never terminate the run.
             warn!(
                 block = quote_block,
                 round_id, "no sampled trade could be quoted; skipping the round"
@@ -269,48 +306,7 @@ async fn run_session<S: SteppingSolver + ?Sized>(
                     return SessionEnd::Unhealthy(e.to_string());
                 }
             }
-            continue;
-        }
-
-        for offset in 1..=cfg.offsets {
-            if let Err(e) = adapter.advance().await {
-                // The round dies with the session: its remaining offsets would be measured against
-                // a rebuilt solver's states, which are not continuous with this
-                // round's quote.
-                state.totals.abandoned_rounds += 1;
-                return SessionEnd::Unhealthy(e.to_string());
-            }
-            let started = Instant::now();
-            let Some(measured_block) = adapter.current_block().await else {
-                warn!(round_id, offset, "no applied block after advancing; abandoning the round");
-                state.totals.abandoned_rounds += 1;
-                break;
-            };
-            let at = RoundAt { round_id, quote_block, measured_block, offset };
-            measure_offset(adapter, state, &quoted, at).await;
-
-            let elapsed = started.elapsed();
-            telemetry::record_block_seconds(elapsed.as_secs_f64());
-            if elapsed > state.block_budget {
-                warn!(
-                    round_id,
-                    offset,
-                    elapsed_ms = elapsed.as_millis(),
-                    budget_ms = state.block_budget.as_millis(),
-                    trades = quoted.len(),
-                    "measurement exceeded its per-block budget; lower --sample-size"
-                );
-            }
-
-            state.totals.blocks += 1;
-            info!(
-                block = measured_block,
-                round_id,
-                offset,
-                trades = quoted.len(),
-                elapsed_s = elapsed.as_secs_f64(),
-                "measured offset"
-            );
+            state.totals.blocks += u64::from(cfg.offsets);
             if cfg
                 .max_blocks
                 .is_some_and(|max| state.totals.blocks >= max)
@@ -318,7 +314,127 @@ async fn run_session<S: SteppingSolver + ?Sized>(
                 info!(blocks = state.totals.blocks, "reached --max-blocks");
                 return SessionEnd::Complete;
             }
+            continue;
         }
+
+        match measure_round(adapter, cfg, state, &quoted, round_id, quote_block).await {
+            RoundOutcome::End(end) => return end,
+            // Rare: advancing succeeded but the solver reported no block right after. Nothing to
+            // do but retry from the top; the next `current_block()` read decides what's next.
+            RoundOutcome::Abandoned => {}
+            // Advance once more so the next round's quote lands on a block none of this round's
+            // offsets measured — otherwise it would double up on the last offset's block (see the
+            // module doc: rounds must not overlap).
+            RoundOutcome::Measured => {
+                if let Err(e) = adapter.advance().await {
+                    return SessionEnd::Unhealthy(e.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// How a round's offset-measuring loop in [`measure_round`] ended.
+enum RoundOutcome {
+    /// Every offset was measured or skipped for a gap; safe to advance once more before the next
+    /// round's quote.
+    Measured,
+    /// Abandoned partway through — the solver reported no block right after a successful
+    /// `advance()`. Rare, and not a feed death, so the outer loop just retries.
+    Abandoned,
+    /// The session should end now, either because the feed died or `--max-blocks` was reached.
+    End(SessionEnd),
+}
+
+/// Measure every offset of one round: advance a block, check it lands where expected, and measure
+/// it — or skip it and note the gap. Split out of [`run_session`] because the round-boundary
+/// bookkeeping (lag, quoting, `--max-blocks` on an empty round) and the offset-by-offset
+/// measurement are two different concerns.
+async fn measure_round<S: SteppingSolver + ?Sized>(
+    adapter: &S,
+    cfg: &RoundConfig,
+    state: &mut RunState,
+    quoted: &[QuotedTrade],
+    round_id: u64,
+    quote_block: u64,
+) -> RoundOutcome {
+    for offset in 1..=cfg.offsets {
+        if let Err(e) = adapter.advance().await {
+            // The round dies with the session: its remaining offsets would be measured against a
+            // rebuilt solver's states, which are not continuous with this round's quote.
+            state.totals.abandoned_rounds += 1;
+            return RoundOutcome::End(SessionEnd::Unhealthy(e.to_string()));
+        }
+        let Some(measured_block) = adapter.current_block().await else {
+            warn!(round_id, offset, "no applied block after advancing; abandoning the round");
+            state.totals.abandoned_rounds += 1;
+            return RoundOutcome::Abandoned;
+        };
+
+        // `advance()` only guarantees a strictly newer block, not the very next one: a feed gap or
+        // reorg can move the state further than one offset's worth. Once that happens the block
+        // number can only stay ahead (it never goes backward), so every later offset in this round
+        // would also land past its target — skip the measurement rather than file a longer move
+        // under a shorter offset. Mirrors the same check monitor.rs makes for its own back-of-block
+        // pairing.
+        let expected_block = quote_block + u64::from(offset);
+        if measured_block == expected_block {
+            let started = Instant::now();
+            let at = RoundAt { round_id, quote_block, measured_block, offset };
+            measure_offset(adapter, state, quoted, at).await;
+            warn_if_over_budget(state, started.elapsed(), round_id, Some(offset), quoted.len());
+            info!(
+                block = measured_block,
+                round_id,
+                offset,
+                trades = quoted.len(),
+                "measured offset"
+            );
+        } else {
+            warn!(
+                round_id,
+                offset,
+                quote_block,
+                expected_block,
+                measured_block,
+                "measured block does not match the expected offset (gap or reorg); skipping the \
+                 measurement"
+            );
+            state.totals.gapped_offsets += 1;
+        }
+
+        state.totals.blocks += 1;
+        if cfg
+            .max_blocks
+            .is_some_and(|max| state.totals.blocks >= max)
+        {
+            info!(blocks = state.totals.blocks, "reached --max-blocks");
+            return RoundOutcome::End(SessionEnd::Complete);
+        }
+    }
+    RoundOutcome::Measured
+}
+
+/// Record `elapsed`'s cost to telemetry and warn when it exceeded the run's per-block budget.
+/// Shared between the quote round (`offset: None`) and each offset's measurement, since both are
+/// one block's worth of solver work and either can be the one that runs hot.
+fn warn_if_over_budget(
+    state: &RunState,
+    elapsed: Duration,
+    round_id: u64,
+    offset: Option<u32>,
+    trades: usize,
+) {
+    telemetry::record_block_seconds(elapsed.as_secs_f64());
+    if elapsed > state.block_budget {
+        warn!(
+            round_id,
+            ?offset,
+            elapsed_ms = elapsed.as_millis(),
+            budget_ms = state.block_budget.as_millis(),
+            trades,
+            "block work exceeded its per-block budget; lower --sample-size"
+        );
     }
 }
 
@@ -386,12 +502,13 @@ async fn measure_offset<S: SteppingSolver + ?Sized>(
             }
         };
         // The fresh solve is the market-movement reference: what any router would have got at this
-        // state, so whatever the replay lost beyond it is down to the route being stale.
+        // state, so whatever the replay lost beyond it is down to the route being stale. Kept
+        // whole (not just its amount) so its route can be recorded alongside the amount.
         let fresh = match adapter
             .solve(trade.shape.token_in, trade.shape.token_out, trade.shape.amount_in)
             .await
         {
-            Outcome::Solved(quote) => Some(quote.amount_out),
+            Outcome::Solved(quote) => Some(quote),
             Outcome::Partial(_) | Outcome::Unsolvable(_) => None,
         };
         let record = DecayRecord::build(
@@ -409,6 +526,9 @@ async fn measure_offset<S: SteppingSolver + ?Sized>(
             state.totals.count_failure(failure);
         }
         if let Some(bps) = record.bps {
+            if bps.execution_slippage_clamped {
+                state.totals.execution_slippage_clamped += 1;
+            }
             state.summary.record(at.offset, bps);
         }
         records.push(record);
@@ -448,10 +568,13 @@ fn report(state: &RunState) {
         blocks = totals.blocks,
         records = totals.records,
         abandoned_rounds = totals.abandoned_rounds,
+        gapped_offsets = totals.gapped_offsets,
         unquotable_samples = totals.unquotable,
         pool_gone = totals.pool_gone,
         simulation_failed = totals.simulation_failed,
         no_market_reference = totals.no_market_reference,
+        zero_amount = totals.zero_amount,
+        execution_slippage_clamped = totals.execution_slippage_clamped,
         "decay run finished"
     );
     let stats = state.summary.stats();
@@ -492,9 +615,10 @@ mod tests {
 
     use alloy::primitives::{Address, U256};
     use async_trait::async_trait;
+    use tycho_simulation::tycho_common::models::Chain;
 
     use super::*;
-    use crate::resolve::SolvedAmount;
+    use crate::resolve::{session::HeadSource, SolvedAmount};
 
     /// A stepping mock that walks a scripted list of per-block outputs.
     ///
@@ -504,6 +628,11 @@ mod tests {
     struct ScriptedSolver {
         /// `(replayed, fresh)` per block, indexed by how many times `advance` has run.
         script: Vec<(Option<u64>, Option<u64>)>,
+        /// Block number reported at each step, indexed the same as `script`. Ordinarily
+        /// `1_000 + step`, but a gap test can override it via `with_blocks` to jump a step's block
+        /// number by more than one, without `advance` itself pretending to move more than one
+        /// block.
+        blocks: Vec<u64>,
         block: AtomicUsize,
         /// Every `(token_in, amount_in)` handed to `solve`, so a test can see what was quoted.
         solved: Mutex<Vec<(Address, U256)>>,
@@ -511,7 +640,17 @@ mod tests {
 
     impl ScriptedSolver {
         fn new(script: Vec<(Option<u64>, Option<u64>)>) -> Self {
-            Self { script, block: AtomicUsize::new(0), solved: Mutex::new(Vec::new()) }
+            let blocks = (0..script.len())
+                .map(|i| 1_000 + u64::try_from(i).unwrap_or(0))
+                .collect();
+            Self::with_blocks(script, blocks)
+        }
+
+        /// Like [`Self::new`], but `blocks[i]` is the block number reported at step `i` — letting a
+        /// test simulate a feed gap.
+        fn with_blocks(script: Vec<(Option<u64>, Option<u64>)>, blocks: Vec<u64>) -> Self {
+            assert_eq!(script.len(), blocks.len(), "one block number per scripted step");
+            Self { script, blocks, block: AtomicUsize::new(0), solved: Mutex::new(Vec::new()) }
         }
 
         fn step(&self) -> usize {
@@ -539,7 +678,7 @@ mod tests {
     #[async_trait]
     impl SteppingSolver for ScriptedSolver {
         async fn current_block(&self) -> Option<u64> {
-            Some(1_000 + u64::try_from(self.step()).unwrap_or(0))
+            self.blocks.get(self.step()).copied()
         }
 
         async fn solve(&self, token_in: Address, _: Address, amount_in: U256) -> Outcome {
@@ -606,7 +745,7 @@ mod tests {
         let mut run = state(5, pool.len());
 
         // --max-blocks equals the offsets, so the run stops exactly at the round's end.
-        let end = run_session(&solver, &config(1, 5, Some(5)), &pool, &mut run).await;
+        let end = run_session(&solver, &config(1, 5, Some(5)), &pool, &mut run, None).await;
         assert!(matches!(end, SessionEnd::Complete));
 
         let stats = run.summary.stats();
@@ -633,7 +772,7 @@ mod tests {
         let pool = shapes(1);
         let mut run = state(3, pool.len());
 
-        run_session(&solver, &config(1, 3, Some(3)), &pool, &mut run).await;
+        run_session(&solver, &config(1, 3, Some(3)), &pool, &mut run, None).await;
 
         for offset in run.summary.stats() {
             // -100 bps at every offset, all of it execution slippage (the fresh solve never moved).
@@ -655,7 +794,7 @@ mod tests {
         let pool = shapes(1);
         let mut run = state(3, pool.len());
 
-        run_session(&solver, &config(1, 3, Some(3)), &pool, &mut run).await;
+        run_session(&solver, &config(1, 3, Some(3)), &pool, &mut run, None).await;
 
         // The scripted solver reports block 1000+step, so a quote at 1000 must be measured at
         // 1001..1003 — a stuck measured_block would mean the loop reads the state before advancing.
@@ -671,7 +810,7 @@ mod tests {
         let pool = shapes(1);
         let mut run = state(5, pool.len());
 
-        let end = run_session(&solver, &config(1, 5, None), &pool, &mut run).await;
+        let end = run_session(&solver, &config(1, 5, None), &pool, &mut run, None).await;
         assert!(matches!(end, SessionEnd::Unhealthy(_)), "a dead feed must end the session");
         assert_eq!(run.totals.abandoned_rounds, 1);
         // Only the offsets that completed before the feed died are recorded.
@@ -694,7 +833,7 @@ mod tests {
         let pool = shapes(2);
         let mut run = state(2, pool.len());
 
-        let end = run_session(&solver, &config(2, 2, None), &pool, &mut run).await;
+        let end = run_session(&solver, &config(2, 2, None), &pool, &mut run, None).await;
         // The round is skipped, then the next round quotes fine and runs until the script ends.
         assert!(matches!(end, SessionEnd::Unhealthy(_)));
         assert_eq!(run.totals.unquotable, 2, "both sampled shapes failed to quote");
@@ -708,7 +847,7 @@ mod tests {
         let pool = shapes(1);
         let mut run = state(2, pool.len());
 
-        run_session(&solver, &config(1, 2, Some(2)), &pool, &mut run).await;
+        run_session(&solver, &config(1, 2, Some(2)), &pool, &mut run, None).await;
 
         // Offset 1's replay failed; offset 2's succeeded.
         assert_eq!(run.totals.simulation_failed, 1);
@@ -732,7 +871,7 @@ mod tests {
         let pool = shapes(8);
         let mut run = state(2, pool.len());
 
-        run_session(&solver, &config(3, 2, Some(2)), &pool, &mut run).await;
+        run_session(&solver, &config(3, 2, Some(2)), &pool, &mut run, None).await;
 
         let solved = solver.solved.lock().expect("lock");
         // 3 quotes at block 0, then 3 fresh solves at each of 2 offsets.
@@ -759,5 +898,85 @@ mod tests {
                 .map(|(t, _)| *t)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn a_block_gap_skips_every_offset_it_contaminates() {
+        // Quote at block 1000 (step 0). The feed then skips straight to 1002 at step 1 — a
+        // two-block gap — so offset 1 (expected 1001) is contaminated, and offset 2 inherits the
+        // same gap since block numbers only move forward, never back.
+        let script =
+            vec![(None, Some(10_000)), (Some(9_900), Some(9_950)), (Some(9_800), Some(9_900))];
+        let blocks = vec![1_000, 1_002, 1_003];
+        let solver = ScriptedSolver::with_blocks(script, blocks);
+        let pool = shapes(1);
+        let mut run = state(2, pool.len());
+
+        let end = run_session(&solver, &config(1, 2, Some(2)), &pool, &mut run, None).await;
+        assert!(matches!(end, SessionEnd::Complete));
+        assert_eq!(
+            run.totals.gapped_offsets, 2,
+            "both offsets are contaminated by the earlier gap"
+        );
+        assert!(run.summary.stats().is_empty(), "a gapped round must not contaminate the summary");
+        // Both blocks still count toward --max-blocks even though neither produced a measurement.
+        assert_eq!(run.totals.blocks, 2);
+    }
+
+    #[tokio::test]
+    async fn an_unquotable_run_still_terminates_at_max_blocks() {
+        // Every round is unquotable (fresh is always None), so nothing is ever measured — but
+        // --max-blocks must still bound the run, or it would spin forever.
+        let script: Vec<(Option<u64>, Option<u64>)> = (0..=10).map(|_| (None, None)).collect();
+        let solver = ScriptedSolver::new(script);
+        let pool = shapes(1);
+        let mut run = state(3, pool.len());
+
+        let end = run_session(&solver, &config(1, 3, Some(3)), &pool, &mut run, None).await;
+        assert!(matches!(end, SessionEnd::Complete), "an unquotable run must still terminate");
+        assert_eq!(run.totals.blocks, 3);
+        assert_eq!(run.totals.records, 0);
+    }
+
+    #[tokio::test]
+    async fn a_clamped_execution_slippage_is_still_counted() {
+        // The held route (replayed 9_950) beats the fresh solve (9_900) at the same state —
+        // solver noise, clamped to zero rather than recorded as a gain — but the run must still be
+        // able to report how often that happened.
+        let script = vec![(None, Some(10_000)), (Some(9_950), Some(9_900))];
+        let solver = ScriptedSolver::new(script);
+        let pool = shapes(1);
+        let mut run = state(1, pool.len());
+
+        run_session(&solver, &config(1, 1, Some(1)), &pool, &mut run, None).await;
+
+        assert_eq!(run.totals.execution_slippage_clamped, 1);
+        assert_eq!(run.summary.stats()[0].count, 1);
+    }
+
+    struct FixedHead(u64);
+
+    #[async_trait]
+    impl HeadSource for FixedHead {
+        async fn head(&self) -> Option<u64> {
+            Some(self.0)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lagging_head_ends_the_session_as_unhealthy() {
+        let mut script = vec![(None, Some(10_000))];
+        script.extend((1..=5).map(|_| (Some(9_900), Some(9_950))));
+        let solver = ScriptedSolver::new(script);
+        let pool = shapes(1);
+        let mut run = state(5, pool.len());
+        // The mock reports block 1000 at step 0; a head of 10_100 is hopelessly far ahead of a
+        // 10-block budget.
+        let guard = LagGuard::new(FixedHead(10_100), Chain::Ethereum, Some(10));
+
+        let end = run_session(&solver, &config(1, 5, None), &pool, &mut run, Some(&guard)).await;
+        assert!(matches!(end, SessionEnd::Unhealthy(_)));
+        // The lag check runs before quoting, so no round should have started.
+        assert_eq!(run.totals.rounds, 0);
     }
 }

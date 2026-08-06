@@ -5,7 +5,10 @@ use fynd_tools_common::bps::raw_bps_diff;
 use num_bigint::BigUint;
 use serde::Serialize;
 
-use crate::{decay::sample::TradeShape, resolve::SolvedAmount};
+use crate::{
+    decay::sample::TradeShape,
+    resolve::{render_route, SolvedAmount},
+};
 
 /// Why a replay produced no measurement. Kept apart from a plain error string because a pool
 /// leaving the feed is a distinct, meaningful outcome — the route became unexecutable, which is
@@ -22,6 +25,11 @@ pub(crate) enum ReplayFailure {
     /// The fresh solve at this block found no route, so market movement has no reference and the
     /// decomposition cannot be computed.
     NoMarketReference,
+    /// The replay and the fresh solve both succeeded, but the quoted, replayed, or fresh amount
+    /// was zero, so [`DecayBps::new`] could not form a ratio. A zero replayed amount is itself the
+    /// extreme decay case — the held route became worthless — so this is marked as a failure
+    /// rather than silently dropped, which would make the reported tail optimistic.
+    ZeroAmount,
 }
 
 impl ReplayFailure {
@@ -42,11 +50,6 @@ impl ReplayFailure {
 /// the later state produced more output than the original quote. PR #297 reported the opposite
 /// (positive = decay), so flip these before comparing against its Ethereum numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-#[expect(
-    clippy::struct_field_names,
-    reason = "the _bps suffix is the unit, and dropping it from a struct of three bare f64s is \
-              exactly how a bps figure gets mistaken for a ratio"
-)]
 pub(crate) struct DecayBps {
     /// The quoted route replayed at the later state, against its own original quote. The total
     /// move: market drift plus whatever the route lost by being stale.
@@ -54,23 +57,38 @@ pub(crate) struct DecayBps {
     /// A freshly solved quote at the later state, against the original quote. The part of the move
     /// that any router would have suffered — unavoidable market drift.
     pub market_movement_bps: f64,
-    /// `route_slippage_bps - market_movement_bps`: the part specific to holding a stale route,
-    /// which better routing or faster submission could recover. Negative means the stale route
-    /// underperformed a fresh solve.
+    /// `route_slippage_bps - market_movement_bps`, clamped at zero: the part specific to holding
+    /// a stale route, which better routing or faster submission could recover. Negative means the
+    /// stale route underperformed a fresh solve. Never positive — see
+    /// [`Self::execution_slippage_clamped`].
     pub execution_slippage_bps: f64,
+    /// Whether the raw `route_slippage_bps - market_movement_bps` was positive — the held route
+    /// beating a fresh solve at the same state — before it was clamped to zero. A real in-block
+    /// solver holds the original route and takes the better of the two, so its outcome is
+    /// `max(replayed, fresh)`; a fresh solve that comes back worse than the route it already found
+    /// a few blocks earlier is the solver failing to reproduce its own result, not a genuine
+    /// opportunity the route missed. Left uncancelled, these wrong-sign cases average against the
+    /// real losses and understate the reported decay. Kept on the record (rather than dropped) so
+    /// the solver-inconsistency rate stays visible and offline analysis can still see the raw
+    /// signal.
+    pub execution_slippage_clamped: bool,
 }
 
 impl DecayBps {
     /// Build the decomposition from three amounts in the output token's units.
     ///
-    /// Returns `None` when the original quote is zero, which leaves every ratio undefined.
+    /// Returns `None` when the quoted, replayed, or fresh amount is zero: `raw_bps_diff` treats a
+    /// zero on either side of a ratio as undefined, and every one of the three amounts appears as
+    /// one side of the two ratios below.
     pub(crate) fn new(quoted: U256, replayed: U256, fresh: U256) -> Option<Self> {
         let route_slippage_bps = bps_against(quoted, replayed)?;
         let market_movement_bps = bps_against(quoted, fresh)?;
+        let raw_execution_slippage_bps = route_slippage_bps - market_movement_bps;
         Some(Self {
             route_slippage_bps,
             market_movement_bps,
-            execution_slippage_bps: route_slippage_bps - market_movement_bps,
+            execution_slippage_bps: raw_execution_slippage_bps.min(0.0),
+            execution_slippage_clamped: raw_execution_slippage_bps > 0.0,
         })
     }
 }
@@ -79,7 +97,7 @@ impl DecayBps {
 ///
 /// `raw_bps_diff(baseline, other)` computes `(baseline - other) / other`, so passing the later
 /// amount as the baseline and the original quote as `other` yields "how much more the later state
-/// produced", matching [`crate::resolve::compare::slippage`]'s convention.
+/// produced", matching `resolve::compare::slippage`'s convention.
 fn bps_against(quoted: U256, later: U256) -> Option<f64> {
     raw_bps_diff(&to_biguint(later), &to_biguint(quoted))
 }
@@ -122,8 +140,18 @@ pub(crate) struct DecayRecord {
     /// Why this measurement has no `bps`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<ReplayFailure>,
-    /// The algorithm that produced the original quote.
-    pub algorithm: String,
+    /// The algorithm that produced the quote whose route is being tested for staleness — the same
+    /// value carried on every offset of a round, since every offset replays the same quote.
+    pub quote_algorithm: String,
+    /// The fresh solve's route at `measured_block`, rendered as a readable path (see
+    /// [`crate::resolve::render_route`]). Absent when the fresh solve found no route.
+    ///
+    /// Recorded so two situations that `execution_slippage_bps` alone cannot tell apart become
+    /// distinguishable: the fresh solve finding a genuinely different, better route (a real,
+    /// measurable gain) versus returning the same route with a different number (solver
+    /// inconsistency — see [`DecayBps::execution_slippage_clamped`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fresh_route: Option<String>,
 }
 
 /// Everything a round holds about one quoted trade, so each of its offsets can be measured against
@@ -144,8 +172,8 @@ impl QuotedTrade {
     }
 }
 
-/// Where a measurement is built from: the quoted trade plus this offset's two outputs.
-#[derive(Debug, Clone, Copy)]
+/// Where a measurement is built from: the quoted trade plus this offset's two outcomes.
+#[derive(Debug, Clone)]
 pub(crate) struct Measurement {
     pub round_id: u64,
     pub offset: u32,
@@ -153,40 +181,53 @@ pub(crate) struct Measurement {
     pub measured_block: u64,
     /// The replayed output, or why the replay produced none.
     pub replayed: Result<U256, ReplayFailure>,
-    /// The fresh solve's output, or `None` when it found no route.
-    pub fresh: Option<U256>,
+    /// The fresh solve's full outcome, kept whole (not just its `amount_out`) so its route can be
+    /// recorded alongside its amount. `None` when it found no route.
+    pub fresh: Option<SolvedAmount>,
 }
 
 impl DecayRecord {
-    /// Project a measurement into a record, computing the decomposition when both legs are present.
+    /// Project a measurement into a record, computing the decomposition when both legs are present
+    /// and non-zero.
     pub(crate) fn build(trade: &QuotedTrade, measurement: Measurement) -> Self {
-        let replayed = measurement.replayed.ok();
-        // A failed replay is the more specific diagnosis, so it wins over a missing fresh solve.
-        let failure = match (measurement.replayed, measurement.fresh) {
-            (Err(failure), _) => Some(failure),
-            (Ok(_), None) => Some(ReplayFailure::NoMarketReference),
-            (Ok(_), Some(_)) => None,
-        };
-        let bps = match (replayed, measurement.fresh) {
+        let Measurement { round_id, offset, quote_block, measured_block, replayed, fresh } =
+            measurement;
+        let replayed_amount = replayed.ok();
+        let fresh_amount = fresh.as_ref().map(|f| f.amount_out);
+        let bps = match (replayed_amount, fresh_amount) {
             (Some(replayed), Some(fresh)) => {
                 DecayBps::new(trade.quoted_amount_out(), replayed, fresh)
             }
             _ => None,
         };
+        // A failed replay is the more specific diagnosis, so it wins over a missing fresh solve,
+        // which in turn wins over a decomposition that silently rejected a zero amount — every
+        // record ends up with exactly one of `bps` or `failure`.
+        let failure = match (&replayed, &fresh) {
+            (Err(failure), _) => Some(*failure),
+            (Ok(_), None) => Some(ReplayFailure::NoMarketReference),
+            (Ok(_), Some(_)) if bps.is_none() => Some(ReplayFailure::ZeroAmount),
+            (Ok(_), Some(_)) => None,
+        };
+        let fresh_route = fresh
+            .as_ref()
+            .and_then(|f| f.solved_route.as_deref())
+            .map(render_route);
         Self {
-            round_id: measurement.round_id,
-            offset: measurement.offset,
-            quote_block: measurement.quote_block,
-            measured_block: measurement.measured_block,
+            round_id,
+            offset,
+            quote_block,
+            measured_block,
             token_in: trade.shape.token_in,
             token_out: trade.shape.token_out,
             amount_in: trade.shape.amount_in.to_string(),
             quoted_amount_out: trade.quoted_amount_out().to_string(),
-            replayed_amount_out: replayed.map(|a| a.to_string()),
-            fresh_amount_out: measurement.fresh.map(|a| a.to_string()),
+            replayed_amount_out: replayed_amount.map(|a| a.to_string()),
+            fresh_amount_out: fresh_amount.map(|a| a.to_string()),
             bps,
             failure,
-            algorithm: trade.quote.algorithm.clone(),
+            quote_algorithm: trade.quote.algorithm.clone(),
+            fresh_route,
         }
     }
 }
@@ -217,7 +258,10 @@ mod tests {
         }
     }
 
-    fn measurement(replayed: Result<U256, ReplayFailure>, fresh: Option<U256>) -> Measurement {
+    fn measurement(
+        replayed: Result<U256, ReplayFailure>,
+        fresh: Option<SolvedAmount>,
+    ) -> Measurement {
         Measurement {
             round_id: 3,
             offset: 2,
@@ -228,11 +272,28 @@ mod tests {
         }
     }
 
+    /// A fresh solve's outcome carrying just an amount and no route — the common case for tests
+    /// exercising the decomposition rather than the route projection (see
+    /// `fresh_route_is_rendered_from_the_fresh_solves_route`).
+    fn fresh_solve(amount_out: u64) -> SolvedAmount {
+        SolvedAmount {
+            amount_out: U256::from(amount_out),
+            amount_out_net_gas: U256::from(amount_out),
+            gas_estimate: U256::from(21_000),
+            algorithm: "most_liquid".to_string(),
+            quote_json: None,
+            solved_route: None,
+        }
+    }
+
     #[test]
-    fn decomposition_identity_holds() {
-        // Whatever the inputs, the two parts must sum back to the total.
+    fn decomposition_identity_holds_when_not_clamped() {
+        // Whatever the inputs, the two parts must sum back to the total — as long as the raw
+        // execution slippage is not positive (see execution_slippage_is_clamped_at_zero_when_...
+        // below for the clamped case, where the identity does not hold by design).
         let bps = DecayBps::new(U256::from(10_000), U256::from(9_900), U256::from(9_950))
             .expect("decomposable");
+        assert!(!bps.execution_slippage_clamped);
         assert!(
             (bps.route_slippage_bps - (bps.market_movement_bps + bps.execution_slippage_bps)).abs() <
                 1e-9
@@ -277,6 +338,21 @@ mod tests {
     }
 
     #[test]
+    fn execution_slippage_is_clamped_at_zero_when_the_stale_route_beats_a_fresh_solve() {
+        // The held route (replayed 9_950) outperforms a fresh solve (9_900) at the same state.
+        // That is solver noise, not a real opportunity: a real in-block solver already holds the
+        // better of the two, so the physical outcome is never worse than the held route.
+        let bps = DecayBps::new(U256::from(10_000), U256::from(9_950), U256::from(9_900))
+            .expect("decomposable");
+        assert!(bps.execution_slippage_clamped);
+        assert!(
+            bps.execution_slippage_bps.abs() < 1e-9,
+            "must clamp to zero, got {}",
+            bps.execution_slippage_bps
+        );
+    }
+
+    #[test]
     fn missing_state_classifies_as_pool_gone() {
         // The exact wording fynd_core::ReplayError::MissingState renders.
         assert_eq!(
@@ -290,10 +366,20 @@ mod tests {
     }
 
     #[test]
+    fn missing_state_error_renders_to_the_string_classify_matches_on() {
+        // Guards the wording `classify` depends on against the real `fynd_core` error rather than
+        // a hand-written copy: if `ReplayError::MissingState`'s `#[error(...)]` attribute is ever
+        // reworded, this test — not just the one above — must catch it.
+        let error = fynd_core::ReplayError::MissingState("0xabc".to_string());
+        let rendered = format!("re-execution failed: {error}");
+        assert_eq!(ReplayFailure::classify(&rendered), ReplayFailure::PoolGone);
+    }
+
+    #[test]
     fn record_carries_bps_when_both_legs_are_present() {
         let record = DecayRecord::build(
             &trade(10_000),
-            measurement(Ok(U256::from(9_900)), Some(U256::from(9_950))),
+            measurement(Ok(U256::from(9_900)), Some(fresh_solve(9_950))),
         );
         assert!(record.bps.is_some());
         assert_eq!(record.failure, None);
@@ -320,6 +406,45 @@ mod tests {
         assert_eq!(record.bps, None);
         // The replayed amount is still recorded — only the decomposition is missing.
         assert_eq!(record.replayed_amount_out.as_deref(), Some("9900"));
+    }
+
+    #[test]
+    fn a_zero_replayed_amount_is_reported_as_a_failure_not_silently_dropped() {
+        // A replayed amount of zero is the extreme decay case — the held route became worthless —
+        // and DecayBps::new rejects the zero, so without this classification the record would
+        // carry neither `bps` nor `failure`, contradicting DecayRecord's own invariant and
+        // silently dropping the worst observations from the tail statistics.
+        let record = DecayRecord::build(
+            &trade(10_000),
+            measurement(Ok(U256::ZERO), Some(fresh_solve(9_950))),
+        );
+        assert_eq!(record.failure, Some(ReplayFailure::ZeroAmount));
+        assert_eq!(record.bps, None);
+        // The zero is still recorded — only the decomposition is missing.
+        assert_eq!(record.replayed_amount_out.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn fresh_route_is_rendered_from_the_fresh_solves_route() {
+        let fresh = SolvedAmount {
+            solved_route: Some(Box::new(crate::resolve::test_support::route(&[(
+                "uniswap_v2",
+                "USDT",
+                "DAI",
+            )]))),
+            ..fresh_solve(9_950)
+        };
+        let record =
+            DecayRecord::build(&trade(10_000), measurement(Ok(U256::from(9_900)), Some(fresh)));
+        assert_eq!(record.fresh_route.as_deref(), Some("USDT -[uniswap_v2]-> DAI"));
+        // The quote's own algorithm is still carried, distinctly named from the fresh route.
+        assert_eq!(record.quote_algorithm, "bellman_ford");
+    }
+
+    #[test]
+    fn fresh_route_is_absent_when_the_fresh_solve_found_none() {
+        let record = DecayRecord::build(&trade(10_000), measurement(Ok(U256::from(9_900)), None));
+        assert_eq!(record.fresh_route, None);
     }
 
     #[test]
