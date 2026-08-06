@@ -38,7 +38,7 @@
 
 <h1>Is clearing trades as a batch worth it?</h1>
 <div class="sub">Base &middot; 14,490 settled trades over 13.25 hours (2026-08-03, $9.17M) &middot;
-APEX batch auction over the Fynd solver &middot; companion to the re-solving reports</div>
+APEX batch auction over the Fynd solver</div>
 
 <h2>The question</h2>
 <p>Fynd quotes every trade alone, against AMM pools. A batch auction can instead collect the
@@ -64,10 +64,10 @@ partial fills, valued in USD at day prices. Orders whose token-pair price moved 
 100&nbsp;bps between trade day and measurement state are excluded from gain (drift guard).</li>
 </ol>
 
-<div class="callout"><b>Same positive-only convention as the re-solving reports.</b> Batching
-is optional per order (the limit floors it), so gain is never negative for the order that
-gains — but a uniform clearing price can also fill an order's <i>counterparty</i> below its
-own baseline. That side is reported separately in the net column rather than hidden.</div>
+<div class="callout"><b>Gain is positive-only by construction.</b> Batching is optional per
+order (the limit floors it), so gain is never negative for the order that gains — but a
+uniform clearing price can also fill an order's <i>counterparty</i> below its own baseline.
+That side is reported separately in the net column rather than hidden.</div>
 
 <h3>How the average decomposes</h3>
 <pre>avg gain per unit of flow = (share of flow batched) &times; (gain on batched flow)</pre>
@@ -98,12 +98,12 @@ own baseline. That side is reported separately in the net column rather than hid
 </table>
 
 <p>The rightmost columns are what applies to an arbitrary dollar of the day's flow, including
-the ~85&ndash;99% that no batch can touch. As in the re-solving measurement, the growth comes
-from the <i>frequency</i> side: the share of flow that finds a counterparty grows 116&times;
-from w=1 to w=150, while the gain on batched flow stays in a narrow 19&ndash;32&nbsp;bps
-band. Unlike re-solving, batching has a real negative side: at a uniform clearing price the
-gaining order's counterparty can do worse than its own routing baseline — at w=5 the
-counterparty losses fully consume the gains.</p>
+the ~85&ndash;99% that no batch can touch. The growth over window length comes almost
+entirely from the <i>frequency</i> side: the share of flow that finds a counterparty grows
+116&times; from w=1 to w=150, while the gain on batched flow stays in a narrow
+19&ndash;32&nbsp;bps band. The negative side is real: at a uniform clearing price the gaining
+order's counterparty can do worse than its own routing baseline — at w=5 the counterparty
+losses fully consume the gains.</p>
 
 <h2>What routing the same orders costs</h2>
 <p>The gain above floors each order at 100 bps below its routing baseline. The sharper
@@ -143,8 +143,8 @@ deadline) could match through pools.</p>
 settled. Flow that would opt into a 5-minute batch is a different population; match rates for
 a deployed auction could differ in either direction.</li>
 <li><b>13.25 h of one day</b> (00:00&ndash;13:15 UTC; the US session is absent), one market
-state, no error bars. The companion re-solving caveat applies: numbers reflect how much this
-particular day moved.</li>
+state, no error bars. Crossing opportunities depend on how correlated and how busy the flow
+happened to be during that window; a different day would produce different numbers.</li>
 <li><b>Synthetic limits.</b> Floors are 100 bps below each order's baseline; real user limits
 were not extracted. A 50/200 bps sweep moved matched volume only slightly.</li>
 <li><b>Gross of gas.</b> Neither the batch's settlement-gas sharing (batching's most obvious
