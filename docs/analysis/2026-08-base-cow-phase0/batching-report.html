@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Batch-clearing trades — Base measurement</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #1a1a1a;
+         max-width: 780px; margin: 2.5rem auto; padding: 0 1.2rem; line-height: 1.55; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin-bottom: .3rem; }
+  .sub { color: #555; margin-bottom: 2rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; }
+  h3 { font-size: .82rem; letter-spacing: .06em; text-transform: uppercase; color: #444; margin-top: 2rem; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .85em;
+              background: #f4f4f4; border-radius: 4px; padding: .1em .35em; }
+  pre { padding: .7em 1em; overflow-x: auto; }
+  .tiles { display: flex; flex-wrap: wrap; gap: .8rem; margin: 1.2rem 0; }
+  .tile { border: 1px solid #ddd; border-radius: 10px; padding: .9rem 1.1rem; flex: 1 1 200px; }
+  .tile .big { font-size: 1.6rem; font-weight: 700; }
+  .tile .lbl { color: #555; font-size: .85rem; margin-top: .15rem; }
+  .tile .note { color: #888; font-size: .78rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .88rem; }
+  th { text-align: right; font-size: .72rem; letter-spacing: .04em; text-transform: uppercase;
+       color: #444; border-bottom: 2px solid #ccc; padding: .45em .55em; }
+  th:first-child, td:first-child { text-align: left; }
+  td { text-align: right; border-bottom: 1px solid #e5e5e5; padding: .45em .55em; }
+  td.strong { font-weight: 700; }
+  .callout { border-left: 4px solid #bbb; background: #fafafa; padding: .7em 1em; margin: 1.2rem 0;
+             font-size: .92rem; }
+  .neg { color: #b3382c; }
+  ul { padding-left: 1.2rem; }
+  li { margin: .45em 0; }
+  .foot { color: #777; font-size: .82rem; border-top: 1px solid #ddd; margin-top: 2.5rem; padding-top: .8rem; }
+  @media print { body { margin: .5rem auto; } .tile { break-inside: avoid; } table { break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<h1>Is clearing trades as a batch worth it?</h1>
+<div class="sub">Base &middot; 14,490 settled trades over 13.25 hours (2026-08-03, $9.17M) &middot;
+APEX batch auction over the Fynd solver &middot; companion to the re-solving reports</div>
+
+<h2>The question</h2>
+<p>Fynd quotes every trade alone, against AMM pools. A batch auction can instead collect the
+trades of a window, cross them against each other where their tokens overlap, route the
+remainder through pools, and settle everything at one uniform clearing price per pair. This
+report measures how much output that adds per order, in basis points, for batch windows of
+1, 5, 15, 30 and 150 Base blocks (2&nbsp;s to 5&nbsp;min).</p>
+
+<h2>How it was measured</h2>
+<ol>
+<li>Take one day of real decoded Base solver trades — every settled swap the hindsight decoder
+attributes across ~30 venue/solver books, fee-adjusted, wash-filtered (14,490 orders).</li>
+<li>Partition each window's trades into connected components (orders sharing tokens, directly
+or through pools). Components with at least two orders go to the APEX batch solver with the
+400 deepest native pools around the order tokens (min TVL 1 ETH); singleton orders are not
+batchable and score zero.</li>
+<li>Every order gets a limit: 100 bps below its baseline. The baseline is the <b>per-order
+routing quote at the exact same market state</b> the batch clears at (Base block 49,575,430),
+so the batch and the alternative see identical prices — no time-drift enters the
+comparison.</li>
+<li>An order's gain is <code>max(0, batch output − routing baseline)</code>, pro-rata for
+partial fills, valued in USD at day prices. Orders whose token-pair price moved more than
+100&nbsp;bps between trade day and measurement state are excluded from gain (drift guard).</li>
+</ol>
+
+<div class="callout"><b>Same positive-only convention as the re-solving reports.</b> Batching
+is optional per order (the limit floors it), so gain is never negative for the order that
+gains — but a uniform clearing price can also fill an order's <i>counterparty</i> below its
+own baseline. That side is reported separately in the net column rather than hidden.</div>
+
+<h3>How the average decomposes</h3>
+<pre>avg gain per unit of flow = (share of flow batched) &times; (gain on batched flow)</pre>
+
+<h2>Results</h2>
+<div class="tiles">
+  <div class="tile"><div class="big">+0.025 bps</div>
+    <div class="lbl">Avg gain per flow-dollar, 1-block batches</div>
+    <div class="note">0.13% of flow batched</div></div>
+  <div class="tile"><div class="big">+3.38 bps</div>
+    <div class="lbl">Avg gain per flow-dollar, 5-minute batches</div>
+    <div class="note">15.2% of flow batched &middot; +1.94 net of counterparty losses</div></div>
+  <div class="tile"><div class="big">&minus;118 / &minus;42 bps</div>
+    <div class="lbl">Batch clearing price vs routing the same order (median, w=1 &rarr; w=150)</div>
+    <div class="note">routing wins on 60&ndash;80% of batched orders</div></div>
+</div>
+
+<h3>Gain from batching, by window length</h3>
+<table>
+<tr><th>window<br>(blocks)</th><th>flow<br>batched</th><th>orders<br>filled</th>
+<th>gain on batched<br>flow (bps)</th><th>avg gain per<br>flow-dollar (bps)</th>
+<th>net of counter-<br>party losses (bps)</th></tr>
+<tr><td>1 (2 s)</td><td>0.13%</td><td>169</td><td>19.3</td><td class="strong">+0.025</td><td>+0.007</td></tr>
+<tr><td>5 (10 s)</td><td>0.94%</td><td>599</td><td>20.8</td><td class="strong">+0.195</td><td class="neg">&minus;0.017</td></tr>
+<tr><td>15 (30 s)</td><td>2.75%</td><td>1,305</td><td>24.2</td><td class="strong">+0.667</td><td>+0.060</td></tr>
+<tr><td>30 (60 s)</td><td>6.34%</td><td>1,925</td><td>31.7</td><td class="strong">+2.011</td><td>+0.683</td></tr>
+<tr><td>150 (5 min)</td><td>15.16%</td><td>3,621</td><td>22.3</td><td class="strong">+3.381</td><td>+1.945</td></tr>
+</table>
+
+<p>The rightmost columns are what applies to an arbitrary dollar of the day's flow, including
+the ~85&ndash;99% that no batch can touch. As in the re-solving measurement, the growth comes
+from the <i>frequency</i> side: the share of flow that finds a counterparty grows 116&times;
+from w=1 to w=150, while the gain on batched flow stays in a narrow 19&ndash;32&nbsp;bps
+band. Unlike re-solving, batching has a real negative side: at a uniform clearing price the
+gaining order's counterparty can do worse than its own routing baseline — at w=5 the
+counterparty losses fully consume the gains.</p>
+
+<h2>What routing the same orders costs</h2>
+<p>The gain above floors each order at 100 bps below its routing baseline. The sharper
+question: for the orders the batch <i>did</i> fill, did the clearing price beat what Fynd's
+routing would deliver at the identical state?</p>
+
+<table>
+<tr><th>window</th><th>orders<br>compared</th><th>clearing beats<br>routing</th>
+<th>median gap<br>(bps)</th></tr>
+<tr><td>1</td><td>310</td><td>20.3%</td><td class="neg">&minus;118.5</td></tr>
+<tr><td>5</td><td>1,086</td><td>20.1%</td><td class="neg">&minus;116.9</td></tr>
+<tr><td>15</td><td>2,150</td><td>25.5%</td><td class="neg">&minus;106.2</td></tr>
+<tr><td>30</td><td>2,897</td><td>30.5%</td><td class="neg">&minus;92.8</td></tr>
+<tr><td>150</td><td>4,516</td><td>40.0%</td><td class="neg">&minus;41.5</td></tr>
+</table>
+
+<p>Batch clearing loses to per-order routing at every window, by a median of roughly one
+limit-width at small windows, narrowing as batches grow. The trend is real — more
+counterparties give the auction better price discovery — but on this flow, at these window
+lengths, multilateral clearing does not beat good routing on price. The batching case
+therefore rests on what this report does not price: settlement-gas sharing, MEV protection
+from uniform clearing, and the no-route long tail that routing cannot serve at all.</p>
+
+<h2>Solver budget</h2>
+<p>APEX searches clearing prices under a deadline. At the production-realistic 1&nbsp;s
+budget, 96&ndash;99% of pooled component solves return nothing and fall back to
+order-crossing only; at 4&nbsp;s, half still do (solve wall times: mean 2.3&ndash;2.4&nbsp;s,
+p50 3.0&ndash;3.3&nbsp;s, p99 pinned at the deadline). Pool liquidity inside the auction is
+therefore budget-bound, not economics-bound: where the search does complete (1&ndash;5-block
+windows), pools add 9&ndash;69% more matched flow. The numbers above use the 1&nbsp;s budget;
+they understate what an auction with a restructured search (or partial-credit at the
+deadline) could match through pools.</p>
+
+<h2>Dataset and limits</h2>
+<ul>
+<li><b>Survivor flow.</b> These are trades that chose instant aggregator execution and
+settled. Flow that would opt into a 5-minute batch is a different population; match rates for
+a deployed auction could differ in either direction.</li>
+<li><b>13.25 h of one day</b> (00:00&ndash;13:15 UTC; the US session is absent), one market
+state, no error bars. The companion re-solving caveat applies: numbers reflect how much this
+particular day moved.</li>
+<li><b>Synthetic limits.</b> Floors are 100 bps below each order's baseline; real user limits
+were not extracted. A 50/200 bps sweep moved matched volume only slightly.</li>
+<li><b>Gross of gas.</b> Neither the batch's settlement-gas sharing (batching's most obvious
+saving) nor routing's per-trade gas is priced. Latency cost of waiting out the window is not
+priced either.</li>
+<li><b>Pool universe</b>: 400 deepest native pools around the order tokens (of 2,702
+candidates &ge; 1 ETH TVL); hooked Uniswap v4 (creator-coin pools) and RFQ liquidity are not
+simulatable and are absent. The unpriceable long tail — 17% of the day's USD — cannot enter
+any cell.</li>
+<li><b>Drift guard is a bound, not a proof</b>: pair moves under 100 bps between trade day
+and measurement state pass through into gain.</li>
+</ul>
+
+<div class="foot">Generated from <code>stage3_results-49575430.json</code> and
+<code>budget-4s/</code> (branch <code>mp/feat/apex-live-monitor</code>, fynd repo,
+tools/apex-batch stage3 at commit <code>60a3d643</code>). Baselines and clearing both
+evaluated at Base block 49,575,430; current-anchor cells, full pool scope. Positive basis
+points mean more output than the per-order routing baseline. Full pitfalls list:
+<code>stage3-apex-with-amms/CAVEATS.md</code>.</div>
+
+</body>
+</html>
