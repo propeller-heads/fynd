@@ -101,10 +101,17 @@ pub enum OrderStatus {
         bought_raw: U256,
         fill_ratio: f64,
     },
-    /// APEX returned a clearing with zero sold amount, or none while the deadline never fired —
-    /// the limit was the binding constraint.
+    /// APEX returned a clearing with zero sold amount, or none from a solve that converged — the
+    /// limit was the binding constraint at prices the search had finished refining.
     UnfilledAtLimit,
-    /// Absent from the result of a solve whose deadline fired: the whole cluster was cut.
+    /// Evaluated, but only against best-so-far prices: the deadline fired mid-cluster, APEX
+    /// cleared anyway, and this order did not cross. Distinct from [`Self::UnfilledAtLimit`]
+    /// because the rejection is provisional — converged prices might have crossed it — and
+    /// distinct from [`Self::ClusterCut`] because the order WAS priced.
+    UnfilledAtBestSoFar,
+    /// The order's trading cluster never started: the deadline landed between clusters, so nothing
+    /// about this order was evaluated at all. Only reachable when APEX partitions a component into
+    /// several trading clusters; a single-cluster component always clears at best-so-far instead.
     ClusterCut,
     /// The order's component errored or panicked inside APEX; nothing about this order's own
     /// economics can be concluded.
@@ -143,6 +150,10 @@ pub struct LiveCounters {
     pub filled: u64,
     pub partially_filled: u64,
     pub unfilled_at_limit: u64,
+    /// Priced and rejected, but only against best-so-far prices — see
+    /// [`OrderStatus::UnfilledAtBestSoFar`]. Tracked apart from `unfilled_at_limit` so a
+    /// provisional rejection is never read as a converged one.
+    pub unfilled_at_best_so_far: u64,
     pub cluster_cut: u64,
 }
 
@@ -766,9 +777,22 @@ fn solve_component(
                 counters.unfilled_at_limit += 1;
                 OrderStatus::UnfilledAtLimit
             }
+            // A fired deadline alone does NOT mean this order went unseen. APEX skips a cluster
+            // only when the deadline lands *between* clusters; a deadline inside a cluster still
+            // clears it at best-so-far prices, and the whole cluster's price vector comes back.
+            // So a priced token means the order was evaluated and did not cross — provisionally,
+            // at unconverged prices — while an unpriced one means its cluster never ran.
             None if result.deadline_fired => {
-                counters.cluster_cut += 1;
-                OrderStatus::ClusterCut
+                if result
+                    .clearing_prices
+                    .contains_key(&order.token_in)
+                {
+                    counters.unfilled_at_best_so_far += 1;
+                    OrderStatus::UnfilledAtBestSoFar
+                } else {
+                    counters.cluster_cut += 1;
+                    OrderStatus::ClusterCut
+                }
             }
             None => {
                 counters.unfilled_at_limit += 1;
@@ -976,11 +1000,20 @@ mod tests {
         assert_eq!(report.counters.filled + report.counters.partially_filled, 0, "{report:?}");
         assert_eq!(report.statuses.len(), 2);
         for (id, status) in &report.statuses {
+            // Never ClusterCut: the deadline can only skip a cluster it has not started, and a
+            // component this small yields a single cluster that always gets cleared — at
+            // converged prices here, at best-so-far prices under time pressure.
             assert!(
-                matches!(status, OrderStatus::UnfilledAtLimit | OrderStatus::ComponentErrored),
+                matches!(
+                    status,
+                    OrderStatus::UnfilledAtLimit |
+                        OrderStatus::UnfilledAtBestSoFar |
+                        OrderStatus::ComponentErrored
+                ),
                 "{id} ended as {status:?}"
             );
         }
+        assert_eq!(report.counters.cluster_cut, 0, "{report:?}");
     }
 
     #[test]
