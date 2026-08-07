@@ -402,6 +402,19 @@ fn component_record(component: &ComponentClearing) -> serde_json::Value {
         "clearing_prices": clearing_prices,
         "pool_clearings": pool_clearings,
         "order_clearings": order_clearings,
+        // Where the budget went. `effective_parallelism_avg` near 1 means the supply registration
+        // ran serially whatever the worker count says, which is what made every budget increase
+        // buy no extra iterations.
+        "solve_metrics": {
+            "supply_calls": component.solve_metrics.supply_calls,
+            "supply_wall_ms": component.solve_metrics.supply_wall_ms,
+            "effective_parallelism_avg": component.solve_metrics.effective_parallelism_avg,
+            "pool_builds": component.solve_metrics.pool_builds,
+            "pool_build_ms": component.solve_metrics.pool_build_ms,
+            "workers": component.solve_metrics.workers,
+            "supply_cache_hits": component.solve_metrics.supply_cache_hits,
+            "supply_cache_misses": component.solve_metrics.supply_cache_misses,
+        },
     })
 }
 

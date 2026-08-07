@@ -18,7 +18,7 @@ ExecStart=/home/agent/apex/fynd/target/release/hindsight monitor \
     --apex-window-blocks 1 \
     --apex-window-blocks 5 \
     --apex-window-blocks 30 \
-    --apex-workers 6 \
+    --apex-workers 4 \
     --apex-queue-capacity 64 \
     --apex-budget-ms 3000 \
     --metrics-port 9899 \

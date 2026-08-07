@@ -174,6 +174,27 @@ pub struct ComponentClearing {
     pub clearing_prices: Vec<(ApexAddress, U256)>,
     pub pool_clearings: Vec<PoolClearingRecord>,
     pub order_clearings: Vec<OrderClearingRecord>,
+    /// What the solve actually spent its budget on. APEX fills these regardless of
+    /// `collect_metrics` (which only controls its CSV dump), and they are the difference between
+    /// knowing a solve was slow and knowing why.
+    pub solve_metrics: ComponentSolveMetrics,
+}
+
+/// Where one component solve's time went, from APEX's own instrumentation.
+#[derive(Debug, Clone, Default)]
+pub struct ComponentSolveMetrics {
+    /// Parallel `register_supply` calls — effectively the price-search iteration count.
+    pub supply_calls: u64,
+    pub supply_wall_ms: f64,
+    /// Summed per-worker busy time over the section's wall time. ~1 means the supply
+    /// registration ran serially however many workers were configured.
+    pub effective_parallelism_avg: f64,
+    /// Rayon pool construction, which happens per cluster once `max_workers > 1`.
+    pub pool_builds: u64,
+    pub pool_build_ms: f64,
+    pub workers: u64,
+    pub supply_cache_hits: u64,
+    pub supply_cache_misses: u64,
 }
 
 /// One pool's leg of a component's clearing, with the pool resolved back to its tycho identity.
@@ -456,6 +477,15 @@ pub fn solve_live_batch(
     report
 }
 
+/// Workers APEX may use *inside* one component solve.
+///
+/// This was 1, which meant `MarketRouter::setup_workers` early-returned and every price-search
+/// iteration registered supply over all ~280 pools serially on one thread. Measured consequence: a
+/// deadline-exited search completed ~39 iterations at a 1.5 s budget and ~36 at 20 s — the budget
+/// never bought iterations because the cost is per-iteration, not per-search. The stage's own
+/// worker count is lowered to match, so total threads stay near the cgroup's core allowance.
+const APEX_MAX_WORKERS: usize = 4;
+
 /// Iteration cap for the price search, raised from APEX's default 1000 to match turbine's
 /// production tuning — the mixed strategy below only pays off if it is allowed to keep stepping.
 const PRICE_SEARCH_MAX_ITERATIONS: u32 = 3_000;
@@ -609,7 +639,7 @@ fn solve_component(
 
     let mut config = ApexConfig {
         enable_two_hops: !pools.is_empty(),
-        max_workers: 1,
+        max_workers: APEX_MAX_WORKERS,
         collect_metrics: false,
         // The search deadline starts at THIS component's solve start, never earlier — an
         // already-expired absolute deadline makes APEX return silently empty.
@@ -720,6 +750,19 @@ fn solve_component(
                 bought_amount: from_apex_u256(clearing.bought_amount),
             })
             .collect(),
+        solve_metrics: ComponentSolveMetrics {
+            supply_calls: result.metrics.supply_calls,
+            supply_wall_ms: result.metrics.supply_wall_ms,
+            effective_parallelism_avg: result
+                .metrics
+                .effective_parallelism
+                .average,
+            pool_builds: result.metrics.pool_builds,
+            pool_build_ms: result.metrics.pool_build_ms,
+            workers: result.metrics.workers,
+            supply_cache_hits: result.metrics.supply_cache_hits,
+            supply_cache_misses: result.metrics.supply_cache_misses,
+        },
     });
 
     // Internalization inputs: net pool exposure over this solve's per-hop clearings, valued in
