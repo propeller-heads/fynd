@@ -58,6 +58,10 @@ pub struct LiveOrder {
 /// delay never changes what state a solve sees.
 #[derive(Clone)]
 pub struct LivePool {
+    /// The tycho component id this pool came from. `apex_address` is keccak-truncated for
+    /// non-address component ids (32-byte Uniswap v4 pool ids), so it cannot be resolved back to
+    /// a pool after the fact — the recorded clearings carry this instead.
+    pub component_id: String,
     pub apex_address: ApexAddress,
     pub token_0: ApexAddress,
     pub token_1: ApexAddress,
@@ -67,6 +71,7 @@ pub struct LivePool {
 impl std::fmt::Debug for LivePool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LivePool")
+            .field("component_id", &self.component_id)
             .field("apex_address", &self.apex_address)
             .field("token_0", &self.token_0)
             .field("token_1", &self.token_1)
@@ -141,6 +146,45 @@ pub struct LiveCounters {
     pub cluster_cut: u64,
 }
 
+/// What one component's APEX solve cleared, recorded verbatim so the economics can be recomputed
+/// offline without re-solving. APEX has no encoder, so the clearing-price vector plus the
+/// per-pool and per-order clearings are the recoverable equivalent of a settlement's calldata.
+#[derive(Debug, Clone, Default)]
+pub struct ComponentClearing {
+    /// The uniform clearing price per token, in APEX's 18-decimal price space.
+    pub clearing_prices: Vec<(ApexAddress, U256)>,
+    pub pool_clearings: Vec<PoolClearingRecord>,
+    pub order_clearings: Vec<OrderClearingRecord>,
+}
+
+/// One pool's leg of a component's clearing, with the pool resolved back to its tycho identity.
+#[derive(Debug, Clone)]
+pub struct PoolClearingRecord {
+    pub apex_address: ApexAddress,
+    /// The tycho component id, when the solve's pool set still knows this address. Absent only if
+    /// APEX returned a clearing for a pool that was not handed to it.
+    pub component_id: Option<String>,
+    pub protocol: Option<String>,
+    pub sell_token: ApexAddress,
+    pub buy_token: ApexAddress,
+    pub sold_amount: U256,
+    pub bought_amount: U256,
+    pub surplus: U256,
+    pub fee: Option<U256>,
+}
+
+/// One limit order's leg of a component's clearing, keyed by the order id the monitor assigned
+/// (`{tx_hash}:{tx_index}`), so it joins the comparisons stream directly.
+#[derive(Debug, Clone)]
+pub struct OrderClearingRecord {
+    pub id: String,
+    pub owner: ApexAddress,
+    pub sell_token: ApexAddress,
+    pub buy_token: ApexAddress,
+    pub sold_amount: U256,
+    pub bought_amount: U256,
+}
+
 /// One bracket's outcome: per-order statuses, the singles control, counters, and per-component
 /// solve wall times (the shadow run's primary series).
 #[derive(Debug, Default)]
@@ -149,6 +193,10 @@ pub struct LiveBatchReport {
     pub singles: Vec<SingleResult>,
     pub counters: LiveCounters,
     pub component_solve_ms: Vec<u128>,
+    /// One entry per component APEX actually returned a result for, in solve order. The singles
+    /// control's own solves are not recorded here — they are a per-order counterfactual, not part
+    /// of the batch's clearing.
+    pub components: Vec<ComponentClearing>,
     /// Σ|per-token net pool exposure| in wei, and the notional actually sold into clearings, both
     /// summed over this bracket's components. Their ratio is the internalization share:
     /// `1 − pool_cleared_wei / (2 × filled_notional_wei)`. The denominator is the REALIZED
@@ -335,6 +383,7 @@ pub fn solve_live_batch(
             &mut report.statuses,
             counters,
             &mut report.component_solve_ms,
+            &mut report.components,
         );
         report.pool_cleared_wei += exposure.pool_cleared_wei;
         report.filled_notional_wei += exposure.filled_notional_wei;
@@ -357,7 +406,9 @@ pub fn solve_live_batch(
                 let mut single_statuses = Vec::new();
                 let mut single_counters = LiveCounters::default();
                 let mut single_times = Vec::new();
-                // The singles control's own exposure is not part of the batch's internalization.
+                let mut single_clearings = Vec::new();
+                // The singles control's own exposure is not part of the batch's internalization,
+                // and its clearings are a counterfactual rather than the batch's own.
                 let _ = solve_component(
                     &[order],
                     &component_pools,
@@ -367,6 +418,7 @@ pub fn solve_live_batch(
                     &mut single_statuses,
                     &mut single_counters,
                     &mut single_times,
+                    &mut single_clearings,
                 );
                 let bought_raw = single_statuses
                     .into_iter()
@@ -403,6 +455,7 @@ fn solve_component(
     statuses: &mut Vec<(String, OrderStatus)>,
     counters: &mut LiveCounters,
     solve_ms: &mut Vec<u128>,
+    clearings_out: &mut Vec<ComponentClearing>,
 ) -> ComponentExposure {
     let mut exposure = ComponentExposure::default();
     // Token closure = order tokens ∪ pool tokens, all priced (the two_hops precondition).
@@ -575,6 +628,51 @@ fn solve_component(
     if result.deadline_fired {
         counters.deadline_fired_components += 1;
     }
+
+    // The clearing itself, recorded before it is collapsed into the internalization scalars.
+    // APEX addresses pools by a keccak-truncated id, so each clearing is resolved back to the
+    // tycho component that produced it while that mapping is still in scope.
+    let pool_identity: HashMap<ApexAddress, &LivePool> = component_pools
+        .iter()
+        .map(|pool| (pool.apex_address, *pool))
+        .collect();
+    clearings_out.push(ComponentClearing {
+        clearing_prices: result
+            .clearing_prices
+            .iter()
+            .map(|(token, price)| (*token, from_apex_u256(*price)))
+            .collect(),
+        pool_clearings: result
+            .pool_clearings
+            .iter()
+            .map(|clearing| {
+                let identity = pool_identity.get(&clearing.address);
+                PoolClearingRecord {
+                    apex_address: clearing.address,
+                    component_id: identity.map(|pool| pool.component_id.clone()),
+                    protocol: identity.map(|pool| pool.adapter.protocol.clone()),
+                    sell_token: clearing.pair.sell_token.address,
+                    buy_token: clearing.pair.buy_token.address,
+                    sold_amount: from_apex_u256(clearing.sold_amount),
+                    bought_amount: from_apex_u256(clearing.bought_amount),
+                    surplus: from_apex_u256(clearing.surplus),
+                    fee: clearing.fee.map(from_apex_u256),
+                }
+            })
+            .collect(),
+        order_clearings: result
+            .limit_order_clearings
+            .iter()
+            .map(|clearing| OrderClearingRecord {
+                id: clearing.id.clone(),
+                owner: clearing.owner,
+                sell_token: clearing.sell_token,
+                buy_token: clearing.buy_token,
+                sold_amount: from_apex_u256(clearing.sold_amount),
+                bought_amount: from_apex_u256(clearing.bought_amount),
+            })
+            .collect(),
+    });
 
     // Internalization inputs: net pool exposure over this solve's per-hop clearings, valued in
     // wei, against the notional the orders actually sold (accumulated in the fill arm below).
@@ -758,6 +856,39 @@ mod tests {
     }
 
     #[test]
+    fn test_crossing_orders_record_prices_and_order_clearings() {
+        // APEX has no encoder, so the clearing-price vector and the per-order clearings are what
+        // makes a solve reconstructible offline. Both must survive onto the report.
+        let input = two_token_input(
+            vec![
+                order("a:0", token(1), token(2), raw(9, 17)),
+                order("b:0", token(2), token(1), raw(9, 17)),
+            ],
+            Vec::new(),
+        );
+        let report = solve_live_batch(&input, BUDGET, BUDGET, true);
+        assert_eq!(report.components.len(), 1, "one batch component, singles excluded");
+        let component = &report.components[0];
+        let priced: HashSet<ApexAddress> = component
+            .clearing_prices
+            .iter()
+            .map(|(token, _)| *token)
+            .collect();
+        assert_eq!(priced, HashSet::from([token(1), token(2)]), "{:?}", component.clearing_prices);
+        assert!(component
+            .clearing_prices
+            .iter()
+            .all(|(_, price)| !price.is_zero()));
+        let mut cleared_ids: Vec<&str> = component
+            .order_clearings
+            .iter()
+            .map(|clearing| clearing.id.as_str())
+            .collect();
+        cleared_ids.sort_unstable();
+        assert_eq!(cleared_ids, vec!["a:0", "b:0"]);
+    }
+
+    #[test]
     fn test_single_order_component_without_pools_is_excluded() {
         let input = two_token_input(vec![order("a:0", token(1), token(2), raw(9, 17))], Vec::new());
         let report = solve_live_batch(&input, BUDGET, BUDGET, true);
@@ -900,6 +1031,7 @@ mod tests {
         let state =
             UniswapV2State::new(to_apex_u256(raw(1_000_000, 18)), to_apex_u256(raw(1_000_000, 18)));
         let pool = LivePool {
+            component_id: "0x0909090909090909090909090909090909090909".to_string(),
             apex_address: token(9),
             token_0: token(1),
             token_1: token(2),
@@ -922,5 +1054,18 @@ mod tests {
             "the singles control fills through the same pool: {:?}",
             report.singles
         );
+
+        // The pool leg resolves back to its tycho component id, which the APEX address alone
+        // cannot do once a component id is hashed rather than parsed.
+        let pool_clearings = &report.components[0].pool_clearings;
+        assert_eq!(pool_clearings.len(), 1, "{pool_clearings:?}");
+        assert_eq!(
+            pool_clearings[0]
+                .component_id
+                .as_deref(),
+            Some("0x0909090909090909090909090909090909090909")
+        );
+        assert_eq!(pool_clearings[0].protocol.as_deref(), Some("uniswap_v2"));
+        assert!(!pool_clearings[0].sold_amount.is_zero());
     }
 }

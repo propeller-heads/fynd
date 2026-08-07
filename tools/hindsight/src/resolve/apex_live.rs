@@ -13,9 +13,12 @@ use std::{
 };
 
 use apex_batch::{
-    adapter::{PoolAddressBook, TychoApexPool},
+    adapter::{from_apex_address, PoolAddressBook, TychoApexPool},
     apex_solver::types::Address as ApexAddress,
-    live::{solve_live_batch, LiveBatchInput, LiveBatchReport, LiveOrder, LivePool, OrderStatus},
+    live::{
+        solve_live_batch, ComponentClearing, LiveBatchInput, LiveBatchReport, LiveOrder, LivePool,
+        OrderStatus,
+    },
     prices::TokenPriceInput,
     subset::{select_pool_subset, PoolCandidate},
 };
@@ -310,6 +313,11 @@ impl ApexRuntime {
                 "internalization_share": internalization,
                 "orders": orders,
                 "singles": singles,
+                "components": report
+                    .components
+                    .iter()
+                    .map(component_record)
+                    .collect::<Vec<_>>(),
             });
             let writer = self.writer.writer();
             if let Err(error) = {
@@ -334,6 +342,58 @@ impl ApexRuntime {
 /// Milliseconds as a JSON-representable u64; a solve cannot run for 584 million years.
 fn u128_ms(millis: u128) -> u64 {
     u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+/// One solved component's clearing, verbatim: the uniform price vector plus every pool and order
+/// leg it cleared. APEX builds no calldata, so this is what makes the solve reconstructible
+/// offline — amounts stay decimal strings because they are 18-decimal `U256`s, not JSON numbers.
+fn component_record(component: &ComponentClearing) -> serde_json::Value {
+    let clearing_prices: Vec<serde_json::Value> = component
+        .clearing_prices
+        .iter()
+        .map(|(token, price)| {
+            serde_json::json!({
+                "token": format!("{:#x}", from_apex_address(*token)),
+                "price": price.to_string(),
+            })
+        })
+        .collect();
+    let pool_clearings: Vec<serde_json::Value> = component
+        .pool_clearings
+        .iter()
+        .map(|clearing| {
+            serde_json::json!({
+                "apex_address": format!("{:#x}", from_apex_address(clearing.apex_address)),
+                "component_id": clearing.component_id,
+                "protocol": clearing.protocol,
+                "sell_token": format!("{:#x}", from_apex_address(clearing.sell_token)),
+                "buy_token": format!("{:#x}", from_apex_address(clearing.buy_token)),
+                "sold_amount": clearing.sold_amount.to_string(),
+                "bought_amount": clearing.bought_amount.to_string(),
+                "surplus": clearing.surplus.to_string(),
+                "fee": clearing.fee.map(|fee| fee.to_string()),
+            })
+        })
+        .collect();
+    let order_clearings: Vec<serde_json::Value> = component
+        .order_clearings
+        .iter()
+        .map(|clearing| {
+            serde_json::json!({
+                "id": clearing.id,
+                "owner": format!("{:#x}", from_apex_address(clearing.owner)),
+                "sell_token": format!("{:#x}", from_apex_address(clearing.sell_token)),
+                "buy_token": format!("{:#x}", from_apex_address(clearing.buy_token)),
+                "sold_amount": clearing.sold_amount.to_string(),
+                "bought_amount": clearing.bought_amount.to_string(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "clearing_prices": clearing_prices,
+        "pool_clearings": pool_clearings,
+        "order_clearings": order_clearings,
+    })
 }
 
 fn status_fields(status: &OrderStatus) -> (&'static str, Option<String>, Option<f64>) {
@@ -500,6 +560,7 @@ fn clone_pool_subset(
         }
         let boxed = simulation.clone_box();
         pools.push(LivePool {
+            component_id: component_id.clone(),
             apex_address,
             token_0: ApexAddress(candidate.tokens[0]),
             token_1: ApexAddress(candidate.tokens[1]),
@@ -664,6 +725,26 @@ mod tests {
                     .iter()
                     .all(|order| order["status"] == "filled"),
                 "the crossing pair reconciles as filled in both brackets: {line}"
+            );
+            // APEX's clearing is the record's substitute for calldata: without the price vector
+            // and the order legs the line cannot be reconstructed offline.
+            let components = line["components"]
+                .as_array()
+                .expect("components array");
+            assert_eq!(components.len(), 1, "{line}");
+            assert_eq!(
+                components[0]["clearing_prices"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(2),
+                "{line}"
+            );
+            assert_eq!(
+                components[0]["order_clearings"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(2),
+                "{line}"
             );
         }
     }
