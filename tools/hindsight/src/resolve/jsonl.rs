@@ -159,6 +159,8 @@ fn comparison_record(
     let slippage = range.slippage.map(|slippage| {
         serde_json::json!({
             "bps": slippage.bps,
+            "quoted_amount_out": slippage.quoted_amount_out.to_string(),
+            "reexecuted_amount_out": slippage.reexecuted_amount_out.to_string(),
             "usd": prices_back.savings_usd(
                 range.token_out,
                 slippage.reexecuted_amount_out,
@@ -168,6 +170,9 @@ fn comparison_record(
     });
     serde_json::json!({
         "block": range.block_number,
+        // The headline verdict (top-of-block), flat so a filter does not have to reach into
+        // `top` and re-derive which state the headline follows.
+        "verdict": range.verdict,
         "tx_index": range.tx_index,
         "settled_tx": range.tx_hash,
         "venue": range.venue,
@@ -181,6 +186,11 @@ fn comparison_record(
         "settled_amount_out": range.settled_amount_out.to_string(),
         "settled_amount_out_net_gas": range.settled_amount_out_net_gas.to_string(),
         "settled_gas_cost": range.settled_gas.map(|gas| gas.to_string()),
+        // The settled trade's own on-chain floor and the venue's cut. The floor is the study's
+        // only non-synthetic limit: it says how much headroom the real trade carried.
+        "settled_min_amount_out": range.min_amount_out.map(|floor| floor.to_string()),
+        "venue_fee_in": range.venue_fee_in.map(|fee| fee.to_string()),
+        "venue_fee_out": range.venue_fee_out.map(|fee| fee.to_string()),
         "quoted_amount_out": range.quote.as_ref().map(|q| q.amount_out.to_string()),
         "quote_source": range.quote.as_ref().and_then(|q| q.source.clone()),
         "quote_timestamp": range.quote.as_ref().and_then(|q| q.timestamp),
@@ -203,14 +213,19 @@ fn state_record(
     let token_out = range.token_out;
     let solved = match &state.outcome {
         Outcome::Solved(solved) => Some(solved),
-        Outcome::Partial(_) | Outcome::Unsolvable(_) => None,
+        Outcome::Partial(_) | Outcome::Unsolvable { .. } => None,
     };
-    // The reason Fynd could not serve the trade — the coverage-gap signal (missing token,
-    // insufficient liquidity, timeout, partial-fill coverage miss).
-    let unsolvable_reason = match &state.outcome {
-        Outcome::Unsolvable(reason) | Outcome::Partial(reason) => Some(reason.as_str()),
-        Outcome::Solved(_) => None,
+    // A liquidity-limited partial route and a total routing gap are different coverage signals,
+    // so the record names which one it was rather than collapsing both into the reason string.
+    let (outcome_status, unsolvable_reason, no_route_cause) = match &state.outcome {
+        Outcome::Solved(_) => ("solved", None, None),
+        Outcome::Partial(reason) => ("partial", Some(reason.as_str()), None),
+        Outcome::Unsolvable { reason, cause } => {
+            ("unsolvable", Some(reason.as_str()), cause.as_ref())
+        }
     };
+    let details = solved.and_then(|s| s.details.as_ref());
+    let fees = details.and_then(|d| d.fees.as_ref());
     let improvement_usd =
         solved.and_then(|s| prices.savings_usd(token_out, s.amount_out, range.settled_amount_out));
     let fynd_value_usd = solved.and_then(|s| prices.value_usd(token_out, s.amount_out));
@@ -228,7 +243,25 @@ fn state_record(
         "improvement_usd": improvement_usd,
         "fynd_value_usd": fynd_value_usd,
         "settled_value_usd": prices.value_usd(token_out, range.settled_amount_out),
+        "outcome_status": outcome_status,
         "unsolvable_reason": unsolvable_reason,
+        "no_route_cause": no_route_cause,
+        // Turns the gas estimate into an actual cost, and records what the quote committed to
+        // on-chain — the encoded floor, the fee split, and the state it was solved against.
+        "gas_price": details.and_then(|d| d.gas_price.map(|price| price.to_string())),
+        "price_impact_bps": details.and_then(|d| d.price_impact_bps),
+        "solved_against": details.map(|d| d.solved_against.as_str()),
+        "block": details.map(|d| serde_json::json!({
+            "number": d.block_number,
+            "hash": d.block_hash,
+            "timestamp": d.block_timestamp,
+        })),
+        "fee_breakdown": fees.map(|f| serde_json::json!({
+            "router_fee": f.router_fee.to_string(),
+            "client_fee": f.client_fee.to_string(),
+            "max_slippage": f.max_slippage.to_string(),
+            "min_amount_received": f.min_amount_received.to_string(),
+        })),
         "quote": solved
             .and_then(|s| s.quote_json.as_deref())
             .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok()),
@@ -289,7 +322,7 @@ mod tests {
     use super::*;
     use crate::{
         decoder::{AttributionSource, DecodedTrade, Registry, SandwichEvidence, SolverQuote},
-        resolve::{build_range, test_support, SolvedAmount},
+        resolve::{build_range, test_support, NoRouteCause, QuoteDetails, QuoteFees, SolvedAmount},
     };
 
     fn empty_prices() -> Prices {
@@ -361,9 +394,9 @@ mod tests {
         let range = build_range(
             &trade,
             &empty_prices(),
-            Outcome::Unsolvable("x".into()),
-            Outcome::Unsolvable("x".into()),
-            &Outcome::Unsolvable("x".into()),
+            Outcome::unsolvable("x"),
+            Outcome::unsolvable("x"),
+            &Outcome::unsolvable("x"),
         );
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
         assert_eq!(rec.pointer("/tx_index").unwrap(), 3);
@@ -455,6 +488,7 @@ mod tests {
             algorithm: "bellman_ford".to_string(),
             quote_json: quote.clone(),
             solved_route: Some(solved_route.clone()),
+            details: None,
         });
         let back = Outcome::Solved(SolvedAmount {
             amount_out: U256::from(1_002_000_000u64),
@@ -463,6 +497,7 @@ mod tests {
             algorithm: "bellman_ford".to_string(),
             quote_json: quote,
             solved_route: Some(solved_route),
+            details: None,
         });
         let range = build_range(&trade, &prices, top, back.clone(), &back);
 
@@ -536,6 +571,185 @@ mod tests {
     }
 
     #[test]
+    fn test_comparison_record_carries_the_quote_details() {
+        // The offline pass must be able to price gas, read the encoded floor, and see what the
+        // settled trade's own floor was — none of which it can recover by re-solving later.
+        let mut trade = DecodedTrade {
+            tx_hash: TxHash::default(),
+            block_number: 25_000_000,
+            tx_index: 0,
+            venue: "relay".into(),
+            solver: "1inch".into(),
+            solver_source: AttributionSource::TraceMatch,
+            decoder: "sender-netting",
+            sender: Address::ZERO,
+            token_in: Address::repeat_byte(0x11),
+            token_out: Address::repeat_byte(0x22),
+            amount_in: U256::from(1_000u64),
+            amount_out: U256::from(1_000u64),
+            venue_fee_in: Some(U256::from(7u64)),
+            venue_fee_out: Some(U256::from(9u64)),
+            settled_gas: None,
+            quote: None,
+            min_amount_out: Some(U256::from(950u64)),
+            sandwich: None,
+        };
+        trade.sandwich = None;
+        let solved = Outcome::Solved(SolvedAmount {
+            amount_out: U256::from(1_100u64),
+            amount_out_net_gas: U256::from(1_090u64),
+            gas_estimate: U256::from(21_000u64),
+            algorithm: "most_liquid".to_string(),
+            quote_json: None,
+            solved_route: None,
+            details: Some(Box::new(QuoteDetails {
+                gas_price: Some(U256::from(3_000_000_000u64)),
+                price_impact_bps: Some(12),
+                block_number: 24_999_999,
+                block_hash: "0xabc".to_string(),
+                block_timestamp: 1_783_421_726,
+                solved_against: "base".to_string(),
+                fees: Some(QuoteFees {
+                    router_fee: U256::from(5u64),
+                    client_fee: U256::from(2u64),
+                    max_slippage: U256::from(11u64),
+                    min_amount_received: U256::from(1_082u64),
+                }),
+            })),
+        });
+        let range =
+            build_range(&trade, &empty_prices(), solved.clone(), solved.clone(), &solved.clone());
+        let rec = comparison_record(&range, &empty_prices(), &empty_prices());
+
+        assert_eq!(rec.pointer("/verdict").unwrap(), "win");
+        assert_eq!(
+            rec.pointer("/settled_min_amount_out")
+                .unwrap(),
+            "950"
+        );
+        assert_eq!(rec.pointer("/venue_fee_in").unwrap(), "7");
+        assert_eq!(rec.pointer("/venue_fee_out").unwrap(), "9");
+        assert_eq!(
+            rec.pointer("/slippage/quoted_amount_out")
+                .unwrap(),
+            "1100"
+        );
+        assert_eq!(
+            rec.pointer("/slippage/reexecuted_amount_out")
+                .unwrap(),
+            "1100"
+        );
+        assert_eq!(
+            rec.pointer("/top/outcome_status")
+                .unwrap(),
+            "solved"
+        );
+        assert_eq!(rec.pointer("/top/gas_price").unwrap(), "3000000000");
+        assert_eq!(
+            rec.pointer("/top/price_impact_bps")
+                .unwrap(),
+            12
+        );
+        assert_eq!(
+            rec.pointer("/top/solved_against")
+                .unwrap(),
+            "base"
+        );
+        assert_eq!(
+            rec.pointer("/top/block/number")
+                .unwrap(),
+            24_999_999u64
+        );
+        assert_eq!(rec.pointer("/top/block/hash").unwrap(), "0xabc");
+        assert_eq!(
+            rec.pointer("/top/fee_breakdown/router_fee")
+                .unwrap(),
+            "5"
+        );
+        assert_eq!(
+            rec.pointer("/top/fee_breakdown/min_amount_received")
+                .unwrap(),
+            "1082"
+        );
+    }
+
+    #[test]
+    fn test_comparison_record_separates_partial_from_unsolvable() {
+        // Both used to collapse into one free-text field, so a liquidity-limited partial route
+        // read exactly like a total routing gap.
+        let trade = DecodedTrade {
+            tx_hash: TxHash::default(),
+            block_number: 25_000_000,
+            tx_index: 0,
+            venue: "relay".into(),
+            solver: "1inch".into(),
+            solver_source: AttributionSource::TraceMatch,
+            decoder: "sender-netting",
+            sender: Address::ZERO,
+            token_in: Address::repeat_byte(0x11),
+            token_out: Address::repeat_byte(0x22),
+            amount_in: U256::from(1_000u64),
+            amount_out: U256::from(10_000u64),
+            venue_fee_in: None,
+            venue_fee_out: None,
+            settled_gas: None,
+            quote: None,
+            min_amount_out: None,
+            sandwich: None,
+        };
+        // A 10%-of-size route is reclassified into `Partial` by `served`.
+        let partial = Outcome::Solved(SolvedAmount {
+            amount_out: U256::from(1_000u64),
+            amount_out_net_gas: U256::from(990u64),
+            gas_estimate: U256::from(21_000u64),
+            algorithm: String::new(),
+            quote_json: None,
+            solved_route: None,
+            details: None,
+        });
+        let gap = Outcome::Unsolvable {
+            reason: "QuoteStatus::NoRoute".to_string(),
+            cause: Some(NoRouteCause {
+                kind: "no_route_found",
+                detail: "no route found for order o".to_string(),
+                path_reason: Some("destination token not in graph".to_string()),
+            }),
+        };
+        let range = build_range(&trade, &empty_prices(), partial, gap, &Outcome::unsolvable("x"));
+        let rec = comparison_record(&range, &empty_prices(), &empty_prices());
+
+        assert_eq!(
+            rec.pointer("/top/outcome_status")
+                .unwrap(),
+            "partial"
+        );
+        assert!(rec
+            .pointer("/top/no_route_cause")
+            .unwrap()
+            .is_null());
+        assert_eq!(
+            rec.pointer("/back/outcome_status")
+                .unwrap(),
+            "unsolvable"
+        );
+        assert_eq!(
+            rec.pointer("/back/no_route_cause/kind")
+                .unwrap(),
+            "no_route_found"
+        );
+        assert_eq!(
+            rec.pointer("/back/no_route_cause/path_reason")
+                .unwrap(),
+            "destination token not in graph"
+        );
+        assert_eq!(
+            rec.pointer("/back/unsolvable_reason")
+                .unwrap(),
+            "QuoteStatus::NoRoute"
+        );
+    }
+
+    #[test]
     fn test_comparison_record_unsolvable() {
         let trade = DecodedTrade {
             tx_hash: TxHash::default(),
@@ -561,9 +775,9 @@ mod tests {
         let range = build_range(
             &trade,
             &empty_prices(),
-            Outcome::Unsolvable("missing token in Tycho".into()),
-            Outcome::Unsolvable("missing token in Tycho".into()),
-            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
+            Outcome::unsolvable("missing token in Tycho"),
+            Outcome::unsolvable("missing token in Tycho"),
+            &Outcome::unsolvable("no top-of-block route to re-execute"),
         );
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
         assert_eq!(rec.pointer("/top/verdict").unwrap(), "unsolvable");
@@ -631,6 +845,7 @@ mod tests {
                 algorithm: String::new(),
                 quote_json: None,
                 solved_route: None,
+                details: None,
             })
         };
         let range =

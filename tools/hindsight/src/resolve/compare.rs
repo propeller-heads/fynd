@@ -154,6 +154,7 @@ mod tests {
             algorithm: String::new(),
             quote_json: None,
             solved_route: None,
+            details: None,
         })
     }
 
@@ -190,7 +191,7 @@ mod tests {
     #[test]
     fn test_compare_unsolvable() {
         let (settled, net) = gross(10_000);
-        let d = compare(&Outcome::Unsolvable("no route".into()), settled, net);
+        let d = compare(&Outcome::unsolvable("no route"), settled, net);
         assert_eq!(d, Deltas::NONE);
     }
 
@@ -231,7 +232,7 @@ mod tests {
     #[test]
     fn test_verdict_unsolvable() {
         let (settled, net) = gross(10_000);
-        let outcome = Outcome::Unsolvable("missing token".into());
+        let outcome = Outcome::unsolvable("missing token");
         assert_eq!(verdict(&outcome, &compare(&outcome, settled, net)), Verdict::Unsolvable);
     }
 
@@ -254,8 +255,8 @@ mod tests {
     #[test]
     fn test_served_unsolvable_and_zero_settled() {
         assert!(matches!(
-            served(Outcome::Unsolvable("x".into()), U256::from(1_000u64)),
-            Outcome::Unsolvable(_)
+            served(Outcome::unsolvable("x"), U256::from(1_000u64)),
+            Outcome::Unsolvable { .. }
         ));
         assert!(matches!(served(solved(1, 1), U256::ZERO), Outcome::Solved(_)));
     }
@@ -277,7 +278,7 @@ mod tests {
 
     #[test]
     fn slippage_none_when_either_side_unsolved() {
-        let failed = Outcome::Unsolvable("re-execution failed".into());
+        let failed = Outcome::unsolvable("re-execution failed");
         assert_eq!(slippage(&failed, &solved(10_000, 9_900)), None);
         assert_eq!(slippage(&solved(10_000, 9_900), &failed), None);
     }

@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use fynd_core::{
     types::{
         EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, QuoteStatus,
+        SolveError,
     },
     BlockStepController, FyndBuilder, Solver,
 };
@@ -33,7 +34,10 @@ use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
     provider_from,
-    resolve::{solve_backs, solve_tops, Outcome, SolvedAmount, SteppingSolver},
+    resolve::{
+        solve_backs, solve_tops, NoRouteCause, Outcome, QuoteDetails, QuoteFees, SolvedAmount,
+        SteppingSolver,
+    },
     telemetry,
     usd::Prices,
 };
@@ -195,7 +199,7 @@ impl StepAdapter<'_> {
 impl SteppingSolver for StepAdapter<'_> {
     async fn solve(&self, token_in: Address, token_out: Address, amount_in: U256) -> Outcome {
         let Ok(amount) = amount_in.to_string().parse::<BigUint>() else {
-            return Outcome::Unsolvable("unparseable amount_in".to_string());
+            return Outcome::unsolvable("unparseable amount_in");
         };
         // Placeholder receiver: routing/amounts are receiver-independent; it only fills the encoded
         // calldata's recipient. Encoding is requested so each quote carries its on-chain
@@ -217,17 +221,17 @@ impl SteppingSolver for StepAdapter<'_> {
 
         let quote = match self.solver.quote(request).await {
             Ok(quote) => quote,
-            Err(e) => return Outcome::Unsolvable(format!("solve error: {e}")),
+            Err(e) => return Outcome::unsolvable(format!("solve error: {e}")),
         };
         let Some(order) = quote.orders().first() else {
-            return Outcome::Unsolvable("solver returned no order quote".to_string());
+            return Outcome::unsolvable("solver returned no order quote");
         };
         order_quote_to_outcome(order)
     }
 
     async fn reexecute(&self, top: &SolvedAmount) -> Outcome {
         let Some(route) = top.solved_route.as_ref() else {
-            return Outcome::Unsolvable("top-of-block quote carried no route".to_string());
+            return Outcome::unsolvable("top-of-block quote carried no route");
         };
         let market = self.solver.market_data();
         let view = market.read().await;
@@ -250,9 +254,12 @@ impl SteppingSolver for StepAdapter<'_> {
                     algorithm: top.algorithm.clone(),
                     quote_json: top.quote_json.clone(),
                     solved_route: None,
+                    // A replay declares no quote of its own: the gas price, fees, block, and
+                    // state label on the top quote describe N-1, not the state replayed against.
+                    details: None,
                 })
             }
-            Err(e) => Outcome::Unsolvable(format!("re-execution failed: {e}")),
+            Err(e) => Outcome::unsolvable(format!("re-execution failed: {e}")),
         }
     }
 
@@ -302,7 +309,14 @@ impl SteppingSolver for StepAdapter<'_> {
 
 fn order_quote_to_outcome(quote: &OrderQuote) -> Outcome {
     if quote.status() != QuoteStatus::Success {
-        return Outcome::Unsolvable(format!("{:?}", quote.status()));
+        // Keep the status string as well as the structured cause: a failed encode and a routing
+        // gap both land here, and only the string distinguishes a cause the solver never set.
+        return Outcome::Unsolvable {
+            reason: format!("{:?}", quote.status()),
+            cause: quote
+                .no_route_cause()
+                .map(no_route_cause),
+        };
     }
     // Project the quote to a slim route + calldata, built directly from the quote object. We must
     // NOT serialize the whole `OrderQuote`: it embeds each hop's `protocol_state`, which both
@@ -321,7 +335,59 @@ fn order_quote_to_outcome(quote: &OrderQuote) -> Outcome {
         quote_json,
         // Kept in memory so the route can be re-executed at back-of-block.
         solved_route: quote.route().cloned().map(Box::new),
+        details: Some(Box::new(quote_details(quote))),
     })
+}
+
+/// Everything the quote reports beyond amounts, so the offline pass can price gas, read the
+/// encoded floor, and confirm which block state produced the number.
+fn quote_details(quote: &OrderQuote) -> QuoteDetails {
+    QuoteDetails {
+        gas_price: quote.gas_price().map(biguint_to_u256),
+        price_impact_bps: quote.price_impact_bps(),
+        block_number: quote.block().number(),
+        block_hash: quote.block().hash().to_string(),
+        block_timestamp: quote.block().timestamp(),
+        solved_against: quote.solved_against().clone(),
+        fees: quote
+            .fee_breakdown()
+            .map(|fees| QuoteFees {
+                router_fee: biguint_to_u256(fees.router_fee()),
+                client_fee: biguint_to_u256(fees.client_fee()),
+                max_slippage: biguint_to_u256(fees.max_slippage()),
+                min_amount_received: biguint_to_u256(fees.min_amount_received()),
+            }),
+    }
+}
+
+/// A `SolveError` as a stable `(kind, detail)` pair. `SolveError` is `#[non_exhaustive]`, so a
+/// variant added upstream falls through to `other` carrying its own message rather than failing
+/// the build — the detail keeps the information either way.
+fn no_route_cause(error: &SolveError) -> NoRouteCause {
+    let kind = match error {
+        SolveError::NoRouteFound { .. } => "no_route_found",
+        SolveError::InsufficientLiquidity { .. } => "insufficient_liquidity",
+        SolveError::Timeout { .. } => "timeout",
+        SolveError::AlgorithmError(_) => "algorithm_error",
+        SolveError::MarketDataStale { .. } => "market_data_stale",
+        SolveError::QueueFull => "queue_full",
+        SolveError::InvalidOrder(_) => "invalid_order",
+        SolveError::Internal(_) => "internal",
+        SolveError::NotReady(_) => "not_ready",
+        SolveError::ComputationFailed(_) => "computation_failed",
+        SolveError::FailedEncoding(_) => "failed_encoding",
+        SolveError::EncodingUnavailable(_) => "encoding_unavailable",
+        SolveError::PriceCheckFailed { .. } => "price_check_failed",
+        SolveError::MaxGasExceeded => "max_gas_exceeded",
+        SolveError::MissingData(_) => "missing_data",
+        SolveError::SimulationFailed(_) => "simulation_failed",
+        _ => "other",
+    };
+    let path_reason = match error {
+        SolveError::NoRouteFound { reason, .. } => reason.map(|reason| reason.to_string()),
+        _ => None,
+    };
+    NoRouteCause { kind, detail: error.to_string(), path_reason }
 }
 
 fn biguint_to_u256(value: &BigUint) -> U256 {
@@ -873,6 +939,28 @@ fn core_to_alloy(address: &CoreAddress) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_no_route_cause_projection() {
+        // The kind is the grouping key an offline coverage pass filters on, so it must track the
+        // variant rather than the prose; the detail keeps the error's own fields.
+        let no_route = no_route_cause(&SolveError::no_route_found_with_reason(
+            "o",
+            fynd_core::algorithm::NoPathReason::DestinationTokenNotInGraph,
+        ));
+        assert_eq!(no_route.kind, "no_route_found");
+        assert_eq!(no_route.path_reason.as_deref(), Some("destination token not in graph"));
+        assert_eq!(no_route.detail, "no route found for order o");
+
+        let timeout = no_route_cause(&SolveError::timeout(250));
+        assert_eq!(timeout.kind, "timeout");
+        assert_eq!(timeout.path_reason, None);
+        assert_eq!(timeout.detail, "solve timeout after 250ms");
+
+        // An encoding failure is not a routing gap: the coverage worklist must not absorb it.
+        let encode = no_route_cause(&SolveError::FailedEncoding("bad router".to_string()));
+        assert_eq!(encode.kind, "failed_encoding");
+    }
 
     #[test]
     fn test_default_lag_blocks_scales_with_block_time() {

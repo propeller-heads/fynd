@@ -105,14 +105,10 @@ mod tests {
             algorithm: String::new(),
             quote_json: None,
             solved_route: None,
+            details: None,
         });
-        let range = build_range(
-            &trade,
-            &prices,
-            top,
-            Outcome::Unsolvable("x".into()),
-            &Outcome::Unsolvable("x".into()),
-        );
+        let range =
+            build_range(&trade, &prices, top, Outcome::unsolvable("x"), &Outcome::unsolvable("x"));
 
         let mut buf = Vec::new();
         write_comparisons(&mut buf, std::slice::from_ref(&range), &prices, &prices);

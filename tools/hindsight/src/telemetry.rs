@@ -100,7 +100,7 @@ struct MetricLabels<'a> {
 fn algorithm_label(outcome: &Outcome) -> &str {
     match outcome {
         Outcome::Solved(solved) if !solved.algorithm.is_empty() => &solved.algorithm,
-        Outcome::Solved(_) | Outcome::Partial(_) | Outcome::Unsolvable(_) => ALGORITHM_NONE,
+        Outcome::Solved(_) | Outcome::Partial(_) | Outcome::Unsolvable { .. } => ALGORITHM_NONE,
     }
 }
 
@@ -713,6 +713,7 @@ mod tests {
             algorithm: algorithm.to_string(),
             quote_json: None,
             solved_route: None,
+            details: None,
         })
     }
 
@@ -731,7 +732,7 @@ mod tests {
         // Nothing solved, nothing to attribute — and a quote that declared no algorithm must not
         // mint an empty label value.
         assert_eq!(algorithm_label(&solved_by("", 1_000, 1_000)), ALGORITHM_NONE);
-        assert_eq!(algorithm_label(&Outcome::Unsolvable("x".into())), ALGORITHM_NONE);
+        assert_eq!(algorithm_label(&Outcome::unsolvable("x")), ALGORITHM_NONE);
         assert_eq!(algorithm_label(&Outcome::Partial("x".into())), ALGORITHM_NONE);
     }
 
@@ -745,7 +746,7 @@ mod tests {
             &empty_prices(),
             solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
             solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
-            &Outcome::Unsolvable("x".into()),
+            &Outcome::unsolvable("x"),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -784,9 +785,9 @@ mod tests {
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
             &empty_prices(),
-            Outcome::Unsolvable("missing token in Tycho".into()),
-            Outcome::Unsolvable("missing token in Tycho".into()),
-            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
+            Outcome::unsolvable("missing token in Tycho"),
+            Outcome::unsolvable("missing token in Tycho"),
+            &Outcome::unsolvable("no top-of-block route to re-execute"),
         );
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -982,7 +983,7 @@ mod tests {
             &empty_prices(),
             solved(1_000_000_000, 995_000_000),
             solved(1_002_000_000, 997_000_000),
-            &Outcome::Unsolvable("re-execution failed: no simulation state".into()),
+            &Outcome::unsolvable("re-execution failed: no simulation state"),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -1097,9 +1098,9 @@ mod tests {
         let range = build_range(
             &t,
             &empty_prices(),
-            Outcome::Unsolvable("no route".into()),
-            Outcome::Unsolvable("no route".into()),
-            &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
+            Outcome::unsolvable("no route"),
+            Outcome::unsolvable("no route"),
+            &Outcome::unsolvable("no top-of-block route to re-execute"),
         );
         let mut prices = empty_prices();
         prices.insert(usdc, 2e-9);
@@ -1124,9 +1125,9 @@ mod tests {
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
             &empty_prices(),
-            Outcome::Unsolvable("x".into()),
-            Outcome::Unsolvable("x".into()),
-            &Outcome::Unsolvable("x".into()),
+            Outcome::unsolvable("x"),
+            Outcome::unsolvable("x"),
+            &Outcome::unsolvable("x"),
         );
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();

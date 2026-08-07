@@ -159,6 +159,45 @@ fn token_label(token: &CoreAddress, symbols: &HashMap<CoreAddress, String>) -> S
     }
 }
 
+/// Everything a Fynd quote reports beyond its amounts, captured so an offline pass never has to
+/// re-solve to learn what the quote committed to. `None` for a re-executed outcome (it replays a
+/// route at a different state and re-declares none of this) and for test fixtures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct QuoteDetails {
+    /// Effective gas price at solve time, in wei — turns `gas_estimate` into an actual cost.
+    pub gas_price: Option<U256>,
+    pub price_impact_bps: Option<i32>,
+    pub block_number: u64,
+    pub block_hash: String,
+    pub block_timestamp: u64,
+    /// Which state overlay the quote was solved against; the base market state for the monitor.
+    pub solved_against: String,
+    /// Present only when encoding was requested and succeeded.
+    pub fees: Option<QuoteFees>,
+}
+
+/// The fee and slippage split of an encoded quote, in `token_out` units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct QuoteFees {
+    pub router_fee: U256,
+    pub client_fee: U256,
+    pub max_slippage: U256,
+    /// The floor encoded as `min_amount_out` in the transaction.
+    pub min_amount_received: U256,
+}
+
+/// Why Fynd produced no route, projected from `fynd_core::types::SolveError` into a stable shape.
+///
+/// `kind` is the error's discriminant, so an offline pass can group coverage gaps without parsing
+/// prose; `detail` keeps the error's own message (which carries its fields), and `path_reason` is
+/// the routing-graph reason when the failure reported one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct NoRouteCause {
+    pub kind: &'static str,
+    pub detail: String,
+    pub path_reason: Option<String>,
+}
+
 /// A Fynd quote for the re-solved order.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SolvedAmount {
@@ -183,6 +222,10 @@ pub(crate) struct SolvedAmount {
     /// relative to its other variants.
     #[serde(skip)]
     pub solved_route: Option<Box<Route>>,
+    /// Gas price, fees, price impact, block, and state label as the quote reported them. Boxed
+    /// for the same reason as `solved_route`: it is several hundred bytes that only the solved
+    /// variant carries, and `Outcome`'s other variants would pay for it.
+    pub details: Option<Box<QuoteDetails>>,
 }
 
 impl PartialEq for SolvedAmount {
@@ -190,7 +233,8 @@ impl PartialEq for SolvedAmount {
         self.amount_out == other.amount_out &&
             self.amount_out_net_gas == other.amount_out_net_gas &&
             self.gas_estimate == other.gas_estimate &&
-            self.quote_json == other.quote_json
+            self.quote_json == other.quote_json &&
+            self.details == other.details
     }
 }
 
@@ -206,7 +250,20 @@ pub(crate) enum Outcome {
     /// route. Tracked apart from `Outcome::Unsolvable` so a coverage gap is not read as a loss.
     Partial(String),
     /// Fynd could not solve at all (missing token in Tycho, insufficient liquidity, timeout).
-    Unsolvable(String),
+    Unsolvable {
+        /// Free text, so a failure the solver never classified (a failed encode, a transport
+        /// error) stays distinguishable from a routing gap.
+        reason: String,
+        /// The solver's own structured cause, when it declared one.
+        cause: Option<NoRouteCause>,
+    },
+}
+
+impl Outcome {
+    /// An unsolvable outcome the solver declared no structured cause for.
+    pub(crate) fn unsolvable(reason: impl Into<String>) -> Self {
+        Self::Unsolvable { reason: reason.into(), cause: None }
+    }
 }
 
 /// Fynd's result at a single block state.
@@ -252,6 +309,15 @@ pub(crate) struct RangeComparison {
     pub settled_amount_out_net_gas: U256,
     /// Wei cost of the settled route's gas, when the trader paid it (from the decoder).
     pub settled_gas: Option<U256>,
+    /// The output floor the settled trade committed to on-chain, in `token_out` units (from the
+    /// decoder). The only non-synthetic limit in the study: it says how much headroom the real
+    /// trade had above its own floor. `None` when the settling router declares none extractably.
+    pub min_amount_out: Option<U256>,
+    /// Venue fee taken from the input, in `token_in` units — already excluded from `amount_in`.
+    pub venue_fee_in: Option<U256>,
+    /// Venue fee taken from the output, in `token_out` units — already added back into
+    /// `settled_amount_out`.
+    pub venue_fee_out: Option<U256>,
     /// The solver's own off-chain quote from its calldata, when declared (from the decoder).
     pub quote: Option<SolverQuote>,
     /// Evidence that a front-run and a back-run bracketed this trade (from the decoder). `None`
@@ -338,6 +404,9 @@ pub(crate) fn build_range(
         settled_amount_out: trade.amount_out,
         settled_amount_out_net_gas: settled_net_gas,
         settled_gas: trade.settled_gas,
+        min_amount_out: trade.min_amount_out,
+        venue_fee_in: trade.venue_fee_in,
+        venue_fee_out: trade.venue_fee_out,
         quote: trade.quote.clone(),
         sandwich: trade.sandwich.clone(),
         top,
@@ -403,8 +472,8 @@ pub(crate) async fn solve_backs<S: SteppingSolver + ?Sized>(
             let reexecute = async {
                 match top {
                     Outcome::Solved(solved) => solver.reexecute(solved).await,
-                    Outcome::Partial(_) | Outcome::Unsolvable(_) => {
-                        Outcome::Unsolvable("no top-of-block route to re-execute".to_string())
+                    Outcome::Partial(_) | Outcome::Unsolvable { .. } => {
+                        Outcome::unsolvable("no top-of-block route to re-execute")
                     }
                 }
             };
@@ -468,6 +537,7 @@ mod tests {
             algorithm: String::new(),
             quote_json: None,
             solved_route: None,
+            details: None,
         })
     }
 
@@ -577,8 +647,8 @@ mod tests {
             &sandwiched,
             &empty_prices(),
             solved(10_200, 10_100),
-            Outcome::Unsolvable("missing token in Tycho".into()),
-            &Outcome::Unsolvable("re-execution failed".into()),
+            Outcome::unsolvable("missing token in Tycho"),
+            &Outcome::unsolvable("re-execution failed"),
         );
 
         assert_eq!(range.top.verdict, Verdict::Sandwiched);
@@ -682,6 +752,7 @@ mod tests {
                 algorithm: String::new(),
                 quote_json: None,
                 solved_route: None,
+                details: None,
             })
         }
 
@@ -717,6 +788,7 @@ mod tests {
                 algorithm: String::new(),
                 quote_json: None,
                 solved_route: None,
+                details: None,
             })
         };
 
@@ -738,7 +810,7 @@ mod tests {
         // back-of-block solve does not need a top route: back still carries a real comparison.
         let solver = MockStepping {
             advanced: std::sync::atomic::AtomicBool::new(false),
-            top: Outcome::Unsolvable("missing token in Tycho".into()),
+            top: Outcome::unsolvable("missing token in Tycho"),
             back: solved(10_100, 10_000),
             reexecuted: solved(10_100, 10_000),
         };
@@ -775,7 +847,7 @@ mod tests {
             &trade(10_000),
             &empty_prices(),
             solved(10_000, 9_900),
-            Outcome::Unsolvable("no route at back-of-block".into()),
+            Outcome::unsolvable("no route at back-of-block"),
             &solved(10_050, 9_950),
         );
         assert_eq!(range.back.verdict, Verdict::Unsolvable);

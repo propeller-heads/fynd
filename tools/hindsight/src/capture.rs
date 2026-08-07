@@ -215,7 +215,7 @@ fn counterfactual(outcome: &Outcome) -> FyndCounterfactual {
             algorithm: None,
             unsolvable_reason: Some(reason.clone()),
         },
-        Outcome::Unsolvable(reason) => FyndCounterfactual {
+        Outcome::Unsolvable { reason, .. } => FyndCounterfactual {
             status: "unsolvable",
             amount_out: None,
             amount_out_net_gas: None,
@@ -313,6 +313,7 @@ mod tests {
             algorithm: "most_liquid".to_string(),
             quote_json: None,
             solved_route: None,
+            details: None,
         }));
         assert_eq!(solved.status, "solved");
         assert_eq!(solved.amount_out.as_deref(), Some("1010"));
@@ -321,7 +322,7 @@ mod tests {
 
         // An unsolvable baseline must not serialize as a zero output: zero is a real APEX result
         // (the order did not clear), unsolvable means Fynd had no route at all.
-        let unsolved = counterfactual(&Outcome::Unsolvable("missing token in Tycho".to_string()));
+        let unsolved = counterfactual(&Outcome::unsolvable("missing token in Tycho"));
         assert_eq!(unsolved.status, "unsolvable");
         assert!(unsolved.amount_out.is_none());
         assert_eq!(unsolved.unsolvable_reason.as_deref(), Some("missing token in Tycho"));

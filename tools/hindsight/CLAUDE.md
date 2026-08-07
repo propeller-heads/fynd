@@ -95,7 +95,7 @@ their solver in calldata — `solver_aliases`).
 |---|---|
 | `mod.rs` | `SteppingSolver` trait; the per-block phases the monitor drives explicitly — `solve_tops` (all trades at N-1, concurrently), the advance, then `solve_backs` (each top route re-executed + each trade solved fresh at N, concurrently). The gap between `solve_tops` and the advance is the pre-advance seam: code that needs the N-1 state with the block's trades known (the APEX stage's pool-subset clone) runs there |
 | `apex_stage.rs` | APEX batch-solve worker pool: dedicated OS threads behind a bounded `try_send` queue, solve deadlines stamped at worker pickup (never enqueue), overrun results discarded and counted, panicking solves dropped without killing the worker |
-| `apex_live.rs` | Wiring between the block loop and the APEX stage: `ApexRuntime` (spawn, dispatch, drain to `apex-YYYY-MM-DD.jsonl` + Prometheus), bracket input building (`build_live_input` clones the native-only 2-hop pool subset from the solver's current state), and the `should_dispatch` eligibility gate (≥2 orders sharing a token). Enabled by `--apex-dir`; the per-order Fynd baseline joins offline on `{tx_hash}:{tx_index}` |
+| `apex_live.rs` | Wiring between the block loop and the APEX stage: `ApexRuntime` (spawn, dispatch, drain to `apex-YYYY-MM-DD.jsonl` + Prometheus), bracket input building (`build_live_input` clones the native-only 2-hop pool subset from the solver's current state), and the `should_dispatch` eligibility gate (≥2 orders sharing a token). Enabled by `--apex-dir`; the per-order Fynd baseline joins offline on `{tx_hash}:{tx_index}`. Each line also carries a `components` array — per solved component, APEX's uniform `clearing_prices` vector plus every pool and order leg it cleared. APEX has no encoder, so this is the record's substitute for calldata; each pool leg keeps the tycho `component_id`, because the APEX address is keccak-truncated for 32-byte pool ids and cannot be resolved back |
 | `compare.rs` | `Verdict` / `Deltas` / `Slippage` — bps diff, win/loss/coverage-miss classification, quote-vs-re-execution slippage |
 | `monitor.rs` | Production `monitor` subcommand: in-process solver, block subscription, JSONL emission |
 | `jsonl.rs` | Append-only JSONL writer used by `monitor` |
@@ -136,14 +136,22 @@ vanished at N).
 
 - `DecodedTrade` — decoded on-chain trade; amounts are venue-fee-adjusted so re-solve compares
   like-for-like. Carries `sandwich` evidence when a bracket pair was found.
-- `RangeComparison` — a trade solved at top and back, including gas-netted settled output and
-  the top route's `Slippage` between the two states (from its re-execution at back).
-- `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
-- `SolvedAmount` — a solved state's amounts plus `algorithm` (which worker pool won the quote) and
-  `solved_route` (the full `fynd_core::types::Route`, kept in memory to replay at back-of-block).
-  The readable path is not stored: `resolve::render_route` derives it from `solved_route` at
-  serialization/log time, reading token symbols off the route's own token map via
-  `Route::token_symbol`.
+- `RangeComparison` — a trade solved at top and back, including gas-netted settled output, the
+  settled trade's own on-chain floor (`min_amount_out`) and venue fees, and the top route's
+  `Slippage` between the two states (from its re-execution at back).
+- `Outcome` — `Solved`, `Partial`, or `Unsolvable { reason, cause }`. The `cause` is a
+  `NoRouteCause` — the solver's `SolveError` projected to a stable `kind` plus its own message and,
+  for a routing failure, the graph-level `path_reason`. The free-text `reason` is kept alongside
+  it so a failure the solver never classified (a failed encode) stays distinguishable from a
+  routing gap.
+- `SolvedAmount` — a solved state's amounts plus `algorithm` (which worker pool won the quote),
+  `solved_route` (the full `fynd_core::types::Route`, kept in memory to replay at back-of-block),
+  and `details` (a boxed `QuoteDetails`: gas price, price impact, block number/hash/timestamp,
+  state label, and the encoded `QuoteFees` split). The readable path is not stored:
+  `resolve::render_route` derives it from `solved_route` at serialization/log time, reading token
+  symbols off the route's own token map via `Route::token_symbol`.
+  A re-executed outcome carries `details: None` — it replays a route at a different state and
+  re-declares none of them.
 
 ### Route attribution
 
