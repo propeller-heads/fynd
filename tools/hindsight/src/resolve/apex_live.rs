@@ -320,9 +320,12 @@ impl ApexRuntime {
                     .collect::<Vec<_>>(),
             });
             let writer = self.writer.writer();
+            // Flushed per line, not left to the 8 KB buffer: a restart terminates the process
+            // without running destructors, so an unflushed tail is lost outright — and under the
+            // watchdog, restarts are routine rather than exceptional.
             if let Err(error) = {
                 use std::io::Write as _;
-                writeln!(writer, "{line}")
+                writeln!(writer, "{line}").and_then(|()| writer.flush())
             } {
                 warn!(%error, "failed to append an apex JSONL line");
             }
