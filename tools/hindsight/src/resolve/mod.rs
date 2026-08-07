@@ -238,6 +238,10 @@ pub(crate) struct RangeComparison {
     pub solver_source: AttributionSource,
     /// Which decoder recovered the settled trade.
     pub decoder: &'static str,
+    /// Who sent the settling transaction. Carried through so a batch's fills can be checked for
+    /// self-matching: two orders crossed against each other by the same sender are not a
+    /// coincidence of wants, they are one party trading with itself.
+    pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
     pub amount_in: U256,
@@ -327,6 +331,7 @@ pub(crate) fn build_range(
         solver: trade.solver.clone(),
         solver_source: trade.solver_source,
         decoder: trade.decoder,
+        sender: trade.sender,
         token_in: trade.token_in,
         token_out: trade.token_out,
         amount_in: trade.amount_in,

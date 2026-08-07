@@ -174,6 +174,7 @@ fn comparison_record(
         "solver": range.solver,
         "solver_source": range.solver_source,
         "decoder": range.decoder,
+        "sender": range.sender,
         "token_in": format!("{:#x}", range.token_in),
         "token_out": format!("{:#x}", range.token_out),
         "amount_in": range.amount_in.to_string(),
