@@ -27,7 +27,7 @@ use alloy::primitives::U256;
 use apex_solver::{
     core::{
         pools::{custom::ApexPool, Pool, PoolMetadata},
-        ApexConfig, Fraction, LimitOrder, Token as ApexToken, TradingPair,
+        ApexConfig, Fraction, LimitOrder, StepStrategy, Token as ApexToken, TradingPair,
     },
     run_apex_with_config,
     types::Address as ApexAddress,
@@ -437,6 +437,23 @@ pub fn solve_live_batch(
     report
 }
 
+/// Iteration cap for the price search, raised from APEX's default 1000 to match turbine's
+/// production tuning — the mixed strategy below only pays off if it is allowed to keep stepping.
+const PRICE_SEARCH_MAX_ITERATIONS: u32 = 3_000;
+
+/// Iterations allowed at the minimum step size before the search gives up, lowered from APEX's
+/// default 30. Once the step cannot shrink further, extra iterations thrash rather than converge;
+/// the budget they free is better spent on the `Top(n)` fallbacks.
+const PRICE_SEARCH_MAX_IT_AT_MIN_STEP: u32 = 10;
+
+/// The step ladder turbine runs in production (`mixed_strategy`): try a full-vector step first,
+/// and when it stops improving fall back to moving only the 2 — then 1 — tokens with the largest
+/// supply/demand imbalance. APEX's default is `AllTokens` alone, which on a component carrying
+/// hundreds of tokens gets stuck in local minima the `Top(n)` steps escape.
+fn mixed_step_strategies() -> Vec<StepStrategy> {
+    vec![StepStrategy::AllTokens, StepStrategy::Top(2), StepStrategy::Top(1)]
+}
+
 /// One component's contribution to the bracket's internalization accounting.
 #[derive(Debug, Default, Clone, Copy)]
 struct ComponentExposure {
@@ -583,6 +600,15 @@ fn solve_component(
     config
         .price_search_config
         .max_precision_increases = MAX_PRECISION_INCREASES;
+    config
+        .price_search_config
+        .max_iterations = PRICE_SEARCH_MAX_ITERATIONS;
+    config
+        .price_search_config
+        .max_it_at_min_step = PRICE_SEARCH_MAX_IT_AT_MIN_STEP;
+    config
+        .price_search_config
+        .iteration_strategies = mixed_step_strategies();
 
     counters.components_solved += 1;
     let tokens: Vec<ApexToken> = apex_tokens.values().copied().collect();
