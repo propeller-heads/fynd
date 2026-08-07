@@ -1131,6 +1131,7 @@ dependencies = [
 [[package]]
 name = "apex-solver"
 version = "0.1.0"
+source = "git+https://github.com/propeller-heads/apex-solver?rev=c1e049dd17c5cd0e7f8a037de3d2b0c82d2e3eb7#c1e049dd17c5cd0e7f8a037de3d2b0c82d2e3eb7"
 dependencies = [
  "hex",
  "indexmap 2.14.0",

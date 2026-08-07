@@ -6,8 +6,9 @@ description = "Offline APEX batch-clearing surplus analysis over captured hindsi
 publish = false
 
 [dependencies]
-# TODO: swap to git dependency before PR — path dep is machine-local for the analysis sprint
-apex-solver = { path = "/Users/pistomat/Projects/propeller-heads/apex-solver", features = [
+# Pinned by rev, not branch: the analysis is a long unattended run and a moving branch would make
+# two builds of the same fynd commit produce different clearings.
+apex-solver = { git = "https://github.com/propeller-heads/apex-solver", rev = "c1e049dd17c5cd0e7f8a037de3d2b0c82d2e3eb7", features = [
     "serde",
     "multithread",
 ] }
