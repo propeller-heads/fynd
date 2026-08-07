@@ -31,7 +31,7 @@ use std::{
 };
 
 pub use allocation::ExclusiveAccess;
-use allocation::{allocate, Allocation, RequestClass, WorkerPoolAdmission};
+use allocation::{allocate, Allocation, OrderClass};
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, histogram};
@@ -145,21 +145,20 @@ pub struct SolverPoolHandle {
     name: String,
     /// Queue handle for this worker pool.
     queue: TaskQueueHandle,
-    /// Which requests this worker pool serves. Decides whether an order is dispatched to it.
-    admission: WorkerPoolAdmission,
+    /// Which liquidity this worker pool routes through. Decides whether an order is dispatched
+    /// to it ([`SolverPoolHandle::serves`]).
+    liquidity_scope: LiquidityScope,
 }
 
 impl SolverPoolHandle {
-    /// Creates a new solver pool handle with the default [`LiquidityScope::PublicOnly`] scope.
+    /// Creates a new solver pool handle with the default [`LiquidityScope`].
     pub fn new(name: impl Into<String>, queue: TaskQueueHandle) -> Self {
-        Self { name: name.into(), queue, admission: WorkerPoolAdmission::default() }
+        Self { name: name.into(), queue, liquidity_scope: LiquidityScope::default() }
     }
 
     /// Sets the worker pool's liquidity scope.
     pub fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
-        self.admission = self
-            .admission
-            .with_liquidity_scope(scope);
+        self.liquidity_scope = scope;
         self
     }
 
@@ -175,12 +174,7 @@ impl SolverPoolHandle {
 
     /// Returns the worker pool's liquidity scope.
     pub fn liquidity_scope(&self) -> LiquidityScope {
-        self.admission.liquidity_scope()
-    }
-
-    /// Returns which requests this pool serves.
-    pub(crate) fn admission(&self) -> WorkerPoolAdmission {
-        self.admission
+        self.liquidity_scope
     }
 }
 
@@ -265,7 +259,7 @@ impl WorkerPoolRouter {
     /// 5. If `encoding_options` are set on the request, encodes winning solutions into on-chain
     ///    transactions
     ///
-    /// `access` is the caller's entitlement to exclusive liquidity, resolved at the trust
+    /// `access` is the caller's access to exclusive liquidity, resolved at the trust
     /// boundary. With [`ExclusiveAccess::Denied`] no exclusive-access worker pool is allocated, so
     /// such worker pools do no work for the request and the quote is built from public liquidity
     /// alone.
@@ -301,8 +295,8 @@ impl WorkerPoolRouter {
 
         // One allocation per order: which worker pools serve an order is a property of the order,
         // not of the request. Today every order in a request classifies identically; once
-        // trade size joins `RequestClass` they will differ.
-        let class = RequestClass::new(access);
+        // trade size joins `OrderClass` they will differ.
+        let class = OrderClass::new(access);
         let allocations: Vec<Allocation<'_>> = request
             .orders()
             .iter()
@@ -431,7 +425,7 @@ impl WorkerPoolRouter {
         let order_id = order.id().to_string();
 
         // Fan-out: send order to the allocated worker pools. Worker pools that do not serve this
-        // order were already dropped by `allocate`, so nothing here filters by entitlement.
+        // order were already dropped by `allocate`, so nothing here filters by access.
         let mut pending: FuturesUnordered<_> = allocation
             .worker_pools()
             .iter()
@@ -1454,7 +1448,8 @@ mod tests {
     }
 
     /// The exclusive pool offers a strictly better route (net 1100 vs 800), so it wins whenever it
-    /// is allocated. An unentitled request must never reach it: not merely lose to the public leg
+    /// is allocated. A request without access must never reach it: not merely lose to the public
+    /// leg
     /// in ranking, but cost the exclusive pool no work at all.
     #[rstest]
     #[case::denied(ExclusiveAccess::Denied, false)]
@@ -1502,7 +1497,7 @@ mod tests {
         assert_eq!(routes_through_exclusive, expect_exclusive_leg);
         assert_eq!(order.surplus_amount().is_some(), expect_exclusive_leg);
 
-        // Either way the quoted output is the public reference, so a denied entitlement costs the
+        // Either way the quoted output is the public reference, so denied access costs the
         // caller nothing they were promised.
         assert_eq!(*order.amount_out(), BigUint::from(990u64));
 
@@ -1520,7 +1515,7 @@ mod tests {
             create_mock_worker_pool("exclusive_pool", Ok(make_exclusive_quote(1100)), 500);
         let exclusive_pool = exclusive_pool.with_liquidity_scope(LiquidityScope::IncludeExclusive);
 
-        // `min_responses(2)` would hold an entitled request until both pools answer.
+        // `min_responses(2)` would hold a request with access until both pools answer.
         let worker_router = WorkerPoolRouter::new(
             vec![public_pool, exclusive_pool],
             WorkerPoolRouterConfig::default()

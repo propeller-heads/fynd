@@ -1,4 +1,4 @@
-//! Resolves the caller's entitlement to exclusive liquidity from the request headers.
+//! Resolves the caller's access to exclusive liquidity from the request headers.
 
 use actix_web::http::header::HeaderMap;
 use fynd_core::ExclusiveAccess;
@@ -6,7 +6,7 @@ use fynd_core::ExclusiveAccess;
 /// Header through which the authenticating proxy grants access to exclusive liquidity.
 const EXCLUSIVE_ACCESS_HEADER: &str = "x-exclusive-access";
 
-/// Reads the exclusive-access entitlement the authenticating proxy resolved for this request.
+/// Reads the exclusive access the authenticating proxy resolved for this request.
 ///
 /// Only the exact value `true` (case-insensitive) grants access; absent, malformed, and all other
 /// values deny it. Fynd does not authenticate callers itself, so this header is only meaningful

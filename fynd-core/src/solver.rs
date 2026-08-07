@@ -313,7 +313,7 @@ pub enum SolverBuildError {
     #[error("no worker pools configured")]
     NoPools,
     /// Every worker pool is `liquidity_scope = "include_exclusive"`, so a request without the
-    /// exclusive-access entitlement would be served by no worker pool at all. At least one worker
+    /// exclusive access would be served by no worker pool at all. At least one worker
     /// pool must route public liquidity.
     #[error(
         "every worker pool sets liquidity_scope = \"include_exclusive\"; requests without \
@@ -683,7 +683,7 @@ impl FyndBuilder {
             return Err(SolverBuildError::NoPools);
         }
 
-        // Exclusive-access worker pools only serve entitled requests, so a deployment made
+        // Exclusive-access worker pools only serve requests granted access, so a deployment made
         // entirely of them would allocate no worker pool at all to everyone else. Caught here
         // rather than per request: it is a configuration mistake, not a runtime condition.
         if self
@@ -1133,9 +1133,9 @@ impl Solver {
 
     /// Submits a [`QuoteRequest`] to the worker pools and returns the best [`Quote`].
     ///
-    /// Grants `ExclusiveAccess::Granted`: a library embedder configures its own pools and
-    /// exclusivity policy, so there is no untrusted caller to gate here. Entitlement is enforced
-    /// at the HTTP boundary, where requests do come from untrusted callers.
+    /// Grants `ExclusiveAccess::Granted`: a library embedder configures its own pools, so there
+    /// is no untrusted caller to gate here. Access is decided at the HTTP boundary, where
+    /// requests do come from untrusted callers.
     ///
     /// # Errors
     ///
@@ -1519,7 +1519,8 @@ mod tests {
         );
     }
 
-    /// A deployment of nothing but exclusive-access pools would serve unentitled requests from no
+    /// A deployment of nothing but exclusive-access pools would serve requests without access
+    /// from no
     /// pool at all.
     #[test]
     fn test_build_rejects_all_exclusive_pools() {

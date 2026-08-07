@@ -153,7 +153,7 @@ Actix Web HTTP handlers. Validates requests, delegates to WorkerPoolRouter, retu
 
 Orchestrates quote requests across multiple worker pools:
 
-1. Allocates the worker pools that serve each order, before dispatch. A worker pool declares which requests it serves (`WorkerPoolAdmission`) and each order is classified against it (`RequestClass`) — today on the caller's entitlement to exclusive liquidity, so an unentitled request is never dispatched to an exclusive-access worker pool
+1. Allocates the worker pools that serve each order, before dispatch. Each order is classified (`OrderClass`) and matched against each worker pool's configuration (`SolverPoolHandle::serves`) — today on the caller's access to exclusive liquidity, so a request without access is never dispatched to an exclusive-access worker pool
 2. Fans out each order to its allocated worker pools in parallel
 3. Manages per-request timeouts with optional early return
 4. Refines gas estimates using `estimate_gas_usage` (tycho-execution) before cross-pool ranking — algorithms use a fast naive estimate internally; this step applies a more accurate one that accounts for token transfers and protocol overhead

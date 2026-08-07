@@ -16,8 +16,8 @@ timeout_ms = 500
 # to capture surplus above the committed public reference. Worker pools with the key omitted
 # default to "public_only": their workers drop exclusive components.
 #
-# Such a worker pool is only dispatched to for requests entitled to exclusive liquidity, so size
-# num_workers to the entitled share of flow, not to total flow. At least one worker pool must be
+# Such a worker pool is only dispatched to for requests granted exclusive access, so size
+# num_workers to that share of flow, not to total flow. At least one worker pool must be
 # public — an all-exclusive configuration is rejected at startup.
 # [pools.exclusive_access]
 # algorithm = "bellman_ford"

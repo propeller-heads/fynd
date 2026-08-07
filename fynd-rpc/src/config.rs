@@ -27,8 +27,8 @@ timeout_ms = 500
 # Example: an exclusive-access worker pool whose workers also route through exclusive components
 # to capture surplus above the committed public reference (see repo-root worker_pools.toml).
 # Worker pools with the key omitted default to "public_only": their workers drop exclusive
-# components. Only requests entitled to exclusive liquidity are dispatched to such a worker pool,
-# so size num_workers to the entitled share of flow.
+# components. Only requests granted exclusive access are dispatched to such a worker pool, so
+# size num_workers to that share of flow.
 # [pools.exclusive_access]
 # algorithm = "bellman_ford"
 # num_workers = 3
