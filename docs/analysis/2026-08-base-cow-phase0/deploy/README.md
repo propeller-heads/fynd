@@ -77,7 +77,41 @@ uv run docs/analysis/2026-08-base-cow-phase0/live_join.py /home/agent/apex-data 
 Shedding well above zero means the solves outrun the workers: raise `--apex-workers` or drop a
 window.
 
-## Why the TVL floor is 50
+## Why aerodrome_slipstreams and lunarbase are excluded
+
+These two were consuming most of the APEX search budget, and removing them is what finally made
+the price search terminate. Measured A/B on the live feed, identical except for the protocol list:
+
+| | with slipstreams | without |
+|---|---|---|
+| components hitting the deadline | 48-51% | **2%** |
+| `NoImprovement` share of exits (i.e. converged) | 8% | **76%** |
+| mean `supply_wall_ms` per component | 2466 | **369** |
+| mean `supply_calls` per component | ~1337 | 2298 |
+| **cost per supply call** | **1.84 ms** | **0.16 ms** |
+
+Supply calls went UP while wall time went DOWN 6.7x, so this is a per-call cost effect, not a
+pool-count effect. Cause: in `tycho-simulation`, `uniswap_v2/v3/v4` and `aerodrome_v1` implement
+`query_pool_swap` analytically, but `aerodrome_slipstreams` and `lunarbase` delegate to the generic
+Brent solver — and `adapter.rs` passes `tolerance: 0.0`, which makes `is_within_tolerance`
+(`actual >= target && actual <= target * 1.0`) demand exact f64 equality. The early exit is
+unreachable, so every supply query runs the full `MAX_ITERATIONS = 30` simulations plus state
+clones, against ~1 for the analytic paths.
+
+lunarbase is a single pool and costs nothing today; it is excluded so a future TVL change cannot
+quietly reintroduce a generic-Brent pool.
+
+**Maintenance cost of this fix:** the explicit `--protocols` list replaces `native_onchain`, which
+auto-expanded to every native protocol. A protocol newly indexed on Base will now be silently
+absent until someone adds it here. Check the list against
+`market_pools_per_protocol` when Base gains a protocol.
+
+## Historical: why the TVL floor was briefly 50
+
+The floor went 10 -> 50 to cut pools per component from 245 to ~201, which moved the deadline rate
+from 65% to ~48%. That was a real superlinear gain, but it treated a symptom: the actual cost was
+the slipstreams pools above. With those excluded the floor returned to 10, which restores the
+wider market both engines are scored against.
 
 APEX's solve time is superlinear in pool count, so the pool subset — not the search budget — is
 the lever that decides whether a component converges. Turbine's production APEX solves in
