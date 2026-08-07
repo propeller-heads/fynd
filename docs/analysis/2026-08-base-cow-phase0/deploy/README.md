@@ -77,7 +77,34 @@ uv run docs/analysis/2026-08-base-cow-phase0/live_join.py /home/agent/apex-data 
 Shedding well above zero means the solves outrun the workers: raise `--apex-workers` or drop a
 window.
 
-## Why the TVL floor is 10, not 1
+## Why the TVL floor is 50
+
+APEX's solve time is superlinear in pool count, so the pool subset — not the search budget — is
+the lever that decides whether a component converges. Turbine's production APEX solves in
+~1.0-1.5 s over 160 simulated pools; at ~245 pools we could not converge inside 3 s, with 65% of
+components exiting on the deadline.
+
+Calibrated on the live feed (25-block probes, measuring the indexed universe and the mean 2-hop
+subset per component):
+
+| `--min-tvl` | indexed pools | pools per component |
+|---|---|---|
+| 10 | 1090 | 245 |
+| 25 | 675 | 266 |
+| **50** | **390** | **197** |
+| 100 | 229 | 94 |
+
+`--apex-max-pools` would cap the subset at 200 directly, but it truncates by class and then by
+`component_id` string — arbitrary within a class, with no liquidity awareness. `--min-tvl` cuts by
+depth instead, which is the principled version of the same reduction.
+
+**This changes the study, not just the runtime.** The TVL floor applies to the whole solver, so
+Fynd's baseline in the comparisons stream is solved against the same thinner market. Comparability
+holds — both engines still see one market — but absolute coverage drops and more trades become
+unsolvable for both sides. Read the results as "batching versus single-order routing on a 50 ETH
+TVL market", not as a claim about the full Base market.
+
+## Historical: why the floor moved off 1
 
 A 60-block trial at `--min-tvl 1` put ~22k pools in front of the subset selector and cut 82% of
 components at the 1 s search deadline — 381 orders `cluster_cut` against 7 filled. That measures

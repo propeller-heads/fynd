@@ -14,7 +14,7 @@ Environment=RUST_LOG=info
 ExecStart=/home/agent/apex/fynd/target/release/hindsight monitor \
     --chain base \
     --tycho-url tycho-base-beta.propellerheads.xyz \
-    --min-tvl 10 \
+    --min-tvl 50 \
     --apex-window-blocks 1 \
     --apex-window-blocks 5 \
     --apex-window-blocks 30 \
