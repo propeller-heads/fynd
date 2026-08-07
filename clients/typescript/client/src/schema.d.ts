@@ -41,6 +41,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/prices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /v1/prices - Return derived token prices and optional market data.
+         * @description By default returns token gas prices only. Each `prices[].price` follows
+         *     `PRICE_UNIT_CONTRACT_V1`: `rawTokenUnitsPerRawGasUnit` (raw target-token units divided by raw
+         *     gas-token units). Use `include` query parameter to add spot prices and/or component depths.
+         *
+         *     # Query Parameters
+         *
+         *     - `include` - Comma-separated list: `depths`, `spot_prices`
+         *     - `limit` - Max entries for spot_prices / component_depths (default: 1000)
+         */
+        get: operations["get_prices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/quote": {
         parameters: {
             query?: never;
@@ -132,6 +159,41 @@ export interface components {
              * @example 0xabcd...
              */
             signature: string;
+        };
+        /** @description A single directional component depth. */
+        ComponentDepthEntry: {
+            /** @description Component (liquidity pool) identifier. */
+            component_id: components["schemas"]["String"];
+            /** @description Maximum input amount before hitting the slippage threshold (decimal string). */
+            depth: string;
+            /**
+             * @description Input token address.
+             * @example 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+             */
+            token_in: string;
+            /**
+             * @description Output token address.
+             * @example 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+             */
+            token_out: string;
+        };
+        /** @description Block numbers at which each computation was last run. */
+        ComputationBlocks: {
+            /**
+             * Format: int64
+             * @description Block at which component depths were computed. `None` if not yet available.
+             */
+            component_depths?: number | null;
+            /**
+             * Format: int64
+             * @description Block at which spot prices were computed. `None` if not yet available.
+             */
+            spot_prices?: number | null;
+            /**
+             * Format: int64
+             * @description Block at which token gas prices were computed.
+             */
+            token_prices: number;
         };
         /** @description Options to customize the encoding behavior. */
         EncodingOptions: {
@@ -416,6 +478,22 @@ export interface components {
              */
             upper_tolerance_bps?: number | null;
         };
+        /** @description Top-level response for GET /v1/prices. */
+        PricesResponse: {
+            /** @description Block numbers at which each computation was last run. */
+            blocks: components["schemas"]["ComputationBlocks"];
+            /** @description Component depths per component direction (only if requested via `include=depths`). */
+            component_depths?: components["schemas"]["ComponentDepthEntry"][] | null;
+            /**
+             * @description The gas token address (e.g. WETH).
+             * @example 0x0000000000000000000000000000000000000000
+             */
+            gas_token: string;
+            /** @description Token gas prices relative to the native gas token. */
+            prices: components["schemas"]["TokenPriceEntry"][];
+            /** @description Spot prices per component direction (only if requested via `include=spot_prices`). */
+            spot_prices?: components["schemas"]["SpotPriceEntry"][] | null;
+        };
         /**
          * @description Complete solution for a [`QuoteRequest`].
          *
@@ -482,6 +560,27 @@ export interface components {
             /** @description Ordered sequence of swaps to execute. */
             swaps: components["schemas"]["Swap"][];
         };
+        /** @description A single directional spot price within a component (liquidity pool). */
+        SpotPriceEntry: {
+            /** @description Component (liquidity pool) identifier. */
+            component_id: components["schemas"]["String"];
+            /**
+             * Format: double
+             * @description Spot price (1 token_in = price token_out).
+             */
+            price: number;
+            /**
+             * @description Input token address.
+             * @example 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+             */
+            token_in: string;
+            /**
+             * @description Output token address.
+             * @example 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+             */
+            token_out: string;
+        };
+        String: string;
         /**
          * @description A single swap within a route.
          *
@@ -529,6 +628,23 @@ export interface components {
              * @example 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
              */
             token_out: string;
+        };
+        /** @description A single token's gas price. */
+        TokenPriceEntry: {
+            /**
+             * Format: double
+             * @description `rawTokenUnitsPerRawGasUnit`: raw target-token units divided by raw gas-token units.
+             *
+             *     This approximate `f64` follows `PRICE_UNIT_CONTRACT_V1` and is intended only for display
+             *     and analytics. Consumers must normalize both tokens' decimals before using it.
+             * @example 3e-9
+             */
+            price: number;
+            /**
+             * @description Token address.
+             * @example 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+             */
+            token: string;
         };
         /** @description An encoded EVM transaction ready to be submitted on-chain. */
         Transaction: {
@@ -613,6 +729,56 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["InstanceInfo"];
+                };
+            };
+        };
+    };
+    get_prices: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Comma-separated list of additional data to include.
+                 *     Valid values: `depths`, `spot_prices`.
+                 * @example depths,spot_prices
+                 */
+                include?: string | null;
+                /**
+                 * @description Maximum number of spot_prices and component_depths entries (default: 1000).
+                 * @example 1000
+                 */
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Prices returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PricesResponse"];
+                };
+            };
+            /** @description Invalid query parameter */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Data not yet available */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

@@ -220,8 +220,9 @@ const DEFAULT_PRICES_LIMIT: usize = 1000;
 #[cfg(feature = "experimental")]
 /// GET /v1/prices - Return derived token prices and optional market data.
 ///
-/// By default returns token gas prices only. Use `include` query parameter
-/// to add spot prices and/or component depths.
+/// By default returns token gas prices only. Each `prices[].price` follows
+/// `PRICE_UNIT_CONTRACT_V1`: `rawTokenUnitsPerRawGasUnit` (raw target-token units divided by raw
+/// gas-token units). Use `include` query parameter to add spot prices and/or component depths.
 ///
 /// # Query Parameters
 ///
@@ -283,7 +284,7 @@ pub async fn get_prices(
                 None => {
                     warn!(
                         token = %address,
-                        "skipping token with unconvertible price (zero denom or overflow)"
+                        "skipping token with non-finite, non-positive, or unrepresentable price"
                     );
                 }
             }
@@ -363,6 +364,8 @@ pub async fn get_prices(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "experimental")]
+    use std::str::FromStr;
     use std::sync::Arc;
 
     use actix_web::{test, web, App, HttpResponse};
@@ -375,6 +378,8 @@ mod tests {
     use serde_json::Value;
     use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
     use tycho_simulation::tycho_common::{models::Chain, Bytes};
+    #[cfg(feature = "experimental")]
+    use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
     use crate::api::{dto::QuoteRequest, AppState, HealthTracker};
 
@@ -433,6 +438,143 @@ mod tests {
             #[cfg(feature = "experimental")]
             tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
         )
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_matches_canonical_unit_contract_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/v1-prices-unit-contract-v1.json"
+        ))
+        .unwrap();
+        let mut state = make_test_state();
+        state.gas_token = tycho_simulation::tycho_common::models::Address::from_str(
+            fixture["gasToken"]["address"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut token_prices = std::collections::HashMap::new();
+
+        for case in fixture["cases"].as_array().unwrap() {
+            if case["expectation"] != "accepted" {
+                continue;
+            }
+            let address = tycho_simulation::tycho_common::models::Address::from_str(
+                case["token"]["address"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let fraction = &case["priceFraction"];
+            let numerator =
+                num_bigint::BigUint::from_str(fraction["numerator"].as_str().unwrap()).unwrap();
+            let denominator = num_bigint::BigUint::from_str(
+                fraction["denominator"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            token_prices.insert(address, Price::new(numerator, denominator));
+        }
+        state
+            .derived_data
+            .write()
+            .await
+            .set_token_prices(token_prices, vec![], 19_000_000, true);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+        let request = test::TestRequest::get()
+            .uri("/v1/prices")
+            .to_request();
+        let body: Value = test::call_and_read_body_json(&app, request).await;
+
+        assert_eq!(body["blocks"]["token_prices"], 19_000_000);
+        assert!(body["gas_token"]
+            .as_str()
+            .unwrap()
+            .eq_ignore_ascii_case(
+                fixture["gasToken"]["address"]
+                    .as_str()
+                    .unwrap()
+            ));
+        let response_prices = body["prices"].as_array().unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            if case["expectation"] != "accepted" {
+                continue;
+            }
+            let expected_address = case["token"]["address"]
+                .as_str()
+                .unwrap();
+            let response_entry = response_prices
+                .iter()
+                .find(|entry| {
+                    entry["token"]
+                        .as_str()
+                        .unwrap()
+                        .eq_ignore_ascii_case(expected_address)
+                })
+                .unwrap_or_else(|| panic!("missing handler response for {}", case["name"]));
+            assert_eq!(
+                response_entry["price"].to_string(),
+                case["rawPrice"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_skips_non_serializable_prices() {
+        let state = make_test_state();
+        let mut token_prices = std::collections::HashMap::new();
+        let valid = tycho_simulation::tycho_common::models::Address::from([1u8; 20]);
+        token_prices.insert(valid.clone(), Price::new(1u8.into(), 2u8.into()));
+        token_prices.insert(
+            tycho_simulation::tycho_common::models::Address::from([2u8; 20]),
+            Price { numerator: 0u8.into(), denominator: 1u8.into() },
+        );
+        token_prices.insert(
+            tycho_simulation::tycho_common::models::Address::from([3u8; 20]),
+            Price::new(num_bigint::BigUint::from(10u8).pow(400), 1u8.into()),
+        );
+        token_prices.insert(
+            tycho_simulation::tycho_common::models::Address::from([4u8; 20]),
+            Price::new(1u8.into(), num_bigint::BigUint::from(10u8).pow(400)),
+        );
+        state
+            .derived_data
+            .write()
+            .await
+            .set_token_prices(token_prices, vec![], 19_000_000, true);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+        let body: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+
+        let prices = body["prices"].as_array().unwrap();
+        assert_eq!(prices.len(), 1);
+        assert!(prices[0]["token"]
+            .as_str()
+            .unwrap()
+            .eq_ignore_ascii_case(&valid.to_string()));
+        assert_eq!(prices[0]["price"], 0.5);
     }
 
     // ── Unknown route (default_service) ────────────────────────────────────

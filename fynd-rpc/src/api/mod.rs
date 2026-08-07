@@ -73,6 +73,15 @@ pub struct ApiDoc;
 )]
 pub struct ExperimentalApiDoc;
 
+/// Builds the OpenAPI contract for every endpoint compiled into this crate.
+pub fn openapi_spec() -> utoipa::openapi::OpenApi {
+    #[allow(unused_mut)]
+    let mut openapi = ApiDoc::openapi();
+    #[cfg(feature = "experimental")]
+    openapi.merge(ExperimentalApiDoc::openapi());
+    openapi
+}
+
 /// Simple tracker for service health metrics.
 ///
 /// Reads the last update timestamp from MarketState to determine how fresh the market data is,
@@ -248,4 +257,19 @@ pub(crate) fn configure_app(
             let body = ErrorResponse::new("not found".into(), "NOT_FOUND".into());
             HttpResponse::NotFound().json(body)
         }));
+}
+
+#[cfg(all(test, feature = "experimental"))]
+mod openapi_tests {
+    #[test]
+    fn test_openapi_spec_exposes_price_unit_contract() {
+        let spec = serde_json::to_value(super::openapi_spec()).unwrap();
+
+        assert!(spec["paths"]["/v1/prices"].is_object());
+        let price = &spec["components"]["schemas"]["TokenPriceEntry"]["properties"]["price"];
+        assert!(price["example"].is_number());
+        let description = price["description"].as_str().unwrap();
+        assert!(description.contains("PRICE_UNIT_CONTRACT_V1"));
+        assert!(description.contains("raw target-token units divided by raw gas-token units"));
+    }
 }

@@ -1,0 +1,154 @@
+{
+  "contractVersion": "PRICE_UNIT_CONTRACT_V1",
+  "priceUnit": "raw_token_units_per_raw_gas_unit",
+  "gasToken": {
+    "address": "0x0000000000000000000000000000000000000001",
+    "decimals": 18
+  },
+  "anchorUsdAssumption": "1",
+  "cases": [
+    {
+      "name": "6_over_18_anchor",
+      "expectation": "accepted",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000006",
+        "decimals": 6
+      },
+      "priceFraction": {
+        "numerator": "3",
+        "denominator": "1000000000"
+      },
+      "rawPrice": "3e-9",
+      "expectedTokenUnitsPerGasToken": "3000",
+      "expectedGasTokenUsd": "3000",
+      "expectedTokenUsd": "1"
+    },
+    {
+      "name": "8_over_18_token",
+      "expectation": "accepted",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000008",
+        "decimals": 8
+      },
+      "priceFraction": {
+        "numerator": "5",
+        "denominator": "1000000000000"
+      },
+      "rawPrice": "5e-12",
+      "expectedTokenUnitsPerGasToken": "0.05",
+      "expectedGasTokenUsd": "3000",
+      "expectedTokenUsd": "60000"
+    },
+    {
+      "name": "18_over_18_token",
+      "expectation": "accepted",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000018",
+        "decimals": 18
+      },
+      "priceFraction": {
+        "numerator": "1500",
+        "denominator": "1"
+      },
+      "rawPrice": "1500.0",
+      "expectedTokenUnitsPerGasToken": "1500",
+      "expectedGasTokenUsd": "3000",
+      "expectedTokenUsd": "2"
+    },
+    {
+      "name": "missing_decimals",
+      "expectation": "rejected",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000020"
+      },
+      "rawPrice": "1.0",
+      "expectedError": "missing_decimals"
+    },
+    {
+      "name": "zero_price",
+      "expectation": "rejected",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000021",
+        "decimals": 18
+      },
+      "priceFraction": {
+        "numerator": "0",
+        "denominator": "1"
+      },
+      "rawPrice": "0.0",
+      "expectedError": "non_positive_price"
+    },
+    {
+      "name": "negative_price",
+      "expectation": "rejected",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000022",
+        "decimals": 18
+      },
+      "rawPrice": "-1",
+      "expectedError": "non_positive_price"
+    },
+    {
+      "name": "nan_price",
+      "expectation": "rejected",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000023",
+        "decimals": 18
+      },
+      "rawPrice": "NaN",
+      "expectedError": "non_finite_price"
+    },
+    {
+      "name": "positive_infinity_price",
+      "expectation": "rejected",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000024",
+        "decimals": 18
+      },
+      "rawPrice": "Infinity",
+      "expectedError": "non_finite_price"
+    },
+    {
+      "name": "negative_infinity_price",
+      "expectation": "rejected",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000025",
+        "decimals": 18
+      },
+      "rawPrice": "-Infinity",
+      "expectedError": "non_finite_price"
+    },
+    {
+      "name": "overflow_scale",
+      "expectation": "rejected",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000026",
+        "decimals": 1000
+      },
+      "rawPrice": "1.0",
+      "expectedError": "decimal_scale_out_of_range"
+    },
+    {
+      "name": "duplicate_address",
+      "expectation": "rejected",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000018",
+        "decimals": 18
+      },
+      "rawPrice": "2.0",
+      "duplicateOf": "18_over_18_token",
+      "expectedError": "duplicate_address"
+    },
+    {
+      "name": "gas_token_mismatch",
+      "expectation": "rejected",
+      "token": {
+        "address": "0x0000000000000000000000000000000000000027",
+        "decimals": 18
+      },
+      "rawPrice": "1.0",
+      "responseGasToken": "0x00000000000000000000000000000000000000ff",
+      "expectedError": "gas_token_mismatch"
+    }
+  ]
+}
