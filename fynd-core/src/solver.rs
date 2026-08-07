@@ -1523,7 +1523,7 @@ mod tests {
     /// from no
     /// pool at all.
     #[test]
-    fn test_build_rejects_all_exclusive_pools() {
+    fn test_build_all_exclusive_pools() {
         let config =
             PoolConfig::new("most_liquid").with_liquidity_scope(LiquidityScope::IncludeExclusive);
         let result = FyndBuilder::new(

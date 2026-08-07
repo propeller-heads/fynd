@@ -1395,14 +1395,20 @@ mod tests {
         worker_b.abort();
     }
 
+    /// The `denied_access` case sets `min_responses(2)`, which would hold a request with access
+    /// until both pools answer; a denied request's allocation holds only the public pool, so it
+    /// must return without waiting on the slow exclusive pool it will never use.
     #[rstest]
-    #[case::pending_exclusive_pool(0, Some(300), true)]
-    #[case::pending_public_pool(300, Some(0), true)]
-    #[case::failed_exclusive_pool(0, None, false)]
+    #[case::pending_exclusive_pool(ExclusiveAccess::Granted, 0, Some(300), 1, true)]
+    #[case::pending_public_pool(ExclusiveAccess::Granted, 300, Some(0), 1, true)]
+    #[case::failed_exclusive_pool(ExclusiveAccess::Granted, 0, None, 1, false)]
+    #[case::denied_access(ExclusiveAccess::Denied, 0, Some(500), 2, false)]
     #[tokio::test]
     async fn test_router_early_return_scope_gating(
+        #[case] access: ExclusiveAccess,
         #[case] public_delay_ms: u64,
         #[case] exclusive_delay_ms: Option<u64>,
+        #[case] min_responses: usize,
         #[case] expect_surplus: bool,
     ) {
         let (public_pool, public_worker) =
@@ -1423,19 +1429,20 @@ mod tests {
 
         let config = WorkerPoolRouterConfig::default()
             .with_timeout(Duration::from_millis(2000))
-            .with_min_responses(1);
+            .with_min_responses(min_responses);
         let worker_router =
             WorkerPoolRouter::new(vec![public_pool, exclusive_pool], config, default_encoder());
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let start = Instant::now();
         let result = worker_router
-            .quote(request, ExclusiveAccess::Granted)
+            .quote(request, access)
             .await
             .expect("quote should succeed");
         let elapsed = start.elapsed();
 
-        // Well under the 2s timeout: the gate releases as soon as both scopes have responded.
+        // Well under the 2s timeout: the gate releases as soon as every allocated scope has
+        // responded.
         assert!(elapsed < Duration::from_millis(500), "took {elapsed:?}");
         let order = &result.orders()[0];
         assert_eq!(order.status(), QuoteStatus::Success);
@@ -1500,41 +1507,6 @@ mod tests {
         // Either way the quoted output is the public reference, so denied access costs the
         // caller nothing they were promised.
         assert_eq!(*order.amount_out(), BigUint::from(990u64));
-
-        drop(worker_router);
-        public_worker.abort();
-        exclusive_worker.abort();
-    }
-
-    /// A denied request must not wait on the exclusive pool it will never use.
-    #[tokio::test]
-    async fn test_router_denied_does_not_wait_for_exclusive_pool() {
-        let (public_pool, public_worker) =
-            create_mock_worker_pool("public_pool", Ok(make_single_quote(800)), 0);
-        let (exclusive_pool, exclusive_worker) =
-            create_mock_worker_pool("exclusive_pool", Ok(make_exclusive_quote(1100)), 500);
-        let exclusive_pool = exclusive_pool.with_liquidity_scope(LiquidityScope::IncludeExclusive);
-
-        // `min_responses(2)` would hold a request with access until both pools answer.
-        let worker_router = WorkerPoolRouter::new(
-            vec![public_pool, exclusive_pool],
-            WorkerPoolRouterConfig::default()
-                .with_timeout(Duration::from_millis(2000))
-                .with_min_responses(2),
-            default_encoder(),
-        );
-        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
-
-        let start = Instant::now();
-        let result = worker_router
-            .quote(request, ExclusiveAccess::Denied)
-            .await
-            .expect("quote should succeed");
-        let elapsed = start.elapsed();
-
-        // Only the public pool is allocated, so `min_responses` is satisfied by its answer alone.
-        assert!(elapsed < Duration::from_millis(300), "took {elapsed:?}");
-        assert_eq!(result.orders()[0].status(), QuoteStatus::Success);
 
         drop(worker_router);
         public_worker.abort();
