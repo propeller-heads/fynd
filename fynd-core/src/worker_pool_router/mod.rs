@@ -308,7 +308,7 @@ impl WorkerPoolRouter {
             .any(Allocation::is_empty)
         {
             return Err(SolveError::Internal(format!(
-                "no worker pool serves this request: {class:?}"
+                "no solver pool serves this request: {class:?}"
             )));
         }
 
@@ -1456,8 +1456,7 @@ mod tests {
 
     /// The exclusive pool offers a strictly better route (net 1100 vs 800), so it wins whenever it
     /// is allocated. A request without access must never reach it: not merely lose to the public
-    /// leg
-    /// in ranking, but cost the exclusive pool no work at all.
+    /// leg in ranking, but cost the exclusive pool no work at all.
     #[rstest]
     #[case::denied(ExclusiveAccess::Denied, false)]
     #[case::granted(ExclusiveAccess::Granted, true)]

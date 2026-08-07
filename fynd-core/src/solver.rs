@@ -1520,8 +1520,7 @@ mod tests {
     }
 
     /// A deployment of nothing but exclusive-access pools would serve requests without access
-    /// from no
-    /// pool at all.
+    /// from no pool at all.
     #[test]
     fn test_build_all_exclusive_pools() {
         let config =
