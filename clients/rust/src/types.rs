@@ -115,6 +115,13 @@ impl PermitSingle {
     }
 }
 
+/// Fee units per basis point in the router's `ClientFeeParams.clientFeeBps`.
+///
+/// Fynd's API takes the client fee in basis points, while the router takes it in the
+/// FeeCalculator's fee units (`MAX_BPS` = 100,000,000 = 100%). Signatures must cover the
+/// scaled value that ends up in the calldata.
+const CLIENT_FEE_UNITS_PER_BPS: u64 = 10_000;
+
 /// Client fee configuration for the Tycho Router.
 ///
 /// When attached to [`EncodingOptions`] via [`EncodingOptions::with_client_fee`], the router
@@ -149,15 +156,16 @@ impl ClientFeeParams {
     /// Pass the returned hash to the fee receiver's signer, then supply the
     /// 65-byte result to [`ClientFeeParams::with_signature`].
     ///
-    /// The hash covers all 10 `ClientFee` fields. The swap-specific inputs
-    /// (`amount_in`, `token_in`, `token_out`, `min_amount_out`, `receiver`,
-    /// `swaps_hash`) come from a prior unsigned quote request — see
+    /// The hash covers all 11 `ClientFee` fields. The swap-specific inputs
+    /// (`amount_in`, `token_in`, `token_out`, `expected_amount_out`, `min_amount_out`,
+    /// `receiver`, `swaps_hash`) come from a prior unsigned quote request — see
     /// [`FeeBreakdown`] and the `swap_client_fee` example for the two-step flow.
     ///
     /// - `router_address`: 20-byte address of the TychoRouter contract.
     /// - `amount_in`: exact input amount from the order.
     /// - `token_in`: 20-byte input token address.
     /// - `token_out`: 20-byte output token address.
+    /// - `expected_amount_out`: quoted output amount — use `Quote::amount_out`.
     /// - `min_amount_out`: minimum output after fees — use [`FeeBreakdown::min_amount_received`].
     /// - `receiver`: 20-byte address receiving the swap output.
     /// - `swaps_hash`: keccak256 of the encoded swaps bytes — use [`FeeBreakdown::swaps_hash`].
@@ -169,6 +177,7 @@ impl ClientFeeParams {
         amount_in: &num_bigint::BigUint,
         token_in: &Bytes,
         token_out: &Bytes,
+        expected_amount_out: &num_bigint::BigUint,
         min_amount_out: &num_bigint::BigUint,
         receiver: &Bytes,
         swaps_hash: &[u8; 32],
@@ -180,15 +189,16 @@ impl ClientFeeParams {
         let amount_in_u256 = biguint_to_u256(amount_in);
         let token_in_addr = p2_bytes_to_address(token_in, "token_in")?;
         let token_out_addr = p2_bytes_to_address(token_out, "token_out")?;
+        let expected_amount_out_u256 = biguint_to_u256(expected_amount_out);
         let min_amount_out_u256 = biguint_to_u256(min_amount_out);
         let receiver_addr = p2_bytes_to_address(receiver, "receiver")?;
         let swaps_b256 = alloy::primitives::B256::from(*swaps_hash);
 
         let type_hash = keccak256(
-            b"ClientFee(uint16 clientFeeBps,address clientFeeReceiver,\
+            b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
 uint256 maxClientContribution,uint256 deadline,\
 uint256 amountIn,address tokenIn,address tokenOut,\
-uint256 minAmountOut,address receiver,bytes swaps)",
+uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
         );
 
         let domain_type_hash = keccak256(
@@ -209,13 +219,14 @@ uint256 chainId,address verifyingContract)",
         let struct_hash = keccak256(
             (
                 type_hash,
-                U256::from(self.bps),
+                U256::from(self.bps as u64 * CLIENT_FEE_UNITS_PER_BPS),
                 fee_receiver,
                 max_contrib,
                 dl,
                 amount_in_u256,
                 token_in_addr,
                 token_out_addr,
+                expected_amount_out_u256,
                 min_amount_out_u256,
                 receiver_addr,
                 swaps_b256,
@@ -940,7 +951,7 @@ impl Quote {
     ///
     /// 1. Request a quote with unsigned [`ClientFeeParams`] (empty signature).
     /// 2. Read [`FeeBreakdown::swaps_hash`] from the response.
-    /// 3. Sign the 10-field EIP-712 hash using [`ClientFeeParams::eip712_signing_hash`].
+    /// 3. Sign the 11-field EIP-712 hash using [`ClientFeeParams::eip712_signing_hash`].
     /// 4. Call this method to patch the signature into the calldata.
     /// 5. Execute the transaction.
     ///
@@ -1341,6 +1352,10 @@ mod tests {
         BigUint::from(1_000_000u64)
     }
 
+    fn sample_expected_amount_out() -> BigUint {
+        BigUint::from(1_010_000u64)
+    }
+
     fn sample_amount_in() -> BigUint {
         BigUint::from(1_000_000_000_000_000_000u64)
     }
@@ -1374,6 +1389,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1393,6 +1409,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1405,6 +1422,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1423,6 +1441,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1435,6 +1454,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1452,6 +1472,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1464,12 +1485,45 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
             )
             .unwrap();
         assert_ne!(h100, h200);
+    }
+
+    #[test]
+    fn client_fee_signing_hash_differs_by_expected_amount_out() {
+        let fee = sample_fee_params(100, sample_fee_receiver());
+        let quoted = fee
+            .eip712_signing_hash(
+                1,
+                &sample_router_address(),
+                &sample_amount_in(),
+                &sample_token_in(),
+                &sample_token_out(),
+                &sample_expected_amount_out(),
+                &sample_min_amount_out(),
+                &sample_swap_receiver(),
+                &sample_swaps_hash(),
+            )
+            .unwrap();
+        let higher = fee
+            .eip712_signing_hash(
+                1,
+                &sample_router_address(),
+                &sample_amount_in(),
+                &sample_token_in(),
+                &sample_token_out(),
+                &(sample_expected_amount_out() + BigUint::from(1u32)),
+                &sample_min_amount_out(),
+                &sample_swap_receiver(),
+                &sample_swaps_hash(),
+            )
+            .unwrap();
+        assert_ne!(quoted, higher);
     }
 
     #[test]
@@ -1482,6 +1536,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1494,6 +1549,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1513,6 +1569,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1532,6 +1589,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),

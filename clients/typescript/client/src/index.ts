@@ -48,6 +48,7 @@ export {
   clientFeeSigningHash,
   withClientFee,
 } from "./client-fee.js";
+export type { ClientFeeSwapContext } from "./client-fee.js";
 export { FyndClient } from "./client.js";
 export type {
   EthProvider,

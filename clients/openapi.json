@@ -313,7 +313,7 @@
               "string",
               "null"
             ],
-            "description": "keccak256 of the ABI-encoded swap bytes, as a 0x-prefixed hex string.\nPresent only when client fee params were included in the request.\nUse this with `amount_in`, `token_in`, `token_out`, `min_amount_received`, and `receiver`\nto compute the 10-field EIP-712 `ClientFee` signing hash (see client library helpers).",
+            "description": "keccak256 of the ABI-encoded swap bytes, as a 0x-prefixed hex string.\nPresent only when client fee params were included in the request.\nUse this with `amount_in`, `token_in`, `token_out`, `amount_out`, `min_amount_received`,\nand `receiver` to compute the 11-field EIP-712 `ClientFee` signing hash (see client library\nhelpers).",
             "example": null
           }
         }

@@ -406,8 +406,9 @@ pub struct FeeBreakdown {
     min_amount_received: BigUint,
     /// keccak256 of the ABI-encoded swap bytes, as a 0x-prefixed hex string.
     /// Present only when client fee params were included in the request.
-    /// Use this with `amount_in`, `token_in`, `token_out`, `min_amount_received`, and `receiver`
-    /// to compute the 10-field EIP-712 `ClientFee` signing hash (see client library helpers).
+    /// Use this with `amount_in`, `token_in`, `token_out`, `amount_out`, `min_amount_received`,
+    /// and `receiver` to compute the 11-field EIP-712 `ClientFee` signing hash (see client library
+    /// helpers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, example = json!(null)))]
     swaps_hash: Option<Bytes>,
