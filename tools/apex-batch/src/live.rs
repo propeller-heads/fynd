@@ -109,10 +109,12 @@ pub enum OrderStatus {
     /// because the rejection is provisional — converged prices might have crossed it — and
     /// distinct from [`Self::ClusterCut`] because the order WAS priced.
     UnfilledAtBestSoFar,
-    /// The order's trading cluster never started: the deadline landed between clusters, so nothing
-    /// about this order was evaluated at all. Only reachable when APEX partitions a component into
-    /// several trading clusters; a single-cluster component always clears at best-so-far instead.
-    ClusterCut,
+    /// APEX never priced this order's tokens, so it was not evaluated at all. Two causes, both
+    /// independent of the deadline: `TokenClusterSolver` discards an order whose tokens land in no
+    /// cluster, and — only when a component yields several clusters — the deadline can land
+    /// between them before one starts. Either way this is a coverage gap, not a price rejection,
+    /// and must not sit in the same bucket as an order APEX considered and declined.
+    NotPriced,
     /// The order's component errored or panicked inside APEX; nothing about this order's own
     /// economics can be concluded.
     ComponentErrored,
@@ -154,7 +156,8 @@ pub struct LiveCounters {
     /// [`OrderStatus::UnfilledAtBestSoFar`]. Tracked apart from `unfilled_at_limit` so a
     /// provisional rejection is never read as a converged one.
     pub unfilled_at_best_so_far: u64,
-    pub cluster_cut: u64,
+    /// Never priced by APEX — see [`OrderStatus::NotPriced`]. A coverage gap, not a rejection.
+    pub not_priced: u64,
 }
 
 /// What one component's APEX solve cleared, recorded verbatim so the economics can be recomputed
@@ -816,26 +819,37 @@ fn solve_component(
                     OrderStatus::Filled { bought_raw, fill_ratio: fill_ratio.min(1.0) }
                 }
             }
+            // Everything below is a non-fill, and the first question is whether APEX priced the
+            // order at all — NOT whether the deadline fired. An unpriced token means APEX never
+            // evaluated it (its cluster was discarded or never ran), which is a coverage gap.
+            // Only once it IS priced does the deadline matter, and then only to say whether the
+            // rejection is final or provisional.
+            Some(clearing)
+                if !result
+                    .clearing_prices
+                    .contains_key(&clearing.sell_token) =>
+            {
+                counters.not_priced += 1;
+                OrderStatus::NotPriced
+            }
+            Some(_) if result.deadline_fired => {
+                counters.unfilled_at_best_so_far += 1;
+                OrderStatus::UnfilledAtBestSoFar
+            }
             Some(_) => {
                 counters.unfilled_at_limit += 1;
                 OrderStatus::UnfilledAtLimit
             }
-            // A fired deadline alone does NOT mean this order went unseen. APEX skips a cluster
-            // only when the deadline lands *between* clusters; a deadline inside a cluster still
-            // clears it at best-so-far prices, and the whole cluster's price vector comes back.
-            // So a priced token means the order was evaluated and did not cross — provisionally,
-            // at unconverged prices — while an unpriced one means its cluster never ran.
+            None if !result
+                .clearing_prices
+                .contains_key(&order.token_in) =>
+            {
+                counters.not_priced += 1;
+                OrderStatus::NotPriced
+            }
             None if result.deadline_fired => {
-                if result
-                    .clearing_prices
-                    .contains_key(&order.token_in)
-                {
-                    counters.unfilled_at_best_so_far += 1;
-                    OrderStatus::UnfilledAtBestSoFar
-                } else {
-                    counters.cluster_cut += 1;
-                    OrderStatus::ClusterCut
-                }
+                counters.unfilled_at_best_so_far += 1;
+                OrderStatus::UnfilledAtBestSoFar
             }
             None => {
                 counters.unfilled_at_limit += 1;
@@ -960,6 +974,53 @@ mod tests {
     }
 
     #[test]
+    fn test_orders_apex_never_priced_are_not_counted_as_rejections() {
+        // Token 3 has metadata and a price on our side, so admission accepts the order — but its
+        // pair reaches no other order and no pool, so APEX's clustering discards it and never
+        // prices it. That is a coverage gap; counting it as `unfilled_at_limit` would claim APEX
+        // considered the order and declined it.
+        let mut input = two_token_input(
+            vec![
+                order("a:0", token(1), token(2), raw(9, 17)),
+                order("b:0", token(2), token(1), raw(9, 17)),
+                order("c:0", token(3), token(4), raw(9, 17)),
+            ],
+            Vec::new(),
+        );
+        for index in [3, 4] {
+            input
+                .token_meta
+                .insert(token(index), (format!("T{index}"), 18));
+            input.price_inputs.insert(
+                token(index),
+                TokenPriceInput { numerator: wei(1, 18), denominator: wei(1, 18), decimals: 18 },
+            );
+        }
+        let report = solve_live_batch(&input, BUDGET, BUDGET, false);
+
+        let status_for = |wanted: &str| {
+            report
+                .statuses
+                .iter()
+                .find(|(id, _)| id == wanted)
+                .map(|(_, status)| status.clone())
+                .unwrap_or_else(|| panic!("{wanted} missing from {report:?}"))
+        };
+        // a and b still cross; c is either dropped before the solve or never priced by it —
+        // never a rejection, which is the distinction this guards.
+        assert!(matches!(status_for("a:0"), OrderStatus::Filled { .. }), "{report:?}");
+        assert!(
+            matches!(
+                status_for("c:0"),
+                OrderStatus::NotPriced | OrderStatus::Excluded(_) | OrderStatus::ComponentErrored
+            ),
+            "c:0 ended as {:?}",
+            status_for("c:0")
+        );
+        assert_eq!(report.counters.unfilled_at_limit, 0, "{report:?}");
+    }
+
+    #[test]
     fn test_crossing_orders_record_prices_and_order_clearings() {
         // APEX has no encoder, so the clearing-price vector and the per-order clearings are what
         // makes a solve reconstructible offline. Both must survive onto the report.
@@ -1043,9 +1104,8 @@ mod tests {
         assert_eq!(report.counters.filled + report.counters.partially_filled, 0, "{report:?}");
         assert_eq!(report.statuses.len(), 2);
         for (id, status) in &report.statuses {
-            // Never ClusterCut: the deadline can only skip a cluster it has not started, and a
-            // component this small yields a single cluster that always gets cleared — at
-            // converged prices here, at best-so-far prices under time pressure.
+            // Never NotPriced: both orders' tokens are priced and their single cluster always
+            // gets cleared — at converged prices here, at best-so-far prices under time pressure.
             assert!(
                 matches!(
                     status,
@@ -1056,7 +1116,7 @@ mod tests {
                 "{id} ended as {status:?}"
             );
         }
-        assert_eq!(report.counters.cluster_cut, 0, "{report:?}");
+        assert_eq!(report.counters.not_priced, 0, "{report:?}");
     }
 
     #[test]

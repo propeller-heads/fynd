@@ -257,7 +257,8 @@ fn describe_apex() {
     describe_counter!(
         APEX_ORDERS,
         "Orders entering the APEX stage, labeled by final status (filled, unfilled_at_limit, \
-         cluster_cut, component_errored, excluded_*) from reconciling clearings against the \
+         unfilled_at_best_so_far, not_priced, component_errored, excluded_*) from reconciling \
+         clearings against the \
          pre-map input list"
     );
 }

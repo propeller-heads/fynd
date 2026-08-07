@@ -428,7 +428,7 @@ fn status_fields(status: &OrderStatus) -> (&'static str, Option<String>, Option<
         }
         OrderStatus::UnfilledAtLimit => ("unfilled_at_limit", None, None),
         OrderStatus::UnfilledAtBestSoFar => ("unfilled_at_best_so_far", None, None),
-        OrderStatus::ClusterCut => ("cluster_cut", None, None),
+        OrderStatus::NotPriced => ("not_priced", None, None),
         OrderStatus::ComponentErrored => ("component_errored", None, None),
         OrderStatus::Excluded(reason) => (reason, None, None),
     }
