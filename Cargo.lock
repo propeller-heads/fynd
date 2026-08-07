@@ -3131,7 +3131,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4130,7 +4130,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -4932,7 +4932,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5679,7 +5679,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5717,7 +5717,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -6472,7 +6472,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6531,7 +6531,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7255,7 +7255,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7906,8 +7906,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.341.7"
-source = "git+https://github.com/propeller-heads/tycho?rev=114f4e2a4003dddb017a257e0fa2b45d5d034091#114f4e2a4003dddb017a257e0fa2b45d5d034091"
+version = "0.354.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "418ae2ea3fbf0376cddf77b43421ac7e08bde342e7753fa9cb7fc79a2ebde206"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7935,8 +7936,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.341.7"
-source = "git+https://github.com/propeller-heads/tycho?rev=114f4e2a4003dddb017a257e0fa2b45d5d034091#114f4e2a4003dddb017a257e0fa2b45d5d034091"
+version = "0.354.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c519ddd22ea7a8e5277e3be5faa72942ff28f36916751aeb471dc1e381442f1"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -7963,8 +7965,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.341.7"
-source = "git+https://github.com/propeller-heads/tycho?rev=114f4e2a4003dddb017a257e0fa2b45d5d034091#114f4e2a4003dddb017a257e0fa2b45d5d034091"
+version = "0.354.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66f561027877004ef4f6794be51c8f5890b04bec0373ff3765416053faa19e72"
 dependencies = [
  "alloy",
  "async-trait",
@@ -7984,8 +7987,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.341.7"
-source = "git+https://github.com/propeller-heads/tycho?rev=114f4e2a4003dddb017a257e0fa2b45d5d034091#114f4e2a4003dddb017a257e0fa2b45d5d034091"
+version = "0.354.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b39c8c20fcf2825f5a589745b16200aa013c69d76f6626c4c244979450fee00b"
 dependencies = [
  "alloy",
  "chrono",
@@ -7999,13 +8003,15 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
  "tycho-common",
 ]
 
 [[package]]
 name = "tycho-simulation"
-version = "0.341.7"
-source = "git+https://github.com/propeller-heads/tycho?rev=114f4e2a4003dddb017a257e0fa2b45d5d034091#114f4e2a4003dddb017a257e0fa2b45d5d034091"
+version = "0.354.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b2d6dd42e10a0c48a14df8b4ab5fccf5acb332926d93fece8bd42eb30d5efb2"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -8529,7 +8535,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -23,7 +23,7 @@ use tycho_simulation::tycho_common::{models::Chain, Bytes};
 use crate::{
     encoding::{
         exclusive_swap::ExclusiveSwapSigner,
-        router_fees::{FeeRates, RouterFees, SharedRouterFees},
+        router_fees::{FeeRates, SharedRouterFees},
     },
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, SolveError, Transaction,
 };
@@ -56,72 +56,85 @@ pub struct Encoder {
     exclusive_swap_signer: Option<ExclusiveSwapSigner>,
 }
 
-/// Maps a successful quote onto an encodable solution. Slippage and the user transfer type are
-/// not part of the quote — callers apply them from their `EncodingOptions` via
-/// `with_slippage` / `with_user_transfer_type`.
+/// Maps a successful quote onto an encodable solution, leaving `min_amount_out` equal to the
+/// quoted output. That is the widest floor the router accepts; callers that emit calldata must
+/// use `solution_from_quote` to supply the fee- and slippage-adjusted floor instead. The user
+/// transfer type is not part of the quote either — callers apply it from their `EncodingOptions`
+/// via `with_user_transfer_type`.
 impl TryFrom<&OrderQuote> for Solution {
     type Error = SolveError;
 
     fn try_from(quote: &OrderQuote) -> Result<Self, Self::Error> {
-        if quote.status() != QuoteStatus::Success {
-            return Err(SolveError::FailedEncoding(format!(
-                "cannot convert quote with status {:?} to Solution",
-                quote.status()
-            )));
-        }
-
-        let route = quote.route().ok_or_else(|| {
-            SolveError::FailedEncoding("successful quote must have a route".to_string())
-        })?;
-
-        let token_in = route
-            .input_token()
-            .ok_or_else(|| SolveError::FailedEncoding("route has no input token".to_string()))?;
-        let token_out = route
-            .output_token()
-            .ok_or_else(|| SolveError::FailedEncoding("route has no output token".to_string()))?;
-
-        let token_map = route.tokens();
-        let lookup_token = |addr: &Bytes| {
-            token_map
-                .get(addr)
-                .cloned()
-                .ok_or_else(|| {
-                    SolveError::FailedEncoding(format!(
-                        "token {addr:?} not found in route's token map; \
-                     algorithm must populate Route::with_tokens for every swap token"
-                    ))
-                })
-        };
-        let swaps = route
-            .swaps()
-            .iter()
-            .map(|s| {
-                let token_in = lookup_token(s.token_in())?;
-                let token_out = lookup_token(s.token_out())?;
-                Ok(Swap::new(
-                    s.protocol_component().clone(),
-                    token_in,
-                    token_out,
-                    s.gas_estimate().clone(),
-                )
-                .with_split(*s.split())
-                .with_protocol_state(Arc::from(s.protocol_state().clone_box()))
-                .with_estimated_amount_in(s.amount_in().clone()))
-            })
-            .collect::<Result<Vec<_>, SolveError>>()?;
-
-        Ok(Solution::new(
-            quote.sender().clone(),
-            quote.receiver().clone(),
-            Bytes::from(token_in.as_ref()),
-            Bytes::from(token_out.as_ref()),
-            quote.amount_in().clone(),
-            quote.amount_out().clone(),
-            0.0,
-            swaps,
-        ))
+        solution_from_quote(quote, quote.amount_out().clone())
     }
+}
+
+/// Maps a successful quote onto an encodable solution with an explicit `min_amount_out`.
+///
+/// `min_amount_out` is the router's revert guardrail: it rejects a value above
+/// `expected_amount_out` (the quoted output) or more than `MAX_SLIPPAGE_TOLERANCE_BPS` below it.
+fn solution_from_quote(
+    quote: &OrderQuote,
+    min_amount_out: BigUint,
+) -> Result<Solution, SolveError> {
+    if quote.status() != QuoteStatus::Success {
+        return Err(SolveError::FailedEncoding(format!(
+            "cannot convert quote with status {:?} to Solution",
+            quote.status()
+        )));
+    }
+
+    let route = quote.route().ok_or_else(|| {
+        SolveError::FailedEncoding("successful quote must have a route".to_string())
+    })?;
+
+    let token_in = route
+        .input_token()
+        .ok_or_else(|| SolveError::FailedEncoding("route has no input token".to_string()))?;
+    let token_out = route
+        .output_token()
+        .ok_or_else(|| SolveError::FailedEncoding("route has no output token".to_string()))?;
+
+    let token_map = route.tokens();
+    let lookup_token = |addr: &Bytes| {
+        token_map
+            .get(addr)
+            .cloned()
+            .ok_or_else(|| {
+                SolveError::FailedEncoding(format!(
+                    "token {addr:?} not found in route's token map; \
+                 algorithm must populate Route::with_tokens for every swap token"
+                ))
+            })
+    };
+    let swaps = route
+        .swaps()
+        .iter()
+        .map(|s| {
+            let token_in = lookup_token(s.token_in())?;
+            let token_out = lookup_token(s.token_out())?;
+            Ok(Swap::new(
+                s.protocol_component().clone(),
+                token_in,
+                token_out,
+                s.gas_estimate().clone(),
+            )
+            .with_split(*s.split())
+            .with_protocol_state(Arc::from(s.protocol_state().clone_box()))
+            .with_estimated_amount_in(s.amount_in().clone()))
+        })
+        .collect::<Result<Vec<_>, SolveError>>()?;
+
+    Ok(Solution::new(
+        quote.sender().clone(),
+        quote.receiver().clone(),
+        Bytes::from(token_in.as_ref()),
+        Bytes::from(token_out.as_ref()),
+        quote.amount_in().clone(),
+        quote.amount_out().clone(),
+        min_amount_out,
+        swaps,
+    ))
 }
 
 impl Encoder {
@@ -213,16 +226,41 @@ impl Encoder {
             tracing::warn!(slippage, "slippage exceeds 50%, possible misconfiguration");
         }
 
-        let mut to_encode: Vec<(usize, Solution)> = Vec::new();
+        let router_fees = self.router_fees.snapshot();
+        let mut to_encode: Vec<(usize, Solution, FeeBreakdown, FeeRates)> = Vec::new();
 
         for (i, quote) in quotes.iter().enumerate() {
             if quote.status() != QuoteStatus::Success {
                 continue;
             }
 
-            let solution = Solution::try_from(quote)?
-                .with_slippage(slippage)
-                .with_user_transfer_type(encoding_options.transfer_type().clone());
+            // Mirror FeeCalculator._resolveClient: custom router fees are looked up by the client
+            // fee receiver; without client fee params the contract falls back to tx.origin, for
+            // which the order sender is our best available proxy.
+            let fee_client = encoding_options
+                .client_fee_params()
+                .map_or_else(|| quote.sender(), |f| f.receiver());
+            let fee_rates = router_fees.fees_for(fee_client);
+            let fee_breakdown = Self::calculate_fee_breakdown(
+                quote.amount_out(),
+                encoding_options
+                    .client_fee_params()
+                    .map_or(0, |f| f.bps()),
+                slippage,
+                fee_rates,
+            )?;
+            Self::check_slippage_guardrail(
+                biguint_to_u256(quote.amount_out()),
+                biguint_to_u256(fee_breakdown.min_amount_received()),
+            )?;
+
+            let solution = solution_from_quote(
+                quote,
+                fee_breakdown
+                    .min_amount_received()
+                    .clone(),
+            )?
+            .with_user_transfer_type(encoding_options.transfer_type().clone());
             let solution = match &self.exclusive_swap_signer {
                 Some(signer) => Self::stamp_exclusive_swaps(solution, quote, signer)?,
                 None => {
@@ -238,17 +276,16 @@ impl Encoder {
                     solution
                 }
             };
-            to_encode.push((i, solution));
+            to_encode.push((i, solution, fee_breakdown, fee_rates));
         }
 
         let solutions: Vec<Solution> = to_encode
             .iter()
-            .map(|(_, s)| s.clone())
+            .map(|(_, s, _, _)| s.clone())
             .collect();
         let encoded_solutions = tycho_encoder.encode_solutions(solutions)?;
 
-        let router_fees = self.router_fees.snapshot();
-        for (encoded_solution, (idx, solution)) in encoded_solutions
+        for (encoded_solution, (idx, solution, fee_breakdown, fee_rates)) in encoded_solutions
             .into_iter()
             .zip(to_encode)
         {
@@ -257,7 +294,8 @@ impl Encoder {
                 encoded_solution,
                 &solution,
                 &encoding_options,
-                &router_fees,
+                fee_breakdown,
+                fee_rates,
             )?;
             quotes[idx].set_transaction(transaction);
             quotes[idx].set_fee_breakdown(fee_breakdown);
@@ -323,39 +361,20 @@ impl Encoder {
     /// `encoded_solution` (single/sequential/split, with optional Permit2 or Vault variants),
     /// prepends the 4-byte selector, and returns a `Transaction` ready for submission.
     ///
-    /// Fee calculation mirrors the on-chain `FeeCalculator.calculateFee` using identical
-    /// integer arithmetic so `min_amount_out` passes the router's post-fee check.
+    /// Both amounts the router compares come off `solution`: `expected_amount_out`, its reference
+    /// for positive and negative slippage, and `min_amount_out`, the post-fee floor below which it
+    /// reverts.
     fn encode_tycho_router_call(
         &self,
         encoded_solution: EncodedSolution,
         solution: &Solution,
         encoding_options: &EncodingOptions,
-        router_fees: &RouterFees,
+        fee_breakdown: FeeBreakdown,
+        fee_rates: FeeRates,
     ) -> Result<(Transaction, FeeBreakdown), EncodingError> {
         let amount_in = biguint_to_u256(solution.amount_in());
-        // The quoted output is the router's `expectedAmountOut`: the reference it measures
-        // positive and negative slippage against. On-chain the FeeCalculator charges fees on
-        // the amount actually received, less any surplus the router captured, so the breakdown
-        // below is the projection for a fill at exactly the quoted amount.
-        let swap_output = solution.amount_out();
-        let expected_amount_out = biguint_to_u256(swap_output);
-        // Mirror FeeCalculator._resolveClient: custom router fees are looked up by the client
-        // fee receiver; without client fee params the contract falls back to tx.origin, for
-        // which the order sender is our best available proxy.
-        let fee_client = encoding_options
-            .client_fee_params()
-            .map_or_else(|| solution.sender(), |f| f.receiver());
-        let fee_rates = router_fees.fees_for(fee_client);
-        let fee_breakdown = Self::calculate_fee_breakdown(
-            swap_output,
-            encoding_options
-                .client_fee_params()
-                .map_or(0, |f| f.bps()),
-            encoding_options.slippage(),
-            fee_rates,
-        )?;
-        let min_amount_out = biguint_to_u256(fee_breakdown.min_amount_received());
-        Self::check_slippage_guardrail(expected_amount_out, min_amount_out)?;
+        let expected_amount_out = biguint_to_u256(solution.expected_amount_out());
+        let min_amount_out = biguint_to_u256(solution.min_amount_out());
         let native_address = &self.chain.native_token().address;
         let router_eth = Address::from_slice(ROUTER_ETH_ADDRESS.as_ref());
         let to_router_address = |raw: Address| {
@@ -669,6 +688,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
+        encoding::router_fees::RouterFees,
         BlockInfo, OrderQuote, QuoteStatus,
     };
 
@@ -842,7 +862,9 @@ mod tests {
         assert_eq!(*solution.token_in(), Bytes::from(make_address(0x01).as_ref()));
         assert_eq!(*solution.token_out(), Bytes::from(make_address(0x02).as_ref()));
         assert_eq!(*solution.amount_in(), *quote.amount_in());
-        assert_eq!(*solution.amount_out(), *quote.amount_out());
+        assert_eq!(*solution.expected_amount_out(), *quote.amount_out());
+        // `TryFrom` leaves the floor at the quoted output; only `encode` narrows it.
+        assert_eq!(*solution.min_amount_out(), *quote.amount_out());
         assert_eq!(solution.swaps().len(), 1);
     }
 

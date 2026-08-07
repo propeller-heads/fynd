@@ -141,12 +141,8 @@ metrics-exporter-prometheus = "0.16"
 metrics-util = "0.20"
 
 # Tycho
-# Draft: pinned to the tip of tycho's feature/extend-router-fees branch. tycho-simulation follows
-# the same rev because tycho-execution depends on tycho-common by path inside the monorepo — a git
-# tycho-execution next to a crates.io tycho-simulation pulls in two incompatible tycho-common
-# versions. Move both back to crates.io releases once that branch is merged and published.
-tycho-execution = { git = "https://github.com/propeller-heads/tycho", rev = "114f4e2a4003dddb017a257e0fa2b45d5d034091" }
-tycho-simulation = { git = "https://github.com/propeller-heads/tycho", rev = "114f4e2a4003dddb017a257e0fa2b45d5d034091" }
+tycho-execution = ">=0.354.0"
+tycho-simulation = ">=0.354.0"
 typetag = "0.2"
 
 # Compression
