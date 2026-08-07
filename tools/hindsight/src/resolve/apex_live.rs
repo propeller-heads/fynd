@@ -393,6 +393,12 @@ fn component_record(component: &ComponentClearing) -> serde_json::Value {
         })
         .collect();
     serde_json::json!({
+        // Per component, not per job: a multi-component job's bracket-level counter cannot say
+        // which component converged, and surplus split by convergence is the question the
+        // deadline population raises.
+        "deadline_fired": component.deadline_fired,
+        "orders_in": component.orders_in,
+        "pools_in_scope": component.pools_in_scope,
         "clearing_prices": clearing_prices,
         "pool_clearings": pool_clearings,
         "order_clearings": order_clearings,

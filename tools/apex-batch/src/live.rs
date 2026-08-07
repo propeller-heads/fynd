@@ -151,6 +151,14 @@ pub struct LiveCounters {
 /// per-pool and per-order clearings are the recoverable equivalent of a settlement's calldata.
 #[derive(Debug, Clone, Default)]
 pub struct ComponentClearing {
+    /// Whether THIS component's price search hit its deadline. The bracket-level counter cannot
+    /// answer that for a multi-component job, which makes any offline split of surplus by
+    /// convergence impossible — and the deadline population is where nearly all the notional is.
+    pub deadline_fired: bool,
+    /// How many orders and pools the search had to price, so a split by convergence can be read
+    /// against component size rather than confounded by it.
+    pub orders_in: usize,
+    pub pools_in_scope: usize,
     /// The uniform clearing price per token, in APEX's 18-decimal price space.
     pub clearing_prices: Vec<(ApexAddress, U256)>,
     pub pool_clearings: Vec<PoolClearingRecord>,
@@ -663,6 +671,9 @@ fn solve_component(
         .map(|pool| (pool.apex_address, *pool))
         .collect();
     clearings_out.push(ComponentClearing {
+        deadline_fired: result.deadline_fired,
+        orders_in: order_amount18.len(),
+        pools_in_scope: component_pools.len(),
         clearing_prices: result
             .clearing_prices
             .iter()
