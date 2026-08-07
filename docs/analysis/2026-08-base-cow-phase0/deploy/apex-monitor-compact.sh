@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Compress closed-day JSONL and warn before the disk fills.
 #
-# At the expected ~0.5 GB/day the box's free space is ample. The guard exists so a runaway becomes
-# visible in the journal before it starves the co-tenant PostgreSQL and tycho-rewind workloads.
+# Measured on the live run: ~1.1 GB/day uncompressed across both streams, most of it the apex
+# stream's per-component clearings. Against 141 GB free that is months of headroom. The guard
+# exists so a runaway becomes visible before it starves the co-tenant PostgreSQL and tycho-rewind
+# workloads.
 set -uo pipefail
 
 DATA_DIR=/home/agent/apex-data

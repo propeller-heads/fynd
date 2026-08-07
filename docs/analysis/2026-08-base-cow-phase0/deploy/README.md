@@ -64,7 +64,9 @@ sudo systemctl restart apex-monitor
 ```bash
 systemctl is-active apex-monitor
 journalctl -u apex-monitor -f
-journalctl -u apex-monitor-health --since '1 day ago'   # every restart is logged, so stalls are countable
+# Every watchdog restart is logged with its stall duration, so stalls are countable. The health
+# unit runs as root and `agent` is not in systemd-journal, so this one needs sudo.
+sudo journalctl -u apex-monitor-health --since '1 day ago' -q
 
 cd /home/agent/apex-data
 jq -r '.window_blocks' apex-*.jsonl | sort -n | uniq -c  # all three windows present?
