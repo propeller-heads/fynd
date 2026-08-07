@@ -1,4 +1,13 @@
 
+## [0.99.0](https://github.com/propeller-heads/fynd/compare/0.98.0...0.99.0) (2026-08-07)
+
+### Features
+
+* **core:** move tycho crates to the 0.354.0 release ([d44556f](https://github.com/propeller-heads/fynd/commit/d44556f527ae58933aa0f9893f917e6c671dd1e2))
+* **client:** sign the 11-field ClientFee payload ([166a2dc](https://github.com/propeller-heads/fynd/commit/166a2dc2091739442b9b5d5ce457556cad75d201))
+* **core:** encode router fees against tycho draft branch ([c37eb9b](https://github.com/propeller-heads/fynd/commit/c37eb9b490330d80fd25768d592dd05b5ad6a865))
+
+
 ## [0.98.0](https://github.com/propeller-heads/fynd/compare/0.97.14...0.98.0) (2026-08-05)
 
 ### Features
