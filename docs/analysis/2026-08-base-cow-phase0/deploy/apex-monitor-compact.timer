@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily compression and disk guard for apex-monitor data
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

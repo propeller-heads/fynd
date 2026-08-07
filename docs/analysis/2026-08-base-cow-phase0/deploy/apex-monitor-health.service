@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart apex-monitor when it stops applying blocks
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/apex-monitor-health.sh

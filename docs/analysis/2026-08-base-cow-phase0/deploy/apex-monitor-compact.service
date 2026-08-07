@@ -1,0 +1,8 @@
+[Unit]
+Description=Compress closed-day apex-monitor JSONL and check free disk
+
+[Service]
+Type=oneshot
+User=agent
+Group=agent
+ExecStart=/usr/local/bin/apex-monitor-compact.sh

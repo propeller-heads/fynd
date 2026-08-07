@@ -1,0 +1,38 @@
+[Unit]
+Description=APEX/Fynd live batching monitor (hindsight)
+Documentation=https://github.com/propeller-heads/fynd/blob/mp/feat/apex-live-monitor/docs/analysis/2026-08-base-cow-phase0/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+WorkingDirectory=/home/agent/apex/fynd
+EnvironmentFile=/etc/apex-monitor.env
+Environment=RUST_LOG=info
+ExecStart=/home/agent/apex/fynd/target/release/hindsight monitor \
+    --chain base \
+    --tycho-url tycho-base-beta.propellerheads.xyz \
+    --min-tvl 1 \
+    --apex-window-blocks 1 \
+    --apex-window-blocks 5 \
+    --apex-window-blocks 30 \
+    --apex-workers 6 \
+    --apex-queue-capacity 64 \
+    --metrics-port 9899 \
+    --comparisons-dir /home/agent/apex-data \
+    --apex-dir /home/agent/apex-data
+
+Restart=always
+RestartSec=30
+
+# Two of the box's eight cores stay free for the co-tenant PostgreSQL and tycho-rewind workloads.
+CPUQuota=600%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=apex-monitor
+
+[Install]
+WantedBy=multi-user.target
