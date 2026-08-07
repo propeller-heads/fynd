@@ -46,6 +46,29 @@ def window_filter() -> int | None:
 def wrong_window(record: dict, wanted: int | None) -> bool:
     return wanted is not None and (record.get("window_blocks") or 1) != wanted
 
+
+def excluded_prefixes() -> list[str]:
+    """`--exclude-prefix 0xadf` (repeatable) drops orders touching a token-factory cluster.
+
+    Base carries deployers that mint thousands of vanity-prefixed tokens and trade them against
+    one another; their volume is manufactured, and Phase 0 already excluded one such pair by
+    hand. Screening by address prefix is crude but matches how these clusters present.
+    """
+    out: list[str] = []
+    for i, arg in enumerate(sys.argv):
+        if arg == "--exclude-prefix" and i + 1 < len(sys.argv):
+            out.append(sys.argv[i + 1].lower())
+    return out
+
+
+def touches_excluded(comparison: dict, prefixes: list[str]) -> bool:
+    if not prefixes:
+        return False
+    for token in (comparison.get("token_in"), comparison.get("token_out")):
+        if token and any(token.lower().startswith(p) for p in prefixes):
+            return True
+    return False
+
 def read_jsonl(path: Path):
     with path.open() as handle:
         for line in handle:
@@ -92,6 +115,7 @@ def main() -> int:
                 comparisons[f"{tx}:{index}"] = record
 
     wanted_window = window_filter()
+    skip_prefixes = excluded_prefixes()
     rows_all: list[tuple[float, float]] = []
     by_bucket: dict[str, list[tuple[float, float]]] = defaultdict(list)
     seen: set[str] = set()
@@ -107,7 +131,7 @@ def main() -> int:
                     continue
                 seen.add(order["id"])
                 comparison = comparisons.get(order["id"])
-                if comparison is None:
+                if comparison is None or touches_excluded(comparison, skip_prefixes):
                     continue
                 state = comparison.get("top" if bracket_wanted == "top" else "back") or {}
                 apex_out, fynd_out = order.get("bought_raw"), state.get("fynd_amount_out")

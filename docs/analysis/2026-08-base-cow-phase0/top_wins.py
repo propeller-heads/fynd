@@ -3,35 +3,21 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""USD-weighted gain restricted to the orders APEX actually won.
+"""Which orders drive the 'gain when APEX wins' figure.
 
-The all-orders weighted average dilutes the wins across volume that never had a chance; this
-answers the narrower question "when APEX does win, how much is that worth per dollar of the
-winning flow".
+A per-dollar gain conditioned on winning is easy to inflate: one large order with an implausible
+gap, or a cluster of micro-orders where a few wei is thousands of basis points, moves it a lot.
+This lists the biggest dollar contributors so the figure can be judged rather than trusted.
 
-Usage: won_only.py <dir-with-apex-and-comparisons-jsonl>
+Usage: top_wins.py <dir> --window N [--baseline fynd|executed]
 """
 
 from __future__ import annotations
 
 import json
-import statistics
 import sys
-from collections import defaultdict
 from pathlib import Path
 
-
-
-def window_filter() -> int | None:
-    """`--window N` restricts to batches of that window length. Records written before
-    multi-window support carry no tag and count as the 1-block case."""
-    if "--window" in sys.argv:
-        return int(sys.argv[sys.argv.index("--window") + 1])
-    return None
-
-
-def wrong_window(record: dict, wanted: int | None) -> bool:
-    return wanted is not None and (record.get("window_blocks") or 1) != wanted
 
 
 def excluded_prefixes() -> list[str]:
@@ -70,6 +56,11 @@ def read_jsonl(path: Path):
 
 def main() -> int:
     directory = Path(sys.argv[1])
+    window = int(sys.argv[sys.argv.index("--window") + 1]) if "--window" in sys.argv else None
+    baseline_name = (
+        sys.argv[sys.argv.index("--baseline") + 1] if "--baseline" in sys.argv else "fynd"
+    )
+
     comparisons = {}
     for path in sorted(directory.glob("comparisons-*.jsonl")):
         for record in read_jsonl(path):
@@ -77,13 +68,14 @@ def main() -> int:
             if tx is not None and index is not None:
                 comparisons[f"{tx}:{index}"] = record
 
-    wanted_window = window_filter()
     skip_prefixes = excluded_prefixes()
-    rows: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    wins: list[tuple[float, float, float, str, str, str]] = []
     seen: set[str] = set()
     for path in sorted(directory.glob("apex-*.jsonl")):
         for record in read_jsonl(path):
-            if record.get("bracket") != "top" or wrong_window(record, wanted_window):
+            if record.get("bracket") != "top":
+                continue
+            if window is not None and (record.get("window_blocks") or 1) != window:
                 continue
             for order in record.get("orders") or []:
                 if order.get("status") not in ("filled", "partially_filled"):
@@ -96,32 +88,50 @@ def main() -> int:
                     continue
                 top = comparison.get("top") or {}
                 apex = order.get("bought_raw")
-                if apex is None:
+                base_raw = (
+                    top.get("fynd_amount_out")
+                    if baseline_name == "fynd"
+                    else comparison.get("settled_amount_out")
+                )
+                if apex is None or base_raw is None:
                     continue
                 ratio = min(1.0, order.get("fill_ratio") or 1.0)
+                base = float(base_raw) * ratio
+                if base <= 0:
+                    continue
+                gap = 10_000.0 * (float(apex) - base) / base
+                if gap <= 0:
+                    continue
                 usd = (top.get("settled_value_usd") or 0.0) * ratio
-                for name, baseline in (
-                    ("fynd", top.get("fynd_amount_out")),
-                    ("executed", comparison.get("settled_amount_out")),
-                ):
-                    if baseline is None:
-                        continue
-                    base = float(baseline) * ratio
-                    if base <= 0:
-                        continue
-                    rows[name].append((10_000.0 * (float(apex) - base) / base, usd))
+                wins.append(
+                    (
+                        gap / 10_000.0 * usd,  # dollar contribution
+                        gap,
+                        usd,
+                        comparison.get("token_in", "")[:10],
+                        comparison.get("token_out", "")[:10],
+                        f"{ratio:.2f}",
+                    )
+                )
 
-    print(f"{'baseline':>9} {'wins':>5} {'win notional':>14} {'gain $':>9} {'per $ when won':>15}")
-    for name, values in rows.items():
-        wins = [(gap, usd) for gap, usd in values if gap > 0]
-        notional = sum(usd for _, usd in wins)
-        gain = sum(gap / 10_000.0 * usd for gap, usd in wins)
-        weighted = 10_000.0 * gain / notional if notional else 0.0
-        median = statistics.median([g for g, _ in wins]) if wins else 0.0
+    wins.sort(reverse=True)
+    total = sum(w[0] for w in wins)
+    print(f"winning orders: {len(wins)}   total gain ${total:.2f}")
+    print(f"{'gain $':>9} {'share':>6} {'bps':>10} {'order $':>10} {'fill':>5}  pair")
+    running = 0.0
+    for gain, gap, usd, token_in, token_out, ratio in wins[:15]:
+        running += gain
         print(
-            f"{name:>9} {len(wins):>5} {notional:>14,.0f} {gain:>9.2f} {weighted:>+14.1f}  "
-            f"(median win {median:+.1f} bps)"
+            f"{gain:>9.2f} {100 * gain / total:>5.1f}% {gap:>10.1f} {usd:>10.2f} {ratio:>5}  "
+            f"{token_in}…/{token_out}…"
         )
+    top10 = sum(w[0] for w in wins[:10])
+    print(f"\ntop 10 orders = {100 * top10 / total:.0f}% of all the gain")
+    tiny = [w for w in wins if w[2] < 10]
+    print(
+        f"wins on orders under $10: {len(tiny)} of {len(wins)} "
+        f"({100 * sum(w[0] for w in tiny) / total:.1f}% of gain)"
+    )
     return 0
 
 
