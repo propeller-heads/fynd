@@ -14,12 +14,13 @@ Environment=RUST_LOG=info
 ExecStart=/home/agent/apex/fynd/target/release/hindsight monitor \
     --chain base \
     --tycho-url tycho-base-beta.propellerheads.xyz \
-    --min-tvl 1 \
+    --min-tvl 10 \
     --apex-window-blocks 1 \
     --apex-window-blocks 5 \
     --apex-window-blocks 30 \
     --apex-workers 6 \
     --apex-queue-capacity 64 \
+    --apex-budget-ms 1500 \
     --metrics-port 9899 \
     --comparisons-dir /home/agent/apex-data \
     --apex-dir /home/agent/apex-data

@@ -75,6 +75,20 @@ uv run docs/analysis/2026-08-base-cow-phase0/live_join.py /home/agent/apex-data 
 Shedding well above zero means the solves outrun the workers: raise `--apex-workers` or drop a
 window.
 
+## Why the TVL floor is 10, not 1
+
+A 60-block trial at `--min-tvl 1` put ~22k pools in front of the subset selector and cut 82% of
+components at the 1 s search deadline — 381 orders `cluster_cut` against 7 filled. That measures
+the budget, not the batching.
+
+Raising the floor is the right lever because `--apex-max-pools` is not a liquidity cut:
+`subset.rs` keeps pools by class (direct → adjacent → linking) and then by component id, so at 22k
+candidates the 400 it keeps are whichever ids sort first, not the deepest pools. `--min-tvl` is
+the only knob that prunes by liquidity, and it prunes before the arbitrary cap applies.
+
+`--apex-budget-ms 1500` uses the headroom a 2 s Base block leaves; the stage solves off the block
+loop's critical path, so the budget bounds a component's search, not the monitor's pacing.
+
 ## Why the watchdog watches a metric, not a file
 
 The plan called for comparing the newest data-file mtime against now. The apex stream writes
