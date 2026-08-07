@@ -20,7 +20,7 @@ ExecStart=/home/agent/apex/fynd/target/release/hindsight monitor \
     --apex-window-blocks 30 \
     --apex-workers 6 \
     --apex-queue-capacity 64 \
-    --apex-budget-ms 1500 \
+    --apex-budget-ms 3000 \
     --metrics-port 9899 \
     --comparisons-dir /home/agent/apex-data \
     --apex-dir /home/agent/apex-data
@@ -28,8 +28,11 @@ ExecStart=/home/agent/apex/fynd/target/release/hindsight monitor \
 Restart=always
 RestartSec=30
 
-# Two of the box's eight cores stay free for the co-tenant PostgreSQL and tycho-rewind workloads.
-CPUQuota=600%
+# One of the box's eight cores stays free for the co-tenants. Measured, they need far less than
+# that: PostgreSQL is idle and tycho-rewind is a project directory, not a running service — every
+# other process on the box totals about 3% of one core. The extra core buys back the throttling
+# the 3 s search budget would otherwise add (8.3% of periods were already clipped at 600%).
+CPUQuota=700%
 
 StandardOutput=journal
 StandardError=journal

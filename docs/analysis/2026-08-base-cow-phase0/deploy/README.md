@@ -88,8 +88,21 @@ Raising the floor is the right lever because `--apex-max-pools` is not a liquidi
 candidates the 400 it keeps are whichever ids sort first, not the deepest pools. `--min-tvl` is
 the only knob that prunes by liquidity, and it prunes before the arbitrary cap applies.
 
-`--apex-budget-ms 1500` uses the headroom a 2 s Base block leaves; the stage solves off the block
-loop's critical path, so the budget bounds a component's search, not the monitor's pacing.
+## Why the search budget is 3 s on a 2 s chain
+
+The budget cannot delay the block loop. Dispatch is `try_send` on a bounded queue, so a saturated
+stage sheds the job and counts it rather than stalling the loop, and the deadline is stamped when
+a worker picks a job up, not at enqueue. The only `skipped_blocks` path in the monitor is a decode
+failure, never slowness: falling behind lags the run, it does not drop slots, and
+`--max-lag-blocks` (600 on Base ≈ 20 min) ends the session for a rebuild long before that matters.
+
+Measured at 1500 ms: every one of 2289 blocks processed in under 1 s (mean 73 ms against a 2000 ms
+block), and 2283 of them were ≤ 1 block behind head. At 1500 ms the deadline still fired on ~80% of
+components, so the study was measuring the budget rather than the batching.
+
+What degrades first as the budget rises is shedding, not pacing — watch `APEX job shed`. Overruns
+do not get systematically worse, because the discard envelope scales with the budget
+(`--apex-budget-ms × 4 × 3`).
 
 ## Why the watchdog watches a metric, not a file
 
