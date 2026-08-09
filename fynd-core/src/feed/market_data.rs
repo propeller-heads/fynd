@@ -264,7 +264,7 @@ impl<'a> MarketDataView<'a> {
     }
 
     /// Returns a reference to the token registry from the base data.
-    pub fn token_registry_ref(&self) -> &FxHashMap<Address, Token> {
+    pub fn token_registry_ref(&self) -> &FxHashMap<Address, Arc<Token>> {
         self.guard.token_registry_ref()
     }
 
@@ -307,11 +307,11 @@ pub struct MarketState {
     /// is applied.
     label: StateLabel,
     /// All components indexed by their ID.
-    components: FxHashMap<ComponentId, ProtocolComponent>,
+    components: FxHashMap<ComponentId, Arc<ProtocolComponent>>,
     /// All states indexed by their component ID.
     simulation_states: FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
-    /// All tokens indexed by their address.
-    tokens: FxHashMap<Address, Token>,
+    /// All tokens indexed by their address. Shared for the same reason as `components`.
+    tokens: FxHashMap<Address, Arc<Token>>,
     /// Current gas price. None if not fetched yet.
     gas_price: Option<BlockGasPrice>,
     /// Protocol sync status indexed by their protocol system name.
@@ -389,6 +389,11 @@ impl MarketState {
 
     /// Gets a component by ID.
     pub fn get_component(&self, id: &str) -> Option<&ProtocolComponent> {
+        self.components.get(id).map(Arc::as_ref)
+    }
+
+    /// Gets a component by ID as a shared handle, for callers that need to keep it.
+    pub fn get_component_shared(&self, id: &str) -> Option<&Arc<ProtocolComponent>> {
         self.components.get(id)
     }
 
@@ -401,6 +406,13 @@ impl MarketState {
 
     /// Gets a token by address.
     pub fn get_token(&self, address: &Address) -> Option<&Token> {
+        self.tokens
+            .get(address)
+            .map(Arc::as_ref)
+    }
+
+    /// Gets a token as a shared handle, for callers that need to keep it.
+    pub fn get_token_shared(&self, address: &Address) -> Option<&Arc<Token>> {
         self.tokens.get(address)
     }
 
@@ -410,7 +422,7 @@ impl MarketState {
     }
 
     /// Returns a reference to the token registry.
-    pub fn token_registry_ref(&self) -> &FxHashMap<Address, Token> {
+    pub fn token_registry_ref(&self) -> &FxHashMap<Address, Arc<Token>> {
         &self.tokens
     }
 
@@ -420,7 +432,7 @@ impl MarketState {
             let protocol_system = component.protocol_system.clone();
             let previous = self
                 .components
-                .insert(component.id.clone(), component);
+                .insert(component.id.clone(), Arc::new(component));
             if previous.is_none() {
                 *self
                     .component_counts
@@ -434,7 +446,7 @@ impl MarketState {
     pub fn upsert_tokens(&mut self, tokens: impl IntoIterator<Item = Token>) {
         for token in tokens {
             self.tokens
-                .insert(token.address.clone(), token);
+                .insert(token.address.clone(), Arc::new(token));
         }
     }
 

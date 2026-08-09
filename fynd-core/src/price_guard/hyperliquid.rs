@@ -218,7 +218,7 @@ impl HyperliquidWorker {
             }
             registry
                 .iter()
-                .map(|(address, token)| (address.clone(), token.clone()))
+                .map(|(address, token)| (address.clone(), Token::clone(token)))
                 .collect()
         };
 

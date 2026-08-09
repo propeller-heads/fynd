@@ -14,7 +14,7 @@
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
@@ -1121,17 +1121,20 @@ pub struct Route {
 impl Route {
     /// Creates a new route from an ordered sequence of swaps.
     ///
+    /// `tokens` is anything that yields address/token pairs -- a map of either hasher, or a
+    /// sequence -- so building a route does not commit the caller to ours.
+    ///
     /// # Errors
     ///
     /// Returns [`RouteValidationError::EmptyRoute`] if `swaps` is empty.
     pub fn new(
         swaps: Vec<Swap>,
-        tokens: FxHashMap<Bytes, Token>,
+        tokens: impl IntoIterator<Item = (Bytes, Token)>,
     ) -> Result<Self, RouteValidationError> {
         if swaps.is_empty() {
             return Err(RouteValidationError::EmptyRoute);
         }
-        Ok(Self { swaps, tokens })
+        Ok(Self { swaps, tokens: tokens.into_iter().collect() })
     }
 
     /// Returns the swaps in this route.
@@ -1229,7 +1232,7 @@ impl Route {
     /// Returns a human-readable path description (e.g., "WETH -> USDC -> DAI").
     ///
     /// Falls back to token address if token not found in the provided map.
-    pub fn path_description(&self, tokens: &FxHashMap<Address, Token>) -> String {
+    pub fn path_description(&self, tokens: &FxHashMap<Address, Arc<Token>>) -> String {
         let mut symbols = Vec::with_capacity(self.swaps.len() + 1);
 
         for (i, swap) in self.swaps.iter().enumerate() {
@@ -2426,11 +2429,11 @@ mod tests {
         #[case] expected: &str,
     ) {
         let route = make_route(swaps);
-        let tokens: FxHashMap<Address, Token> = token_data
+        let tokens: FxHashMap<Address, Arc<Token>> = token_data
             .into_iter()
             .map(|(byte, symbol)| {
                 let t = make_token(byte, symbol);
-                (t.address.clone(), t)
+                (t.address.clone(), Arc::new(t))
             })
             .collect();
 
