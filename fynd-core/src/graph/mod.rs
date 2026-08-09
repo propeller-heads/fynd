@@ -8,9 +8,10 @@ pub mod petgraph;
 pub mod token_graph;
 
 pub use petgraph::{EdgeData, PetgraphStableDiGraphManager, StableDiGraph};
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use thiserror::Error;
-pub use token_graph::{PairEdge, TokenGraph, TopologyGraph, TopologyGraphManager};
+pub use token_graph::{PairEdge, TokenGraph, TokenPath, TopologyGraph, TopologyGraphManager};
 use tycho_simulation::{
     tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim},
     tycho_core::models::token::Token,
@@ -140,7 +141,18 @@ where
     fn graph(&self) -> &G;
 }
 
-use rustc_hash::FxHashMap;
+/// What a caller will accept from a route search.
+///
+/// Bundles the bounds every path query carries so they travel as one argument instead of three.
+pub struct GraphQueryFilter {
+    /// Shortest route to return, in hops. A query with `0` matches nothing.
+    pub min_hops: usize,
+    /// Longest route to return, in hops.
+    pub max_hops: usize,
+    /// Tokens a route may pass *through*. Its own endpoints are always allowed, whatever this
+    /// holds. `None` allows every token.
+    pub connector_tokens: Option<FxHashSet<Address>>,
+}
 
 use crate::{derived::DerivedData, feed::market_data::MarketDataView};
 
