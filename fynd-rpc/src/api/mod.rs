@@ -78,7 +78,26 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     #[allow(unused_mut)]
     let mut openapi = ApiDoc::openapi();
     #[cfg(feature = "experimental")]
-    openapi.merge(ExperimentalApiDoc::openapi());
+    {
+        openapi.merge(ExperimentalApiDoc::openapi());
+        // Mark experimental operations so spec consumers know the endpoint may not
+        // exist on a non-experimental (default) build.
+        if let Some(paths) = openapi
+            .paths
+            .paths
+            .get_mut("/v1/prices")
+        {
+            for operation in [paths.get.as_mut(), paths.post.as_mut(), paths.put.as_mut()]
+                .into_iter()
+                .flatten()
+            {
+                operation
+                    .extensions
+                    .get_or_insert_with(Default::default)
+                    .insert("x-experimental".to_string(), serde_json::json!(true));
+            }
+        }
+    }
     openapi
 }
 
@@ -267,9 +286,20 @@ mod openapi_tests {
 
         assert!(spec["paths"]["/v1/prices"].is_object());
         let price = &spec["components"]["schemas"]["TokenPriceEntry"]["properties"]["price"];
-        assert!(price["example"].is_number());
+        assert!(price["type"] == "string", "price must be a string type in the spec");
+        assert_eq!(price["example"], "0.000000003");
         let description = price["description"].as_str().unwrap();
         assert!(description.contains("PRICE_UNIT_CONTRACT_V1"));
         assert!(description.contains("raw target-token units divided by raw gas-token units"));
+
+        // PricesResponse must carry the contract version and unit on the wire.
+        let props = &spec["components"]["schemas"]["PricesResponse"]["properties"];
+        assert!(props["contract_version"].is_object(), "contract_version must be in the spec");
+        assert!(props["price_unit"].is_object(), "price_unit must be in the spec");
+
+        // Experimental operations must be marked so spec consumers know they may not exist
+        // on a non-experimental build.
+        let ext = &spec["paths"]["/v1/prices"]["get"]["x-experimental"];
+        assert_eq!(ext, true, "x-experimental extension must be true on /v1/prices");
     }
 }

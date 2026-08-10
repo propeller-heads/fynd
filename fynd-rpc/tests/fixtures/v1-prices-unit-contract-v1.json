@@ -18,7 +18,7 @@
         "numerator": "3",
         "denominator": "1000000000"
       },
-      "rawPrice": "3e-9",
+      "rawPrice": "0.000000003",
       "expectedTokenUnitsPerGasToken": "3000",
       "expectedGasTokenUsd": "3000",
       "expectedTokenUsd": "1"
@@ -34,7 +34,7 @@
         "numerator": "5",
         "denominator": "1000000000000"
       },
-      "rawPrice": "5e-12",
+      "rawPrice": "0.000000000005",
       "expectedTokenUnitsPerGasToken": "0.05",
       "expectedGasTokenUsd": "3000",
       "expectedTokenUsd": "60000"
@@ -50,7 +50,7 @@
         "numerator": "1500",
         "denominator": "1"
       },
-      "rawPrice": "1500.0",
+      "rawPrice": "1500",
       "expectedTokenUnitsPerGasToken": "1500",
       "expectedGasTokenUsd": "3000",
       "expectedTokenUsd": "2"

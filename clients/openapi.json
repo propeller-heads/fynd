@@ -131,7 +131,8 @@
               }
             }
           }
-        }
+        },
+        "x-experimental": true
       }
     },
     "/v1/quote": {
@@ -790,6 +791,8 @@
         "required": [
           "prices",
           "gas_token",
+          "contract_version",
+          "price_unit",
           "blocks"
         ],
         "properties": {
@@ -807,10 +810,20 @@
             },
             "description": "Component depths per component direction (only if requested via `include=depths`)."
           },
+          "contract_version": {
+            "type": "string",
+            "description": "Unit contract version for `prices[].price`. Consumers should assert this matches their\nexpected contract before interpreting prices.",
+            "example": "PRICE_UNIT_CONTRACT_V1"
+          },
           "gas_token": {
             "type": "string",
             "description": "The gas token address (e.g. WETH).",
             "example": "0x0000000000000000000000000000000000000000"
+          },
+          "price_unit": {
+            "type": "string",
+            "description": "Machine-readable unit name for `prices[].price`:\n`raw_token_units_per_raw_gas_unit` (raw target-token units divided by raw gas-token units).",
+            "example": "raw_token_units_per_raw_gas_unit"
           },
           "prices": {
             "type": "array",
@@ -1052,10 +1065,9 @@
         ],
         "properties": {
           "price": {
-            "type": "number",
-            "format": "double",
-            "description": "`rawTokenUnitsPerRawGasUnit`: raw target-token units divided by raw gas-token units.\n\nThis approximate `f64` follows `PRICE_UNIT_CONTRACT_V1` and is intended only for display\nand analytics. Consumers must normalize both tokens' decimals before using it.",
-            "example": 3e-9
+            "type": "string",
+            "description": "`rawTokenUnitsPerRawGasUnit`: raw target-token units divided by raw gas-token units,\nserialized as a decimal string with up to 17 significant digits.\n\nFollows `PRICE_UNIT_CONTRACT_V1` and is intended only for display and analytics.\nConsumers must normalize both tokens' decimals before using it. The string format\navoids `f64` rendering inconsistencies across languages (e.g. Rust's `1500.0` vs\nJavaScript's `\"1500\"`); parse it with a decimal-aware parser (BigDecimal, BigNumber, etc.).",
+            "example": "0.000000003"
           },
           "token": {
             "type": "string",

@@ -8,8 +8,9 @@ use tracing::{info, warn};
 use super::{dto, ApiError, AppState};
 #[cfg(feature = "experimental")]
 use crate::api::prices::{
-    price_to_f64, ComponentDepthEntry, ComputationBlocks, IncludeField, PricesQuery,
-    PricesResponse, SpotPriceEntry, TokenPriceEntry,
+    price_to_decimal_string, ComponentDepthEntry, ComputationBlocks, IncludeField, PricesQuery,
+    PricesResponse, SpotPriceEntry, TokenPriceEntry, PRICE_UNIT_CONTRACT_V1,
+    RAW_TOKEN_UNITS_PER_RAW_GAS_UNIT,
 };
 use crate::api::{
     error::{solve_error_code, ErrorResponse},
@@ -277,9 +278,9 @@ pub async fn get_prices(
     let mut prices = Vec::new();
     if let Some(token_prices) = &token_prices {
         for (address, price) in token_prices {
-            match price_to_f64(&price.numerator, &price.denominator) {
-                Some(f) => {
-                    prices.push(TokenPriceEntry { token: address.clone(), price: f });
+            match price_to_decimal_string(&price.numerator, &price.denominator) {
+                Some(s) => {
+                    prices.push(TokenPriceEntry { token: address.clone(), price: s });
                 }
                 None => {
                     warn!(
@@ -343,6 +344,8 @@ pub async fn get_prices(
     let response = PricesResponse {
         prices,
         gas_token: state.gas_token.clone(),
+        contract_version: PRICE_UNIT_CONTRACT_V1,
+        price_unit: RAW_TOKEN_UNITS_PER_RAW_GAS_UNIT,
         blocks: ComputationBlocks {
             token_prices: token_prices_block,
             spot_prices: spot_prices_block,
@@ -495,6 +498,8 @@ mod tests {
         let body: Value = test::call_and_read_body_json(&app, request).await;
 
         assert_eq!(body["blocks"]["token_prices"], 19_000_000);
+        assert_eq!(body["contract_version"], "PRICE_UNIT_CONTRACT_V1");
+        assert_eq!(body["price_unit"], "raw_token_units_per_raw_gas_unit");
         assert!(body["gas_token"]
             .as_str()
             .unwrap()
@@ -521,7 +526,9 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("missing handler response for {}", case["name"]));
             assert_eq!(
-                response_entry["price"].to_string(),
+                response_entry["price"]
+                    .as_str()
+                    .unwrap(),
                 case["rawPrice"].as_str().unwrap(),
                 "{}",
                 case["name"]
@@ -574,7 +581,7 @@ mod tests {
             .as_str()
             .unwrap()
             .eq_ignore_ascii_case(&valid.to_string()));
-        assert_eq!(prices[0]["price"], 0.5);
+        assert_eq!(prices[0]["price"], "0.5");
     }
 
     // ── Unknown route (default_service) ────────────────────────────────────

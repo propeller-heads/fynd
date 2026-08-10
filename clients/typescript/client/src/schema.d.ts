@@ -485,10 +485,22 @@ export interface components {
             /** @description Component depths per component direction (only if requested via `include=depths`). */
             component_depths?: components["schemas"]["ComponentDepthEntry"][] | null;
             /**
+             * @description Unit contract version for `prices[].price`. Consumers should assert this matches their
+             *     expected contract before interpreting prices.
+             * @example PRICE_UNIT_CONTRACT_V1
+             */
+            contract_version: string;
+            /**
              * @description The gas token address (e.g. WETH).
              * @example 0x0000000000000000000000000000000000000000
              */
             gas_token: string;
+            /**
+             * @description Machine-readable unit name for `prices[].price`:
+             *     `raw_token_units_per_raw_gas_unit` (raw target-token units divided by raw gas-token units).
+             * @example raw_token_units_per_raw_gas_unit
+             */
+            price_unit: string;
             /** @description Token gas prices relative to the native gas token. */
             prices: components["schemas"]["TokenPriceEntry"][];
             /** @description Spot prices per component direction (only if requested via `include=spot_prices`). */
@@ -632,14 +644,16 @@ export interface components {
         /** @description A single token's gas price. */
         TokenPriceEntry: {
             /**
-             * Format: double
-             * @description `rawTokenUnitsPerRawGasUnit`: raw target-token units divided by raw gas-token units.
+             * @description `rawTokenUnitsPerRawGasUnit`: raw target-token units divided by raw gas-token units,
+             *     serialized as a decimal string with up to 17 significant digits.
              *
-             *     This approximate `f64` follows `PRICE_UNIT_CONTRACT_V1` and is intended only for display
-             *     and analytics. Consumers must normalize both tokens' decimals before using it.
-             * @example 3e-9
+             *     Follows `PRICE_UNIT_CONTRACT_V1` and is intended only for display and analytics.
+             *     Consumers must normalize both tokens' decimals before using it. The string format
+             *     avoids `f64` rendering inconsistencies across languages (e.g. Rust's `1500.0` vs
+             *     JavaScript's `"1500"`); parse it with a decimal-aware parser (BigDecimal, BigNumber, etc.).
+             * @example 0.000000003
              */
-            price: number;
+            price: string;
             /**
              * @description Token address.
              * @example 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
