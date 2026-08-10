@@ -144,10 +144,7 @@ impl DerivedComputation for ComponentDepthComputation {
                     .collect()
             };
 
-            let component_ids: FxHashSet<ComponentId> = components_to_compute
-                .iter()
-                .cloned()
-                .collect();
+            let component_ids: FxHashSet<&ComponentId> = components_to_compute.iter().collect();
             let snapshot: MarketState = market_guard.extract_subset(&component_ids);
 
             (snapshot, components_to_compute)
@@ -269,8 +266,8 @@ impl DerivedComputation for ComponentDepthComputation {
                 let limit_price = Price::new(numerator, denominator);
 
                 let params = QueryPoolSwapParams::new(
-                    token_in.clone(),
-                    token_out.clone(),
+                    (**token_in).clone(),
+                    (**token_out).clone(),
                     SwapConstraint::TradeLimitPrice {
                         limit: limit_price,
                         tolerance: 0.0,

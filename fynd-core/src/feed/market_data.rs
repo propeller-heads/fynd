@@ -234,7 +234,7 @@ impl<'a> MarketDataView<'a> {
     /// If no overlay is active, this is equivalent to `self.extract_subset(component_ids)`.
     pub fn extract_subset_with_overlay(
         &self,
-        component_ids: &FxHashSet<ComponentId>,
+        component_ids: &FxHashSet<&ComponentId>,
     ) -> MarketState {
         let mut subset = self.guard.extract_subset(component_ids);
         if let Some((ref label, ref states)) = self.overlay {
@@ -259,7 +259,7 @@ impl<'a> MarketDataView<'a> {
     }
 
     /// Extracts a base-data subset for the given component IDs (no overlay applied).
-    pub fn extract_subset(&self, component_ids: &FxHashSet<ComponentId>) -> MarketState {
+    pub fn extract_subset(&self, component_ids: &FxHashSet<&ComponentId>) -> MarketState {
         self.guard.extract_subset(component_ids)
     }
 
@@ -281,6 +281,11 @@ impl<'a> MarketDataView<'a> {
     /// Returns a token by address from the base data.
     pub fn get_token(&self, address: &Address) -> Option<&Token> {
         self.guard.get_token(address)
+    }
+
+    /// Returns a token by address from the base data, to be held rather than copied.
+    pub fn get_token_shared(&self, address: &Address) -> Option<&Arc<Token>> {
+        self.guard.get_token_shared(address)
     }
 
     /// Returns a component by ID from the base data.
@@ -504,7 +509,7 @@ impl MarketState {
     /// - Simulation states for those components (cloned via `clone_box`)
     /// - Tokens referenced by those components
     /// - Gas price and block info
-    pub fn extract_subset(&self, component_ids: &FxHashSet<ComponentId>) -> MarketState {
+    pub fn extract_subset(&self, component_ids: &FxHashSet<&ComponentId>) -> MarketState {
         let mut components =
             FxHashMap::with_capacity_and_hasher(component_ids.len(), rustc_hash::FxBuildHasher);
         let mut simulation_states =
@@ -514,7 +519,7 @@ impl MarketState {
         let mut token_addresses: FxHashSet<&Address> =
             FxHashSet::with_capacity_and_hasher(component_ids.len() * 2, rustc_hash::FxBuildHasher);
 
-        for id in component_ids {
+        for &id in component_ids {
             if let Some(component) = self.components.get(id) {
                 token_addresses.extend(&component.tokens);
                 components.insert(id.clone(), component.clone());
@@ -636,9 +641,8 @@ mod tests {
         market.update_last_updated(BlockInfo::new(12345, "0xabc".to_string(), 0));
 
         // Extract only component_ab
-        let ids: FxHashSet<_> = ["component_ab".to_string()]
-            .into_iter()
-            .collect();
+        let component_ab = "component_ab".to_string();
+        let ids: FxHashSet<&ComponentId> = [&component_ab].into_iter().collect();
         let subset = market.extract_subset(&ids);
 
         // Components: only component_ab
@@ -846,9 +850,8 @@ mod tests {
             .read_labeled(&label)
             .await
             .expect("label was just registered");
-        let ids: FxHashSet<ComponentId> = ["component_ab".to_string()]
-            .into_iter()
-            .collect();
+        let component_ab = "component_ab".to_string();
+        let ids: FxHashSet<&ComponentId> = [&component_ab].into_iter().collect();
         let subset = guard.extract_subset_with_overlay(&ids);
 
         let sim = subset

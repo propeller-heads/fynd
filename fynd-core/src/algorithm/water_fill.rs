@@ -400,12 +400,12 @@ impl WaterFillAlgorithm {
                     debug!(error = %e, "water-fill bounded discovery failed; using exhaustive candidates only")
                 }
             }
-            let component_ids: FxHashSet<ComponentId> = paths
+            let component_ids: FxHashSet<&ComponentId> = paths
                 .iter()
                 .flat_map(|p| {
                     p.edge_iter()
                         .iter()
-                        .map(|e| e.component_id.clone())
+                        .map(|e| &e.component_id)
                 })
                 .collect();
             let subset = view.extract_subset_with_overlay(&component_ids);

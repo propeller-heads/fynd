@@ -346,28 +346,28 @@ impl TokenGasPriceComputation {
             (topology, gas_price, block)
         };
 
-        // Discover paths to find which components candidate paths need (cheap DFS)
-        let needed_component_ids = {
+        // Discover which components the candidate paths need (cheap DFS), then take a subset of
+        // the market holding those alone. The ids are borrowed from the paths that named them,
+        // which is why the extraction happens here rather than on a set handed out of this block.
+        let subset = {
             let mut graph_manager = PetgraphStableDiGraphManager::new();
             graph_manager.initialize_graph(&topology);
             let mut paths = self.discover_paths(&graph_manager, spot_prices)?;
             if let Some(tokens) = filter_tokens {
                 paths.retain(|token, _| tokens.contains(token));
             }
-            paths
+            let needed_component_ids: FxHashSet<&ComponentId> = paths
                 .values()
                 .flatten()
                 .flat_map(|c| {
                     c.path
                         .edge_data
                         .iter()
-                        .map(|e| e.component_id.clone())
+                        .map(|e| &e.component_id)
                 })
-                .collect::<FxHashSet<ComponentId>>()
-        };
+                .collect();
 
-        // Brief lock 2: extract only the simulation states we need
-        let subset = {
+            // Brief lock 2: extract only the simulation states we need
             market
                 .read()
                 .await

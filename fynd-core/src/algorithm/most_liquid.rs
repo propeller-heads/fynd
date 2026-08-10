@@ -718,12 +718,18 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 3: Every pool on every leg of every candidate -- each one is a choice the
         // resolution below may make, so all of them have to be in the subset.
-        let component_ids: FxHashSet<ComponentId> = scored_paths
-            .iter()
-            .flat_map(|(path, _)| path.windows(2))
-            .flat_map(|pair| graph.pools_between(pair[0], pair[1]))
-            .map(|pool| pool.component_id.clone())
-            .collect();
+        let mut pairs: FxHashSet<(NodeIndex, NodeIndex)> = FxHashSet::default();
+        for (token_path, _) in &scored_paths {
+            for pair in token_path.windows(2) {
+                pairs.insert((pair[0], pair[1]));
+            }
+        }
+        let mut component_ids: FxHashSet<&ComponentId> = FxHashSet::default();
+        for &(from, to) in &pairs {
+            for pool in graph.pools_between(from, to) {
+                component_ids.insert(&pool.component_id);
+            }
+        }
 
         // Step 4: Brief lock — check gas price + extract market subset for simulation
         let market = {
