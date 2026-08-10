@@ -24,7 +24,7 @@ use tycho_simulation::{
 use crate::{
     algorithm::most_liquid::DepthAndPrice,
     feed::market_data::{MarketData, MarketState},
-    graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
+    graph::{petgraph::PetgraphStableDiGraphManager, GraphManager, TopologyGraphManager},
     types::{quote::OrderSide, BlockInfo, Order},
 };
 
@@ -518,7 +518,7 @@ pub fn order(token_in: &Token, token_out: &Token, amount: u128, side: OrderSide)
 /// Use `market_read(&market_ref)` to get a `MarketState` reference for other tests.
 pub fn setup_market_weighted(
     components: Vec<(&str, &Token, &Token, MockProtocolSim)>,
-) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
     setup_market_weighted_boxed(
         components
             .into_iter()
@@ -532,7 +532,7 @@ pub fn setup_market_weighted(
 /// reserves).
 pub fn setup_market_weighted_boxed(
     components: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
-) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
     let mut market = MarketState::new();
     let mut component_weights = FxHashMap::default();
 
@@ -561,12 +561,12 @@ pub fn setup_market_weighted_boxed(
         component_weights.insert(component_id, (token_in, token_out, weight_to, weight_from));
     }
 
-    let mut graph_manager = PetgraphStableDiGraphManager::default();
+    let mut graph_manager = TopologyGraphManager::default();
     graph_manager.initialize_graph(&market.component_topology());
 
     for (component_id, (token_in, token_out, weight_to, weight_from)) in component_weights {
         graph_manager
-            .set_edge_weight(
+            .set_pool_weight(
                 &component_id.to_string(),
                 &token_in.address,
                 &token_out.address,
@@ -575,7 +575,7 @@ pub fn setup_market_weighted_boxed(
             )
             .unwrap();
         graph_manager
-            .set_edge_weight(
+            .set_pool_weight(
                 &component_id.to_string(),
                 &token_out.address,
                 &token_in.address,
@@ -588,10 +588,8 @@ pub fn setup_market_weighted_boxed(
     (MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market))), graph_manager)
 }
 
-/// Setup helper for algorithms that do not use pre-computed edge weights
-pub fn setup_market_unweighted(
-    components: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
-) -> (MarketData, PetgraphStableDiGraphManager<()>) {
+/// Builds the market half of the unweighted fixtures, without a graph.
+fn unweighted_market(components: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>) -> MarketState {
     let mut market = MarketState::new();
 
     market.update_gas_price(BlockGasPrice {
@@ -610,7 +608,26 @@ pub fn setup_market_unweighted(
         market.upsert_tokens(tokens);
     }
 
+    market
+}
+
+/// A market and a pool graph, for algorithms that do not use pre-computed edge weights.
+pub fn setup_market_unweighted(
+    components: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
+) -> (MarketData, PetgraphStableDiGraphManager<()>) {
+    let market = unweighted_market(components);
     let mut graph_manager = PetgraphStableDiGraphManager::<()>::default();
+    graph_manager.initialize_graph(&market.component_topology());
+
+    (MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market))), graph_manager)
+}
+
+/// A market and a topology graph, for algorithms that route over token pairs.
+pub fn setup_market_unweighted_topology(
+    components: Vec<(&str, &Token, &Token, Box<dyn ProtocolSim>)>,
+) -> (MarketData, TopologyGraphManager<()>) {
+    let market = unweighted_market(components);
+    let mut graph_manager = TopologyGraphManager::<()>::default();
     graph_manager.initialize_graph(&market.component_topology());
 
     (MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market))), graph_manager)
@@ -633,9 +650,9 @@ pub mod fixtures {
     }
 
     /// A <-> B <-> C <-> D linear chain (bidirectional).
-    pub(crate) fn linear_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
+    pub(crate) fn linear_graph() -> TopologyGraphManager<DepthAndPrice> {
         let (a, b, c, d) = addrs();
-        let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
+        let mut m = TopologyGraphManager::<DepthAndPrice>::new();
         let mut t = FxHashMap::default();
         t.insert("ab".into(), vec![a.clone(), b.clone()]);
         t.insert("bc".into(), vec![b.clone(), c.clone()]);
@@ -645,9 +662,9 @@ pub mod fixtures {
     }
 
     /// 3 parallel components A<->B, 2 components B<->C.
-    pub(crate) fn parallel_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
+    pub(crate) fn parallel_graph() -> TopologyGraphManager<DepthAndPrice> {
         let (a, b, c, _) = addrs();
-        let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
+        let mut m = TopologyGraphManager::<DepthAndPrice>::new();
         let mut t = FxHashMap::default();
         t.insert("ab1".into(), vec![a.clone(), b.clone()]);
         t.insert("ab2".into(), vec![a.clone(), b.clone()]);
@@ -659,9 +676,9 @@ pub mod fixtures {
     }
 
     /// Diamond: A->B->D, A->C->D (two 2-hop paths).
-    pub(crate) fn diamond_graph() -> PetgraphStableDiGraphManager<DepthAndPrice> {
+    pub(crate) fn diamond_graph() -> TopologyGraphManager<DepthAndPrice> {
         let (a, b, c, d) = addrs();
-        let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
+        let mut m = TopologyGraphManager::<DepthAndPrice>::new();
         let mut t = FxHashMap::default();
         t.insert("ab".into(), vec![a.clone(), b.clone()]);
         t.insert("ac".into(), vec![a, c.clone()]);

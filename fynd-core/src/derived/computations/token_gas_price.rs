@@ -41,6 +41,7 @@ use tycho_simulation::{
 };
 
 use crate::{
+    algorithm::paths,
     derived::{
         computation::{
             ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
@@ -55,7 +56,6 @@ use crate::{
     feed::market_data::{MarketData, MarketState},
     graph::{GraphManager, Path, PetgraphStableDiGraphManager},
     types::ComponentId,
-    MostLiquidAlgorithm,
 };
 
 /// A path with its score
@@ -219,7 +219,7 @@ impl TokenGasPriceComputation {
             .collect();
         // Forward: gas_token → target_token
         let buy_result =
-            MostLiquidAlgorithm::simulate_path(&path, market, None, self.simulation_amount.clone())
+            paths::simulate_pool_path(&path, market, None, self.simulation_amount.clone())
                 .map_err(|e| {
                     ComputationError::SimulationFailed(format!("buy simulation failed: {}", e))
                 })?;
@@ -237,11 +237,10 @@ impl TokenGasPriceComputation {
         // Reverse: target_token → gas_token
         let reversed_path = path.reversed();
 
-        let sell_result =
-            MostLiquidAlgorithm::simulate_path(&reversed_path, market, None, buy_out.clone())
-                .map_err(|e| {
-                    ComputationError::SimulationFailed(format!("sell simulation failed: {}", e))
-                })?;
+        let sell_result = paths::simulate_pool_path(&reversed_path, market, None, buy_out.clone())
+            .map_err(|e| {
+                ComputationError::SimulationFailed(format!("sell simulation failed: {}", e))
+            })?;
         let sell_gas_units = sell_result.route().total_gas();
         let sell_gas_cost = &sell_gas_units * gas_price; // Convert gas units to actual cost
         let sell_out = sell_result

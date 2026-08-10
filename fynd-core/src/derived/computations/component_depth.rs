@@ -356,6 +356,7 @@ impl DerivedComputation for ComponentDepthComputation {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use rustc_hash::FxHashMap;
     use tycho_simulation::{
         tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::token::Token,
     };
@@ -474,7 +475,7 @@ mod tests {
         let derived = DerivedData::new_shared();
         let spot_comp = SpotPriceComputation::new();
         let changed = ChangedComponents {
-            added: rustc_hash::FxHashMap::from_iter([(
+            added: FxHashMap::from_iter([(
                 "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
@@ -777,7 +778,7 @@ mod tests {
             .set_spot_prices(partial_spot, vec![], 0, true);
 
         let changed = ChangedComponents {
-            added: rustc_hash::FxHashMap::from_iter([(
+            added: FxHashMap::from_iter([(
                 "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
@@ -824,7 +825,7 @@ mod tests {
             .set_spot_prices(SpotPrices::default(), vec![], 0, true);
 
         let changed = ChangedComponents {
-            added: rustc_hash::FxHashMap::from_iter([(
+            added: FxHashMap::from_iter([(
                 "phantom_component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
@@ -876,7 +877,7 @@ mod tests {
         let derived = DerivedData::new_shared();
 
         let changed = ChangedComponents {
-            added: rustc_hash::FxHashMap::from_iter([(
+            added: FxHashMap::from_iter([(
                 "component".to_string(),
                 vec![token_in.address.clone(), token_out.address.clone()],
             )]),

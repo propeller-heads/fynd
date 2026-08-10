@@ -31,7 +31,6 @@ use num_bigint::{BigInt, BigUint};
 use rustc_hash::FxHashMap;
 use tracing_subscriber::EnvFilter;
 use tycho_simulation::{evm::tycho_models::Chain, tycho_core::Bytes};
-
 // =============================================================================
 // Custom algorithm implementation
 // =============================================================================

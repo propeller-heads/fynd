@@ -17,25 +17,26 @@ use tycho_simulation::{
     tycho_core::models::token::Token,
 };
 
-use crate::types::ComponentId;
+use crate::{derived::DerivedData, feed::market_data::MarketDataView, types::ComponentId};
 
 /// Tokens held without allocating. A path of `h` hops names `h + 1` tokens, so this covers every
-/// `max_hops` up to 4. A deeper path still works: `SmallVec` moves to the heap and behaves as a `Vec` from there.
+/// `max_hops` up to 4. A deeper path still works: `SmallVec` moves to the heap and behaves as a
+/// `Vec` from there.
 pub(crate) const INLINE_TOKENS: usize = 5;
 
 /// Edges held without allocating. A path's edges are its tokens less one, and an edge is a leg of
 /// a route, so this sizes per-leg buffers too.
 pub(crate) const INLINE_EDGES: usize = INLINE_TOKENS - 1;
 
-/// A path through the graph as a sequence of edge indices.
+/// A route with a pool chosen for every leg.
 ///
-/// Each edge index points to an edge in the graph containing the component ID and weight.
-/// This representation allows O(1) access to edge data during scoring and simulation.
+/// Borrows from the graph rather than copying it, so scoring and simulation read a leg's component
+/// id and weight without a lookup.
 #[derive(Default)]
 pub struct Path<'a, D> {
-    /// Sequence of token addresses in the path.
+    /// The tokens the route passes through, in order.
     pub tokens: SmallVec<[&'a Address; INLINE_TOKENS]>,
-    /// Sequence of edge indices representing the path. Length is tokens.len() - 1.
+    /// The pool taken on each leg. One shorter than `tokens`.
     pub edge_data: SmallVec<[&'a EdgeData<D>; INLINE_EDGES]>,
 }
 
@@ -153,8 +154,6 @@ pub struct GraphQueryFilter {
     /// holds. `None` allows every token.
     pub connector_tokens: Option<FxHashSet<Address>>,
 }
-
-use crate::{derived::DerivedData, feed::market_data::MarketDataView};
 
 /// Trait for edge weight types that can be computed from a ProtocolSim and DerivedData.
 ///
