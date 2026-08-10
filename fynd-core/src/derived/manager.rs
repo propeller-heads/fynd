@@ -162,10 +162,16 @@ impl ComputationManagerConfig {
     /// work, but it still marks the computation as succeeded and broadcasts a
     /// `ComputationComplete` event, so dependent computations and waiting workers proceed
     /// as usual. The caller must write the output into the store at the same block before
-    /// the manager starts.
+    /// the manager starts. The skip only applies when the store agrees on the block, so a
+    /// hydration entry that no longer matches the store falls back to a live computation.
     ///
-    /// Hydration applies to one block only. Once the market moves past that block, the
-    /// computation runs live again.
+    /// The skip bypasses the computation's own requirements, because a seeded output does
+    /// not depend on this block's upstream run. Hydrate a dependent computation only when
+    /// its upstream output is equally trustworthy for that block.
+    ///
+    /// Hydration is keyed by block, not by id, so the computation runs live again once the
+    /// market moves past that block. Every recomputation at the hydrated block is skipped,
+    /// including repeated updates within the same block.
     pub fn with_hydrated(
         mut self,
         hydrated: impl IntoIterator<Item = (ComputationId, u64)>,
@@ -407,12 +413,18 @@ impl ComputationManager {
                     let computation_id = nodes[idx].0;
                     // A hydrated computation was seeded into the store for this exact block.
                     // Skip the work, but still report success so in-pass dependents and
-                    // waiting workers unblock.
+                    // waiting workers unblock. Both sides must agree on the block: a store
+                    // entry from any other block is stale and must not be served as fresh.
                     if self.hydrated.get(computation_id) == Some(&block) &&
-                        store
-                            .output_block(computation_id)
-                            .is_some()
+                        store.output_block(computation_id) == Some(block)
                     {
+                        // Hydrated output is as current as a computed one, so the freshness
+                        // gauge must advance or staleness alerts fire for this block.
+                        gauge!(
+                            "derived_last_success_timestamp_seconds",
+                            "computation" => computation_id
+                        )
+                        .set(unix_now_seconds());
                         info!(computation = computation_id, block, "computation hydrated, skipped");
                         succeeded.insert(computation_id);
                         let _ = self
@@ -1150,6 +1162,60 @@ mod tests {
         assert!(
             guard.spot_prices().is_some(),
             "spot prices must be computed live when the hydrated block does not match"
+        );
+    }
+
+    /// The hydration entry alone must not suppress the work. Both an empty store and a
+    /// store holding another block's output have to fall back to a live computation.
+    #[rstest::rstest]
+    #[case::store_never_seeded(None)]
+    #[case::store_holds_another_block(Some(1u64))]
+    #[tokio::test]
+    async fn hydration_without_matching_store_output_runs_live(
+        #[case] seeded_block_offset: Option<u64>,
+    ) {
+        use crate::derived::types::SpotPrices;
+
+        let eth = token(1, "ETH");
+        let market = market_with_block();
+        let block = market
+            .read()
+            .await
+            .last_updated()
+            .expect("market carries a block")
+            .number();
+
+        let config = ComputationManagerConfig::new()
+            .with_gas_token(eth.address.clone())
+            .with_hydrated([(SpotPriceComputation::ID, block)]);
+        let (manager, _out_rx) = ComputationManager::new(config, market).unwrap();
+
+        let sentinel = ("stale_sentinel".to_string(), eth.address.clone(), eth.address.clone());
+        if let Some(offset) = seeded_block_offset {
+            let mut seeded = SpotPrices::new();
+            seeded.insert(sentinel.clone(), 1234.0);
+            manager
+                .store()
+                .write()
+                .await
+                .set_spot_prices(seeded, vec![], block + offset, true);
+        }
+
+        run_full_recompute(&manager).await;
+
+        let store = manager.store();
+        let guard = store.read().await;
+        let spot_prices = guard
+            .spot_prices()
+            .expect("spot prices must be computed live");
+        assert!(
+            !spot_prices.contains_key(&sentinel),
+            "a store entry from another block must not be served as this block's output"
+        );
+        assert_eq!(
+            guard.output_block(SpotPriceComputation::ID),
+            Some(block),
+            "the live computation must stamp the current block"
         );
     }
 

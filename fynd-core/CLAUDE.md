@@ -84,8 +84,12 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
 `Solver::from_recording_hydrated` builds the same pipeline from precomputed spot prices and
 component depths. It writes both into the store and marks them hydrated, so the manager skips
 them for the replayed block and still reports them complete. Token prices always run live.
-Produce the depths with `fynd_core::derived::pool_depth`, so an offline pass and the live path
-share one kernel.
+
+Produce the depths with `derived::pool_depth` at `solver::defaults::DEPTH_SLIPPAGE_THRESHOLD`,
+so an offline pass and the live path share one kernel and one threshold. Name computations with
+`derived::computation_ids::{SPOT_PRICES, POOL_DEPTHS, TOKEN_PRICES}` rather than string
+literals — `POOL_DEPTHS` is the legacy `"pool_depths"` Prometheus label, not `"component_depths"`,
+and `with_hydrated` ignores an unrecognised id silently.
 
 ## Data Flow
 

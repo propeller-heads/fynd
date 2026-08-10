@@ -49,6 +49,7 @@ use crate::{
 /// Each variant maps onto one [`FailedItemError`](crate::derived::FailedItemError) variant,
 /// so a caller can report the failure without changing its meaning.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum PoolDepthError {
     /// The decimal difference between the two tokens is too large for a meaningful price.
     #[error("extreme decimal mismatch ({from}\u{2192}{to})")]
@@ -482,6 +483,105 @@ mod tests {
         assert!(
             matches!(result, Err(ComputationError::InvalidConfiguration(_))),
             "expected InvalidConfiguration for {_desc}, got {result:?}"
+        );
+    }
+
+    /// `denominator_exp` is `SCALE_EXP + decimals_in - decimals_out`, so a pair is
+    /// measurable exactly while `decimals_out - decimals_in` stays at or below `SCALE_EXP`.
+    #[rstest]
+    #[case::at_the_limit(0, 18, false)]
+    #[case::past_the_limit(0, 19, true)]
+    #[test]
+    fn test_pool_depth_decimal_mismatch_boundary(
+        #[case] decimals_in: u32,
+        #[case] decimals_out: u32,
+        #[case] expect_mismatch: bool,
+    ) {
+        let token_in = token_with_decimals(0x01, "IN", decimals_in);
+        let token_out = token_with_decimals(0x02, "OUT", decimals_out);
+        let sim = MockProtocolSim::new(1.0)
+            .with_liquidity(1_000_000)
+            .with_tokens(&[token_in.clone(), token_out.clone()]);
+
+        let result = pool_depth(&sim, &token_in, &token_out, 1.0, 0.01);
+
+        if expect_mismatch {
+            assert_eq!(
+                result,
+                Err(PoolDepthError::ExtremeDecimalMismatch { from: decimals_in, to: decimals_out })
+            );
+        } else {
+            assert!(result.is_ok(), "a pair within the decimal range should measure: {result:?}");
+        }
+    }
+
+    #[test]
+    fn test_pool_depth_rejects_spot_price_below_scale() {
+        let token_in = token_with_decimals(0x01, "IN", 18);
+        let token_out = token_with_decimals(0x02, "OUT", 18);
+        let sim = MockProtocolSim::new(1.0)
+            .with_liquidity(1_000_000)
+            .with_tokens(&[token_in.clone(), token_out.clone()]);
+        // Scaling by 10^18 truncates any price below 10^-18 to a zero numerator.
+        let spot_price = 1e-19;
+
+        let result = pool_depth(&sim, &token_in, &token_out, spot_price, 0.01);
+
+        assert_eq!(result, Err(PoolDepthError::SpotPriceTooSmall(spot_price)));
+    }
+
+    #[tokio::test]
+    async fn test_compute_partial_failure_extreme_decimal_mismatch() {
+        let token_in = token_with_decimals(0x01, "IN", 0);
+        let token_out = token_with_decimals(0x02, "OUT", 19);
+
+        let (market, _) = setup_market_weighted(vec![(
+            "component",
+            &token_in,
+            &token_out,
+            MockProtocolSim::new(1.0)
+                .with_liquidity(1_000_000)
+                .with_tokens(&[token_in.clone(), token_out.clone()]),
+        )]);
+        let derived = DerivedData::new_shared();
+
+        let mut spot_prices = SpotPrices::new();
+        spot_prices.insert(
+            ("component".to_string(), token_in.address.clone(), token_out.address.clone()),
+            1.0,
+        );
+        spot_prices.insert(
+            ("component".to_string(), token_out.address.clone(), token_in.address.clone()),
+            1.0,
+        );
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(spot_prices, vec![], 0, true);
+
+        let changed = ChangedComponents {
+            added: std::collections::HashMap::from([(
+                "component".to_string(),
+                vec![token_in.address.clone(), token_out.address.clone()],
+            )]),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
+        };
+
+        let output = ComponentDepthComputation::default()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("should succeed with partial results");
+
+        let mismatch_key = format!("component/{}/{}", token_in.address, token_out.address);
+        assert!(
+            output.failed_items.iter().any(|item| {
+                item.key == mismatch_key &&
+                    item.error == FailedItemError::ExtremeDecimalMismatch { from: 0, to: 19 }
+            }),
+            "IN→OUT should carry ExtremeDecimalMismatch with the pair's decimals, got: {:?}",
+            output.failed_items
         );
     }
 

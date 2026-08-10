@@ -59,9 +59,31 @@ mod store;
 pub(crate) mod tracker;
 pub(crate) mod types;
 
-// Only export the public API: manager, config, store, and shared reference type
-pub use computation::FailedItemError;
+// Only export the public API: the manager and its config, the store and its shared
+// reference type, the data types callers exchange with it, and the reusable depth kernel
+pub use computation::{ComputationId, FailedItemError};
 pub use computations::component_depth::{pool_depth, PoolDepthError};
 pub use manager::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef};
 pub use store::DerivedData;
-pub use types::{ComponentDepths, SpotPrices};
+pub use types::{ComponentDepthKey, ComponentDepths, SpotPriceKey, SpotPrices};
+
+/// Identifiers of the built-in computations, for
+/// [`ComputationManagerConfig::with_hydrated`].
+///
+/// Use these rather than string literals. `POOL_DEPTHS` in particular does not match its
+/// computation's name: the string is a Prometheus label that predates the rename, and an
+/// unrecognised identifier is ignored rather than reported.
+pub mod computation_ids {
+    use super::{
+        computation::DerivedComputation,
+        computations::{ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
+        ComputationId,
+    };
+
+    /// Spot price of every component in every token direction.
+    pub const SPOT_PRICES: ComputationId = SpotPriceComputation::ID;
+    /// Component depth at the configured slippage threshold. Depends on spot prices.
+    pub const POOL_DEPTHS: ComputationId = ComponentDepthComputation::ID;
+    /// Token price relative to the gas token. Depends on spot prices and the gas price.
+    pub const TOKEN_PRICES: ComputationId = TokenGasPriceComputation::ID;
+}

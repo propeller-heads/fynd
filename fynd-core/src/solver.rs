@@ -95,11 +95,17 @@ pub mod defaults {
     pub const POOL_MAX_HOPS: usize = 3;
     /// Per-worker-pool solve timeout in milliseconds.
     pub const POOL_TIMEOUT_MS: u64 = 100;
+
+    /// Price impact a component depth is measured at, as a fraction (0.01 = 1%).
+    ///
+    /// A precompute pass must pass this same value to
+    /// [`pool_depth`](crate::derived::pool_depth), or it produces depths the live solver
+    /// would never produce.
+    pub const DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;
 }
 
 // Internal-only defaults not shared with downstream crates.
 const DEFAULT_TYCHO_USE_TLS: bool = true;
-const DEFAULT_DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;
 /// Generous router timeout for standalone (non-server) use. HTTP services should
 /// override this to a tighter value appropriate for their SLA.
 const DEFAULT_ROUTER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -715,7 +721,7 @@ impl FyndBuilder {
         let gas_token = native_token(&self.chain).map_err(|_| SolverBuildError::GasToken)?;
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
-            .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
+            .with_depth_slippage_threshold(defaults::DEPTH_SLIPPAGE_THRESHOLD);
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.
         let (computation_manager, _) =
@@ -1285,12 +1291,11 @@ impl Solver {
         let gas_token = native_token(&chain).map_err(|_| SolverBuildError::GasToken)?;
         let mut computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
-            .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
+            .with_depth_slippage_threshold(defaults::DEPTH_SLIPPAGE_THRESHOLD);
         if hydration.is_some() {
-            use crate::derived::computation::DerivedComputation;
             computation_config = computation_config.with_hydrated([
-                (crate::derived::computations::SpotPriceComputation::ID, block_number),
-                (crate::derived::computations::ComponentDepthComputation::ID, block_number),
+                (crate::derived::computation_ids::SPOT_PRICES, block_number),
+                (crate::derived::computation_ids::POOL_DEPTHS, block_number),
             ]);
         }
         let (computation_manager, _) =
