@@ -128,6 +128,8 @@ pub struct ComputationManagerConfig {
     max_hop: usize,
     /// Slippage threshold for component depth computation (0.0 < threshold < 1.0).
     depth_slippage_threshold: f64,
+    /// Computations whose output is already in the store, mapped to the block it holds.
+    hydrated: HashMap<ComputationId, u64>,
 }
 
 impl ComputationManagerConfig {
@@ -154,6 +156,24 @@ impl ComputationManagerConfig {
         self
     }
 
+    /// Marks computations as already hydrated at the given block.
+    ///
+    /// The manager skips a hydrated computation for that one block: it does not run the
+    /// work, but it still marks the computation as succeeded and broadcasts a
+    /// `ComputationComplete` event, so dependent computations and waiting workers proceed
+    /// as usual. The caller must write the output into the store at the same block before
+    /// the manager starts.
+    ///
+    /// Hydration applies to one block only. Once the market moves past that block, the
+    /// computation runs live again.
+    pub fn with_hydrated(
+        mut self,
+        hydrated: impl IntoIterator<Item = (ComputationId, u64)>,
+    ) -> Self {
+        self.hydrated = hydrated.into_iter().collect();
+        self
+    }
+
     /// Returns the gas token address.
     pub fn gas_token(&self) -> &Address {
         &self.gas_token
@@ -172,7 +192,12 @@ impl ComputationManagerConfig {
 
 impl Default for ComputationManagerConfig {
     fn default() -> Self {
-        Self { gas_token: Address::zero(20), max_hop: 2, depth_slippage_threshold: 0.01 }
+        Self {
+            gas_token: Address::zero(20),
+            max_hop: 2,
+            depth_slippage_threshold: 0.01,
+            hydrated: HashMap::new(),
+        }
     }
 }
 
@@ -186,6 +211,11 @@ pub struct ComputationManager {
     computations: Vec<Box<dyn ErasedComputation>>,
     /// Event broadcaster for derived data updates.
     event_tx: broadcast::Sender<DerivedDataEvent>,
+    /// Computations whose output was seeded into the store, mapped to the block it holds.
+    ///
+    /// Set through
+    /// [`ComputationManagerConfig::with_hydrated`](ComputationManagerConfig::with_hydrated).
+    hydrated: HashMap<ComputationId, u64>,
 }
 
 /// A dependency-ordered execution plan for the registered computations.
@@ -214,6 +244,7 @@ impl ComputationManager {
                 .with_gas_token(config.gas_token),
         )?;
         manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
+        manager.hydrated = config.hydrated;
         Ok((manager, event_rx))
     }
 
@@ -229,6 +260,7 @@ impl ComputationManager {
                 store: DerivedData::new_shared(),
                 computations: Vec::new(),
                 event_tx,
+                hydrated: HashMap::new(),
             },
             event_rx,
         )
@@ -372,6 +404,27 @@ impl ComputationManager {
             {
                 let store = self.store.read().await;
                 for &idx in stage {
+                    let computation_id = nodes[idx].0;
+                    // A hydrated computation was seeded into the store for this exact block.
+                    // Skip the work, but still report success so in-pass dependents and
+                    // waiting workers unblock.
+                    if self.hydrated.get(computation_id) == Some(&block) &&
+                        store
+                            .output_block(computation_id)
+                            .is_some()
+                    {
+                        info!(computation = computation_id, block, "computation hydrated, skipped");
+                        succeeded.insert(computation_id);
+                        let _ = self
+                            .event_tx
+                            .send(DerivedDataEvent::ComputationComplete {
+                                computation_id,
+                                block,
+                                failed_items: vec![],
+                            });
+                        continue;
+                    }
+
                     let reqs = &nodes[idx].1;
                     let fresh_ready = reqs
                         .fresh_requirements()
@@ -384,7 +437,6 @@ impl ComputationManager {
                     if fresh_ready && stale_ready {
                         runnable.push(idx);
                     } else {
-                        let computation_id = nodes[idx].0;
                         counter!(
                             "derived_computation_failures_total",
                             "computation" => computation_id,
@@ -1005,6 +1057,99 @@ mod tests {
                 DerivedDataEvent::ComputationComplete { computation_id: "counter", .. }
             )),
             "expected ComputationComplete(counter), got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hydrated_computation_is_skipped_but_still_unblocks_dependents() {
+        use crate::derived::types::SpotPrices;
+
+        let eth = token(1, "ETH");
+        let market = market_with_block();
+        let block = market
+            .read()
+            .await
+            .last_updated()
+            .expect("market carries a block")
+            .number();
+        let changed = ChangedComponents { is_full_recompute: true, ..Default::default() };
+
+        // Seed what the live computation would produce, plus a sentinel entry it never
+        // produces. A surviving sentinel proves the computation did not run.
+        let scratch_store = DerivedData::new_shared();
+        let mut seeded: SpotPrices = SpotPriceComputation::new()
+            .compute(&market, &scratch_store, &changed)
+            .await
+            .expect("spot price computation should succeed")
+            .data;
+        let sentinel = ("hydrated_sentinel".to_string(), eth.address.clone(), eth.address.clone());
+        seeded.insert(sentinel.clone(), 1234.0);
+
+        let config = ComputationManagerConfig::new()
+            .with_gas_token(eth.address.clone())
+            .with_hydrated([(SpotPriceComputation::ID, block)]);
+        let (manager, _out_rx) = ComputationManager::new(config, market).unwrap();
+        manager
+            .store()
+            .write()
+            .await
+            .set_spot_prices(seeded, vec![], block, true);
+
+        let events = run_full_recompute(&manager).await;
+
+        let store = manager.store();
+        let guard = store.read().await;
+        assert_eq!(
+            guard
+                .spot_prices()
+                .expect("spot prices stay in the store")
+                .get(&sentinel),
+            Some(&1234.0),
+            "hydrated spot prices must not be recomputed"
+        );
+        assert!(
+            guard.component_depths().is_some(),
+            "pool_depths requires fresh spot_prices and must still run"
+        );
+        assert!(
+            guard.token_prices().is_some(),
+            "token_prices requires fresh spot_prices and must still run"
+        );
+        drop(guard);
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                DerivedDataEvent::ComputationComplete { computation_id: "spot_prices", .. }
+            )),
+            "a hydrated computation must still broadcast ComputationComplete, got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hydration_applies_to_its_block_only() {
+        let eth = token(1, "ETH");
+        let market = market_with_block();
+        let block = market
+            .read()
+            .await
+            .last_updated()
+            .expect("market carries a block")
+            .number();
+
+        // Hydrate a block the market never reaches, so the skip must not trigger.
+        let config = ComputationManagerConfig::new()
+            .with_gas_token(eth.address.clone())
+            .with_hydrated([(SpotPriceComputation::ID, block + 1)]);
+        let (manager, _out_rx) = ComputationManager::new(config, market).unwrap();
+
+        run_full_recompute(&manager).await;
+
+        let store = manager.store();
+        let guard = store.read().await;
+        assert!(
+            guard.spot_prices().is_some(),
+            "spot prices must be computed live when the hydrated block does not match"
         );
     }
 
