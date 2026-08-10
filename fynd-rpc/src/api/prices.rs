@@ -156,14 +156,14 @@ const MAX_PRICE_OPERAND_BITS: u64 = 1328;
 
 /// Convert a `tycho_core::Price { numerator, denominator }` to a decimal string.
 ///
-/// Performs exact integer long-division and emits up to [`PRICE_DECIMAL_PRECISION`]
+/// Performs exact integer long-division and emits up to `PRICE_DECIMAL_PRECISION` (17)
 /// significant digits in plain decimal notation (no scientific notation, no trailing `.0`).
 /// Digits beyond the precision budget are truncated (not rounded); magnitude is always
 /// preserved.
 ///
 /// Returns `None` when the numerator or denominator is zero (defensive: `Price::new`
 /// panics on zeroes, but struct literals can still produce them) or when either operand
-/// exceeds [`MAX_PRICE_OPERAND_BITS`] bits, which guards against unbounded computation.
+/// exceeds `MAX_PRICE_OPERAND_BITS`, which guards against unbounded computation.
 pub fn price_to_decimal_string(
     numerator: &num_bigint::BigUint,
     denominator: &num_bigint::BigUint,
