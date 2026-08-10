@@ -46,11 +46,21 @@ use crate::{
 
 /// Reason why [`pool_depth`] could not measure a token pair.
 ///
-/// Each variant maps onto one [`FailedItemError`](crate::derived::FailedItemError) variant,
-/// so a caller can report the failure without changing its meaning.
+/// Every variant except [`InvalidSlippageThreshold`](Self::InvalidSlippageThreshold) maps
+/// onto one [`FailedItemError`](crate::derived::FailedItemError) variant, so a caller can
+/// report the failure without changing its meaning. An invalid threshold is a caller
+/// configuration error rather than a property of the pair, so it has no counterpart.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum PoolDepthError {
+    /// The slippage threshold is not a finite value between 0 and 1 exclusive.
+    #[error("invalid slippage threshold: {0}")]
+    InvalidSlippageThreshold(f64),
+
+    /// The spot price is not a finite positive value.
+    #[error("invalid spot price: {0}")]
+    InvalidSpotPrice(f64),
+
     /// The decimal difference between the two tokens is too large for a meaningful price.
     #[error("extreme decimal mismatch ({from}\u{2192}{to})")]
     ExtremeDecimalMismatch {
@@ -87,8 +97,9 @@ pub enum PoolDepthError {
 /// * `slippage_threshold` - Value between 0 and 1 exclusive (e.g., 0.01 for 1%).
 ///
 /// # Errors
-/// Returns [`PoolDepthError`] when the token decimals are too far apart, when the spot
-/// price is too small to scale, or when the simulation fails.
+/// Returns [`PoolDepthError`] when either float argument is out of range, when the token
+/// decimals are too far apart, when the spot price is too small to scale, or when the
+/// simulation fails. Each error names the argument at fault.
 pub fn pool_depth(
     sim_state: &dyn ProtocolSim,
     token_in: &Token,
@@ -96,6 +107,17 @@ pub fn pool_depth(
     spot_price: f64,
     slippage_threshold: f64,
 ) -> Result<BigUint, PoolDepthError> {
+    // Reject bad arguments before they reach the fixed-point scaling below. A negative or
+    // NaN `min_price` saturates the f64->u128 cast to zero and an infinite one saturates it
+    // to the maximum, so without these guards the caller gets an error naming the wrong
+    // argument instead of the one at fault.
+    if !slippage_threshold.is_finite() || slippage_threshold <= 0.0 || slippage_threshold >= 1.0 {
+        return Err(PoolDepthError::InvalidSlippageThreshold(slippage_threshold));
+    }
+    if !spot_price.is_finite() || spot_price <= 0.0 {
+        return Err(PoolDepthError::InvalidSpotPrice(spot_price));
+    }
+
     let min_price = spot_price * (1.0 - slippage_threshold);
 
     // Price is a raw fraction (numerator/denominator) that query_pool_swap
@@ -345,6 +367,40 @@ impl DerivedComputation for ComponentDepthComputation {
                         component_depths.insert(key, depth);
                         succeeded += 1;
                     }
+                    Err(PoolDepthError::InvalidSpotPrice(price)) => {
+                        warn!(
+                            component_id,
+                            token_in = %token_in.address,
+                            token_out = %token_out.address,
+                            spot_price,
+                            "spot price is not a finite positive value, skipping pair"
+                        );
+                        component_depths.remove(&key);
+                        failed_items.push(FailedItem {
+                            key: format!(
+                                "{}/{}/{}",
+                                component_id, token_in.address, token_out.address
+                            ),
+                            error: FailedItemError::InvalidSpotPrice(price),
+                        });
+                    }
+                    // `ComponentDepthComputation::new` rejects an out-of-range threshold, so
+                    // this arm reports a broken invariant rather than bad market data.
+                    Err(e @ PoolDepthError::InvalidSlippageThreshold(_)) => {
+                        warn!(
+                            component_id,
+                            error = %e,
+                            "component depth misconfigured, skipping pair"
+                        );
+                        component_depths.remove(&key);
+                        failed_items.push(FailedItem {
+                            key: format!(
+                                "{}/{}/{}",
+                                component_id, token_in.address, token_out.address
+                            ),
+                            error: FailedItemError::SimulationFailed(e.to_string()),
+                        });
+                    }
                     Err(PoolDepthError::ExtremeDecimalMismatch { from, to }) => {
                         warn!(
                             component_id,
@@ -515,6 +571,52 @@ mod tests {
         }
     }
 
+    /// A bad argument must name itself. Before these guards the float-to-integer cast
+    /// saturated and the caller got `SpotPriceTooSmall` no matter which argument was wrong.
+    #[rstest]
+    #[case::zero(0.0)]
+    #[case::one(1.0)]
+    #[case::negative(-0.1)]
+    #[case::greater_than_one(1.5)]
+    #[case::nan(f64::NAN)]
+    #[case::infinity(f64::INFINITY)]
+    #[test]
+    fn test_pool_depth_rejects_invalid_slippage(#[case] slippage_threshold: f64) {
+        let token_in = token_with_decimals(0x01, "IN", 18);
+        let token_out = token_with_decimals(0x02, "OUT", 18);
+        let sim = MockProtocolSim::new(1.0)
+            .with_liquidity(1_000_000)
+            .with_tokens(&[token_in.clone(), token_out.clone()]);
+
+        let result = pool_depth(&sim, &token_in, &token_out, 2000.0, slippage_threshold);
+
+        assert!(
+            matches!(result, Err(PoolDepthError::InvalidSlippageThreshold(t)) if t.to_bits() == slippage_threshold.to_bits()),
+            "threshold {slippage_threshold} should name itself, got {result:?}"
+        );
+    }
+
+    #[rstest]
+    #[case::zero(0.0)]
+    #[case::negative(-1.0)]
+    #[case::nan(f64::NAN)]
+    #[case::infinity(f64::INFINITY)]
+    #[test]
+    fn test_pool_depth_rejects_invalid_spot_price(#[case] spot_price: f64) {
+        let token_in = token_with_decimals(0x01, "IN", 18);
+        let token_out = token_with_decimals(0x02, "OUT", 18);
+        let sim = MockProtocolSim::new(1.0)
+            .with_liquidity(1_000_000)
+            .with_tokens(&[token_in.clone(), token_out.clone()]);
+
+        let result = pool_depth(&sim, &token_in, &token_out, spot_price, 0.01);
+
+        assert!(
+            matches!(result, Err(PoolDepthError::InvalidSpotPrice(p)) if p.to_bits() == spot_price.to_bits()),
+            "spot price {spot_price} should name itself, got {result:?}"
+        );
+    }
+
     #[test]
     fn test_pool_depth_rejects_spot_price_below_scale() {
         let token_in = token_with_decimals(0x01, "IN", 18);
@@ -581,6 +683,55 @@ mod tests {
                     item.error == FailedItemError::ExtremeDecimalMismatch { from: 0, to: 19 }
             }),
             "IN→OUT should carry ExtremeDecimalMismatch with the pair's decimals, got: {:?}",
+            output.failed_items
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compute_partial_failure_invalid_spot_price() {
+        let eth = token(0x01, "ETH");
+        let usdc = token(0x02, "USDC");
+
+        let (market, _) = setup_market_weighted(vec![(
+            "component",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(2000.0)
+                .with_liquidity(1_000_000)
+                .with_tokens(&[eth.clone(), usdc.clone()]),
+        )]);
+        let derived = DerivedData::new_shared();
+
+        let mut spot_prices = SpotPrices::new();
+        spot_prices
+            .insert(("component".to_string(), eth.address.clone(), usdc.address.clone()), f64::NAN);
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(spot_prices, vec![], 0, true);
+
+        let changed = ChangedComponents {
+            added: std::collections::HashMap::from([(
+                "component".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
+        };
+
+        let output = ComponentDepthComputation::default()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("should succeed with partial results");
+
+        let eth_usdc_key = format!("component/{}/{}", eth.address, usdc.address);
+        assert!(
+            output.failed_items.iter().any(|item| {
+                item.key == eth_usdc_key &&
+                    matches!(item.error, FailedItemError::InvalidSpotPrice(p) if p.is_nan())
+            }),
+            "a non-finite stored spot price should report InvalidSpotPrice, got: {:?}",
             output.failed_items
         );
     }

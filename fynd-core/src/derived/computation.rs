@@ -153,6 +153,10 @@ pub enum FailedItemError {
     #[error("spot price too small: {0}")]
     SpotPriceTooSmall(f64),
 
+    /// The stored spot price is not a finite positive value.
+    #[error("invalid spot price: {0}")]
+    InvalidSpotPrice(f64),
+
     /// Protocol simulation returned an error.
     #[error("simulation failed: {0}")]
     SimulationFailed(String),
