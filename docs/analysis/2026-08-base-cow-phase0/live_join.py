@@ -25,6 +25,14 @@ from pathlib import Path
 
 FILLED = ("filled", "partially_filled")
 
+# Settled USD notional below which a fill is excluded from the unweighted bps stats (median, mean,
+# p05/p95, win rate) — matches `hindsight::telemetry::MIN_NOTIONAL_USD`. On a dust fill a few wei
+# of rounding is thousands of bps, so dust dominates those unweighted quantiles while contributing
+# nothing real; the naive mean is the worst-hit (one $0.000002 fill can move it by orders of
+# magnitude). The USD-weighted sums (gaps_usd, losses_usd, notional_usd) keep every fill — a $5 win
+# still adds $5 — so total surplus and volume stay complete regardless of this floor.
+MIN_NOTIONAL_USD = 100.0
+
 
 
 def window_filter() -> int | None:
@@ -104,6 +112,7 @@ def summarize(directory: Path) -> dict:
     gaps_usd: dict[tuple[str, str], float] = defaultdict(float)
     losses_usd: dict[tuple[str, str], float] = defaultdict(float)
     loss_count: dict[tuple[str, str], int] = defaultdict(int)
+    dust_excluded: dict[tuple[str, str], int] = defaultdict(int)
     notional_usd: dict[str, float] = defaultdict(float)
     vs_singles: dict[str, list[float]] = defaultdict(list)
     # Internalization is per bracket-solve; weight each by its filled notional so a tiny solve
@@ -150,6 +159,10 @@ def summarize(directory: Path) -> dict:
                 fill_ratio = min(1.0, order.get("fill_ratio") or 1.0)
                 usd = state.get("settled_value_usd") or 0.0
                 notional_usd[bracket] += usd * fill_ratio
+                # A near-zero baseline (dust settlement, sub-cent) makes `bps` explode without
+                # being economically real — see MIN_NOTIONAL_USD. Gate only the unweighted stats
+                # (the bps list and the win/loss count); the USD sums below stay unguarded.
+                above_floor = usd * fill_ratio >= MIN_NOTIONAL_USD
                 # Two baselines, both pro-rated to what the batch actually filled: Fynd's quote at
                 # this bracket's state, and the amount the trade really settled for on-chain.
                 baselines = {
@@ -165,13 +178,17 @@ def summarize(directory: Path) -> dict:
                     if gap is None:
                         continue
                     key = (bracket, baseline_name)
-                    gaps[key].append(gap)
+                    if above_floor:
+                        gaps[key].append(gap)
+                    else:
+                        dust_excluded[key] += 1
                     gaps_usd[key] += gap / 10_000.0 * usd * fill_ratio
                     if gap < 0:
-                        loss_count[key] += 1
                         losses_usd[key] += -gap / 10_000.0 * usd * fill_ratio
+                        if above_floor:
+                            loss_count[key] += 1
                 single_out = singles.get(order["id"])
-                if single_out is not None:
+                if single_out is not None and above_floor:
                     single_gap = bps(float(apex_out), float(single_out) * fill_ratio)
                     if single_gap is not None:
                         vs_singles[bracket].append(single_gap)
@@ -214,9 +231,12 @@ def summarize(directory: Path) -> dict:
         "apex_counters": dict(sorted(counters.items())),
         "join_losses": {"ids_without_comparison": unmatched_ids, "no_fynd_quote": no_fynd_quote},
         # Signed, so `net_surplus_usd` already carries the losing side; `negative_*` breaks that
-        # out so gross and net can both be reported.
+        # out so gross and net can both be reported. `mean_bps`/`median_bps`/`apex_wins_share`
+        # exclude sub-`MIN_NOTIONAL_USD` dust (dust_excluded counts how many, per key) — the USD
+        # figures do not, so total surplus stays complete even where the bps stats above them omit
+        # a fill.
         "apex_vs_baseline_same_state": {
-            f"{bracket}_vs_{baseline}": stats(values) | {
+            f"{bracket}_vs_{baseline}": stats(gaps.get((bracket, baseline), [])) | {
                 "filled_notional_usd": round(notional_usd[bracket], 2),
                 "net_surplus_usd": round(gaps_usd[(bracket, baseline)], 2),
                 "negative_fill_gaps": loss_count[(bracket, baseline)],
@@ -224,8 +244,9 @@ def summarize(directory: Path) -> dict:
                 "gross_surplus_usd": round(
                     gaps_usd[(bracket, baseline)] + losses_usd[(bracket, baseline)], 2
                 ),
+                "dust_excluded": dust_excluded[(bracket, baseline)],
             }
-            for (bracket, baseline), values in sorted(gaps.items())
+            for (bracket, baseline) in sorted(set(gaps_usd) | set(dust_excluded))
         },
         "internalization": {
             bracket: {
