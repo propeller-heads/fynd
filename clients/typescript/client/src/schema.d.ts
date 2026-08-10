@@ -111,9 +111,14 @@ export interface paths {
          *     (descending), then `component_count`, then address. The list is recomputed lazily at
          *     most once per derived-data update and cached; nothing runs on the quote path.
          *
+         *     Paginate with `offset`/`limit` (e.g. `?limit=100&offset=1000` returns tokens ranked
+         *     #1001-#1100). Pages are consistent while the response `block` is unchanged; restart
+         *     from offset 0 when it advances mid-pagination.
+         *
          *     # Query Parameters
          *
          *     - `limit` - Maximum number of tokens returned (default: 1000)
+         *     - `offset` - Number of tokens to skip from the start of the ranked list (default: 0)
          */
         get: operations["get_tokens"];
         put?: never;
@@ -925,6 +930,14 @@ export interface operations {
                  * @example 1000
                  */
                 limit?: number | null;
+                /**
+                 * @description Number of tokens to skip from the start of the ranked list (default: 0).
+                 *
+                 *     Pages are consistent as long as `block` is unchanged between requests;
+                 *     restart from offset 0 when it advances mid-pagination.
+                 * @example 0
+                 */
+                offset?: number | null;
             };
             header?: never;
             path?: never;

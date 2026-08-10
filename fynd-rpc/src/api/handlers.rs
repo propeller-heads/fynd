@@ -389,9 +389,14 @@ const DEFAULT_TOKENS_LIMIT: usize = 1000;
 /// (descending), then `component_count`, then address. The list is recomputed lazily at
 /// most once per derived-data update and cached; nothing runs on the quote path.
 ///
+/// Paginate with `offset`/`limit` (e.g. `?limit=100&offset=1000` returns tokens ranked
+/// #1001-#1100). Pages are consistent while the response `block` is unchanged; restart
+/// from offset 0 when it advances mid-pagination.
+///
 /// # Query Parameters
 ///
 /// - `limit` - Maximum number of tokens returned (default: 1000)
+/// - `offset` - Number of tokens to skip from the start of the ranked list (default: 0)
 #[utoipa::path(
     get,
     path = "/v1/tokens",
@@ -410,6 +415,7 @@ pub async fn get_tokens(
     let limit = query
         .limit
         .unwrap_or(DEFAULT_TOKENS_LIMIT);
+    let offset = query.offset.unwrap_or(0);
 
     let cache_key = {
         let store = state.derived_data.read().await;
@@ -421,7 +427,7 @@ pub async fn get_tokens(
 
     if let Some(cache) = state.tokens_cache.read().await.as_ref() {
         if cache.key == cache_key {
-            return Ok(tokens_response(cache, limit));
+            return Ok(tokens_response(cache, limit, offset));
         }
     }
 
@@ -450,7 +456,7 @@ pub async fn get_tokens(
     };
 
     let cache = TokensCache { key, entries: std::sync::Arc::new(entries) };
-    let response = tokens_response(&cache, limit);
+    let response = tokens_response(&cache, limit, offset);
     info!(num_tokens = cache.entries.len(), block = key.0, "tokens list recomputed");
     *state.tokens_cache.write().await = Some(cache);
 
@@ -458,11 +464,13 @@ pub async fn get_tokens(
 }
 
 #[cfg(feature = "experimental")]
-/// Serializes a cached token list, truncated to `limit`.
-fn tokens_response(cache: &TokensCache, limit: usize) -> HttpResponse {
+/// Serializes one page of a cached token list: `offset` skips into the ranked
+/// list, `limit` sizes the page. An offset past the end yields an empty page.
+fn tokens_response(cache: &TokensCache, limit: usize, offset: usize) -> HttpResponse {
     let tokens: Vec<_> = cache
         .entries
         .iter()
+        .skip(offset)
         .take(limit)
         .cloned()
         .collect();
@@ -797,6 +805,31 @@ mod tests {
             1
         );
         assert_eq!(limited["tokens"][0]["symbol"], "USDC");
+
+        // Offset pages into the ranked list: limit=1&offset=1 is the #2 token.
+        let paged: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/tokens?limit=1&offset=1")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(paged["total"], 3);
+        assert_eq!(paged["tokens"][0]["symbol"], "WETH");
+
+        // An offset past the end yields an empty page, not an error.
+        let past_end: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/tokens?offset=5")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(past_end["total"], 3);
+        assert!(past_end["tokens"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[cfg(feature = "experimental")]

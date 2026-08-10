@@ -203,7 +203,7 @@
           "tokens"
         ],
         "summary": "GET /v1/tokens - Return the tokens currently in the routing graph, ranked by usefulness.",
-        "description": "Serves metadata (symbol, decimals, tax, gas, quality) for exactly the tokens present in\nthe routing graph, sorted by approximate routable `liquidity` in raw gas-token units\n(descending), then `component_count`, then address. The list is recomputed lazily at\nmost once per derived-data update and cached; nothing runs on the quote path.\n\n# Query Parameters\n\n- `limit` - Maximum number of tokens returned (default: 1000)",
+        "description": "Serves metadata (symbol, decimals, tax, gas, quality) for exactly the tokens present in\nthe routing graph, sorted by approximate routable `liquidity` in raw gas-token units\n(descending), then `component_count`, then address. The list is recomputed lazily at\nmost once per derived-data update and cached; nothing runs on the quote path.\n\nPaginate with `offset`/`limit` (e.g. `?limit=100&offset=1000` returns tokens ranked\n#1001-#1100). Pages are consistent while the response `block` is unchanged; restart\nfrom offset 0 when it advances mid-pagination.\n\n# Query Parameters\n\n- `limit` - Maximum number of tokens returned (default: 1000)\n- `offset` - Number of tokens to skip from the start of the ranked list (default: 0)",
         "operationId": "get_tokens",
         "parameters": [
           {
@@ -219,6 +219,20 @@
               "minimum": 0
             },
             "example": 1000
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Number of tokens to skip from the start of the ranked list (default: 0).\n\nPages are consistent as long as `block` is unchanged between requests;\nrestart from offset 0 when it advances mid-pagination.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "example": 0
           }
         ],
         "responses": {

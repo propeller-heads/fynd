@@ -19,6 +19,12 @@ pub struct TokensQuery {
     /// Maximum number of tokens returned (default: 1000).
     #[param(example = 1000)]
     pub limit: Option<usize>,
+    /// Number of tokens to skip from the start of the ranked list (default: 0).
+    ///
+    /// Pages are consistent as long as `block` is unchanged between requests;
+    /// restart from offset 0 when it advances mid-pagination.
+    #[param(example = 0)]
+    pub offset: Option<usize>,
 }
 
 /// Top-level response for GET /v1/tokens.
