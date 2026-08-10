@@ -50,9 +50,10 @@ export interface paths {
         };
         /**
          * GET /v1/prices - Return derived token prices and optional market data.
-         * @description By default returns token gas prices only. Each `prices[].price` follows
-         *     `PRICE_UNIT_CONTRACT_V1`: `rawTokenUnitsPerRawGasUnit` (raw target-token units divided by raw
-         *     gas-token units). Use `include` query parameter to add spot prices and/or component depths.
+         * @description By default returns token gas prices only. Each `prices[].price` is a plain decimal string
+         *     holding raw target-token units divided by raw gas-token units; consumers must normalize
+         *     both tokens' decimals before using it. Use `include` query parameter to add spot prices
+         *     and/or component depths.
          *
          *     # Query Parameters
          *
@@ -485,23 +486,11 @@ export interface components {
             /** @description Component depths per component direction (only if requested via `include=depths`). */
             component_depths?: components["schemas"]["ComponentDepthEntry"][] | null;
             /**
-             * @description Unit contract version for `prices[].price`. Consumers should assert this matches their
-             *     expected contract before interpreting prices.
-             * @example PRICE_UNIT_CONTRACT_V1
-             */
-            contract_version: string;
-            /**
              * @description The gas token address (e.g. WETH).
              * @example 0x0000000000000000000000000000000000000000
              */
             gas_token: string;
-            /**
-             * @description Machine-readable unit name for `prices[].price`:
-             *     `raw_token_units_per_raw_gas_unit` (raw target-token units divided by raw gas-token units).
-             * @example raw_token_units_per_raw_gas_unit
-             */
-            price_unit: string;
-            /** @description Token gas prices relative to the native gas token. */
+            /** @description Token gas prices relative to the native gas token, sorted by token address. */
             prices: components["schemas"]["TokenPriceEntry"][];
             /** @description Spot prices per component direction (only if requested via `include=spot_prices`). */
             spot_prices?: components["schemas"]["SpotPriceEntry"][] | null;
@@ -644,13 +633,13 @@ export interface components {
         /** @description A single token's gas price. */
         TokenPriceEntry: {
             /**
-             * @description `rawTokenUnitsPerRawGasUnit`: raw target-token units divided by raw gas-token units,
-             *     serialized as a decimal string with up to 17 significant digits.
+             * @description Raw target-token units divided by raw gas-token units, serialized as a plain decimal
+             *     string with up to 17 significant digits (no scientific notation).
              *
-             *     Follows `PRICE_UNIT_CONTRACT_V1` and is intended only for display and analytics.
-             *     Consumers must normalize both tokens' decimals before using it. The string format
-             *     avoids `f64` rendering inconsistencies across languages (e.g. Rust's `1500.0` vs
-             *     JavaScript's `"1500"`); parse it with a decimal-aware parser (BigDecimal, BigNumber, etc.).
+             *     Intended for display and analytics only. Consumers must normalize both tokens'
+             *     decimals before using it, and should parse it with a decimal-aware parser
+             *     (BigDecimal, BigNumber, etc.) — the string format avoids `f64` rendering
+             *     inconsistencies across languages.
              * @example 0.000000003
              */
             price: string;
