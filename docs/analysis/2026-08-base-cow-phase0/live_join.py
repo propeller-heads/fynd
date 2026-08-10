@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -37,22 +38,41 @@ def window_filter() -> int | None:
 def wrong_window(record: dict, wanted: int | None) -> bool:
     return wanted is not None and (record.get("window_blocks") or 1) != wanted
 
+def iter_lines(path: Path):
+    """Lines of a JSONL file, transparently decompressing `.zst` (the disk guard's daily
+    compaction pass rotates closed days to `<name>.jsonl.zst`, via the `zstd` CLI — matches its
+    own `zstd -q -10 -T2 --rm` invocation)."""
+    if path.suffix == ".zst":
+        proc = subprocess.run(["zstd", "-dc", str(path)], capture_output=True, check=True)
+        yield from proc.stdout.decode().splitlines()
+    else:
+        with path.open() as handle:
+            yield from handle
+
+
 def read_jsonl(path: Path):
-    with path.open() as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue  # a run killed mid-write leaves at most one partial line
+    for line in iter_lines(path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue  # a run killed mid-write leaves at most one partial line
+
+
+def matching_files(directory: Path, prefix: str) -> list[Path]:
+    """Every `<prefix>-*.jsonl[.zst]` file, live or compacted — a plain glob misses the `.zst`
+    ones, which would silently drop every closed day the disk guard has already compressed."""
+    return sorted(directory.glob(f"{prefix}-*.jsonl")) + sorted(
+        directory.glob(f"{prefix}-*.jsonl.zst")
+    )
 
 
 def load_comparisons(directory: Path) -> dict[str, dict]:
     """Per-order Fynd baseline, keyed by order id, from every comparisons file present."""
     by_id: dict[str, dict] = {}
-    for path in sorted(directory.glob("comparisons-*.jsonl")):
+    for path in matching_files(directory, "comparisons"):
         for record in read_jsonl(path):
             tx, index = record.get("settled_tx"), record.get("tx_index")
             if tx is None or index is None:
@@ -94,7 +114,7 @@ def summarize(directory: Path) -> dict:
     no_fynd_quote = 0
     filled_orders: dict[str, int] = defaultdict(int)
 
-    for path in sorted(directory.glob("apex-*.jsonl")):
+    for path in matching_files(directory, "apex"):
         for record in read_jsonl(path):
             if wrong_window(record, wanted_window):
                 continue
