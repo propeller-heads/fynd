@@ -26,12 +26,18 @@ from pathlib import Path
 FILLED = ("filled", "partially_filled")
 
 # Settled USD notional below which a fill is excluded from the unweighted bps stats (median, mean,
-# p05/p95, win rate) — matches `hindsight::telemetry::MIN_NOTIONAL_USD`. On a dust fill a few wei
-# of rounding is thousands of bps, so dust dominates those unweighted quantiles while contributing
-# nothing real; the naive mean is the worst-hit (one $0.000002 fill can move it by orders of
-# magnitude). The USD-weighted sums (gaps_usd, losses_usd, notional_usd) keep every fill — a $5 win
-# still adds $5 — so total surplus and volume stay complete regardless of this floor.
-MIN_NOTIONAL_USD = 100.0
+# p05/p95, win rate). On a dust fill a few wei of rounding is thousands of bps, so dust dominates
+# those unweighted quantiles while contributing nothing real; the naive mean is the worst-hit (one
+# $0.000002 fill can move it by orders of magnitude). The USD-weighted sums (gaps_usd, losses_usd,
+# notional_usd) keep every fill — a $5 win still adds $5 — so total surplus and volume stay
+# complete regardless of this floor.
+#
+# $1, not `hindsight::telemetry::MIN_NOTIONAL_USD`'s $100: that constant is calibrated for
+# aggregator-flow-wide trades and is too high for this order population, whose median fill is
+# ~$15 (measured on live window-1 data, 2026-08-10) — a $100 floor discarded the median trade and
+# 74% of all fills as "dust". $1 removes the true sub-cent/near-zero outliers (15% of fills)
+# without cutting the small-but-real long-tail flow this study exists to measure.
+MIN_NOTIONAL_USD = 1.0
 
 
 
