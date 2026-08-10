@@ -20,7 +20,10 @@ use num_traits::Zero;
 use tracing::{debug, instrument, warn, Span};
 use tycho_simulation::{
     evm::query_pool_swap::query_pool_swap,
-    tycho_common::simulation::errors::SimulationError,
+    tycho_common::{
+        models::token::Token,
+        simulation::{errors::SimulationError, protocol_sim::ProtocolSim},
+    },
     tycho_core::simulation::protocol_sim::{Price, QueryPoolSwapParams, SwapConstraint},
 };
 
@@ -40,6 +43,114 @@ use crate::{
     feed::market_data::{MarketData, MarketState},
     types::ComponentId,
 };
+
+/// Reason why [`pool_depth`] could not measure a token pair.
+///
+/// Each variant maps onto one [`FailedItemError`](crate::derived::FailedItemError) variant,
+/// so a caller can report the failure without changing its meaning.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum PoolDepthError {
+    /// The decimal difference between the two tokens is too large for a meaningful price.
+    #[error("extreme decimal mismatch ({from}\u{2192}{to})")]
+    ExtremeDecimalMismatch {
+        /// Source token decimals.
+        from: u32,
+        /// Target token decimals.
+        to: u32,
+    },
+
+    /// The spot price is too small to build a non-zero limit price.
+    #[error("spot price too small: {0}")]
+    SpotPriceTooSmall(f64),
+
+    /// Protocol simulation returned an error.
+    #[error("simulation failed: {0}")]
+    SimulationFailed(String),
+}
+
+/// Measures the depth of one pool in one token direction.
+///
+/// Depth is the largest input amount that keeps the trade price at or above
+/// `spot_price * (1 - slippage_threshold)`. The function calls the pool's own
+/// `query_pool_swap`, and falls back to the generic Brent solver when the protocol does
+/// not implement it.
+///
+/// This is the same kernel `ComponentDepthComputation` runs on every block. An offline
+/// pass must call this function, not a copy of it, so that both produce the same numbers.
+///
+/// # Arguments
+/// * `sim_state` - Simulation state of the pool.
+/// * `token_in` - Token the trade sells.
+/// * `token_out` - Token the trade buys.
+/// * `spot_price` - Price of `token_in` in `token_out`, already computed for this pair.
+/// * `slippage_threshold` - Value between 0 and 1 exclusive (e.g., 0.01 for 1%).
+///
+/// # Errors
+/// Returns [`PoolDepthError`] when the token decimals are too far apart, when the spot
+/// price is too small to scale, or when the simulation fails.
+pub fn pool_depth(
+    sim_state: &dyn ProtocolSim,
+    token_in: &Token,
+    token_out: &Token,
+    spot_price: f64,
+    slippage_threshold: f64,
+) -> Result<BigUint, PoolDepthError> {
+    let min_price = spot_price * (1.0 - slippage_threshold);
+
+    // Price is a raw fraction (numerator/denominator) that query_pool_swap
+    // converts back to f64 by multiplying by 10^(dec_in - dec_out). We keep
+    // the f64→u128 multiply at a fixed precision scale and absorb the decimal
+    // adjustment into the BigUint denominator.
+    const SCALE_EXP: i32 = 18;
+    let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
+    let denominator_exp = SCALE_EXP + decimal_diff;
+    if denominator_exp < 0 {
+        return Err(PoolDepthError::ExtremeDecimalMismatch {
+            from: token_in.decimals,
+            to: token_out.decimals,
+        });
+    }
+
+    let numerator = BigUint::from((min_price * 10_f64.powi(SCALE_EXP)) as u128);
+    let denominator = BigUint::from(10u64).pow(denominator_exp as u32);
+
+    if numerator.is_zero() {
+        return Err(PoolDepthError::SpotPriceTooSmall(spot_price));
+    }
+
+    let limit_price = Price::new(numerator, denominator);
+
+    let params = QueryPoolSwapParams::new(
+        token_in.clone(),
+        token_out.clone(),
+        SwapConstraint::TradeLimitPrice {
+            limit: limit_price,
+            tolerance: 0.0,
+            min_amount_in: None,
+            max_amount_in: None,
+        },
+    );
+
+    match sim_state.query_pool_swap(&params) {
+        Ok(swap) => Ok(swap),
+        Err(SimulationError::FatalError(msg)) if msg == "query_pool_swap not implemented" => {
+            query_pool_swap(sim_state, &params)
+        }
+        Err(SimulationError::InvalidInput(msg, _))
+            if msg.contains("does not support TradeLimitPrice") =>
+        {
+            query_pool_swap(sim_state, &params)
+        }
+        Err(e) => Err(e),
+    }
+    .map(|swap| swap.amount_in().clone())
+    .map_err(|e| {
+        PoolDepthError::SimulationFailed(format!(
+            "query_pool_swap failed for {}/{}: {e}",
+            token_in.address, token_out.address
+        ))
+    })
+}
 
 /// Computes component depths for all components in all directions.
 ///
@@ -220,94 +331,54 @@ impl DerivedComputation for ComponentDepthComputation {
                     continue;
                 };
 
-                let min_price = spot_price * (1.0 - self.slippage_threshold);
-
-                // Price is a raw fraction (numerator/denominator) that query_pool_swap
-                // converts back to f64 by multiplying by 10^(dec_in - dec_out). We keep
-                // the f64→u128 multiply at a fixed precision scale and absorb the decimal
-                // adjustment into the BigUint denominator.
-                const SCALE_EXP: i32 = 18;
-                let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
-                let denominator_exp = SCALE_EXP + decimal_diff;
-                if denominator_exp < 0 {
-                    warn!(
-                        component_id,
-                        token_in = %token_in.address,
-                        token_out = %token_out.address,
-                        "extreme decimal mismatch ({}→{}), skipping pair",
-                        token_in.decimals, token_out.decimals
-                    );
-                    component_depths.remove(&key);
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: FailedItemError::ExtremeDecimalMismatch {
-                            from: token_in.decimals,
-                            to: token_out.decimals,
-                        },
-                    });
-                    continue;
-                }
-
-                let numerator = BigUint::from((min_price * 10_f64.powi(SCALE_EXP)) as u128);
-                let denominator = BigUint::from(10u64).pow(denominator_exp as u32);
-
-                if numerator.is_zero() {
-                    debug!(
-                        component_id,
-                        token_in = %token_in.address,
-                        token_out = %token_out.address,
-                        spot_price,
-                        "spot price too small to compute depth, skipping pair"
-                    );
-                    component_depths.remove(&key);
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: FailedItemError::SpotPriceTooSmall(*spot_price),
-                    });
-                    continue;
-                }
-
-                let limit_price = Price::new(numerator, denominator);
-
-                let params = QueryPoolSwapParams::new(
-                    token_in.clone(),
-                    token_out.clone(),
-                    SwapConstraint::TradeLimitPrice {
-                        limit: limit_price,
-                        tolerance: 0.0,
-                        min_amount_in: None,
-                        max_amount_in: None,
-                    },
+                let depth_result = pool_depth(
+                    sim_state,
+                    token_in,
+                    token_out,
+                    *spot_price,
+                    self.slippage_threshold,
                 );
-
-                let depth_result = match sim_state.query_pool_swap(&params) {
-                    Ok(swap) => Ok(swap),
-                    Err(SimulationError::FatalError(msg))
-                        if msg == "query_pool_swap not implemented" =>
-                    {
-                        query_pool_swap(sim_state, &params)
-                    }
-                    Err(SimulationError::InvalidInput(msg, _))
-                        if msg.contains("does not support TradeLimitPrice") =>
-                    {
-                        query_pool_swap(sim_state, &params)
-                    }
-                    Err(e) => Err(e),
-                }
-                .map(|swap| swap.amount_in().clone())
-                .map_err(|e| {
-                    ComputationError::SimulationFailed(format!(
-                        "query_pool_swap failed for {}/{}: {e}",
-                        token_in.address, token_out.address
-                    ))
-                });
 
                 match depth_result {
                     Ok(depth) => {
                         component_depths.insert(key, depth);
                         succeeded += 1;
                     }
-                    Err(e) => {
+                    Err(PoolDepthError::ExtremeDecimalMismatch { from, to }) => {
+                        warn!(
+                            component_id,
+                            token_in = %token_in.address,
+                            token_out = %token_out.address,
+                            "extreme decimal mismatch ({}→{}), skipping pair",
+                            from, to
+                        );
+                        component_depths.remove(&key);
+                        failed_items.push(FailedItem {
+                            key: format!(
+                                "{}/{}/{}",
+                                component_id, token_in.address, token_out.address
+                            ),
+                            error: FailedItemError::ExtremeDecimalMismatch { from, to },
+                        });
+                    }
+                    Err(PoolDepthError::SpotPriceTooSmall(price)) => {
+                        debug!(
+                            component_id,
+                            token_in = %token_in.address,
+                            token_out = %token_out.address,
+                            spot_price,
+                            "spot price too small to compute depth, skipping pair"
+                        );
+                        component_depths.remove(&key);
+                        failed_items.push(FailedItem {
+                            key: format!(
+                                "{}/{}/{}",
+                                component_id, token_in.address, token_out.address
+                            ),
+                            error: FailedItemError::SpotPriceTooSmall(price),
+                        });
+                    }
+                    Err(e @ PoolDepthError::SimulationFailed(_)) => {
                         // Diagnostic: probe with 1 unit to understand why depth search failed.
                         // Guarded so a panicking component degrades to a diagnostic string instead
                         // of killing the computation worker.
@@ -319,6 +390,7 @@ impl DerivedComputation for ComponentDepthComputation {
                             .get_limits(token_in.address.clone(), token_out.address.clone())
                             .map(|(max_in, max_out)| format!("max_in={max_in}, max_out={max_out}"))
                             .unwrap_or_else(|e| format!("limits_error={e}"));
+                        let min_price = spot_price * (1.0 - self.slippage_threshold);
                         debug!(
                             component_id,
                             token_in = %token_in.address,
@@ -538,28 +610,25 @@ mod tests {
         );
     }
 
-    /// Verify that Price construction in compute() correctly handles decimal scaling
-    /// across mixed-decimal token pairs (e.g. WETH(18)/USDC(6)).
+    /// Verify that `pool_depth` handles decimal scaling across mixed-decimal token pairs
+    /// (e.g. WETH(18)/USDC(6)).
     ///
-    /// Uses the shared `query_pool_swap` function directly because UniV2's trait
-    /// method rejects TradeLimitPrice, but the shared function works with any
-    /// ProtocolSim via get_amount_out/spot_price.
+    /// UniV2's own `query_pool_swap` rejects TradeLimitPrice, so this also covers the
+    /// fallback to the shared Brent solver inside `pool_depth`.
     #[rstest]
     #[case::same_decimals(18, 18, 1000, 2000)]
     #[case::high_to_low(18, 6, 1000, 2_000_000)]
     #[case::low_to_high(6, 18, 2_000_000, 1000)]
     #[case::small_difference(8, 18, 100, 2000)]
     #[test]
-    fn test_decimal_scaling_with_real_univ2(
+    fn test_pool_depth_decimal_scaling_with_real_univ2(
         #[case] decimals_in: u32,
         #[case] decimals_out: u32,
         #[case] tokens_in_reserve: u64,
         #[case] tokens_out_reserve: u64,
     ) {
         use alloy::primitives::U256;
-        use tycho_simulation::evm::{
-            protocol::uniswap_v2::state::UniswapV2State, query_pool_swap::query_pool_swap,
-        };
+        use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
 
         let token_in = token_with_decimals(0x01, "IN", decimals_in);
         let token_out = token_with_decimals(0x02, "OUT", decimals_out);
@@ -575,41 +644,24 @@ mod tests {
             .expect("spot_price should succeed");
 
         let slippage = 0.01;
-        let min_price = spot_price * (1.0 - slippage);
-
-        let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
-        let numerator = BigUint::from((min_price * 10_f64.powi(18)) as u128);
-        let denominator = BigUint::from(10u64).pow((18 + decimal_diff) as u32);
-
-        let limit_price = Price::new(numerator, denominator);
-
-        let params = QueryPoolSwapParams::new(
-            token_in.clone(),
-            token_out.clone(),
-            SwapConstraint::TradeLimitPrice {
-                limit: limit_price,
-                tolerance: 0.0,
-                min_amount_in: None,
-                max_amount_in: None,
-            },
-        );
-
-        let result = query_pool_swap(&univ2, &params);
+        let depth = pool_depth(&univ2, &token_in, &token_out, spot_price, slippage);
         assert!(
-            result.is_ok(),
-            "query_pool_swap should succeed for {decimals_in}/{decimals_out} decimals, \
+            depth.is_ok(),
+            "pool_depth should succeed for {decimals_in}/{decimals_out} decimals, \
              got error: {:?}",
-            result.err()
+            depth.err()
         );
 
-        let swap = result.unwrap();
+        let depth = depth.unwrap();
         assert!(
-            !swap.amount_in().is_zero(),
-            "amount_in should be non-zero for {decimals_in}/{decimals_out} decimals"
+            !depth.is_zero(),
+            "depth should be non-zero for {decimals_in}/{decimals_out} decimals"
         );
 
-        let post_swap_spot = swap
-            .new_state()
+        let post_swap_spot = univ2
+            .get_amount_out(depth, &token_in, &token_out)
+            .expect("swapping the depth amount should succeed")
+            .new_state
             .spot_price(&token_in, &token_out)
             .expect("post-swap spot_price should succeed");
         let price_impact = ((post_swap_spot - spot_price) / spot_price).abs();
@@ -620,20 +672,17 @@ mod tests {
         );
     }
 
-    /// Exercises the Brent solver fallback path with realistic UniV2 component states to verify
-    /// it produces sensible depth values. This validates that the Price construction
-    /// approach in compute() is correct across a range of real-world token pairs.
+    /// Exercises `pool_depth` with realistic UniV2 component states to verify it produces
+    /// sensible depth values across a range of real-world token pairs.
     ///
     /// Three components covering the key decimal configurations encountered in production:
     ///   - WETH/USDC: 18/6 decimals, ~$2000 price, ~$10M liquidity
     ///   - WETH/WBTC: 18/8 decimals, ~15 price, ~$5M liquidity
     ///   - USDC/USDT: 6/6 decimals, ~1 price, ~$50M liquidity
     #[test]
-    fn test_brent_solver_with_realistic_components() {
+    fn test_pool_depth_with_realistic_components() {
         use alloy::primitives::U256;
-        use tycho_simulation::evm::{
-            protocol::uniswap_v2::state::UniswapV2State, query_pool_swap::query_pool_swap,
-        };
+        use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
 
         struct ComponentCase {
             name: &'static str,
@@ -671,7 +720,6 @@ mod tests {
         ];
 
         let slippage = 0.01_f64;
-        const SCALE_EXP: i32 = 18;
 
         for case in &cases {
             let decimals_in = case.token_in.decimals;
@@ -687,41 +735,15 @@ mod tests {
                 .spot_price(&case.token_in, &case.token_out)
                 .unwrap_or_else(|e| panic!("[{}] spot_price failed: {e}", case.name));
 
-            let min_price = spot_price * (1.0 - slippage);
-
-            let decimal_diff = decimals_in as i32 - decimals_out as i32;
-            let denominator_exp = SCALE_EXP + decimal_diff;
-            assert!(
-                denominator_exp >= 0,
-                "[{}] denominator_exp would be negative: {denominator_exp}",
-                case.name
-            );
-
-            let numerator = BigUint::from((min_price * 10_f64.powi(SCALE_EXP)) as u128);
-            let denominator = BigUint::from(10u64).pow(denominator_exp as u32);
-            let limit_price = Price::new(numerator, denominator);
-
-            let limit_price_f64 = min_price;
-
-            let params = QueryPoolSwapParams::new(
-                case.token_in.clone(),
-                case.token_out.clone(),
-                SwapConstraint::TradeLimitPrice {
-                    limit: limit_price,
-                    tolerance: 0.0,
-                    min_amount_in: None,
-                    max_amount_in: None,
-                },
-            );
-
-            let result = query_pool_swap(&univ2, &params)
-                .unwrap_or_else(|e| panic!("[{}] query_pool_swap failed: {e}", case.name));
-
-            let amount_in = result.amount_in();
+            let amount_in =
+                pool_depth(&univ2, &case.token_in, &case.token_out, spot_price, slippage)
+                    .unwrap_or_else(|e| panic!("[{}] pool_depth failed: {e}", case.name));
             assert!(!amount_in.is_zero(), "[{}] amount_in (depth) should be non-zero", case.name);
 
-            let post_swap_spot = result
-                .new_state()
+            let post_swap_spot = univ2
+                .get_amount_out(amount_in.clone(), &case.token_in, &case.token_out)
+                .unwrap_or_else(|e| panic!("[{}] swapping the depth amount failed: {e}", case.name))
+                .new_state
                 .spot_price(&case.token_in, &case.token_out)
                 .unwrap_or_else(|e| panic!("[{}] post-swap spot_price failed: {e}", case.name));
             let price_impact = ((post_swap_spot - spot_price) / spot_price).abs();
@@ -739,7 +761,7 @@ mod tests {
                  post_swap_spot={:.6}, price_impact={:.4}%",
                 case.name,
                 spot_price,
-                limit_price_f64,
+                spot_price * (1.0 - slippage),
                 amount_in,
                 amount_in_human,
                 post_swap_spot,
