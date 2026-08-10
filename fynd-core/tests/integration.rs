@@ -5,6 +5,8 @@ mod harness;
 
 #[path = "integration/derived_data_tests.rs"]
 mod derived_data_tests;
+#[path = "integration/hydration_tests.rs"]
+mod hydration_tests;
 #[path = "integration/solution_tests.rs"]
 mod solution_tests;
 #[path = "integration/timing_tests.rs"]

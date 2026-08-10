@@ -12,7 +12,7 @@ applications.
 | `worker_pool/`        | `WorkerPool` manages dedicated OS threads. `SolverWorker` runs a prioritized select loop (shutdown > market events > derived events > tasks). `TaskQueue` is `async_channel`-based |
 | `worker_pool_router/` | `WorkerPoolRouter` fans out orders to all pools, ranks candidates by `amount_out_net_gas` descending; price guard (if enabled) validates in rank order; optionally encodes          |
 | `feed/`               | `TychoFeed` (WebSocket → MarketState), `GasPriceFetcher`, `MarketEvent` broadcasting, `ProtocolRegistry`                                                                           |
-| `derived/`            | `ComputationManager` runs `SpotPriceComputation`, `ComponentDepthComputation`, `TokenGasPriceComputation` in dependency order. `ReadinessTracker` gates workers until data is fresh     |
+| `derived/`            | `ComputationManager` runs `SpotPriceComputation`, `ComponentDepthComputation`, `TokenGasPriceComputation` in dependency order. `ReadinessTracker` gates workers until data is fresh. `pool_depth` is the public depth kernel; `ComputationManagerConfig::with_hydrated` skips a precomputed computation for one block |
 | `graph/`              | `pub` — `GraphManager` trait (initialize + incremental update), `PetgraphStableDiGraphManager`, `StableDiGraph` (re-exported), `EdgeWeightUpdaterWithDerived`, `Path` type           |
 | `price_guard/`        | Price guard: external price validation for quotes. Sub-modules: `guard` (validation logic), `binance_ws` (Binance WebSocket price provider), `hyperliquid` (Hyperliquid oracle provider), `provider_registry`, `config`, `utils` |
 | `replay.rs`           | `replay_route(&Route, &MarketState)` — re-execute an already-built route against a (possibly newer) market state, honoring split fractions and shared-pool depletion. Used by `hindsight` to measure quote-to-execution slippage |
@@ -80,6 +80,12 @@ pipeline and asserts solution availability, quality vs baseline, derived-data me
 Run with `cargo nextest run -p fynd-core --features test-utils --test integration`. The
 `test-utils` feature gates `Solver::from_recording` and the recording helpers; fixtures are
 recorded with `tools/record-market`. See `tests/integration/README.md`.
+
+`Solver::from_recording_hydrated` builds the same pipeline from precomputed spot prices and
+component depths. It writes both into the store and marks them hydrated, so the manager skips
+them for the replayed block and still reports them complete. Token prices always run live.
+Produce the depths with `fynd_core::derived::pool_depth`, so an offline pass and the live path
+share one kernel.
 
 ## Data Flow
 

@@ -54,6 +54,13 @@ use crate::{
     Algorithm, Quote, QuoteRequest, SolveError,
 };
 
+/// Precomputed derived data handed to [`Solver::from_recording_hydrated`].
+#[cfg(feature = "test-utils")]
+struct Hydration {
+    spot_prices: crate::derived::SpotPrices,
+    component_depths: crate::derived::ComponentDepths,
+}
+
 /// Default values for [`FyndBuilder`] configuration and [`PoolConfig`] deserialization.
 ///
 /// These are the single source of truth for all tunable defaults. Downstream
@@ -1185,6 +1192,51 @@ impl Solver {
         pools: std::collections::HashMap<String, PoolConfig>,
         gas_price_wei: Option<num_bigint::BigUint>,
     ) -> Result<Self, SolverBuildError> {
+        Self::build_from_recording(chain, updates, pools, gas_price_wei, None).await
+    }
+
+    /// Build a Solver by replaying recorded market updates with precomputed derived data.
+    ///
+    /// Behaves like [`from_recording`](Self::from_recording), except that the spot prices
+    /// and component depths given here are written straight into the derived data store.
+    /// The computation manager skips both computations for the replayed block and reports
+    /// them as complete, so the solver reaches ready without recomputing them.
+    ///
+    /// Token prices still run live, because they depend on the gas price rather than on the
+    /// recording alone.
+    ///
+    /// Produce the two maps with [`pool_depth`](crate::derived::pool_depth) and the same
+    /// spot prices the live path computes. Values from a different market state give
+    /// quotes the live solver would not produce.
+    ///
+    /// Requires the `test-utils` feature.
+    #[cfg(feature = "test-utils")]
+    pub async fn from_recording_hydrated(
+        chain: Chain,
+        updates: Vec<tycho_simulation::protocol::models::Update>,
+        pools: std::collections::HashMap<String, PoolConfig>,
+        gas_price_wei: Option<num_bigint::BigUint>,
+        spot_prices: crate::derived::SpotPrices,
+        component_depths: crate::derived::ComponentDepths,
+    ) -> Result<Self, SolverBuildError> {
+        Self::build_from_recording(
+            chain,
+            updates,
+            pools,
+            gas_price_wei,
+            Some(Hydration { spot_prices, component_depths }),
+        )
+        .await
+    }
+
+    #[cfg(feature = "test-utils")]
+    async fn build_from_recording(
+        chain: Chain,
+        updates: Vec<tycho_simulation::protocol::models::Update>,
+        pools: std::collections::HashMap<String, PoolConfig>,
+        gas_price_wei: Option<num_bigint::BigUint>,
+        hydration: Option<Hydration>,
+    ) -> Result<Self, SolverBuildError> {
         if pools.is_empty() {
             return Err(SolverBuildError::NoPools);
         }
@@ -1231,15 +1283,29 @@ impl Solver {
 
         // Computation manager
         let gas_token = native_token(&chain).map_err(|_| SolverBuildError::GasToken)?;
-        let computation_config = ComputationManagerConfig::new()
+        let mut computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
+        if hydration.is_some() {
+            use crate::derived::computation::DerivedComputation;
+            computation_config = computation_config.with_hydrated([
+                (crate::derived::computations::SpotPriceComputation::ID, block_number),
+                (crate::derived::computations::ComponentDepthComputation::ID, block_number),
+            ]);
+        }
         let (computation_manager, _) =
             ComputationManager::new(computation_config, market_data.clone())
                 .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
 
         let derived_data: SharedDerivedDataRef = computation_manager.store();
         let derived_event_tx = computation_manager.event_sender();
+
+        // Seed the store before the manager runs, so its hydration skip finds the output.
+        if let Some(Hydration { spot_prices, component_depths }) = hydration {
+            let mut store = derived_data.write().await;
+            store.set_spot_prices(spot_prices, vec![], block_number, true);
+            store.set_component_depths(component_depths, vec![], block_number, true);
+        }
 
         let computation_event_rx = feed.subscribe();
         let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
