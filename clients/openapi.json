@@ -196,6 +196,55 @@
           }
         }
       }
+    },
+    "/v1/tokens": {
+      "get": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "GET /v1/tokens - Return the tokens currently in the routing graph, ranked by usefulness.",
+        "description": "Serves metadata (symbol, decimals, tax, gas, quality) for exactly the tokens present in\nthe routing graph, sorted by approximate routable `liquidity` in raw gas-token units\n(descending), then `component_count`, then address. The list is recomputed lazily at\nmost once per derived-data update and cached; nothing runs on the quote path.\n\n# Query Parameters\n\n- `limit` - Maximum number of tokens returned (default: 1000)",
+        "operationId": "get_tokens",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of tokens returned (default: 1000).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "example": 1000
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Graph tokens returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokensResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Data not yet available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "x-experimental": true
+      }
     }
   },
   "components": {
@@ -450,6 +499,74 @@
             ],
             "description": "keccak256 of the ABI-encoded swap bytes, as a 0x-prefixed hex string.\nPresent only when client fee params were included in the request.\nUse this with `amount_in`, `token_in`, `token_out`, `amount_out`, `min_amount_received`,\nand `receiver` to compute the 11-field EIP-712 `ClientFee` signing hash (see client library\nhelpers).",
             "example": null
+          }
+        }
+      },
+      "GraphTokenEntry": {
+        "type": "object",
+        "description": "A token currently present in the routing graph, with ranking signals.",
+        "required": [
+          "address",
+          "symbol",
+          "decimals",
+          "tax",
+          "gas",
+          "quality",
+          "component_count"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "Token address.",
+            "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          },
+          "component_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of graph components (liquidity pools) containing this token.",
+            "minimum": 0
+          },
+          "decimals": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Token decimals.",
+            "minimum": 0
+          },
+          "gas": {
+            "type": "array",
+            "items": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Transfer gas cost estimates as indexed by Tycho (entries may be null)."
+          },
+          "liquidity": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Approximate routable liquidity in raw gas-token units: the sum of this token's\ndirectional component depths converted via its gas price. Approximate `f64`,\nintended for sorting and display only. Absent when the token has no computed\ngas price."
+          },
+          "quality": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Tycho token quality: 100 = normal; lower values indicate rebasing, fee-on-transfer,\nor analysis-failed tokens.",
+            "minimum": 0
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Token symbol as indexed by Tycho."
+          },
+          "tax": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Transfer tax in basis points (0 for ordinary tokens).",
+            "minimum": 0
           }
         }
       },
@@ -1061,6 +1178,35 @@
             "type": "string",
             "description": "Token address.",
             "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          }
+        }
+      },
+      "TokensResponse": {
+        "type": "object",
+        "description": "Top-level response for GET /v1/tokens.",
+        "required": [
+          "tokens",
+          "total",
+          "block"
+        ],
+        "properties": {
+          "block": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block at which token gas prices (the `liquidity` input) were computed.",
+            "minimum": 0
+          },
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GraphTokenEntry"
+            },
+            "description": "Graph tokens sorted by descending `liquidity`, then `component_count`, then address."
+          },
+          "total": {
+            "type": "integer",
+            "description": "Total number of graph tokens before `limit` was applied.",
+            "minimum": 0
           }
         }
       },

@@ -97,6 +97,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /v1/tokens - Return the tokens currently in the routing graph, ranked by usefulness.
+         * @description Serves metadata (symbol, decimals, tax, gas, quality) for exactly the tokens present in
+         *     the routing graph, sorted by approximate routable `liquidity` in raw gas-token units
+         *     (descending), then `component_count`, then address. The list is recomputed lazily at
+         *     most once per derived-data update and cached; nothing runs on the quote path.
+         *
+         *     # Query Parameters
+         *
+         *     - `limit` - Maximum number of tokens returned (default: 1000)
+         */
+        get: operations["get_tokens"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -258,6 +285,47 @@ export interface components {
              * @example null
              */
             swaps_hash?: string | null;
+        };
+        /** @description A token currently present in the routing graph, with ranking signals. */
+        GraphTokenEntry: {
+            /**
+             * @description Token address.
+             * @example 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+             */
+            address: string;
+            /**
+             * Format: int32
+             * @description Number of graph components (liquidity pools) containing this token.
+             */
+            component_count: number;
+            /**
+             * Format: int32
+             * @description Token decimals.
+             */
+            decimals: number;
+            /** @description Transfer gas cost estimates as indexed by Tycho (entries may be null). */
+            gas: (number | null)[];
+            /**
+             * Format: double
+             * @description Approximate routable liquidity in raw gas-token units: the sum of this token's
+             *     directional component depths converted via its gas price. Approximate `f64`,
+             *     intended for sorting and display only. Absent when the token has no computed
+             *     gas price.
+             */
+            liquidity?: number | null;
+            /**
+             * Format: int32
+             * @description Tycho token quality: 100 = normal; lower values indicate rebasing, fee-on-transfer,
+             *     or analysis-failed tokens.
+             */
+            quality: number;
+            /** @description Token symbol as indexed by Tycho. */
+            symbol: string;
+            /**
+             * Format: int64
+             * @description Transfer tax in basis points (0 for ordinary tokens).
+             */
+            tax: number;
         };
         /** @description Health check response. */
         HealthStatus: {
@@ -649,6 +717,18 @@ export interface components {
              */
             token: string;
         };
+        /** @description Top-level response for GET /v1/tokens. */
+        TokensResponse: {
+            /**
+             * Format: int64
+             * @description Block at which token gas prices (the `liquidity` input) were computed.
+             */
+            block: number;
+            /** @description Graph tokens sorted by descending `liquidity`, then `component_count`, then address. */
+            tokens: components["schemas"]["GraphTokenEntry"][];
+            /** @description Total number of graph tokens before `limit` was applied. */
+            total: number;
+        };
         /** @description An encoded EVM transaction ready to be submitted on-chain. */
         Transaction: {
             /**
@@ -827,6 +907,41 @@ export interface operations {
                 };
             };
             /** @description Queue full, overloaded, stale data, or timeout */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_tokens: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Maximum number of tokens returned (default: 1000).
+                 * @example 1000
+                 */
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Graph tokens returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokensResponse"];
+                };
+            };
+            /** @description Data not yet available */
             503: {
                 headers: {
                     [name: string]: unknown;

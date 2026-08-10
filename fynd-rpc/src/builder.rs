@@ -283,6 +283,8 @@ impl FyndRPCBuilder {
             Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]
             gas_token,
+            #[cfg(feature = "experimental")]
+            _market_data.clone(),
         );
 
         let hosted_swagger_url = self.hosted_swagger_url;
