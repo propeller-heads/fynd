@@ -77,9 +77,9 @@ pub(crate) struct Allocation<'a> {
     worker_pools: Vec<&'a SolverPoolHandle>,
     /// Liquidity scope of each selected worker pool, keyed by worker pool name.
     scopes: HashMap<String, LiquidityScope>,
-    /// Whether both scopes are selected — the single fact that early-return gating and the
-    /// ranking split branch on. See [`Allocation::surplus_routing_active`].
-    surplus_routing_active: bool,
+    /// Whether an exclusive-scope worker pool is selected — the single fact that early-return
+    /// gating and the ranking split branch on. See [`Allocation::exclusive_routing_active`].
+    exclusive_routing_active: bool,
 }
 
 impl<'a> Allocation<'a> {
@@ -93,11 +93,13 @@ impl<'a> Allocation<'a> {
         &self.scopes
     }
 
-    /// Returns `true` when surplus routing is active for this allocation: it needs both scopes —
-    /// a [`LiquidityScope::PublicOnly`] worker pool for the committed reference and a
-    /// [`LiquidityScope::IncludeExclusive`] one that may beat it.
-    pub(crate) fn surplus_routing_active(&self) -> bool {
-        self.surplus_routing_active
+    /// Returns `true` when a selected worker pool routes through exclusive liquidity
+    /// ([`LiquidityScope::IncludeExclusive`]). A [`LiquidityScope::PublicOnly`] worker pool is
+    /// then also selected — public worker pools serve every order, and startup rejects a
+    /// configuration without one — so the ranking always has a public reference to overlay the
+    /// exclusive candidate onto.
+    pub(crate) fn exclusive_routing_active(&self) -> bool {
+        self.exclusive_routing_active
     }
 
     /// Returns whether the named worker pool was selected and routes through exclusive liquidity.
@@ -122,14 +124,11 @@ pub(crate) fn allocate(worker_pools: &[SolverPoolHandle], class: OrderClass) -> 
         .iter()
         .map(|worker_pool| (worker_pool.name().to_string(), worker_pool.liquidity_scope()))
         .collect();
-    let surplus_routing_active = scopes
+    let exclusive_routing_active = scopes
         .values()
-        .any(|scope| *scope == LiquidityScope::IncludeExclusive) &&
-        scopes
-            .values()
-            .any(|scope| *scope == LiquidityScope::PublicOnly);
+        .any(|scope| *scope == LiquidityScope::IncludeExclusive);
 
-    Allocation { worker_pools, scopes, surplus_routing_active }
+    Allocation { worker_pools, scopes, exclusive_routing_active }
 }
 
 #[cfg(test)]

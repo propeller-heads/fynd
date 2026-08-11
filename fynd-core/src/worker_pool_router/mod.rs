@@ -332,15 +332,16 @@ impl WorkerPoolRouter {
 
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
         // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
-        // fallback chain. When the allocation holds both scopes, the winning exclusive-access
-        // candidate is overlaid onto that ranked list (prepended) by `combine_with_surplus`, so
-        // the fallbacks are preserved. If the public worker pools find nothing, that ranking is
-        // the `NoRouteFound` placeholder. The exclusive candidate then uses a default fee.
+        // fallback chain. When the allocation holds an exclusive-scope worker pool, the winning
+        // exclusive-access candidate is overlaid onto that ranked list (prepended) by
+        // `combine_with_surplus`, so the fallbacks are preserved. If the public worker pools find
+        // nothing, that ranking is the `NoRouteFound` placeholder. The exclusive candidate then
+        // uses a default fee.
         let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
             .into_iter()
             .zip(&allocations)
             .map(|(responses, allocation)| {
-                if allocation.surplus_routing_active() {
+                if allocation.exclusive_routing_active() {
                     let public_ranked = self.rank_quotes(
                         &responses.public_only(allocation.scopes()),
                         request.options(),
@@ -492,12 +493,12 @@ impl WorkerPoolRouter {
                             // Extract the OrderQuote from SingleOrderQuote
                             quotes.push((worker_pool_name.clone(), single_quote.order().clone()));
 
-                            // Scope-aware early return: when surplus routing is active for this
-                            // allocation, only fire once we have ≥1 public AND ≥1
+                            // Scope-aware early return: when the allocation routes through
+                            // exclusive liquidity, only fire once we have ≥1 public AND ≥1
                             // exclusive-access response (so the surplus overlay has both
                             // inputs). Otherwise, use pure count-based gating (original
                             // behaviour).
-                            let scope_ready = if allocation.surplus_routing_active() {
+                            let scope_ready = if allocation.exclusive_routing_active() {
                                 has_public_response && has_exclusive_access_response
                             } else {
                                 true
