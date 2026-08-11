@@ -20,9 +20,9 @@
 //!
 //! # Assumptions
 //!
-//! - **The tracked address both pays and receives.** A swap whose output is delivered to a
-//!   different receiver nets as output-less and is declined (a coverage miss, never a wrong
-//!   record).
+//! - **The tracked address both pays and receives.** A swap whose output goes to a different
+//!   receiver nets as output-less and is declined — unless a dust payout in the output token poses
+//!   as the output; the dust-output check in `TransferLedger::net_swap` declines that too.
 //! - **One swap per address per transaction.** Two swaps by the same address net into one combined
 //!   flow; if they share sides they merge, otherwise they decline as multi-token.
 //! - **Rebasing/fee-on-transfer tokens** can leave residue that fails the one-in/one-out rule; such
@@ -129,6 +129,13 @@ impl TransferLedger {
     /// was repaid in *both* tokens it went out and came back — an arbitrage or liquidity probe —
     /// and the two leftovers are what the round trip cost, not a conversion of one into the other.
     /// Those are declined; see `is_round_trip`.
+    ///
+    /// # Dust outputs
+    ///
+    /// A dust payout can pose as the output when the real output went to a different receiver:
+    /// tx `0xd01666df…` on Arbitrum fills 6,164 DAI → 3.2313 WETH to the order's receiver and
+    /// pays the tracked trader 0.00009 WETH; the pair decoded as a $6k win. The output leg must
+    /// therefore itself pass the residue proof — see `is_dust_output`.
     pub(crate) fn net_swap(&self, tracked: Address) -> Option<NetSwap> {
         let mut amounts_by_token: HashMap<Address, TokenAmounts> = HashMap::new();
         for &(token, from, to, value) in &self.transfers {
@@ -295,7 +302,32 @@ fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwa
         debug!(?token_in, ?token_out, "declining round-trip flow");
         return None;
     }
+    if is_dust_output(amounts_by_token, token_out, amount_out) {
+        debug!(
+            ?token_in,
+            ?token_out,
+            "declining dust output: real output went to a different receiver"
+        );
+        return None;
+    }
     Some(NetSwap { token_in, amount_in, token_out, amount_out })
+}
+
+/// Whether the lone output leg is dust rather than the trade's output: one-directional,
+/// routed third-party, and under 1% of the token's gross flow. A real output is a far larger
+/// share, so the real output went to a different receiver. The input leg is not tested — a
+/// batch member's real payment can be a tiny share of its token's gross flow.
+fn is_dust_output(
+    amounts_by_token: &HashMap<Address, TokenAmounts>,
+    token_out: Address,
+    amount_out: U256,
+) -> bool {
+    let Some(amounts) = amounts_by_token.get(&token_out) else {
+        return false;
+    };
+    amounts.sent.is_zero() &&
+        amounts.routed_third_party &&
+        amount_out.saturating_mul(U256::from(RESIDUE_GROSS_RATIO)) < amounts.gross
 }
 
 /// Whether the tracked address's flow in both swap tokens is bidirectional, which makes the net a
@@ -554,6 +586,48 @@ mod tests {
         ];
 
         assert!(net_swap(&logs, &[], user).is_none());
+    }
+
+    #[test]
+    fn test_dust_output_different_receiver() {
+        // The shape of tx 0xd01666df… on Arbitrum: the trader pays DAI, the fill's WETH goes to
+        // the order's receiver, and the venue pays the trader a dust WETH distribution. Netting
+        // the trader pairs the DAI with the dust — a fake mega-win — so the trade must decline.
+        let trader = addr(1);
+        let receiver = addr(2);
+        let venue = addr(3);
+        let pool = addr(50);
+        let dai = addr(10);
+        let weth = addr(11);
+
+        let logs = vec![
+            make_transfer_log(dai, trader, pool, U256::from(6_164_000_000u64)),
+            make_transfer_log(weth, pool, receiver, U256::from(3_231_301u64)),
+            make_transfer_log(weth, venue, trader, U256::from(90u64)),
+        ];
+
+        assert!(net_swap(&logs, &[], trader).is_none());
+    }
+
+    #[test]
+    fn test_output_via_router_still_decodes() {
+        // The output token routing third-party is normal — pool pays the router, the router pays
+        // the trader. The trader's share of the token's gross flow is half, far above residue,
+        // so the orphaned-output rejection must not fire.
+        let trader = addr(1);
+        let router = addr(2);
+        let pool = addr(50);
+        let token_in = addr(10);
+        let token_out = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_in, trader, pool, U256::from(1000)),
+            make_transfer_log(token_out, pool, router, U256::from(2000)),
+            make_transfer_log(token_out, router, trader, U256::from(2000)),
+        ];
+
+        let result = net_swap(&logs, &[], trader).unwrap();
+        assert_eq!(result, swap(token_in, 1000, token_out, 2000));
     }
 
     #[test]
