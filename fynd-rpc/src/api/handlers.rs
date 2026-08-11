@@ -445,15 +445,14 @@ pub async fn get_tokens(
         )
     };
 
-    let entries = {
+    // Snapshot under the read guard and rank outside it, so the per-block feed writer
+    // is never blocked by the fold over the full topology.
+    let (topology, token_registry) = {
         let market = state.market_data.read().await;
-        build_token_entries(
-            &market.component_topology(),
-            market.token_registry_ref(),
-            depths.as_ref(),
-            token_prices.as_ref(),
-        )
+        (market.component_topology(), market.token_registry_ref().clone())
     };
+    let entries =
+        build_token_entries(&topology, &token_registry, depths.as_ref(), token_prices.as_ref());
 
     let cache = TokensCache { key, entries: std::sync::Arc::new(entries) };
     let response = tokens_response(&cache, limit, offset);
