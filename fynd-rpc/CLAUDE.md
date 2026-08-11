@@ -48,7 +48,7 @@ annotations live in one place.
 | `handlers.rs` | Request handlers for `/v1/quote`, `/v1/health`, and `/v1/info` |
 | `dto.rs` | Re-exports wire types from `fynd-rpc-types` (conversions to `fynd-core` types live in `fynd-rpc-types` via the `core` feature) |
 | `error.rs` | `ApiError` type with HTTP status code mapping |
-| `prices.rs` | Types and helpers for `GET /v1/prices`: query params, response DTOs (`PricesResponse`, `TokenPriceEntry`, etc.), `price_to_f64` conversion |
+| `prices.rs` | Types and helpers for `GET /v1/prices`: query params, response DTOs (`PricesResponse`, `TokenPriceEntry`, etc.), `price_to_decimal_string` exact decimal serialization |
 | `middleware.rs` | HTTP metrics middleware: records `http_request_duration_seconds` (histogram) and `http_requests_total` (counter with per-client `user_identity`/`user_plan`/`client_version` labels sourced from proxy-injected headers) |
 
 ## Builder Pattern

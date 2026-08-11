@@ -20,7 +20,8 @@ OPENAPI_JSON="$REPO_ROOT/clients/openapi.json"
 TS_SCHEMA="$REPO_ROOT/clients/typescript/client/src/schema.d.ts"
 
 echo "==> Generating OpenAPI spec..."
-cargo run --manifest-path "$REPO_ROOT/Cargo.toml" -- openapi 2>/dev/null >"$OPENAPI_JSON"
+cargo run --manifest-path "$REPO_ROOT/Cargo.toml" --features fynd-rpc/experimental -- openapi \
+    2>/dev/null >"$OPENAPI_JSON"
 echo "    Written: $OPENAPI_JSON"
 
 echo "==> Regenerating TypeScript schema..."

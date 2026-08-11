@@ -3,12 +3,12 @@
 use actix_web::{web, HttpResponse};
 use tracing::instrument;
 #[cfg(feature = "experimental")]
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::{dto, ApiError, AppState};
 #[cfg(feature = "experimental")]
 use crate::api::prices::{
-    price_to_f64, ComponentDepthEntry, ComputationBlocks, IncludeField, PricesQuery,
+    price_to_decimal_string, ComponentDepthEntry, ComputationBlocks, IncludeField, PricesQuery,
     PricesResponse, SpotPriceEntry, TokenPriceEntry,
 };
 use crate::api::{
@@ -220,8 +220,10 @@ const DEFAULT_PRICES_LIMIT: usize = 1000;
 #[cfg(feature = "experimental")]
 /// GET /v1/prices - Return derived token prices and optional market data.
 ///
-/// By default returns token gas prices only. Use `include` query parameter
-/// to add spot prices and/or component depths.
+/// By default returns token gas prices only. Each `prices[].price` is a plain decimal string
+/// holding raw target-token units divided by raw gas-token units; consumers must normalize
+/// both tokens' decimals before using it. Use `include` query parameter to add spot prices
+/// and/or component depths.
 ///
 /// # Query Parameters
 ///
@@ -274,21 +276,31 @@ pub async fn get_prices(
 
     // Convert token gas prices
     let mut prices = Vec::new();
+    let mut skipped_tokens = 0usize;
     if let Some(token_prices) = &token_prices {
         for (address, price) in token_prices {
-            match price_to_f64(&price.numerator, &price.denominator) {
-                Some(f) => {
-                    prices.push(TokenPriceEntry { token: address.clone(), price: f });
+            match price_to_decimal_string(&price.numerator, &price.denominator) {
+                Some(price) => {
+                    prices.push(TokenPriceEntry { token: address.clone(), price });
                 }
                 None => {
-                    warn!(
+                    debug!(
                         token = %address,
-                        "skipping token with unconvertible price (zero denom or overflow)"
+                        "cannot serialize token price (zero or oversized numerator/denominator)"
                     );
+                    skipped_tokens += 1;
                 }
             }
         }
     }
+    if skipped_tokens > 0 {
+        warn!(
+            skipped_tokens,
+            "skipped tokens with unrepresentable prices (zero or oversized numerator/denominator)"
+        );
+    }
+    // Sort for a deterministic wire order; HashMap iteration order varies per process.
+    prices.sort_by(|a, b| a.token.cmp(&b.token));
     // Convert spot prices if requested (sorted for deterministic limit)
     let spot_prices = if want_spot {
         let mut entries: Vec<SpotPriceEntry> = spot_prices_data
@@ -363,6 +375,8 @@ pub async fn get_prices(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "experimental")]
+    use std::str::FromStr;
     use std::sync::Arc;
 
     use actix_web::{test, web, App, HttpResponse};
@@ -375,6 +389,8 @@ mod tests {
     use serde_json::Value;
     use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
     use tycho_simulation::tycho_common::{models::Chain, Bytes};
+    #[cfg(feature = "experimental")]
+    use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
     use crate::api::{dto::QuoteRequest, AppState, HealthTracker};
 
@@ -433,6 +449,112 @@ mod tests {
             #[cfg(feature = "experimental")]
             tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
         )
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_serializes_decimal_strings() {
+        let gas_token = "0x0000000000000000000000000000000000000001";
+        // (address, numerator, denominator, expected decimal string), pre-sorted by address
+        // because the handler sorts entries for a deterministic wire order.
+        let cases = [
+            ("0x0000000000000000000000000000000000000006", 3u128, 1_000_000_000u128, "0.000000003"),
+            ("0x0000000000000000000000000000000000000008", 5, 1_000_000_000_000, "0.000000000005"),
+            ("0x0000000000000000000000000000000000000018", 1500, 1, "1500"),
+        ];
+        let mut state = make_test_state();
+        state.gas_token =
+            tycho_simulation::tycho_common::models::Address::from_str(gas_token).unwrap();
+        let mut token_prices = std::collections::HashMap::new();
+        for (address, numerator, denominator) in
+            cases.map(|(address, numerator, denominator, _)| (address, numerator, denominator))
+        {
+            token_prices.insert(
+                tycho_simulation::tycho_common::models::Address::from_str(address).unwrap(),
+                Price::new(numerator.into(), denominator.into()),
+            );
+        }
+        state
+            .derived_data
+            .write()
+            .await
+            .set_token_prices(token_prices, vec![], 19_000_000, true);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+        let request = test::TestRequest::get()
+            .uri("/v1/prices")
+            .to_request();
+        let body: Value = test::call_and_read_body_json(&app, request).await;
+
+        assert_eq!(body["blocks"]["token_prices"], 19_000_000);
+        assert!(body["gas_token"]
+            .as_str()
+            .unwrap()
+            .eq_ignore_ascii_case(gas_token));
+        let response_prices = body["prices"].as_array().unwrap();
+        assert_eq!(response_prices.len(), cases.len());
+        for (entry, (address, _, _, expected_price)) in response_prices.iter().zip(cases) {
+            assert!(entry["token"]
+                .as_str()
+                .unwrap()
+                .eq_ignore_ascii_case(address));
+            assert_eq!(entry["price"].as_str().unwrap(), expected_price);
+        }
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_skips_non_serializable_prices() {
+        let state = make_test_state();
+        let mut token_prices = std::collections::HashMap::new();
+        let valid = tycho_simulation::tycho_common::models::Address::from([1u8; 20]);
+        token_prices.insert(valid.clone(), Price::new(1u8.into(), 2u8.into()));
+        // Struct literal because Price::new panics on a zero numerator — this state is
+        // constructor-unreachable, and the skip path is exercised defensively.
+        token_prices.insert(
+            tycho_simulation::tycho_common::models::Address::from([2u8; 20]),
+            Price { numerator: 0u8.into(), denominator: 1u8.into() },
+        );
+        token_prices.insert(
+            tycho_simulation::tycho_common::models::Address::from([3u8; 20]),
+            Price::new(num_bigint::BigUint::from(10u8).pow(400), 1u8.into()),
+        );
+        token_prices.insert(
+            tycho_simulation::tycho_common::models::Address::from([4u8; 20]),
+            Price::new(1u8.into(), num_bigint::BigUint::from(10u8).pow(400)),
+        );
+        state
+            .derived_data
+            .write()
+            .await
+            .set_token_prices(token_prices, vec![], 19_000_000, true);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+        let body: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+
+        let prices = body["prices"].as_array().unwrap();
+        assert_eq!(prices.len(), 1);
+        assert!(prices[0]["token"]
+            .as_str()
+            .unwrap()
+            .eq_ignore_ascii_case(&valid.to_string()));
+        assert_eq!(prices[0]["price"], "0.5");
     }
 
     // ── Unknown route (default_service) ────────────────────────────────────

@@ -73,6 +73,30 @@ pub struct ApiDoc;
 )]
 pub struct ExperimentalApiDoc;
 
+/// Builds the OpenAPI contract for every endpoint compiled into this crate.
+pub fn openapi_spec() -> utoipa::openapi::OpenApi {
+    #[allow(unused_mut)]
+    let mut openapi = ApiDoc::openapi();
+    #[cfg(feature = "experimental")]
+    {
+        openapi.merge(ExperimentalApiDoc::openapi());
+        // Mark experimental operations so spec consumers know the endpoint may not
+        // exist on a non-experimental (default) build.
+        if let Some(operation) = openapi
+            .paths
+            .paths
+            .get_mut("/v1/prices")
+            .and_then(|path_item| path_item.get.as_mut())
+        {
+            operation
+                .extensions
+                .get_or_insert_with(Default::default)
+                .insert("x-experimental".to_string(), serde_json::json!(true));
+        }
+    }
+    openapi
+}
+
 /// Simple tracker for service health metrics.
 ///
 /// Reads the last update timestamp from MarketState to determine how fresh the market data is,
@@ -248,4 +272,22 @@ pub(crate) fn configure_app(
             let body = ErrorResponse::new("not found".into(), "NOT_FOUND".into());
             HttpResponse::NotFound().json(body)
         }));
+}
+
+#[cfg(all(test, feature = "experimental"))]
+mod openapi_tests {
+    #[test]
+    fn test_openapi_spec_marks_prices_experimental() {
+        let spec = serde_json::to_value(super::openapi_spec()).unwrap();
+
+        assert!(spec["paths"]["/v1/prices"].is_object());
+        let price = &spec["components"]["schemas"]["TokenPriceEntry"]["properties"]["price"];
+        assert_eq!(price["type"], "string", "price must serialize as a decimal string");
+        assert_eq!(price["example"], "0.000000003");
+
+        // Experimental operations must be marked so spec consumers know they may not exist
+        // on a non-experimental build.
+        let ext = &spec["paths"]["/v1/prices"]["get"]["x-experimental"];
+        assert_eq!(ext, true, "x-experimental extension must be true on /v1/prices");
+    }
 }
