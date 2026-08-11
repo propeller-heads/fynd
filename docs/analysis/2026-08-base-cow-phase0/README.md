@@ -22,11 +22,22 @@ flow before building any simulation.
   10 wallets funded by one operator via Disperse.app, ~$239M gross/4d with net flow ≈ 0. Would
   have fabricated $101M of "matched" volume (the perfect synthetic CoW).
 
+## Phase 1: live APEX batching monitor (branch `mp/feat/apex-live-monitor`)
+
+The follow-up simulation phase this Phase 0 scan gated. See
+[`LIVE-MONITOR-FINDINGS.md`](LIVE-MONITOR-FINDINGS.md) for the deployment/investigation log
+(deadline-pressure root cause, taxonomy fixes, two correctness bugs found in `tycho-simulation`
+along the way) and [`RESULTS.md`](RESULTS.md) for the batching-vs-Fynd numbers.
+
 ## Files
 
 | File | What |
 |---|---|
 | `PLAN.md` | Full working plan: decisions log, APEX-phase architecture, agent findings, implementation queue |
+| `LIVE-MONITOR-FINDINGS.md` | Phase 1 investigation log: live monitor deployment, deadline-pressure root cause, taxonomy fixes, `tycho-simulation` bugs found via cross-session collaboration |
+| `RESULTS.md` | Phase 1 results: APEX batching vs. Fynd, by window and bracket, with methodology caveats |
+| `deploy/README.md` | Phase 1 ops: how the live monitor is deployed and operated on Hetzner |
+| `live_join.py` | Phase 1: joins the live monitor's APEX and comparisons JSONL streams offline |
 | `cow_scan.py` | The scan (stdlib Python): intent loading, quarantine, ETH≡WETH canonicalization, solvable-universe split, pairwise/ring/multilateral decomposition per tumbling window, two surplus baselines, wash-pair exclusion |
 | `cow_scan_results.json` | Full scan output (per-window metrics, categories, volume buckets, per-day counters) |
 | `p2p_matches_w1.json` | Single-block matches in the no-route slice (wash-check input; sorted by surplus) |

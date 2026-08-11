@@ -8,7 +8,11 @@ disk guard so a runaway is visible before it starves the box's co-tenants.
 
 Box: `agent@100.116.92.13` (`ssh -i ~/.ssh/hetzner_agent`). Ubuntu 24.04, 8 cores, 30 GB RAM,
 Rust toolchain already installed. Co-tenants: an idle PostgreSQL 15 and a `tycho-rewind` project —
-leave both alone, which is what `CPUQuota=600%` is for.
+leave both alone, which is what `CPUQuota=700%` is for.
+
+See [`../LIVE-MONITOR-FINDINGS.md`](../LIVE-MONITOR-FINDINGS.md) for why the config below looks
+the way it does (search-deadline investigation, the `--protocols` exclusion) and
+[`../RESULTS.md`](../RESULTS.md) for what the collected data says.
 
 ## Files
 
