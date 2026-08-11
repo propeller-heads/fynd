@@ -425,6 +425,17 @@ impl WorkerPoolRouter {
         let start_time = Instant::now();
         let order_id = order.id().to_string();
 
+        let allocated: Vec<(&str, LiquidityScope)> = allocation
+            .worker_pools()
+            .iter()
+            .map(|worker_pool| (worker_pool.name(), worker_pool.liquidity_scope()))
+            .collect();
+        debug!(
+            order_id = %order_id,
+            worker_pools = ?allocated,
+            "dispatching order to allocated worker pools"
+        );
+
         // Fan-out: send order to the allocated worker pools. Worker pools that do not serve this
         // order were already dropped by `allocate`, so nothing here filters by access.
         let mut pending: FuturesUnordered<_> = allocation
