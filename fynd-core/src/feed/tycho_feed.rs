@@ -5,7 +5,10 @@
 //! - Updates MarketState (exclusive write access)
 //! - Broadcasts MarketEvents to Solvers
 
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use metrics::{gauge, histogram};
 use tokio::{
@@ -21,7 +24,7 @@ use tycho_simulation::{
     protocol::models::Update,
     rfq::stream::RFQStreamBuilder,
     tycho_client::feed::{component_tracker::ComponentFilter, SynchronizerState},
-    tycho_common::traits::TxDeltaIndexer,
+    tycho_common::{models::Address, traits::TxDeltaIndexer},
     tycho_core::Bytes,
     utils::load_all_tokens,
 };
@@ -29,11 +32,11 @@ use tycho_simulation::{
 use crate::{
     feed::{
         events::MarketEvent,
-        market_data::MarketData,
+        market_data::{MarketData, MarketState},
         protocol_registry::{register_exchanges, register_rfq},
         DataFeedError, TychoFeedConfig,
     },
-    types::BlockInfo,
+    types::{BlockInfo, ComponentId},
 };
 
 /// The Tycho indexer that keeps market data synchronized.
@@ -57,6 +60,129 @@ pub(crate) struct TychoFeed {
 /// Client-metadata entries Fynd reports to Tycho via the `X-Tycho-Client-Metadata` header.
 fn fynd_client_metadata() -> [(&'static str, &'static str); 1] {
     [("fynd_version", env!("CARGO_PKG_VERSION"))]
+}
+
+/// Reads out of one Tycho update which components were added, removed and changed.
+///
+/// Returns `None` when the update touches no component, which is when the live feed stays
+/// silent rather than broadcasting an empty event.
+///
+/// This is the diff the live feed announces on every block, and the input a
+/// [`ComputationManager`](crate::derived::ComputationManager) recomputes from. An offline
+/// pass that walks recorded updates must call this function, not a copy of it, so that
+/// both decide on the same set of changed components.
+pub fn market_event_from_update(update: &Update) -> Option<MarketEvent> {
+    let added_components: HashMap<ComponentId, Vec<Address>> = update
+        .new_pairs
+        .iter()
+        .map(|(id, component)| {
+            (
+                id.clone(),
+                component
+                    .tokens
+                    .iter()
+                    .map(|token| token.address.clone())
+                    .collect(),
+            )
+        })
+        .collect();
+    let removed_components: Vec<ComponentId> = update
+        .removed_pairs
+        .keys()
+        .cloned()
+        .collect();
+    // TODO: Should we still emit as updated if the component is new?
+    let updated_components: Vec<ComponentId> = update
+        .states
+        .keys()
+        .filter(|id| {
+            !update
+                .new_pairs
+                .contains_key(id.as_str())
+        })
+        .cloned()
+        .collect();
+
+    if added_components.is_empty() && removed_components.is_empty() && updated_components.is_empty()
+    {
+        return None;
+    }
+
+    Some(MarketEvent::MarketUpdated { added_components, removed_components, updated_components })
+}
+
+/// Applies one Tycho update to a market state.
+///
+/// Returns the highest block a protocol synchronizer reported ready in this update, which
+/// is the block info the function wrote to `state`. `None` when no protocol reported
+/// ready, in which case the state keeps the block it had.
+///
+/// This is how the live feed advances its own market state. An offline pass that walks
+/// recorded updates must call this function, not a copy of it, so that both build the same
+/// state out of the same update.
+pub fn apply_update_to_market_state(state: &mut MarketState, update: Update) -> Option<BlockInfo> {
+    let Update {
+        new_pairs: added_components,
+        removed_pairs: removed_components,
+        states: updated_or_new_states,
+        sync_states,
+        ..
+    } = update;
+
+    // TODO: how do we handle delayed and stale states? Should the feed or the solvers handle
+    // this?
+    let latest_block_info = sync_states
+        .values()
+        .filter_map(|status| {
+            if let SynchronizerState::Ready(header) = status {
+                Some(BlockInfo::new(header.number, header.hash.to_string(), header.timestamp))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|b| b.number());
+
+    // Collected before the components move into `upsert_components` below.
+    let maybe_new_tokens: Vec<_> = added_components
+        .values()
+        .flat_map(|component| component.tokens.iter().cloned())
+        .collect();
+
+    state.upsert_components(
+        added_components
+            .into_values()
+            .map(|component| {
+                // We can't use From<ProtocolComponent> because it removes "0x" prefix
+                // from the id
+                tycho_simulation::tycho_common::models::protocol::ProtocolComponent {
+                    id: component.id.to_string(),
+                    protocol_system: component.protocol_system,
+                    protocol_type_name: component.protocol_type_name,
+                    chain: component.chain,
+                    tokens: component
+                        .tokens
+                        .into_iter()
+                        .map(|t| t.address)
+                        .collect(),
+                    static_attributes: component.static_attributes,
+                    change: Default::default(),
+                    creation_tx: component.creation_tx,
+                    created_at: component.created_at,
+                    contract_addresses: component.contract_ids,
+                }
+            }),
+    );
+    state.remove_components(removed_components.keys());
+    state.upsert_tokens(maybe_new_tokens);
+    state.update_states(updated_or_new_states);
+    state.update_protocol_sync_status(sync_states);
+
+    // Update the last updated block info if one of the protocols reported "Ready" status.
+    if let Some(block_info) = latest_block_info.clone() {
+        state.update_last_updated(block_info);
+    }
+
+    latest_block_info
 }
 
 impl TychoFeed {
@@ -645,90 +771,25 @@ impl TychoFeed {
     /// Handles a message from Tycho stream.
     #[instrument(skip(self, msg))]
     pub(crate) async fn handle_tycho_message(&self, msg: Update) -> Result<(), DataFeedError> {
-        // Collect variables for market shared data update
-        let Update {
-            new_pairs: added_components,
-            removed_pairs: removed_components,
-            states: updated_or_new_states,
-            sync_states,
-            ..
-        } = msg;
-
-        let updated_components_ids: HashSet<_> = updated_or_new_states
-            .keys()
-            .filter(|id| !added_components.contains_key(id.as_str())) // TODO: Should we still emit as updated if the component is new?
-            .cloned()
-            .collect();
-
-        let maybe_new_tokens = added_components
-            .values()
-            .flat_map(|component| component.tokens.iter().cloned());
-        // TODO: how do we handle delayed and stale states? Should the feed or the solvers handle
-        // this?
-        let latest_block_info = sync_states
-            .values()
-            .filter_map(|status| {
-                if let SynchronizerState::Ready(header) = status {
-                    Some(BlockInfo::new(header.number, header.hash.to_string(), header.timestamp))
-                } else {
-                    None
-                }
-            })
-            .max_by_key(|b| b.number());
-        // Captured before `latest_block_info` moves into the `apply_block_update` closure below.
-        let latest_block_fields = latest_block_info
-            .as_ref()
-            .map(|block_info| (block_info.number(), block_info.timestamp()));
+        let market_update_event = market_event_from_update(&msg);
 
         info!(
             "received block/timestamp {} with {} new components, {} removed, {} updated",
             msg.block_number_or_timestamp,
-            added_components.len(),
-            removed_components.len(),
-            updated_or_new_states.len()
+            msg.new_pairs.len(),
+            msg.removed_pairs.len(),
+            msg.states.len()
         );
         trace!("Updating market data");
         let new_block_number = msg.block_number_or_timestamp;
         let update_start = Instant::now();
         let mut latest_component_count = 0;
         let mut token_count = 0;
+        let mut latest_block_fields = None;
         self.market_data
             .apply_block_update(new_block_number, |market_data| {
-                market_data.upsert_components(
-                    added_components
-                        .clone()
-                        .into_values()
-                        .map(|component| {
-                            // We can't use From<ProtocolComponent> because it removes "0x" prefix
-                            // from the id
-                            tycho_simulation::tycho_common::models::protocol::ProtocolComponent {
-                                id: component.id.to_string(),
-                                protocol_system: component.protocol_system,
-                                protocol_type_name: component.protocol_type_name,
-                                chain: component.chain,
-                                tokens: component
-                                    .tokens
-                                    .into_iter()
-                                    .map(|t| t.address)
-                                    .collect(),
-                                static_attributes: component.static_attributes,
-                                change: Default::default(),
-                                creation_tx: component.creation_tx,
-                                created_at: component.created_at,
-                                contract_addresses: component.contract_ids,
-                            }
-                        }),
-                );
-                market_data.remove_components(removed_components.keys());
-                market_data.upsert_tokens(maybe_new_tokens);
-                market_data.update_states(updated_or_new_states);
-                market_data.update_protocol_sync_status(sync_states);
-
-                // Update the last updated block info if one of the protocols reported "Ready"
-                // status.
-                if let Some(block_info) = latest_block_info {
-                    market_data.update_last_updated(block_info);
-                }
+                latest_block_fields = apply_update_to_market_state(market_data, msg)
+                    .map(|block_info| (block_info.number(), block_info.timestamp()));
 
                 latest_component_count = market_data.component_count();
                 token_count = market_data.token_count();
@@ -747,31 +808,7 @@ impl TychoFeed {
             gauge!("market_last_update_timestamp_seconds").set(block_timestamp as f64);
         }
 
-        // Only broadcast event if there are actual changes
-        if !added_components.is_empty() ||
-            !removed_components.is_empty() ||
-            !updated_components_ids.is_empty()
-        {
-            let market_update_event = MarketEvent::MarketUpdated {
-                added_components: added_components
-                    .into_iter()
-                    .map(|(id, component)| {
-                        (
-                            id,
-                            component
-                                .tokens
-                                .into_iter()
-                                .map(|token| token.address)
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-                removed_components: removed_components.into_keys().collect(),
-                updated_components: updated_components_ids
-                    .into_iter()
-                    .collect(),
-            };
-
+        if let Some(market_update_event) = market_update_event {
             self.event_tx
                 .send(market_update_event)
                 .map_err(|e| DataFeedError::EventChannelError(e.to_string()))?;

@@ -65,7 +65,10 @@ pub use computation::{ComputationId, FailedItemError};
 pub use computations::component_depth::{pool_depth, PoolDepthError};
 pub use manager::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef};
 pub use store::DerivedData;
-pub use types::{ComponentDepthKey, ComponentDepths, SpotPriceKey, SpotPrices};
+pub use types::{
+    ComponentDepthKey, ComponentDepths, SpotPriceKey, SpotPrices, TokenGasPriceKey, TokenGasPrices,
+    TokenPriceEntry, TokenPricesWithDeps,
+};
 
 /// Identifiers of the built-in computations, for
 /// [`ComputationManagerConfig::with_hydrated`].
