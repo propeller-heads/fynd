@@ -73,7 +73,7 @@ pub(crate) async fn quote(
     // conversion consumes `dto_request`. This is cheap (no serialization); the
     // JSON encoding is deferred to the failure-only task below.
     let num_orders = dto_request.orders().len();
-    let replay_capture = request_capture::ReplayRequest::capture(&dto_request);
+    let replay_capture = request_capture::ReplayRequest::capture(&dto_request, access);
 
     // Convert DTO to core types
     let core_request: fynd_core::QuoteRequest = dto_request.into();
