@@ -1,4 +1,12 @@
 
+## [0.99.3](https://github.com/propeller-heads/fynd/compare/0.99.2...0.99.3) (2026-08-11)
+
+### Features
+
+* **rpc:** add offset pagination to GET /v1/tokens ([da05b88](https://github.com/propeller-heads/fynd/commit/da05b88a06864b47088c01379e3d3736784202be))
+* **rpc:** add experimental GET /v1/tokens graph token endpoint ([efdc327](https://github.com/propeller-heads/fynd/commit/efdc327d569a053a8d38a9ff8f66e5dc1113befd))
+
+
 ## [0.99.2](https://github.com/propeller-heads/fynd/compare/0.99.1...0.99.2) (2026-08-11)
 
 ### Features
