@@ -30,9 +30,13 @@
 //! available in the [`DerivedData`](crate::derived::store::DerivedData).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
+use futures::future::join_all;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
@@ -54,7 +58,7 @@ use crate::{
         types::{SpotPriceKey, SpotPrices, TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
     },
     feed::market_data::{MarketData, MarketState},
-    graph::{GraphManager, Path, PetgraphStableDiGraphManager},
+    graph::{EdgeData, GraphManager, Path, PetgraphStableDiGraphManager},
     types::ComponentId,
     MostLiquidAlgorithm,
 };
@@ -412,23 +416,64 @@ impl TokenGasPriceComputation {
             paths.sort_by(|a, b| b.score.total_cmp(&a.score));
         }
 
-        // Round-robin: pop one candidate per token each round, keep best by spread
+        // Round-robin: pop one candidate per token each round, keep best by spread.
+        // Each round's per-token simulations are independent of one another (only the
+        // round-robin ordering across rounds matters for selection), so the inner loop is
+        // fanned out via `spawn_blocking` -- `compute_spread_and_mid_price` is synchronous
+        // CPU-bound simulation work -- and folded back into `best_prices` sequentially once
+        // the round completes, preserving the exact same "keep if spread is better" semantics.
+        let subset = Arc::new(subset);
         let mut best_prices: HashMap<Address, (f64, Price, HashSet<ComponentId>)> = HashMap::new();
         let mut candidates_exhausted = false;
 
         while !candidates_exhausted {
             candidates_exhausted = true;
 
+            let mut round_tasks = Vec::new();
             for (token, candidate_paths) in paths_by_token.iter_mut() {
                 let Some(candidate) = candidate_paths.pop() else {
                     continue;
                 };
                 candidates_exhausted = false;
 
-                match self.compute_spread_and_mid_price(candidate.path, &subset, &gas_price) {
+                // `candidate.path` borrows from the DFS's local graph_manager, which isn't
+                // `'static`, so it can't move into `spawn_blocking` as-is. Clone just this
+                // one path's (small, max_hops-bounded) token/edge data into owned form and
+                // reborrow it inside the blocking closure instead.
+                let owned_tokens: Vec<Address> = candidate
+                    .path
+                    .tokens
+                    .iter()
+                    .map(|t| (*t).clone())
+                    .collect();
+                let owned_edges: Vec<EdgeData<()>> = candidate
+                    .path
+                    .edge_data
+                    .iter()
+                    .map(|e| (*e).clone())
+                    .collect();
+                let token = token.clone();
+                let computation = self.clone();
+                let subset = Arc::clone(&subset);
+                let gas_price = gas_price.clone();
+
+                round_tasks.push(tokio::task::spawn_blocking(move || {
+                    let path = Path {
+                        tokens: owned_tokens.iter().collect(),
+                        edge_data: owned_edges.iter().collect(),
+                    };
+                    let result =
+                        computation.compute_spread_and_mid_price(path, &subset, &gas_price);
+                    (token, result)
+                }));
+            }
+
+            for joined in join_all(round_tasks).await {
+                let (token, result) = joined.expect("token price simulation task panicked");
+                match result {
                     Ok((spread, price, components)) => {
                         let is_better = best_prices
-                            .get(token)
+                            .get(&token)
                             .map(|(existing_spread, _, _)| spread < *existing_spread)
                             .unwrap_or(true);
                         if is_better {
@@ -437,7 +482,7 @@ impl TokenGasPriceComputation {
                                 spread_ratio = spread,
                                 "found better price (lower spread)"
                             );
-                            best_prices.insert(token.clone(), (spread, price, components));
+                            best_prices.insert(token, (spread, price, components));
                         }
                     }
                     Err(_) => continue,
