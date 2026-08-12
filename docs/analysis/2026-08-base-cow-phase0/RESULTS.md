@@ -27,12 +27,13 @@ python3 docs/analysis/2026-08-base-cow-phase0/live_join.py <data-dir> --window 1
   move a mean even after the dust floor.
 - `batch_vs_singles`'s mean is separately unstable for an unrelated reason (see Known open items
   in the findings doc) — use its median/win-rate only.
-- **USD-weighted totals are not outlier-robust.** One example found in this final pull: the
-  `top, vs Fynd, window=5` uplift total ($434,236) is 99% a single $427k order with a ~9,941bps
-  "win" — almost certainly one badly-priced Fynd quote, not real signal. Before quoting any
-  USD/day figure as a business number, check for single-order dominance the way that example was
-  found (sort per-order USD contribution, inspect the top few) — this pass did not audit every
-  cell for it, only the one that looked obviously wrong.
+- **USD-weighted totals are not outlier-robust.** Found (and excluded from every uplift figure
+  below) one $427k order with a ~9,941bps "win" — almost certainly one badly-priced Fynd quote,
+  not real signal — that alone was 99% of the raw window-5/top uplift total. Before quoting any
+  USD/day figure as a business number, check for single-order dominance the way that one was
+  found (sort per-order USD contribution, inspect the top few) — only the uplift table below was
+  audited this way; the median-based tables are inherently robust to one order at this sample
+  size, but no other USD-weighted figure in this doc has been individually checked.
 
 ## Headline: APEX vs Fynd, same block state, top-of-block
 
@@ -75,7 +76,7 @@ settled for on-chain (whichever solver won it).
 |---|---|---|---|---|
 | 1 | top | 18.98 | 65.74 | 13.4% |
 | 1 | bottom | 19.14 | 57.41 | 17.5% |
-| 5 | top | 29.46 | 68.37 | 23.6% |
+| 5 | top | 29.44 | 66.51 | 23.6% |
 | 5 | bottom | 27.29 | 59.10 | 29.3% |
 | 30 | top | 30.11 | 41.48 | 55.1% |
 | 30 | bottom | 30.38 | 42.33 | 57.9% |
@@ -91,17 +92,18 @@ Fynd otherwise, so the policy never does worse than Fynd alone. Averaged over ev
 
 | window | bracket | uplift mean bps | uplift median bps | uplift $ (4.47d) | **$/day** |
 |---|---|---|---|---|---|
-| 1 | top | 8.79 | 0.00 | $21,626 | **$4,835** |
+| 1 | top | 8.79 | 0.00 | $21,626 | $4,835 |
 | 1 | bottom | 10.02 | 0.00 | $16,214 | $3,624 |
-| **5** | **top** | 16.14 | 0.00 | **$434,236** ⚠ | **$97,062** ⚠ |
+| 5 | top | 15.70 | 0.00 | $28,842 | $6,448 |
 | 5 | bottom | 17.34 | 0.00 | $32,467 | $7,258 |
+| **30** | **bottom** | 24.50 | 3.46 | $86,081 | **$19,241** |
 | 30 | top | 22.85 | 2.04 | $39,456 | $8,821 |
-| 30 | bottom | 24.50 | 3.46 | $86,081 | $19,241 |
 
-⚠ **Do not quote the window-5/top figure as-is** — one $427k order accounts for $405k of the
-$434k (see Data section). With that order excluded the figure would land far closer to the
-window-1/window-30 pattern; re-run with an explicit exclusion or a notional cap before using this
-row.
+One $427k order (`0x50e9cfa3f9…:19`, block 49847565, ~9,941bps "win," almost certainly one
+badly-priced Fynd quote) was excluded from every window/bracket above — it only ever appeared in
+the window-5 batches (both brackets), and only contributed a positive gap in the top bracket. Before
+exclusion the window-5/top row read $434,236 total / $97,062 per day, entirely from that one
+order; both numbers now sit in line with the rest of the table.
 
 Two things worth carrying forward when quoting the rest of this table:
 
@@ -156,8 +158,8 @@ better than not batching at all (82% win rate, 53bps median vs. solving orders i
 internalizes just over half of filled notional order-against-order rather than through pools.
 
 The "use the better of APEX or Fynd" policy is worth on the order of **$3,600–$19,000/day** at
-current volume across the reliable rows of that table (the window-5/top row is excluded pending
-the outlier fix above) — real, and larger than the day-1 estimate suggested, but this whole
+current volume across all six window/bracket rows (one $427k outlier order excluded, see above) —
+real, and larger than the day-1 estimate suggested, but this whole
 dataset was computed against a pool universe missing `aerodrome_slipstreams`/`lunarbase` and
 running on a `tycho-simulation` version with a confirmed target-price bug affecting the majority
 pool family (`uniswap_v3`) — see `LIVE-MONITOR-FINDINGS.md`. **Re-measure once that fix lands**
