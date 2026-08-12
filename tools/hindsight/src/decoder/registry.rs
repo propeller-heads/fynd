@@ -17,6 +17,8 @@ use anyhow::Context;
 use serde::Deserialize;
 use tycho_simulation::tycho_common::models::Chain;
 
+use crate::decoder::decode::TradeDecoder;
+
 /// The built-in address books, embedded at compile time (validated by tests, so they cannot fail
 /// to parse at runtime).
 const ETHEREUM_TOML: &str = include_str!("registry/ethereum.toml");
@@ -84,9 +86,9 @@ struct AddressBook {
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
 /// collectors its fees are sent to, and its calldata solver aliases. Keyed by venue name in
-/// the address book; the name binds to a decoder at load time (see
-/// `crate::decoder::venues::decoders_for`).
-#[derive(Debug, Deserialize)]
+/// the address book; the name binds to decoder constructors at load time (see
+/// `crate::decoder::venues::DECODERS`).
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VenueAddresses {
     pub(crate) entry_points: HashSet<Address>,
@@ -112,6 +114,33 @@ impl VenueAddresses {
             }
         }
         id.to_string()
+    }
+}
+
+/// A loaded venue: its address-book section plus its decoders, constructed once at registry load
+/// with those addresses (see `crate::decoder::venues::DECODERS` for the name → constructor
+/// binding). The decode path resolves an entry point to this entry and calls the trait objects —
+/// no name is converted to code per transaction.
+pub(crate) struct Venue {
+    pub(crate) addresses: VenueAddresses,
+    /// The venue's decoders, tried in order — the first to return a flow wins.
+    pub(crate) decoders: Vec<Box<dyn TradeDecoder>>,
+}
+
+impl std::fmt::Debug for Venue {
+    /// Decoders are trait objects, so they print by name.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Venue")
+            .field("addresses", &self.addresses)
+            .field(
+                "decoders",
+                &self
+                    .decoders
+                    .iter()
+                    .map(|decoder| decoder.name())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
     }
 }
 
@@ -141,8 +170,9 @@ pub(crate) struct Registry {
     /// `(stablecoin, decimals)` anchors for valuing trades in USD (see `crate::usd`), sorted by
     /// address for deterministic averaging.
     usd_stablecoins: Vec<(Address, u32)>,
-    /// Venue address sets, keyed by the venue name from the address book.
-    venues: HashMap<String, VenueAddresses>,
+    /// Loaded venues — addresses plus constructed decoders — keyed by the venue name from the
+    /// address book.
+    venues: HashMap<String, Venue>,
     /// Trader address → order-flow venue name, for venues identified by who owns the order
     /// rather than by the entry point (e.g. kpk's Safes settling through `CoW`).
     venue_owners: HashMap<Address, String>,
@@ -195,18 +225,6 @@ impl Registry {
         let mut book: AddressBook =
             toml::from_str(text).context("failed to parse address book TOML")?;
 
-        // A venue section only carries addresses; its decoders are bound by name in code. An
-        // unbound name (a typo, or a venue with no decoder yet) must fail here — silently never
-        // decoding would just drop that venue's trades.
-        for name in book.venues.keys() {
-            if !crate::decoder::venues::has_decoder(name) {
-                anyhow::bail!(
-                    "address book venue '{name}' has no decoder \
-                     (see venues::decoders_for for the recognized names)"
-                );
-            }
-        }
-
         let mut names = book.solvers.clone();
         for (name, venue) in &book.venues {
             for &entry_point in &venue.entry_points {
@@ -228,6 +246,21 @@ impl Registry {
                 .collect();
         }
 
+        // Construct each venue's decoders with its addresses, once. A venue section only carries
+        // addresses; its name binds to decoder constructors in code (`venues::DECODERS`). An
+        // unbound name (a typo, or a venue with no decoder yet) must fail here — silently never
+        // decoding would just drop that venue's trades.
+        let mut venues = HashMap::new();
+        for (name, addresses) in book.venues {
+            let Some(decoders) = crate::decoder::venues::build(&name, &addresses) else {
+                anyhow::bail!(
+                    "address book venue '{name}' has no decoder \
+                     (see venues::DECODERS for the recognized names)"
+                );
+            };
+            venues.insert(name, Venue { addresses, decoders });
+        }
+
         Ok(Self {
             solver_names,
             solvers: book.solvers,
@@ -237,7 +270,7 @@ impl Registry {
             wrapped_native: book.wrapped_native,
             infrastructure: book.infrastructure,
             usd_stablecoins,
-            venues: book.venues,
+            venues,
             venue_owners: book.venue_owners,
             venue_fees: book.venue_fees,
             venue_integrators: book
@@ -298,7 +331,16 @@ impl Registry {
 
     /// The named venue's address book section, when the book has one.
     pub(crate) fn venue(&self, name: &str) -> Option<&VenueAddresses> {
-        self.venues.get(name)
+        self.venues
+            .get(name)
+            .map(|venue| &venue.addresses)
+    }
+
+    /// The venue whose entry point this address is — its addresses and its decoders — if any.
+    pub(crate) fn venue_for(&self, address: Address) -> Option<&Venue> {
+        self.names
+            .get(&address)
+            .and_then(|name| self.venues.get(name))
     }
 
     /// The order-flow venue that owns trades from this trader address, if any. Used to attribute
@@ -328,14 +370,6 @@ impl Registry {
     pub(crate) fn venue_for_appdata(&self, app_data: B256) -> Option<&str> {
         self.venue_appdata
             .get(&app_data)
-            .map(String::as_str)
-    }
-
-    /// The venue whose entry point this address is, if any.
-    pub(crate) fn venue_name(&self, address: Address) -> Option<&str> {
-        self.names
-            .get(&address)
-            .filter(|name| self.venues.contains_key(name.as_str()))
             .map(String::as_str)
     }
 
@@ -538,12 +572,17 @@ mod tests {
         assert!(!relay.fee_collectors.contains(&router));
         assert!(relay.entry_points.contains(&router));
 
-        assert_eq!(registry.venue_name(router), Some("relay"));
-        assert_eq!(
-            registry.venue_name(address!("0x881d40237659c251811cec9c364ef91dc08d300c")),
-            Some("metamask")
-        );
-        assert_eq!(registry.venue_name(collector), None);
+        // Entry points resolve to the venue entry; a fee collector is not an entry point.
+        assert!(registry
+            .venue_for(router)
+            .is_some_and(|venue| venue
+                .addresses
+                .entry_points
+                .contains(&router)));
+        assert!(registry
+            .venue_for(address!("0x881d40237659c251811cec9c364ef91dc08d300c"))
+            .is_some());
+        assert!(registry.venue_for(collector).is_none());
         assert!(registry.venue("kyberswap").is_none());
     }
 

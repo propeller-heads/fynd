@@ -12,12 +12,13 @@
 
 use std::collections::HashSet;
 
-use alloy::{primitives::U256, providers::Provider, sol, sol_types::SolCall};
+use alloy::{primitives::U256, sol, sol_types::SolCall};
 use async_trait::async_trait;
 
 use crate::decoder::{
     decode::{DecodeContext, TradeDecoder, TraderFlow},
     netting_decoders::venue_flow,
+    registry::VenueAddresses,
 };
 
 sol! {
@@ -25,18 +26,24 @@ sol! {
     function fillQuoteEthToToken(address buyToken, address to, bytes data, uint256 feeAmount);
 }
 
+/// Rainbow's decoders (see `venues::DECODERS`). Rainbow keeps its fee in the router — there is
+/// no fee-collector state to hold, so the constructor takes no addresses.
+pub(crate) fn decoders(_addresses: &VenueAddresses) -> Vec<Box<dyn TradeDecoder>> {
+    vec![Box::new(RainbowCalldata)]
+}
+
 /// Rainbow's calldata decoder.
 pub(crate) struct RainbowCalldata;
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for RainbowCalldata {
+impl TradeDecoder for RainbowCalldata {
     fn name(&self) -> &'static str {
         "rainbow-calldata"
     }
 
     /// Net the sender's flow, then subtract the input-side fee read from the calldata so the
     /// amount that entered the swap is comparable to a re-solve. Declines any non-ETH→token call.
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         let fee = eth_to_token_fee(ctx.input)?;
         // The router keeps no fee transfer, so there is nothing for `venue_flow` to back out; it
         // just nets the sender. The input-side fee is applied here.
@@ -58,19 +65,12 @@ fn eth_to_token_fee(input: &[u8]) -> Option<U256> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use alloy::{
-        primitives::{Address, U256},
-        providers::RootProvider,
-        rpc::client::RpcClient,
-        transports::mock::Asserter,
-    };
+    use alloy::primitives::{Address, U256};
 
     use super::*;
     use crate::decoder::{
         registry::Registry,
-        test_utils::{addr, frame, make_transfer_log, receipt, swap, tx_hash},
+        test_utils::{addr, make_transfer_log, swap, CtxFixture},
         transfer_ledger::TransferLedger,
     };
 
@@ -91,22 +91,8 @@ mod tests {
         entry_point: Address,
     ) -> Option<TraderFlow> {
         let registry = Registry::ethereum();
-        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
-        let mut code_cache = HashMap::new();
-        let user = addr(1);
-        let receipt = receipt(tx_hash(1), user, Some(entry_point), vec![]);
-        let root = frame("CALL", user, entry_point, 0);
-        let mut ctx = DecodeContext {
-            provider: &provider,
-            registry: &registry,
-            code_cache: &mut code_cache,
-            receipt: &receipt,
-            entry_point,
-            transfer_ledger: ledger,
-            input,
-            root: &root,
-            venue: registry.venue("rainbow"),
-        };
+        let mut fixture = CtxFixture::new(addr(1), entry_point);
+        let mut ctx = fixture.ctx(&registry, ledger, input);
         RainbowCalldata.decode(&mut ctx).await
     }
 

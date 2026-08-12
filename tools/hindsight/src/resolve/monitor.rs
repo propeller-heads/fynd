@@ -293,8 +293,8 @@ fn biguint_to_u256(value: &BigUint) -> U256 {
 /// Tycho stream that drives `block`, so poll the RPC head until it reaches `block` or `budget`
 /// expires — that distinguishes a transient race from a real failure. A block still undecodable
 /// once the RPC has indexed it is a genuine error and surfaces to the caller.
-async fn decode_block_when_available<P: Provider>(
-    decoder: &mut Decoder<P>,
+async fn decode_block_when_available(
+    decoder: &mut Decoder,
     block: u64,
     budget: Duration,
 ) -> anyhow::Result<Vec<DecodedTrade>> {
@@ -567,11 +567,11 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
 
 /// Drive one solver session: step blocks and re-solve each block's settled trades until the run
 /// completes or the feed dies.
-async fn run_session<P: Provider>(
+async fn run_session(
     cfg: &MonitorArgs,
     pacing: &Pacing,
     adapter: &StepAdapter<'_>,
-    decoder: &mut Decoder<P>,
+    decoder: &mut Decoder,
     comparisons: &mut Option<super::jsonl::RotatingWriter>,
     totals: &mut Totals,
 ) -> SessionEnd {
@@ -755,7 +755,7 @@ mod tests {
     }
 
     /// A mocked provider whose `eth_blockNumber` answers come from `heads`, in order.
-    fn decoder_with_heads(heads: &[u64]) -> Decoder<impl Provider> {
+    fn decoder_with_heads(heads: &[u64]) -> Decoder {
         use alloy::providers::{mock::Asserter, ProviderBuilder};
 
         let asserter = Asserter::new();

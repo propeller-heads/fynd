@@ -99,8 +99,8 @@ impl VerifyReport {
 }
 
 /// Decode each block locally and compare against Allium's `aggregator_trades`.
-pub(crate) async fn run<P: Provider>(
-    decoder: &mut Decoder<P>,
+pub(crate) async fn run(
+    decoder: &mut Decoder,
     allium: &AlliumClient,
     blocks: &[u64],
     tolerance_bps: f64,

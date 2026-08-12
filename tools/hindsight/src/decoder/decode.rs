@@ -1,10 +1,13 @@
 //! Decoding a matched transaction into a trader's flow.
 //!
 //! One decoder handles one matched transaction. Which decoder runs is chosen by the matched
-//! entity (`decoders_for`): a direct sender, an intent order, or a specific venue. Each entity
-//! maps to an ordered list of `TradeDecoder`s tried in turn — the first that returns a flow
-//! wins, so a later one is the fallback for what the earlier ones cannot decode. That is where an
-//! entity picks how its swaps are read, in the order it prefers.
+//! entity: a direct sender, an intent order, or a specific venue. Each entity holds an ordered
+//! list of `TradeDecoder`s tried in turn — the first that returns a flow wins, so a later one is
+//! the fallback for what the earlier ones cannot decode. That is where an entity picks how its
+//! swaps are read, in the order it prefers. Every decoder is constructed once, with the state it
+//! needs: a venue's decoders are built at registry load and live on its `Venue` entry; the
+//! sender and intent lists are built once per `Decoder` (see [`EntityDecoders`]). The
+//! per-transaction path only resolves an address and calls trait objects.
 //!
 //! What a decoder reads is open — the value movements, the calldata, the event logs, a
 //! combination, or a source not needed yet; all of it arrives in the `DecodeContext`, and a
@@ -17,7 +20,7 @@ use std::collections::HashMap;
 use alloy::{
     network::AnyTransactionReceipt,
     primitives::{Address, U256},
-    providers::Provider,
+    providers::DynProvider,
     rpc::types::trace::geth::CallFrame,
 };
 use async_trait::async_trait;
@@ -25,41 +28,41 @@ use async_trait::async_trait;
 use crate::decoder::{
     intents,
     netting_decoders::SenderNetting,
-    registry::{Registry, VenueAddresses},
+    registry::{Registry, Venue},
     transfer_ledger::{NetSwap, TransferLedger},
-    venues,
 };
 
 /// Decode one matched, traced transaction into the trader's flow, or `None` when this decoder
 /// cannot. Async because a decoder may need RPC lookups beyond the transaction (e.g. checking an
 /// address for contract code).
 #[async_trait]
-pub(crate) trait TradeDecoder<P: Provider>: Send + Sync {
+pub(crate) trait TradeDecoder: Send + Sync {
     /// Label recorded on the trades this decoder produced, so the JSONL records say which decoder
     /// carried each trade (deliberately not a metric label).
     fn name(&self) -> &'static str;
 
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow>;
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow>;
 }
 
 /// Whose flow a matched transaction carries — the axis that selects the decoders.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub(crate) enum TraderRole<'a> {
     /// The transaction sender (a direct solver swap).
     Sender,
     /// An intent fill: the sender is a solver or batch settler acting for the swapper.
     Intent,
-    /// A venue the sender entered through, named by its address-book section.
-    Venue(&'a str),
+    /// A venue the sender entered through: its registry entry, carrying its addresses and its
+    /// decoders.
+    Venue(&'a Venue),
 }
 
 impl<'a> TraderRole<'a> {
     /// Classify the role from the entry point. Assumes the transaction already matched (see
     /// `matching`): an entry point that is neither a venue nor otherwise known can only have
     /// matched via a solver log, which is a solver-initiated intent fill.
-    fn classify(entry_point: Address, registry: &'a Registry) -> Self {
-        if let Some(name) = registry.venue_name(entry_point) {
-            return TraderRole::Venue(name);
+    pub(crate) fn classify(entry_point: Address, registry: &'a Registry) -> Self {
+        if let Some(venue) = registry.venue_for(entry_point) {
+            return TraderRole::Venue(venue);
         }
         // Batch settlers (e.g. CoW) are entered by a solver, not the trader, so the real swap is
         // the swapper's net flow — decoded like a solver-initiated intent fill.
@@ -73,34 +76,38 @@ impl<'a> TraderRole<'a> {
     }
 }
 
-/// The decoders tried for a role, in order — the first to return a flow wins. This is the one
-/// place the entity → decoder mapping lives: an entity lists its decoders, in the order it wants
-/// them tried.
-fn decoders_for<P: Provider>(role: TraderRole<'_>) -> Vec<Box<dyn TradeDecoder<P>>> {
-    match role {
-        TraderRole::Sender => vec![Box::new(SenderNetting)],
-        TraderRole::Intent => intents::decoders_for(),
-        TraderRole::Venue(name) => venues::decoders_for(name),
+/// The decoders for the two entities that are not venues, built once per `Decoder`. A venue's
+/// decoders live on its registry entry instead, constructed with that venue's addresses.
+pub(crate) struct EntityDecoders {
+    sender: Vec<Box<dyn TradeDecoder>>,
+    intent: Vec<Box<dyn TradeDecoder>>,
+}
+
+impl EntityDecoders {
+    pub(crate) fn new() -> Self {
+        Self { sender: vec![Box::new(SenderNetting)], intent: intents::decoders() }
     }
 }
 
-/// Decode a matched transaction: pick the decoders for its role and try them in order. Returns
-/// the winning decoder's name with the flow.
-pub(crate) async fn recover<P: Provider>(
-    ctx: &mut DecodeContext<'_, P>,
+/// Decode a matched transaction: try its role's decoders in order. Returns the winning decoder's
+/// name with the flow.
+pub(crate) async fn recover(
+    role: TraderRole<'_>,
+    decoders: &EntityDecoders,
+    ctx: &mut DecodeContext<'_>,
 ) -> Option<(&'static str, TraderFlow)> {
-    let role = TraderRole::classify(ctx.entry_point, ctx.registry);
-    if let TraderRole::Venue(name) = role {
-        let registry = ctx.registry;
-        ctx.venue = registry.venue(name);
-    }
-    try_decoders(decoders_for(role), ctx).await
+    let list = match role {
+        TraderRole::Sender => &decoders.sender,
+        TraderRole::Intent => &decoders.intent,
+        TraderRole::Venue(venue) => &venue.decoders,
+    };
+    try_decoders(list, ctx).await
 }
 
 /// Try each decoder in order; the first flow wins and the rest are not consulted.
-async fn try_decoders<P: Provider>(
-    decoders: Vec<Box<dyn TradeDecoder<P>>>,
-    ctx: &mut DecodeContext<'_, P>,
+async fn try_decoders(
+    decoders: &[Box<dyn TradeDecoder>],
+    ctx: &mut DecodeContext<'_>,
 ) -> Option<(&'static str, TraderFlow)> {
     for decoder in decoders {
         if let Some(flow) = decoder.decode(ctx).await {
@@ -115,9 +122,9 @@ async fn try_decoders<P: Provider>(
 /// Every kind of evidence is gathered up front, for every matched transaction, regardless of
 /// which decoder wins: the receipt and its logs, the root calldata, and the flattened transfer
 /// ledger all arrive here. A decoder that starts needing another input extends this struct.
-pub(crate) struct DecodeContext<'a, P> {
+pub(crate) struct DecodeContext<'a> {
     /// RPC access, for decoders that must look beyond the transaction.
-    pub provider: &'a P,
+    pub provider: &'a DynProvider,
     pub registry: &'a Registry,
     /// Cross-block contract-code cache, owned by the decoder.
     pub code_cache: &'a mut HashMap<Address, bool>,
@@ -134,10 +141,6 @@ pub(crate) struct DecodeContext<'a, P> {
     /// call (its calldata, its declared output recipient) walks this itself rather than netting
     /// the ledger — e.g. a packed calldata layout (Fly) only decodes inside its own frame.
     pub root: &'a CallFrame,
-    /// The matched venue's address-book section (entry points, fee collectors, solver aliases),
-    /// set when the transaction entered through a venue so venue decoders never look themselves
-    /// up by name. `None` for direct and intent transactions.
-    pub venue: Option<&'a VenueAddresses>,
 }
 
 /// Which part of the transaction's gas counts as the settled route's cost. Decided by the
@@ -216,21 +219,19 @@ mod tests {
         Arc,
     };
 
-    use alloy::{providers::RootProvider, rpc::client::RpcClient, transports::mock::Asserter};
-
     use super::*;
-    use crate::decoder::test_utils::{addr, frame, receipt, swap, tx_hash};
+    use crate::decoder::test_utils::{addr, swap, CtxFixture};
 
     /// Always declines.
     struct Declines;
 
     #[async_trait]
-    impl<P: Provider> TradeDecoder<P> for Declines {
+    impl TradeDecoder for Declines {
         fn name(&self) -> &'static str {
             "declines"
         }
 
-        async fn decode(&self, _ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+        async fn decode(&self, _ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
             None
         }
     }
@@ -239,12 +240,12 @@ mod tests {
     struct Wins;
 
     #[async_trait]
-    impl<P: Provider> TradeDecoder<P> for Wins {
+    impl TradeDecoder for Wins {
         fn name(&self) -> &'static str {
             "wins"
         }
 
-        async fn decode(&self, _ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+        async fn decode(&self, _ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
             Some(TraderFlow::without_fees(addr(1), swap(addr(10), 1, addr(11), 2)))
         }
     }
@@ -253,38 +254,23 @@ mod tests {
     struct CountsCalls(Arc<AtomicUsize>);
 
     #[async_trait]
-    impl<P: Provider> TradeDecoder<P> for CountsCalls {
+    impl TradeDecoder for CountsCalls {
         fn name(&self) -> &'static str {
             "counts"
         }
 
-        async fn decode(&self, _ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+        async fn decode(&self, _ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
             self.0.fetch_add(1, Ordering::SeqCst);
             None
         }
     }
 
-    async fn try_with(
-        decoders: Vec<Box<dyn TradeDecoder<RootProvider>>>,
-    ) -> Option<(&'static str, TraderFlow)> {
-        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
+    async fn try_with(decoders: Vec<Box<dyn TradeDecoder>>) -> Option<(&'static str, TraderFlow)> {
         let registry = Registry::ethereum();
-        let mut code_cache = HashMap::new();
-        let receipt = receipt(tx_hash(1), addr(1), Some(addr(2)), vec![]);
         let transfer_ledger = TransferLedger::from_transaction(&[], &[]);
-        let root = frame("CALL", addr(1), addr(2), 0);
-        let mut ctx = DecodeContext {
-            provider: &provider,
-            registry: &registry,
-            code_cache: &mut code_cache,
-            receipt: &receipt,
-            entry_point: addr(2),
-            transfer_ledger: &transfer_ledger,
-            input: &[],
-            root: &root,
-            venue: None,
-        };
-        try_decoders(decoders, &mut ctx).await
+        let mut fixture = CtxFixture::new(addr(1), addr(2));
+        let mut ctx = fixture.ctx(&registry, &transfer_ledger, &[]);
+        try_decoders(&decoders, &mut ctx).await
     }
 
     #[tokio::test]

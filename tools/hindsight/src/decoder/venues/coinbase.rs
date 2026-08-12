@@ -5,50 +5,50 @@
 //! output token, sent to its fee wallet. Nets the sender's flow and backs that fee out through the
 //! shared `venue_flow` — no venue-specific corrections.
 
-use alloy::providers::Provider;
 use async_trait::async_trait;
 
 use crate::decoder::{
     decode::{DecodeContext, TradeDecoder, TraderFlow},
     netting_decoders::venue_flow,
+    registry::VenueAddresses,
 };
 
+/// Coinbase Wallet's decoders, constructed with its address-book section (see
+/// `venues::DECODERS`).
+pub(crate) fn decoders(addresses: &VenueAddresses) -> Vec<Box<dyn TradeDecoder>> {
+    vec![Box::new(CoinbaseNetting { addresses: addresses.clone() })]
+}
+
 /// Coinbase Wallet's netting decoder.
-pub(crate) struct CoinbaseNetting;
+pub(crate) struct CoinbaseNetting {
+    addresses: VenueAddresses,
+}
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for CoinbaseNetting {
+impl TradeDecoder for CoinbaseNetting {
     fn name(&self) -> &'static str {
         "coinbase-netting"
     }
 
     /// Net the sender's flow and back the output-token fee out.
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
-        let addresses = ctx.venue?;
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         venue_flow(
             ctx.transfer_ledger,
             ctx.receipt.from,
             ctx.entry_point,
-            &addresses.fee_collectors,
+            &self.addresses.fee_collectors,
         )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use alloy::{
-        primitives::{Address, U256},
-        providers::RootProvider,
-        rpc::client::RpcClient,
-        transports::mock::Asserter,
-    };
+    use alloy::primitives::{Address, U256};
 
     use super::*;
     use crate::decoder::{
         registry::Registry,
-        test_utils::{addr, frame, make_transfer_log, receipt, swap, tx_hash},
+        test_utils::{addr, make_transfer_log, swap, venue_addresses, CtxFixture},
         transfer_ledger::TransferLedger,
     };
 
@@ -68,22 +68,10 @@ mod tests {
         sender: Address,
         entry_point: Address,
     ) -> Option<TraderFlow> {
-        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
-        let mut code_cache = HashMap::new();
-        let receipt = receipt(tx_hash(1), sender, Some(entry_point), vec![]);
-        let root = frame("CALL", sender, entry_point, 0);
-        let mut ctx = DecodeContext {
-            provider: &provider,
-            registry,
-            code_cache: &mut code_cache,
-            receipt: &receipt,
-            entry_point,
-            transfer_ledger: ledger,
-            input: &[],
-            root: &root,
-            venue: registry.venue("coinbase"),
-        };
-        CoinbaseNetting.decode(&mut ctx).await
+        let decoder = CoinbaseNetting { addresses: venue_addresses(registry, "coinbase") };
+        let mut fixture = CtxFixture::new(sender, entry_point);
+        let mut ctx = fixture.ctx(registry, ledger, &[]);
+        decoder.decode(&mut ctx).await
     }
 
     #[tokio::test]

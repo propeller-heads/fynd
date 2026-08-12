@@ -1,13 +1,14 @@
 //! Venue-specific decoders: the platforms users enter through (Relay, `MetaMask`).
 //!
 //! A venue owns the order flow — it picks a solver and may take a fee. One module here is one
-//! venue, holding every decoder for it. A venue lists its decoders in `decoders_for`, tried in
-//! order: today each is a netting decoder (net the sender, back the fee out, add venue-specific
-//! corrections), and a venue that is better read from its calldata would add a calldata decoder
-//! ahead of or behind netting.
+//! venue, holding every decoder for it. A venue lists its decoders in its `decoders` constructor
+//! (registered in `DECODERS`), tried in order: most are netting decoders (net the sender, back
+//! the fee out, add venue-specific corrections), and a venue that is better read from its
+//! calldata puts a calldata decoder ahead of or behind netting.
 //!
 //! Its address facts — entry points, fee collectors, solver aliases — are pure data in the
-//! address book's `[venues.<name>]` section, handed to the decoder through the context.
+//! address book's `[venues.<name>]` section. The decoders are constructed with those addresses
+//! when the registry loads, so each holds its own state.
 //!
 //! # What happens when a venue is missing
 //!
@@ -30,40 +31,48 @@ pub(crate) mod rabby;
 pub(crate) mod rainbow;
 pub(crate) mod relay;
 
-use alloy::providers::{Provider, RootProvider};
+use crate::decoder::{decode::TradeDecoder, registry::VenueAddresses};
 
-use crate::decoder::decode::TradeDecoder;
+/// Constructs a venue's decoders from its address-book section, so each decoder holds the
+/// addresses it needs as its own state.
+type Constructor = fn(&VenueAddresses) -> Vec<Box<dyn TradeDecoder>>;
 
-/// The decoders tried for a venue, in order (first hit wins). This is the one place a venue is
-/// registered — adding a venue is a `mod` declaration plus one arm here. A name that resolves to
-/// no decoders is rejected by the registry at load time (see `has_decoder`).
-pub(crate) fn decoders_for<P: Provider>(name: &str) -> Vec<Box<dyn TradeDecoder<P>>> {
-    match name {
-        "relay" => vec![Box::new(relay::RelayCalldata), Box::new(relay::RelayNetting)],
-        "metamask" => vec![Box::new(metamask::MetaMaskNetting)],
-        "rabby" => vec![Box::new(rabby::RabbyNetting)],
-        "coinbase" => vec![Box::new(coinbase::CoinbaseNetting)],
-        "rainbow" => vec![Box::new(rainbow::RainbowCalldata)],
-        _ => vec![],
-    }
-}
+/// The one name → code binding: each address-book venue name maps to the constructor of its
+/// decoders, in the order they are tried (first hit wins). Consulted once, when the registry
+/// loads — the constructed decoders live on the venue's registry entry, and decoding calls them
+/// as trait objects. Adding a venue is a `mod` declaration plus one row here; a `[venues.<name>]`
+/// section with no row fails the registry load.
+const DECODERS: &[(&str, Constructor)] = &[
+    ("relay", relay::decoders),
+    ("metamask", metamask::decoders),
+    ("rabby", rabby::decoders),
+    ("coinbase", coinbase::decoders),
+    ("rainbow", rainbow::decoders),
+];
 
-/// Whether a venue name resolves to a decoder — derived from `decoders_for` so the two cannot
-/// drift. The registry uses this at load time to reject an address-book venue with no decoder.
-/// The provider type is irrelevant; only whether a decoder exists matters.
-pub(crate) fn has_decoder(name: &str) -> bool {
-    !decoders_for::<RootProvider>(name).is_empty()
+/// Construct the named venue's decoders with its addresses, or `None` for a name with no
+/// `DECODERS` row. Called by the registry at load time, once per venue.
+pub(crate) fn build(name: &str, addresses: &VenueAddresses) -> Option<Vec<Box<dyn TradeDecoder>>> {
+    DECODERS
+        .iter()
+        .find(|(registered, _)| *registered == name)
+        .map(|(_, constructor)| constructor(addresses))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decoder::registry::Registry;
 
     #[test]
-    fn test_has_decoder_follows_decoders_for() {
-        // A registered venue resolves; an unknown name does not. Adding a venue needs no change
-        // here — `has_decoder` derives from the one `decoders_for` registration.
-        assert!(has_decoder("relay"));
-        assert!(!has_decoder("nope"));
+    fn test_build_follows_the_registration_table() {
+        // A registered venue constructs its decoders; an unknown name does not — which is what
+        // lets the registry reject an address-book venue with no DECODERS row at load time.
+        let registry = Registry::ethereum();
+        let relay = registry.venue("relay").unwrap();
+        assert!(!build("relay", relay)
+            .unwrap()
+            .is_empty());
+        assert!(build("nope", relay).is_none());
     }
 }

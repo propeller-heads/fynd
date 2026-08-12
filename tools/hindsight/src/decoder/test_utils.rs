@@ -1,13 +1,33 @@
+use std::collections::HashMap;
+
 use alloy::{
     consensus::{Eip658Value, Receipt, ReceiptWithBloom},
     network::{AnyReceiptEnvelope, AnyTransactionReceipt},
     primitives::{address, Address, Bloom, Bytes, Log as PrimitiveLog, TxHash, B256, U256},
-    rpc::types::{trace::geth::CallFrame, Log, TransactionReceipt},
+    providers::{DynProvider, Provider, RootProvider},
+    rpc::{
+        client::RpcClient,
+        types::{trace::geth::CallFrame, Log, TransactionReceipt},
+    },
     serde::WithOtherFields,
     sol_types::SolEvent,
+    transports::mock::Asserter,
 };
 
-use crate::decoder::transfer_ledger::{NetSwap, Transfer};
+use crate::decoder::{
+    decode::DecodeContext,
+    registry::{Registry, VenueAddresses},
+    transfer_ledger::{NetSwap, Transfer, TransferLedger},
+};
+
+/// The named venue's address-book section, for tests that construct a venue decoder directly.
+/// Panics naming the venue when the book has no such section — a silent default (empty entry
+/// points, no fee collectors) would let such a test pass without exercising the decoder.
+pub(crate) fn venue_addresses(registry: &Registry, name: &str) -> VenueAddresses {
+    let addresses = registry.venue(name);
+    assert!(addresses.is_some(), "the address book has no venue '{name}'");
+    addresses.unwrap().clone()
+}
 
 /// The canonical Permit2 deployment, for fixtures exercising the registry's infrastructure set.
 pub(crate) const PERMIT2: Address = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");
@@ -84,6 +104,71 @@ pub(crate) fn frame(typ: &str, from: Address, to: Address, value: u64) -> CallFr
 pub(crate) fn make_pool_log(pool: Address) -> Log {
     let primitive = PrimitiveLog::new_unchecked(pool, vec![B256::repeat_byte(0xAA)], Bytes::new());
     Log { inner: primitive, ..Default::default() }
+}
+
+/// Owns everything a `DecodeContext` borrows, so a decoder test builds one in two lines instead
+/// of hand-assembling every field. The provider is a mocked `DynProvider` that answers nothing —
+/// tests that need RPC answers push them via [`CtxFixture::with_asserter`].
+pub(crate) struct CtxFixture {
+    provider: DynProvider,
+    code_cache: HashMap<Address, bool>,
+    receipt: AnyTransactionReceipt,
+    root: CallFrame,
+    entry_point: Address,
+}
+
+impl CtxFixture {
+    /// A fixture for a transaction `sender` sent into `entry_point`, with an empty receipt and a
+    /// bare root frame. Replace [`CtxFixture::root`] for trace-walking decoders.
+    pub(crate) fn new(sender: Address, entry_point: Address) -> Self {
+        Self::with_asserter(sender, entry_point, &Asserter::new())
+    }
+
+    /// Like [`CtxFixture::new`], with a caller-held [`Asserter`] to feed the provider mocked RPC
+    /// responses.
+    pub(crate) fn with_asserter(
+        sender: Address,
+        entry_point: Address,
+        asserter: &Asserter,
+    ) -> Self {
+        Self {
+            provider: RootProvider::new(RpcClient::mocked(asserter.clone())).erased(),
+            code_cache: HashMap::new(),
+            receipt: receipt(tx_hash(1), sender, Some(entry_point), vec![]),
+            root: frame("CALL", sender, entry_point, 0),
+            entry_point,
+        }
+    }
+
+    /// Replace the root trace frame, for decoders that walk the trace.
+    pub(crate) fn set_root(&mut self, root: CallFrame) {
+        self.root = root;
+    }
+
+    /// Replace the receipt's logs, for decoders that read events.
+    pub(crate) fn set_logs(&mut self, logs: Vec<Log>) {
+        self.receipt = receipt(tx_hash(1), self.receipt.from, self.receipt.to, logs);
+    }
+
+    /// The `DecodeContext` over this fixture's fields and the caller's registry, ledger, and
+    /// calldata.
+    pub(crate) fn ctx<'a>(
+        &'a mut self,
+        registry: &'a Registry,
+        transfer_ledger: &'a TransferLedger,
+        input: &'a [u8],
+    ) -> DecodeContext<'a> {
+        DecodeContext {
+            provider: &self.provider,
+            registry,
+            code_cache: &mut self.code_cache,
+            receipt: &self.receipt,
+            entry_point: self.entry_point,
+            transfer_ledger,
+            input,
+            root: &self.root,
+        }
+    }
 }
 
 /// A synthetic transaction receipt for decoder tests that need block-level context (sandwich

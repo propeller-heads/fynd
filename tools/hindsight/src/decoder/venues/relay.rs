@@ -11,18 +11,25 @@
 
 use std::collections::HashSet;
 
-use alloy::{
-    primitives::{Address, U256},
-    providers::Provider,
-};
+use alloy::primitives::{Address, U256};
 use async_trait::async_trait;
 
 use crate::decoder::{
     decode::{DecodeContext, GasScope, TradeDecoder, TraderFlow},
     netting_decoders::venue_flow,
+    registry::VenueAddresses,
     solvers, trace,
     transfer_ledger::{NetSwap, TransferLedger},
 };
+
+/// Relay's decoders, in try order, constructed with its address-book section (see
+/// `venues::DECODERS`).
+pub(crate) fn decoders(addresses: &VenueAddresses) -> Vec<Box<dyn TradeDecoder>> {
+    vec![
+        Box::new(RelayCalldata { addresses: addresses.clone() }),
+        Box::new(RelayNetting { addresses: addresses.clone() }),
+    ]
+}
 
 /// Relay's calldata-primary decoder.
 ///
@@ -40,16 +47,17 @@ use crate::decoder::{
 /// trade cleared it by construction, so a violation means the wrong legs were picked up), and,
 /// when the calldata also declares a quote, it must sit within `plausible_quote`'s band of the
 /// recovered output.
-pub(crate) struct RelayCalldata;
+pub(crate) struct RelayCalldata {
+    addresses: VenueAddresses,
+}
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for RelayCalldata {
+impl TradeDecoder for RelayCalldata {
     fn name(&self) -> &'static str {
         "relay-calldata"
     }
 
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
-        let addresses = ctx.venue?;
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         let solver_frame = trace::find_solver_frame(ctx.root, ctx.registry)?;
         let knowledge = solvers::knowledge(&ctx.registry.label(solver_frame.to?));
         let intent = knowledge.swap_intent(&solver_frame.input, None)?;
@@ -72,7 +80,7 @@ impl<P: Provider> TradeDecoder<P> for RelayCalldata {
         // amount above needs adjusting — the fee is recorded for transparency only.
         let fees = ctx
             .transfer_ledger
-            .received_by(&addresses.fee_collectors);
+            .received_by(&self.addresses.fee_collectors);
         let venue_fee_in = fees
             .get(&intent.token_in)
             .copied()
@@ -112,10 +120,12 @@ impl<P: Provider> TradeDecoder<P> for RelayCalldata {
 }
 
 /// Relay's netting decoder.
-pub(crate) struct RelayNetting;
+pub(crate) struct RelayNetting {
+    addresses: VenueAddresses,
+}
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for RelayNetting {
+impl TradeDecoder for RelayNetting {
     fn name(&self) -> &'static str {
         "relay-netting"
     }
@@ -124,20 +134,19 @@ impl<P: Provider> TradeDecoder<P> for RelayNetting {
     /// When the sender has no net flow the transaction is a solver-initiated rebalancing fill,
     /// decoded by anchoring on the fee collector instead (Relay funds the swap from it); the
     /// collector is the funding source there, not a fee recipient, so no fee is backed out.
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
-        let addresses = ctx.venue?;
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         if let Some(flow) = venue_flow(
             ctx.transfer_ledger,
             ctx.receipt.from,
             ctx.entry_point,
-            &addresses.fee_collectors,
+            &self.addresses.fee_collectors,
         ) {
             return Some(flow);
         }
         decode_rebalance(
             ctx.transfer_ledger,
-            &addresses.fee_collectors,
-            &addresses.entry_points,
+            &self.addresses.fee_collectors,
+            &self.addresses.entry_points,
             ctx.registry.wrapped_native(),
         )
         .map(|swap| TraderFlow::without_fees(ctx.receipt.from, swap))
@@ -214,19 +223,13 @@ fn decode_rebalance(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use alloy::{
-        providers::RootProvider,
-        rpc::{client::RpcClient, types::Log},
-        transports::mock::Asserter,
-    };
+    use alloy::rpc::types::Log;
 
     use super::*;
     use crate::decoder::{
         decode::GasScope,
         registry::Registry,
-        test_utils::{addr, frame, make_transfer_log, receipt, swap, tx_hash},
+        test_utils::{addr, frame, make_transfer_log, swap, venue_addresses, CtxFixture},
     };
 
     fn transfer_ledger(logs: &[Log], native: &[(Address, Address, U256)]) -> TransferLedger {
@@ -243,6 +246,11 @@ mod tests {
             .unwrap()
     }
 
+    /// The `RelayNetting` decoder constructed with the registry's relay addresses.
+    fn relay_netting(registry: &Registry) -> RelayNetting {
+        RelayNetting { addresses: venue_addresses(registry, "relay") }
+    }
+
     /// Decode a Relay transaction through the full `RelayNetting` decoder.
     async fn decode(
         registry: &Registry,
@@ -250,22 +258,11 @@ mod tests {
         sender: Address,
         entry_point: Address,
     ) -> Option<TraderFlow> {
-        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
-        let mut code_cache = HashMap::new();
-        let receipt = receipt(tx_hash(1), sender, Some(entry_point), vec![]);
-        let root = frame("CALL", sender, entry_point, 0);
-        let mut ctx = DecodeContext {
-            provider: &provider,
-            registry,
-            code_cache: &mut code_cache,
-            receipt: &receipt,
-            entry_point,
-            transfer_ledger: ledger,
-            input: &[],
-            root: &root,
-            venue: registry.venue("relay"),
-        };
-        RelayNetting.decode(&mut ctx).await
+        let mut fixture = CtxFixture::new(sender, entry_point);
+        let mut ctx = fixture.ctx(registry, ledger, &[]);
+        relay_netting(registry)
+            .decode(&mut ctx)
+            .await
     }
 
     #[test]
@@ -491,21 +488,11 @@ mod tests {
             sender: Address,
             router: Address,
         ) -> Option<TraderFlow> {
-            let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
-            let mut code_cache = HashMap::new();
-            let receipt = receipt(tx_hash(1), sender, Some(router), vec![]);
-            let mut ctx = DecodeContext {
-                provider: &provider,
-                registry,
-                code_cache: &mut code_cache,
-                receipt: &receipt,
-                entry_point: router,
-                transfer_ledger: ledger,
-                input: &[],
-                root,
-                venue: registry.venue("relay"),
-            };
-            RelayCalldata.decode(&mut ctx).await
+            let decoder = RelayCalldata { addresses: venue_addresses(registry, "relay") };
+            let mut fixture = CtxFixture::new(sender, router);
+            fixture.set_root(root.clone());
+            let mut ctx = fixture.ctx(registry, ledger, &[]);
+            decoder.decode(&mut ctx).await
         }
 
         #[tokio::test]

@@ -36,7 +36,7 @@ use alloy::{
     eips::BlockId,
     network::AnyTransactionReceipt,
     primitives::{Address, TxHash, U256},
-    providers::Provider,
+    providers::{DynProvider, Provider},
     rpc::types::trace::geth::CallFrame,
 };
 use anyhow::Context;
@@ -44,7 +44,7 @@ use futures::stream::StreamExt;
 use tracing::{debug, warn};
 
 use crate::decoder::{
-    decode::{recover, DecodeContext, GasScope, TraderFlow},
+    decode::{recover, DecodeContext, EntityDecoders, GasScope, TraderFlow, TraderRole},
     matching::MatchedSolverTrade,
     solvers::SwapIntent,
     trace::{collect_native_transfers, fetch_trace, route_gas},
@@ -167,10 +167,14 @@ fn intent_fields(intent: Option<&SwapIntent>) -> (Option<U256>, Option<U256>, Op
 const TRACE_CONCURRENCY: usize = 10;
 
 /// Stateful trade decoder: owns the RPC provider, the chain's address
-/// registry, and the caches that are worth keeping across blocks.
-pub(crate) struct Decoder<P> {
-    provider: P,
+/// registry, the entity decoders, and the caches that are worth keeping
+/// across blocks.
+pub(crate) struct Decoder {
+    provider: DynProvider,
     registry: Registry,
+    /// The sender and intent decoder lists, built once. Venue decoders live on their registry
+    /// entries instead, constructed with each venue's addresses.
+    decoders: EntityDecoders,
     /// Whether an address had contract code when first checked, kept for the
     /// life of the decoder. An address gaining code mid-run (a deploy or an
     /// EIP-7702 delegation) keeps its stale answer until restart — acceptable
@@ -178,14 +182,22 @@ pub(crate) struct Decoder<P> {
     code_cache: HashMap<Address, bool>,
 }
 
-impl<P: Provider> Decoder<P> {
-    pub(crate) fn new(provider: P, registry: Registry) -> Self {
-        Self { provider, registry, code_cache: HashMap::new() }
+impl Decoder {
+    /// The provider is type-erased once here: decoders are trait objects held in the registry
+    /// and the entity lists, so they read RPC through `DynProvider` rather than a type
+    /// parameter.
+    pub(crate) fn new(provider: impl Provider + 'static, registry: Registry) -> Self {
+        Self {
+            provider: provider.erased(),
+            registry,
+            decoders: EntityDecoders::new(),
+            code_cache: HashMap::new(),
+        }
     }
 
     /// The decoder's RPC provider, for adjacent lookups (chain head, token
     /// metadata) that should share its connection.
-    pub(crate) fn provider(&self) -> &P {
+    pub(crate) fn provider(&self) -> &DynProvider {
         &self.provider
     }
 
@@ -290,7 +302,7 @@ impl<P: Provider> Decoder<P> {
         block_number: u64,
         tx_index: u64,
     ) -> Option<DecodedTrade> {
-        let Self { provider, registry, code_cache } = self;
+        let Self { provider, registry, decoders, code_cache } = self;
         let MatchedSolverTrade { receipt, entry_point } = matched;
         let logs = receipt.logs();
         let sender = receipt.from;
@@ -299,6 +311,7 @@ impl<P: Provider> Decoder<P> {
         collect_native_transfers(root, &mut native);
         let transfer_ledger = TransferLedger::from_transaction(logs, &native);
 
+        let role = TraderRole::classify(entry_point, registry);
         let mut ctx = DecodeContext {
             provider,
             registry,
@@ -308,9 +321,8 @@ impl<P: Provider> Decoder<P> {
             transfer_ledger: &transfer_ledger,
             input: &root.input,
             root,
-            venue: None,
         };
-        let Some((decoder, mut flow)) = recover(&mut ctx).await else {
+        let Some((decoder, mut flow)) = recover(role, decoders, &mut ctx).await else {
             warn!(
                 tx = %receipt.transaction_hash,
                 venue = %registry.label(entry_point),

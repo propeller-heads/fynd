@@ -22,12 +22,12 @@ use crate::decoder::{
 pub(crate) struct IntentNetting;
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for IntentNetting {
+impl TradeDecoder for IntentNetting {
     fn name(&self) -> &'static str {
         "intent-netting"
     }
 
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         find_intent_trade(
             ctx.provider,
             ctx.transfer_ledger,

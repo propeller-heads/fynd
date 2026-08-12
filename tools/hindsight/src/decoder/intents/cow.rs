@@ -13,7 +13,6 @@
 
 use alloy::{
     primitives::{address, Address, B256},
-    providers::Provider,
     sol,
     sol_types::{SolCall, SolEvent},
 };
@@ -83,12 +82,12 @@ const COW_NATIVE_ETH: Address = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 pub(crate) struct CowSettlement;
 
 #[async_trait]
-impl<P: Provider> TradeDecoder<P> for CowSettlement {
+impl TradeDecoder for CowSettlement {
     fn name(&self) -> &'static str {
         "cow-trade"
     }
 
-    async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         let mut trades = ctx.receipt.logs().iter().filter(|log| {
             ctx.registry
                 .is_batch_settler(log.address()) &&
@@ -134,20 +133,16 @@ fn normalize_native(token: Address) -> Address {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use alloy::{
         primitives::{address, b256, Bytes, U256},
-        providers::RootProvider,
-        rpc::{client::RpcClient, types::Log},
+        rpc::types::Log,
         sol_types::SolCall,
-        transports::mock::Asserter,
     };
 
     use super::*;
     use crate::decoder::{
         registry::Registry,
-        test_utils::{addr, frame, receipt, swap, tx_hash},
+        test_utils::{addr, swap, CtxFixture},
         transfer_ledger::TransferLedger,
     };
 
@@ -183,22 +178,10 @@ mod tests {
 
     async fn decode(logs: Vec<Log>) -> Option<TraderFlow> {
         let registry = Registry::ethereum();
-        let provider = RootProvider::new(RpcClient::mocked(Asserter::new()));
-        let mut code_cache = HashMap::new();
-        let receipt = receipt(tx_hash(1), addr(2), Some(COW_SETTLEMENT), logs);
         let transfer_ledger = TransferLedger::from_transaction(&[], &[]);
-        let root = frame("CALL", addr(2), COW_SETTLEMENT, 0);
-        let mut ctx = DecodeContext {
-            provider: &provider,
-            registry: &registry,
-            code_cache: &mut code_cache,
-            receipt: &receipt,
-            entry_point: COW_SETTLEMENT,
-            transfer_ledger: &transfer_ledger,
-            input: &[],
-            root: &root,
-            venue: None,
-        };
+        let mut fixture = CtxFixture::new(addr(2), COW_SETTLEMENT);
+        fixture.set_logs(logs);
+        let mut ctx = fixture.ctx(&registry, &transfer_ledger, &[]);
         CowSettlement.decode(&mut ctx).await
     }
 
