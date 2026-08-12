@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use fynd_core::{
-    derived::{ComponentDepths, SpotPrices},
+    derived::{ComponentDepths, SpotPrices, TokenGasPrices},
     Quote, QuoteOptions, QuoteRequest, SolveError, Solver,
 };
 use fynd_test_fixtures::{read_recording, TestScenario};
@@ -29,10 +29,12 @@ impl TestHarness {
     }
 
     /// Build the same pipeline, but seed spot prices and component depths instead of
-    /// computing them from the recording.
+    /// computing them from the recording. `token_prices` is independently optional, matching
+    /// [`Solver::from_recording_hydrated`].
     pub async fn from_fixture_hydrated(
         spot_prices: SpotPrices,
         component_depths: ComponentDepths,
+        token_prices: Option<TokenGasPrices>,
     ) -> Self {
         let (chain, chain_name, updates, gas_price) = load_fixture();
 
@@ -43,6 +45,7 @@ impl TestHarness {
             gas_price,
             spot_prices,
             component_depths,
+            token_prices,
         )
         .await
         .expect("failed to build hydrated solver from recording");

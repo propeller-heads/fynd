@@ -59,6 +59,9 @@ use crate::{
 struct Hydration {
     spot_prices: crate::derived::SpotPrices,
     component_depths: crate::derived::ComponentDepths,
+    /// `None` means token prices still run live (the original `from_recording_hydrated`
+    /// behavior); `Some` seeds them the same way `spot_prices`/`component_depths` are seeded.
+    token_prices: Option<crate::derived::TokenGasPrices>,
 }
 
 /// Default values for [`FyndBuilder`] configuration and [`PoolConfig`] deserialization.
@@ -1208,11 +1211,12 @@ impl Solver {
     /// The computation manager skips both computations for the replayed block and reports
     /// them as complete, so the solver reaches ready without recomputing them.
     ///
-    /// Token prices still run live, because they depend on the gas price rather than on the
-    /// recording alone.
+    /// `token_prices` is independently optional: `None` means token prices still run live
+    /// (the original behavior, since they depend on the gas price rather than on the
+    /// recording alone); `Some` seeds and skips them the same way the other two are.
     ///
-    /// Produce the two maps with [`pool_depth`](crate::derived::pool_depth) and the same
-    /// spot prices the live path computes. Values from a different market state give
+    /// Produce the maps with [`pool_depth`](crate::derived::pool_depth) and the same spot
+    /// prices/token prices the live path computes. Values from a different market state give
     /// quotes the live solver would not produce.
     ///
     /// Requires the `test-utils` feature.
@@ -1224,13 +1228,14 @@ impl Solver {
         gas_price_wei: Option<num_bigint::BigUint>,
         spot_prices: crate::derived::SpotPrices,
         component_depths: crate::derived::ComponentDepths,
+        token_prices: Option<crate::derived::TokenGasPrices>,
     ) -> Result<Self, SolverBuildError> {
         Self::build_from_recording(
             chain,
             updates,
             pools,
             gas_price_wei,
-            Some(Hydration { spot_prices, component_depths }),
+            Some(Hydration { spot_prices, component_depths, token_prices }),
         )
         .await
     }
@@ -1292,11 +1297,15 @@ impl Solver {
         let mut computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
             .with_depth_slippage_threshold(defaults::DEPTH_SLIPPAGE_THRESHOLD);
-        if hydration.is_some() {
-            computation_config = computation_config.with_hydrated([
+        if let Some(hydration) = &hydration {
+            let mut hydrated = vec![
                 (crate::derived::computation_ids::SPOT_PRICES, block_number),
                 (crate::derived::computation_ids::POOL_DEPTHS, block_number),
-            ]);
+            ];
+            if hydration.token_prices.is_some() {
+                hydrated.push((crate::derived::computation_ids::TOKEN_PRICES, block_number));
+            }
+            computation_config = computation_config.with_hydrated(hydrated);
         }
         let (computation_manager, _) =
             ComputationManager::new(computation_config, market_data.clone())
@@ -1306,10 +1315,24 @@ impl Solver {
         let derived_event_tx = computation_manager.event_sender();
 
         // Seed the store before the manager runs, so its hydration skip finds the output.
-        if let Some(Hydration { spot_prices, component_depths }) = hydration {
+        if let Some(Hydration { spot_prices, component_depths, token_prices }) = hydration {
             let mut store = derived_data.write().await;
             store.set_spot_prices(spot_prices, vec![], block_number, true);
             store.set_component_depths(component_depths, vec![], block_number, true);
+            if let Some(token_prices) = token_prices {
+                store.set_token_prices(token_prices, vec![], block_number, true);
+                // `derived_data_ready()` also requires a `token_prices_deps` entry, which
+                // normally records which components/tokens each token's best path routes
+                // through -- needed so a live feed's *next* block can incrementally recompute
+                // only what actually changed. A replayed solver never processes a second
+                // update (`from_recording_hydrated` takes exactly one), so no incremental
+                // recompute is ever attempted against this seed; an empty map only has to
+                // satisfy the readiness check, not describe real path dependencies.
+                store.set_token_prices_deps(
+                    crate::derived::TokenPricesWithDeps::new(),
+                    block_number,
+                );
+            }
         }
 
         let computation_event_rx = feed.subscribe();

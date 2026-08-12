@@ -1,4 +1,7 @@
 use fynd_test_fixtures::expected::load_expected_file;
+use tycho_simulation::{
+    tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
+};
 
 use crate::harness::TestHarness;
 
@@ -31,7 +34,8 @@ async fn test_hydrated_solver_matches_plain_replay() {
     };
 
     let hydrated =
-        TestHarness::from_fixture_hydrated(spot_prices.clone(), component_depths.clone()).await;
+        TestHarness::from_fixture_hydrated(spot_prices.clone(), component_depths.clone(), None)
+            .await;
 
     {
         let derived_ref = hydrated.solver().derived_data();
@@ -100,4 +104,57 @@ async fn test_hydrated_solver_matches_plain_replay() {
     }
 
     assert!(compared > 0, "no scenarios were compared");
+}
+
+/// Seeding token prices must skip the live computation entirely, not merely tolerate it
+/// happening to agree with the seed.
+///
+/// Seeds a sentinel entry for an address that plays no part in the fixture's real candidate
+/// graph, mapped to an arbitrary price -- a live recompute could never produce this entry, so
+/// its presence (and nothing else's absence) is direct evidence the skip took effect rather
+/// than the store just holding a coincidentally-identical live result.
+#[tokio::test]
+async fn test_hydrated_token_prices_are_not_recomputed() {
+    let plain = TestHarness::from_fixture().await;
+
+    let (spot_prices, component_depths) = {
+        let derived_ref = plain.solver().derived_data();
+        let derived = derived_ref.read().await;
+        (
+            derived
+                .spot_prices()
+                .expect("spot prices not computed")
+                .clone(),
+            derived
+                .component_depths()
+                .expect("component depths not computed")
+                .clone(),
+        )
+    };
+
+    let sentinel_address = Address::from(vec![0xffu8; 20]);
+    let sentinel_price = Price {
+        numerator: num_bigint::BigUint::from(999u32),
+        denominator: num_bigint::BigUint::from(1u32),
+    };
+    let mut seeded_token_prices = fynd_core::derived::TokenGasPrices::new();
+    seeded_token_prices.insert(sentinel_address.clone(), sentinel_price.clone());
+
+    let hydrated = TestHarness::from_fixture_hydrated(
+        spot_prices,
+        component_depths,
+        Some(seeded_token_prices),
+    )
+    .await;
+
+    let derived_ref = hydrated.solver().derived_data();
+    let derived = derived_ref.read().await;
+    let token_prices = derived
+        .token_prices()
+        .expect("seeded token prices missing");
+    assert_eq!(
+        token_prices.get(&sentinel_address),
+        Some(&sentinel_price),
+        "hydrated token prices must stay exactly as seeded, not be recomputed live"
+    );
 }
