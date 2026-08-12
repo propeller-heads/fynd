@@ -19,7 +19,7 @@ use alloy::{
 use crate::decoder::{
     decode::TraderFlow,
     registry::Registry,
-    transfer_ledger::{NetSwap, Transfer},
+    transfer_ledger::{NetSwap, Transfer, TransferLedger, RESIDUE_GROSS_RATIO},
 };
 
 /// A transaction rejected as not a comparable trade, by the shape that disqualified it.
@@ -37,17 +37,55 @@ pub(crate) enum Veto {
     /// destination chain, so there is no same-chain swap to record. Placed at match time by
     /// `solvers::solver_veto`, never by `check`.
     BridgeOrder,
+    /// Part of the trader's input never reached routing: the trader's own transfer of the input
+    /// token split a significant share off to an address that only accumulates — a
+    /// fee-on-transfer token's tax wallet, or an unregistered input-side fee. The skim nets into
+    /// `amount_in`, and the re-solve cannot model it, so every comparison would credit Fynd with
+    /// value no routing can recover.
+    FeeOnTransfer,
 }
 
 /// Check a decoded flow against every post-decode veto, returning the first.
-pub(crate) fn check(flow: &TraderFlow, logs: &[Log], registry: &Registry) -> Option<Veto> {
+pub(crate) fn check(
+    flow: &TraderFlow,
+    transfer_ledger: &TransferLedger,
+    logs: &[Log],
+    registry: &Registry,
+) -> Option<Veto> {
     if received_nft(logs, flow.tracked) {
         return Some(Veto::NftPurchase);
     }
     if wrap_pair_mispaired(&flow.swap, registry.wrapped_native()) {
         return Some(Veto::MispairedWrapPair);
     }
+    if input_skimmed(flow, transfer_ledger, registry) {
+        return Some(Veto::FeeOnTransfer);
+    }
     None
+}
+
+/// Whether a significant share of the trader's input-token outflow went to a pure sink that is
+/// not a registered fee collector.
+///
+/// A fee-on-transfer token's tax is invisible to netting: the token contract splits the trader's
+/// own transfer, so the full outflow nets as `amount_in` while only the untaxed part reached the
+/// route (ZRP on Polygon taxes 5%, and every settled trade read as a constant ~525 bps win). The
+/// tax leg's fingerprint is that it comes straight from the trader and lands on an address that
+/// sends nothing all transaction — a pool or router always sends something onward. Registered fee
+/// collectors share the shape but carry venue fees, which the venue decoders and
+/// `venue_attribution` back out — so they are exempt. A leg under the residue line (1% of the
+/// input, `RESIDUE_GROSS_RATIO`) is dust, not a skim.
+fn input_skimmed(flow: &TraderFlow, transfer_ledger: &TransferLedger, registry: &Registry) -> bool {
+    for (recipient, amount) in transfer_ledger.sink_payments_from(flow.tracked, flow.swap.token_in)
+    {
+        if registry.is_fee_collector(recipient) || registry.is_infrastructure(recipient) {
+            continue;
+        }
+        if amount.saturating_mul(U256::from(RESIDUE_GROSS_RATIO)) >= flow.swap.amount_in {
+            return true;
+        }
+    }
+    false
 }
 
 sol! {
@@ -181,6 +219,128 @@ mod tests {
         assert!(!wrap_pair_mispaired(&swap(weth, 1000, Address::ZERO, 1000), weth));
         // An unwrap with a fee taken stays within the 2x band.
         assert!(!wrap_pair_mispaired(&swap(weth, 1000, Address::ZERO, 900), weth));
+    }
+
+    fn flow(tracked: Address, net: NetSwap) -> TraderFlow {
+        TraderFlow::without_fees(tracked, net)
+    }
+
+    #[test]
+    fn test_fee_on_transfer_input_tax() {
+        // The transfer-tax shape (ZRP on Polygon): the token contract splits the trader's own
+        // transfer, 95% to the pool and 5% to a tax wallet that sends nothing, while netting
+        // reads the full outflow as amount_in.
+        let trader = addr(1);
+        let pool = addr(50);
+        let tax_wallet = addr(60);
+        let token_in = addr(10);
+        let token_out = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_in, trader, pool, U256::from(950)),
+            make_transfer_log(token_in, trader, tax_wallet, U256::from(50)),
+            make_transfer_log(token_out, pool, trader, U256::from(2000)),
+        ];
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+        let taxed = flow(trader, swap(token_in, 1000, token_out, 2000));
+
+        assert_eq!(
+            check(&taxed, &transfer_ledger, &logs, &Registry::ethereum()),
+            Some(Veto::FeeOnTransfer)
+        );
+    }
+
+    #[test]
+    fn test_fee_collector_sink_is_not_a_skim() {
+        // The same split, but the sink is a registered venue fee collector: a venue fee the
+        // decoders back out, not a token tax.
+        let registry = Registry::ethereum();
+        let collector = *registry
+            .venue("metamask")
+            .unwrap()
+            .fee_collectors
+            .iter()
+            .next()
+            .unwrap();
+        let trader = addr(1);
+        let pool = addr(50);
+        let token_in = addr(10);
+        let token_out = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_in, trader, pool, U256::from(950)),
+            make_transfer_log(token_in, trader, collector, U256::from(50)),
+            make_transfer_log(token_out, pool, trader, U256::from(2000)),
+        ];
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+        let fee_paying = flow(trader, swap(token_in, 1000, token_out, 2000));
+
+        assert_eq!(check(&fee_paying, &transfer_ledger, &logs, &registry), None);
+    }
+
+    #[test]
+    fn test_router_paid_fee_is_not_a_skim() {
+        // The partner-fee shape (ParaSwap): the router skims the output to a fee wallet. The
+        // sink leg comes from the router, not the trader, so it is a solver fee — part of the
+        // settled price by policy, never a fee-on-transfer veto.
+        let trader = addr(1);
+        let pool = addr(50);
+        let router = addr(2);
+        let fee_wallet = addr(60);
+        let token_in = addr(10);
+        let token_out = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_in, trader, pool, U256::from(1000)),
+            make_transfer_log(token_out, pool, router, U256::from(2000)),
+            make_transfer_log(token_out, router, fee_wallet, U256::from(30)),
+            make_transfer_log(token_out, router, trader, U256::from(1970)),
+        ];
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+        let partner_fee = flow(trader, swap(token_in, 1000, token_out, 1970));
+
+        assert_eq!(check(&partner_fee, &transfer_ledger, &logs, &Registry::ethereum()), None);
+    }
+
+    #[test]
+    fn test_split_route_pools_are_not_sinks() {
+        // A split route pays two pools; both send output onward, so neither is a sink.
+        let trader = addr(1);
+        let pool_a = addr(50);
+        let pool_b = addr(51);
+        let token_in = addr(10);
+        let token_out = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_in, trader, pool_a, U256::from(600)),
+            make_transfer_log(token_in, trader, pool_b, U256::from(400)),
+            make_transfer_log(token_out, pool_a, trader, U256::from(1200)),
+            make_transfer_log(token_out, pool_b, trader, U256::from(800)),
+        ];
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+        let split = flow(trader, swap(token_in, 1000, token_out, 2000));
+
+        assert_eq!(check(&split, &transfer_ledger, &logs, &Registry::ethereum()), None);
+    }
+
+    #[test]
+    fn test_dust_sink_leg_is_not_a_skim() {
+        // A sink leg under the 1% residue line is rounding dust, not a tax.
+        let trader = addr(1);
+        let pool = addr(50);
+        let sink = addr(60);
+        let token_in = addr(10);
+        let token_out = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_in, trader, pool, U256::from(9950)),
+            make_transfer_log(token_in, trader, sink, U256::from(50)),
+            make_transfer_log(token_out, pool, trader, U256::from(20_000)),
+        ];
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+        let dusty = flow(trader, swap(token_in, 10_000, token_out, 20_000));
+
+        assert_eq!(check(&dusty, &transfer_ledger, &logs, &Registry::ethereum()), None);
     }
 
     #[test]
