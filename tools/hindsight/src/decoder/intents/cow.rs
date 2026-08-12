@@ -19,7 +19,7 @@ use alloy::{
 use async_trait::async_trait;
 
 use crate::decoder::{
-    decode::{DecodeContext, GasScope, TradeDecoder, TraderFlow},
+    decode::{DecodeContext, TradeDecoder, TraderFlow},
     transfer_ledger::{to_primitive_log, NetSwap},
 };
 
@@ -117,8 +117,6 @@ impl TradeDecoder for CowSettlement {
             venue_fee_in: fee,
             venue_fee_out: None,
             solver_override: None,
-            // The solver pays settlement gas and recoups it in the order price, not the trader.
-            gas_scope: GasScope::NotCharged,
         })
     }
 }
@@ -197,7 +195,6 @@ mod tests {
         assert_eq!(flow.tracked, owner);
         assert_eq!(flow.swap, swap(sell, 990, buy, 2000));
         assert_eq!(flow.venue_fee_in, Some(U256::from(10)));
-        assert_eq!(flow.gas_scope, GasScope::NotCharged);
     }
 
     #[tokio::test]

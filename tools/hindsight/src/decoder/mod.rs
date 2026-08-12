@@ -364,9 +364,9 @@ impl Decoder {
             registry,
         );
 
-        // Gas the trader paid for the settled route, as a wei cost. The flow's gas scope says
-        // which gas that is — see `GasScope`.
-        let settled_gas = match flow.gas_scope {
+        // Gas the trader paid for the settled route, as a wei cost. The scope is derived from
+        // the role and the flow, in one place — see `decode::gas_scope`.
+        let settled_gas = match decode::gas_scope(role, &flow, &transfer_ledger, sender) {
             GasScope::WholeTransaction => Some(U256::from(receipt.gas_used)),
             GasScope::SolverFrame => route_gas(root, registry),
             GasScope::NotCharged => None,

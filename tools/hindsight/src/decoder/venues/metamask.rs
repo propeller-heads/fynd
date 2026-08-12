@@ -70,7 +70,6 @@ mod tests {
 
     use super::*;
     use crate::decoder::{
-        decode::GasScope,
         registry::Registry,
         test_utils::{addr, make_transfer_log, swap, venue_addresses, CtxFixture},
         transfer_ledger::TransferLedger,
@@ -170,7 +169,6 @@ mod tests {
         assert_eq!(flow.swap, swap(token_in, 15_000_000, Address::ZERO, 8_408));
         assert_eq!(flow.venue_fee_in, None);
         assert_eq!(flow.venue_fee_out, Some(U256::from(883)));
-        assert_eq!(flow.gas_scope, GasScope::SolverFrame);
     }
 
     #[tokio::test]

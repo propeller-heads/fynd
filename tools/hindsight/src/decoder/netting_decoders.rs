@@ -18,16 +18,13 @@ use alloy::primitives::Address;
 use async_trait::async_trait;
 
 use crate::decoder::{
-    decode::{DecodeContext, GasScope, TradeDecoder, TraderFlow},
+    decode::{DecodeContext, TradeDecoder, TraderFlow},
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
 /// Net the sender's flow. When the sender nets nothing, fall back to the contract the transaction
 /// entered through (`tx.to`), for the rare shape where the swap output is delivered to that
 /// contract rather than back to the sender.
-///
-/// A sender-tracked flow charges the whole receipt's gas (the trader sent the transaction); the
-/// fallback charges nothing, since the tracked contract and the gas-paying sender differ.
 pub(crate) fn sender_flow(
     transfer_ledger: &TransferLedger,
     sender: Address,
@@ -35,10 +32,7 @@ pub(crate) fn sender_flow(
 ) -> Option<TraderFlow> {
     transfer_ledger
         .net_swap(sender)
-        .map(|swap| TraderFlow {
-            gas_scope: GasScope::WholeTransaction,
-            ..TraderFlow::without_fees(sender, swap)
-        })
+        .map(|swap| TraderFlow::without_fees(sender, swap))
         .or_else(|| {
             transfer_ledger
                 .net_swap(entry_point)
@@ -49,10 +43,6 @@ pub(crate) fn sender_flow(
 /// Net the sender's flow and back the venue's fee out of it — the shared shape of every
 /// fee-taking venue entry. Venue decoders call this, then add what is specific to them.
 ///
-/// A trader-paid flow's gas scope narrows to the solver call's trace frame: inside a venue's
-/// contract the receipt's gas includes the venue's own overhead, which is charged whichever solver
-/// the venue picks and must stay out of the comparison.
-///
 /// One exception to the fee back-out: when the tracked trader IS a fee collector, the transaction
 /// is a treasury operation — the collector's receipts are its own output, not a fee, and backing
 /// them "out" would add the output to itself and double it.
@@ -62,10 +52,7 @@ pub(crate) fn venue_flow(
     entry_point: Address,
     fee_collectors: &HashSet<Address>,
 ) -> Option<TraderFlow> {
-    let mut flow = sender_flow(transfer_ledger, sender, entry_point)?;
-    if flow.gas_scope == GasScope::WholeTransaction {
-        flow.gas_scope = GasScope::SolverFrame;
-    }
+    let flow = sender_flow(transfer_ledger, sender, entry_point)?;
     if fee_collectors.contains(&flow.tracked) {
         return Some(flow);
     }
@@ -102,7 +89,6 @@ fn back_out_venue_fees(
         venue_fee_in,
         venue_fee_out,
         solver_override: flow.solver_override,
-        gas_scope: flow.gas_scope,
     }
 }
 

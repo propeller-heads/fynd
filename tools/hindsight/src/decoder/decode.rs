@@ -143,8 +143,7 @@ pub(crate) struct DecodeContext<'a> {
     pub root: &'a CallFrame,
 }
 
-/// Which part of the transaction's gas counts as the settled route's cost. Decided by the
-/// decoder — only it knows who sent the transaction and what wraps the route.
+/// Which part of the transaction's gas counts as the settled route's cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GasScope {
     /// The trader sent the transaction: all of its gas is the route's cost.
@@ -157,8 +156,39 @@ pub(crate) enum GasScope {
     NotCharged,
 }
 
+/// Derive how the settled route's gas is charged, from facts the role and the decoded flow
+/// already establish — decoders do not declare it.
+///
+/// Gas is charged only when the trader paid it *for this route*: the flow tracks the sender, and
+/// the sender actually funded the swap (net-sent the input token — a venue transaction whose
+/// sender has no outflow is a solver-initiated rebalance). A direct solver entry then charges the
+/// whole transaction; a venue entry charges only the solver call's trace frame, since the venue's
+/// own overhead is charged whichever router it picks. Intent fills never charge: the solver sent
+/// the transaction and recoups its gas in the order price.
+pub(crate) fn gas_scope(
+    role: TraderRole<'_>,
+    flow: &TraderFlow,
+    transfer_ledger: &TransferLedger,
+    sender: Address,
+) -> GasScope {
+    if flow.tracked != sender {
+        return GasScope::NotCharged;
+    }
+    let sender_funded = transfer_ledger
+        .group_net_sent(&std::collections::HashSet::from([sender]))
+        .contains_key(&flow.swap.token_in);
+    if !sender_funded {
+        return GasScope::NotCharged;
+    }
+    match role {
+        TraderRole::Sender => GasScope::WholeTransaction,
+        TraderRole::Venue(_) => GasScope::SolverFrame,
+        TraderRole::Intent => GasScope::NotCharged,
+    }
+}
+
 /// The trader's side of a matched transaction: the swap, plus the corrections that make it
-/// comparable (venue fees backed out, gas scope).
+/// comparable (venue fees backed out).
 pub(crate) struct TraderFlow {
     /// The address whose net flow the swap was read from.
     pub tracked: Address,
@@ -170,20 +200,11 @@ pub(crate) struct TraderFlow {
     /// Solver label asserted by the decoder itself (e.g. `MetaMask` declares its solver in
     /// calldata), overriding trace-based attribution.
     pub solver_override: Option<String>,
-    /// How the settled route's gas is charged against the settled output.
-    pub gas_scope: GasScope,
 }
 
 impl TraderFlow {
     pub(crate) fn without_fees(tracked: Address, swap: NetSwap) -> Self {
-        Self {
-            tracked,
-            swap,
-            venue_fee_in: None,
-            venue_fee_out: None,
-            solver_override: None,
-            gas_scope: GasScope::NotCharged,
-        }
+        Self { tracked, swap, venue_fee_in: None, venue_fee_out: None, solver_override: None }
     }
 
     /// Record `fee` as an output-token venue fee and gross it back into `swap.amount_out`, so the
@@ -297,5 +318,101 @@ mod tests {
         assert!(try_with(vec![Box::new(Declines)])
             .await
             .is_none());
+    }
+
+    mod gas_scope_rules {
+        use alloy::primitives::{address, U256};
+
+        use super::*;
+        use crate::decoder::test_utils::make_transfer_log;
+
+        /// 1inch v6 — a `[solvers]` entry, so classify resolves the Sender role.
+        const ONEINCH: Address = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        /// Relay's router — a venue entry point, so classify resolves the Venue role.
+        const RELAY: Address = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
+        /// The `CoW` settlement contract — a batch settler, so classify resolves Intent.
+        const COW: Address = address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41");
+
+        /// A ledger where `sender` pays `token_in` into a pool.
+        fn funded_ledger(sender: Address, token_in: Address) -> TransferLedger {
+            let logs = vec![make_transfer_log(token_in, sender, addr(50), U256::from(1000))];
+            TransferLedger::from_transaction(&logs, &[])
+        }
+
+        fn flow(tracked: Address, token_in: Address) -> TraderFlow {
+            TraderFlow::without_fees(
+                tracked,
+                NetSwap {
+                    token_in,
+                    amount_in: U256::from(1000),
+                    token_out: addr(11),
+                    amount_out: U256::from(2000),
+                },
+            )
+        }
+
+        #[test]
+        fn test_direct_sender_charges_the_whole_transaction() {
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let role = TraderRole::classify(ONEINCH, &registry);
+            let ledger = funded_ledger(sender, addr(10));
+            assert_eq!(
+                gas_scope(role, &flow(sender, addr(10)), &ledger, sender),
+                GasScope::WholeTransaction
+            );
+        }
+
+        #[test]
+        fn test_venue_entry_charges_the_solver_frame() {
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let role = TraderRole::classify(RELAY, &registry);
+            let ledger = funded_ledger(sender, addr(10));
+            assert_eq!(
+                gas_scope(role, &flow(sender, addr(10)), &ledger, sender),
+                GasScope::SolverFrame
+            );
+        }
+
+        #[test]
+        fn test_unfunded_sender_charges_nothing() {
+            // The sender never net-sent the input token: a solver-initiated rebalance whose
+            // flow still tracks the sender. Charging it would bill the route to a bystander.
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let role = TraderRole::classify(RELAY, &registry);
+            let ledger = TransferLedger::from_transaction(&[], &[]);
+            assert_eq!(
+                gas_scope(role, &flow(sender, addr(10)), &ledger, sender),
+                GasScope::NotCharged
+            );
+        }
+
+        #[test]
+        fn test_tracked_is_not_the_sender_charges_nothing() {
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let role = TraderRole::classify(ONEINCH, &registry);
+            let ledger = funded_ledger(sender, addr(10));
+            assert_eq!(
+                gas_scope(role, &flow(addr(2), addr(10)), &ledger, sender),
+                GasScope::NotCharged
+            );
+        }
+
+        #[test]
+        fn test_intent_fill_charges_nothing() {
+            // Even a self-settled order charges nothing: the solver recoups settlement gas in
+            // the order price, so charging it against the output would double-count.
+            let registry = Registry::ethereum();
+            let sender = addr(1);
+            let role = TraderRole::classify(COW, &registry);
+            let ledger = funded_ledger(sender, addr(10));
+            assert_eq!(
+                gas_scope(role, &flow(sender, addr(10)), &ledger, sender),
+                GasScope::NotCharged
+            );
+        }
     }
 }
