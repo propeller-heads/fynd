@@ -34,8 +34,9 @@ pub use allocation::ExclusiveAccess;
 use allocation::{allocate, Allocation, OrderClass};
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
-use metrics::{counter, histogram};
+use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use tycho_execution::encoding::{
@@ -797,10 +798,11 @@ fn combine_with_surplus(
         return public_ranked;
     };
 
-    let commitment = match public_ranked
+    let public_reference = public_ranked
         .first()
-        .filter(|q| q.status() == QuoteStatus::Success)
-    {
+        .filter(|q| q.status() == QuoteStatus::Success);
+
+    let commitment = match public_reference {
         Some(public_reference) => {
             matched_commitment(public_reference, exclusive_candidate, user_share_bps)
         }
@@ -809,6 +811,14 @@ fn combine_with_surplus(
     let Some(committed_amount_out) = commitment else {
         return public_ranked;
     };
+
+    // Only meaningful against a public reference: the user's improvement over what a plain
+    // public quote would have paid. The no-public-route fallback (default_fee_commitment) has
+    // no public amount_out to diff against.
+    if let Some(public_reference) = public_reference {
+        let user_savings = &committed_amount_out - public_reference.amount_out();
+        gauge!("exclusive_user_savings_amount").increment(user_savings.to_f64().unwrap_or(0.0));
+    }
 
     let mut result = Vec::with_capacity(public_ranked.len() + 1);
     result.push(pin_commitment(exclusive_candidate, committed_amount_out));
@@ -912,6 +922,8 @@ fn pin_commitment(exclusive_candidate: &OrderQuote, committed_amount_out: BigUin
     let exclusive_route_amount_out = exclusive_candidate.amount_out();
     let exclusive_gas_cost = exclusive_route_amount_out - exclusive_candidate.amount_out_net_gas();
     let surplus_amount = exclusive_route_amount_out - &committed_amount_out;
+
+    gauge!("exclusive_fee_amount").increment(surplus_amount.to_f64().unwrap_or(0.0));
 
     let mut surplus_quote = exclusive_candidate.clone();
 
