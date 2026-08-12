@@ -14,6 +14,7 @@ to a root cause. Companion to [`deploy/README.md`](deploy/README.md) (how to run
 | 2026-08-07 20:36:27 UTC | Clean-slate restart on the final config; everything before is archived at `/home/agent/apex-archive/20260807T203433Z-pre-final-config/` on the box |
 | 2026-08-09 08:26 UTC | Watchdog caught one genuine production stall (feed wedged, process alive) — see "Failure resistance" below |
 | 2026-08-10/11 | Found and helped verify a real correctness bug in `tycho-simulation`'s `uniswap_v3`/`aerodrome_slipstreams` target-price math via a peer session (below) |
+| 2026-08-12 07:59:21 UTC | Monitor stopped by request. `apex-monitor.service`, `apex-monitor-health.timer`, `apex-monitor-compact.timer` all stopped and disabled on the box. **4.4742 days total run, 383,309 comparisons joined** — final numbers in [`RESULTS.md`](RESULTS.md) |
 
 ## The search-deadline problem
 
@@ -192,6 +193,11 @@ reconsidering once both fixes are in.
 - Zero jobs shed since the final config deployed. Head lag consistently ~0.01 blocks mean.
 - Two deliberate restart tests (kill -9, simulated stall) both recovered within their expected
   windows during initial verification.
+- **Final shutdown confirmed the same behavior.** `systemctl stop` sent `SIGTERM`; the process did
+  not exit within systemd's timeout and was `SIGKILL`'d — the identical pattern seen during the
+  2026-08-09 stall. No data was lost: both JSONL streams' final lines parse cleanly, which is the
+  direct payoff of the per-line-flush fix made earlier (a `SIGKILL`'d process loses whatever sat
+  in an unflushed buffer, and the default `BufWriter` would have lost up to 8KB here).
 
 ## Known open items
 
