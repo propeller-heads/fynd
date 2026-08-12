@@ -2,8 +2,10 @@
 //!
 //! Deliberately not the benchmark. `algorithm_bench` compares configurations and writes a report;
 //! this runs a single configuration and writes nothing, so a flamegraph contains the solve and
-//! almost nothing else. Both replay the same fixture, read the same dataset and solve at the same
-//! default gas price, so a route seen in the viewer can be profiled here by its order id.
+//! almost nothing else. Both take their market the same way -- the recorded fixture, or `--market
+//! live` -- and read the same dataset, so a route seen in the viewer can be profiled here by its
+//! order id. Offline, on the same fixture and gas price, it is the same solve; live it is a
+//! different block, and so a different market.
 //!
 //! ```text
 //! ./scripts/profile.sh --config water_fill_d3 --order 2073
@@ -35,10 +37,10 @@ use std::{path::PathBuf, time::Instant};
 use clap::Parser;
 use common::{
     available_configs, block_components, build_market, build_solver, format_micros,
-    load_bench_config, load_blocked_tokens, print_protocol_breakdown, resolved_gas_price_gwei,
-    symbol_table, timings_of, token_label,
+    load_bench_config, load_blocked_tokens, print_protocol_breakdown, protocol_breakdown,
+    resolved_gas_price_gwei, symbol_table, timings_of, token_label,
     trades::{load_trade_orders, recorded_tokens, TradeOrder},
-    LiveArgs, MarketMode, MarketSource,
+    LiveFlags, MarketSource,
 };
 use fynd_core::{types::QuoteStatus, QuoteOptions, QuoteRequest, Solver};
 
@@ -76,45 +78,9 @@ struct Args {
     #[arg(long, value_parser = common::parse_gas_price_gwei)]
     gas_price_gwei: Option<f64>,
 
-    /// Where the market comes from: the recorded fixture, or one block captured live from Tycho.
-    #[arg(long, value_enum, default_value_t = MarketMode::Offline)]
-    market: MarketMode,
-
-    /// Tycho WebSocket URL. Live runs only.
-    #[arg(long, env = "TYCHO_URL")]
-    tycho_url: Option<String>,
-
-    /// Tycho API key. Live runs only.
-    #[arg(long, env = "TYCHO_API_KEY")]
-    tycho_api_key: Option<String>,
-
-    /// Chain to capture. Live runs only.
-    #[arg(long, default_value = "ethereum")]
-    chain: String,
-
-    /// Protocol systems to stream, comma separated. Defaults to every one Tycho has.
-    #[arg(long, value_delimiter = ',')]
-    protocols: Option<Vec<String>>,
-
-    /// Minimum component TVL in ETH.
-    #[arg(long, default_value_t = 10.0)]
-    min_tvl: f64,
-
-    /// Minimum token quality score.
-    #[arg(long, default_value_t = 100)]
-    min_token_quality: i32,
-
-    /// Only include tokens traded within this many days.
-    #[arg(long, default_value_t = 3)]
-    traded_n_days_ago: u64,
-
-    /// How long to wait for Tycho's snapshot before giving up.
-    #[arg(long, default_value_t = 120)]
-    capture_timeout_secs: u64,
-
-    /// Chain RPC, read for the live gas price. Live runs only.
-    #[arg(long, env = "RPC_URL")]
-    rpc_url: Option<String>,
+    /// Market flags: `--market`, and the Tycho settings a live capture needs.
+    #[command(flatten)]
+    live: LiveFlags,
 
     /// Trade dataset path.
     #[arg(long)]
@@ -196,22 +162,7 @@ async fn main() {
     let config = load_bench_config(&args.config)
         .unwrap_or_else(|reason| panic!("{reason}. Available: {}", available_configs().join(", ")));
 
-    let mut market = match build_market(
-        args.market,
-        LiveArgs {
-            tycho_url: args.tycho_url.as_deref(),
-            tycho_api_key: args.tycho_api_key.as_deref(),
-            chain: &args.chain,
-            protocols: args.protocols.clone(),
-            min_tvl: args.min_tvl,
-            min_token_quality: args.min_token_quality,
-            traded_n_days_ago: args.traded_n_days_ago,
-            capture_timeout_secs: args.capture_timeout_secs,
-            rpc_url: args.rpc_url.as_deref(),
-        },
-    )
-    .await
-    {
+    let mut market = match build_market(args.live.clone()).await {
         Ok(market) => market,
         Err(reason) => {
             eprintln!("error: {reason}");
@@ -219,6 +170,7 @@ async fn main() {
         }
     };
     let gas_price_gwei = resolved_gas_price_gwei(args.gas_price_gwei, &market);
+    let market_protocols = protocol_breakdown(&market.updates);
     let blocked = load_blocked_tokens();
     let blocked_components = block_components(&mut market.updates, &blocked.addresses);
     let known_tokens = recorded_tokens(&market.updates);
@@ -261,7 +213,7 @@ async fn main() {
         ),
     }
     println!("  gas price          {gas_price_gwei} gwei");
-    print_protocol_breakdown(&market.updates);
+    print_protocol_breakdown(&market_protocols);
     if !blocked.symbols.is_empty() {
         println!(
             "  blocked            {} ({blocked_components} pools)",

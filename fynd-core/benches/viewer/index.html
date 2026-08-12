@@ -134,8 +134,8 @@
     font-family: var(--mono); font-size: 27px; font-weight: 600;
     letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1;
   }
-  /* Always two lines, so every card breaks in the same place instead of only the ones whose
-     numbers happen to be wide. Two 11px lines come to about the height of the 27px figure. */
+  /* Always two lines, so every card breaks in the same place whatever its numbers. Two 11px
+     lines come to about the height of the 27px figure beside them. */
   .card-hero-label {
     display: flex; flex-direction: column; gap: 1px; line-height: 1.25;
     font-family: var(--mono); font-size: 11px; color: var(--ink-3);
@@ -146,8 +146,8 @@
   .wlt i.w { background: var(--gain); }
   .wlt i.l { background: var(--loss); }
   .wlt i.t { background: var(--tie); opacity: 0.5; }
-  /* The counts sit under the bar in its own colours instead of on a labelled row: the label
-     plus three numbers did not fit a card width and wrapped mid-value. */
+  /* The counts sit under the bar in its colours: a label plus three numbers does not fit a card
+     width without wrapping mid-value. */
   .wlt-legend {
     display: flex; align-items: baseline; gap: 5px; margin-top: -4px;
     font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums;
@@ -218,8 +218,8 @@
   .toggle input { accent-color: var(--accent); margin: 0; }
   .toggle:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-  /* Distribution and speed share a row: the histograms want width, the speed bars read fine
-     narrow, and stacked full-width they left the right half of a wide screen empty. */
+  /* Distribution and speed share a row: the histograms want width and the speed bars read fine
+     narrow, so side by side fills a wide screen that either alone would leave half empty. */
   .report-split { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); gap: 22px; align-items: start; }
   @media (max-width: 1400px) { .report-split { grid-template-columns: minmax(0, 1fr); } }
 
@@ -404,8 +404,8 @@
     letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3);
   }
   .modal-head input[type="search"] { width: auto; flex: 1; max-width: 280px; }
-  /* Offline and live runs are not comparable, so the picker shows one kind at a time rather than
-     mixing them behind a badge. */
+  /* One kind of run at a time: offline and live are not comparable, so the picker never mixes
+     them. */
   .source-toggle { display: flex; margin-left: auto; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
   .source-toggle button {
     font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
@@ -799,8 +799,8 @@
     }
     const market = f.market ?? {};
     const facts = {
-      market: f.source === "live"
-        ? `live · ${market.chain ?? "?"} #${market.block ?? "?"}`
+      market: runSource(f) === "live"
+        ? `live · ${market.chain_name ?? "?"} #${market.block ?? "?"}`
         : "offline fixture",
       orders: (f.orders ?? 0).toLocaleString(),
       pairs: (f.pairs ?? 0).toLocaleString(),
@@ -818,16 +818,17 @@
   // reading anything else. Listed newest first, on the same name ordering the page opens with.
   const datasetName = run => (run.dataset ?? "").split("/").pop() || "—";
 
-  // Runs written before live capture existed carry no `source`. They were all offline.
-  const runSource = run => (run.source === "live" ? "live" : "offline");
+  // The kind lives on the market object. Runs written before live capture existed carry no
+  // market at all, and they were all offline.
+  const runSource = run => ((run.market?.source ?? run.source) === "live" ? "live" : "offline");
 
   // A live run is one block of one chain; an offline run is the fixture. Shown in the picker so
   // the two are never confused at a glance.
   function marketCell(run) {
     const market = run.market ?? {};
     if (runSource(run) !== "live") return "fixture";
-    const block = market.block ? `#${market.block}` : "—";
-    return `${market.chain ?? "?"} ${block}`;
+    const block = market.block === undefined ? "—" : `#${market.block}`;
+    return `${market.chain_name ?? "?"} ${block}`;
   }
 
   const runTime = run => {

@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Compare the routing algorithms offline against the recorded market fixture.
+# Compare the routing algorithms against the recorded market fixture.
 #
 # Builds fynd-core/benches/algorithm_bench.rs with release optimisations plus debug symbols and
 # runs it. Every run writes bench-results/<name>/ holding report.md, orders.csv, pairs.csv,
-# routes.jsonl and run.json, so runs can be compared rather than overwritten. Browse them with
-# ./scripts/bench-viewer.sh.
+# protocols.csv, routes.jsonl and run.json, so runs can be compared rather than overwritten.
+# Browse them with ./scripts/bench-viewer.sh.
+#
+# To run against a live market instead, use ./scripts/bench-live.sh, which is this script with
+# --market live and the Tycho settings.
 #
 # To profile one algorithm instead of comparing several, use ./scripts/profile.sh -- it runs a
 # single config on one thread and writes nothing.
@@ -27,7 +30,9 @@ SHOW_BENCH_HELP=0
 BENCH_ARGS=()
 
 usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Everything from the second line to the first non-comment, so the range never has to be
+  # updated when the header grows.
+  sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do

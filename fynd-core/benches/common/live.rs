@@ -27,7 +27,7 @@ use tycho_simulation::{
     utils::load_all_tokens,
 };
 
-use super::{Market, MarketSource};
+use super::{header_line, Market, MarketSource};
 
 /// Strips a scheme and any trailing slash from a Tycho host.
 ///
@@ -46,8 +46,9 @@ pub fn normalize_host(raw: &str) -> &str {
 
 /// What to capture, and from where.
 pub struct LiveOptions {
-    /// Bare host, no scheme. Run it through [`normalize_host`] first.
-    pub tycho_url: String,
+    /// Tycho host without a scheme, e.g. `tycho-beta.propellerheads.xyz`. The scheme is added per
+    /// use: `https://` for the RPC, and by the stream builder for the socket.
+    pub tycho_host: String,
     pub tycho_api_key: String,
     pub chain: Chain,
     pub chain_name: String,
@@ -71,15 +72,15 @@ pub struct LiveOptions {
 /// Returns a message for a failed connection, an unusable filter, or a snapshot that does not
 /// arrive inside `capture_timeout_secs`.
 pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
-    println!("  tycho              {}", opts.tycho_url);
+    header_line("tycho", &opts.tycho_host);
     let protocols = match &opts.protocols {
         Some(list) if !list.is_empty() => list.clone(),
-        _ => discover_protocols(opts).await?,
+        _ => discover_protocols(&opts.tycho_host, &opts.tycho_api_key, opts.chain).await?,
     };
-    println!("  protocols          {}", protocols.join(", "));
+    header_line("protocols", protocols.join(", "));
 
     let tokens = load_all_tokens(
-        &opts.tycho_url,
+        &opts.tycho_host,
         false,
         Some(&opts.tycho_api_key),
         true,
@@ -89,11 +90,11 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     )
     .await
     .map_err(|e| format!("failed to load the token list: {e}"))?;
-    println!("  tokens             {}", tokens.len());
+    header_line("tokens", tokens.len());
 
     let filter = ComponentFilter::with_tvl_range(opts.min_tvl, opts.min_tvl);
     let builder = register_exchanges_for_recording(
-        ProtocolStreamBuilder::new(&opts.tycho_url, opts.chain),
+        ProtocolStreamBuilder::new(&opts.tycho_host, opts.chain),
         filter,
         &protocols,
     )
@@ -110,7 +111,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
             .map_err(|e| format!("failed to build the Tycho stream: {e}"))?,
     );
 
-    println!("  waiting for the snapshot (up to {}s) ...", opts.capture_timeout_secs);
+    header_line("waiting", format!("for the snapshot, up to {}s", opts.capture_timeout_secs));
     let snapshot =
         match tokio::time::timeout(Duration::from_secs(opts.capture_timeout_secs), stream.next())
             .await
@@ -129,7 +130,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     let block = snapshot.block_number_or_timestamp;
     let components = snapshot.new_pairs.len();
     let states = snapshot.states.len();
-    println!("  captured block     {block} ({components} components, {states} states)");
+    header_line("captured block", format!("{block} ({components} components, {states} states)"));
 
     // A protocol that was streamed but brought no pool is either unindexed on this endpoint or
     // filtered out by --min-tvl. Either way it is worth saying, because the market silently
@@ -145,10 +146,9 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
         .filter(|protocol| !present.contains(protocol))
         .collect();
     if !empty.is_empty() {
-        println!(
-            "  no pools from      {} (unindexed here, or below --min-tvl {})",
-            empty.join(", "),
-            opts.min_tvl
+        header_line(
+            "no pools from",
+            format!("{} (unindexed here, or below --min-tvl {})", empty.join(", "), opts.min_tvl),
         );
     }
 
@@ -159,7 +159,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
 
     Ok(Market {
         chain: opts.chain,
-        recorded_gas_price: live_gas_price,
+        market_gas_price: live_gas_price,
         updates: vec![snapshot],
         source: MarketSource::Live {
             chain_name: opts.chain_name.clone(),
@@ -181,14 +181,18 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
 ///
 /// The `all_onchain` / `native_onchain` expansion lives in `fynd-rpc`, which fynd-core cannot
 /// depend on, so the plain listing is done here.
-async fn discover_protocols(opts: &LiveOptions) -> Result<Vec<String>, String> {
-    let rpc_url = format!("https://{}", opts.tycho_url);
-    let options = HttpRPCClientOptions::new().with_auth_key(Some(opts.tycho_api_key.clone()));
+async fn discover_protocols(
+    host: &str,
+    api_key: &str,
+    chain: Chain,
+) -> Result<Vec<String>, String> {
+    let rpc_url = format!("https://{host}");
+    let options = HttpRPCClientOptions::new().with_auth_key(Some(api_key.to_string()));
     let client = HttpRPCClient::new(&rpc_url, options)
         .map_err(|e| format!("failed to reach the Tycho RPC at {rpc_url}: {e}"))?;
 
     let systems = client
-        .get_protocol_systems(ProtocolSystemsParams::new(opts.chain))
+        .get_protocol_systems(ProtocolSystemsParams::new(chain))
         .await
         .map_err(|e| format!("failed to list protocol systems: {e}"))?;
 
@@ -197,24 +201,18 @@ async fn discover_protocols(opts: &LiveOptions) -> Result<Vec<String>, String> {
     let dci = systems.dci_protocols();
 
     let mut all: Vec<String> = streamable.to_vec();
-    let dci_only: Vec<&String> = dci
+    let dci_only: Vec<String> = dci
         .iter()
         .filter(|protocol| !streamable.contains(protocol))
+        .cloned()
         .collect();
     if !dci_only.is_empty() {
-        println!(
-            "  via dci            {}",
-            dci_only
-                .iter()
-                .map(|p| p.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        all.extend(dci_only.into_iter().cloned());
+        header_line("via dci", dci_only.join(", "));
+        all.extend(dci_only);
     }
 
     if all.is_empty() {
-        return Err(format!("Tycho reports no protocol systems for {}", opts.chain_name));
+        return Err(format!("Tycho reports no protocol systems for {chain}"));
     }
     // Sorted, so two captures from the same deployment register in the same order.
     all.sort();

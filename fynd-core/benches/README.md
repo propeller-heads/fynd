@@ -89,12 +89,15 @@ Every option `bench.sh` takes still works, plus:
 
 | option | what it does |
 |---|---|
-| `--protocols A,B` | Protocol systems to stream. Defaults to every one Tycho has for the chain |
+| `--protocols A,B` | Protocol systems to stream. Defaults to every one Tycho has for the chain, including those it serves through the Dynamic Contract Indexer |
 | `--chain NAME` | Chain to capture. Defaults to `ethereum` |
 | `--min-tvl X` | Minimum component TVL in ETH. The main lever on how big the market is |
 | `--min-token-quality N` | Minimum token quality score |
 | `--traded-n-days-ago N` | Only tokens traded within this many days |
 | `--capture-timeout-secs N` | How long to wait for the snapshot before giving up |
+| `--tycho-url HOST` | Overrides `TYCHO_URL`. Scheme optional |
+| `--tycho-api-key KEY` | Overrides `TYCHO_API_KEY` |
+| `--rpc-url URL` | Overrides `RPC_URL`, read for the live gas price |
 
 Without `--gas-price-gwei` a live run prices gas at whatever the chain is charging, read from
 `RPC_URL`. Pass the flag and it wins. An offline run has no such price to read — the fixture
@@ -227,9 +230,11 @@ block from Tycho.
 The two kinds of market meet in one function, `build_market`, and both come out as a `Market`.
 Nothing downstream can tell which it was handed, which is what stops an offline and a live run
 measuring differently. What each run was is carried on `Market::source`, written to `run.json`, and
-shown in the report and the viewer. Anything used by both
-belongs there, so the two cannot drift apart on what they measure — including the default gas
-price, which is one constant so an order picked out of a report profiles the same solve.
+shown in the report and the viewer.
+
+Anything used by both programs belongs in `common/`, so the two cannot drift apart on what they
+measure. The market flags are one `clap` struct, `LiveFlags`, flattened into each binary for the
+same reason: two copies of a dozen attributes drift the first time one is edited.
 
 Both are declared `harness = false` in `Cargo.toml`, which means they get a plain `main()` instead
 of the test harness. That is why they parse their own arguments with `clap`.

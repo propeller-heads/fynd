@@ -74,7 +74,7 @@ pub struct BenchConfig {
     pub algorithm: String,
     pub max_hops: usize,
     /// The file's contents: a flat table of `PoolConfig` fields.
-    pub pool_fields: toml::Table,
+    pub worker_pool_fields: toml::Table,
 }
 
 /// Tokens dropped from the market before anything is solved.
@@ -193,12 +193,7 @@ pub fn load_bench_config(label: &str) -> Result<BenchConfig, String> {
         .and_then(|value| value.as_integer())
         .unwrap_or(3) as usize;
 
-    Ok(BenchConfig {
-        label: label.to_string(),
-        algorithm,
-        max_hops,
-        pool_fields: worker_pool_fields,
-    })
+    Ok(BenchConfig { label: label.to_string(), algorithm, max_hops, worker_pool_fields })
 }
 
 /// Every configuration on disk, by file stem, sorted. The default when `--configs` is absent.
@@ -239,7 +234,7 @@ pub fn pool_configs(
     workers: usize,
     timeout_ms: u64,
 ) -> HashMap<String, PoolConfig> {
-    let mut fields = config.pool_fields.clone();
+    let mut fields = config.worker_pool_fields.clone();
     fields.insert("num_workers".to_string(), toml::Value::Integer(workers as i64));
     fields.insert("task_queue_capacity".to_string(), toml::Value::Integer(10_000));
     fields
@@ -270,27 +265,65 @@ pub enum MarketMode {
 ///
 /// Returns a message when a live capture cannot be made. The offline path panics instead -- a
 /// missing fixture is a broken checkout, not a run-time condition.
-pub async fn build_market(mode: MarketMode, live: LiveArgs<'_>) -> Result<Market, String> {
-    match mode {
+pub async fn build_market(flags: LiveFlags) -> Result<Market, String> {
+    match flags.market {
         MarketMode::Offline => Ok(load_market()),
-        MarketMode::Live => live::capture_market(&live.into_options()?).await,
+        MarketMode::Live => live::capture_market(&flags.into_options()?).await,
     }
 }
 
-/// The live flags, as both bench binaries parse them.
-pub struct LiveArgs<'a> {
-    pub tycho_url: Option<&'a str>,
-    pub tycho_api_key: Option<&'a str>,
-    pub chain: &'a str,
+/// The market flags, parsed once and flattened into both binaries.
+///
+/// One declaration rather than two: the benchmark and the profiler have to agree on what a live
+/// capture means, and two copies of a dozen `clap` attributes drift the first time one is edited.
+#[derive(clap::Args, Debug, Clone)]
+pub struct LiveFlags {
+    /// Where the market comes from: the recorded fixture, or one block captured live from Tycho.
+    ///
+    /// Offline runs are reproducible and comparable with each other. A live run is a point-in-time
+    /// market: its configs compare with each other, not with any other run.
+    #[arg(long, value_enum, default_value_t = MarketMode::Offline)]
+    pub market: MarketMode,
+
+    /// Tycho host, with or without a scheme. Live runs only.
+    #[arg(long, env = "TYCHO_URL")]
+    pub tycho_url: Option<String>,
+
+    /// Tycho API key. Live runs only.
+    #[arg(long, env = "TYCHO_API_KEY")]
+    pub tycho_api_key: Option<String>,
+
+    /// Chain to capture. Live runs only.
+    #[arg(long, default_value = "ethereum")]
+    pub chain: String,
+
+    /// Protocol systems to stream, comma separated. Defaults to every one Tycho has for the chain,
+    /// including those it serves through the Dynamic Contract Indexer.
+    #[arg(long, value_delimiter = ',')]
     pub protocols: Option<Vec<String>>,
+
+    /// Minimum component TVL in ETH. The main lever on how big the captured market is.
+    #[arg(long, default_value_t = 10.0)]
     pub min_tvl: f64,
+
+    /// Minimum token quality score.
+    #[arg(long, default_value_t = 100)]
     pub min_token_quality: i32,
+
+    /// Only include tokens traded within this many days.
+    #[arg(long, default_value_t = 3)]
     pub traded_n_days_ago: u64,
+
+    /// How long to wait for Tycho's snapshot before giving up, in seconds.
+    #[arg(long, default_value_t = 120)]
     pub capture_timeout_secs: u64,
-    pub rpc_url: Option<&'a str>,
+
+    /// Chain RPC, read for the live gas price. Live runs only.
+    #[arg(long, env = "RPC_URL")]
+    pub rpc_url: Option<String>,
 }
 
-impl LiveArgs<'_> {
+impl LiveFlags {
     /// Checks the flags a live capture cannot do without, and names the missing one.
     fn into_options(self) -> Result<live::LiveOptions, String> {
         let tycho_url = self
@@ -299,12 +332,12 @@ impl LiveArgs<'_> {
         let tycho_api_key = self
             .tycho_api_key
             .ok_or("--market live needs --tycho-api-key (or TYCHO_API_KEY)")?;
-        let chain = fynd_core::types::parse_chain(self.chain)
+        let chain = fynd_core::types::parse_chain(&self.chain)
             .map_err(|e| format!("unsupported chain `{}`: {e}", self.chain))?;
 
         Ok(live::LiveOptions {
-            tycho_url: live::normalize_host(tycho_url).to_string(),
-            tycho_api_key: tycho_api_key.to_string(),
+            tycho_host: live::normalize_host(&tycho_url).to_string(),
+            tycho_api_key,
             chain,
             chain_name: self.chain.to_ascii_lowercase(),
             protocols: self.protocols,
@@ -312,7 +345,7 @@ impl LiveArgs<'_> {
             min_token_quality: self.min_token_quality,
             traded_n_days_ago: self.traded_n_days_ago,
             capture_timeout_secs: self.capture_timeout_secs,
-            rpc_url: self.rpc_url.map(str::to_string),
+            rpc_url: self.rpc_url,
         })
     }
 }
@@ -322,58 +355,35 @@ impl LiveArgs<'_> {
 /// Carried on the [`Market`] itself so a report cannot be written without saying which it was: an
 /// offline run is reproducible and comparable to every other offline run, a live one is a
 /// point-in-time market that only compares within itself.
-#[derive(Clone, Debug)]
+///
+/// Serialized straight into `run.json`, which is what the viewer's run picker filters on.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
 pub enum MarketSource {
     /// Replayed from the recorded fixture.
     Offline {
-        /// When the fixture was recorded, as unix seconds. Written to `run.json` so a report can
-        /// be tied to the fixture that produced it.
-        #[allow(dead_code, reason = "only the benchmark writes it; the profiler reads neither")]
+        /// When the fixture was recorded, as unix seconds, so a report can be tied to the fixture
+        /// that produced it.
         recorded_at_secs: u64,
         /// Chain the fixture was recorded on.
         chain_name: String,
     },
     /// Captured from Tycho at one block.
     Live {
+        /// Chain the capture was taken from.
         chain_name: String,
+        /// Block the snapshot sits at. Everything in the run was solved against this one block.
         block: u64,
+        /// Components the snapshot carried.
         components: usize,
+        /// Of those, the ones with a simulation state. A component without one cannot be routed
+        /// through, so the two coming apart is worth seeing.
         states: usize,
-        #[allow(dead_code, reason = "only the benchmark writes it")]
+        /// Protocol systems streamed, after discovery.
         protocols: Vec<String>,
-        #[allow(dead_code, reason = "only the benchmark writes it")]
+        /// Minimum component TVL the capture filtered on, in ETH.
         min_tvl: f64,
     },
-}
-
-impl MarketSource {
-    /// `"live"` or `"offline"`, for the report and the viewer's run picker.
-    #[allow(dead_code, reason = "only the benchmark writes run.json")]
-    pub fn label(&self) -> &'static str {
-        match self {
-            MarketSource::Offline { .. } => "offline",
-            MarketSource::Live { .. } => "live",
-        }
-    }
-
-    /// The chain the market is on.
-    #[allow(dead_code, reason = "read by neither binary today; kept beside `block`")]
-    pub fn chain_name(&self) -> &str {
-        match self {
-            MarketSource::Offline { chain_name, .. } | MarketSource::Live { chain_name, .. } => {
-                chain_name
-            }
-        }
-    }
-
-    /// The block the market sits at, when that is known. The fixture does not record one.
-    #[allow(dead_code, reason = "the report reads the variant's fields directly")]
-    pub fn block(&self) -> Option<u64> {
-        match self {
-            MarketSource::Offline { .. } => None,
-            MarketSource::Live { block, .. } => Some(*block),
-        }
-    }
 }
 
 /// The market every config in a run solves against, held once and cloned per solver.
@@ -383,8 +393,9 @@ impl MarketSource {
 pub struct Market {
     pub chain: Chain,
     /// The market's own gas price: recorded with the fixture, or read from the chain on a live
-    /// capture. Used only when `--gas-price-gwei` is absent, and reported either way.
-    pub recorded_gas_price: Option<BigUint>,
+    /// capture. Used only when `--gas-price-gwei` is absent, and reported either way. `None` when
+    /// the fixture carried none, or no `--rpc-url` was given.
+    pub market_gas_price: Option<BigUint>,
     pub updates: Vec<Update>,
     pub source: MarketSource,
 }
@@ -394,7 +405,7 @@ pub fn load_market() -> Market {
     Market {
         chain: fynd_core::types::parse_chain(&recording.metadata.chain)
             .expect("fixture chain supported"),
-        recorded_gas_price: recording
+        market_gas_price: recording
             .metadata
             .gas_price_as_biguint(),
         source: MarketSource::Offline {
@@ -415,7 +426,7 @@ pub fn resolved_gas_price_gwei(flag: Option<f64>, market: &Market) -> f64 {
     if let Some(gwei) = flag {
         return gwei;
     }
-    match &market.recorded_gas_price {
+    match &market.market_gas_price {
         Some(wei) => wei
             .to_f64()
             .map(|wei| wei / 1e9)
@@ -423,6 +434,14 @@ pub fn resolved_gas_price_gwei(flag: Option<f64>, market: &Market) -> f64 {
             .unwrap_or(DEFAULT_GAS_PRICE_GWEI),
         None => DEFAULT_GAS_PRICE_GWEI,
     }
+}
+
+/// Prints one line of a run header: a label in a fixed column, then its value.
+///
+/// The width lives here rather than in each caller's format string, which is what kept the columns
+/// lining up only by luck across four files.
+pub fn header_line(label: &str, value: impl std::fmt::Display) {
+    println!("  {label:<18} {value}");
 }
 
 /// One protocol's share of the market, as the graph will see it.
@@ -442,14 +461,14 @@ pub struct ProtocolCount {
 /// first screen of a run rather than after a puzzling report.
 pub fn protocol_breakdown(updates: &[Update]) -> Vec<ProtocolCount> {
     let mut protocol_of: HashMap<&str, &str> = HashMap::new();
-    let mut stated: HashSet<&str> = HashSet::new();
+    let mut has_state: HashSet<&str> = HashSet::new();
 
     for update in updates {
         for (id, component) in &update.new_pairs {
             protocol_of.insert(id.as_str(), component.protocol_system.as_str());
         }
         for id in update.states.keys() {
-            stated.insert(id.as_str());
+            has_state.insert(id.as_str());
         }
         for id in update.removed_pairs.keys() {
             protocol_of.remove(id.as_str());
@@ -460,7 +479,7 @@ pub fn protocol_breakdown(updates: &[Update]) -> Vec<ProtocolCount> {
     for (id, protocol) in &protocol_of {
         let entry = totals.entry(protocol).or_insert((0, 0));
         entry.0 += 1;
-        if stated.contains(id) {
+        if has_state.contains(id) {
             entry.1 += 1;
         }
     }
@@ -482,34 +501,25 @@ pub fn protocol_breakdown(updates: &[Update]) -> Vec<ProtocolCount> {
     counts
 }
 
-/// Prints the breakdown, and says plainly when a protocol has no simulatable pool at all.
-pub fn print_protocol_breakdown(updates: &[Update]) {
-    let counts = protocol_breakdown(updates);
+/// Prints a breakdown already counted, so the market is walked once however many places read it.
+pub fn print_protocol_breakdown(counts: &[ProtocolCount]) {
     let (components, with_state) = counts
         .iter()
         .fold((0, 0), |(c, s), row| (c + row.components, s + row.with_state));
 
-    println!("\n  market graph       {components} pools, {with_state} simulatable");
+    println!();
+    header_line("market graph", format!("{components} pools, {with_state} simulatable"));
     println!("    {:<24}{:>10}{:>12}", "protocol", "pools", "simulatable");
-    for row in &counts {
-        let flag = if row.with_state == 0 { "  <- none usable" } else { "" };
+    for row in counts {
+        // The zero is the whole point of the column, so it is called out on the row it happens on
+        // rather than summarised again underneath.
+        let flag = if row.with_state == 0 { "  <- none usable, cannot be routed" } else { "" };
         println!("    {:<24}{:>10}{:>12}{}", row.protocol, row.components, row.with_state, flag);
-    }
-
-    let dead: Vec<&str> = counts
-        .iter()
-        .filter(|row| row.with_state == 0)
-        .map(|row| row.protocol.as_str())
-        .collect();
-    if !dead.is_empty() {
-        println!(
-            "    note: no pool of {} carries a state, so nothing routes through them",
-            dead.join(", ")
-        );
     }
 }
 
-/// Builds a solver for one config and waits until it can answer.
+/// Builds a solver for one config and waits until it can answer./// Builds a solver for one config
+/// and waits until it can answer.
 ///
 /// # Errors
 ///
