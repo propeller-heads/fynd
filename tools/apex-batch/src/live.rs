@@ -33,6 +33,7 @@ use apex_solver::{
     types::Address as ApexAddress,
 };
 use num_bigint::BigUint;
+use tracing::warn;
 
 use crate::{
     adapter::{from_apex_u256, to_apex_u256, TychoApexPool},
@@ -685,9 +686,21 @@ fn solve_component(
         Ok(Err(error)) => {
             counters.component_errored_orders += order_amount18.len() as u64;
             let kind = component_error_kind(&error);
+            // Full Display, not just the bucketed kind: for trade_solver errors this carries the
+            // specific pair/value thiserror renders (e.g. which y_sell_buy went negative) that
+            // the coarse kind alone discards. Bounded volume — only fires on the few percent of
+            // components that actually error.
+            warn!(
+                kind = %kind,
+                orders = order_amount18.len(),
+                pools = component_pools.len(),
+                closure = closure.len(),
+                %error,
+                "APEX component solve errored"
+            );
             *counters
                 .component_errors
-                .entry(kind.to_string())
+                .entry(kind)
                 .or_default() += 1;
             for (order, _) in &order_amount18 {
                 statuses.push((order.id.clone(), OrderStatus::ComponentErrored));
@@ -861,15 +874,44 @@ fn solve_component(
     exposure
 }
 
-fn component_error_kind(error: &apex_solver::core::ApexError) -> &'static str {
+/// `TradeSolverError` (apex-solver's simplex back-substitution error) is not part of
+/// apex-solver's public API — only the wrapping `ApexError` is re-exported — so its four
+/// variants cannot be pattern-matched from here. `thiserror` still renders each one's own detail
+/// into `ApexError`'s `Display`, so the kind is recovered by matching that rendered text instead
+/// of the type. Brittle against an upstream wording change (falls back to `trade_solver:other`,
+/// never silently mis-sorted into a wrong bucket), but the alternative is no visibility at all
+/// into which of the four is actually driving the count — measured at 96% of all live component
+/// errors, and rising sharply with batch size (0.34% of components at window 1, 5.73% at 30),
+/// so distinguishing them matters more than the fragility costs.
+fn trade_solver_error_kind(rendered: &str) -> &'static str {
+    if rendered.contains("Negative trade amount") {
+        "trade_solver:negative_trade_amount"
+    } else if rendered.contains("construct_solution stuck") {
+        "trade_solver:construct_solution_stuck"
+    } else if rendered.contains("Cannot set upper bound") {
+        "trade_solver:set_upper_bound_twice"
+    } else if rendered.contains("Setting upper bound to zero") {
+        "trade_solver:zero_upper_bound"
+    } else {
+        "trade_solver:other"
+    }
+}
+
+fn component_error_kind(error: &apex_solver::core::ApexError) -> String {
     match error {
-        apex_solver::core::ApexError::InvalidInput(_) => "invalid_input",
-        apex_solver::core::ApexError::MetricsCollectionError(_) => "metrics",
-        apex_solver::core::ApexError::TradeSolverError(_) => "trade_solver",
-        apex_solver::core::ApexError::MarketRouterError(_) => "market_router",
-        apex_solver::core::ApexError::ClearingUnderLimitPrice(_, _) => "clearing_under_limit",
-        apex_solver::core::ApexError::NegativeBalanceDelta(_, _) => "negative_balance_delta",
-        _ => "other",
+        apex_solver::core::ApexError::InvalidInput(_) => "invalid_input".to_string(),
+        apex_solver::core::ApexError::MetricsCollectionError(_) => "metrics".to_string(),
+        apex_solver::core::ApexError::TradeSolverError(_) => {
+            trade_solver_error_kind(&error.to_string()).to_string()
+        }
+        apex_solver::core::ApexError::MarketRouterError(_) => "market_router".to_string(),
+        apex_solver::core::ApexError::ClearingUnderLimitPrice(_, _) => {
+            "clearing_under_limit".to_string()
+        }
+        apex_solver::core::ApexError::NegativeBalanceDelta(_, _) => {
+            "negative_balance_delta".to_string()
+        }
+        _ => "other".to_string(),
     }
 }
 
@@ -890,6 +932,48 @@ mod tests {
     };
 
     use super::*;
+
+    /// Pins the classification against apex-solver's actual rendered messages (as of
+    /// `apex-solver` rev `c1e049d`), since `trade_solver_error_kind` can only match on the
+    /// wrapping `ApexError`'s `Display` text, not the private inner type.
+    #[test]
+    fn test_trade_solver_error_kind_matches_real_messages() {
+        assert_eq!(
+            trade_solver_error_kind(
+                "Error during trade solving simplex algorithm: Negative trade amount computed \
+                 for y_5_12 = -42"
+            ),
+            "trade_solver:negative_trade_amount"
+        );
+        assert_eq!(
+            trade_solver_error_kind(
+                "Error during trade solving simplex algorithm: construct_solution stuck: no \
+                 progress possible with remaining unsolved variables"
+            ),
+            "trade_solver:construct_solution_stuck"
+        );
+        assert_eq!(
+            trade_solver_error_kind(
+                "Error during trade solving simplex algorithm: Cannot set upper bound for the \
+                 same pair twice for pair: PairAddresses(..)"
+            ),
+            "trade_solver:set_upper_bound_twice"
+        );
+        assert_eq!(
+            trade_solver_error_kind(
+                "Error during trade solving simplex algorithm: Setting upper bound to zero is \
+                 not allowed"
+            ),
+            "trade_solver:zero_upper_bound"
+        );
+        assert_eq!(
+            trade_solver_error_kind(
+                "Error during trade solving simplex algorithm: some new variant"
+            ),
+            "trade_solver:other",
+            "an unrecognized message must fall back, never silently mis-sort"
+        );
+    }
 
     fn token(index: u8) -> ApexAddress {
         ApexAddress([index; 20])
