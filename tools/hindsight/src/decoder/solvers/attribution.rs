@@ -8,7 +8,7 @@
 use alloy::{primitives::Address, rpc::types::trace::geth::CallFrame};
 use serde::Serialize;
 
-use crate::decoder::{registry::Registry, trace};
+use crate::decoder::{registry::Registry, solvers::SolverKnowledge, trace};
 
 /// The evidence tier that produced a record's solver label, most- to least-trusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -29,10 +29,21 @@ pub(crate) enum AttributionSource {
     Fallback,
 }
 
-/// A solver label and the evidence tier it came from.
+/// A solver label, the evidence tier it came from, and the solver's resolved
+/// `SolverKnowledge` handle — resolved here, once, so every later consultation (swap intent,
+/// veto, integrator tag) calls the trait on the handle instead of re-deriving the
+/// implementation from the name.
 pub(crate) struct Attribution {
     pub solver: String,
     pub source: AttributionSource,
+    pub knowledge: &'static dyn SolverKnowledge,
+}
+
+impl Attribution {
+    fn new(solver: String, source: AttributionSource) -> Self {
+        let knowledge = super::knowledge(&solver);
+        Self { solver, source, knowledge }
+    }
 }
 
 /// Attribute the solver that settled a matched transaction.
@@ -47,24 +58,18 @@ pub(crate) fn attribute(
     registry: &Registry,
 ) -> Attribution {
     if let Some(solver) = declared {
-        return Attribution { solver, source: AttributionSource::Declared };
+        return Attribution::new(solver, AttributionSource::Declared);
     }
     if registry.is_solver(entry_point) {
-        return Attribution {
-            solver: registry.label(entry_point),
-            source: AttributionSource::EntryPoint,
-        };
+        return Attribution::new(registry.label(entry_point), AttributionSource::EntryPoint);
     }
     if let Some(found) = trace::find_solver_frame(root, registry).and_then(|frame| frame.to) {
-        return Attribution { solver: registry.label(found), source: AttributionSource::TraceMatch };
+        return Attribution::new(registry.label(found), AttributionSource::TraceMatch);
     }
     if let Some(guess) = trace::largest_external_call(root, entry_point, sender, registry) {
-        return Attribution {
-            solver: registry.label(guess),
-            source: AttributionSource::LargestCall,
-        };
+        return Attribution::new(registry.label(guess), AttributionSource::LargestCall);
     }
-    Attribution { solver: registry.label(entry_point), source: AttributionSource::Fallback }
+    Attribution::new(registry.label(entry_point), AttributionSource::Fallback)
 }
 
 #[cfg(test)]

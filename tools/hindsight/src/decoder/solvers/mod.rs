@@ -150,7 +150,8 @@ pub(crate) trait SolverKnowledge: Send + Sync {
 }
 
 /// The solvers with a `SolverKnowledge` implementation, by address-book name. A solver absent
-/// here needs none — its address-book entry alone is complete.
+/// here needs none — its address-book entry alone is complete. Consulted once, when a solver
+/// name is resolved to its handle (see [`knowledge`]); everything after that calls the trait.
 const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
     ("fly", &fly::Fly),
     ("kyberswap", &kyberswap::Kyberswap),
@@ -158,6 +159,22 @@ const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
     ("paraswap", &paraswap::Paraswap),
     ("0x", &zeroex::ZeroEx),
 ];
+
+/// A solver with no `SolverKnowledge` implementation: every method keeps its "nothing to add"
+/// default, so callers hold one handle type and never branch on whether a solver has code.
+struct NoKnowledge;
+
+impl SolverKnowledge for NoKnowledge {}
+
+/// Resolve a solver name to its `SolverKnowledge` handle, once. A book-only solver — or a label
+/// that is not a solver at all — resolves to the no-op implementation, whose every method
+/// declares nothing.
+pub(crate) fn knowledge(solver: &str) -> &'static dyn SolverKnowledge {
+    IMPLEMENTATIONS
+        .iter()
+        .find(|(name, _)| *name == solver)
+        .map_or(&NoKnowledge, |(_, knowledge)| *knowledge)
+}
 
 /// The veto a solver places on a matched transaction that must be skipped instead of decoded,
 /// if any.
@@ -187,28 +204,6 @@ pub(crate) fn integrator(logs: &[Log]) -> Option<String> {
     IMPLEMENTATIONS
         .iter()
         .find_map(|(_, knowledge)| knowledge.integrator(logs))
-}
-
-/// The swap terms encoded in the solver frame's own calldata, dispatched on the attributed
-/// solver so a lookalike blob from another router cannot masquerade as an intent.
-pub(crate) fn swap_intent(
-    solver: &str,
-    input: &[u8],
-    amount_in_hint: Option<U256>,
-) -> Option<SwapIntent> {
-    let (_, knowledge) = IMPLEMENTATIONS
-        .iter()
-        .find(|(name, _)| *name == solver)?;
-    knowledge.swap_intent(input, amount_in_hint)
-}
-
-/// The address the solver frame's own calldata declares as the output recipient, dispatched on
-/// the attributed solver so a lookalike blob from another router cannot masquerade as one.
-pub(crate) fn output_recipient(solver: &str, input: &[u8]) -> Option<Address> {
-    let (_, knowledge) = IMPLEMENTATIONS
-        .iter()
-        .find(|(name, _)| *name == solver)?;
-    knowledge.output_recipient(input)
 }
 
 /// Whether a declared quote is in the same units as the settled output.
@@ -293,10 +288,10 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_intent_dispatch_scoped_to_the_attributed_solver() {
+    fn test_knowledge_scopes_intents_to_the_attributed_solver() {
         // A ParaSwap-shaped calldata (token pair, then the fromAmount/toAmount/quotedAmount
-        // triple) only parses into an intent when the attributed solver is paraswap; an unlisted
-        // solver never yields one from the same bytes.
+        // triple) only parses into an intent through paraswap's handle; a book-only solver
+        // resolves to the no-op handle, which never yields one from the same bytes.
         let amount_in = U256::from(171_521_496u64);
         let mut input = vec![0xe3u8, 0xea, 0xd5, 0x9e];
         for word in [
@@ -308,7 +303,11 @@ mod tests {
         ] {
             input.extend_from_slice(&word.to_be_bytes::<32>());
         }
-        assert!(swap_intent("paraswap", &input, Some(amount_in)).is_some());
-        assert!(swap_intent("1inch", &input, Some(amount_in)).is_none());
+        assert!(knowledge("paraswap")
+            .swap_intent(&input, Some(amount_in))
+            .is_some());
+        assert!(knowledge("1inch")
+            .swap_intent(&input, Some(amount_in))
+            .is_none());
     }
 }

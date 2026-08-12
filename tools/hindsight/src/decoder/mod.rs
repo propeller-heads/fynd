@@ -370,7 +370,9 @@ impl<P: Provider> Decoder<P> {
         // dropped (quotes are self-reported); the ABI-decoded terms stay either way.
         let intent = trace::find_solver_frame(root, registry)
             .and_then(|frame| {
-                solvers::swap_intent(&attribution.solver, &frame.input, Some(flow.swap.amount_in))
+                attribution
+                    .knowledge
+                    .swap_intent(&frame.input, Some(flow.swap.amount_in))
             })
             .map(|mut intent| {
                 if let Some(quoted) = intent.declared_quote() {

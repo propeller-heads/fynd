@@ -51,9 +51,9 @@ impl<P: Provider> TradeDecoder<P> for RelayCalldata {
     async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow> {
         let addresses = ctx.venue?;
         let solver_frame = trace::find_solver_frame(ctx.root, ctx.registry)?;
-        let solver = ctx.registry.label(solver_frame.to?);
-        let intent = solvers::swap_intent(&solver, &solver_frame.input, None)?;
-        let recipient = solvers::output_recipient(&solver, &solver_frame.input)?;
+        let knowledge = solvers::knowledge(&ctx.registry.label(solver_frame.to?));
+        let intent = knowledge.swap_intent(&solver_frame.input, None)?;
+        let recipient = knowledge.output_recipient(&solver_frame.input)?;
 
         let amount_out = ctx
             .transfer_ledger
