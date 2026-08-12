@@ -77,7 +77,7 @@ options.
 
 ```bash
 export TYCHO_URL=... TYCHO_API_KEY=... RPC_URL=...
-./scripts/bench-live.sh --name live-now --orders 500
+./scripts/bench.sh --market live --name live-now --orders 500
 ```
 
 Same benchmark, same output, same viewer. It connects, takes the snapshot of one block, and solves
@@ -85,7 +85,7 @@ against that. One block is a whole market: the snapshot carries every component 
 filters admit, and derived data — spot prices, depths, token gas prices — is computed locally from
 it rather than streamed, so nothing is gained by waiting for a second block.
 
-Every option `bench.sh` takes still works, plus:
+Every other option works as it does offline, plus:
 
 | option | what it does |
 |---|---|

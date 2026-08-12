@@ -6,8 +6,8 @@
 # protocols.csv, routes.jsonl and run.json, so runs can be compared rather than overwritten.
 # Browse them with ./scripts/bench-viewer.sh.
 #
-# To run against a live market instead, use ./scripts/bench-live.sh, which is this script with
-# --market live and the Tycho settings.
+# To run against a live market instead, pass --market live. That needs TYCHO_URL and
+# TYCHO_API_KEY, and reads RPC_URL for the gas price; --help-bench lists the rest.
 #
 # To profile one algorithm instead of comparing several, use ./scripts/profile.sh -- it runs a
 # single config on one thread and writes nothing.
