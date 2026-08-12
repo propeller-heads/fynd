@@ -18,7 +18,7 @@ use crate::decoder::{
     decode::{DecodeContext, TradeDecoder, TraderFlow},
     netting::venue_flow,
     registry::VenueAddresses,
-    solvers, trace,
+    solvers,
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
@@ -58,14 +58,12 @@ impl TradeDecoder for RelayCalldata {
     }
 
     async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
-        let solver_frame = trace::find_solver_frame(ctx.root, ctx.registry)?;
-        let knowledge = solvers::knowledge(&ctx.registry.label(solver_frame.to?));
-        let intent = knowledge.swap_intent(&solver_frame.input, None)?;
-        let recipient = knowledge.output_recipient(&solver_frame.input)?;
+        let settled = solvers::settled_intent(ctx.root, ctx.registry)?;
+        let intent = settled.intent;
 
         let amount_out = ctx
             .transfer_ledger
-            .received_by_address(recipient, intent.token_out);
+            .received_by_address(settled.output_recipient, intent.token_out);
         if amount_out.is_zero() || amount_out < intent.min_amount_out {
             return None;
         }

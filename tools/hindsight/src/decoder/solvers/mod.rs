@@ -15,10 +15,10 @@ pub(crate) mod zeroex;
 
 use alloy::{
     primitives::{Address, U256},
-    rpc::types::Log,
+    rpc::types::{trace::geth::CallFrame, Log},
 };
 
-use crate::decoder::{registry::Registry, veto::Veto};
+use crate::decoder::{registry::Registry, trace, veto::Veto};
 
 /// A trader's swap terms recovered from a solver frame's own calldata: what the trade moved, the
 /// floor the trader would accept, and — when the calldata declares one — the solver's own
@@ -204,6 +204,29 @@ pub(crate) fn integrator(logs: &[Log]) -> Option<String> {
     IMPLEMENTATIONS
         .iter()
         .find_map(|(_, knowledge)| knowledge.integrator(logs))
+}
+
+/// The settling solver frame's own declaration of a trade: its swap intent plus the output
+/// recipient whose receipt anchors the settled amount — the one field calldata can never carry.
+pub(crate) struct SettledIntent {
+    pub intent: SwapIntent,
+    /// The address the solver's calldata declares as the output recipient.
+    pub output_recipient: Address,
+}
+
+/// Read the settling solver's own declaration of the trade from the trace, in one step: find the
+/// solver frame, resolve that solver's knowledge handle, and recover its swap intent and declared
+/// output recipient. This is the venue-agnostic half of a calldata-primary decode — a venue's
+/// calldata decoder calls this, then applies its own guards, fee basis, and corrections.
+///
+/// `None` when the trace has no solver frame, or the solver's calldata does not carry the terms
+/// or the recipient — the caller falls through to its netting fallback.
+pub(crate) fn settled_intent(root: &CallFrame, registry: &Registry) -> Option<SettledIntent> {
+    let frame = trace::find_solver_frame(root, registry)?;
+    let knowledge = knowledge(&registry.label(frame.to?));
+    let intent = knowledge.swap_intent(&frame.input, None)?;
+    let output_recipient = knowledge.output_recipient(&frame.input)?;
+    Some(SettledIntent { intent, output_recipient })
 }
 
 /// Whether a declared quote is in the same units as the settled output.
