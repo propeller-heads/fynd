@@ -777,9 +777,9 @@ mod tests {
         assert_eq!(body["total"], 3);
         let tokens = body["tokens"].as_array().unwrap();
         assert_eq!(tokens.len(), 3);
-        // USDC: 400 raw units deep at price 2 = 800 gas units; WETH: 100 at 1 = 100.
+        // USDC: 400 raw units deep at 2 USDC per gas unit = 200 gas units; WETH: 100 at 1 = 100.
         assert_eq!(tokens[0]["symbol"], "USDC");
-        assert_eq!(tokens[0]["liquidity"], 800.0);
+        assert_eq!(tokens[0]["liquidity"], 200.0);
         assert_eq!(tokens[0]["component_count"], 1);
         assert_eq!(tokens[0]["decimals"], 6);
         assert_eq!(tokens[0]["quality"], 100);
