@@ -34,10 +34,11 @@ use std::{path::PathBuf, time::Instant};
 
 use clap::Parser;
 use common::{
-    available_configs, block_components, build_solver, format_micros, load_bench_config,
-    load_blocked_tokens, load_market, symbol_table, timings_of, token_label,
+    available_configs, block_components, build_market, build_solver, format_micros,
+    load_bench_config, load_blocked_tokens, print_protocol_breakdown, resolved_gas_price_gwei,
+    symbol_table, timings_of, token_label,
     trades::{load_trade_orders, recorded_tokens, TradeOrder},
-    DEFAULT_GAS_PRICE_GWEI,
+    LiveArgs, MarketMode, MarketSource,
 };
 use fynd_core::{types::QuoteStatus, QuoteOptions, QuoteRequest, Solver};
 
@@ -70,9 +71,50 @@ struct Args {
     #[arg(long, default_value_t = 5000)]
     timeout_ms: u64,
 
-    /// Gas price in gwei, fractions allowed. The fixture's own block sat near 0.1.
-    #[arg(long, default_value_t = DEFAULT_GAS_PRICE_GWEI, value_parser = common::parse_gas_price_gwei)]
-    gas_price_gwei: f64,
+    /// Gas price in gwei, fractions allowed. Without it a live run prices at whatever the chain
+    /// is charging, and an offline run at the default.
+    #[arg(long, value_parser = common::parse_gas_price_gwei)]
+    gas_price_gwei: Option<f64>,
+
+    /// Where the market comes from: the recorded fixture, or one block captured live from Tycho.
+    #[arg(long, value_enum, default_value_t = MarketMode::Offline)]
+    market: MarketMode,
+
+    /// Tycho WebSocket URL. Live runs only.
+    #[arg(long, env = "TYCHO_URL")]
+    tycho_url: Option<String>,
+
+    /// Tycho API key. Live runs only.
+    #[arg(long, env = "TYCHO_API_KEY")]
+    tycho_api_key: Option<String>,
+
+    /// Chain to capture. Live runs only.
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+
+    /// Protocol systems to stream, comma separated. Defaults to every one Tycho has.
+    #[arg(long, value_delimiter = ',')]
+    protocols: Option<Vec<String>>,
+
+    /// Minimum component TVL in ETH.
+    #[arg(long, default_value_t = 10.0)]
+    min_tvl: f64,
+
+    /// Minimum token quality score.
+    #[arg(long, default_value_t = 100)]
+    min_token_quality: i32,
+
+    /// Only include tokens traded within this many days.
+    #[arg(long, default_value_t = 3)]
+    traded_n_days_ago: u64,
+
+    /// How long to wait for Tycho's snapshot before giving up.
+    #[arg(long, default_value_t = 120)]
+    capture_timeout_secs: u64,
+
+    /// Chain RPC, read for the live gas price. Live runs only.
+    #[arg(long, env = "RPC_URL")]
+    rpc_url: Option<String>,
 
     /// Trade dataset path.
     #[arg(long)]
@@ -154,7 +196,29 @@ async fn main() {
     let config = load_bench_config(&args.config)
         .unwrap_or_else(|reason| panic!("{reason}. Available: {}", available_configs().join(", ")));
 
-    let mut market = load_market();
+    let mut market = match build_market(
+        args.market,
+        LiveArgs {
+            tycho_url: args.tycho_url.as_deref(),
+            tycho_api_key: args.tycho_api_key.as_deref(),
+            chain: &args.chain,
+            protocols: args.protocols.clone(),
+            min_tvl: args.min_tvl,
+            min_token_quality: args.min_token_quality,
+            traded_n_days_ago: args.traded_n_days_ago,
+            capture_timeout_secs: args.capture_timeout_secs,
+            rpc_url: args.rpc_url.as_deref(),
+        },
+    )
+    .await
+    {
+        Ok(market) => market,
+        Err(reason) => {
+            eprintln!("error: {reason}");
+            std::process::exit(1);
+        }
+    };
+    let gas_price_gwei = resolved_gas_price_gwei(args.gas_price_gwei, &market);
     let blocked = load_blocked_tokens();
     let blocked_components = block_components(&mut market.updates, &blocked.addresses);
     let known_tokens = recorded_tokens(&market.updates);
@@ -187,7 +251,17 @@ async fn main() {
     }
     println!("  dataset            {} of {} eligible", summary.kept, summary.eligible);
     println!("  timeout            {}ms", args.timeout_ms);
-    println!("  gas price          {} gwei", args.gas_price_gwei);
+    match &market.source {
+        MarketSource::Offline { chain_name, .. } => {
+            println!("  market             offline fixture ({chain_name})")
+        }
+        MarketSource::Live { chain_name, block, components, states, .. } => println!(
+            "  market             live {chain_name} block {block} \
+             ({components} components, {states} states)"
+        ),
+    }
+    println!("  gas price          {gas_price_gwei} gwei");
+    print_protocol_breakdown(&market.updates);
     if !blocked.symbols.is_empty() {
         println!(
             "  blocked            {} ({blocked_components} pools)",
@@ -198,7 +272,7 @@ async fn main() {
 
     let setup = Instant::now();
     // One worker, so the flamegraph has a single solving thread to read.
-    let solver = build_solver(&config, &market, 1, args.timeout_ms, args.gas_price_gwei)
+    let solver = build_solver(&config, &market, 1, args.timeout_ms, gas_price_gwei)
         .await
         .unwrap_or_else(|reason| panic!("could not build {}: {reason}", config.label));
     let setup_ms = setup.elapsed().as_millis();

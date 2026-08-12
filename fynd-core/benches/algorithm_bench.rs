@@ -43,7 +43,7 @@
 //! naming a token the recording never saw — and whatever that removes is counted in the report.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -53,10 +53,12 @@ mod common;
 use chrono::Utc;
 use clap::Parser;
 use common::{
-    available_configs, block_components, build_solver, load_bench_config, load_blocked_tokens,
-    load_market, mean_and_median, symbol_table, timings_of, token_label,
+    available_configs, block_components, build_market, build_solver, load_bench_config,
+    load_blocked_tokens, mean_and_median, print_protocol_breakdown, protocol_breakdown,
+    resolved_gas_price_gwei, symbol_table, timings_of, token_label,
     trades::{load_trade_orders, recorded_tokens, TradeLoadSummary, TradeOrder},
-    usd_out, wei_per_token, BenchConfig, BlockedTokens, DEFAULT_GAS_PRICE_GWEI,
+    usd_out, wei_per_token, BenchConfig, BlockedTokens, LiveArgs, MarketMode, MarketSource,
+    ProtocolCount,
 };
 use futures::stream::StreamExt;
 use fynd_core::{types::QuoteStatus, QuoteOptions, QuoteRequest, Solver};
@@ -129,10 +131,13 @@ const PAIR_ROWS: usize = 30;
 
 #[derive(Parser, Debug)]
 #[command(
-    about = "Compare routing algorithms offline against a recorded market",
-    long_about = "Replays the recorded market fixture through one solver per algorithm and \
-                  reports output net of gas against the baseline, per token pair and overall.\n\n\
-                  Writes bench-results/<name>/{report.md,orders.csv,pairs.csv,routes.jsonl}."
+    about = "Compare routing algorithms against a recorded or a live market",
+    long_about = "Runs one solver per algorithm over the same market and reports output net of \
+                  gas against the baseline, per token pair and overall.\n\n\
+                  The market is either the recorded fixture (--market offline, reproducible) or \
+                  one block captured live from Tycho (--market live).\n\n\
+                  Writes bench-results/<name>/\
+                  {report.md,orders.csv,pairs.csv,protocols.csv,routes.jsonl}."
 )]
 struct Args {
     /// Name for this run. Names the output directory, so runs can be told apart and diffed.
@@ -151,11 +156,53 @@ struct Args {
     #[arg(long, default_value_t = 5000)]
     timeout_ms: u64,
 
-    /// Gas price in gwei, fractions allowed — `0.1` is about what the fixture's own block sat at.
-    /// Always wins over the recording's own value, which is absent on the current fixture; without
-    /// it the solver falls back to its 10 gwei default.
-    #[arg(long, default_value_t = DEFAULT_GAS_PRICE_GWEI, value_parser = common::parse_gas_price_gwei)]
-    gas_price_gwei: f64,
+    /// Gas price in gwei, fractions allowed. Without it a live run prices at whatever the chain
+    /// is charging, and an offline run at the default, since the fixture carries no gas price.
+    #[arg(long, value_parser = common::parse_gas_price_gwei)]
+    gas_price_gwei: Option<f64>,
+
+    /// Where the market comes from: the recorded fixture, or one block captured live from Tycho.
+    ///
+    /// Offline runs are reproducible and comparable with each other. A live run is a point-in-time
+    /// market: its configs compare with each other, not with any other run.
+    #[arg(long, value_enum, default_value_t = MarketMode::Offline)]
+    market: MarketMode,
+
+    /// Tycho WebSocket URL. Live runs only.
+    #[arg(long, env = "TYCHO_URL")]
+    tycho_url: Option<String>,
+
+    /// Tycho API key. Live runs only.
+    #[arg(long, env = "TYCHO_API_KEY")]
+    tycho_api_key: Option<String>,
+
+    /// Chain to capture. Live runs only.
+    #[arg(long, default_value = "ethereum")]
+    chain: String,
+
+    /// Protocol systems to stream, comma separated. Defaults to every one Tycho has for the chain.
+    #[arg(long, value_delimiter = ',')]
+    protocols: Option<Vec<String>>,
+
+    /// Minimum component TVL in ETH. The main lever on how big the captured market is.
+    #[arg(long, default_value_t = 10.0)]
+    min_tvl: f64,
+
+    /// Minimum token quality score.
+    #[arg(long, default_value_t = 100)]
+    min_token_quality: i32,
+
+    /// Only include tokens traded within this many days.
+    #[arg(long, default_value_t = 3)]
+    traded_n_days_ago: u64,
+
+    /// How long to wait for Tycho's snapshot before giving up.
+    #[arg(long, default_value_t = 120)]
+    capture_timeout_secs: u64,
+
+    /// Chain RPC, read for the live gas price. Live runs only.
+    #[arg(long, env = "RPC_URL")]
+    rpc_url: Option<String>,
 
     /// Configs to run, comma separated, named after the files in `benches/configs/`, e.g.
     /// `water_fill_d3,path_frank_wolfe_d3`. Defaults to every config on disk. The baseline is
@@ -244,7 +291,7 @@ struct Run {
 }
 
 impl Run {
-    fn resolve(args: Args) -> (Self, ConfigSet) {
+    fn resolve(args: Args, gas_price_gwei: f64) -> (Self, ConfigSet) {
         let cores = num_cpus::get();
         let jobs = args.jobs.unwrap_or(cores).max(1);
         let trades = args
@@ -257,7 +304,7 @@ impl Run {
             jobs,
             workers: jobs.min(cores),
             timeout_ms: args.timeout_ms,
-            gas_price_gwei: args.gas_price_gwei,
+            gas_price_gwei,
             orders: args.orders,
             repeats: args.repeats.max(1),
             trades,
@@ -608,6 +655,11 @@ fn pair_name(pair: &TokenPair, symbols: &HashMap<Address, String>) -> String {
 /// threading the same bundle through another signature.
 struct BenchOutcome<'a> {
     run: &'a Run,
+    /// Which market the run solved against, and what it was.
+    source: &'a MarketSource,
+    /// Pools per protocol in the graph every config solved, so usage can be read against what
+    /// was there to use.
+    market_protocols: &'a [ProtocolCount],
     /// Every config that produced data, in run order; the baseline is first.
     results: &'a [(BenchConfig, ConfigRun)],
     /// Configs asked for but not run, each with why.
@@ -722,9 +774,29 @@ fn routes_jsonl(outcome: &BenchOutcome<'_>) -> String {
 /// What the run was, for the viewer's run picker and the report header.
 fn run_json(outcome: &BenchOutcome<'_>) -> String {
     let run = outcome.run;
+    let market = match outcome.source {
+        MarketSource::Offline { recorded_at_secs, chain_name } => serde_json::json!({
+            "source": "offline",
+            "chain": chain_name,
+            "recorded_at_secs": recorded_at_secs,
+        }),
+        MarketSource::Live { chain_name, block, components, states, protocols, min_tvl } => {
+            serde_json::json!({
+                "source": "live",
+                "chain": chain_name,
+                "block": block,
+                "components": components,
+                "states": states,
+                "protocols": protocols,
+                "min_tvl": min_tvl,
+            })
+        }
+    };
     serde_json::json!({
         "name": run.name,
         "finished_at": Utc::now().to_rfc3339(),
+        "source": outcome.source.label(),
+        "market": market,
         "orders": outcome.orders.len(),
         "pairs": outcome.pairs.len(),
         "baseline": BASELINE,
@@ -845,6 +917,98 @@ fn orders_csv(outcome: &BenchOutcome<'_>) -> String {
     csv
 }
 
+/// One row per config and protocol: what each algorithm actually routed through.
+///
+/// Tidy rather than wide — one observation per row — so it plots without reshaping, and a protocol
+/// that appears for one config and not another still has a row saying zero.
+///
+/// `pools_in_market` and `pools_simulatable` repeat down the rows because they belong to the
+/// market, not the config. They are here so usage can be read against opportunity: a protocol with
+/// 400 pools and 3 legs is a very different finding from one with 3 pools and 3 legs.
+///
+/// `orders` counts solves whose route touched the protocol at least once, so a route crossing two
+/// protocols counts for both. The same holds for `usd`, which therefore sums to more than the run
+/// across protocols. `legs` and `pools_used` do not double count.
+fn protocols_csv(outcome: &BenchOutcome<'_>) -> String {
+    let mut csv = String::from(
+        "config,algorithm,protocol,pools_in_market,pools_simulatable,pools_used,legs,legs_pct,\
+         orders,orders_pct,usd\n",
+    );
+
+    for (config, config_run) in outcome.results {
+        // Every protocol in the market gets a row, used or not: a zero is the interesting answer
+        // when an algorithm never touches liquidity that was available to it.
+        let mut pools_used: HashMap<&str, HashSet<&str>> = HashMap::new();
+        let mut legs: HashMap<&str, usize> = HashMap::new();
+        let mut orders: HashMap<&str, usize> = HashMap::new();
+        let mut usd: HashMap<&str, f64> = HashMap::new();
+        let (mut total_legs, mut solved_orders) = (0usize, 0usize);
+
+        for (index, measurement) in config_run
+            .measurements
+            .iter()
+            .enumerate()
+        {
+            if measurement.net_out.is_none() {
+                continue;
+            }
+            solved_orders += 1;
+            let mut seen: HashSet<&str> = HashSet::new();
+            for edge in &measurement.edges {
+                total_legs += 1;
+                *legs.entry(&edge.protocol).or_default() += 1;
+                pools_used
+                    .entry(&edge.protocol)
+                    .or_default()
+                    .insert(&edge.component_id);
+                seen.insert(&edge.protocol);
+            }
+            for protocol in seen {
+                *orders.entry(protocol).or_default() += 1;
+                if let Some(amount) = outcome.orders[index].amount_usd {
+                    *usd.entry(protocol).or_default() += amount;
+                }
+            }
+        }
+
+        // Market order, so every config's block reads the same way down the file.
+        for row in outcome.market_protocols {
+            let protocol = row.protocol.as_str();
+            let legs_count = legs.get(protocol).copied().unwrap_or(0);
+            let orders_count = orders
+                .get(protocol)
+                .copied()
+                .unwrap_or(0);
+            let pct = |part: usize, whole: usize| {
+                if whole == 0 {
+                    0.0
+                } else {
+                    part as f64 / whole as f64 * 100.0
+                }
+            };
+            csv.push_str(&format!(
+                "{},{},{},{},{},{},{},{:.1},{},{:.1},{:.0}\n",
+                config.label,
+                config.algorithm,
+                protocol,
+                row.components,
+                row.with_state,
+                pools_used
+                    .get(protocol)
+                    .map_or(0, HashSet::len),
+                legs_count,
+                pct(legs_count, total_legs),
+                orders_count,
+                pct(orders_count, solved_orders),
+                usd.get(protocol)
+                    .copied()
+                    .unwrap_or(0.0),
+            ));
+        }
+    }
+    csv
+}
+
 /// One row per token pair and config.
 fn pairs_csv(outcome: &BenchOutcome<'_>) -> String {
     let mut csv = String::from(
@@ -888,6 +1052,17 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
 
     out.push_str("## Run\n\n");
     out.push_str("| setting | value |\n|---|---|\n");
+    match outcome.source {
+        MarketSource::Offline { chain_name, .. } => {
+            out.push_str(&format!("| market | offline fixture, {chain_name} |\n"));
+        }
+        MarketSource::Live { chain_name, block, components, states, min_tvl, protocols } => {
+            out.push_str(&format!(
+                "| market | **live**, {chain_name} block {block} |\n                 | captured | {components} components, {states} states, min TVL {min_tvl} ETH |\n                 | protocols | {} |\n",
+                protocols.join(", ")
+            ));
+        }
+    }
     out.push_str(&format!("| orders run | {} |\n", orders.len()));
     out.push_str(&format!(
         "| configs | {} |\n",
@@ -1054,9 +1229,34 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
 
 #[tokio::main]
 async fn main() {
-    let (run, mut configs) = Run::resolve(Args::parse());
+    let args = Args::parse();
 
-    let mut market = load_market();
+    let mut market = match build_market(
+        args.market,
+        LiveArgs {
+            tycho_url: args.tycho_url.as_deref(),
+            tycho_api_key: args.tycho_api_key.as_deref(),
+            chain: &args.chain,
+            protocols: args.protocols.clone(),
+            min_tvl: args.min_tvl,
+            min_token_quality: args.min_token_quality,
+            traded_n_days_ago: args.traded_n_days_ago,
+            capture_timeout_secs: args.capture_timeout_secs,
+            rpc_url: args.rpc_url.as_deref(),
+        },
+    )
+    .await
+    {
+        Ok(market) => market,
+        Err(reason) => {
+            eprintln!("error: {reason}");
+            std::process::exit(1);
+        }
+    };
+    let source = market.source.clone();
+    let gas_price_gwei = resolved_gas_price_gwei(args.gas_price_gwei, &market);
+    let (run, mut configs) = Run::resolve(args, gas_price_gwei);
+
     let mut blocked = load_blocked_tokens();
     blocked.dropped_component_count = block_components(&mut market.updates, &blocked.addresses);
 
@@ -1067,6 +1267,17 @@ async fn main() {
     assert!(!orders.is_empty(), "no dataset order survived filtering");
 
     println!("\n=== algorithm_bench: {} ===", run.name);
+    match &source {
+        MarketSource::Offline { chain_name, .. } => {
+            println!("  market             offline fixture ({chain_name})");
+        }
+        MarketSource::Live { chain_name, block, components, states, .. } => {
+            println!(
+                "  market             live {chain_name} block {block} \
+                 ({components} components, {states} states)"
+            );
+        }
+    }
     println!("  dataset            {}", run.trades.display());
     println!("  orders in file     {}", summary.seen);
     println!("  eligible           {}", summary.eligible);
@@ -1075,9 +1286,11 @@ async fn main() {
     println!("  workers per pool   {}", run.workers);
     println!("  timeout            {}ms", run.timeout_ms);
     println!("  gas price          {} gwei", run.gas_price_gwei);
+    let market_protocols = protocol_breakdown(&market.updates);
+    print_protocol_breakdown(&market.updates);
     if !blocked.symbols.is_empty() {
         println!(
-            "  blocked            {} ({} pools dropped)",
+            "\n  blocked            {} ({} pools dropped)",
             blocked.symbols.join(", "),
             blocked.dropped_component_count
         );
@@ -1157,6 +1370,8 @@ async fn main() {
 
     let outcome = BenchOutcome {
         run: &run,
+        source: &source,
+        market_protocols: &market_protocols,
         results: &results,
         skipped: &configs.skipped,
         orders: &orders,
@@ -1176,6 +1391,7 @@ async fn main() {
     write_file(&run.out_dir, "report.md", &report_markdown(&outcome));
     write_file(&run.out_dir, "orders.csv", &orders_csv(&outcome));
     write_file(&run.out_dir, "pairs.csv", &pairs_csv(&outcome));
+    write_file(&run.out_dir, "protocols.csv", &protocols_csv(&outcome));
     write_file(&run.out_dir, "routes.jsonl", &routes_jsonl(&outcome));
     write_file(&run.out_dir, "run.json", &run_json(&outcome));
     if let Some(root) = run.out_dir.parent() {

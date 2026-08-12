@@ -122,36 +122,60 @@
   }
   .section-title p { margin: 0; color: var(--ink-3); font-size: 12.5px; }
 
-  .scorecards { display: grid; grid-template-columns: repeat(auto-fit, minmax(216px, 1fr)); gap: 12px; }
+  .scorecards { display: grid; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr)); gap: 12px; }
   .card {
     border: 1px solid var(--line); border-radius: var(--r); background: var(--surface);
     padding: 13px 15px; display: flex; flex-direction: column; gap: 9px;
   }
   .card.is-baseline { border-style: dashed; }
   .card-name { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
-  .card-hero { display: flex; align-items: baseline; gap: 8px; }
+  .card-hero { display: flex; align-items: center; gap: 9px; }
   .card-hero b {
     font-family: var(--mono); font-size: 27px; font-weight: 600;
     letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1;
   }
-  .card-hero span { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
-  .wlt { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--tie-soft); }
+  /* Always two lines, so every card breaks in the same place instead of only the ones whose
+     numbers happen to be wide. Two 11px lines come to about the height of the 27px figure. */
+  .card-hero-label {
+    display: flex; flex-direction: column; gap: 1px; line-height: 1.25;
+    font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+  }
+  .card-hero-label span { white-space: nowrap; }
+  .wlt { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--tie-soft); }
   .wlt i { display: block; }
   .wlt i.w { background: var(--gain); }
   .wlt i.l { background: var(--loss); }
   .wlt i.t { background: var(--tie); opacity: 0.5; }
+  /* The counts sit under the bar in its own colours instead of on a labelled row: the label
+     plus three numbers did not fit a card width and wrapped mid-value. */
+  .wlt-legend {
+    display: flex; align-items: baseline; gap: 5px; margin-top: -4px;
+    font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums;
+  }
+  .wlt-legend b { font-weight: 600; }
+  .wlt-legend .w { color: var(--gain); }
+  .wlt-legend .l { color: var(--loss); }
+  .wlt-legend .t { color: var(--tie); }
+  .wlt-legend i { color: var(--ink-3); font-style: normal; opacity: 0.55; }
+
   .card-rows { display: flex; flex-direction: column; gap: 3px; }
   .card-row { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
-  .card-row span { color: var(--ink-3); font-family: var(--mono); font-size: 11px; }
+  .card-row span { color: var(--ink-3); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
   .card-row b { font-family: var(--mono); font-weight: 500; font-variant-numeric: tabular-nums; font-size: 12px; }
 
-  .bars { display: flex; flex-direction: column; gap: 7px; }
+  .bars {
+    display: flex; flex-direction: column; gap: 11px;
+    border: 1px solid var(--line); border-radius: var(--r); background: var(--surface);
+    padding: 15px 16px;
+  }
   .bar-row { display: grid; grid-template-columns: 150px 1fr auto; gap: 12px; align-items: center; }
-  .bar-row > span:first-child { font-family: var(--mono); font-size: 12px; }
-  .bar-track { background: var(--surface-2); border-radius: 2px; height: 16px; position: relative; overflow: hidden; }
+  .bar-row > span:first-child { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .bar-track { background: var(--surface-2); border-radius: 2px; height: 22px; position: relative; overflow: hidden; }
   .bar-fill { height: 100%; background: var(--accent); opacity: 0.75; border-radius: 2px; }
   .bar-fill.p95 { background: var(--accent); opacity: 0.3; }
-  .bar-row > b { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 76px; text-align: right; }
+  /* nowrap: in the narrow column the p95 label would otherwise wrap and rows would lose their
+     shared height, making the bars hard to compare down the list. */
+  .bar-row > b { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 76px; text-align: right; white-space: nowrap; }
 
   /* ---------- distribution ---------- */
   .slicer {
@@ -194,6 +218,11 @@
   .toggle input { accent-color: var(--accent); margin: 0; }
   .toggle:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+  /* Distribution and speed share a row: the histograms want width, the speed bars read fine
+     narrow, and stacked full-width they left the right half of a wide screen empty. */
+  .report-split { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+  @media (max-width: 1400px) { .report-split { grid-template-columns: minmax(0, 1fr); } }
+
   .hists { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 12px; }
   .hist { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; }
   .hist-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
@@ -212,6 +241,15 @@
   .hist-axis span { font-family: var(--mono); font-size: 9px; color: var(--ink-3); text-align: center; letter-spacing: -0.02em; }
 
   /* ---------- shared tables ---------- */
+  /* A faint bar behind each usage cell, grown from the right so it sits under the number:
+     the shape of an algorithm's protocol mix reads without comparing rows one by one. */
+  .usage {
+    background: linear-gradient(to left, var(--accent-soft) var(--fill, 0%), transparent 0);
+    /* content-box keeps the fill off the cell padding, so neighbouring columns stay separate
+       instead of reading as one band running across the row. */
+    background-clip: content-box;
+  }
+
   .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
   table { border-collapse: collapse; width: 100%; font-size: 13px; }
   th, td { padding: 8px 12px; text-align: right; white-space: nowrap; }
@@ -365,7 +403,18 @@
     margin: 0; font-family: var(--mono); font-size: 11px; font-weight: 500;
     letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3);
   }
-  .modal-head input[type="search"] { width: auto; flex: 1; max-width: 280px; margin-left: auto; }
+  .modal-head input[type="search"] { width: auto; flex: 1; max-width: 280px; }
+  /* Offline and live runs are not comparable, so the picker shows one kind at a time rather than
+     mixing them behind a badge. */
+  .source-toggle { display: flex; margin-left: auto; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+  .source-toggle button {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 4px 10px; border: 0; background: transparent; color: var(--ink-3); cursor: pointer;
+  }
+  .source-toggle button + button { border-left: 1px solid var(--line); }
+  .source-toggle button:hover { color: var(--ink-1); }
+  .source-toggle button.on { background: var(--accent-soft); color: var(--ink-1); }
+  #run-table td.market { font-family: var(--mono); font-size: 11px; white-space: nowrap; }
   .modal-hint { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
   #run-table { max-height: min(70vh, 660px); overflow: auto; border: 0; border-radius: 0; }
   #run-table tbody tr { cursor: pointer; }
@@ -438,6 +487,10 @@
   <div class="modal-head">
     <h2 id="run-count">Runs</h2>
     <span class="modal-hint">↑↓ move · enter open · esc close</span>
+    <div class="source-toggle" id="source-toggle" role="group" aria-label="Market">
+      <button type="button" data-source="offline">offline</button>
+      <button type="button" data-source="live">live</button>
+    </div>
     <input type="search" id="run-filter" placeholder="filter runs…" aria-label="Filter runs" />
   </div>
   <div class="table-wrap" id="run-table"></div>
@@ -463,8 +516,10 @@
     routesError: null,
     selected: null, sort: "spread", query: "",
     pairSort: "orders", usdLo: null, usdHi: null, hideTies: false,
-    runQuery: "", runCursor: 0,
+    runQuery: "", runCursor: 0, runSource: "offline",
     algo: null, algoOutcome: "all", algoField: "all",
+    protocols: null,     // rows of protocols.csv, or null when the run predates it
+    protoMetric: "legs_pct",
   };
 
   let BASELINE = "";
@@ -541,6 +596,14 @@
         outcome: r.outcome || "",
       };
     });
+    // protocols.csv arrived later than the other outputs, so an older run simply has none.
+    // A missing file is expected here, not an error worth failing the whole load over.
+    try {
+      state.protocols = parseCsv(await getText(`${ROOT}/${name}/protocols.csv`));
+    } catch {
+      state.protocols = null;
+    }
+
     state.orders = [...byOrder.values()];
     // bps is recomputed here rather than read from the csv's rounded column, so this page and
     // report.md put the same number under the same label
@@ -734,7 +797,11 @@
       document.getElementById("facts").innerHTML = "";
       return;
     }
+    const market = f.market ?? {};
     const facts = {
+      market: f.source === "live"
+        ? `live · ${market.chain ?? "?"} #${market.block ?? "?"}`
+        : "offline fixture",
       orders: (f.orders ?? 0).toLocaleString(),
       pairs: (f.pairs ?? 0).toLocaleString(),
       baseline: f.baseline ?? "—",
@@ -750,6 +817,18 @@
   // index.json carries each run's whole run.json, so the picker can show what a run was without
   // reading anything else. Listed newest first, on the same name ordering the page opens with.
   const datasetName = run => (run.dataset ?? "").split("/").pop() || "—";
+
+  // Runs written before live capture existed carry no `source`. They were all offline.
+  const runSource = run => (run.source === "live" ? "live" : "offline");
+
+  // A live run is one block of one chain; an offline run is the fixture. Shown in the picker so
+  // the two are never confused at a glance.
+  function marketCell(run) {
+    const market = run.market ?? {};
+    if (runSource(run) !== "live") return "fixture";
+    const block = market.block ? `#${market.block}` : "—";
+    return `${market.chain ?? "?"} ${block}`;
+  }
 
   const runTime = run => {
     const at = Date.parse(run.finished_at ?? "");
@@ -773,9 +852,10 @@
   }
 
   function matchingRuns() {
+    const ofKind = runList().filter(r => runSource(r) === state.runSource);
     const query = state.runQuery.trim().toLowerCase();
-    if (!query) return runList();
-    return runList().filter(r =>
+    if (!query) return ofKind;
+    return ofKind.filter(r =>
       [r.name, runWhen(r), r.baseline, ...(r.configs ?? []), datasetName(r)]
         .join(" ").toLowerCase().includes(query));
   }
@@ -783,17 +863,24 @@
   function renderRunTable() {
     const rows = matchingRuns();
     const wrap = document.getElementById("run-table");
-    document.getElementById("run-count").textContent = rows.length === state.runs.length
-      ? `${rows.length} runs`
-      : `${rows.length} of ${state.runs.length} runs`;
+    const kind = state.runSource;
+    const ofKind = state.runs.filter(r => runSource(r) === kind).length;
+    document.getElementById("run-count").textContent = rows.length === ofKind
+      ? `${rows.length} ${kind} runs`
+      : `${rows.length} of ${ofKind} ${kind} runs`;
+    document.querySelectorAll("#source-toggle button").forEach(b =>
+      b.classList.toggle("on", b.dataset.source === kind));
     if (!rows.length) {
-      wrap.innerHTML = `<div class="modal-empty">No run matches “${state.runQuery}”.</div>`;
+      wrap.innerHTML = state.runQuery
+        ? `<div class="modal-empty">No ${kind} run matches “${state.runQuery}”.</div>`
+        : `<div class="modal-empty">No ${kind} runs yet.</div>`;
       return;
     }
     state.runCursor = Math.min(state.runCursor, rows.length - 1);
     wrap.innerHTML = `<table>
       <thead><tr>
-        <th>run</th><th>when</th><th>orders</th><th>pairs</th><th class="configs">configs</th>
+        <th>run</th><th>when</th><th>market</th><th>orders</th><th>pairs</th>
+        <th class="configs">configs</th>
         <th>jobs</th><th>passes</th><th>timeout</th><th>gas</th><th>dataset</th>
       </tr></thead>
       <tbody>${rows.map((r, i) => {
@@ -804,6 +891,7 @@
         return `<tr data-run="${r.name}" data-i="${i}" class="${classes}">
           <td>${r.name}</td>
           <td>${runWhen(r)}</td>
+          <td class="market">${marketCell(r)}</td>
           <td>${(r.orders ?? 0).toLocaleString()}</td>
           <td>${(r.pairs ?? 0).toLocaleString()}</td>
           <td class="configs"><div class="cfg-list">${configs}</div></td>
@@ -822,6 +910,9 @@
 
   function openRunPicker() {
     state.runQuery = "";
+    // Show the kind the open run is, so opening the picker never hides what is on screen.
+    const open = state.runs.find(r => r.name === state.run);
+    if (open) state.runSource = runSource(open);
     state.runCursor = Math.max(0, matchingRuns().findIndex(r => r.name === state.run));
     document.getElementById("run-filter").value = "";
     renderRunTable();
@@ -918,15 +1009,15 @@
       <div class="card-name">${config}${isBase ? '<span class="baseline-tag">baseline</span>' : ""}</div>
       <div class="card-hero">
         <b class="${isBase ? "none" : cls(d.mean)}">${isBase ? "—" : fmtBps(d.mean)}</b>
-        <span>mean bps${isBase ? "" : ` · median ${fmtBps(d.median)}`}</span>
+        <span class="card-hero-label"><span>mean bps</span>${isBase ? "" : `<span>median ${fmtBps(d.median)}</span>`}</span>
       </div>
       <div class="wlt" role="img" aria-label="${d.w} won, ${d.l} lost, ${d.t} tied">
         <i class="w" style="width:${d.w / tot * 100}%"></i>
         <i class="l" style="width:${d.l / tot * 100}%"></i>
         <i class="t" style="width:${d.t / tot * 100}%"></i>
       </div>
+      ${isBase ? "" : `<div class="wlt-legend" aria-hidden="true"><b class="w">${d.w.toLocaleString()}</b><i>/</i><b class="l">${d.l.toLocaleString()}</b><i>/</i><b class="t">${d.t.toLocaleString()}</b></div>`}
       <div class="card-rows">
-        <div class="card-row"><span>won / lost / tied</span><b>${isBase ? "—" : `${d.w} / ${d.l} / ${d.t}`}</b></div>
         <div class="card-row"><span>best / behind field</span><b>${nBest.toLocaleString()} / ${nBehind.toLocaleString()}</b></div>
         <div class="card-row"><span>solved</span><b>${d.solved.toLocaleString()} / ${rows.length}</b></div>
         <div class="card-row"><span>only / missed</span><b>${isBase ? "—" : `${d.only} / ${d.missed}`}</b></div>
@@ -1134,15 +1225,15 @@
         <div class="card-name">${c}${isBase ? '<span class="baseline-tag">baseline</span>' : ""}</div>
         <div class="card-hero">
           <b class="${isBase ? "none" : cls(d.mean)}">${isBase ? "—" : fmtBps(d.mean)}</b>
-          <span>mean bps${isBase ? "" : ` · median ${fmtBps(d.median)}`}</span>
+          <span class="card-hero-label"><span>mean bps</span>${isBase ? "" : `<span>median ${fmtBps(d.median)}</span>`}</span>
         </div>
         <div class="wlt" role="img" aria-label="${d.w} better, ${d.l} worse, ${d.t} tie">
           <i class="w" style="width:${d.w / tot * 100}%"></i>
           <i class="l" style="width:${d.l / tot * 100}%"></i>
           <i class="t" style="width:${d.t / tot * 100}%"></i>
         </div>
+        ${isBase ? "" : `<div class="wlt-legend" aria-hidden="true"><b class="w">${d.w.toLocaleString()}</b><i>/</i><b class="l">${d.l.toLocaleString()}</b><i>/</i><b class="t">${d.t.toLocaleString()}</b></div>`}
         <div class="card-rows">
-          <div class="card-row"><span>better / worse / tie</span><b>${isBase ? "—" : `${d.w} / ${d.l} / ${d.t}`}</b></div>
           <div class="card-row"><span>solved</span><b>${d.solved.toLocaleString()} / ${rows.length}</b></div>
           <div class="card-row"><span>only / missed</span><b>${isBase ? "—" : `${d.only} / ${d.missed}`}</b></div>
           <div class="card-row"><span>p50 solve</span><b>${ms(d.p50)}</b></div>
@@ -1179,7 +1270,7 @@
         <span>${c}</span>
         <div class="bar-track" role="img" aria-label="p50 ${ms(d.p50)}, p95 ${ms(d.p95)}">
           <div class="bar-fill p95" style="width:${d.p95 / maxP95 * 100}%"></div>
-          <div class="bar-fill" style="width:${d.p50 / maxP95 * 100}%; margin-top:-16px"></div>
+          <div class="bar-fill" style="width:${d.p50 / maxP95 * 100}%; margin-top:-22px"></div>
         </div>
         <b>${ms(d.p50)} <span class="lbl">p95 ${ms(d.p95)}</span></b>
       </div>`;
@@ -1222,20 +1313,23 @@
           <p>Against <code>${BASELINE}</code>, over the orders both solved.</p></div>
         <div class="scorecards" style="margin-top:12px">${cards}</div>
       </div>
-      <div>
-        <div class="section-title"><h2>Distribution</h2>
-          <p>Per-order bps against the baseline. Bins are log-spaced.</p>
-          <label class="toggle">
-            <input type="checkbox" id="hide-ties" ${state.hideTies ? "checked" : ""} />
-            hide ties
-          </label></div>
-        <div class="hists" style="margin-top:12px">${hists}</div>
+      <div class="report-split">
+        <div>
+          <div class="section-title"><h2>Distribution</h2>
+            <p>Per-order bps against the baseline. Bins are log-spaced.</p>
+            <label class="toggle">
+              <input type="checkbox" id="hide-ties" ${state.hideTies ? "checked" : ""} />
+              hide ties
+            </label></div>
+          <div class="hists" style="margin-top:12px">${hists}</div>
+        </div>
+        <div>
+          <div class="section-title"><h2>Speed</h2>
+            <p>Solid is p50, faded is p95, over the first pass.${speedBasis()}</p></div>
+          <div class="bars" style="margin-top:12px">${speed}</div>
+        </div>
       </div>
-      <div>
-        <div class="section-title"><h2>Speed</h2>
-          <p>Solid is p50, faded is p95, over the first pass.${speedBasis()}</p></div>
-        <div class="bars" style="margin-top:12px">${speed}</div>
-      </div>
+      ${protocolSection()}
       <div>
         <div class="section-title"><h2>By token pair</h2>
           <p>Mean bps. Pairs with fewer than ${MIN_ORDERS} orders in the slice are left out.</p></div>
@@ -1249,8 +1343,91 @@
       renderReport();
       document.getElementById("hide-ties")?.focus();
     });
+    document.querySelectorAll("[data-proto-metric]").forEach(b =>
+      b.addEventListener("click", () => {
+        state.protoMetric = b.dataset.protoMetric;
+        renderReport();
+      }));
     document.querySelectorAll("[data-psort]").forEach(th =>
       th.addEventListener("click", () => { state.pairSort = th.dataset.psort; renderReport(); }));
+  }
+
+
+  // ------------------------------------------------------------ protocols
+  // protocols.csv is aggregated over the whole run, so unlike every other section here it does
+  // not follow the trade-size slicer. The subtitle says so rather than letting it look filtered.
+  const PROTO_METRICS = [
+    { key: "legs_pct",   label: "legs %",     fmt: v => `${v.toFixed(1)}%` },
+    { key: "orders_pct", label: "orders %",   fmt: v => `${v.toFixed(1)}%` },
+    { key: "pools_used", label: "pools used", fmt: v => v.toLocaleString() },
+    { key: "usd",        label: "usd",        fmt: v => fmtUsd(v) },
+  ];
+
+  function protocolSection() {
+    if (!state.protocols?.length) {
+      return `<div>
+        <div class="section-title"><h2>By protocol</h2>
+          <p class="none">No <code>protocols.csv</code> in this run.</p></div>
+      </div>`;
+    }
+
+    const metric = PROTO_METRICS.find(m => m.key === state.protoMetric) ?? PROTO_METRICS[0];
+    const byProtocol = new Map();
+    for (const r of state.protocols) {
+      if (!byProtocol.has(r.protocol)) {
+        byProtocol.set(r.protocol, {
+          protocol: r.protocol,
+          pools: numOrNull(r.pools_in_market) ?? 0,
+          sim: numOrNull(r.pools_simulatable) ?? 0,
+          m: {},
+        });
+      }
+      byProtocol.get(r.protocol).m[r.config] = {
+        legs_pct: numOrNull(r.legs_pct) ?? 0,
+        orders_pct: numOrNull(r.orders_pct) ?? 0,
+        pools_used: numOrNull(r.pools_used) ?? 0,
+        usd: numOrNull(r.usd) ?? 0,
+      };
+    }
+
+    // Sorted by the metric on show, so switching it floats the protocols that metric cares about.
+    const total = p => CONFIGS.reduce((sum, c) => sum + (p.m[c]?.[metric.key] ?? 0), 0);
+    const rows = [...byProtocol.values()].sort((a, b) => total(b) - total(a) || b.pools - a.pools);
+    // Scaled per column, so a bar shows where one algorithm's liquidity went rather than how two
+    // algorithms compare on one protocol — the columns already sit side by side for that.
+    const peak = Object.fromEntries(CONFIGS.map(c =>
+      [c, Math.max(...rows.map(p => p.m[c]?.[metric.key] ?? 0), 1)]));
+
+    const table = `<div class="table-wrap"><table>
+      <thead><tr>
+        <th>protocol</th><th>pools</th><th>simulatable</th>
+        ${CONFIGS.map(c => `<th>${c}</th>`).join("")}
+      </tr></thead>
+      <tbody>${rows.map(p => `<tr>
+        <td>${p.protocol}</td>
+        <td>${p.pools.toLocaleString()}</td>
+        <td>${p.sim.toLocaleString()}</td>
+        ${CONFIGS.map(c => {
+          const v = p.m[c]?.[metric.key];
+          // A protocol an algorithm never touched is the interesting case, so an untouched zero
+          // is greyed rather than dropped.
+          if (v === undefined) return `<td class="none">—</td>`;
+          if (v === 0) return `<td class="none">${metric.fmt(v)}</td>`;
+          return `<td class="usage" style="--fill:${v / peak[c] * 100}%">${metric.fmt(v)}</td>`;
+        }).join("")}
+      </tr>`).join("")}</tbody>
+    </table></div>`;
+
+    return `<div>
+      <div class="section-title"><h2>By protocol</h2>
+        <p>Which liquidity each algorithm actually used. Over the whole run, so the trade-size
+           slicer does not apply.</p>
+        <div class="chips">${PROTO_METRICS.map(m =>
+          `<button type="button" data-proto-metric="${m.key}"
+             aria-pressed="${m.key === state.protoMetric}">${m.label}</button>`).join("")}</div>
+      </div>
+      <div style="margin-top:12px">${table}</div>
+    </div>`;
   }
 
   // ---------------------------------------------------------------- orders tab
@@ -1571,6 +1748,13 @@
   }
 
   document.getElementById("run-open").addEventListener("click", openRunPicker);
+  document.getElementById("source-toggle").addEventListener("click", e => {
+    const button = e.target.closest("button[data-source]");
+    if (!button || button.dataset.source === state.runSource) return;
+    state.runSource = button.dataset.source;
+    state.runCursor = 0;
+    renderRunTable();
+  });
   document.getElementById("run-filter").addEventListener("input", e => {
     state.runQuery = e.target.value;
     state.runCursor = 0;
@@ -1624,6 +1808,7 @@
     for (const candidate of runList()) {
       try {
         await loadRun(candidate.name);
+        state.runSource = runSource(candidate);
         boot("");
         renderHeader();
         renderReport();

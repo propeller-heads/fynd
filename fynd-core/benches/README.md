@@ -1,7 +1,6 @@
-# Offline algorithm benchmark
+# Algorithm benchmark
 
-Two programs that run the routing algorithms against a recorded market, so a change can be measured
-without touching the network.
+Two programs that run the routing algorithms against one market, so a change can be measured.
 
 | what | file | what it does |
 |---|---|---|
@@ -9,13 +8,34 @@ without touching the network.
 | profiler | `profile.rs` | Runs one config over a few orders on one thread, writes nothing |
 | viewer | `viewer/index.html` | Reads the reports in a browser |
 
-Both replay the same market fixture and read the same order dataset, so an order seen in the viewer
+Both read the same order dataset and take their market the same way, so an order seen in the viewer
 can be profiled by its id.
+
+## Two kinds of market
+
+| | offline (`--market offline`, the default) | live (`--market live`) |
+|---|---|---|
+| where it comes from | the recorded fixture | one block captured from Tycho |
+| needs the network | no | yes, plus a Tycho API key |
+| reproducible | yes — every offline run replays the same block | no — each run is its own block |
+| comparable with | every other offline run | only the configs inside that same run |
+| VM-backed pools | **missing** | present |
+
+That last row is the reason live exists. `MarketRecording` cannot serialize VM-backed states, and
+drops them silently. In the current fixture that means every Uniswap v4 (384), Balancer (42), Curve
+(3) and Maverick (1) pool is a component with no state, so nothing can route through it — along
+with about two thirds of Uniswap v3. A live capture never serializes, so they are all there.
+
+The trade is reproducibility. An offline run is the same market every time, which is what makes a
+change measurable against last week. A live run is whatever the chain was doing at that block. The
+viewer keeps the two apart in its run picker for exactly that reason.
 
 ## What you need first
 
-**The market fixture** is in Git LFS at `fynd-core/tests/fixtures/market_recording.json.zst`. Run
-`git lfs pull` if it is a small text file instead of 771 KB of compressed JSON.
+**The market fixture**, for offline runs, is in Git LFS at
+`fynd-core/tests/fixtures/market_recording.json.zst`. Run `git lfs pull` if it is a small text file
+instead of 771 KB of compressed JSON. Live runs do not read it; they need `TYCHO_URL` and
+`TYCHO_API_KEY` instead, and `RPC_URL` to price gas at the chain's rate.
 
 **The order dataset** is `aggregator_trades_50k_1k_usd.json` in the repository root. It is
 gitignored because it is large. If you do not have it, ask someone for a copy — rebuilding it means
@@ -53,15 +73,64 @@ Useful options:
 Anything the script does not consume is forwarded unchanged, so the benchmark validates its own
 options.
 
-A run writes five files:
+## Running against a live market
+
+```bash
+export TYCHO_URL=... TYCHO_API_KEY=... RPC_URL=...
+./scripts/bench-live.sh --name live-now --orders 500
+```
+
+Same benchmark, same output, same viewer. It connects, takes the snapshot of one block, and solves
+against that. One block is a whole market: the snapshot carries every component and state the
+filters admit, and derived data — spot prices, depths, token gas prices — is computed locally from
+it rather than streamed, so nothing is gained by waiting for a second block.
+
+Every option `bench.sh` takes still works, plus:
+
+| option | what it does |
+|---|---|
+| `--protocols A,B` | Protocol systems to stream. Defaults to every one Tycho has for the chain |
+| `--chain NAME` | Chain to capture. Defaults to `ethereum` |
+| `--min-tvl X` | Minimum component TVL in ETH. The main lever on how big the market is |
+| `--min-token-quality N` | Minimum token quality score |
+| `--traded-n-days-ago N` | Only tokens traded within this many days |
+| `--capture-timeout-secs N` | How long to wait for the snapshot before giving up |
+
+Without `--gas-price-gwei` a live run prices gas at whatever the chain is charging, read from
+`RPC_URL`. Pass the flag and it wins. An offline run has no such price to read — the fixture
+carries none — so it keeps using the default.
+
+The profiler takes the same flags, so a slow order from a live run can be profiled against a fresh
+market: `./scripts/profile.sh --market live --config water_fill_d3 --orders 200`. It will be a
+different block, so it is a different market.
+
+A run writes six files:
 
 | file | what is in it |
 |---|---|
 | `report.md` | The summary. Small enough to paste into a pull request |
+| `protocols.csv` | What each config routed through, one row per config and protocol |
 | `orders.csv` | One row per order per config |
 | `pairs.csv` | The same, aggregated by token pair |
 | `routes.jsonl` | The full route each config found, for the viewer |
 | `run.json` | The settings the run used, and when it finished |
+
+### protocols.csv
+
+One row per config and protocol, including protocols a config never touched — a zero against 400
+available pools is the interesting answer, and it only exists as a row if every protocol is
+listed.
+
+| column | what it is |
+|---|---|
+| `pools_in_market` / `pools_simulatable` | the market, not the config, so they repeat down the rows. Usage means little without them |
+| `pools_used` | distinct pools of that protocol the config routed through |
+| `legs` / `legs_pct` | swap legs, and their share of that config's legs |
+| `orders` / `orders_pct` | solves whose route touched the protocol at least once |
+| `usd` | dataset USD of those orders |
+
+`orders` and `usd` count a route once per protocol it crosses, so across protocols they sum to more
+than the run. `legs` and `pools_used` do not double count.
 
 ## Reading the results
 
@@ -150,9 +219,15 @@ explains what the columns mean, and is worth updating alongside any new column.
 
 ## How the code is arranged
 
-`common/mod.rs` holds what both programs need: loading the market, loading configs, applying the
+`common/mod.rs` holds what both programs need: building the market, loading configs, applying the
 blocklist, resolving token symbols, building the solver, and the percentile and median helpers the
-reported numbers come from. `common/trades.rs` reads the order dataset. Anything used by both
+reported numbers come from. `common/trades.rs` reads the order dataset. `common/live.rs` captures a
+block from Tycho.
+
+The two kinds of market meet in one function, `build_market`, and both come out as a `Market`.
+Nothing downstream can tell which it was handed, which is what stops an offline and a live run
+measuring differently. What each run was is carried on `Market::source`, written to `run.json`, and
+shown in the report and the viewer. Anything used by both
 belongs there, so the two cannot drift apart on what they measure — including the default gas
 price, which is one constant so an order picked out of a report profiles the same solve.
 

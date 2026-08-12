@@ -7,6 +7,7 @@
 //! Cargo compiles this once per bench target and each uses a subset, so the few items only one of
 //! them reads carry their own `allow(dead_code)`.
 
+pub mod live;
 pub mod trades;
 
 use std::{
@@ -179,20 +180,25 @@ pub fn load_bench_config(label: &str) -> Result<BenchConfig, String> {
     let path = configs_dir().join(format!("{label}.toml"));
     let contents = std::fs::read_to_string(&path)
         .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
-    let pool_fields: toml::Table = toml::from_str(&contents)
+    let worker_pool_fields: toml::Table = toml::from_str(&contents)
         .map_err(|error| format!("{} does not parse: {error}", path.display()))?;
 
-    let algorithm = pool_fields
+    let algorithm = worker_pool_fields
         .get("algorithm")
         .and_then(|value| value.as_str())
         .ok_or_else(|| format!("{} has no `algorithm` key", path.display()))?
         .to_string();
-    let max_hops = pool_fields
+    let max_hops = worker_pool_fields
         .get("max_hops")
         .and_then(|value| value.as_integer())
-        .unwrap_or(0) as usize;
+        .unwrap_or(3) as usize;
 
-    Ok(BenchConfig { label: label.to_string(), algorithm, max_hops, pool_fields })
+    Ok(BenchConfig {
+        label: label.to_string(),
+        algorithm,
+        max_hops,
+        pool_fields: worker_pool_fields,
+    })
 }
 
 /// Every configuration on disk, by file stem, sorted. The default when `--configs` is absent.
@@ -246,17 +252,141 @@ pub fn pool_configs(
     HashMap::from([("bench".to_string(), pool)])
 }
 
-/// The recording, parsed once and replayed into every config's solver.
+/// Which market a run solves against, as asked for on the command line.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum MarketMode {
+    /// The recorded fixture. Reproducible, and comparable with every other offline run.
+    Offline,
+    /// One block captured live from Tycho.
+    Live,
+}
+
+/// Builds the market a run solves against.
 ///
-/// Decompressing and deserializing the fixture costs more than cloning it, and the clone is what
-/// `Solver::from_recording` consumes.
+/// The two paths meet here and nowhere else: everything downstream takes a [`Market`] and cannot
+/// tell which it was handed, which is what keeps the offline and live runs measuring the same way.
+///
+/// # Errors
+///
+/// Returns a message when a live capture cannot be made. The offline path panics instead -- a
+/// missing fixture is a broken checkout, not a run-time condition.
+pub async fn build_market(mode: MarketMode, live: LiveArgs<'_>) -> Result<Market, String> {
+    match mode {
+        MarketMode::Offline => Ok(load_market()),
+        MarketMode::Live => live::capture_market(&live.into_options()?).await,
+    }
+}
+
+/// The live flags, as both bench binaries parse them.
+pub struct LiveArgs<'a> {
+    pub tycho_url: Option<&'a str>,
+    pub tycho_api_key: Option<&'a str>,
+    pub chain: &'a str,
+    pub protocols: Option<Vec<String>>,
+    pub min_tvl: f64,
+    pub min_token_quality: i32,
+    pub traded_n_days_ago: u64,
+    pub capture_timeout_secs: u64,
+    pub rpc_url: Option<&'a str>,
+}
+
+impl LiveArgs<'_> {
+    /// Checks the flags a live capture cannot do without, and names the missing one.
+    fn into_options(self) -> Result<live::LiveOptions, String> {
+        let tycho_url = self
+            .tycho_url
+            .ok_or("--market live needs --tycho-url (or TYCHO_URL)")?;
+        let tycho_api_key = self
+            .tycho_api_key
+            .ok_or("--market live needs --tycho-api-key (or TYCHO_API_KEY)")?;
+        let chain = fynd_core::types::parse_chain(self.chain)
+            .map_err(|e| format!("unsupported chain `{}`: {e}", self.chain))?;
+
+        Ok(live::LiveOptions {
+            tycho_url: live::normalize_host(tycho_url).to_string(),
+            tycho_api_key: tycho_api_key.to_string(),
+            chain,
+            chain_name: self.chain.to_ascii_lowercase(),
+            protocols: self.protocols,
+            min_tvl: self.min_tvl,
+            min_token_quality: self.min_token_quality,
+            traded_n_days_ago: self.traded_n_days_ago,
+            capture_timeout_secs: self.capture_timeout_secs,
+            rpc_url: self.rpc_url.map(str::to_string),
+        })
+    }
+}
+
+/// Where a run's market came from.
+///
+/// Carried on the [`Market`] itself so a report cannot be written without saying which it was: an
+/// offline run is reproducible and comparable to every other offline run, a live one is a
+/// point-in-time market that only compares within itself.
+#[derive(Clone, Debug)]
+pub enum MarketSource {
+    /// Replayed from the recorded fixture.
+    Offline {
+        /// When the fixture was recorded, as unix seconds. Written to `run.json` so a report can
+        /// be tied to the fixture that produced it.
+        #[allow(dead_code, reason = "only the benchmark writes it; the profiler reads neither")]
+        recorded_at_secs: u64,
+        /// Chain the fixture was recorded on.
+        chain_name: String,
+    },
+    /// Captured from Tycho at one block.
+    Live {
+        chain_name: String,
+        block: u64,
+        components: usize,
+        states: usize,
+        #[allow(dead_code, reason = "only the benchmark writes it")]
+        protocols: Vec<String>,
+        #[allow(dead_code, reason = "only the benchmark writes it")]
+        min_tvl: f64,
+    },
+}
+
+impl MarketSource {
+    /// `"live"` or `"offline"`, for the report and the viewer's run picker.
+    #[allow(dead_code, reason = "only the benchmark writes run.json")]
+    pub fn label(&self) -> &'static str {
+        match self {
+            MarketSource::Offline { .. } => "offline",
+            MarketSource::Live { .. } => "live",
+        }
+    }
+
+    /// The chain the market is on.
+    #[allow(dead_code, reason = "read by neither binary today; kept beside `block`")]
+    pub fn chain_name(&self) -> &str {
+        match self {
+            MarketSource::Offline { chain_name, .. } | MarketSource::Live { chain_name, .. } => {
+                chain_name
+            }
+        }
+    }
+
+    /// The block the market sits at, when that is known. The fixture does not record one.
+    #[allow(dead_code, reason = "the report reads the variant's fields directly")]
+    pub fn block(&self) -> Option<u64> {
+        match self {
+            MarketSource::Offline { .. } => None,
+            MarketSource::Live { block, .. } => Some(*block),
+        }
+    }
+}
+
+/// The market every config in a run solves against, held once and cloned per solver.
+///
+/// Built either by replaying the fixture or by capturing a live block; from here on the two are
+/// the same thing, which is what keeps the two paths honest about measuring the same way.
 pub struct Market {
     pub chain: Chain,
-    /// Gas price the recording captured, if any. Reported rather than used: the run solves at
-    /// `--gas-price-gwei` so the figure is stated up front instead of depending on the fixture.
-    #[allow(dead_code, reason = "only the benchmark's run header prints it")]
+    /// The market's own gas price: recorded with the fixture, or read from the chain on a live
+    /// capture. Used only when `--gas-price-gwei` is absent, and reported either way.
     pub recorded_gas_price: Option<BigUint>,
     pub updates: Vec<Update>,
+    pub source: MarketSource,
 }
 
 pub fn load_market() -> Market {
@@ -267,7 +397,115 @@ pub fn load_market() -> Market {
         recorded_gas_price: recording
             .metadata
             .gas_price_as_biguint(),
+        source: MarketSource::Offline {
+            recorded_at_secs: recording.metadata.recorded_at_secs,
+            chain_name: recording.metadata.chain.clone(),
+        },
         updates: recording.updates,
+    }
+}
+
+/// The gas price a run solves at, in gwei: the flag if given, else the market's own, else the
+/// default.
+///
+/// A live run without `--gas-price-gwei` prices at whatever the chain is charging, which is the
+/// point of running live. An offline run falls back to the default, because the fixture carries no
+/// gas price.
+pub fn resolved_gas_price_gwei(flag: Option<f64>, market: &Market) -> f64 {
+    if let Some(gwei) = flag {
+        return gwei;
+    }
+    match &market.recorded_gas_price {
+        Some(wei) => wei
+            .to_f64()
+            .map(|wei| wei / 1e9)
+            .filter(|gwei| gwei.is_finite() && *gwei > 0.0)
+            .unwrap_or(DEFAULT_GAS_PRICE_GWEI),
+        None => DEFAULT_GAS_PRICE_GWEI,
+    }
+}
+
+/// One protocol's share of the market, as the graph will see it.
+pub struct ProtocolCount {
+    pub protocol: String,
+    /// Components the graph will hold.
+    pub components: usize,
+    /// Of those, the ones carrying a simulation state.
+    pub with_state: usize,
+}
+
+/// Pools per protocol, and how many of them can actually be simulated.
+///
+/// Both numbers, because they come apart: a component with no state is in the graph and routable
+/// on paper, but every attempt to swap through it fails, so it is dead liquidity. A total hides
+/// that. The recorded fixture is missing every VM-backed state, which this makes visible on the
+/// first screen of a run rather than after a puzzling report.
+pub fn protocol_breakdown(updates: &[Update]) -> Vec<ProtocolCount> {
+    let mut protocol_of: HashMap<&str, &str> = HashMap::new();
+    let mut stated: HashSet<&str> = HashSet::new();
+
+    for update in updates {
+        for (id, component) in &update.new_pairs {
+            protocol_of.insert(id.as_str(), component.protocol_system.as_str());
+        }
+        for id in update.states.keys() {
+            stated.insert(id.as_str());
+        }
+        for id in update.removed_pairs.keys() {
+            protocol_of.remove(id.as_str());
+        }
+    }
+
+    let mut totals: HashMap<&str, (usize, usize)> = HashMap::new();
+    for (id, protocol) in &protocol_of {
+        let entry = totals.entry(protocol).or_insert((0, 0));
+        entry.0 += 1;
+        if stated.contains(id) {
+            entry.1 += 1;
+        }
+    }
+
+    let mut counts: Vec<ProtocolCount> = totals
+        .into_iter()
+        .map(|(protocol, (components, with_state))| ProtocolCount {
+            protocol: protocol.to_string(),
+            components,
+            with_state,
+        })
+        .collect();
+    // Biggest first, then by name so equal sizes do not reorder between runs.
+    counts.sort_by(|a, b| {
+        b.components
+            .cmp(&a.components)
+            .then_with(|| a.protocol.cmp(&b.protocol))
+    });
+    counts
+}
+
+/// Prints the breakdown, and says plainly when a protocol has no simulatable pool at all.
+pub fn print_protocol_breakdown(updates: &[Update]) {
+    let counts = protocol_breakdown(updates);
+    let (components, with_state) = counts
+        .iter()
+        .fold((0, 0), |(c, s), row| (c + row.components, s + row.with_state));
+
+    println!("\n  market graph       {components} pools, {with_state} simulatable");
+    println!("    {:<24}{:>10}{:>12}", "protocol", "pools", "simulatable");
+    for row in &counts {
+        let flag = if row.with_state == 0 { "  <- none usable" } else { "" };
+        println!("    {:<24}{:>10}{:>12}{}", row.protocol, row.components, row.with_state, flag);
+    }
+
+    let dead: Vec<&str> = counts
+        .iter()
+        .filter(|row| row.with_state == 0)
+        .map(|row| row.protocol.as_str())
+        .collect();
+    if !dead.is_empty() {
+        println!(
+            "    note: no pool of {} carries a state, so nothing routes through them",
+            dead.join(", ")
+        );
     }
 }
 
