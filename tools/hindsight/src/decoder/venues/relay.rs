@@ -16,7 +16,7 @@ use async_trait::async_trait;
 
 use crate::decoder::{
     decode::{DecodeContext, TradeDecoder, TraderFlow},
-    netting_decoders::venue_flow,
+    netting::venue_flow,
     registry::VenueAddresses,
     solvers, trace,
     transfer_ledger::{NetSwap, TransferLedger},

@@ -27,7 +27,7 @@ use async_trait::async_trait;
 
 use crate::decoder::{
     intents,
-    netting_decoders::SenderNetting,
+    netting::SenderNetting,
     registry::{Registry, Venue},
     transfer_ledger::{NetSwap, TransferLedger},
 };

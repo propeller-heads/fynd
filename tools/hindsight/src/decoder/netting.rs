@@ -1,11 +1,21 @@
-//! Generic intent decoding: the fallback for the Intent role.
+//! Transfer-netting: recover a swap from what actually moved. The one netting module.
 //!
-//! Covers transactions where the sender is not the trader — solver-initiated intent fills
-//! (`UniswapX`, 1inch limit orders) and batch settlements — by finding the order swapper's net
-//! flow. `IntentNetting` is the decoder; `find_intent_trade` does the finding. A source with a
-//! richer signal (see `super::cow`) is tried ahead of this.
+//! The evidence is the ERC-20 `Transfer` events plus the native transfers recovered from the
+//! trace (see `transfer_ledger`) — what actually moved, not what any contract or calldata
+//! declared. It needs no knowledge of any router's format.
+//!
+//! This module is the engine plus the two generic netting decoders. The engine — `sender_flow`,
+//! `venue_flow`, and `find_intent_trade` — is what every netting decoder builds on. The decoders
+//! are `SenderNetting` (direct solver swaps: the sender is the trader) and `IntentNetting` (the
+//! Intent-role fallback: the sender acts for the swapper, so the swapper's net flow is found
+//! instead). Venue netting decoders live in `super::venues` and call the engine with their own
+//! corrections.
+//!
+//! Netting requires the trader to both pay and receive. When the swap's output is delivered to a
+//! different receiver, nothing nets against the trader's input and the transaction is declined —
+//! a coverage miss, never wrong amounts (see `transfer_ledger` for the model's assumptions).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use alloy::{primitives::Address, providers::Provider};
 use async_trait::async_trait;
@@ -16,6 +26,90 @@ use crate::decoder::{
     registry::Registry,
     transfer_ledger::{NetSwap, TransferLedger},
 };
+
+/// Net the sender's flow. When the sender nets nothing, fall back to the contract the transaction
+/// entered through (`tx.to`), for the rare shape where the swap output is delivered to that
+/// contract rather than back to the sender.
+pub(crate) fn sender_flow(
+    transfer_ledger: &TransferLedger,
+    sender: Address,
+    entry_point: Address,
+) -> Option<TraderFlow> {
+    transfer_ledger
+        .net_swap(sender)
+        .map(|swap| TraderFlow::without_fees(sender, swap))
+        .or_else(|| {
+            transfer_ledger
+                .net_swap(entry_point)
+                .map(|swap| TraderFlow::without_fees(entry_point, swap))
+        })
+}
+
+/// Net the sender's flow and back the venue's fee out of it — the shared shape of every
+/// fee-taking venue entry. Venue decoders call this, then add what is specific to them.
+///
+/// One exception to the fee back-out: when the tracked trader IS a fee collector, the transaction
+/// is a treasury operation — the collector's receipts are its own output, not a fee, and backing
+/// them "out" would add the output to itself and double it.
+pub(crate) fn venue_flow(
+    transfer_ledger: &TransferLedger,
+    sender: Address,
+    entry_point: Address,
+    fee_collectors: &HashSet<Address>,
+) -> Option<TraderFlow> {
+    let flow = sender_flow(transfer_ledger, sender, entry_point)?;
+    if fee_collectors.contains(&flow.tracked) {
+        return Some(flow);
+    }
+    Some(back_out_venue_fees(flow, transfer_ledger, fee_collectors))
+}
+
+/// Back a venue fee out of a decoded user flow.
+///
+/// The venue can take its fee on either side. An input-side fee is subtracted from `amount_in`
+/// (the user's gross spend included money that never entered the swap) and an output-side fee is
+/// added back into `amount_out` (the swap produced more than the user kept), so both sides are the
+/// amounts actually swapped — the like-for-like basis vs Fynd.
+fn back_out_venue_fees(
+    flow: TraderFlow,
+    transfer_ledger: &TransferLedger,
+    fee_collectors: &HashSet<Address>,
+) -> TraderFlow {
+    let fees = transfer_ledger.received_by(fee_collectors);
+    let venue_fee_in = fees
+        .get(&flow.swap.token_in)
+        .copied()
+        .filter(|fee| !fee.is_zero());
+    let amount_in =
+        venue_fee_in.map_or(flow.swap.amount_in, |fee| flow.swap.amount_in.saturating_sub(fee));
+    let venue_fee_out = fees
+        .get(&flow.swap.token_out)
+        .copied()
+        .filter(|fee| !fee.is_zero());
+    let amount_out =
+        venue_fee_out.map_or(flow.swap.amount_out, |fee| flow.swap.amount_out.saturating_add(fee));
+    TraderFlow {
+        tracked: flow.tracked,
+        swap: NetSwap { amount_in, amount_out, ..flow.swap },
+        venue_fee_in,
+        venue_fee_out,
+        solver_override: flow.solver_override,
+    }
+}
+
+/// Direct solver swaps: the sender is the trader, so net the sender's flow.
+pub(crate) struct SenderNetting;
+
+#[async_trait]
+impl TradeDecoder for SenderNetting {
+    fn name(&self) -> &'static str {
+        "sender-netting"
+    }
+
+    async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
+        sender_flow(ctx.transfer_ledger, ctx.receipt.from, ctx.entry_point)
+    }
+}
 
 /// Solver-initiated intent fills and batch settlements: the sender acts on the swapper's behalf, so
 /// the real swap is the swapper's net flow.

@@ -6,17 +6,16 @@
 //! `venues/`: one place lists the Intent role's decoders, tried in order.
 
 pub(crate) mod cow;
-pub(crate) mod netting;
 
 use alloy::primitives::{Address, B256};
 
-use crate::decoder::{decode::TradeDecoder, registry::Registry};
+use crate::decoder::{decode::TradeDecoder, netting::IntentNetting, registry::Registry};
 
 /// The decoders tried for the Intent role, first flow wins: a source with a rich signal (`CoW`'s
 /// `Trade` event) is tried before the generic net-flow finder that works for any intent fill.
 /// Built once per `Decoder` (see `decode::EntityDecoders`).
 pub(crate) fn decoders() -> Vec<Box<dyn TradeDecoder>> {
-    vec![Box::new(cow::CowSettlement), Box::new(netting::IntentNetting)]
+    vec![Box::new(cow::CowSettlement), Box::new(IntentNetting)]
 }
 
 /// The order-flow tag a batch settlement carries for venue attribution: `CoW`'s per-order

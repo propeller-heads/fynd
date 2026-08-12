@@ -17,7 +17,7 @@
 mod decode;
 mod intents;
 mod matching;
-mod netting_decoders;
+mod netting;
 mod registry;
 mod sandwich;
 mod solvers;
