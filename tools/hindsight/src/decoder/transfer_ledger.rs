@@ -26,8 +26,8 @@
 //! - **One swap per address per transaction.** Two swaps by the same address net into one combined
 //!   flow; if they share sides they merge, otherwise they decline as multi-token.
 //! - **Rebasing/fee-on-transfer tokens** can leave residue that fails the one-in/one-out rule; such
-//!   trades decline rather than record skewed amounts. An input-side transfer tax nets cleanly (the
-//!   tax is part of the trader's outflow), so it is caught after decoding instead — see
+//!   trades decline rather than record skewed amounts. An input-side transfer fee nets cleanly (the
+//!   fee is part of the trader's outflow), so it is caught after decoding instead — see
 //!   `veto::Veto::FeeOnTransfer`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -219,20 +219,26 @@ impl TransferLedger {
             .collect()
     }
 
-    /// Totals of `token` that `from` sent directly to pure sinks — addresses that received value
-    /// in the transaction but never sent any — as `(recipient, total)`.
-    pub(crate) fn sink_payments_from(&self, from: Address, token: Address) -> Vec<(Address, U256)> {
+    /// Totals of `token` paid to pure sinks — addresses that received value in the transaction
+    /// but never sent any — by senders that never received the token themselves: a trader
+    /// spending it or a pool paying out a swap, never a router forwarding what it was paid.
+    /// Returned as `(recipient, total)`.
+    pub(crate) fn sink_payments(&self, token: Address) -> Vec<(Address, U256)> {
         let mut senders: HashSet<Address> = HashSet::new();
-        for &(_, sender, _, _) in &self.transfers {
-            senders.insert(sender);
-        }
-        let mut payments: HashMap<Address, U256> = HashMap::new();
-        for &(transferred, sender, to, value) in &self.transfers {
-            if transferred == token && sender == from && !senders.contains(&to) {
-                *payments.entry(to).or_default() += value;
+        let mut token_receivers: HashSet<Address> = HashSet::new();
+        for &(transferred, from, to, _) in &self.transfers {
+            senders.insert(from);
+            if transferred == token {
+                token_receivers.insert(to);
             }
         }
-        payments
+        let mut totals: HashMap<Address, U256> = HashMap::new();
+        for &(transferred, from, to, value) in &self.transfers {
+            if transferred == token && !token_receivers.contains(&from) && !senders.contains(&to) {
+                *totals.entry(to).or_default() += value;
+            }
+        }
+        totals
             .into_iter()
             .filter(|(_, total)| !total.is_zero())
             .collect()
@@ -744,31 +750,31 @@ mod tests {
     }
 
     #[test]
-    fn test_sink_payments_from() {
-        // The pool forwards value (not a sink); the tax wallet only accumulates. Only the
-        // trader's own payments count — the pool's payout to the trader is not a sink payment
-        // because the trader sent value too.
+    fn test_sink_payments() {
+        // The trader pays token_a to the pool (a sender, so never a sink) and, split by the
+        // token contract, to a wallet that only accumulates. On the token_b side the pool is
+        // the source of the fee wallet's leg, while the router only forwards what it received.
         let trader = addr(1);
         let pool = addr(50);
-        let tax_wallet = addr(60);
+        let router = addr(2);
+        let in_fee_wallet = addr(60);
+        let out_fee_wallet = addr(61);
         let token_a = addr(10);
         let token_b = addr(11);
 
         let logs = vec![
             make_transfer_log(token_a, trader, pool, U256::from(950)),
-            make_transfer_log(token_a, trader, tax_wallet, U256::from(30)),
-            make_transfer_log(token_a, trader, tax_wallet, U256::from(20)),
-            make_transfer_log(token_b, pool, trader, U256::from(1000)),
+            make_transfer_log(token_a, trader, in_fee_wallet, U256::from(30)),
+            make_transfer_log(token_a, trader, in_fee_wallet, U256::from(20)),
+            make_transfer_log(token_b, pool, trader, U256::from(1900)),
+            make_transfer_log(token_b, pool, out_fee_wallet, U256::from(100)),
+            make_transfer_log(token_b, pool, router, U256::from(500)),
+            make_transfer_log(token_b, router, out_fee_wallet, U256::from(500)),
         ];
         let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
 
-        assert_eq!(
-            transfer_ledger.sink_payments_from(trader, token_a),
-            vec![(tax_wallet, U256::from(50))]
-        );
-        assert!(transfer_ledger
-            .sink_payments_from(pool, token_b)
-            .is_empty());
+        assert_eq!(transfer_ledger.sink_payments(token_a), vec![(in_fee_wallet, U256::from(50))]);
+        assert_eq!(transfer_ledger.sink_payments(token_b), vec![(out_fee_wallet, U256::from(100))]);
     }
 
     #[test]

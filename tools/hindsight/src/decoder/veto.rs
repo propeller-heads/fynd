@@ -37,11 +37,13 @@ pub(crate) enum Veto {
     /// destination chain, so there is no same-chain swap to record. Placed at match time by
     /// `solvers::solver_veto`, never by `check`.
     BridgeOrder,
-    /// Part of the trader's input never reached routing: the trader's own transfer of the input
-    /// token split a significant share off to an address that only accumulates — a
-    /// fee-on-transfer token's tax wallet, or an unregistered input-side fee. The skim nets into
-    /// `amount_in`, and the re-solve cannot model it, so every comparison would credit Fynd with
-    /// value no routing can recover.
+    /// Part of the trade's value was taken by a fee on transfer: the token contract (or an
+    /// unregistered fee) split a transfer, landing a significant share on an address that only
+    /// accumulates — its fee wallet. Selling such a token, the fee nets into `amount_in`;
+    /// buying it, the trader's receipt is already net of the fee the pool paid gross.
+    /// Fee-on-transfer tokens are not supported by the Tycho simulation (the re-solve quotes as
+    /// if the full amounts moved fee-free), so every comparison would credit Fynd with the
+    /// token's own fee.
     FeeOnTransfer,
 }
 
@@ -58,31 +60,33 @@ pub(crate) fn check(
     if wrap_pair_mispaired(&flow.swap, registry.wrapped_native()) {
         return Some(Veto::MispairedWrapPair);
     }
-    if input_skimmed(flow, transfer_ledger, registry) {
+    if fee_on_transfer(flow, transfer_ledger, registry) {
         return Some(Veto::FeeOnTransfer);
     }
     None
 }
 
-/// Whether a significant share of the trader's input-token outflow went to a pure sink that is
-/// not a registered fee collector.
+/// Whether a fee on transfer took a significant share of either side of the trade.
 ///
-/// A fee-on-transfer token's tax is invisible to netting: the token contract splits the trader's
-/// own transfer, so the full outflow nets as `amount_in` while only the untaxed part reached the
-/// route (ZRP on Polygon taxes 5%, and every settled trade read as a constant ~525 bps win). The
-/// tax leg's fingerprint is that it comes straight from the trader and lands on an address that
-/// sends nothing all transaction — a pool or router always sends something onward. Registered fee
-/// collectors share the shape but carry venue fees, which the venue decoders and
-/// `venue_attribution` back out — so they are exempt. A leg under the residue line (1% of the
-/// input, `RESIDUE_GROSS_RATIO`) is dust, not a skim.
-fn input_skimmed(flow: &TraderFlow, transfer_ledger: &TransferLedger, registry: &Registry) -> bool {
-    for (recipient, amount) in transfer_ledger.sink_payments_from(flow.tracked, flow.swap.token_in)
-    {
-        if registry.is_fee_collector(recipient) || registry.is_infrastructure(recipient) {
-            continue;
-        }
-        if amount.saturating_mul(U256::from(RESIDUE_GROSS_RATIO)) >= flow.swap.amount_in {
-            return true;
+/// Catches any fee-on-transfer token that Tycho mislabels and does not support: the re-solve
+/// quotes fee-free amounts, so the comparison would credit Fynd with the token's own fee.
+/// Registered venue fee collectors are exempt — their fees are backed out downstream. A leg
+/// under the residue line (1% of the trade amount, `RESIDUE_GROSS_RATIO`) is dust, not a fee.
+fn fee_on_transfer(
+    flow: &TraderFlow,
+    transfer_ledger: &TransferLedger,
+    registry: &Registry,
+) -> bool {
+    let sides =
+        [(flow.swap.token_in, flow.swap.amount_in), (flow.swap.token_out, flow.swap.amount_out)];
+    for (token, trade_amount) in sides {
+        for (recipient, total) in transfer_ledger.sink_payments(token) {
+            if registry.is_fee_collector(recipient) || registry.is_infrastructure(recipient) {
+                continue;
+            }
+            if total.saturating_mul(U256::from(RESIDUE_GROSS_RATIO)) >= trade_amount {
+                return true;
+            }
         }
     }
     false
@@ -251,7 +255,32 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_collector_sink_is_not_a_skim() {
+    fn test_fee_on_transfer_output_tax() {
+        // The buy-side mirror: the pool pays the gross output and the token contract splits it —
+        // 95% to the trader, 5% to the fee wallet. The pool never received the output token, so
+        // it is the token's source, unlike a router that forwards what it was paid.
+        let trader = addr(1);
+        let pool = addr(50);
+        let tax_wallet = addr(60);
+        let token_in = addr(10);
+        let token_out = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_in, trader, pool, U256::from(1000)),
+            make_transfer_log(token_out, pool, trader, U256::from(1900)),
+            make_transfer_log(token_out, pool, tax_wallet, U256::from(100)),
+        ];
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+        let taxed = flow(trader, swap(token_in, 1000, token_out, 1900));
+
+        assert_eq!(
+            check(&taxed, &transfer_ledger, &logs, &Registry::ethereum()),
+            Some(Veto::FeeOnTransfer)
+        );
+    }
+
+    #[test]
+    fn test_fee_collector_sink_is_not_a_transfer_fee() {
         // The same split, but the sink is a registered venue fee collector: a venue fee the
         // decoders back out, not a token tax.
         let registry = Registry::ethereum();
@@ -279,10 +308,10 @@ mod tests {
     }
 
     #[test]
-    fn test_router_paid_fee_is_not_a_skim() {
-        // The partner-fee shape (ParaSwap): the router skims the output to a fee wallet. The
-        // sink leg comes from the router, not the trader, so it is a solver fee — part of the
-        // settled price by policy, never a fee-on-transfer veto.
+    fn test_router_paid_fee_is_not_a_transfer_fee() {
+        // The partner-fee shape (ParaSwap): the router pays a cut of the output to a fee wallet.
+        // The sink leg comes from the router, not the trader, so it is a solver fee — part
+        // of the settled price by policy, never a fee-on-transfer veto.
         let trader = addr(1);
         let pool = addr(50);
         let router = addr(2);
@@ -324,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dust_sink_leg_is_not_a_skim() {
+    fn test_dust_sink_leg_is_not_a_transfer_fee() {
         // A sink leg under the 1% residue line is rounding dust, not a tax.
         let trader = addr(1);
         let pool = addr(50);

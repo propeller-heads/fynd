@@ -293,7 +293,8 @@ impl Registry {
 
     /// Whether the address is a registered fee collector: a venue section's collector or a
     /// fee-identified venue wallet. Fees paid to these are venue fees — backed out by the venue
-    /// decoders and `venue_attribution` — not token-level skims (see `veto::Veto::FeeOnTransfer`).
+    /// decoders and `venue_attribution` — not token-level transfer fees (see
+    /// `veto::Veto::FeeOnTransfer`).
     pub(crate) fn is_fee_collector(&self, address: Address) -> bool {
         self.venue_fees.contains_key(&address) ||
             self.venues
