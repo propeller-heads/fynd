@@ -4,7 +4,7 @@
 //! address on either side of the swap, and its solvers submit rebalancing fills whose transaction
 //! sender has no net flow.
 //!
-//! Two decoders, tried in order (`venues::decoders_for`): [`RelayCalldata`] reads the trader's
+//! Two decoders, tried in order (see [`decoders`]): [`RelayCalldata`] reads the trader's
 //! terms straight from the settling solver's own calldata, and [`RelayNetting`] nets the ledger
 //! for the solvers `RelayCalldata` cannot parse (0x Settler) or transactions with no solver frame
 //! at all. See `.claude/plans/calldata-first-decoding.md` for the empirics behind the ordering.
