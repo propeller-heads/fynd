@@ -57,6 +57,12 @@ impl TradeDecoder for RelayCalldata {
         "relay-calldata"
     }
 
+    /// The flow below is built from the intent itself, so the orchestrator's intent-vs-flow
+    /// disagreement warning has nothing independent to compare.
+    fn flow_is_the_intent(&self) -> bool {
+        true
+    }
+
     async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         let settled = solvers::settled_intent(ctx.root, ctx.registry)?;
         let intent = settled.intent;

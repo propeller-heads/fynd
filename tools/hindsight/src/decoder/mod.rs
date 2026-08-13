@@ -123,15 +123,16 @@ pub(crate) struct DecodedTrade {
 /// Log a disagreement between the calldata-recovered intent and the netted flow, on any of the
 /// three terms they both claim. The ledger stays authoritative for what settled; two
 /// independently-derived readings landing on different terms is diagnostic signal we would
-/// otherwise lose, not a decode failure. Skipped for `relay-calldata`, whose flow already IS the
-/// intent, so there is nothing independent to disagree with.
+/// otherwise lose, not a decode failure. Skipped when the winning decoder's flow already IS the
+/// intent (`TradeDecoder::flow_is_the_intent`), since there is nothing independent to disagree
+/// with.
 fn warn_on_intent_disagreement(
-    decoder: &str,
+    flow_is_the_intent: bool,
     tx_hash: TxHash,
     intent: Option<&SwapIntent>,
     flow: &TraderFlow,
 ) {
-    let Some(intent) = intent.filter(|_| decoder != "relay-calldata") else {
+    let Some(intent) = intent.filter(|_| !flow_is_the_intent) else {
         return;
     };
     if intent.token_in == flow.swap.token_in &&
@@ -395,7 +396,12 @@ impl Decoder {
                 intent
             });
 
-        warn_on_intent_disagreement(decoder, receipt.transaction_hash, intent.as_ref(), &flow);
+        warn_on_intent_disagreement(
+            decoder.flow_is_the_intent(),
+            receipt.transaction_hash,
+            intent.as_ref(),
+            &flow,
+        );
         let (min_amount_out, declared_quote, quote_timestamp) = intent_fields(intent.as_ref());
 
         Some(DecodedTrade {
@@ -405,7 +411,7 @@ impl Decoder {
             venue,
             solver: attribution.solver,
             solver_source: attribution.source,
-            decoder,
+            decoder: decoder.name(),
             sender: flow.tracked,
             token_in: flow.swap.token_in,
             token_out: flow.swap.token_out,

@@ -42,6 +42,13 @@ pub(crate) trait TradeDecoder: Send + Sync {
     fn name(&self) -> &'static str;
 
     async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow>;
+
+    /// Whether this decoder's flow *is* the calldata-recovered intent, so the orchestrator's
+    /// intent-vs-flow disagreement warning has nothing independent to compare it against.
+    /// Declared here so the orchestrator never identifies a decoder by its name string.
+    fn flow_is_the_intent(&self) -> bool {
+        false
+    }
 }
 
 /// Whose flow a matched transaction carries — the axis that selects the decoders.
@@ -89,13 +96,13 @@ impl EntityDecoders {
     }
 }
 
-/// Decode a matched transaction: try its role's decoders in order. Returns the winning decoder's
-/// name with the flow.
-pub(crate) async fn recover(
-    role: TraderRole<'_>,
-    decoders: &EntityDecoders,
+/// Decode a matched transaction: try its role's decoders in order. Returns the winning decoder
+/// with the flow.
+pub(crate) async fn recover<'d>(
+    role: TraderRole<'d>,
+    decoders: &'d EntityDecoders,
     ctx: &mut DecodeContext<'_>,
-) -> Option<(&'static str, TraderFlow)> {
+) -> Option<(&'d dyn TradeDecoder, TraderFlow)> {
     let list = match role {
         TraderRole::Sender => &decoders.sender,
         TraderRole::Intent => &decoders.intent,
@@ -105,13 +112,13 @@ pub(crate) async fn recover(
 }
 
 /// Try each decoder in order; the first flow wins and the rest are not consulted.
-async fn try_decoders(
-    decoders: &[Box<dyn TradeDecoder>],
+async fn try_decoders<'d>(
+    decoders: &'d [Box<dyn TradeDecoder>],
     ctx: &mut DecodeContext<'_>,
-) -> Option<(&'static str, TraderFlow)> {
+) -> Option<(&'d dyn TradeDecoder, TraderFlow)> {
     for decoder in decoders {
         if let Some(flow) = decoder.decode(ctx).await {
-            return Some((decoder.name(), flow));
+            return Some((decoder.as_ref(), flow));
         }
     }
     None
@@ -291,7 +298,9 @@ mod tests {
         let transfer_ledger = TransferLedger::from_transaction(&[], &[]);
         let mut fixture = CtxFixture::new(addr(1), addr(2));
         let mut ctx = fixture.ctx(&registry, &transfer_ledger, &[]);
-        try_decoders(&decoders, &mut ctx).await
+        try_decoders(&decoders, &mut ctx)
+            .await
+            .map(|(decoder, flow)| (decoder.name(), flow))
     }
 
     #[tokio::test]
