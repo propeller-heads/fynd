@@ -1,6 +1,6 @@
 //! HTTP request handlers for the solver API.
 
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use tracing::instrument;
 #[cfg(feature = "experimental")]
 use tracing::{debug, info, warn};
@@ -15,6 +15,7 @@ use crate::api::prices::{
 use crate::api::tokens::{build_token_entries, TokensCache, TokensQuery, TokensResponse};
 use crate::api::{
     error::{solve_error_code, ErrorResponse},
+    exclusive_access,
     request_capture::{
         self, failure_reason_slug, log_request_capture, log_slow_solve, quote_status_code,
         RequestOutcome,
@@ -58,11 +59,13 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         (status = 503, description = "Queue full, overloaded, stale data, or timeout", body = ErrorResponse),
     )
 )]
-#[instrument(skip(state, request), fields(num_orders = request.orders().len()))]
+#[instrument(skip(state, request, http_request), fields(num_orders = request.orders().len()))]
 pub(crate) async fn quote(
     state: web::Data<AppState>,
     request: web::Json<dto::QuoteRequest>,
+    http_request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
+    let access = exclusive_access::from_headers(http_request.headers());
     let dto_request = request.into_inner();
 
     // Validate request
@@ -74,7 +77,7 @@ pub(crate) async fn quote(
     // conversion consumes `dto_request`. This is cheap (no serialization); the
     // JSON encoding is deferred to the failure-only task below.
     let num_orders = dto_request.orders().len();
-    let replay_capture = request_capture::ReplayRequest::capture(&dto_request);
+    let replay_capture = request_capture::ReplayRequest::capture(&dto_request, access);
 
     // Convert DTO to core types
     let core_request: fynd_core::QuoteRequest = dto_request.into();
@@ -88,7 +91,7 @@ pub(crate) async fn quote(
 
     let result = state
         .worker_router()
-        .quote(core_request)
+        .quote(core_request, access)
         .await;
 
     let outcome = match &result {
