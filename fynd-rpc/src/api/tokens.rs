@@ -58,9 +58,9 @@ pub struct GraphTokenEntry {
     /// Number of graph components (liquidity pools) containing this token.
     pub component_count: u32,
     /// Approximate routable liquidity in raw gas-token units: the sum of this token's
-    /// directional component depths converted via its gas price. Approximate `f64`,
-    /// intended for sorting and display only. Absent when the token has no computed
-    /// gas price.
+    /// directional component depths, each divided by the token's gas price (token raw units
+    /// per gas-token raw unit). Approximate `f64`, intended for sorting and display only.
+    /// Absent when the token has no computed gas price.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liquidity: Option<f64>,
 }
@@ -74,24 +74,31 @@ pub(crate) struct TokensCache {
     pub entries: Arc<Vec<GraphTokenEntry>>,
 }
 
-/// Approximates a `Price { numerator, denominator }` as an f64 ratio for scoring.
+/// Approximates the gas-token units obtained per one raw unit of the priced token.
 ///
-/// Returns `None` unless the result is finite and strictly positive. The score is
-/// internal ranking input, never wire output — exact decimal serialization for the
-/// wire lives in [`crate::api::prices::price_to_decimal_string`].
-fn price_ratio_f64(price: &Price) -> Option<f64> {
+/// [`TokenGasPrices`] stores `numerator / denominator` as *token raw units per gas-token raw
+/// unit*, so converting a raw token amount to gas-token units multiplies by the inverse,
+/// `denominator / numerator` — the same direction as
+/// `fynd_core::algorithm::most_liquid`.
+///
+/// Returns `None` unless the factor is finite and strictly positive, which also rejects a
+/// zero or f64-overflowing numerator or denominator. The score is internal ranking input,
+/// never wire output — exact decimal serialization for the wire lives in
+/// [`crate::api::prices::price_to_decimal_string`].
+fn gas_units_per_token_unit(price: &Price) -> Option<f64> {
     use num_traits::ToPrimitive;
 
-    let ratio = price.numerator.to_f64()? / price.denominator.to_f64()?;
-    (ratio.is_finite() && ratio > 0.0).then_some(ratio)
+    let factor = price.denominator.to_f64()? / price.numerator.to_f64()?;
+    (factor.is_finite() && factor > 0.0).then_some(factor)
 }
 
 /// Builds ranked token entries from the market topology and derived data.
 ///
 /// A token is included when it appears in at least one component's token list and has
 /// metadata in the token registry. `liquidity` is the sum over all directional depths
-/// where the token is the input, each converted to raw gas-token units via the token's
-/// gas price; tokens without a computed gas price get `None` and sort after priced ones.
+/// where the token is the input, each converted to raw gas-token units by dividing by the
+/// token's gas price (token raw units per gas-token raw unit); tokens without a computed
+/// gas price get `None` and sort after priced ones.
 pub fn build_token_entries(
     topology: &HashMap<ComponentId, Vec<Address>>,
     token_registry: &HashMap<Address, Token>,
@@ -116,9 +123,9 @@ pub fn build_token_entries(
                 continue;
             }
             let Some(price) = prices.get(token_in) else { continue };
-            let Some(price) = price_ratio_f64(price) else { continue };
+            let Some(gas_per_token_unit) = gas_units_per_token_unit(price) else { continue };
             let Some(depth) = depth.to_f64() else { continue };
-            let gas_units = depth * price;
+            let gas_units = depth * gas_per_token_unit;
             if gas_units.is_finite() {
                 *liquidity
                     .entry(token_in.clone())
@@ -213,7 +220,7 @@ mod tests {
     #[test]
     fn test_build_token_entries_sums_depths_into_gas_units() {
         let (topology, registry) = test_market();
-        // A depths: 100 in c1 + 300 in c3; price 2 gas units per raw A unit.
+        // A depths: 100 in c1 + 300 in c3; price 2 raw A units per gas-token unit.
         let depths: ComponentDepths = [
             (("c1".to_string(), addr(0x0a), addr(0x0b)), BigUint::from(100u32)),
             (("c3".to_string(), addr(0x0a), addr(0x0c)), BigUint::from(300u32)),
@@ -242,13 +249,61 @@ mod tests {
             .iter()
             .find(|e| e.address == addr(0x0c))
             .unwrap();
-        assert_eq!(entry_a.liquidity, Some(800.0));
+        assert_eq!(entry_a.liquidity, Some(200.0));
         assert_eq!(entry_b.liquidity, Some(50.0));
         assert_eq!(entry_c.liquidity, None);
         // Priced tokens sort before the unpriced one regardless of degree.
         assert_eq!(entries[0].address, addr(0x0a));
         assert_eq!(entries[1].address, addr(0x0b));
         assert_eq!(entries[2].address, addr(0x0c));
+    }
+
+    /// Liquidity is a gas-token-denominated quantity, so two tokens holding the same value
+    /// must score the same however cheap or expensive one unit of each is. Multiplying by
+    /// the price instead of dividing scaled each score by `price^2`, which put these two 36
+    /// orders of magnitude apart and ranked cheap high-decimal tokens above USDC/WBTC.
+    #[test]
+    fn test_build_token_entries_liquidity_independent_of_token_price() {
+        let (topology, registry) = test_market();
+        // A: 1e18 raw units at 1e9 A per gas unit. B: 1 raw unit at 1e-9 B per gas unit.
+        // Both hold 1e9 gas-token units.
+        let depths: ComponentDepths = [
+            (
+                ("c1".to_string(), addr(0x0a), addr(0x0b)),
+                BigUint::from(1_000_000_000_000_000_000u64),
+            ),
+            (("c1".to_string(), addr(0x0b), addr(0x0a)), BigUint::from(1u32)),
+        ]
+        .into_iter()
+        .collect();
+        let prices: TokenGasPrices = [
+            (addr(0x0a), Price::new(BigUint::from(1_000_000_000u32), BigUint::from(1u8))),
+            (addr(0x0b), Price::new(BigUint::from(1u8), BigUint::from(1_000_000_000u32))),
+        ]
+        .into_iter()
+        .collect();
+
+        let entries = build_token_entries(&topology, &registry, Some(&depths), Some(&prices));
+
+        let liquidity_a = entries
+            .iter()
+            .find(|e| e.address == addr(0x0a))
+            .unwrap()
+            .liquidity
+            .unwrap();
+        let liquidity_b = entries
+            .iter()
+            .find(|e| e.address == addr(0x0b))
+            .unwrap()
+            .liquidity
+            .unwrap();
+        assert!(
+            (liquidity_a - liquidity_b).abs() / liquidity_a < 1e-9,
+            "expected equal liquidity, got {liquidity_a} and {liquidity_b}"
+        );
+        // Tied scores fall through to the component-count tie-break: A is in 3, B in 2.
+        assert_eq!(entries[0].address, addr(0x0a));
+        assert_eq!(entries[1].address, addr(0x0b));
     }
 
     #[test]

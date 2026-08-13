@@ -313,9 +313,9 @@ export interface components {
             /**
              * Format: double
              * @description Approximate routable liquidity in raw gas-token units: the sum of this token's
-             *     directional component depths converted via its gas price. Approximate `f64`,
-             *     intended for sorting and display only. Absent when the token has no computed
-             *     gas price.
+             *     directional component depths, each divided by the token's gas price (token raw units
+             *     per gas-token raw unit). Approximate `f64`, intended for sorting and display only.
+             *     Absent when the token has no computed gas price.
              */
             liquidity?: number | null;
             /**
