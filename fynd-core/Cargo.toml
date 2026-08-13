@@ -25,6 +25,7 @@ num-bigint.workspace = true
 num-rational.workspace = true
 num-traits.workspace = true
 num_cpus.workspace = true
+rayon.workspace = true
 async-channel.workspace = true
 async-trait.workspace = true
 itertools.workspace = true

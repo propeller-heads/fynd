@@ -6,7 +6,7 @@
 
 use num_bigint::{BigInt, BigUint};
 use rustc_hash::FxHashMap;
-use tracing::{debug, instrument, trace};
+use tracing::{instrument, trace};
 use tycho_simulation::{
     tycho_common::simulation::protocol_sim::ProtocolSim,
     tycho_core::models::{token::Token, Address},
@@ -16,10 +16,10 @@ use super::{most_liquid::DepthAndPrice, NoPathReason};
 use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
     derived::types::TokenGasPrices,
-    feed::market_data::MarketState,
+    feed::market_data::{MarketData, MarketDataView, MarketState},
     graph::{GraphError, GraphQueryFilter, Path, TokenPath, TopologyGraph},
     types::{ComponentId, Route, RouteResult, Swap},
-    AlgorithmError,
+    AlgorithmError, StateLabel,
 };
 
 /// Every route between two tokens, one per combination of the pools serving its legs.
@@ -97,7 +97,7 @@ pub(crate) fn try_score_path(path: &Path<DepthAndPrice>) -> Option<f64> {
 
     for edge in path.edge_iter() {
         let Some(data) = edge.data.as_ref() else {
-            debug!(component_id = %edge.component_id, "edge missing weight data, path cannot be scored");
+            trace!(component_id = %edge.component_id, "edge missing weight data, path cannot be scored");
             return None;
         };
 
@@ -234,6 +234,23 @@ pub(crate) fn get_token<'a>(
             kind: "token",
             id: Some(format!("{:?}", address)),
         })
+}
+
+pub(crate) async fn read_market<'a>(
+    market: &'a MarketData,
+    label: Option<StateLabel>,
+) -> Result<MarketDataView<'a>, AlgorithmError> {
+    let view = match label.as_ref() {
+        Some(l) => market
+            .read_labeled(l)
+            .await
+            .map_err(|e| AlgorithmError::Other(e.to_string()))?,
+        None => market.read().await,
+    };
+    if view.gas_price().is_none() {
+        return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
+    }
+    Ok(view)
 }
 
 #[cfg(test)]
