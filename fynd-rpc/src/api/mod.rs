@@ -17,6 +17,9 @@ pub(crate) mod middleware;
 pub mod prices;
 /// Builds re-issuable, signature-free representation of a quote request for replay logging.
 pub(crate) mod request_capture;
+#[cfg(feature = "experimental")]
+/// Response types and helpers for `GET /v1/tokens` (experimental).
+pub mod tokens;
 
 use std::{
     sync::Arc,
@@ -62,15 +65,18 @@ use crate::api::error::ErrorResponse;
 pub struct ApiDoc;
 
 #[cfg(feature = "experimental")]
-/// OpenAPI documentation bundle for experimental endpoints (`GET /v1/prices`).
+/// OpenAPI documentation bundle for experimental endpoints (`GET /v1/prices`,
+/// `GET /v1/tokens`).
 #[derive(OpenApi)]
 #[openapi(
-    paths(handlers::get_prices),
+    paths(handlers::get_prices, handlers::get_tokens),
     components(schemas(
         prices::PricesResponse,
         prices::TokenPriceEntry,
         prices::SpotPriceEntry,
         prices::ComponentDepthEntry,
+        tokens::TokensResponse,
+        tokens::GraphTokenEntry,
     ))
 )]
 pub struct ExperimentalApiDoc;
@@ -84,16 +90,18 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         openapi.merge(ExperimentalApiDoc::openapi());
         // Mark experimental operations so spec consumers know the endpoint may not
         // exist on a non-experimental (default) build.
-        if let Some(operation) = openapi
-            .paths
-            .paths
-            .get_mut("/v1/prices")
-            .and_then(|path_item| path_item.get.as_mut())
-        {
-            operation
-                .extensions
-                .get_or_insert_with(Default::default)
-                .insert("x-experimental".to_string(), serde_json::json!(true));
+        for path in ["/v1/prices", "/v1/tokens"] {
+            if let Some(operation) = openapi
+                .paths
+                .paths
+                .get_mut(path)
+                .and_then(|path_item| path_item.get.as_mut())
+            {
+                operation
+                    .extensions
+                    .get_or_insert_with(Default::default)
+                    .insert("x-experimental".to_string(), serde_json::json!(true));
+            }
         }
     }
     openapi
@@ -196,10 +204,15 @@ pub struct AppState {
     pub(crate) derived_data: SharedDerivedDataRef,
     #[cfg(feature = "experimental")]
     pub(crate) gas_token: Address,
+    #[cfg(feature = "experimental")]
+    pub(crate) market_data: MarketData,
+    #[cfg(feature = "experimental")]
+    pub(crate) tokens_cache: Arc<tokio::sync::RwLock<Option<tokens::TokensCache>>>,
 }
 
 impl AppState {
     /// Creates new application state.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         worker_router: WorkerPoolRouter,
         health_tracker: HealthTracker,
@@ -208,6 +221,7 @@ impl AppState {
         permit2_address: Bytes,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
         #[cfg(feature = "experimental")] gas_token: Address,
+        #[cfg(feature = "experimental")] market_data: MarketData,
     ) -> Self {
         Self {
             worker_router: Arc::new(worker_router),
@@ -219,6 +233,10 @@ impl AppState {
             derived_data,
             #[cfg(feature = "experimental")]
             gas_token,
+            #[cfg(feature = "experimental")]
+            market_data,
+            #[cfg(feature = "experimental")]
+            tokens_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -289,7 +307,10 @@ mod openapi_tests {
 
         // Experimental operations must be marked so spec consumers know they may not exist
         // on a non-experimental build.
-        let ext = &spec["paths"]["/v1/prices"]["get"]["x-experimental"];
-        assert_eq!(ext, true, "x-experimental extension must be true on /v1/prices");
+        for path in ["/v1/prices", "/v1/tokens"] {
+            assert!(spec["paths"][path].is_object());
+            let ext = &spec["paths"][path]["get"]["x-experimental"];
+            assert_eq!(ext, true, "x-experimental extension must be true on {path}");
+        }
     }
 }
