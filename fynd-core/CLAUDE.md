@@ -10,7 +10,7 @@ applications.
 | `algorithm/`          | `Algorithm` trait + built-in `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`, `WaterFillAlgorithm`. Pluggable via associated graph types. `AlgorithmConfig` shared by built-ins |
 | `solver.rs`           | `FyndBuilder` assembles the full pipeline (feed + gas + computations + pools + encoder + router). `Solver` runs it                                                                 |
 | `worker_pool/`        | `WorkerPool` manages dedicated OS threads. `SolverWorker` runs a prioritized select loop (shutdown > market events > derived events > tasks). `TaskQueue` is `async_channel`-based |
-| `worker_pool_router/` | `WorkerPoolRouter` fans out orders to all pools, ranks candidates by `amount_out_net_gas` descending; price guard (if enabled) validates in rank order; optionally encodes          |
+| `worker_pool_router/` | `WorkerPoolRouter` allocates the worker pools that serve each order (`allocation`: `OrderClass` matched by `SolverPoolHandle::serves`), fans out to those, ranks candidates by `amount_out_net_gas` descending; price guard (if enabled) validates in rank order; optionally encodes |
 | `feed/`               | `TychoFeed` (WebSocket → MarketState), `GasPriceFetcher`, `MarketEvent` broadcasting, `ProtocolRegistry`                                                                           |
 | `derived/`            | `ComputationManager` runs `SpotPriceComputation`, `ComponentDepthComputation`, `TokenGasPriceComputation` in dependency order. `ReadinessTracker` gates workers until data is fresh     |
 | `graph/`              | `pub` — `GraphManager` trait (initialize + incremental update), `PetgraphStableDiGraphManager`, `StableDiGraph` (re-exported), `EdgeWeightUpdaterWithDerived`, `Path` type           |
@@ -92,7 +92,9 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
 
 **Solving** (`Solver::quote(request)`):
 
-1. `WorkerPoolRouter` fans out to all pools in parallel
+0. `WorkerPoolRouter` allocates the pools serving each order — today an exclusive-access pool is
+   allocated only to a request granted exclusive access
+1. `WorkerPoolRouter` fans out to the allocated pools in parallel
 2. Each pool dispatches to a `SolverWorker` → `Algorithm::find_best_route` → `RouteResult`
 3. Selects best by `amount_out_net_gas` → optional `Encoder` → `Quote`
 
