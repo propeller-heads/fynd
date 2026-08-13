@@ -40,11 +40,14 @@ use alloy::{
     rpc::types::trace::geth::CallFrame,
 };
 use anyhow::Context;
+use async_trait::async_trait;
 use futures::stream::StreamExt;
 use tracing::{debug, warn};
 
 use crate::decoder::{
-    decode::{recover, DecodeContext, EntityDecoders, GasScope, TraderFlow, TraderRole},
+    decode::{
+        recover, ContractCode, DecodeContext, EntityDecoders, GasScope, TraderFlow, TraderRole,
+    },
     matching::MatchedSolverTrade,
     solvers::{SolverKnowledge, SwapIntent},
     trace::{collect_native_transfers, fetch_trace, route_gas},
@@ -191,6 +194,37 @@ fn intent_fields(intent: Option<&SwapIntent>) -> (Option<U256>, Option<U256>, Op
 /// without tripping provider rate limits.
 const TRACE_CONCURRENCY: usize = 10;
 
+/// The RPC-backed [`ContractCode`] adapter, with a cross-block cache.
+///
+/// Whether an address had contract code when first checked is kept for the life of the decoder.
+/// An address gaining code mid-run (a deploy or an EIP-7702 delegation) keeps its stale answer
+/// until restart — acceptable for distinguishing swapper EOAs from pools. A 7702-delegated
+/// account carries code, so a 7702 swapper EOA is classified as a contract and dropped; 7702 is
+/// not yet widely used, so this is accepted for now.
+struct CachedContractCode {
+    provider: DynProvider,
+    cache: HashMap<Address, bool>,
+}
+
+#[async_trait]
+impl ContractCode for CachedContractCode {
+    /// On RPC failure the address is treated as a contract, per the port's contract.
+    async fn is_contract(&mut self, address: Address) -> bool {
+        if let Some(&is_contract) = self.cache.get(&address) {
+            return is_contract;
+        }
+        let is_contract = match self.provider.get_code_at(address).await {
+            Ok(code) => !code.is_empty(),
+            Err(error) => {
+                warn!(%address, %error, "failed to fetch code; treating as contract");
+                true
+            }
+        };
+        self.cache.insert(address, is_contract);
+        is_contract
+    }
+}
+
 /// Stateful trade decoder: owns the RPC provider, the chain's address
 /// registry, the entity decoders, and the caches that are worth keeping
 /// across blocks.
@@ -200,11 +234,9 @@ pub(crate) struct Decoder {
     /// The sender and intent decoder lists, built once. Venue decoders live on their registry
     /// entries instead, constructed with each venue's addresses.
     decoders: EntityDecoders,
-    /// Whether an address had contract code when first checked, kept for the
-    /// life of the decoder. An address gaining code mid-run (a deploy or an
-    /// EIP-7702 delegation) keeps its stale answer until restart — acceptable
-    /// for distinguishing swapper EOAs from pools.
-    code_cache: HashMap<Address, bool>,
+    /// Answers decoders' "does this address hold contract code?" over RPC, caching across
+    /// blocks.
+    contract_code: CachedContractCode,
 }
 
 impl Decoder {
@@ -212,11 +244,12 @@ impl Decoder {
     /// and the entity lists, so they read RPC through `DynProvider` rather than a type
     /// parameter.
     pub(crate) fn new(provider: impl Provider + 'static, registry: Registry) -> Self {
+        let provider = provider.erased();
         Self {
-            provider: provider.erased(),
+            contract_code: CachedContractCode { provider: provider.clone(), cache: HashMap::new() },
+            provider,
             registry,
             decoders: EntityDecoders::new(),
-            code_cache: HashMap::new(),
         }
     }
 
@@ -327,7 +360,7 @@ impl Decoder {
         block_number: u64,
         tx_index: u64,
     ) -> Option<DecodedTrade> {
-        let Self { provider, registry, decoders, code_cache } = self;
+        let Self { provider: _, registry, decoders, contract_code } = self;
         let MatchedSolverTrade { receipt, entry_point } = matched;
         let logs = receipt.logs();
         let sender = receipt.from;
@@ -338,9 +371,8 @@ impl Decoder {
 
         let role = TraderRole::classify(entry_point, registry);
         let mut ctx = DecodeContext {
-            provider,
+            contract_code,
             registry,
-            code_cache,
             receipt,
             entry_point,
             transfer_ledger: &transfer_ledger,

@@ -15,14 +15,13 @@
 //! different receiver, nothing nets against the trader's input and the transaction is declined —
 //! a coverage miss, never wrong amounts (see `transfer_ledger` for the model's assumptions).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use alloy::{primitives::Address, providers::Provider};
+use alloy::primitives::Address;
 use async_trait::async_trait;
-use tracing::warn;
 
 use crate::decoder::{
-    decode::{DecodeContext, TradeDecoder, TraderFlow},
+    decode::{ContractCode, DecodeContext, TradeDecoder, TraderFlow},
     registry::Registry,
     transfer_ledger::{NetSwap, TransferLedger},
 };
@@ -123,11 +122,10 @@ impl TradeDecoder for IntentNetting {
 
     async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
         find_intent_trade(
-            ctx.provider,
+            ctx.contract_code,
             ctx.transfer_ledger,
             &[ctx.entry_point, ctx.receipt.from],
             ctx.registry,
-            ctx.code_cache,
         )
         .await
     }
@@ -152,15 +150,17 @@ impl TradeDecoder for IntentNetting {
 ///   decode can attribute the wrong account's flow.
 /// - **Smart-wallet swappers are declined.** A swapper behind contract code (account abstraction,
 ///   EIP-7702 delegation) is indistinguishable from a pool here, so its fills are dropped.
-pub(crate) async fn find_intent_trade<P: Provider>(
-    provider: &P,
+pub(crate) async fn find_intent_trade(
+    contract_code: &mut dyn ContractCode,
     transfer_ledger: &TransferLedger,
     exclude: &[Address],
     registry: &Registry,
-    code_cache: &mut HashMap<Address, bool>,
 ) -> Option<TraderFlow> {
     for (candidate, trade) in intent_candidates(transfer_ledger, exclude, registry) {
-        if !is_contract(provider, candidate, code_cache).await {
+        if !contract_code
+            .is_contract(candidate)
+            .await
+        {
             return Some(TraderFlow::without_fees(candidate, trade));
         }
     }
@@ -188,45 +188,23 @@ fn intent_candidates(
     swaps
 }
 
-/// Whether an address has contract code, cached across blocks. On RPC failure
-/// the address is treated as a contract so it is not mistaken for an EOA
-/// swapper.
-///
-/// v0 limitation: an EIP-7702-delegated account carries code, so a 7702 swapper EOA is classified
-/// as a contract and dropped. 7702 is not yet widely used, so this is accepted for now.
-async fn is_contract<P: Provider>(
-    provider: &P,
-    address: Address,
-    cache: &mut HashMap<Address, bool>,
-) -> bool {
-    if let Some(is_contract) = cache.get(&address) {
-        return *is_contract;
-    }
-    let is_contract = match provider.get_code_at(address).await {
-        Ok(code) => !code.is_empty(),
-        Err(error) => {
-            warn!(%address, %error, "failed to fetch code; treating as contract");
-            true
-        }
-    };
-    cache.insert(address, is_contract);
-    is_contract
-}
-
 #[cfg(test)]
 mod tests {
-    use alloy::{
-        primitives::{Bytes, U256},
-        providers::RootProvider,
-        rpc::client::RpcClient,
-        transports::mock::Asserter,
-    };
+    use std::collections::HashMap;
+
+    use alloy::primitives::U256;
 
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log, swap};
 
-    fn mocked_provider(asserter: &Asserter) -> RootProvider {
-        RootProvider::new(RpcClient::mocked(asserter.clone()))
+    /// `ContractCode` fake: the listed addresses are EOAs, every other address is a contract.
+    struct EoaSet(HashSet<Address>);
+
+    #[async_trait]
+    impl ContractCode for EoaSet {
+        async fn is_contract(&mut self, address: Address) -> bool {
+            !self.0.contains(&address)
+        }
     }
 
     /// The swapper/pool inverse-swap fixture: swapper sells `token_a` for `token_b`, pool nets the
@@ -241,14 +219,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_intent_trade_eoa_candidate() {
-        let asserter = Asserter::new();
-        // Candidates in address order: addr(100) first — an EOA (empty code).
-        asserter.push_success(&Bytes::default());
-        let provider = mocked_provider(&asserter);
-
+        // Candidates in address order: addr(100) first — an EOA.
+        let mut contract_code = EoaSet(HashSet::from([addr(100)]));
         let registry = Registry::ethereum();
-        let mut cache = HashMap::new();
-        let flow = find_intent_trade(&provider, &inverse_swap_ledger(), &[], &registry, &mut cache)
+        let flow = find_intent_trade(&mut contract_code, &inverse_swap_ledger(), &[], &registry)
             .await
             .unwrap();
         assert_eq!(flow.tracked, addr(100));
@@ -257,17 +231,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_intent_trade_all_candidates_contracts() {
-        let asserter = Asserter::new();
         // Both candidates carry code: a routing intermediary and a pool. Guessing one would net
         // residue dust as an absurd swap, so the fill must be declined.
-        asserter.push_success(&Bytes::from(vec![0xfe]));
-        asserter.push_success(&Bytes::from(vec![0xfe]));
-        let provider = mocked_provider(&asserter);
-
+        let mut contract_code = EoaSet(HashSet::new());
         let registry = Registry::ethereum();
-        let mut cache = HashMap::new();
         let flow =
-            find_intent_trade(&provider, &inverse_swap_ledger(), &[], &registry, &mut cache).await;
+            find_intent_trade(&mut contract_code, &inverse_swap_ledger(), &[], &registry).await;
         assert!(flow.is_none());
     }
 

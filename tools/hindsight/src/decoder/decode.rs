@@ -15,12 +15,9 @@
 //! bespoke to one protocol lives in that protocol's module. Everything around decoding — matching,
 //! vetoes, attribution, gas, quotes — stays in the orchestrator.
 
-use std::collections::HashMap;
-
 use alloy::{
     network::AnyTransactionReceipt,
     primitives::{Address, U256},
-    providers::DynProvider,
     rpc::types::trace::geth::CallFrame,
 };
 use async_trait::async_trait;
@@ -32,8 +29,19 @@ use crate::decoder::{
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
+/// The one question a decoder may ask beyond the transaction: does this address hold contract
+/// code? A port owned by the decode layer, so decoders depend on the question rather than on an
+/// RPC client; the RPC-backed adapter — with its cross-block cache — lives with the `Decoder`.
+///
+/// An implementation that cannot answer must say `true`: treating an unknown address as a
+/// contract declines a trade, while treating it as an EOA records a wrong one.
+#[async_trait]
+pub(crate) trait ContractCode: Send {
+    async fn is_contract(&mut self, address: Address) -> bool;
+}
+
 /// Decode one matched, traced transaction into the trader's flow, or `None` when this decoder
-/// cannot. Async because a decoder may need RPC lookups beyond the transaction (e.g. checking an
+/// cannot. Async because a decoder may need lookups beyond the transaction (e.g. checking an
 /// address for contract code).
 #[async_trait]
 pub(crate) trait TradeDecoder: Send + Sync {
@@ -130,11 +138,9 @@ async fn try_decoders<'d>(
 /// which decoder wins: the receipt and its logs, the root calldata, and the flattened transfer
 /// ledger all arrive here. A decoder that starts needing another input extends this struct.
 pub(crate) struct DecodeContext<'a> {
-    /// RPC access, for decoders that must look beyond the transaction.
-    pub provider: &'a DynProvider,
+    /// Answers "does this address hold contract code?" (see [`ContractCode`]).
+    pub contract_code: &'a mut dyn ContractCode,
     pub registry: &'a Registry,
-    /// Cross-block contract-code cache, owned by the decoder.
-    pub code_cache: &'a mut HashMap<Address, bool>,
     /// The matched transaction's receipt (sender, logs).
     pub receipt: &'a AnyTransactionReceipt,
     /// The contract the transaction entered through (`tx.to`).

@@ -1,24 +1,29 @@
-use std::collections::HashMap;
-
 use alloy::{
     consensus::{Eip658Value, Receipt, ReceiptWithBloom},
     network::{AnyReceiptEnvelope, AnyTransactionReceipt},
     primitives::{address, Address, Bloom, Bytes, Log as PrimitiveLog, TxHash, B256, U256},
-    providers::{DynProvider, Provider, RootProvider},
-    rpc::{
-        client::RpcClient,
-        types::{trace::geth::CallFrame, Log, TransactionReceipt},
-    },
+    rpc::types::{trace::geth::CallFrame, Log, TransactionReceipt},
     serde::WithOtherFields,
     sol_types::SolEvent,
-    transports::mock::Asserter,
 };
+use async_trait::async_trait;
 
 use crate::decoder::{
-    decode::DecodeContext,
+    decode::{ContractCode, DecodeContext},
     registry::{Registry, VenueAddresses},
     transfer_ledger::{NetSwap, Transfer, TransferLedger},
 };
+
+/// Every address is a contract — the failure-safe default the RPC-backed adapter also falls back
+/// to. A test that needs an EOA swapper supplies its own [`ContractCode`] fake.
+pub(crate) struct AllContracts;
+
+#[async_trait]
+impl ContractCode for AllContracts {
+    async fn is_contract(&mut self, _address: Address) -> bool {
+        true
+    }
+}
 
 /// The named venue's address-book section, for tests that construct a venue decoder directly.
 /// Panics naming the venue when the book has no such section — a silent default (empty entry
@@ -107,11 +112,9 @@ pub(crate) fn make_pool_log(pool: Address) -> Log {
 }
 
 /// Owns everything a `DecodeContext` borrows, so a decoder test builds one in two lines instead
-/// of hand-assembling every field. The provider is a mocked `DynProvider` that answers nothing —
-/// tests that need RPC answers push them via [`CtxFixture::with_asserter`].
+/// of hand-assembling every field. Contract-code lookups answer "contract" for every address.
 pub(crate) struct CtxFixture {
-    provider: DynProvider,
-    code_cache: HashMap<Address, bool>,
+    contract_code: AllContracts,
     receipt: AnyTransactionReceipt,
     root: CallFrame,
     entry_point: Address,
@@ -121,19 +124,8 @@ impl CtxFixture {
     /// A fixture for a transaction `sender` sent into `entry_point`, with an empty receipt and a
     /// bare root frame. Replace [`CtxFixture::root`] for trace-walking decoders.
     pub(crate) fn new(sender: Address, entry_point: Address) -> Self {
-        Self::with_asserter(sender, entry_point, &Asserter::new())
-    }
-
-    /// Like [`CtxFixture::new`], with a caller-held [`Asserter`] to feed the provider mocked RPC
-    /// responses.
-    pub(crate) fn with_asserter(
-        sender: Address,
-        entry_point: Address,
-        asserter: &Asserter,
-    ) -> Self {
         Self {
-            provider: RootProvider::new(RpcClient::mocked(asserter.clone())).erased(),
-            code_cache: HashMap::new(),
+            contract_code: AllContracts,
             receipt: receipt(tx_hash(1), sender, Some(entry_point), vec![]),
             root: frame("CALL", sender, entry_point, 0),
             entry_point,
@@ -159,9 +151,8 @@ impl CtxFixture {
         input: &'a [u8],
     ) -> DecodeContext<'a> {
         DecodeContext {
-            provider: &self.provider,
+            contract_code: &mut self.contract_code,
             registry,
-            code_cache: &mut self.code_cache,
             receipt: &self.receipt,
             entry_point: self.entry_point,
             transfer_ledger,
