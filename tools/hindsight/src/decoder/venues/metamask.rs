@@ -27,7 +27,8 @@ pub(crate) fn decoders(addresses: &VenueAddresses) -> Vec<Box<dyn TradeDecoder>>
     vec![Box::new(MetaMaskNetting { addresses: addresses.clone() })]
 }
 
-/// `MetaMask`'s netting decoder.
+/// `MetaMask`'s netting decoder. Holds the full section: it uses both the fee collectors and the
+/// solver-alias table (`normalize_solver`).
 pub(crate) struct MetaMaskNetting {
     addresses: VenueAddresses,
 }

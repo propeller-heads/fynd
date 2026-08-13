@@ -46,7 +46,7 @@ use tracing::{debug, warn};
 use crate::decoder::{
     decode::{recover, DecodeContext, EntityDecoders, GasScope, TraderFlow, TraderRole},
     matching::MatchedSolverTrade,
-    solvers::SwapIntent,
+    solvers::{SolverKnowledge, SwapIntent},
     trace::{collect_native_transfers, fetch_trace, route_gas},
     transfer_ledger::TransferLedger,
 };
@@ -151,6 +151,30 @@ fn warn_on_intent_disagreement(
         flow_amount_in = %flow.swap.amount_in,
         "calldata-recovered intent disagrees with the netted flow"
     );
+}
+
+/// The trader's swap terms, when the settling solver frame's own calldata declares them.
+/// Dispatched with the solver frame's input, not the root transaction's — a packed calldata
+/// layout (Fly) uses offsets valid only in its own frame — and with the decoded flow's input
+/// amount as a hint for scan-based extractors (`ParaSwap`). Only the netted amounts stay
+/// authoritative for what actually settled; this is informational. A declared quote that fails
+/// the unit-plausibility check against the settled amount is dropped (quotes are self-reported);
+/// the ABI-decoded terms stay either way.
+fn recover_intent(
+    knowledge: &dyn SolverKnowledge,
+    root: &CallFrame,
+    registry: &Registry,
+    flow: &TraderFlow,
+) -> Option<SwapIntent> {
+    let intent = trace::find_solver_frame(root, registry)
+        .and_then(|frame| knowledge.swap_intent(&frame.input, Some(flow.swap.amount_in)))?;
+    let mut intent = intent;
+    if let Some(quoted) = intent.declared_quote() {
+        if !solvers::plausible_quote(quoted, flow.swap.amount_out) {
+            intent.clear_quote();
+        }
+    }
+    Some(intent)
 }
 
 /// Copy the calldata-declared terms off a parsed intent, or all-`None` when no intent was
@@ -374,27 +398,7 @@ impl Decoder {
         }
         .map(|units| units * U256::from(receipt.effective_gas_price));
 
-        // The trader's swap terms, when the settling solver frame's own calldata declares them.
-        // Dispatched with the solver frame's input, not the root transaction's — a packed
-        // calldata layout (Fly) uses offsets valid only in its own frame — and with the decoded
-        // flow's input amount as a hint for scan-based extractors (ParaSwap). Only the netting
-        // amounts above stay authoritative for what actually settled; this is informational. A
-        // declared quote that fails the unit-plausibility check against the settled amount is
-        // dropped (quotes are self-reported); the ABI-decoded terms stay either way.
-        let intent = trace::find_solver_frame(root, registry)
-            .and_then(|frame| {
-                attribution
-                    .knowledge
-                    .swap_intent(&frame.input, Some(flow.swap.amount_in))
-            })
-            .map(|mut intent| {
-                if let Some(quoted) = intent.declared_quote() {
-                    if !solvers::plausible_quote(quoted, flow.swap.amount_out) {
-                        intent.clear_quote();
-                    }
-                }
-                intent
-            });
+        let intent = recover_intent(attribution.knowledge, root, registry, &flow);
 
         warn_on_intent_disagreement(
             decoder.flow_is_the_intent(),

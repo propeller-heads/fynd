@@ -13,6 +13,8 @@
 //! token and would miss that, so the wrapped-native fee is recognized here and grossed back into
 //! the ETH output.
 
+use std::collections::HashSet;
+
 use alloy::primitives::Address;
 use async_trait::async_trait;
 
@@ -22,14 +24,14 @@ use crate::decoder::{
     registry::VenueAddresses,
 };
 
-/// Rabby's decoders, constructed with its address-book section (see `venues::DECODERS`).
+/// Rabby's decoders, constructed with the address-book fields they use (see `venues::DECODERS`).
 pub(crate) fn decoders(addresses: &VenueAddresses) -> Vec<Box<dyn TradeDecoder>> {
-    vec![Box::new(RabbyNetting { addresses: addresses.clone() })]
+    vec![Box::new(RabbyNetting { fee_collectors: addresses.fee_collectors.clone() })]
 }
 
 /// Rabby's netting decoder.
 pub(crate) struct RabbyNetting {
-    addresses: VenueAddresses,
+    fee_collectors: HashSet<Address>,
 }
 
 #[async_trait]
@@ -45,13 +47,13 @@ impl TradeDecoder for RabbyNetting {
             ctx.transfer_ledger,
             ctx.receipt.from,
             ctx.entry_point,
-            &self.addresses.fee_collectors,
+            &self.fee_collectors,
         )?;
 
         if flow.swap.token_out == Address::ZERO {
             let wrapped_fee = ctx
                 .transfer_ledger
-                .received_by(&self.addresses.fee_collectors)
+                .received_by(&self.fee_collectors)
                 .get(&ctx.registry.wrapped_native())
                 .copied()
                 .filter(|fee| !fee.is_zero());
@@ -91,7 +93,8 @@ mod tests {
         sender: Address,
         entry_point: Address,
     ) -> Option<TraderFlow> {
-        let decoder = RabbyNetting { addresses: venue_addresses(registry, "rabby") };
+        let decoder =
+            RabbyNetting { fee_collectors: venue_addresses(registry, "rabby").fee_collectors };
         let mut fixture = CtxFixture::new(sender, entry_point);
         let mut ctx = fixture.ctx(registry, ledger, &[]);
         decoder.decode(&mut ctx).await

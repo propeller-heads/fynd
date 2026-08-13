@@ -5,6 +5,9 @@
 //! output token, sent to its fee wallet. Nets the sender's flow and backs that fee out through the
 //! shared `venue_flow` — no venue-specific corrections.
 
+use std::collections::HashSet;
+
+use alloy::primitives::Address;
 use async_trait::async_trait;
 
 use crate::decoder::{
@@ -13,15 +16,15 @@ use crate::decoder::{
     registry::VenueAddresses,
 };
 
-/// Coinbase Wallet's decoders, constructed with its address-book section (see
+/// Coinbase Wallet's decoders, constructed with the address-book fields they use (see
 /// `venues::DECODERS`).
 pub(crate) fn decoders(addresses: &VenueAddresses) -> Vec<Box<dyn TradeDecoder>> {
-    vec![Box::new(CoinbaseNetting { addresses: addresses.clone() })]
+    vec![Box::new(CoinbaseNetting { fee_collectors: addresses.fee_collectors.clone() })]
 }
 
 /// Coinbase Wallet's netting decoder.
 pub(crate) struct CoinbaseNetting {
-    addresses: VenueAddresses,
+    fee_collectors: HashSet<Address>,
 }
 
 #[async_trait]
@@ -32,12 +35,7 @@ impl TradeDecoder for CoinbaseNetting {
 
     /// Net the sender's flow and back the output-token fee out.
     async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
-        venue_flow(
-            ctx.transfer_ledger,
-            ctx.receipt.from,
-            ctx.entry_point,
-            &self.addresses.fee_collectors,
-        )
+        venue_flow(ctx.transfer_ledger, ctx.receipt.from, ctx.entry_point, &self.fee_collectors)
     }
 }
 
@@ -68,7 +66,9 @@ mod tests {
         sender: Address,
         entry_point: Address,
     ) -> Option<TraderFlow> {
-        let decoder = CoinbaseNetting { addresses: venue_addresses(registry, "coinbase") };
+        let decoder = CoinbaseNetting {
+            fee_collectors: venue_addresses(registry, "coinbase").fee_collectors,
+        };
         let mut fixture = CtxFixture::new(sender, entry_point);
         let mut ctx = fixture.ctx(registry, ledger, &[]);
         decoder.decode(&mut ctx).await

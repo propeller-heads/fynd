@@ -22,12 +22,15 @@ use crate::decoder::{
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
-/// Relay's decoders, in try order, constructed with its address-book section (see
+/// Relay's decoders, in try order, each constructed with the address-book fields it uses (see
 /// `venues::DECODERS`).
 pub(crate) fn decoders(addresses: &VenueAddresses) -> Vec<Box<dyn TradeDecoder>> {
     vec![
-        Box::new(RelayCalldata { addresses: addresses.clone() }),
-        Box::new(RelayNetting { addresses: addresses.clone() }),
+        Box::new(RelayCalldata { fee_collectors: addresses.fee_collectors.clone() }),
+        Box::new(RelayNetting {
+            fee_collectors: addresses.fee_collectors.clone(),
+            entry_points: addresses.entry_points.clone(),
+        }),
     ]
 }
 
@@ -48,7 +51,7 @@ pub(crate) fn decoders(addresses: &VenueAddresses) -> Vec<Box<dyn TradeDecoder>>
 /// when the calldata also declares a quote, it must sit within `plausible_quote`'s band of the
 /// recovered output.
 pub(crate) struct RelayCalldata {
-    addresses: VenueAddresses,
+    fee_collectors: HashSet<Address>,
 }
 
 #[async_trait]
@@ -84,7 +87,7 @@ impl TradeDecoder for RelayCalldata {
         // amount above needs adjusting — the fee is recorded for transparency only.
         let fees = ctx
             .transfer_ledger
-            .received_by(&self.addresses.fee_collectors);
+            .received_by(&self.fee_collectors);
         let venue_fee_in = fees
             .get(&intent.token_in)
             .copied()
@@ -111,7 +114,8 @@ impl TradeDecoder for RelayCalldata {
 
 /// Relay's netting decoder.
 pub(crate) struct RelayNetting {
-    addresses: VenueAddresses,
+    fee_collectors: HashSet<Address>,
+    entry_points: HashSet<Address>,
 }
 
 #[async_trait]
@@ -125,18 +129,15 @@ impl TradeDecoder for RelayNetting {
     /// decoded by anchoring on the fee collector instead (Relay funds the swap from it); the
     /// collector is the funding source there, not a fee recipient, so no fee is backed out.
     async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
-        if let Some(flow) = venue_flow(
-            ctx.transfer_ledger,
-            ctx.receipt.from,
-            ctx.entry_point,
-            &self.addresses.fee_collectors,
-        ) {
+        if let Some(flow) =
+            venue_flow(ctx.transfer_ledger, ctx.receipt.from, ctx.entry_point, &self.fee_collectors)
+        {
             return Some(flow);
         }
         decode_rebalance(
             ctx.transfer_ledger,
-            &self.addresses.fee_collectors,
-            &self.addresses.entry_points,
+            &self.fee_collectors,
+            &self.entry_points,
             ctx.registry.wrapped_native(),
         )
         .map(|swap| TraderFlow::without_fees(ctx.receipt.from, swap))
@@ -247,7 +248,11 @@ mod tests {
 
     /// The `RelayNetting` decoder constructed with the registry's relay addresses.
     fn relay_netting(registry: &Registry) -> RelayNetting {
-        RelayNetting { addresses: venue_addresses(registry, "relay") }
+        let addresses = venue_addresses(registry, "relay");
+        RelayNetting {
+            fee_collectors: addresses.fee_collectors,
+            entry_points: addresses.entry_points,
+        }
     }
 
     /// Decode a Relay transaction through the full `RelayNetting` decoder.
@@ -493,7 +498,8 @@ mod tests {
             sender: Address,
             router: Address,
         ) -> Option<TraderFlow> {
-            let decoder = RelayCalldata { addresses: venue_addresses(registry, "relay") };
+            let decoder =
+                RelayCalldata { fee_collectors: venue_addresses(registry, "relay").fee_collectors };
             let mut fixture = CtxFixture::new(sender, router);
             fixture.set_root(root.clone());
             let mut ctx = fixture.ctx(registry, ledger, &[]);
