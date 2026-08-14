@@ -212,10 +212,10 @@ impl SolveReport {
 
 /// A built route's output less what its gas costs, in the output token.
 ///
-/// Read off the swaps rather than off the solve, because the swaps are simulated against each
-/// other's state: a pool the route crosses twice pays the second time what it really would, which
-/// the hop-by-hop solve does not account for. Falls back to the gross amount when the output token
-/// has no price, which is what happens before derived data has been computed.
+/// Read off the swaps rather than off the solve because [`MostLiquidAlgorithm::build_route`]
+/// re-simulates with state overrides, so its numbers — not the solve's — are the ones the caller
+/// is handed. Falls back to the gross amount when the output token has no price, which is what
+/// happens before derived data has been computed.
 fn swap_on_route(
     route: &Route,
     token_prices: Option<&TokenGasPrices>,
@@ -243,9 +243,7 @@ fn swap_on_route(
 /// winner is built into swaps.
 #[derive(Clone)]
 struct HopResult {
-    /// Where the pool these numbers came from sits in the pair's pool list. An index rather than
-    /// an id, so remembering one costs nothing: the list is fixed for as long as an order is being
-    /// solved.
+    /// Where the pool these numbers came from sits in the pair's pool list.
     pool_ix: usize,
     /// What that pool paid out, before gas.
     amount_out: BigUint,
