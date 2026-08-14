@@ -3,8 +3,8 @@
 //! This algorithm finds routes by:
 //! 1. Finding every route between the two tokens as a sequence of tokens, no pools chosen yet
 //! 2. Ranking those sequences by spot price and liquidity depth, deepest first
-//! 3. Solving each sequence leg by leg, taking the pool that pays most at the amount that reaches
-//!    it, which is one simulation per pool per leg rather than per pool combination
+//! 3. Solving each sequence hop by hop, taking the pool that pays most at the amount that reaches
+//!    it, which is one simulation per pool per hop rather than per pool combination
 //! 4. Ranking the solved sequences by net output (output less gas, in the output token)
 //! 5. Building swaps for the winner alone, with stats recorded to the tracing span
 
@@ -42,7 +42,7 @@ use crate::{
 enum MostLiquidError {
     /// No pool trading this pair could take the amount that reached it.
     #[error("no pool between {from:?} and {to:?} could trade the amount")]
-    LegNotTradable { from: NodeIndex, to: NodeIndex },
+    HopNotTradable { from: NodeIndex, to: NodeIndex },
     /// A token on the sequence is not in the market subset this solve was given.
     #[error("token {0:?} not in the market subset")]
     TokenMissing(NodeIndex),
@@ -61,9 +61,9 @@ struct SolveContext<'a> {
     amount_in: &'a BigUint,
 }
 
-/// A token sequence with every leg solved, before any swap is built.
+/// A token sequence with every hop solved, before any swap is built.
 struct SolvedRoute {
-    legs: SmallVec<[SwapOutcome; INLINE_EDGES]>,
+    hops: SmallVec<[HopResult; INLINE_EDGES]>,
     /// The route's output less the gas it costs, in the output token's own units. Falls back to
     /// the gross amount when that token has no price, which is what happens before derived data
     /// has been computed.
@@ -117,7 +117,7 @@ struct SolveReport {
     paths_simulated: usize,
     /// Sequences the ranking could not place at all, so they were never simulated.
     scoring_failures: usize,
-    /// Sequences with a leg no pool would trade.
+    /// Sequences with a hop no pool would trade.
     simulation_failures: usize,
     /// Winners whose swaps did not form a route the executor can take.
     validation_failures: usize,
@@ -210,7 +210,7 @@ impl SolveReport {
 ///
 /// Read off the swaps rather than off the solve, because the swaps are simulated against each
 /// other's state: a pool the route crosses twice pays the second time what it really would, which
-/// the leg-by-leg solve does not account for. Falls back to the gross amount when the output token
+/// the hop-by-hop solve does not account for. Falls back to the gross amount when the output token
 /// has no price, which is what happens before derived data has been computed.
 fn swap_on_route(
     route: &Route,
@@ -238,7 +238,7 @@ fn swap_on_route(
 /// Holds no pool state and no component: a candidate route is solved to compare it, and only the
 /// winner is built into swaps.
 #[derive(Clone)]
-struct SwapOutcome {
+struct HopResult {
     /// Where the pool these numbers came from sits in the pair's pool list. An index rather than
     /// an id, so remembering one costs nothing: the list is fixed for as long as an order is being
     /// solved.
@@ -411,18 +411,18 @@ impl MostLiquidAlgorithm {
         self
     }
 
-    /// Ranks a token sequence without simulating it, by the best its legs could do.
+    /// Ranks a token sequence without simulating it, by the best its hops could do.
     ///
     /// Pools don't carry a state override. Even though possible in some rare cases, the cost
     /// of handling it is optionally left out in trade for performance. When building the route for
     /// encoding this is taken into account.
     ///
     /// The same shape as [`MostLiquidAlgorithm::try_score_path`] — spot prices multiplied, thinnest
-    /// depth as the bottleneck — but a leg here stands for several pools, so it is scored on its
+    /// depth as the bottleneck — but a hop here stands for several pools, so it is scored on its
     /// best. That makes the figure an upper bound on any route through the sequence, which is what
     /// a ranking wants: no sequence is pushed down the queue below one that cannot beat it.
     ///
-    /// A leg whose pools all lack derived data scores as unmeasured, which sinks the sequence to
+    /// A hop whose pools all lack derived data scores as unmeasured, which sinks the sequence to
     /// the bottom of the queue without removing it. Depth is what the ranking is made of, so a
     /// sequence missing it cannot be placed -- but it can still be simulated, and simulation is
     /// what decides.
@@ -456,7 +456,7 @@ impl MostLiquidAlgorithm {
             }
 
             if best_price == f64::MIN {
-                // Nothing measured on this leg. Neutral on price, thinnest possible on depth, so
+                // Nothing measured on this hop. Neutral on price, thinnest possible on depth, so
                 // the sequence sinks to the bottom of the queue rather than out of it.
                 min_depth = 0.0;
             } else {
@@ -468,16 +468,16 @@ impl MostLiquidAlgorithm {
         Some(price * min_depth)
     }
 
-    /// Solves a fixed token sequence, choosing the pool to swap through on each leg.
+    /// Solves a fixed token sequence, choosing the pool to swap through on each hop.
     ///
-    /// Walks the legs in order and, at each, simulates every pool serving that pair at the amount
+    /// Walks the hops in order and, at each, simulates every pool serving that pair at the amount
     /// actually arriving and keeps whichever nets most after its own gas. Enumerating the
-    /// combinations instead costs the product of the pools per leg; this costs their sum.
+    /// combinations instead costs the product of the pools per hop; this costs their sum.
     ///
-    /// Choosing leg by leg is not a shortcut that gives up accuracy. More into a pool is more out
-    /// of it, so the largest amount at each leg carries through to the largest amount at the
+    /// Choosing hop by hop is not a shortcut that gives up accuracy. More into a pool is more out
+    /// of it, so the largest amount at each hop carries through to the largest amount at the
     /// end. Gas does not disturb that: the gas already spent is common to every candidate at a
-    /// leg and drops out of the comparison, and a leg's own gas priced in the token it pays out
+    /// hop and drops out of the comparison, and a hop's own gas priced in the token it pays out
     /// ranks the candidates the same way as comparing whole routes would. What it does improve
     /// on is the ranking heuristic, which never sees the order size — here every choice is made
     /// at the amount really flowing.
@@ -490,9 +490,9 @@ impl MostLiquidAlgorithm {
     ) -> Result<SolvedRoute, MostLiquidError> {
         let SolveContext { graph, market, token_prices, gas_price, amount_in } = *ctx;
         let mut current_amount = amount_in.clone();
-        let mut legs: SmallVec<[SwapOutcome; INLINE_EDGES]> = SmallVec::new();
+        let mut hops: SmallVec<[HopResult; INLINE_EDGES]> = SmallVec::new();
         let mut gas = BigUint::ZERO;
-        // What a unit of gas costs in the token the route pays out, which is the last leg's own
+        // What a unit of gas costs in the token the route pays out, which is the last hop's own
         // output token. `None` when that token has no price.
         let mut route_gas_price = None;
 
@@ -525,14 +525,14 @@ impl MostLiquidAlgorithm {
             // the simulation is the ground truth about what it pays -- the derived figures only
             // decide what gets tried first.
             let pools = graph.pools_between(pair[0], pair[1]);
-            let leg = cache
+            let hop = cache
                 .swap((pair[0], pair[1]), &current_amount, pools, simulate)
-                .ok_or(MostLiquidError::LegNotTradable { from: pair[0], to: pair[1] })?;
+                .ok_or(MostLiquidError::HopNotTradable { from: pair[0], to: pair[1] })?;
 
-            gas += &leg.gas;
-            current_amount = leg.amount_out.clone();
+            gas += &hop.gas;
+            current_amount = hop.amount_out.clone();
             route_gas_price = token_out_gas_price;
-            legs.push(leg);
+            hops.push(hop);
         }
 
         let net_amount_out = match route_gas_price {
@@ -543,12 +543,12 @@ impl MostLiquidAlgorithm {
             None => BigInt::from(current_amount),
         };
 
-        Ok(SolvedRoute { legs, net_amount_out })
+        Ok(SolvedRoute { hops, net_amount_out })
     }
 
     /// Builds the route the caller chose, once, from the pools it picked.
     ///
-    /// Each leg is simulated again rather than carrying its result through the comparison: the
+    /// Each hop is simulated again rather than carrying its result through the comparison: the
     /// numbers come out the same, and a swap needs the pool's state as it was before it, which
     /// nothing else has to hold on to. That state is also what a pool crossed twice by one route
     /// depends on being right, which is why the swaps built here are what the quote reports.
@@ -559,12 +559,12 @@ impl MostLiquidAlgorithm {
     ) -> Result<Route, AlgorithmError> {
         let SolveContext { graph, market, amount_in, .. } = *ctx;
         let mut current_amount = amount_in.clone();
-        let mut swaps = Vec::with_capacity(solved.legs.len());
+        let mut swaps = Vec::with_capacity(solved.hops.len());
         let mut tokens: FxHashMap<Address, Token> = FxHashMap::default();
         let mut state_overrides: FxHashMap<ComponentId, Box<dyn ProtocolSim>> =
             FxHashMap::default();
 
-        for (pair, leg) in token_path.windows(2).zip(&solved.legs) {
+        for (pair, hop) in token_path.windows(2).zip(&solved.hops) {
             let address_in = &graph[pair[0]];
             let address_out = &graph[pair[1]];
             let token_in = paths::get_token(market, address_in)?;
@@ -572,7 +572,7 @@ impl MostLiquidAlgorithm {
 
             let component_id = graph
                 .pools_between(pair[0], pair[1])
-                .get(leg.pool_ix)
+                .get(hop.pool_ix)
                 .map(|edge| &edge.component_id)
                 .ok_or_else(|| AlgorithmError::DataNotFound {
                     kind: "pool",
@@ -665,7 +665,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
         let amount_in = order.amount().clone();
 
-        // Step 1: Find every route as a sequence of tokens. Pools are chosen per leg during
+        // Step 1: Find every route as a sequence of tokens. Pools are chosen per hop during
         // simulation.
         let all_paths =
             paths::find_token_paths(graph, order.token_in(), order.token_out(), &self.query)?;
@@ -716,7 +716,7 @@ impl Algorithm for MostLiquidAlgorithm {
             });
         }
 
-        // Step 3: Every pool on every leg of every candidate -- each one is a choice the
+        // Step 3: Every pool on every hop of every candidate -- each one is a choice the
         // resolution below may make, so all of them have to be in the subset.
         let mut pairs: FxHashSet<(NodeIndex, NodeIndex)> = FxHashSet::default();
         for (token_path, _) in &scored_paths {
@@ -795,7 +795,7 @@ impl Algorithm for MostLiquidAlgorithm {
         }
 
         // Only the winner is built into swaps: that is what copies a component and a pool state per
-        // leg, and every other candidate would have thrown them away.
+        // hop, and every other candidate would have thrown them away.
         let best = match best_route {
             Some((token_path, solved)) => {
                 let route = Self::build_route(&ctx, token_path, &solved)?;
@@ -848,7 +848,7 @@ impl Algorithm for MostLiquidAlgorithm {
 /// input amount, so routes arriving with the same amount get the same numbers.
 ///
 /// Remembering nothing is a valid state: [`PoolSwapsCache::new`] takes a flag, and with it off
-/// every leg asks every pool, which is the answer the cache is an approximation of.
+/// every hop asks every pool, which is the answer the cache is an approximation of.
 struct PoolSwapsCache {
     pairs: FxHashMap<(NodeIndex, NodeIndex), PairChoice>,
     enabled: bool,
@@ -861,7 +861,7 @@ struct PairChoice {
     /// Keyed by the amount that went in. Each outcome names the pool it came from, which is not
     /// always `pool_ix`: a later amount can be won by a different pool, and the outcomes already
     /// recorded still belong to whichever pool produced them.
-    outcomes: FxHashMap<BigUint, SwapOutcome>,
+    outcomes: FxHashMap<BigUint, HopResult>,
 }
 
 impl PoolSwapsCache {
@@ -882,7 +882,7 @@ impl PoolSwapsCache {
         amount_in: &BigUint,
         pools: &[EdgeData<D>],
         mut simulate: impl FnMut(&ComponentId) -> Option<(GetAmountOutResult, BigInt)>,
-    ) -> Option<SwapOutcome> {
+    ) -> Option<HopResult> {
         if let Some(choice) = self.pairs.get(&pair) {
             if let Some(outcome) = choice.outcomes.get(amount_in) {
                 return Some(outcome.clone());
@@ -927,8 +927,8 @@ impl PoolSwapsCache {
         pool_ix: usize,
         amount_in: &BigUint,
         result: GetAmountOutResult,
-    ) -> SwapOutcome {
-        let outcome = SwapOutcome { pool_ix, amount_out: result.amount, gas: result.gas };
+    ) -> HopResult {
+        let outcome = HopResult { pool_ix, amount_out: result.amount, gas: result.gas };
         if !self.enabled {
             return outcome;
         }
@@ -1438,7 +1438,7 @@ mod tests {
             .unwrap();
 
         // component2 has no weight, so it never gets ranked -- but it pays 3x against component1's
-        // 2x, and simulating both is what settles the leg.
+        // 2x, and simulating both is what settles the hop.
         assert_eq!(result.route().swaps().len(), 1);
         assert_eq!(result.route().swaps()[0].component_id(), "component2");
         assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(ONE_ETH * 3));
@@ -1803,11 +1803,11 @@ mod tests {
 
     // ==================== Leg solving Tests ====================
 
-    /// Each leg is solved on its own, at the amount that actually reaches it.
+    /// Each hop is solved on its own, at the amount that actually reaches it.
     ///
-    /// The pool paying most is deliberately not the first on either leg, and it is not the one the
+    /// The pool paying most is deliberately not the first on either hop, and it is not the one the
     /// score ranking favours either — `spot_price * min_depth` prefers the deep, cheap pools here.
-    /// Only simulating at the order's size finds them, and picking per leg is what makes that
+    /// Only simulating at the order's size finds them, and picking per hop is what makes that
     /// affordable: four simulations rather than the four two-hop routes they combine into.
     #[tokio::test]
     async fn test_each_leg_takes_its_best_paying_pool() {
@@ -1839,9 +1839,9 @@ mod tests {
             .iter()
             .map(|swap| swap.component_id())
             .collect();
-        assert_eq!(chosen, vec!["ab2", "bc2"], "each leg must take its best-paying pool");
+        assert_eq!(chosen, vec!["ab2", "bc2"], "each hop must take its best-paying pool");
 
-        // 1000 -> 3000 over the first leg, and the second leg has to be settled on that 3000
+        // 1000 -> 3000 over the first hop, and the second hop has to be settled on that 3000
         // rather than on the order amount.
         assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(3000u64));
         assert_eq!(*result.route().swaps()[1].amount_in(), BigUint::from(3000u64));
@@ -1950,10 +1950,10 @@ mod tests {
 
     // ==================== score_token_path Tests ====================
 
-    /// A leg with no measured pool cannot be placed, so the sequence sinks to the bottom of the
+    /// A hop with no measured pool cannot be placed, so the sequence sinks to the bottom of the
     /// queue rather than out of it: it still scores, and the score is the lowest there is.
     #[test]
-    fn test_score_token_path_sinks_a_sequence_with_an_unmeasured_leg() {
+    fn test_score_token_path_sinks_a_sequence_with_an_unmeasured_hop() {
         let (a, b, c, _) = addrs();
         let mut manager = linear_graph();
         // A->B measured, B->C left without derived data.
@@ -1966,7 +1966,7 @@ mod tests {
         let unmeasured =
             MostLiquidAlgorithm::score_token_path(graph, &[node(&a), node(&b), node(&c)]);
 
-        assert_eq!(unmeasured, Some(0.0), "an unmeasured leg scores zero, not None");
+        assert_eq!(unmeasured, Some(0.0), "an unmeasured hop scores zero, not None");
         assert!(
             MostLiquidAlgorithm::score_token_path(graph, &[node(&a), node(&b)])
                 .is_some_and(|measured| measured > 0.0),
