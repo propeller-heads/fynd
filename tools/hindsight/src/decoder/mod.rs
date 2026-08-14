@@ -393,7 +393,7 @@ impl Decoder {
         // `venue_attribution`) overrides the entry-point label, backing any venue fee out before
         // the quote check reads the grossed output. The appData tag is read from a batch settler's
         // calldata; other transactions carry none.
-        let integrator = solvers::integrator(logs);
+        let integrator = solvers::integrator(logs, registry);
         let app_data = intents::venue_tag(registry, entry_point, &root.input);
         let venue = venue_attribution::attribute(
             registry,

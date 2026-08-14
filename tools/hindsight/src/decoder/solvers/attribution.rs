@@ -29,10 +29,10 @@ pub(crate) enum AttributionSource {
     Fallback,
 }
 
-/// A solver label, the evidence tier it came from, and the solver's resolved
-/// `SolverKnowledge` handle — resolved here, once, so every later consultation (declared swap,
-/// veto, integrator tag) calls the trait on the handle instead of re-deriving the
-/// implementation from the name.
+/// A solver label, the evidence tier it came from, and the solver's `SolverKnowledge` handle.
+/// Address-based tiers take the handle straight off the registry's solver entry; name-based
+/// tiers (a venue-declared solver id, the fallback labels) resolve the name once here. Every
+/// later consultation (declared swap, veto, integrator tag) calls the trait on the handle.
 pub(crate) struct Attribution {
     pub solver: String,
     pub source: AttributionSource,
@@ -60,11 +60,22 @@ pub(crate) fn attribute(
     if let Some(solver) = declared {
         return Attribution::new(solver, AttributionSource::Declared);
     }
-    if registry.is_solver(entry_point) {
-        return Attribution::new(registry.label(entry_point), AttributionSource::EntryPoint);
+    if let Some(solver) = registry.solver(entry_point) {
+        return Attribution {
+            solver: solver.name.clone(),
+            source: AttributionSource::EntryPoint,
+            knowledge: solver.knowledge,
+        };
     }
-    if let Some(found) = trace::find_solver_frame(root, registry).and_then(|frame| frame.to) {
-        return Attribution::new(registry.label(found), AttributionSource::TraceMatch);
+    if let Some(solver) = trace::find_solver_frame(root, registry)
+        .and_then(|frame| frame.to)
+        .and_then(|address| registry.solver(address))
+    {
+        return Attribution {
+            solver: solver.name.clone(),
+            source: AttributionSource::TraceMatch,
+            knowledge: solver.knowledge,
+        };
     }
     if let Some(guess) = trace::largest_external_call(root, entry_point, sender, registry) {
         return Attribution::new(registry.label(guess), AttributionSource::LargestCall);

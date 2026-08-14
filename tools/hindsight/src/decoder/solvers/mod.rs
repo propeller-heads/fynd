@@ -184,26 +184,22 @@ pub(crate) fn knowledge(solver: &str) -> &'static dyn SolverKnowledge {
 /// part of the transaction — as its entry point or as a log emitter — so a veto can never
 /// affect another solver's trades.
 pub(crate) fn solver_veto(logs: &[Log], entry_point: Address, registry: &Registry) -> Option<Veto> {
-    for (name, knowledge) in IMPLEMENTATIONS {
-        let present = registry.solver_name(entry_point) == Some(name) ||
+    std::iter::once(entry_point)
+        .chain(
             logs.iter()
-                .any(|log| registry.solver_name(log.address()) == Some(name));
-        if present {
-            if let Some(veto) = knowledge.solver_veto(logs) {
-                return Some(veto);
-            }
-        }
-    }
-    None
+                .map(alloy::rpc::types::Log::address),
+        )
+        .filter_map(|address| registry.solver(address))
+        .find_map(|solver| solver.knowledge.solver_veto(logs))
 }
 
 /// The order-flow integrator tag declared in a transaction's logs, from whichever solver records
 /// one. Only a solver that fronts other apps (`LiFi`) returns a tag; the rest default to `None`, so
 /// the first hit is the answer.
-pub(crate) fn integrator(logs: &[Log]) -> Option<String> {
-    IMPLEMENTATIONS
-        .iter()
-        .find_map(|(_, knowledge)| knowledge.integrator(logs))
+pub(crate) fn integrator(logs: &[Log], registry: &Registry) -> Option<String> {
+    logs.iter()
+        .filter_map(|log| registry.solver(log.address()))
+        .find_map(|solver| solver.knowledge.integrator(logs))
 }
 
 /// The settling solver frame's own declaration of a trade: its declared swap plus the output
@@ -226,9 +222,13 @@ pub(crate) fn solver_declaration(
     registry: &Registry,
 ) -> Option<SolverDeclaration> {
     let frame = trace::find_solver_frame(root, registry)?;
-    let knowledge = knowledge(&registry.label(frame.to?));
-    let swap = knowledge.declared_swap(&frame.input, None)?;
-    let output_recipient = knowledge.output_recipient(&frame.input)?;
+    let solver = registry.solver(frame.to?)?;
+    let swap = solver
+        .knowledge
+        .declared_swap(&frame.input, None)?;
+    let output_recipient = solver
+        .knowledge
+        .output_recipient(&frame.input)?;
     Some(SolverDeclaration { swap, output_recipient })
 }
 

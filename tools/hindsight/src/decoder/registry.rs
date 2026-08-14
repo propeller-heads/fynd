@@ -17,7 +17,7 @@ use anyhow::Context;
 use serde::Deserialize;
 use tycho_simulation::tycho_common::models::Chain;
 
-use crate::decoder::decode::TradeDecoder;
+use crate::decoder::{decode::TradeDecoder, solvers, solvers::SolverKnowledge};
 
 /// The built-in address books, embedded at compile time (validated by tests, so they cannot fail
 /// to parse at runtime).
@@ -117,6 +117,25 @@ impl VenueAddresses {
     }
 }
 
+/// A loaded solver: its display name plus its `SolverKnowledge` implementation, bound once at
+/// registry load by joining the address book's `[solvers]` names against
+/// `solvers::IMPLEMENTATIONS`. The decode path resolves a solver address to this entry and calls
+/// the trait — no name is converted to code per trade. A solver with no implementation carries
+/// the shared no-op handle.
+pub(crate) struct Solver {
+    pub(crate) name: String,
+    pub(crate) knowledge: &'static dyn SolverKnowledge,
+}
+
+impl std::fmt::Debug for Solver {
+    /// The knowledge handle is a trait object; only the name prints.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Solver")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A loaded venue: its address-book section plus its decoders, constructed once at registry load
 /// with those addresses (see `crate::decoder::venues::DECODERS` for the name → constructor
 /// binding). The decode path resolves an entry point to this entry and calls the trait objects —
@@ -147,8 +166,9 @@ impl std::fmt::Debug for Venue {
 /// Per-chain address book for trade decoding, loaded from TOML (see the module docs).
 #[derive(Debug)]
 pub(crate) struct Registry {
-    /// Solver routers — the venue that actually settles a swap.
-    solvers: HashMap<Address, String>,
+    /// Solver routers — the router that actually settles a swap — each bound to its
+    /// `SolverKnowledge` implementation at load.
+    solvers: HashMap<Address, Solver>,
     /// Display names of all registered solvers, for O(1) `is_solver_name` checks.
     solver_names: HashSet<String>,
     /// Every known address (solvers and venues), for name resolution.
@@ -226,6 +246,14 @@ impl Registry {
             toml::from_str(text).context("failed to parse address book TOML")?;
 
         let mut names = book.solvers.clone();
+        let solvers: HashMap<Address, Solver> = book
+            .solvers
+            .iter()
+            .map(|(&address, name)| {
+                let entry = Solver { name: name.clone(), knowledge: solvers::knowledge(name) };
+                (address, entry)
+            })
+            .collect();
         for (name, venue) in &book.venues {
             for &entry_point in &venue.entry_points {
                 names.insert(entry_point, name.clone());
@@ -263,7 +291,7 @@ impl Registry {
 
         Ok(Self {
             solver_names,
-            solvers: book.solvers,
+            solvers,
             names,
             batch_settlers: book.batch_settlers,
             labels: book.labels,
@@ -291,11 +319,9 @@ impl Registry {
         self.solvers.contains_key(&address)
     }
 
-    /// The registered solver name for `address`, if any.
-    pub(crate) fn solver_name(&self, address: Address) -> Option<&str> {
-        self.solvers
-            .get(&address)
-            .map(String::as_str)
+    /// The loaded solver entry — name plus its `SolverKnowledge` handle — for `address`, if any.
+    pub(crate) fn solver(&self, address: Address) -> Option<&Solver> {
+        self.solvers.get(&address)
     }
 
     /// Whether `name` is a registered solver's display name. Bounds the metric label
@@ -467,7 +493,7 @@ mod tests {
                 registry
                     .solvers
                     .values()
-                    .any(|name| name == "tycho"),
+                    .any(|solver| solver.name == "tycho"),
                 "{chain} has no tycho router"
             );
         }
