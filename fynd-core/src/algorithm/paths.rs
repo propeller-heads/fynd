@@ -236,10 +236,19 @@ pub(crate) fn get_token<'a>(
         })
 }
 
+/// A read view of the market under `label`, together with the gas price it was found to carry.
+///
+/// Returning the gas price is what makes the check below worth doing here: a caller holding the
+/// view still has to get the price out of an `Option`, and would re-establish the same guarantee.
+///
+/// # Errors
+///
+/// [`AlgorithmError::Other`] when `label` names no registered overlay, and
+/// [`AlgorithmError::DataNotFound`] when the market carries no gas price.
 pub(crate) async fn read_market<'a>(
     market: &'a MarketData,
     label: Option<StateLabel>,
-) -> Result<MarketDataView<'a>, AlgorithmError> {
+) -> Result<(MarketDataView<'a>, BigUint), AlgorithmError> {
     let view = match label.as_ref() {
         Some(l) => market
             .read_labeled(l)
@@ -247,10 +256,12 @@ pub(crate) async fn read_market<'a>(
             .map_err(|e| AlgorithmError::Other(e.to_string()))?,
         None => market.read().await,
     };
-    if view.gas_price().is_none() {
-        return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
-    }
-    Ok(view)
+    let gas_price = view
+        .gas_price()
+        .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
+        .effective_gas_price()
+        .clone();
+    Ok((view, gas_price))
 }
 
 #[cfg(test)]

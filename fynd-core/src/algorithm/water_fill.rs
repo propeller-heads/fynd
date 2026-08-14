@@ -43,7 +43,7 @@ use tycho_simulation::tycho_common::{models::Address, simulation::protocol_sim::
 use super::{
     most_liquid::DepthAndPrice,
     paths,
-    sim_meter::{MeteredProtocolSim, SolveMeter, SwapCaller},
+    sim_meter::{MeteredProtocolSim, SolveMeter},
     split_primitives::{build_split_route, HopDescriptor, PathAllocation, SimulatedHop},
     Algorithm, AlgorithmConfig, NoPathReason,
 };
@@ -148,6 +148,53 @@ struct StepResult {
     new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
 }
 
+/// The stage of a solve a swap was asked for.
+///
+/// Recorded against every swap so the report can say how much of a solve sits where answers can be
+/// reused, and how much is in the passes that read state they have committed to and can never come
+/// through the cache.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SolvePass {
+    /// Bounded discovery expanding its frontier.
+    Discovery,
+    /// Ranking every candidate path at the full order amount.
+    Ranking,
+    /// Choosing which candidates fill-and-spill will split across, by probing each with a first
+    /// chunk.
+    SetSelection,
+    /// Exchange refinement re-pricing a path on its own.
+    Exchange,
+    /// The chunked water-fills, which read what they have committed and never reach the cache.
+    Chunking,
+    /// Building the legs of a route that will be returned.
+    Assembly,
+}
+
+impl SolvePass {
+    /// Whether this pass can take an amount read across two nearby ones.
+    ///
+    /// The passes that settle which paths get split can: reading across errs low, so a path may
+    /// lose a place it deserved but never take one it did not, and every path they put forward is
+    /// simulated for real before anything is allocated to it.
+    ///
+    /// Discovery is held out even though it also only orders things. Its amounts feed the next hop
+    /// rather than staying with one path, so reading low compounds along the frontier and moves
+    /// which edges survive pruning — a different candidate set, not a differently ordered one.
+    ///
+    /// The rest cannot. Exchange refinement shifts flow on a strictly-improving comparison, where
+    /// a read-across amount could invent a gain that is not there; the chunked fills and the route
+    /// builders decide and report amounts that are handed back to the caller.
+    pub(crate) fn may_interpolate(self) -> bool {
+        match self {
+            SolvePass::Ranking | SolvePass::SetSelection => true,
+            SolvePass::Discovery |
+            SolvePass::Exchange |
+            SolvePass::Chunking |
+            SolvePass::Assembly => false,
+        }
+    }
+}
+
 /// A pool and the direction taken through it. Both token addresses are part of it — a pool trading
 /// three tokens answers `USDC -> DAI` and `USDT -> DAI` differently for the same amount.
 #[derive(PartialEq, Eq, Hash)]
@@ -157,7 +204,8 @@ struct PoolDirection<'a> {
     address_out: &'a Address,
 }
 
-/// What one hop paid: what came out, and the gas it cost.
+/// What a swap paid: what came out, and the gas it cost. Used both for one hop and, summed, for
+/// a whole path.
 #[derive(Clone)]
 struct HopOutcome {
     amount_out: BigUint,
@@ -185,15 +233,17 @@ impl AmountsSwapped {
             .is_some_and(|refused_from| amount_in >= refused_from)
     }
 
-    /// Keeps what the pool paid for `amount_in`, and moves the refusal point down to it when this
-    /// refusal is one the pool can be taken to repeat for anything larger.
+    /// Records what the pool paid for `amount_in`.
     ///
-    /// A pool refuses because the swap outgrows what it can serve, so refusals run upwards. Two
-    /// things have to hold before that is assumed of one:
+    /// A pool usually refuses because the swap is bigger than it can serve, so a refusal normally
+    /// means every larger amount is refused too. When that looks true here, `refused_from` is set
+    /// to this amount (or lowered to it) and larger amounts are refused without asking the pool.
     ///
-    /// * a smaller amount it did serve, so this is a limit being crossed rather than an amount too
-    ///   small to quote, which fails at the other end;
-    /// * no larger amount it served, which would say this pool does not refuse upwards at all.
+    /// Two things must hold first, because a refusal is not always about size:
+    ///
+    /// * the pool served some smaller amount, so this really is a limit — a swap can also fail for
+    ///   being too small to quote, and that fails at the opposite end;
+    /// * the pool served no larger amount, which would prove it does not refuse by size at all.
     fn remember(&mut self, insert_at: usize, amount_in: &BigUint, outcome: Option<HopOutcome>) {
         let refused = outcome.is_none();
         self.outcome_by_amount
@@ -232,12 +282,12 @@ impl AmountsSwapped {
 /// A refusal is kept like any other answer: a pool that will not take an amount refuses every path
 /// that reaches it with that amount. It is also read upwards — once a pool has refused, larger
 /// amounts are refused without asking it again, on the terms [`AmountsSwapped::remember`] sets out.
-/// That holds for every caller: it says what the pool would do, rather than approximating a number
-/// it would return, so `accuracy` has no bearing on it.
+/// That holds for every pass: it says what the pool would do, rather than approximating a number
+/// it would return, so it holds for every pass, whatever [`SolvePass::may_interpolate`] says.
 ///
-/// For a pass [`SwapCaller::may_interpolate`] admits, an amount never asked for can be answered by
-/// across the two nearest amounts that were. See [`SwapCache::interpolate`] for when that is
-/// allowed and which way it errs.
+/// For a pass [`SolvePass::may_interpolate`] admits, an amount never asked for can be answered by
+/// reading across the two nearest amounts that were. See [`SwapCache::interpolate`] for when that
+/// is allowed and which way it errs.
 struct SwapCache<'a> {
     by_direction: FxHashMap<PoolDirection<'a>, AmountsSwapped>,
 }
@@ -250,14 +300,14 @@ impl<'a> SwapCache<'a> {
     /// What `direction` pays for `amount_in`.
     ///
     /// Answers from the amounts already asked of that pool where it can, reading across two of them
-    /// when `accuracy` allows it, and otherwise calls `simulate` and keeps the result. Every route
-    /// through here is booked against the component, so the report separates what was simulated
-    /// from what was reused and from what was read across.
+    /// when the asking pass allows it, and otherwise calls `simulate` and keeps the result. Every
+    /// route through here is booked against the component and the pass, so the report separates
+    /// what was simulated from what was reused and from what was read across.
     fn swap(
         &mut self,
         direction: PoolDirection<'a>,
         amount_in: &BigUint,
-        caller: SwapCaller,
+        pass: SolvePass,
         meter: &mut SolveMeter<'a>,
         simulate: impl FnOnce(&mut SolveMeter<'a>) -> Option<HopOutcome>,
     ) -> Option<HopOutcome> {
@@ -272,7 +322,7 @@ impl<'a> SwapCache<'a> {
             .binary_search_by(|(amount, _)| amount.cmp(amount_in))
         {
             Ok(asked_before) => {
-                meter.record_cache_hit(component_id, caller);
+                meter.record_cache_hit(component_id, pass);
                 return amounts_swapped.outcome_by_amount[asked_before]
                     .1
                     .clone();
@@ -283,15 +333,13 @@ impl<'a> SwapCache<'a> {
         // Asking a pool for more than it has already turned down buys the same refusal again, and
         // on a `vm:` pool that is as expensive as a swap it would have served.
         if amounts_swapped.refuses(amount_in) {
-            meter.record_refusal_without_calling(component_id, caller);
+            meter.record_refusal_without_calling(component_id, pass);
             return None;
         }
 
-        if caller.may_interpolate() {
-            if let Some(read_across) =
-                Self::interpolate(amounts_swapped, insert_at, amount_in)
-            {
-                meter.record_interpolation(component_id, caller);
+        if pass.may_interpolate() {
+            if let Some(read_across) = Self::interpolate(amounts_swapped, insert_at, amount_in) {
+                meter.record_interpolation(component_id, pass);
                 return Some(read_across);
             }
         }
@@ -315,8 +363,14 @@ impl<'a> SwapCache<'a> {
     ///
     /// The two amounts must also sit within [`INTERPOLATION_GAP_PERCENT`] of the one asked for.
     /// A wider gap is where the line drifts furthest from the curve, and the gap narrows on its
-    /// own: a request the gate turns away is simulated, and that amount lands between the two,
-    /// leaving a closer pair behind for the next caller.
+    /// own: a request this turns away is simulated, and that amount lands between the two,
+    /// leaving a closer pair behind for the next pass.
+    ///
+    /// Gas takes the larger amount's figure, not the nearer one's. Gas does not climb smoothly — a
+    /// crossed tick costs what it costs — and a swap never needs less gas than a smaller one, so
+    /// the larger amount's figure is never under the truth. Ranking subtracts gas from output, so
+    /// understating it here would overstate a path's net and let it take a place it had not
+    /// earned, which is the one thing this must not do.
     fn interpolate(
         amounts_swapped: &AmountsSwapped,
         insert_at: usize,
@@ -331,7 +385,7 @@ impl<'a> SwapCache<'a> {
         let (lower, upper) = (lower.as_ref()?, upper.as_ref()?);
 
         let amount_gap = upper_amount - lower_amount;
-        if amount_gap.clone() * 100u32 > amount_in * INTERPOLATION_GAP_PERCENT {
+        if &amount_gap * 100u32 > amount_in * INTERPOLATION_GAP_PERCENT {
             return None;
         }
         // A pool paying less for more is not the concave curve this reads across.
@@ -341,37 +395,19 @@ impl<'a> SwapCache<'a> {
 
         let output_gap = &upper.amount_out - &lower.amount_out;
         let amount_past_lower = amount_in - lower_amount;
-        let amount_out =
-            &lower.amount_out + output_gap * amount_past_lower.clone() / amount_gap.clone();
-        // Gas steps rather than climbing — a tick crossed costs what it costs — so the nearer
-        // amount's gas stands rather than being read across.
-        let gas = if amount_past_lower * 2u32 < amount_gap {
-            lower.gas.clone()
-        } else {
-            upper.gas.clone()
-        };
-        Some(HopOutcome { amount_out, gas })
+        let amount_out = &lower.amount_out + output_gap * amount_past_lower / amount_gap;
+        Some(HopOutcome { amount_out, gas: upper.gas.clone() })
     }
 }
 
 /// What one path pays for the whole order.
 #[derive(Clone)]
-struct FullAmountOutcome {
-    /// The output, or zero when the path could not take the whole order.
-    output: BigUint,
-    /// Gas summed over the path's hops. `None` when it could not take the whole order, which is
-    /// what also bars it from the single-path baseline.
-    gas: Option<BigUint>,
-}
-
-impl FullAmountOutcome {
-    fn filled(output: BigUint, gas: BigUint) -> Self {
-        Self { output, gas: Some(gas) }
-    }
-
-    fn unfilled() -> Self {
-        Self { output: BigUint::zero(), gas: None }
-    }
+enum FullAmountOutcome {
+    /// The path took the whole order, paying `output` and costing `gas` over its hops.
+    Filled { output: BigUint, gas: BigUint },
+    /// The path could not take the whole order. It still ranks by output, at zero, because a
+    /// fraction of the order may suit it; it cannot be the single-path baseline.
+    Unfilled,
 }
 
 /// The two orderings the full-amount pass produces, both holding indices into the path list it
@@ -433,7 +469,7 @@ impl WaterFillAlgorithm {
 
     /// Simulates `amount` through `path`, reading each component from `overlay` if present else the
     /// base state. Returns the output, summed gas, and the resulting per-component states so
-    /// the caller can commit them into an overlay.
+    /// the pass can commit them into an overlay.
     fn simulate_step<'g>(
         path: &Path<'g, DepthAndPrice>,
         market: &MarketState,
@@ -469,7 +505,7 @@ impl WaterFillAlgorithm {
             let result = state
                 .get_amount_out_metered(
                     component_id,
-                    SwapCaller::Chunking,
+                    SolvePass::Chunking,
                     meter,
                     current.clone(),
                     token_in,
@@ -563,16 +599,11 @@ impl WaterFillAlgorithm {
             None
         };
 
-        let mut scored_paths = self.get_scored_paths(graph, order)?;
+        let mut scored_paths = self.top_scored_paths(graph, order)?;
         let mut joined_paths = Vec::new();
 
         let timeout_ms = self.timeout.as_millis() as u64;
-        let market_view = read_market(&market, label).await?;
-        let gas_price = market_view
-            .gas_price()
-            .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
-            .effective_gas_price()
-            .clone();
+        let (market_view, gas_price) = read_market(&market, label).await?;
 
         // Bounded amount-aware discovery (see the discovery section below): union its
         // candidates ahead of the pre-ranked set, so connector/anchor routes (incl. the
@@ -586,9 +617,6 @@ impl WaterFillAlgorithm {
         let mut cache = SwapCache::new();
         let mut meter = SolveMeter::new();
 
-        // Not fatal — the pre-ranked exhaustive set already guarantees a route — but log it
-        // so a misconfiguration or systematic discovery failure is visible rather than
-        // silently narrowing the candidate set.
         let (discovered_paths, _) = discover_paths(
                 graph,
                 &market_view,
@@ -609,7 +637,7 @@ impl WaterFillAlgorithm {
             })
             .unwrap_or_default();
 
-        trace!("Discovered (simulated) {} paths", discovered_paths.len());
+        trace!(discovered = discovered_paths.len(), "water-fill discovery");
 
         let mut keys: FxHashSet<Vec<ComponentId>> = scored_paths
             .iter()
@@ -646,7 +674,7 @@ impl WaterFillAlgorithm {
         );
 
         // No early exit on a missing single path: a split across thin components can fill an order
-        // that no single path can, so the caller decides — it only errors when neither a
+        // that no single path can, so the pass decides — it only errors when neither a
         // single path nor a split candidate fills the order.
         let ordered: Vec<Path<DepthAndPrice>> = ranking
             .by_output
@@ -696,7 +724,7 @@ impl WaterFillAlgorithm {
     /// A path that crosses one pool twice is dropped instead of ranked: its second crossing would
     /// have to see its own earlier swap, and every swap here reads untouched state.
     ///
-    /// Nothing here builds a route. Only the baseline the caller picks out of the ranking is worth
+    /// Nothing here builds a route. Only the baseline the pass picks out of the ranking is worth
     /// copying a component and a pool state per leg.
     fn rank_at_full_amount<'a>(
         &self,
@@ -721,16 +749,18 @@ impl WaterFillAlgorithm {
                 continue;
             }
             outcomes_by_path[path_ix] = Some(
-                match simulate_path_cached(
+                match simulate_path(
                     path,
                     market,
                     cache,
                     meter,
                     order_amount.clone(),
-                    SwapCaller::Ranking,
+                    SolvePass::Ranking,
                 ) {
-                    Some(paid) => FullAmountOutcome::filled(paid.amount_out, paid.gas),
-                    None => FullAmountOutcome::unfilled(),
+                    Some(paid) => {
+                        FullAmountOutcome::Filled { output: paid.amount_out, gas: paid.gas }
+                    }
+                    None => FullAmountOutcome::Unfilled,
                 },
             );
         }
@@ -738,7 +768,9 @@ impl WaterFillAlgorithm {
         rank_outcomes(outcomes_by_path, gas_price, token_prices, order.token_out())
     }
 
-    fn get_scored_paths<'a>(
+    /// Every path the graph holds between the order's tokens, best spot-price-times-depth score
+    /// first, cut to `max_candidates`. A path no edge weight covers sorts behind every scored one.
+    fn top_scored_paths<'a>(
         &self,
         graph: &'a TopologyGraph<DepthAndPrice>,
         order: &Order,
@@ -753,21 +785,23 @@ impl WaterFillAlgorithm {
             });
         }
 
-        let n_total = all_paths.len();
-        trace!("Number of paths: {}", n_total);
+        let path_count = all_paths.len();
+        let mut scored_count = 0usize;
 
-        let mut n_scored = 0usize;
-
+        // A path no edge weight covers sorts behind every scored one rather than level with a
+        // path scored at zero: the score is a spot price times a depth, so zero is a real score
+        // that a weightless path has not earned.
         let mut scored: Vec<(Path<DepthAndPrice>, f64)> = all_paths
             .into_iter()
-            .map(|p| {
-                let score = if let Some(s) = paths::try_score_path(&p) {
-                    n_scored += 1;
-                    s
-                } else {
-                    0.0
+            .map(|path| {
+                let score = match paths::try_score_path(&path) {
+                    Some(score) => {
+                        scored_count += 1;
+                        score
+                    }
+                    None => f64::MIN,
                 };
-                (p, score)
+                (path, score)
             })
             .collect();
         scored.sort_by(|(_, a), (_, b)| {
@@ -775,7 +809,7 @@ impl WaterFillAlgorithm {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        trace!("Scored {}/{}, limit: {}", n_scored, n_total, self.max_candidates);
+        trace!(path_count, scored_count, limit = self.max_candidates, "water-fill path scoring");
 
         scored.truncate(self.max_candidates);
 
@@ -908,7 +942,7 @@ impl WaterFillAlgorithm {
     /// floor is built from, it fixes the active path set (the coarse-gated paths with a nonzero
     /// amount), re-allocates over that set on a fine grid with the gate off (gas already
     /// justified), then runs the exchange-refinement pass. If a tight timeout cuts off either pass
-    /// this returns `None` and the caller falls back to the 20-chunk floor candidate.
+    /// this returns `None` and the pass falls back to the 20-chunk floor candidate.
     fn disjoint_refine<'g>(
         &self,
         ctx: &SplitContext<'_, 'g>,
@@ -955,14 +989,8 @@ impl WaterFillAlgorithm {
         if amount.is_zero() {
             return Some(BigInt::zero());
         }
-        let paid = simulate_path_cached(
-            path,
-            ctx.market,
-            cache,
-            meter,
-            amount.clone(),
-            SwapCaller::Exchange,
-        )?;
+        let paid =
+            simulate_path(path, ctx.market, cache, meter, amount.clone(), SolvePass::Exchange)?;
         let activation = Self::activation_cost(ctx, &paid.gas);
         Some(BigInt::from(paid.amount_out) - activation)
     }
@@ -1105,7 +1133,7 @@ impl WaterFillAlgorithm {
             let result = state
                 .get_amount_out_metered(
                     component_id,
-                    SwapCaller::Assembly,
+                    SolvePass::Assembly,
                     meter,
                     current.clone(),
                     token_in,
@@ -1271,8 +1299,8 @@ impl WaterFillAlgorithm {
             let Some((best_i, _)) = best else {
                 break;
             };
-            // Taking the winner's marginal is also what forgets it: its pools are about to move,
-            // so what it just paid stops answering for the next chunk.
+            // Take the winner's marginal rather than read it: its pools are about to move, so
+            // what it just paid no longer answers, and taking it is how that is forgotten.
             let Some(step) = marginals[best_i].take() else {
                 break;
             };
@@ -1313,13 +1341,13 @@ impl WaterFillAlgorithm {
             }
             // Nothing is committed yet, so these probes read untouched state and go through the
             // cache like every other swap that does.
-            let Some(probe) = simulate_path_cached(
+            let Some(probe) = simulate_path(
                 path,
                 ctx.market,
                 cache,
                 meter,
                 first_chunk.clone(),
-                SwapCaller::Probes,
+                SolvePass::SetSelection,
             ) else {
                 continue;
             };
@@ -1472,7 +1500,9 @@ impl WaterFillAlgorithm {
             let Some((best_i, _)) = best else {
                 break;
             };
-            // Taking the winner's marginal is also what forgets it.
+            // Take the winner's marginal rather than read it: taking is how it is forgotten.
+            // `best` is only set while that entry holds a marginal, so the `else` cannot be
+            // reached; it stands in for an unwrap the crate's lints forbid.
             let Some(step) = marginals[best_i].take() else {
                 break;
             };
@@ -1491,13 +1521,13 @@ impl WaterFillAlgorithm {
                     else {
                         continue;
                     };
-                    // The hops ahead of the pool that moved are unchanged — same pool, same
-                    // direction, same chunk as last time — but the whole path is simulated again
-                    // from its first hop. Counted so the log can say what serving that opening run
-                    // from the cache would be worth here.
-                    forgotten_marginals += 1;
-                    hops_before_moved_pool += first_moved_hop;
-                    marginals[i] = None;
+                    // Only a marginal that was actually held counts as thrown away. The winner's
+                    // was taken just above, and a candidate the activation gate keeps skipping
+                    // never refills one, so counting either would overstate the repeated work.
+                    if marginals[i].take().is_some() {
+                        forgotten_marginals += 1;
+                        hops_before_moved_pool += first_moved_hop;
+                    }
                 }
             }
 
@@ -1581,14 +1611,14 @@ fn simulate_hop<'a>(
     address_in: &Address,
     address_out: &Address,
     amount_in: &BigUint,
-    caller: SwapCaller,
+    pass: SolvePass,
     meter: &mut SolveMeter<'a>,
 ) -> Option<HopOutcome> {
     let token_in = market.get_token(address_in)?;
     let token_out = market.get_token(address_out)?;
     let state = market.get_simulation_state(component_id)?;
     let result = state
-        .get_amount_out_metered(component_id, caller, meter, amount_in.clone(), token_in, token_out)
+        .get_amount_out_metered(component_id, pass, meter, amount_in.clone(), token_in, token_out)
         .ok()?;
     Some(HopOutcome { amount_out: result.amount, gas: result.gas })
 }
@@ -1597,17 +1627,17 @@ fn simulate_hop<'a>(
 /// hop some other path already made is not made again. Returns what the path pays and its summed
 /// gas, or `None` as soon as one hop refuses.
 ///
-/// The caller must not hand this a path that crosses one pool twice: the second crossing would
+/// The pass must not hand this a path that crosses one pool twice: the second crossing would
 /// have to see the first one's swap, and every hop here reads untouched state. Both path sets this
 /// runs on are already free of them — `rank_at_full_amount` drops them, and discovery never builds
 /// one because `can_extend_path` refuses to repeat a component.
-fn simulate_path_cached<'a>(
+fn simulate_path<'a>(
     path: &Path<'a, DepthAndPrice>,
     market: &MarketState,
     cache: &mut SwapCache<'a>,
     meter: &mut SolveMeter<'a>,
     amount_in: BigUint,
-    caller: SwapCaller,
+    pass: SolvePass,
 ) -> Option<HopOutcome> {
     // What the next hop swaps; once the last one is done, what the path pays out.
     let mut hop_amount_in = amount_in;
@@ -1615,14 +1645,14 @@ fn simulate_path_cached<'a>(
 
     for (address_in, edge, address_out) in path.iter() {
         let direction = PoolDirection { component_id: &edge.component_id, address_in, address_out };
-        let hop = cache.swap(direction, &hop_amount_in, caller, meter, |meter| {
+        let hop = cache.swap(direction, &hop_amount_in, pass, meter, |meter| {
             simulate_hop(
                 market,
                 &edge.component_id,
                 address_in,
                 address_out,
                 &hop_amount_in,
-                caller,
+                pass,
                 meter,
             )
         })?;
@@ -1633,7 +1663,7 @@ fn simulate_path_cached<'a>(
     Some(HopOutcome { amount_out: hop_amount_in, gas: path_gas })
 }
 
-/// Turns the full-amount pass's per-path outcomes into the two orderings the caller consumes. Both
+/// Turns the full-amount pass's per-path outcomes into the two orderings the pass consumes. Both
 /// are built in path order and sorted stably, so paths paying the same amount keep the order they
 /// were enumerated in. A path with no outcome never ran — the pass timed out before reaching it,
 /// or it crossed a pool twice — and appears in neither ordering.
@@ -1650,16 +1680,20 @@ fn rank_outcomes(
         let Some(outcome) = outcome else {
             continue;
         };
-        if let Some(ref gas) = outcome.gas {
-            let gas_cost =
-                WaterFillAlgorithm::gas_cost_in_token(gas, gas_price, token_prices, token_out);
-            let net_output = match gas_cost {
-                Some(gas_cost) => BigInt::from(outcome.output.clone()) - BigInt::from(gas_cost),
-                None => BigInt::from(outcome.output.clone()),
-            };
-            by_output_net_gas.push((path_ix, net_output));
-        }
-        by_output.push((path_ix, outcome.output));
+        let output = match outcome {
+            FullAmountOutcome::Filled { output, gas } => {
+                let gas_cost =
+                    WaterFillAlgorithm::gas_cost_in_token(&gas, gas_price, token_prices, token_out);
+                let net_output = match gas_cost {
+                    Some(gas_cost) => BigInt::from(output.clone()) - BigInt::from(gas_cost),
+                    None => BigInt::from(output.clone()),
+                };
+                by_output_net_gas.push((path_ix, net_output));
+                output
+            }
+            FullAmountOutcome::Unfilled => BigUint::zero(),
+        };
+        by_output.push((path_ix, output));
     }
 
     by_output.sort_by(|(_, a), (_, b)| b.cmp(a));
@@ -1768,7 +1802,6 @@ where
         let mut next_by_node: FxHashMap<NodeIndex, Vec<CandidatePathState<'a, W>>> =
             FxHashMap::default();
         for state in frontier {
-            // This candidate path already reached token_out
             if state.node == to_idx && from_idx != to_idx {
                 continue;
             }
@@ -1898,7 +1931,7 @@ fn score_candidate_edges<'a, W>(
             let direction =
                 PoolDirection { component_id: &pool.component_id, address_in, address_out };
             let Some(hop) =
-                cache.swap(direction, &state.amount_out, SwapCaller::Discovery, meter, |meter| {
+                cache.swap(direction, &state.amount_out, SolvePass::Discovery, meter, |meter| {
                     simulate_edge(market, &state.amount_out, address_in, pool, address_out, meter)
                 })
             else {
@@ -2011,7 +2044,7 @@ fn simulate_edge<'a, W>(
     let result = state
         .get_amount_out_metered(
             &edge.component_id,
-            SwapCaller::Discovery,
+            SolvePass::Discovery,
             meter,
             amount.clone(),
             token_in,
@@ -2432,46 +2465,141 @@ mod tests {
         );
     }
 
-    /// An invalid hop configuration is rejected before any graph work.
-    #[tokio::test]
-    async fn test_discovery_rejects_invalid_hop_configuration() {
-        let link = token_with_decimals(0x01, "LINK", 18);
-        let weth = token_with_decimals(0x02, "WETH", 18);
-        let (market, graph_manager) = setup_market_unweighted_topology(vec![(
-            "link_weth",
-            &link,
-            &weth,
-            Box::new(v2_component(2_000_000, 5_700)) as Box<dyn ProtocolSim>,
-        )]);
-        let order = Order::new(
-            link.address.clone(),
-            weth.address.clone(),
-            BigUint::from(1_000u64) * BigUint::from(10u64).pow(18),
-            OrderSide::Sell,
-            addr(0xFF),
-        );
+    // ==================== Reading across known amounts ====================
 
-        let start = Instant::now();
-        let view = market.read().await;
-        let result = discover_paths(
-            graph_manager.graph(),
-            &view,
-            &order,
-            &mut SwapCache::new(),
-            &mut SolveMeter::new(),
-            CandidateSearchConfig {
-                query: &GraphQueryFilter { min_hops: 0, max_hops: 3, connector_tokens: None },
-                max_candidates: 128,
-                anchor_tokens: &FxHashSet::default(),
-                source_token: order.token_in(),
-                start: &start,
-                timeout_ms: 2000,
-            },
-        );
-        assert!(
-            matches!(result, Err(AlgorithmError::InvalidConfiguration { .. })),
-            "min_hops of 0 should be rejected",
-        );
+    fn hop(amount_out: u64, gas: u64) -> HopOutcome {
+        HopOutcome { amount_out: BigUint::from(amount_out), gas: BigUint::from(gas) }
+    }
+
+    /// A cache holding `amounts` for one pool direction, with no refusal point recorded.
+    fn cache_holding(amounts: Vec<(u64, Option<HopOutcome>)>) -> AmountsSwapped {
+        AmountsSwapped {
+            outcome_by_amount: amounts
+                .into_iter()
+                .map(|(amount, outcome)| (BigUint::from(amount), outcome))
+                .collect(),
+            refused_from: None,
+        }
+    }
+
+    /// Where `amount` would be inserted into a cache's ascending amounts.
+    fn insert_at(swapped: &AmountsSwapped, amount: &BigUint) -> usize {
+        swapped
+            .outcome_by_amount
+            .binary_search_by(|(known, _)| known.cmp(amount))
+            .expect_err("amount must not already be recorded")
+    }
+
+    fn read_across(swapped: &AmountsSwapped, amount: u64) -> Option<HopOutcome> {
+        let amount = BigUint::from(amount);
+        SwapCache::interpolate(swapped, insert_at(swapped, &amount), &amount)
+    }
+
+    /// Halfway between two amounts reads back halfway between their outputs.
+    #[test]
+    fn test_interpolate_reads_across_two_amounts() {
+        let swapped = cache_holding(vec![(1000, Some(hop(2000, 50))), (1040, Some(hop(2080, 90)))]);
+
+        let across = read_across(&swapped, 1020).expect("bracketed and inside the gap");
+
+        assert_eq!(across.amount_out, BigUint::from(2040u64));
+    }
+
+    /// Gas comes from the larger amount, never the nearer one: understating gas would overstate a
+    /// path's output net of gas, which is the one direction reading across must not err in.
+    #[test]
+    fn test_interpolate_takes_gas_from_the_larger_amount() {
+        let swapped = cache_holding(vec![(1000, Some(hop(2000, 50))), (1040, Some(hop(2080, 90)))]);
+
+        let nearer_the_lower = read_across(&swapped, 1001).expect("bracketed and inside the gap");
+
+        assert_eq!(nearer_the_lower.gas, BigUint::from(90u64));
+    }
+
+    /// Amounts further apart than `INTERPOLATION_GAP_PERCENT` are left to the pool.
+    #[test]
+    fn test_interpolate_declines_a_wide_gap() {
+        let swapped = cache_holding(vec![(1000, Some(hop(2000, 50))), (1500, Some(hop(2600, 90)))]);
+
+        assert!(read_across(&swapped, 1200).is_none());
+    }
+
+    /// Above every amount asked, the straight line carries a price the pool no longer offers, so
+    /// there is nothing to read across.
+    #[test]
+    fn test_interpolate_declines_above_the_largest_amount() {
+        let swapped = cache_holding(vec![(1000, Some(hop(2000, 50))), (1040, Some(hop(2080, 90)))]);
+
+        assert!(read_across(&swapped, 1050).is_none());
+    }
+
+    /// A pool paying less for more is not the curve this reads across.
+    #[test]
+    fn test_interpolate_declines_when_output_falls() {
+        let swapped = cache_holding(vec![(1000, Some(hop(2000, 50))), (1040, Some(hop(1900, 90)))]);
+
+        assert!(read_across(&swapped, 1020).is_none());
+    }
+
+    /// A refused amount either side leaves nothing to read across.
+    #[test]
+    fn test_interpolate_declines_across_a_refusal() {
+        let swapped = cache_holding(vec![(1000, Some(hop(2000, 50))), (1040, None)]);
+
+        assert!(read_across(&swapped, 1020).is_none());
+    }
+
+    // ==================== Refusals reaching upwards ====================
+
+    fn remember(swapped: &mut AmountsSwapped, amount: u64, outcome: Option<HopOutcome>) {
+        let amount = BigUint::from(amount);
+        let at = insert_at(swapped, &amount);
+        swapped.remember(at, &amount, outcome);
+    }
+
+    /// A refusal above an amount the pool served is taken to refuse everything larger.
+    #[test]
+    fn test_refusal_above_a_served_amount_reaches_upwards() {
+        let mut swapped = cache_holding(vec![(1000, Some(hop(2000, 50)))]);
+
+        remember(&mut swapped, 2000, None);
+
+        assert!(swapped.refuses(&BigUint::from(2000u64)));
+        assert!(swapped.refuses(&BigUint::from(5000u64)));
+        assert!(!swapped.refuses(&BigUint::from(1500u64)));
+    }
+
+    /// A refusal with nothing served below it may be an amount too small to quote rather than a
+    /// limit, so it stands only for itself.
+    #[test]
+    fn test_refusal_with_nothing_served_below_stands_alone() {
+        let mut swapped = cache_holding(vec![]);
+
+        remember(&mut swapped, 1000, None);
+
+        assert!(!swapped.refuses(&BigUint::from(5000u64)));
+    }
+
+    /// A larger amount the pool did serve says it does not refuse upwards at all.
+    #[test]
+    fn test_refusal_below_a_served_amount_does_not_reach_upwards() {
+        let mut swapped =
+            cache_holding(vec![(1000, Some(hop(2000, 50))), (3000, Some(hop(5000, 50)))]);
+
+        remember(&mut swapped, 2000, None);
+
+        assert!(!swapped.refuses(&BigUint::from(4000u64)));
+    }
+
+    /// A second, lower refusal moves the point everything above is refused from down to it.
+    #[test]
+    fn test_lower_refusal_moves_the_refusal_point_down() {
+        let mut swapped = cache_holding(vec![(1000, Some(hop(2000, 50)))]);
+
+        remember(&mut swapped, 3000, None);
+        remember(&mut swapped, 2000, None);
+
+        assert!(swapped.refuses(&BigUint::from(2000u64)));
     }
 
     /// Anchors are the most-connected tokens (highest component-edge degree) plus the native-ETH
