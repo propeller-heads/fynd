@@ -26,7 +26,7 @@ pub(crate) struct Comparison {
 pub(crate) struct State {
     pub verdict: String,
     #[serde(default)]
-    pub net_bps: Option<f64>,
+    pub raw_bps: Option<f64>,
     /// Signed USD delta of Fynd's output vs the settled output — negative on a loss. Present only
     /// for a solved state.
     #[serde(default)]
@@ -92,7 +92,6 @@ mod tests {
             amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
             venue_fee_in: None,
             venue_fee_out: None,
-            settled_gas: None,
             min_amount_out: None,
             declared_quote: None,
             quote_timestamp: None,
@@ -109,7 +108,6 @@ mod tests {
         });
         let range = build_range(
             &trade,
-            &prices,
             top,
             Outcome::Unsolvable("x".into()),
             &Outcome::Unsolvable("x".into()),
@@ -125,7 +123,7 @@ mod tests {
         assert_eq!(record.solver, "1inch");
         assert_eq!(record.top.verdict, "win");
         assert!(record.top.is_scored());
-        assert!(record.top.net_bps.unwrap() > 0.0);
+        assert!(record.top.raw_bps.unwrap() > 0.0);
         assert!((record.top.improvement_usd.unwrap() - 10.0).abs() < 1e-3);
         assert_eq!(record.token_out, format!("{usdc:#x}"));
     }

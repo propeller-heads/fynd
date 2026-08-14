@@ -17,7 +17,7 @@ Built-in address books: `ethereum`, `base`, `unichain`, `arbitrum`, `bsc`, `poly
 name needs `--registry`.
 
 - **`decode`** — Fetch block receipts, match solver transactions, trace each one, and emit decoded
-  trades (token in/out, amounts, venue, solver, gas, sandwich evidence). Accepts `--block N`,
+  trades (token in/out, amounts, venue, solver, sandwich evidence). Accepts `--block N`,
   `--range START-END` (max 1000 blocks), or defaults to the latest block. Use `--json` for
   machine-readable output.
 
@@ -59,7 +59,7 @@ Match → trace → decode → veto → record.
 | File/dir | Purpose |
 |---|---|
 | `matching.rs` | Receipt-only filter: is this transaction a solver trade at all, plus match-time vetoes |
-| `decode.rs` | The `TradeDecoder` trait, `TraderRole` classification, the built-once sender/intent lists (`EntityDecoders`), the gas-scope derivation, `DecodeContext`, `TraderFlow` |
+| `decode.rs` | The `TradeDecoder` trait, `TraderRole` classification, the built-once sender/intent lists (`EntityDecoders`), `DecodeContext`, `TraderFlow` |
 | `netting.rs` | The one netting module: the engine (`sender_flow`, `venue_flow`, `find_intent_trade`) plus the generic `SenderNetting` and `IntentNetting` decoders |
 | `transfer_ledger.rs` | Builds a transfer ledger from logs and native ETH flows |
 | `veto.rs` | The shared `Veto` type, plus post-decode vetoes of non-comparable shapes (NFT purchases, mis-paired wrap trades) |
@@ -154,8 +154,8 @@ across the 165 trades both paths could decode.
   like-for-like. Carries `sandwich` evidence when a bracket pair was found, and `min_amount_out`,
   `declared_quote`, and `quote_timestamp` (the calldata-declared terms copied off the settling
   solver's `SwapIntent`, when one was recovered).
-- `RangeComparison` — a trade solved at top and back, including gas-netted settled output and
-  the top route's `Slippage` between the two states (from its re-execution at back).
+- `RangeComparison` — a trade solved at top and back, plus the top route's `Slippage` between
+  the two states (from its re-execution at back). All comparisons are gross of gas.
 - `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
 - `SolvedAmount` — a solved state's amounts plus `algorithm` (which worker pool won the quote) and
   `solved_route` (the full `fynd_core::types::Route`, kept in memory to replay at back-of-block).
@@ -202,7 +202,7 @@ It surfaces three ways:
 ## Adding a venue / solver / decoder / chain
 
 - **Solver** (a router Fynd competes with): one line in the address book's `[solvers]` section is
-  enough for matching, attribution, gas isolation, and metric labels. Optional code: a
+  enough for matching, attribution, and metric labels. Optional code: a
   `SolverKnowledge` impl in `solvers/` (one row in `solvers::IMPLEMENTATIONS`; callers reach it
   through the resolved handle, so no dispatch function is added) with a `solver_veto` method if
   some of its orders are not same-chain swaps, or a `swap_intent` method if a trade's terms

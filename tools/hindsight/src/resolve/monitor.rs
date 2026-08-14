@@ -639,7 +639,7 @@ async fn run_session(
         // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
         // USD valuation.
         let prices_top = snapshot_prices(adapter.solver, decoder.registry()).await;
-        let ranges = match resolve_block_range(adapter, &trades, &prices_top).await {
+        let ranges = match resolve_block_range(adapter, &trades).await {
             Ok(ranges) => ranges,
             Err(e) => return SessionEnd::Unhealthy(e.to_string()),
         };

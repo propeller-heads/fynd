@@ -59,7 +59,7 @@ All take `--chain` (selects the address book) and `--registry` /
            ┌─────────────────┐   swap_intent    ┌─────────────────┐
            │ post-processing │ ───────────────▶ │ SolverKnowledge │
            └────────┬────────┘                  └─────────────────┘
-                    │  veto → venue attribution → solver attribution → gas → intent → sandwich scan
+                    │  veto → venue attribution → solver attribution → intent → sandwich scan
                     ▼
               DecodedTrade
 ```
@@ -146,7 +146,7 @@ match role {
      (venues/relay.rs)              (venues/metamask.rs)
 
    direct call vs a solver-settled intent order — SAME solver, DIFFERENT decoder:
-     0x called directly             → Sender → [ SenderNetting ]     (your own tx, your gas)
+     0x called directly             → Sender → [ SenderNetting ]     (your own transaction)
      0x settling your intent order  → Intent → the intent decoders   (a solver settles for you)
    an intent source with a richer signal gets its own decoder ahead of the netting fallback —
    CoW reads its Trade event (intents/cow.rs), then IntentNetting catches the rest. Relay is the
@@ -179,17 +179,6 @@ A decoder may read one of these, several at once, or something else.
 Example of a venue correction: on a MetaMask ETH→token swap, netting alone recovers "1000 ETH →
 2000 TOKEN" — well-formed but wrong, because 9 of the 1000 went to MetaMask's fee wallet before
 the swap. `MetaMaskNetting` backs the fee out to 991.
-
-### Gas is derived, not declared
-
-Decoders do not decide gas. One rule (`decode::gas_scope`) derives how the settled route's gas is
-charged, from facts the role and the flow already establish:
-
-| The flow says | Gas charged |
-|---|---|
-| The trader sent the transaction and funded the swap; entry point is a solver | The whole transaction |
-| The trader sent the transaction and funded the swap; entry point is a venue | The solver call's trace frame (the venue's own overhead is charged whichever router it picks) |
-| The sender never funded the swap (a solver-initiated rebalance), or someone else's flow is tracked (intent fills) | Nothing |
 
 ### Solver knowledge (`solvers/`)
 

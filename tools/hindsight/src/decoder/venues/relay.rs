@@ -218,7 +218,6 @@ mod tests {
 
     use super::*;
     use crate::decoder::{
-        decode::{gas_scope, GasScope, TraderRole},
         registry::Registry,
         test_utils::{addr, frame, make_transfer_log, swap, venue_addresses, CtxFixture},
     };
@@ -232,15 +231,6 @@ mod tests {
             .venue("relay")
             .unwrap()
             .fee_collectors
-            .iter()
-            .next()
-            .unwrap()
-    }
-
-    /// A registered relay entry point, so `TraderRole::classify` resolves the Venue role.
-    fn relay_entry_point(registry: &Registry) -> Address {
-        *venue_addresses(registry, "relay")
-            .entry_points
             .iter()
             .next()
             .unwrap()
@@ -399,9 +389,6 @@ mod tests {
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
         assert_eq!(flow.venue_fee_in, Some(U256::from(40)));
         assert_eq!(flow.venue_fee_out, None);
-        // Trader-funded venue entry: the derived scope charges the solver frame's gas.
-        let role = TraderRole::classify(relay_entry_point(&registry), &registry);
-        assert_eq!(gas_scope(role, &flow, &ledger, user), GasScope::SolverFrame);
     }
 
     #[tokio::test]
@@ -451,9 +438,6 @@ mod tests {
         assert_eq!(flow.swap, swap(token_in, 1000, token_out, 2000));
         assert_eq!(flow.venue_fee_in, None);
         assert_eq!(flow.venue_fee_out, None);
-        // The sender never funded the swap, so the derived scope charges nothing.
-        let role = TraderRole::classify(relay_entry_point(&registry), &registry);
-        assert_eq!(gas_scope(role, &flow, &ledger, solver), GasScope::NotCharged);
     }
 
     mod relay_calldata {
@@ -600,9 +584,9 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_decode_collector_funded_is_not_charged_gas() {
+        async fn test_decode_collector_funded_rebalance() {
             // The fee collector, not the sender, net-sends the input token: a solver-initiated
-            // rebalance, which charges no gas to any trader.
+            // rebalance still decodes from the calldata, with the intent's own amounts.
             let registry = Registry::ethereum();
             let sender = addr(1);
             let collector = relay_collector(&registry);
@@ -614,8 +598,8 @@ mod tests {
             let flow = decode_calldata(&registry, &root, &ledger, sender, ROUTER)
                 .await
                 .unwrap();
-            let role = TraderRole::classify(ROUTER, &registry);
-            assert_eq!(gas_scope(role, &flow, &ledger, sender), GasScope::NotCharged);
+            assert_eq!(flow.tracked, sender);
+            assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
         }
 
         #[tokio::test]
