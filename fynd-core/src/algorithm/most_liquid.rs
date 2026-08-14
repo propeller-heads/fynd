@@ -4,7 +4,8 @@
 //! 1. Finding every route between the two tokens as a sequence of tokens, no pools chosen yet
 //! 2. Ranking those sequences by spot price and liquidity depth, deepest first
 //! 3. Solving each sequence hop by hop, taking the pool that pays most at the amount that reaches
-//!    it, which is one simulation per pool per hop rather than per pool combination
+//!    it — one simulation per pool per hop rather than per pool combination, and never the same
+//!    pool on two hops
 //! 4. Ranking the solved sequences by net output (output less gas, in the output token)
 //! 5. Building swaps for the winner alone, with stats recorded to the tracing span
 
@@ -18,7 +19,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use tracing::{debug, instrument, trace};
 use tycho_simulation::{
-    tycho_common::simulation::protocol_sim::{GetAmountOutResult, ProtocolSim},
+    tycho_common::simulation::protocol_sim::{GetAmountOutResult, Price, ProtocolSim},
     tycho_core::models::{token::Token, Address},
 };
 
@@ -57,8 +58,9 @@ struct SolveContext<'a> {
     graph: &'a TopologyGraph<DepthAndPrice>,
     market: &'a MarketState,
     token_prices: Option<&'a TokenGasPrices>,
-    gas_price: &'a BigUint,
     amount_in: &'a BigUint,
+    /// What a unit of gas costs, read once off the market snapshot.
+    gas_price: &'a BigUint,
     /// When the solve started, against which every candidate checks the timeout.
     start: Instant,
 }
@@ -410,20 +412,11 @@ impl MostLiquidAlgorithm {
         })
     }
 
-    /// Sets whether a pair's simulation results are reused across one order's routes.
-    ///
-    /// On, a pair is asked once and the answer serves every route crossing it. Off, every route
-    /// asks every pool on the pair at the amount reaching it, which is exact but much slower.
-    pub fn with_cache_pair_swaps(mut self, enabled: bool) -> Self {
-        self.cache_pair_swaps = enabled;
-        self
-    }
-
     /// Ranks a token sequence without simulating it, by the best its hops could do.
     ///
-    /// Pools don't carry a state override. Even though possible in some rare cases, the cost
-    /// of handling it is optionally left out in trade for performance. When building the route for
-    /// encoding this is taken into account.
+    /// Every pool on a hop is read as the market holds it, with nothing carried between hops. That
+    /// is exact here because [`MostLiquidAlgorithm::solve_token_path`] never takes the same pool
+    /// twice, so no hop is scored against a pool an earlier hop would have moved.
     ///
     /// The same shape as [`MostLiquidAlgorithm::try_score_path`] — spot prices multiplied, thinnest
     /// depth as the bottleneck — but a hop here stands for several pools, so it is scored on its
@@ -476,90 +469,13 @@ impl MostLiquidAlgorithm {
         Some(price * min_depth)
     }
 
-    /// Solves a fixed token sequence, choosing the pool to swap through on each hop.
-    ///
-    /// Walks the hops in order and, at each, simulates every pool serving that pair at the amount
-    /// actually arriving and keeps whichever nets most after its own gas. Enumerating the
-    /// combinations instead costs the product of the pools per hop; this costs their sum.
-    ///
-    /// Choosing hop by hop is not a shortcut that gives up accuracy. More into a pool is more out
-    /// of it, so the largest amount at each hop carries through to the largest amount at the
-    /// end. Gas does not disturb that: the gas already spent is common to every candidate at a
-    /// hop and drops out of the comparison, and a hop's own gas priced in the token it pays out
-    /// ranks the candidates the same way as comparing whole routes would. What it does improve
-    /// on is the ranking heuristic, which never sees the order size — here every choice is made
-    /// at the amount really flowing.
-    ///
-    /// Falls back to comparing gross output when a token has no price, which is exact for gross.
-    fn solve_token_path(
-        ctx: &SolveContext<'_>,
-        token_path: &[NodeIndex],
-        cache: &mut PoolSwapsCache,
-    ) -> Result<SolvedRoute, MostLiquidError> {
-        let SolveContext { graph, market, token_prices, gas_price, amount_in, start: _ } = *ctx;
-        let mut current_amount = amount_in.clone();
-        let mut hops: SmallVec<[HopResult; INLINE_EDGES]> = SmallVec::new();
-        let mut gas = BigUint::ZERO;
-        // What a unit of gas costs in the token the route pays out, which is the last hop's own
-        // output token. `None` when that token has no price.
-        let mut route_gas_price = None;
-
-        for pair in token_path.windows(2) {
-            let token_in = market
-                .get_token(&graph[pair[0]])
-                .ok_or(MostLiquidError::TokenMissing(pair[0]))?;
-            let token_out = market
-                .get_token(&graph[pair[1]])
-                .ok_or(MostLiquidError::TokenMissing(pair[1]))?;
-            let token_out_gas_price =
-                token_prices.and_then(|prices| prices.get(&token_out.address));
-
-            let simulate = |component_id: &ComponentId| {
-                let state = market.get_simulation_state(component_id)?;
-                let result = state
-                    .get_amount_out_guarded(current_amount.clone(), token_in, token_out)
-                    .ok()?;
-                let net = match token_out_gas_price {
-                    Some(price) => {
-                        let cost = &result.gas * gas_price * &price.numerator / &price.denominator;
-                        BigInt::from(result.amount.clone()) - BigInt::from(cost)
-                    }
-                    None => BigInt::from(result.amount.clone()),
-                };
-                Some((result, net))
-            };
-
-            // Weights are not consulted. A pool whose depth could not be measured still trades, and
-            // the simulation is the ground truth about what it pays -- the derived figures only
-            // decide what gets tried first.
-            let pools = graph.pools_between(pair[0], pair[1]);
-            let hop = cache
-                .swap((pair[0], pair[1]), &current_amount, pools, simulate)
-                .ok_or(MostLiquidError::HopNotTradable { from: pair[0], to: pair[1] })?;
-
-            gas += &hop.gas;
-            current_amount = hop.amount_out.clone();
-            route_gas_price = token_out_gas_price;
-            hops.push(hop);
-        }
-
-        let net_amount_out = match route_gas_price {
-            Some(price) => {
-                let cost = gas * gas_price * &price.numerator / &price.denominator;
-                BigInt::from(current_amount) - BigInt::from(cost)
-            }
-            None => BigInt::from(current_amount),
-        };
-
-        Ok(SolvedRoute { hops, net_amount_out })
-    }
-
     /// Builds the route the caller chose, once, from the pools it picked.
     ///
     /// Each hop is simulated again rather than carrying its result through the comparison: the
     /// numbers come out the same, and a swap needs the pool's state as it was before it, which
-    /// nothing else has to hold on to. That state is also what a pool crossed twice by one route
-    /// depends on being right, which is why the swaps built here are what the quote reports.
+    /// nothing else has to hold on to. The state overrides are a backstop only -- the solve hands
+    /// over a route whose hops name distinct pools -- and they cover protocols whose components
+    /// share state behind the scenes.
     fn build_route(
         ctx: &SolveContext<'_>,
         token_path: &[NodeIndex],
@@ -762,6 +678,130 @@ impl MostLiquidAlgorithm {
             }
         }
     }
+
+    /// Solves a fixed token sequence, choosing the pool to swap through on each hop.
+    ///
+    /// Walks the hops in order and, at each, simulates every pool serving that pair at the amount
+    /// actually arriving and keeps whichever nets most after its own gas. Enumerating the
+    /// combinations instead costs the product of the pools per hop; this costs their sum.
+    ///
+    /// Choosing hop by hop is not a shortcut that gives up accuracy. More into a pool is more out
+    /// of it, so the largest amount at each hop carries through to the largest amount at the
+    /// end. Gas does not disturb that: the gas already spent is common to every candidate at a
+    /// hop and drops out of the comparison, and a hop's own gas priced in the token it pays out
+    /// ranks the candidates the same way as comparing whole routes would. What it does improve
+    /// on is the ranking heuristic, which never sees the order size — here every choice is made
+    /// at the amount really flowing.
+    ///
+    /// Falls back to comparing gross output when a token has no price, which is exact for gross.
+    ///
+    /// A pool an earlier hop swapped through is not offered to a later one. Each hop is simulated
+    /// against the pool's state as the market holds it, so a pool taken twice would be quoted the
+    /// second time as if the first swap had not moved it. Two hops of one sequence never name the
+    /// same token pair, but one component can serve two pairs -- a pool holding A, B and C is on
+    /// both hops of A -> B -> C -- and a circular sequence crosses the same pair in both
+    /// directions. Sequences whose hops all run out of pools this way are dropped, the same as any
+    /// other sequence that cannot be settled.
+    fn solve_token_path(
+        ctx: &SolveContext<'_>,
+        token_path: &[NodeIndex],
+        cache: &mut PoolSwapsCache,
+    ) -> Result<SolvedRoute, MostLiquidError> {
+        let mut current_amount = ctx.amount_in.clone();
+        let mut hops: SmallVec<[HopResult; INLINE_EDGES]> = SmallVec::new();
+        let mut used_components: SmallVec<[&ComponentId; INLINE_EDGES]> = SmallVec::new();
+        let mut gas = BigUint::ZERO;
+        // What a unit of gas costs in the token the route pays out, which is the last hop's own
+        // output token. `None` when that token has no price.
+        let mut route_gas_price = None;
+
+        for pair in token_path.windows(2) {
+            let (token_in, token_out, token_out_gas_price) = Self::get_pair_data(ctx, pair)?;
+
+            let simulate = |component_id: &ComponentId| {
+                let state = ctx
+                    .market
+                    .get_simulation_state(component_id)?;
+                let result = state
+                    .get_amount_out_guarded(current_amount.clone(), token_in, token_out)
+                    .ok()?;
+                let net = match token_out_gas_price {
+                    Some(price) => {
+                        let cost =
+                            &result.gas * ctx.gas_price * &price.numerator / &price.denominator;
+                        BigInt::from(result.amount.clone()) - BigInt::from(cost)
+                    }
+                    None => BigInt::from(result.amount.clone()),
+                };
+                Some((result, net))
+            };
+
+            let pools = ctx
+                .graph
+                .pools_between(pair[0], pair[1]);
+
+            // A pool this route already crossed cannot be offered again. Where that bites, the
+            // pool is picked here and the cache is left alone in both directions: what it holds
+            // was chosen over every pool, and the best of a narrowed field is not the answer the
+            // next route to ask this pair at this amount should be handed.
+            let restricted = pools
+                .iter()
+                .any(|edge| used_components.contains(&&edge.component_id));
+            let hop_result = if restricted {
+                best_paying_pool(pools, |id| !used_components.contains(&id), simulate)
+            } else {
+                cache.swap((pair[0], pair[1]), &current_amount, pools, simulate)
+            };
+            let Some(hop_result) = hop_result else {
+                return Err(MostLiquidError::HopNotTradable { from: pair[0], to: pair[1] })
+            };
+
+            let chosen = pools
+                .get(hop_result.pool_ix)
+                .expect("Pool used not present in the pools available");
+
+            used_components.push(&chosen.component_id);
+
+            gas += &hop_result.gas;
+            current_amount = hop_result.amount_out.clone();
+            route_gas_price = token_out_gas_price;
+            hops.push(hop_result);
+        }
+
+        let net_amount_out = match route_gas_price {
+            Some(price) => {
+                let cost = gas * ctx.gas_price * &price.numerator / &price.denominator;
+                BigInt::from(current_amount) - BigInt::from(cost)
+            }
+            None => BigInt::from(current_amount),
+        };
+
+        Ok(SolvedRoute { hops, net_amount_out })
+    }
+
+    fn get_pair_data<'a>(
+        ctx: &SolveContext<'a>,
+        pair: &[NodeIndex],
+    ) -> Result<(&'a Token, &'a Token, Option<&'a Price>), MostLiquidError> {
+        let token_in = ctx
+            .market
+            .get_token(&ctx.graph[pair[0]])
+            .ok_or(MostLiquidError::TokenMissing(pair[0]))?;
+        let token_out = ctx
+            .market
+            .get_token(&ctx.graph[pair[1]])
+            .ok_or(MostLiquidError::TokenMissing(pair[1]))?;
+        let token_out_gas_price = ctx
+            .token_prices
+            .and_then(|prices| prices.get(&token_out.address));
+        Ok((token_in, token_out, token_out_gas_price))
+    }
+}
+
+impl Default for MostLiquidAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Algorithm for MostLiquidAlgorithm {
@@ -872,10 +912,35 @@ impl Algorithm for MostLiquidAlgorithm {
     }
 }
 
-impl Default for MostLiquidAlgorithm {
-    fn default() -> Self {
-        Self::new()
+/// The pool on a pair paying the most net of gas, among those `usable` admits.
+///
+/// `pool_ix` indexes `pools`, so a caller that skipped some still gets back the index the built
+/// route needs.
+fn best_paying_pool<D>(
+    pools: &[EdgeData<D>],
+    mut usable: impl FnMut(&ComponentId) -> bool,
+    mut simulate: impl FnMut(&ComponentId) -> Option<(GetAmountOutResult, BigInt)>,
+) -> Option<HopResult> {
+    let mut best: Option<(usize, GetAmountOutResult, BigInt)> = None;
+
+    for (pool_ix, edge) in pools.iter().enumerate() {
+        if !usable(&edge.component_id) {
+            continue;
+        }
+        let Some((result, net)) = simulate(&edge.component_id) else {
+            trace!(component_id = edge.component_id, "simulation failed, skipping pool");
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(_, _, best_net)| net > *best_net)
+        {
+            best = Some((pool_ix, result, net));
+        }
     }
+
+    let (pool_ix, result, _) = best?;
+    Some(HopResult::new(pool_ix, result))
 }
 
 /// What each token pair paid, created for every order and not persisted after it.
@@ -891,7 +956,7 @@ struct PoolSwapsCache {
     enabled: bool,
 }
 
-/// One pair's entry: the pool that won it, and what it paid at each amount seen so far.
+/// The pool that won a pair, and what it paid at each amount seen so far.
 struct PairCacheEntry {
     /// Where the pool that last won this pair sits in its pool list.
     pool_ix: usize,
@@ -924,36 +989,20 @@ impl PoolSwapsCache {
             if let Some(outcome) = choice.outcomes_by_amount.get(amount_in) {
                 return Some(outcome.clone());
             }
-            // The pool is known but not at this amount. A pool that won once wins again -- which
-            // pool pays most barely moves across the amounts one order's routes see -- so only it
-            // is simulated, and what it pays is simulated rather than assumed.
-            let pool_ix = choice.pool_ix;
+
+            // The pool was simulated but not at this amount. We assume that amounts dont move
+            // so much so we assume the same winner wins again at a slightly different amount.
             if let Some((result, _)) = pools
-                .get(pool_ix)
+                .get(choice.pool_ix)
                 .and_then(|edge| simulate(&edge.component_id))
             {
-                let hop_result = HopResult::new(pool_ix, result);
+                let hop_result = HopResult::new(choice.pool_ix, result);
                 self.record(pair, amount_in, &hop_result);
                 return Some(hop_result);
             }
         }
 
-        let mut best: Option<(usize, GetAmountOutResult, BigInt)> = None;
-        for (pool_ix, edge) in pools.iter().enumerate() {
-            let Some((result, net)) = simulate(&edge.component_id) else {
-                trace!(component_id = edge.component_id, "simulation failed, skipping pool");
-                continue;
-            };
-            if best
-                .as_ref()
-                .is_none_or(|(_, _, best_net)| net > *best_net)
-            {
-                best = Some((pool_ix, result, net));
-            }
-        }
-
-        let (pool_ix, result, _) = best?;
-        let hop_result = HopResult::new(pool_ix, result);
+        let hop_result = best_paying_pool(pools, |_| true, simulate)?;
         self.record(pair, amount_in, &hop_result);
         Some(hop_result)
     }
@@ -983,7 +1032,6 @@ impl PoolSwapsCache {
 
 #[cfg(test)]
 mod tests {
-
     use tycho_simulation::{
         tycho_core::simulation::protocol_sim::Price,
         tycho_ethereum::gas::{BlockGasPrice, GasPrice},
@@ -1404,6 +1452,113 @@ mod tests {
         assert_eq!(result.route().swaps()[1].component_id(), "component2".to_string());
     }
 
+    /// Builds a market and graph from components that may hold more than two tokens.
+    ///
+    /// [`setup_market_weighted`] takes one pair per component, which cannot express the pool that
+    /// serves two hops of the same sequence. Sets no edge weights: an unranked sequence is still
+    /// simulated, and these cases are about which pool a hop picks.
+    fn setup_market_multi_token(
+        components: Vec<(&str, Vec<Token>, MockProtocolSim)>,
+        tokens: &[Token],
+    ) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
+        let mut market = MarketState::new();
+        market.update_gas_price(BlockGasPrice {
+            block_number: 1,
+            block_hash: Default::default(),
+            block_timestamp: 0,
+            pricing: GasPrice::Legacy { gas_price: BigUint::from(1u64) },
+        });
+        market.upsert_tokens(tokens.to_vec());
+        let protocol_components: Vec<_> = components
+            .iter()
+            .map(|(id, tokens, _)| component(id, tokens))
+            .collect();
+        market.upsert_components(protocol_components);
+        let states: Vec<_> = components
+            .into_iter()
+            .map(|(id, _, sim)| (id.to_string(), Box::new(sim) as Box<dyn ProtocolSim>))
+            .collect();
+        market.update_states(states);
+
+        let mut manager = TopologyGraphManager::default();
+        manager.initialize_graph(&market.component_topology());
+        (wrap_market(market), manager)
+    }
+
+    /// A pool serving two hops of one sequence is taken by the first of them only.
+    ///
+    /// `multi` holds all three tokens, so it trades both A -> B and B -> C, and it pays more than
+    /// `bc` on the second hop. Taking it twice would price the second swap against a pool the
+    /// first swap had already moved, so the second hop falls to `bc`.
+    #[tokio::test]
+    async fn test_find_best_route_never_takes_one_pool_twice() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market_multi_token(
+            vec![
+                (
+                    "multi",
+                    vec![token_a.clone(), token_b.clone(), token_c.clone()],
+                    MockProtocolSim::new(3.0),
+                ),
+                ("bc", vec![token_b.clone(), token_c.clone()], MockProtocolSim::new(2.0)),
+            ],
+            &[token_a.clone(), token_b.clone(), token_c.clone()],
+        );
+
+        // Two hops exactly, so the direct A -> C pool `multi` also offers is not the answer.
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(2, 2, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
+
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, None, &order)
+            .await
+            .unwrap();
+
+        assert_eq!(result.route().swaps().len(), 2);
+        assert_eq!(result.route().swaps()[0].component_id(), "multi");
+        assert_eq!(result.route().swaps()[1].component_id(), "bc");
+        // A -> B through multi: 1000 * 3. B -> C through bc: 3000 * 2.
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(3000u64));
+        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(6000u64));
+    }
+
+    /// A sequence whose second hop has no pool left is dropped rather than solved.
+    ///
+    /// `multi` is the only pool on either hop of A -> B -> C, and the first hop takes it.
+    #[tokio::test]
+    async fn test_find_best_route_drops_sequence_with_no_pool_left() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market_multi_token(
+            vec![(
+                "multi",
+                vec![token_a.clone(), token_b.clone(), token_c.clone()],
+                MockProtocolSim::new(3.0),
+            )],
+            &[token_a.clone(), token_b.clone(), token_c.clone()],
+        );
+
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(2, 2, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
+
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, None, &order)
+            .await;
+
+        assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
+    }
+
     /// A pool with no derived data is still a pool that trades.
     ///
     /// Depth is measured by binary search over simulations and gives up for a range of reasons --
@@ -1644,19 +1799,18 @@ mod tests {
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "gas price", .. })));
     }
 
+    /// A circle crosses the pair in both directions, so it needs a pool for each direction.
     #[tokio::test]
     async fn test_find_best_route_circular_arbitrage() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        // MockProtocolSim::get_amount_out multiplies by spot_price when token_in < token_out.
-        // After the first swap, spot_price increments to 3.
-        let (market, manager) = setup_market_weighted(vec![(
-            "component1",
-            &token_a,
-            &token_b,
-            MockProtocolSim::new(2.0),
-        )]);
+        // MockProtocolSim::get_amount_out multiplies by spot_price when token_in < token_out and
+        // divides by it otherwise.
+        let (market, manager) = setup_market_weighted(vec![
+            ("component1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component2", &token_a, &token_b, MockProtocolSim::new(3.0)),
+        ]);
 
         // Use min_hops=2 to require at least 2 hops (circular)
         let algorithm = MostLiquidAlgorithm::with_config(
@@ -1675,18 +1829,47 @@ mod tests {
         // Should have 2 swaps forming a circle
         assert_eq!(result.route().swaps().len(), 2, "Should have 2 swaps for circular route");
 
-        // First swap: A -> B (100 * 2 = 200)
+        // First swap: A -> B through component2, which pays most (100 * 3 = 300)
         assert_eq!(*result.route().swaps()[0].token_in(), token_a.address);
         assert_eq!(*result.route().swaps()[0].token_out(), token_b.address);
-        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(200u64));
+        assert_eq!(result.route().swaps()[0].component_id(), "component2");
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(300u64));
 
-        // Second swap: B -> A (200 / 3 = 66, spot_price incremented to 3)
+        // Second swap: B -> A. component2 is spent, so the hop falls to component1 (300 / 2 = 150)
         assert_eq!(*result.route().swaps()[1].token_in(), token_b.address);
         assert_eq!(*result.route().swaps()[1].token_out(), token_a.address);
-        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(66u64));
+        assert_eq!(result.route().swaps()[1].component_id(), "component1");
+        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(150u64));
 
         // Verify the route starts and ends with the same token
         assert_eq!(result.route().swaps()[0].token_in(), result.route().swaps()[1].token_out());
+    }
+
+    /// One pool is not a circle: the return hop would have to cross the pool the outbound hop
+    /// already moved, which is the reuse the solve refuses.
+    #[tokio::test]
+    async fn test_find_best_route_circular_needs_two_pools() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0),
+        )]);
+
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(2, 2, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_a, 100, OrderSide::Sell);
+
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, None, &order)
+            .await;
+
+        assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
     }
 
     #[tokio::test]
@@ -1730,7 +1913,7 @@ mod tests {
     #[tokio::test]
     async fn test_find_best_route_respects_max_hops() {
         // Setup: Only path is A->B->C (2 hops)
-        // With max_hops=1, should return NoPath error
+        // With max_hops=1, no sequence reaches C, so nothing can be scored
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -1751,8 +1934,8 @@ mod tests {
             .find_best_route(manager.graph(), market, None, None, &order)
             .await;
         assert!(
-            matches!(result, Err(AlgorithmError::NoPath { .. })),
-            "Should return NoPath when max_hops is insufficient"
+            matches!(result, Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })),
+            "Should fail when max_hops is insufficient"
         );
     }
 
@@ -1837,7 +2020,7 @@ mod tests {
         assert_eq!(algorithm.name(), "most_liquid");
     }
 
-    // ==================== Leg solving Tests ====================
+    // ==================== Hop solving Tests ====================
 
     /// Each hop is solved on its own, at the amount that actually reaches it.
     ///
