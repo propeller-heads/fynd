@@ -3,8 +3,8 @@
 //! Solver addresses live in the address book's `[solvers]` section, and for most solvers that
 //! line is all that is needed: matching, attribution, and gas isolation work from the address
 //! alone. A solver whose transactions carry more information than that gets a module here with a
-//! `SolverKnowledge` impl registered in `IMPLEMENTATIONS`: a swap intent recovered from calldata,
-//! or a matching veto for order shapes that are not same-chain swaps.
+//! `SolverKnowledge` impl registered in `IMPLEMENTATIONS`: the declared swap recovered from
+//! calldata, or a matching veto for order shapes that are not same-chain swaps.
 
 pub(crate) mod attribution;
 pub(crate) mod fly;
@@ -29,11 +29,11 @@ use crate::decoder::{registry::Registry, trace, veto::Veto};
 /// revert emits no logs to net a settled amount from. The declared quote is different: it is the
 /// number the venue compared against at decision time — what the solver's API promised — as
 /// opposed to the settled amount, which is what execution delivered. It is self-reported and not
-/// every solver declares one, so it is read through [`SwapIntent::quoted_amount_out`] (falls back
-/// to the floor) or [`SwapIntent::declared_quote`] (the raw value, for callers that must tell a
+/// every solver declares one, so it is read through [`DeclaredSwap::quoted_amount_out`] (falls back
+/// to the floor) or [`DeclaredSwap::declared_quote`] (the raw value, for callers that must tell a
 /// real quote from the fallback).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct SwapIntent {
+pub(crate) struct DeclaredSwap {
     /// `Address::ZERO` for native ETH.
     pub token_in: Address,
     /// `Address::ZERO` for native ETH.
@@ -50,9 +50,9 @@ pub(crate) struct SwapIntent {
     pub timestamp: Option<u64>,
 }
 
-impl SwapIntent {
-    /// A swap intent with just the ABI-enforced terms: token in/out, amount in, and the on-chain
-    /// floor. No declared quote or timestamp — attach one with [`SwapIntent::with_quote`].
+impl DeclaredSwap {
+    /// A declared swap with just the ABI-enforced terms: token in/out, amount in, and the on-chain
+    /// floor. No declared quote or timestamp — attach one with [`DeclaredSwap::with_quote`].
     pub(crate) fn new(
         token_in: Address,
         token_out: Address,
@@ -92,7 +92,7 @@ impl SwapIntent {
     }
 
     /// The raw declared quote, `None` when the calldata carried none. Distinct from
-    /// [`SwapIntent::quoted_amount_out`], which falls back to the floor — analysts need to tell
+    /// [`DeclaredSwap::quoted_amount_out`], which falls back to the floor — analysts need to tell
     /// a real quote from the fallback.
     pub(crate) fn declared_quote(&self) -> Option<U256> {
         self.quoted_amount_out
@@ -120,14 +120,14 @@ pub(crate) trait SolverKnowledge: Send + Sync {
     /// `amount_in_hint` is the decoded flow's input amount, when one is known — absent for a
     /// reverted trade, which has no netted flow to draw it from. Some extractors (`ParaSwap`) need
     /// it to locate fields by value rather than by ABI offset.
-    fn swap_intent(&self, _input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
+    fn declared_swap(&self, _input: &[u8], _amount_in_hint: Option<U256>) -> Option<DeclaredSwap> {
         None
     }
 
     /// The address this solver's calldata declares as the output recipient, when it carries one
     /// plainly enough to recover — how a calldata-primary decode learns whose receipt to read the
     /// settled amount from, since calldata alone never carries a settled amount. Dispatched with
-    /// the same solver-frame input as `swap_intent`. `None` when the calldata carries no such
+    /// the same solver-frame input as `declared_swap`. `None` when the calldata carries no such
     /// field (most solvers deliver to the caller implicitly) or it did not parse.
     fn output_recipient(&self, _input: &[u8]) -> Option<Address> {
         None
@@ -206,27 +206,30 @@ pub(crate) fn integrator(logs: &[Log]) -> Option<String> {
         .find_map(|(_, knowledge)| knowledge.integrator(logs))
 }
 
-/// The settling solver frame's own declaration of a trade: its swap intent plus the output
+/// The settling solver frame's own declaration of a trade: its declared swap plus the output
 /// recipient whose receipt anchors the settled amount — the one field calldata can never carry.
-pub(crate) struct SettledIntent {
-    pub intent: SwapIntent,
+pub(crate) struct SolverDeclaration {
+    pub swap: DeclaredSwap,
     /// The address the solver's calldata declares as the output recipient.
     pub output_recipient: Address,
 }
 
 /// Read the settling solver's own declaration of the trade from the trace, in one step: find the
-/// solver frame, resolve that solver's knowledge handle, and recover its swap intent and declared
+/// solver frame, resolve that solver's knowledge handle, and recover its declared swap and declared
 /// output recipient. This is the venue-agnostic half of a calldata-primary decode — a venue's
 /// calldata decoder calls this, then applies its own guards, fee basis, and corrections.
 ///
 /// `None` when the trace has no solver frame, or the solver's calldata does not carry the terms
 /// or the recipient — the caller falls through to its netting fallback.
-pub(crate) fn settled_intent(root: &CallFrame, registry: &Registry) -> Option<SettledIntent> {
+pub(crate) fn solver_declaration(
+    root: &CallFrame,
+    registry: &Registry,
+) -> Option<SolverDeclaration> {
     let frame = trace::find_solver_frame(root, registry)?;
     let knowledge = knowledge(&registry.label(frame.to?));
-    let intent = knowledge.swap_intent(&frame.input, None)?;
+    let swap = knowledge.declared_swap(&frame.input, None)?;
     let output_recipient = knowledge.output_recipient(&frame.input)?;
-    Some(SettledIntent { intent, output_recipient })
+    Some(SolverDeclaration { swap, output_recipient })
 }
 
 /// Whether a declared quote is in the same units as the settled output.
@@ -327,10 +330,10 @@ mod tests {
             input.extend_from_slice(&word.to_be_bytes::<32>());
         }
         assert!(knowledge("paraswap")
-            .swap_intent(&input, Some(amount_in))
+            .declared_swap(&input, Some(amount_in))
             .is_some());
         assert!(knowledge("1inch")
-            .swap_intent(&input, Some(amount_in))
+            .declared_swap(&input, Some(amount_in))
             .is_none());
     }
 }

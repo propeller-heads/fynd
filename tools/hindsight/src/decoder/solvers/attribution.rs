@@ -30,7 +30,7 @@ pub(crate) enum AttributionSource {
 }
 
 /// A solver label, the evidence tier it came from, and the solver's resolved
-/// `SolverKnowledge` handle — resolved here, once, so every later consultation (swap intent,
+/// `SolverKnowledge` handle — resolved here, once, so every later consultation (declared swap,
 /// veto, integrator tag) calls the trait on the handle instead of re-deriving the
 /// implementation from the name.
 pub(crate) struct Attribution {

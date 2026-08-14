@@ -11,7 +11,7 @@
 
 use alloy::primitives::{Address, U256};
 
-use crate::decoder::solvers::{SolverKnowledge, SwapIntent};
+use crate::decoder::solvers::{DeclaredSwap, SolverKnowledge};
 
 /// Byte length of an ABI-encoded word.
 const WORD_LEN: usize = 32;
@@ -51,7 +51,7 @@ impl SolverKnowledge for Paraswap {
     /// not a token pair) — the intent is lost along with the quote, since there is nothing left
     /// to recover the floor from. A reverted trade has no netted flow to draw a hint from, so
     /// `amount_in_hint: None` always yields `None`.
-    fn swap_intent(&self, input: &[u8], amount_in_hint: Option<U256>) -> Option<SwapIntent> {
+    fn declared_swap(&self, input: &[u8], amount_in_hint: Option<U256>) -> Option<DeclaredSwap> {
         let amount_in = amount_in_hint.filter(|hint| !hint.is_zero())?;
         if input.len() < 4 {
             return None;
@@ -77,7 +77,7 @@ impl SolverKnowledge for Paraswap {
             if !is_address_word(src_token) || !is_address_word(dst_token) {
                 continue;
             }
-            let intent = SwapIntent::new(
+            let intent = DeclaredSwap::new(
                 address_from_word(src_token),
                 address_from_word(dst_token),
                 amount_in,
@@ -119,7 +119,7 @@ mod tests {
             U256::ZERO, // metadata
         ];
         let intent = Paraswap
-            .swap_intent(&calldata(&words), Some(amount_in))
+            .declared_swap(&calldata(&words), Some(amount_in))
             .unwrap();
         assert_eq!(intent.token_in, address_from_word(src_token));
         assert_eq!(intent.token_out, address_from_word(dst_token));
@@ -139,13 +139,13 @@ mod tests {
             U256::from(171_602_266u64),
         ];
         assert!(Paraswap
-            .swap_intent(&calldata(&words), Some(U256::from(999u64)))
+            .declared_swap(&calldata(&words), Some(U256::from(999u64)))
             .is_none());
         assert!(Paraswap
-            .swap_intent(&[], Some(U256::from(1u64)))
+            .declared_swap(&[], Some(U256::from(1u64)))
             .is_none());
         assert!(Paraswap
-            .swap_intent(&calldata(&words), Some(U256::ZERO))
+            .declared_swap(&calldata(&words), Some(U256::ZERO))
             .is_none());
     }
 
@@ -161,7 +161,7 @@ mod tests {
             U256::from(171_602_266u64),
         ];
         assert!(Paraswap
-            .swap_intent(&calldata(&words), None)
+            .declared_swap(&calldata(&words), None)
             .is_none());
     }
 
@@ -178,7 +178,7 @@ mod tests {
             U256::from(400_000u64),
         ];
         assert!(Paraswap
-            .swap_intent(&calldata(&below), Some(amount_in))
+            .declared_swap(&calldata(&below), Some(amount_in))
             .is_none());
         let far_above = [
             U256::from(0x1111u64),
@@ -188,7 +188,7 @@ mod tests {
             U256::from(10_000_000u64),
         ];
         assert!(Paraswap
-            .swap_intent(&calldata(&far_above), Some(amount_in))
+            .declared_swap(&calldata(&far_above), Some(amount_in))
             .is_none());
     }
 
@@ -206,7 +206,7 @@ mod tests {
             U256::from(995_000u64),
         ];
         assert!(Paraswap
-            .swap_intent(&calldata(&words), Some(amount_in))
+            .declared_swap(&calldata(&words), Some(amount_in))
             .is_none());
     }
 
@@ -217,7 +217,7 @@ mod tests {
         let amount_in = U256::from(1_000_000u64);
         let words = [amount_in, U256::from(990_000u64), U256::from(995_000u64)];
         assert!(Paraswap
-            .swap_intent(&calldata(&words), Some(amount_in))
+            .declared_swap(&calldata(&words), Some(amount_in))
             .is_none());
     }
 }

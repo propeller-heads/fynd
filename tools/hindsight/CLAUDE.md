@@ -66,7 +66,7 @@ Match → trace → decode → veto → record.
 | `registry.rs` | Per-chain address book, loaded from TOML (see below) |
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |
 | `venues/` | Per-venue `TradeDecoder` impls (Relay, MetaMask, Rabby), constructed with their venue's addresses at registry load and registered in the `venues::DECODERS` table. Relay has two, tried in order: `RelayCalldata` (calldata-primary, see below) then `RelayNetting` (the fallback) |
-| `solvers/` | Per-solver knowledge behind one resolved handle (`solvers::knowledge`): match-time vetoes, attribution, and swap intents (`fly.rs`'s packed-calldata parser, `kyberswap.rs`'s ABI-decoded `swap` params, `zeroex.rs`'s ABI-decoded `AllowanceHolder.exec`/`Settler.execute`) recovered from a solver frame's own calldata, plus `settled_intent` — the one-step frame-find + intent + `output_recipient` read that anchors a calldata-primary decode |
+| `solvers/` | Per-solver knowledge behind one resolved handle (`solvers::knowledge`): match-time vetoes, attribution, and declared swaps (`fly.rs`'s packed-calldata parser, `kyberswap.rs`'s ABI-decoded `swap` params, `zeroex.rs`'s ABI-decoded `AllowanceHolder.exec`/`Settler.execute`) recovered from a solver frame's own calldata, plus `solver_declaration` — the one-step frame-find + declared-swap + `output_recipient` read that anchors a calldata-primary decode |
 | `intents/` | Intent-role decoders (solver-sent, trader-not-sender): `cow.rs` reads CoW's `Trade` event; `decoders` lists it ahead of the shared `netting::IntentNetting` fallback |
 | `trace.rs` | Transaction trace fetching and processing |
 
@@ -133,12 +133,12 @@ vanished at N).
 ### Calldata-first Relay decoding
 
 `RelayCalldata` reads `token_in`/`token_out`/`amount_in` from the settling solver frame's own
-`SwapIntent` and recovers the settled `amount_out` as the gross amount of `token_out` received by
+`DeclaredSwap` and recovers the settled `amount_out` as the gross amount of `token_out` received by
 the output recipient the same calldata declares — the one field calldata can never carry. Two
 guards protect the recipient-receipt query: the recovered output must clear the intent's
 `min_amount_out` floor, and any declared quote must sit within `plausible_quote`'s band of it;
 either failure falls through to `RelayNetting`. The frame-find, handle resolution, and
-intent/recipient reads are the shared `solvers::settled_intent` step; only the guards and the
+declared-swap/recipient reads are the shared `solvers::solver_declaration` step; only the guards and the
 fee basis are Relay's own. The solver frame's `amount_in` needs no fee
 adjustment — Relay pays its input-side fee to the collector *before* forwarding into the solver
 call, so it is already the post-fee figure `amount_in` is defined to be — and the recipient's
@@ -153,7 +153,7 @@ across the 165 trades both paths could decode.
 - `DecodedTrade` — decoded on-chain trade; amounts are venue-fee-adjusted so re-solve compares
   like-for-like. Carries `sandwich` evidence when a bracket pair was found, and `min_amount_out`,
   `declared_quote`, and `quote_timestamp` (the calldata-declared terms copied off the settling
-  solver's `SwapIntent`, when one was recovered).
+  solver's `DeclaredSwap`, when one was recovered).
 - `RangeComparison` — a trade solved at top and back, plus the top route's `Slippage` between
   the two states (from its re-execution at back). All comparisons are gross of gas.
 - `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
@@ -205,7 +205,7 @@ It surfaces three ways:
   enough for matching, attribution, and metric labels. Optional code: a
   `SolverKnowledge` impl in `solvers/` (one row in `solvers::IMPLEMENTATIONS`; callers reach it
   through the resolved handle, so no dispatch function is added) with a `solver_veto` method if
-  some of its orders are not same-chain swaps, or a `swap_intent` method if a trade's terms
+  some of its orders are not same-chain swaps, or a `declared_swap` method if a trade's terms
   (tokens, amounts, on-chain floor, and — when the calldata declares one — the solver's
   off-chain quote) can be recovered from the settling solver frame's own calldata.
 - **Venue** (a platform users enter through): a `[venues.<name>]` address-book section plus a
@@ -215,8 +215,8 @@ It surfaces three ways:
   only what is specific to the venue. The registry fails to load if an address-book venue has no
   `DECODERS` row.
 - **Decoder** (a new way to read a swap — calldata decoding, log parsing): a `TradeDecoder`, with
-  its extraction toolkit in `netting`/`solvers::settled_intent`, listed for the entities that use
-  it. Netting is one shared engine; a venue's calldata decoder is the shared `settled_intent`
+  its extraction toolkit in `netting`/`solvers::solver_declaration`, listed for the entities that use
+  it. Netting is one shared engine; a venue's calldata decoder is the shared `solver_declaration`
   read plus that venue's own guards and fee basis.
 - **Chain**: a new `registry/<chain>.toml` plus its entry in `registry::BUILTIN_CHAINS`, or passed
   via `--registry`. Verify each venue's fee collector on that chain before adding it — a missing

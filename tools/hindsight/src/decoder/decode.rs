@@ -54,7 +54,7 @@ pub(crate) trait TradeDecoder: Send + Sync {
     /// Whether this decoder's flow *is* the calldata-recovered intent, so the orchestrator's
     /// intent-vs-flow disagreement warning has nothing independent to compare it against.
     /// Declared here so the orchestrator never identifies a decoder by its name string.
-    fn flow_is_the_intent(&self) -> bool {
+    fn flow_is_the_declared_swap(&self) -> bool {
         false
     }
 }

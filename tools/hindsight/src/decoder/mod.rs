@@ -47,7 +47,7 @@ use tracing::{debug, warn};
 use crate::decoder::{
     decode::{recover, ContractCode, DecodeContext, EntityDecoders, TraderFlow, TraderRole},
     matching::MatchedSolverTrade,
-    solvers::{SolverKnowledge, SwapIntent},
+    solvers::{DeclaredSwap, SolverKnowledge},
     trace::{collect_native_transfers, fetch_trace},
     transfer_ledger::TransferLedger,
 };
@@ -94,7 +94,7 @@ pub(crate) struct DecodedTrade {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub venue_fee_out: Option<U256>,
     /// The on-chain enforced floor declared in the settling solver frame's own calldata (see
-    /// `solvers::swap_intent` for the solvers that declare one). A settled trade cleared this by
+    /// `solvers::declared_swap` for the solvers that declare one). A settled trade cleared this by
     /// construction; it is recorded so avoidance analysis has the same field on both settled and
     /// reverted trades. `None` when no solver frame was found or its calldata did not parse.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,15 +118,15 @@ pub(crate) struct DecodedTrade {
 /// three terms they both claim. The ledger stays authoritative for what settled; two
 /// independently-derived readings landing on different terms is diagnostic signal we would
 /// otherwise lose, not a decode failure. Skipped when the winning decoder's flow already IS the
-/// intent (`TradeDecoder::flow_is_the_intent`), since there is nothing independent to disagree
-/// with.
-fn warn_on_intent_disagreement(
-    flow_is_the_intent: bool,
+/// intent (`TradeDecoder::flow_is_the_declared_swap`), since there is nothing independent to
+/// disagree with.
+fn warn_on_declaration_disagreement(
+    flow_is_the_declared_swap: bool,
     tx_hash: TxHash,
-    intent: Option<&SwapIntent>,
+    intent: Option<&DeclaredSwap>,
     flow: &TraderFlow,
 ) {
-    let Some(intent) = intent.filter(|_| !flow_is_the_intent) else {
+    let Some(intent) = intent.filter(|_| !flow_is_the_declared_swap) else {
         return;
     };
     if intent.token_in == flow.swap.token_in &&
@@ -154,14 +154,14 @@ fn warn_on_intent_disagreement(
 /// authoritative for what actually settled; this is informational. A declared quote that fails
 /// the unit-plausibility check against the settled amount is dropped (quotes are self-reported);
 /// the ABI-decoded terms stay either way.
-fn recover_intent(
+fn recover_declared_swap(
     knowledge: &dyn SolverKnowledge,
     root: &CallFrame,
     registry: &Registry,
     flow: &TraderFlow,
-) -> Option<SwapIntent> {
+) -> Option<DeclaredSwap> {
     let intent = trace::find_solver_frame(root, registry)
-        .and_then(|frame| knowledge.swap_intent(&frame.input, Some(flow.swap.amount_in)))?;
+        .and_then(|frame| knowledge.declared_swap(&frame.input, Some(flow.swap.amount_in)))?;
     let mut intent = intent;
     if let Some(quoted) = intent.declared_quote() {
         if !solvers::plausible_quote(quoted, flow.swap.amount_out) {
@@ -173,9 +173,9 @@ fn recover_intent(
 
 /// Copy the calldata-declared terms off a parsed intent, or all-`None` when no intent was
 /// recovered. Split out of `decode_transaction` purely to keep it under the line limit.
-fn intent_fields(intent: Option<&SwapIntent>) -> (Option<U256>, Option<U256>, Option<u64>) {
+fn declaration_fields(intent: Option<&DeclaredSwap>) -> (Option<U256>, Option<U256>, Option<u64>) {
     let min_amount_out = intent.map(|intent| intent.min_amount_out);
-    let declared_quote = intent.and_then(SwapIntent::declared_quote);
+    let declared_quote = intent.and_then(DeclaredSwap::declared_quote);
     let quote_timestamp = intent.and_then(|intent| intent.timestamp);
     (min_amount_out, declared_quote, quote_timestamp)
 }
@@ -412,15 +412,15 @@ impl Decoder {
             registry,
         );
 
-        let intent = recover_intent(attribution.knowledge, root, registry, &flow);
+        let intent = recover_declared_swap(attribution.knowledge, root, registry, &flow);
 
-        warn_on_intent_disagreement(
-            decoder.flow_is_the_intent(),
+        warn_on_declaration_disagreement(
+            decoder.flow_is_the_declared_swap(),
             receipt.transaction_hash,
             intent.as_ref(),
             &flow,
         );
-        let (min_amount_out, declared_quote, quote_timestamp) = intent_fields(intent.as_ref());
+        let (min_amount_out, declared_quote, quote_timestamp) = declaration_fields(intent.as_ref());
 
         Some(DecodedTrade {
             tx_hash: receipt.transaction_hash,

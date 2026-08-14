@@ -36,9 +36,9 @@ pub(crate) fn decoders(addresses: &VenueAddresses) -> Vec<Box<dyn TradeDecoder>>
 
 /// Relay's calldata-primary decoder.
 ///
-/// Reads `token_in`/`token_out`/`amount_in` straight from the settling solver frame's `SwapIntent`
-/// (already the post-fee, on-chain-enforced terms — Relay pays its input-side fee to the
-/// collector *before* forwarding into the solver call) and recovers the settled `amount_out` as
+/// Reads `token_in`/`token_out`/`amount_in` straight from the settling solver frame's
+/// `DeclaredSwap` (already the post-fee, on-chain-enforced terms — Relay pays its input-side fee to
+/// the collector *before* forwarding into the solver call) and recovers the settled `amount_out` as
 /// the gross amount of `intent.token_out` received by the output recipient the same calldata
 /// declares — the one field calldata can never carry. Declines (falling through to
 /// [`RelayNetting`]) when no solver frame or intent is found, the recipient never received the
@@ -62,13 +62,13 @@ impl TradeDecoder for RelayCalldata {
 
     /// The flow below is built from the intent itself, so the orchestrator's intent-vs-flow
     /// disagreement warning has nothing independent to compare.
-    fn flow_is_the_intent(&self) -> bool {
+    fn flow_is_the_declared_swap(&self) -> bool {
         true
     }
 
     async fn decode(&self, ctx: &mut DecodeContext<'_>) -> Option<TraderFlow> {
-        let settled = solvers::settled_intent(ctx.root, ctx.registry)?;
-        let intent = settled.intent;
+        let settled = solvers::solver_declaration(ctx.root, ctx.registry)?;
+        let intent = settled.swap;
 
         let amount_out = ctx
             .transfer_ledger
@@ -447,7 +447,7 @@ mod tests {
 
         /// Fly's own router — same address on every chain (`docs.fly.trade`).
         const FLY: Address = address!("0x20f6ee51340adeed01a59b0e65cb3703f3dc860c");
-        /// 0x's `AllowanceHolder` — a registered solver with no `swap_intent` support.
+        /// 0x's `AllowanceHolder` — a registered solver with no `declared_swap` support.
         const ZEROX: Address = address!("0xdef1c0ded9bec7f1a1670819833240f027b25eff");
         /// Relay's own router — in the live fixture this is both the entry point and the
         /// declared output recipient Fly's calldata carries (Relay receives and forwards).
@@ -553,7 +553,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_decode_solver_without_intent_support_declines() {
-            // 0x is a registered solver (matches `find_solver_frame`) but has no `swap_intent`
+            // 0x is a registered solver (matches `find_solver_frame`) but has no `declared_swap`
             // implementation: the calldata path has nothing to recover, so it falls through.
             let registry = Registry::ethereum();
             let sender = addr(1);
