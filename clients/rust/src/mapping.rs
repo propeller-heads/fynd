@@ -355,13 +355,17 @@ impl TryFrom<fynd_rpc_types::InstanceInfo> for crate::types::InstanceInfo {
     type Error = FyndError;
 
     fn try_from(dto: fynd_rpc_types::InstanceInfo) -> Result<Self, Self::Error> {
-        let router = bytes::Bytes::copy_from_slice(dto.router_address().as_ref());
+        let router = dto
+            .router_address()
+            .map(|r| bytes::Bytes::copy_from_slice(r.as_ref()));
         let permit2 = bytes::Bytes::copy_from_slice(dto.permit2_address().as_ref());
-        if router.len() != 20 {
-            return Err(FyndError::Protocol(format!(
-                "router_address must be 20 bytes, got {}",
-                router.len()
-            )));
+        if let Some(router) = &router {
+            if router.len() != 20 {
+                return Err(FyndError::Protocol(format!(
+                    "router_address must be 20 bytes, got {}",
+                    router.len()
+                )));
+            }
         }
         if permit2.len() != 20 {
             return Err(FyndError::Protocol(format!(
@@ -369,7 +373,12 @@ impl TryFrom<fynd_rpc_types::InstanceInfo> for crate::types::InstanceInfo {
                 permit2.len()
             )));
         }
-        Ok(crate::types::InstanceInfo::new(router, permit2, dto.chain_id()))
+        Ok(crate::types::InstanceInfo::new(
+            router,
+            permit2,
+            dto.chain_id(),
+            dto.version().to_string(),
+        ))
     }
 }
 
@@ -404,7 +413,7 @@ mod tests {
     fn sample_dto_swap() -> dto::Swap {
         serde_json::from_str(
             r#"{
-            "component_id": "pool-1",
+            "component_id": "component-1",
             "protocol": "uniswap-v3",
             "token_in": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "token_out": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -442,6 +451,27 @@ mod tests {
         }"#,
         )
         .expect("valid order quote JSON")
+    }
+
+    // -----------------------------------------------------------------------
+    // InstanceInfo conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn instance_info_maps_version() {
+        let dto: fynd_rpc_types::InstanceInfo = serde_json::from_str(
+            r#"{
+            "version": "9.9.9",
+            "chain_id": 1,
+            "router_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "permit2_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }"#,
+        )
+        .expect("valid instance info JSON");
+
+        let mapped: crate::types::InstanceInfo = dto.try_into().expect("maps");
+        assert_eq!(mapped.version(), "9.9.9");
+        assert_eq!(mapped.chain_id(), 1);
     }
 
     // -----------------------------------------------------------------------
@@ -503,7 +533,7 @@ mod tests {
     #[test]
     fn swap_try_from_dto_happy_path() {
         let client_swap = Swap::try_from(sample_dto_swap()).unwrap();
-        assert_eq!(client_swap.component_id(), "pool-1");
+        assert_eq!(client_swap.component_id(), "component-1");
         assert_eq!(client_swap.protocol(), "uniswap-v3");
         assert_eq!(client_swap.token_in(), &Bytes::copy_from_slice(&[0xaa; 20]));
         assert_eq!(client_swap.token_out(), &Bytes::copy_from_slice(&[0xbb; 20]));

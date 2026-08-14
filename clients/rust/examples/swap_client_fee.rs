@@ -7,13 +7,13 @@
 //! as the fee receiver (in production this is the integrator's key).
 //!
 //! The EIP-712 `ClientFee` type hash includes swap-specific fields (`amountIn`,
-//! `tokenIn`, `tokenOut`, `minAmountOut`, `receiver`, `bytes swaps`) that are
-//! only known after the server has encoded the transaction. The server returns
+//! `tokenIn`, `tokenOut`, `expectedAmountOut`, `minAmountOut`, `receiver`, `bytes swaps`) that
+//! are only known after the server has encoded the transaction. The server returns
 //! `swaps_hash` in the fee breakdown and `signature_offset` in the transaction so the client can
 //! sign and patch the calldata locally:
 //!
 //! 1. Request a quote with unsigned client fee params (empty signature).
-//! 2. Sign the full 10-field EIP-712 hash using `swaps_hash` from the response.
+//! 2. Sign the full 11-field EIP-712 hash using `swaps_hash` from the response.
 //! 3. Patch the signature into the calldata via `quote.with_client_fee_signature()`.
 //! 4. Execute.
 //!
@@ -85,7 +85,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     let info = client.info().await?;
-    let router_address = info.router_address().clone();
+    let router_address = info
+        .router_address()
+        .expect("example requires a chain with encoding support")
+        .clone();
     let chain_id = info.chain_id();
 
     // Approve the router to spend WETH if the current allowance is insufficient.
@@ -146,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .swaps_hash()
         .ok_or("no swaps_hash — server must support client fee signing")?;
 
-    // Step 2: sign the full 10-field EIP-712 ClientFee hash.
+    // Step 2: sign the full 11-field EIP-712 ClientFee hash.
     // receiver defaults to sender when the order has no explicit receiver.
     let hash = fee.eip712_signing_hash(
         chain_id,
@@ -154,6 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         quote.amount_in(),
         &Bytes::copy_from_slice(sell_token.as_slice()),
         &Bytes::copy_from_slice(buy_token.as_slice()),
+        quote.amount_out(),
         fee_breakdown.min_amount_received(),
         &Bytes::copy_from_slice(sender.as_slice()),
         swaps_hash,

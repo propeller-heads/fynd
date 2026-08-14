@@ -28,8 +28,11 @@ use tycho_simulation::tycho_common::{
 };
 use uuid::Uuid;
 
-use super::primitives::ComponentId;
-use crate::{feed::market_data::StateLabel, price_guard::config::PriceGuardConfig, AlgorithmError};
+use super::{internal::SolveError, primitives::ComponentId};
+use crate::{
+    algorithm::NoPathReason, feed::market_data::StateLabel, price_guard::config::PriceGuardConfig,
+    AlgorithmError,
+};
 
 // ============================================================================
 // REQUEST TYPES
@@ -251,7 +254,7 @@ pub struct FeeBreakdown {
     #[serde_as(as = "DisplayFromStr")]
     min_amount_received: BigUint,
     /// keccak256 of the ABI-encoded swap bytes, present when client fee params were provided.
-    /// Clients use this to compute the 10-field EIP-712 signing hash for the client fee.
+    /// Clients use this to compute the 11-field EIP-712 signing hash for the client fee.
     #[serde(skip)]
     swaps_hash: Option<[u8; 32]>,
 }
@@ -294,7 +297,7 @@ impl FeeBreakdown {
     }
 
     /// keccak256 of the ABI-encoded swap bytes.
-    /// Used by clients to construct the full 10-field EIP-712 `ClientFee` signing hash.
+    /// Used by clients to construct the full 11-field EIP-712 `ClientFee` signing hash.
     pub fn swaps_hash(&self) -> Option<&[u8; 32]> {
         self.swaps_hash.as_ref()
     }
@@ -701,6 +704,42 @@ impl SingleOrderQuote {
     }
 }
 
+/// Order-level surplus summary for a quote routed through an exclusive component:
+/// `surplus_amount` is what the protocol captures (realized output minus the committed output
+/// the user is quoted), in the order's `token_out`.
+///
+/// The committed output is `max(public_amount_out, public_net + exclusive_gas)` — never below
+/// the public market's displayed amount, and high enough that the user still nets the public
+/// route's value after paying the exclusive route's gas.
+///
+/// Informational only (observability). The value the encoder acts on is the per-leg
+/// [`Swap::committed_amount_out`], since surplus is captured per component on-chain.
+#[derive(Debug, Clone)]
+pub struct SurplusInfo {
+    /// Surplus captured by the protocol: realized surplus-route output minus the committed
+    /// output.
+    surplus_amount: BigUint,
+    /// The output the user is committed to (the quoted `amount_out`).
+    committed_amount_out: BigUint,
+}
+
+impl SurplusInfo {
+    /// Creates surplus info from the captured surplus and the committed output.
+    pub fn new(surplus_amount: BigUint, committed_amount_out: BigUint) -> Self {
+        Self { surplus_amount, committed_amount_out }
+    }
+
+    /// Returns the surplus amount captured by the protocol.
+    pub fn surplus_amount(&self) -> &BigUint {
+        &self.surplus_amount
+    }
+
+    /// Returns the committed output the user is quoted.
+    pub fn committed_amount_out(&self) -> &BigUint {
+        &self.committed_amount_out
+    }
+}
+
 /// Quote for a single [`Order`].
 ///
 /// Contains the route to execute (if found), along with expected amounts,
@@ -752,6 +791,18 @@ pub struct OrderQuote {
     /// The state overlay this quote was computed against.
     /// When no overlay was requested this is the block number of the base state at solve time.
     solved_against: StateLabel,
+    /// Why this order failed (internal use only; set by the router fallback,
+    /// skipped during serialization).
+    #[serde(skip)]
+    no_route_cause: Option<SolveError>,
+    /// Order-level surplus summary, populated when this quote executes through an exclusive
+    /// component.
+    ///
+    /// Informational only (observability); the value the encoder acts on is the per-leg
+    /// [`Swap::committed_amount_out`]. `None` for pure public quotes. `#[serde(skip)]` — internal
+    /// reporting data, not part of the wire format.
+    #[serde(skip)]
+    surplus: Option<SurplusInfo>,
 }
 
 impl OrderQuote {
@@ -786,7 +837,33 @@ impl OrderQuote {
             sender,
             receiver,
             solved_against,
+            no_route_cause: None,
+            surplus: None,
         }
+    }
+
+    /// Attaches the order-level surplus summary (committed output + captured surplus).
+    ///
+    /// Set by the router when a surplus route is selected, for observability. The per-leg
+    /// [`Swap::committed_amount_out`] (not this) is what the encoder acts on.
+    pub(crate) fn with_surplus(mut self, surplus: SurplusInfo) -> Self {
+        self.surplus = Some(surplus);
+        self
+    }
+
+    /// Returns the captured surplus amount, if this quote routes through an exclusive component.
+    pub fn surplus_amount(&self) -> Option<&BigUint> {
+        self.surplus
+            .as_ref()
+            .map(SurplusInfo::surplus_amount)
+    }
+
+    /// Returns the committed public-market output, if this quote routes through an exclusive
+    /// component.
+    pub fn committed_amount_out(&self) -> Option<&BigUint> {
+        self.surplus
+            .as_ref()
+            .map(SurplusInfo::committed_amount_out)
     }
 
     /// Sets the status of this quote.
@@ -822,6 +899,13 @@ impl OrderQuote {
         self.gas_estimate = gas_estimate;
     }
 
+    /// Overrides the output amount (used by `combine_with_surplus` to pin to the committed
+    /// reference).
+    pub(crate) fn set_amount_out(&mut self, value: BigUint) {
+        self.amount_out = value;
+    }
+
+    /// Overrides the gas-adjusted net output (used by gas refinement and surplus overlay).
     pub(crate) fn set_amount_out_net_gas(&mut self, value: BigUint) {
         self.amount_out_net_gas = value;
     }
@@ -839,6 +923,11 @@ impl OrderQuote {
     /// Returns the route, if a valid route was found.
     pub fn route(&self) -> Option<&Route> {
         self.route.as_ref()
+    }
+
+    /// Returns a mutable reference to the route.
+    pub(crate) fn route_mut(&mut self) -> Option<&mut Route> {
+        self.route.as_mut()
     }
 
     /// Consumes this solution and returns the route.
@@ -914,6 +1003,25 @@ impl OrderQuote {
     /// Returns the state overlay this quote was computed against.
     pub fn solved_against(&self) -> &StateLabel {
         &self.solved_against
+    }
+
+    /// Records why this order failed. Internal; skipped during serialization.
+    pub(crate) fn set_no_route_cause(&mut self, cause: Option<SolveError>) {
+        self.no_route_cause = cause;
+    }
+
+    /// Returns the recorded failure cause, if any.
+    pub fn no_route_cause(&self) -> Option<&SolveError> {
+        self.no_route_cause.as_ref()
+    }
+
+    /// Returns the no-route path reason, when the failure cause was a
+    /// route-finding failure that reported one.
+    pub fn no_route_reason(&self) -> Option<NoPathReason> {
+        match self.no_route_cause.as_ref() {
+            Some(SolveError::NoRouteFound { reason, .. }) => *reason,
+            _ => None,
+        }
     }
 }
 
@@ -993,7 +1101,7 @@ impl BlockInfo {
 
 /// A route consisting of one or more swaps, either sequential or split.
 ///
-/// A route describes the path through liquidity pools to execute a swap.
+/// A route describes the path through components (liquidity pools) to execute a swap.
 /// For sequential (multi-hop) swaps, the output of each swap becomes the input
 /// of the next. For split swaps, the input is divided across multiple parallel
 /// paths (each swap carries a `split` fraction).
@@ -1030,6 +1138,11 @@ impl Route {
         &self.swaps
     }
 
+    /// Returns a mutable reference to the swaps in this route.
+    pub(crate) fn swaps_mut(&mut self) -> &mut [Swap] {
+        &mut self.swaps
+    }
+
     /// Consumes the route and returns its swaps.
     pub fn into_swaps(self) -> Vec<Swap> {
         self.swaps
@@ -1039,6 +1152,18 @@ impl Route {
     /// [`Route::with_tokens`].
     pub(crate) fn tokens(&self) -> &HashMap<Bytes, Token> {
         &self.tokens
+    }
+
+    /// Returns the symbol of `address`, resolved from this route's own token map (populated by
+    /// the algorithm that built the route). `None` if the route carries no entry for it — for
+    /// example a route built without a token map (tests, replays).
+    ///
+    /// Lets a caller outside this crate render a human-readable path (tokens and protocols
+    /// interleaved) without needing a separate, externally-sourced token table.
+    pub fn token_symbol(&self, address: &Address) -> Option<&str> {
+        self.tokens
+            .get(address)
+            .map(|token| token.symbol.as_str())
     }
 }
 
@@ -1477,11 +1602,11 @@ pub enum RouteValidationError {
 
 /// A single swap within a route.
 ///
-/// Represents an atomic swap on a specific liquidity pool (component).
+/// Represents an atomic swap on a specific component (liquidity pool).
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Swap {
-    /// Identifier of the liquidity pool component.
+    /// Identifier of the component (liquidity pool).
     component_id: ComponentId,
     /// Protocol system identifier (e.g., "uniswap_v2", "uniswap_v3", "vm:balancer").
     protocol: String,
@@ -1505,6 +1630,15 @@ pub struct Swap {
     /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
     #[serde_as(as = "DisplayFromStr")]
     split: f64,
+    /// Per-leg committed output for an exclusive swap.
+    ///
+    /// Set only on the single exclusive leg of a surplus route. The encoding layer turns it into
+    /// the protocol's exclusive-swap payload, which limits the taker's output to the committed
+    /// amount; the component then captures `amount_out - committed_amount_out` as surplus,
+    /// denominated in this swap's `token_out`. `None` for ordinary public swaps. In-process only —
+    /// consumed by the encoder; `#[serde(skip)]` so it never enters the wire format.
+    #[serde(skip)]
+    committed_amount_out: Option<BigUint>,
 }
 
 impl Swap {
@@ -1532,6 +1666,7 @@ impl Swap {
             protocol_component,
             protocol_state,
             split: 0.0,
+            committed_amount_out: None,
         }
     }
     /// Sets the split fraction for this swap (e.g. 0.5 means 50% of a split route).
@@ -1540,7 +1675,15 @@ impl Swap {
         self
     }
 
-    /// Returns the component ID of the liquidity pool.
+    /// Sets the per-leg committed output for an exclusive swap.
+    ///
+    /// The router stamps this onto the single exclusive leg of a surplus route so the encoding
+    /// layer can build the leg's exclusive-swap payload. See [`Swap::committed_amount_out`].
+    pub(crate) fn set_committed_amount_out(&mut self, committed_amount_out: BigUint) {
+        self.committed_amount_out = Some(committed_amount_out);
+    }
+
+    /// Returns the component ID (liquidity pool) of the swap.
     pub fn component_id(&self) -> &str {
         &self.component_id
     }
@@ -1588,6 +1731,14 @@ impl Swap {
     /// Returns the split of this swap.
     pub fn split(&self) -> &f64 {
         &self.split
+    }
+
+    /// Returns the per-leg committed output, if this is the exclusive leg of a surplus route.
+    ///
+    /// `None` for ordinary public swaps. When `Some`, the encoding layer derives the leg's
+    /// exclusive-swap payload from this and the leg's `amount_out`.
+    pub fn committed_amount_out(&self) -> Option<&BigUint> {
+        self.committed_amount_out.as_ref()
     }
 }
 
@@ -1661,6 +1812,34 @@ mod tests {
     use super::*;
     use crate::algorithm::test_utils::{component, token, MockProtocolSim};
 
+    #[test]
+    fn test_no_route_reason_shim_extracts_nested_path_reason() {
+        let mut quote = OrderQuote::new(
+            "o1".to_string(),
+            QuoteStatus::NoRouteFound,
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BlockInfo::new(0, String::new(), 0),
+            String::new(),
+            Bytes::default(),
+            Bytes::default(),
+            "0".to_string(),
+        );
+        assert_eq!(quote.no_route_reason(), None);
+
+        quote.set_no_route_cause(Some(SolveError::no_route_found_with_reason(
+            "o1",
+            NoPathReason::NoGraphPath,
+        )));
+        assert_eq!(quote.no_route_reason(), Some(NoPathReason::NoGraphPath));
+
+        quote.set_no_route_cause(Some(SolveError::QueueFull));
+        assert_eq!(quote.no_route_reason(), None);
+        assert!(matches!(quote.no_route_cause(), Some(SolveError::QueueFull)));
+    }
+
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
     }
@@ -1679,14 +1858,14 @@ mod tests {
         let token_in = token(token_in_byte, "TIN");
         let token_out = token(token_out_byte, "TOUT");
         Swap::new(
-            "pool-1".to_string(),
+            "component-1".to_string(),
             "uniswap_v2".to_string(),
             make_address(token_in_byte),
             make_address(token_out_byte),
             BigUint::from(amount_in),
             BigUint::from(amount_out),
             BigUint::from(100_000u64),
-            component("test-pool", &[token_in, token_out]),
+            component("test-component", &[token_in, token_out]),
             Box::new(MockProtocolSim::default()),
         )
     }
@@ -1745,6 +1924,40 @@ mod tests {
         assert!(id.contains('-')); // UUIDs contain dashes
     }
 
+    fn make_quote(amount_out: u64) -> OrderQuote {
+        OrderQuote::new(
+            "order-1".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1_000u64),
+            BigUint::from(amount_out),
+            BigUint::from(100_000u64),
+            BigUint::from(amount_out),
+            BlockInfo::new(1, "0x1".to_string(), 1),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_surplus_round_trips_through_getters() {
+        let committed = BigUint::from(990u64);
+        let surplus = BigUint::from(15u64);
+        let quote =
+            make_quote(990).with_surplus(SurplusInfo::new(surplus.clone(), committed.clone()));
+
+        assert_eq!(quote.surplus_amount(), Some(&surplus));
+        assert_eq!(quote.committed_amount_out(), Some(&committed));
+    }
+
+    #[test]
+    fn public_quote_has_no_surplus() {
+        let quote = make_quote(990);
+        assert_eq!(quote.surplus_amount(), None);
+        assert_eq!(quote.committed_amount_out(), None);
+    }
+
     // -------------------------------------------------------------------------
     // Route Tests
     // -------------------------------------------------------------------------
@@ -1754,6 +1967,26 @@ mod tests {
             .map(|(a, b)| make_swap(a, b, 1000, 990))
             .collect();
         Route::new(swaps, HashMap::new()).unwrap()
+    }
+
+    #[test]
+    fn test_route_token_symbol_resolves_from_own_map() {
+        let token_in = token(0x01, "TIN");
+        let token_out = token(0x02, "TOUT");
+        let tokens = HashMap::from([
+            (token_in.address.clone(), token_in.clone()),
+            (token_out.address.clone(), token_out.clone()),
+        ]);
+        let route = Route::new(vec![make_swap(0x01, 0x02, 1000, 990)], tokens).unwrap();
+        assert_eq!(route.token_symbol(&make_address(0x01)), Some("TIN"));
+        assert_eq!(route.token_symbol(&make_address(0x02)), Some("TOUT"));
+    }
+
+    #[test]
+    fn test_route_token_symbol_missing_returns_none() {
+        // `make_route` builds with an empty token map: any address is unresolved.
+        let route = make_route(vec![(0x01, 0x02)]);
+        assert_eq!(route.token_symbol(&make_address(0x01)), None);
     }
 
     #[rstest]
@@ -2077,7 +2310,7 @@ mod tests {
     #[test]
     fn test_swap_deserializes_amounts_from_strings() {
         let json = r#"{
-            "component_id": "pool-1",
+            "component_id": "component-1",
             "protocol": "uniswap_v2",
             "token_in": "0x0101010101010101010101010101010101010101",
             "token_out": "0x0202020202020202020202020202020202020202",
@@ -2086,7 +2319,7 @@ mod tests {
             "gas_estimate": "150000",
             "split": "0",
             "protocol_component": {
-                "id": "test-pool",
+                "id": "test-component",
                 "protocol_system": "uniswap_v2",
                 "protocol_type_name": "swap",
                 "chain": "ethereum",

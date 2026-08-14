@@ -21,10 +21,10 @@
 //! to implement your own routing strategy.
 
 /// Route-finding algorithms. Includes [`MostLiquidAlgorithm`],
-/// [`algorithm::BellmanFordAlgorithm`], [`PathFrankWolfeAlgorithm`], and the
-/// pluggable [`Algorithm`] trait.
+/// [`algorithm::BellmanFordAlgorithm`], [`PathFrankWolfeAlgorithm`],
+/// [`algorithm::WaterFillAlgorithm`], and the pluggable [`Algorithm`] trait.
 pub mod algorithm;
-/// Derived data computations: spot prices, pool depths, and gas prices.
+/// Derived data computations: spot prices, component depths, and gas prices.
 pub mod derived;
 /// Encodes solved routes into ABI-encoded on-chain calldata via Tycho's router contracts.
 pub mod encoding;
@@ -35,6 +35,8 @@ pub mod feed;
 pub mod graph;
 /// External price validation for quotes.
 pub mod price_guard;
+/// Re-execute an already-built route against a (possibly newer) market state.
+pub mod replay;
 /// [`FyndBuilder`](solver::FyndBuilder) assembles the full pipeline and returns a
 /// [`Solver`](solver::Solver).
 pub mod solver;
@@ -48,7 +50,8 @@ pub mod worker_pool_router;
 
 // Re-export commonly used types for convenience
 pub use algorithm::{
-    Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm, PathFrankWolfeAlgorithm,
+    Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm, NoPathReason,
+    PathFrankWolfeAlgorithm,
 };
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
@@ -57,6 +60,7 @@ pub use price_guard::{
     config::PriceGuardConfig,
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
+pub use replay::{replay_route, ReplayError, RouteReplay};
 pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
 /// Processes ephemeral pending bundles against live Tycho market state. Obtained by calling
 /// [`FyndBuilder::build_with_pending`](solver::FyndBuilder::build_with_pending).
@@ -77,11 +81,14 @@ pub use types::{
     BlockInfo, ClientFeeParams, ComponentId, EncodingOptions, FeeBreakdown, Order, OrderQuote,
     OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions,
     QuoteRequest, QuoteStatus, Route, RouteValidationError, SingleOrderQuote, SolveError,
-    SolveParams, SolveResult, Swap, TaskId, Transaction, UserTransferType,
+    SolveParams, SolveResult, SurplusInfo, Swap, TaskId, Transaction, UserTransferType,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},
     registry::UnknownAlgorithmError,
     TaskQueueHandle,
 };
-pub use worker_pool_router::{config::WorkerPoolRouterConfig, SolverPoolHandle, WorkerPoolRouter};
+pub use worker_pool_router::{
+    config::WorkerPoolRouterConfig, ExclusiveAccess, LiquidityScope, SolverPoolHandle,
+    WorkerPoolRouter,
+};

@@ -25,12 +25,35 @@ use crate::{
     },
     feed::{
         events::{MarketEvent, MarketEventHandler},
+        exclusivity::{remove_exclusive_components, scope_event},
         market_data::MarketData,
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     types::internal::SolveTask,
+    worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
+
+/// Records per-worker-pool queue metrics at task pickup: how long the task waited in the
+/// queue and the depth left behind it. Queue wait growing while solve time stays
+/// flat is the leading indicator of worker saturation.
+fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth: usize) {
+    metrics::histogram!("worker_pool_queue_wait_seconds", "pool" => pool_name.to_string())
+        .record(queue_wait.as_secs_f64());
+    metrics::gauge!("worker_pool_queue_depth", "pool" => pool_name.to_string())
+        .set(queue_depth as f64);
+}
+
+/// Records per-pool solve latency: one algorithm's own working time for one order, excluding
+/// queue wait. Unlike `worker_router_solve_duration_seconds`, which times the router racing every
+/// pool and so belongs to no single pool, this is attributable per pool.
+///
+/// Successful solves only — a pool that exhausts its timeout returns before this point and is
+/// counted in `worker_router_solver_failures_total{error_type="timeout"}` instead.
+fn record_solve_duration(pool_name: &str, solve_time: Duration) {
+    metrics::histogram!("worker_pool_solve_duration_seconds", "pool" => pool_name.to_string())
+        .record(solve_time.as_secs_f64());
+}
 
 /// A solver worker instance that maintains a market graph and processes solve requests.
 pub(crate) struct SolverWorker<A>
@@ -44,7 +67,7 @@ where
     graph_manager: A::GraphManager,
     /// Reference to shared market data.
     market_data: MarketData,
-    /// Reference to shared derived data (pool depths, token prices).
+    /// Reference to shared derived data (component depths, token prices).
     derived_data: SharedDerivedDataRef,
     /// Algorithm's computation requirements (which derived data to react to).
     requirements: ComputationRequirements,
@@ -55,8 +78,11 @@ where
     /// Whether the graph has been initialized.
     initialized: bool,
     /// Worker identifier (for logging).
-    // TODO: make this a string to include pool name
     worker_id: usize,
+    /// Worker pool name (used as the `pool` metric label).
+    pool_name: String,
+    /// Which liquidity this worker ingests.
+    liquidity_scope: LiquidityScope,
 }
 
 impl<A> SolverWorker<A>
@@ -71,14 +97,16 @@ where
     /// # Arguments
     ///
     /// * `market_data` - Shared reference to market data
-    /// * `derived_data` - Shared reference to derived data (pool depths, token prices)
+    /// * `derived_data` - Shared reference to derived data (component depths, token prices)
     /// * `algorithm` - The algorithm to use for route finding
     /// * `worker_id` - Identifier for this worker (for logging)
+    /// * `pool_name` - Worker pool name (used as the `pool` metric label)
     pub fn new(
         market_data: MarketData,
         derived_data: SharedDerivedDataRef,
         algorithm: A,
         worker_id: usize,
+        pool_name: String,
     ) -> Self {
         let requirements = algorithm.computation_requirements();
         Self {
@@ -91,7 +119,15 @@ where
             ready_notify: Arc::new(Notify::new()),
             initialized: false,
             worker_id,
+            pool_name,
+            liquidity_scope: LiquidityScope::default(),
         }
+    }
+
+    /// Sets which liquidity this worker ingests.
+    pub(crate) fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
+        self.liquidity_scope = scope;
+        self
     }
 
     /// Initializes the graph from MarketState.
@@ -102,7 +138,13 @@ where
         let topology = {
             // read lock on market data
             let market = self.market_data.read().await;
-            market.component_topology().clone() // clone to avoid holding the lock
+            let topology = market.component_topology().clone(); // clone to avoid holding the lock
+            match self.liquidity_scope {
+                LiquidityScope::PublicOnly => {
+                    remove_exclusive_components(market.base_market_state(), topology)
+                }
+                LiquidityScope::IncludeExclusive => topology,
+            }
         };
 
         self.graph_manager
@@ -112,6 +154,13 @@ where
 
     /// Processes a single market event.
     pub async fn process_event(&mut self, event: MarketEvent) {
+        let event = {
+            let market = self.market_data.read().await;
+            match self.liquidity_scope {
+                LiquidityScope::PublicOnly => scope_event(market.base_market_state(), event),
+                LiquidityScope::IncludeExclusive => event,
+            }
+        };
         match event {
             MarketEvent::MarketUpdated { .. } => {
                 if let Err(e) = self
@@ -246,7 +295,7 @@ where
                                 order_id = %order.id(),
                                 "route missing first swap for buy order"
                             );
-                            SolveError::NoRouteFound { order_id: order.id().to_string() }
+                            SolveError::no_route_found(order.id())
                         })?
                 };
                 let amount_out = if order.is_sell() {
@@ -255,7 +304,7 @@ where
                             order_id = %order.id(),
                             "route missing swaps for sell order"
                         );
-                        SolveError::NoRouteFound { order_id: order.id().to_string() }
+                        SolveError::no_route_found(order.id())
                     })?;
                     route
                         .swaps()
@@ -299,39 +348,14 @@ where
                 quote
             }
             Err(err) => {
-                let solve_error = match err {
-                    crate::AlgorithmError::NoPath { .. } => {
-                        debug!(
-                            order_id = %order.id(),
-                            error = %err,
-                            "no route found"
-                        );
-                        SolveError::NoRouteFound { order_id: order.id().to_string() }
-                    }
-                    crate::AlgorithmError::Timeout { elapsed_ms } => {
-                        warn!(
-                            order_id = %order.id(),
-                            elapsed_ms,
-                            "solve timeout"
-                        );
-                        SolveError::Timeout { elapsed_ms }
-                    }
-                    _ => {
-                        error!(
-                            order_id = %order.id(),
-                            error = %err,
-                            "algorithm error"
-                        );
-                        SolveError::AlgorithmError(err.to_string())
-                    }
-                };
-                return Err(solve_error);
+                return Err(solve_error_from_algorithm_error(order.id(), order.amount(), err))
             }
         };
 
-        let solve_time_ms = start_time.elapsed().as_millis() as u64;
+        let solve_time = start_time.elapsed();
+        record_solve_duration(&self.pool_name, solve_time);
 
-        Ok(SingleOrderQuote::new(order_quote, solve_time_ms))
+        Ok(SingleOrderQuote::new(order_quote, solve_time.as_millis() as u64))
     }
 
     /// Waits for required derived data to become ready, or until timeout.
@@ -412,7 +436,7 @@ where
     /// # Arguments
     ///
     /// * `event_rx` - Receiver for market events
-    /// * `derived_event_rx` - Receiver for derived data events (pool depths, etc.)
+    /// * `derived_event_rx` - Receiver for derived data events (component depths, etc.)
     /// * `task_rx` - Shared receiver for solve tasks
     /// * `shutdown_rx` - Receiver for shutdown signals
     pub async fn run(
@@ -464,7 +488,7 @@ where
                     }
                 }
 
-                // Process derived data events (pool depths, token prices)
+                // Process derived data events (component depths, token prices)
                 derived_result = derived_event_rx.recv(), if !derived_closed => {
                     match derived_result {
                         Ok(event) => {
@@ -519,7 +543,11 @@ where
                     match task.ok() {
                         Some(task) => {
                             let task_id = task.id();
-                            let _wait_time = task.wait_time();
+                            record_task_pickup_metrics(
+                                &self.pool_name,
+                                task.wait_time(),
+                                task_rx.len(),
+                            );
 
                             // Wait for derived data readiness before solving
                             // Use algorithm timeout as the max wait time
@@ -553,6 +581,49 @@ where
                     }
                 }
             }
+        }
+    }
+}
+
+/// Maps an [`AlgorithmError`](crate::AlgorithmError) to the [`SolveError`] class
+/// reported upstream, logging at a severity matching the failure class.
+///
+/// `amount_in` seeds `InsufficientLiquidity::required`; the algorithm variant
+/// carries no amounts, so `available` is reported as zero (= not reported).
+fn solve_error_from_algorithm_error(
+    order_id: &str,
+    amount_in: &BigUint,
+    err: crate::AlgorithmError,
+) -> SolveError {
+    match err {
+        crate::AlgorithmError::NoPath { reason, .. } => {
+            debug!(order_id = %order_id, error = %err, "no route found");
+            SolveError::no_route_found_with_reason(order_id, reason)
+        }
+        crate::AlgorithmError::Timeout { elapsed_ms } => {
+            warn!(order_id = %order_id, elapsed_ms, "solve timeout");
+            SolveError::Timeout { elapsed_ms }
+        }
+        crate::AlgorithmError::InsufficientLiquidity => {
+            debug!(order_id = %order_id, "insufficient liquidity on all paths");
+            SolveError::insufficient_liquidity(amount_in.clone(), BigUint::ZERO)
+        }
+        crate::AlgorithmError::DataNotFound { kind, id } => {
+            warn!(order_id = %order_id, kind, id = ?id, "required data not found");
+            SolveError::MissingData(match id {
+                Some(id) => format!("{kind}: {id}"),
+                None => kind.to_string(),
+            })
+        }
+        crate::AlgorithmError::SimulationFailed { component_id, error } => {
+            warn!(order_id = %order_id, %component_id, %error, "simulation failed");
+            SolveError::SimulationFailed(format!("{component_id}: {error}"))
+        }
+        crate::AlgorithmError::InvalidConfiguration { .. } |
+        crate::AlgorithmError::ExactOutNotSupported |
+        crate::AlgorithmError::Other(_) => {
+            error!(order_id = %order_id, error = %err, "algorithm error");
+            SolveError::AlgorithmError(err.to_string())
         }
     }
 }
@@ -690,7 +761,8 @@ mod tests {
     async fn test_quote_rejects_invalid_route() {
         let (market, _) = setup_market_weighted(vec![]);
         let derived = DerivedData::new_shared();
-        let mut worker = SolverWorker::new(market, derived, InvalidRouteAlgorithm, 0);
+        let mut worker =
+            SolverWorker::new(market, derived, InvalidRouteAlgorithm, 0, "test_pool".to_string());
 
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -716,7 +788,7 @@ mod tests {
         let derived = DerivedData::new_shared();
 
         let algorithm = MockAlgorithm::new();
-        let worker = SolverWorker::new(market, derived, algorithm, 0);
+        let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Should return immediately since there are no requirements
         let result = worker
@@ -734,7 +806,7 @@ mod tests {
             .allow_stale(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Mark as ready by handling a completion event
         worker
@@ -761,7 +833,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let worker = SolverWorker::new(market, derived, algorithm, 0);
+        let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Should timeout since no events are received
         let result = worker
@@ -787,7 +859,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let worker = SolverWorker::new(market, derived, algorithm, 0);
+        let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Clone the notify handle to simulate the main loop notifying
         let notify = worker.ready_notify.clone();
@@ -819,7 +891,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Clone the notify handle and get a reference to the tracker
         let notify = worker.ready_notify.clone();
@@ -862,7 +934,7 @@ mod tests {
             .allow_stale(TokenGasPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         let notify = worker.ready_notify.clone();
 
@@ -907,7 +979,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Mark the current block and record a failure for spot_prices
         worker
@@ -955,7 +1027,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Mark the current block and record a failure for spot_prices
         worker
@@ -997,7 +1069,7 @@ mod tests {
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
         let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Create channels
         let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
@@ -1073,7 +1145,8 @@ mod tests {
 
         let (market, _) = setup_market_weighted(vec![]);
         let derived = DerivedData::new_shared();
-        let mut worker = SolverWorker::new(market, derived, MockAlgorithm::new(), 0);
+        let mut worker =
+            SolverWorker::new(market, derived, MockAlgorithm::new(), 0, "test_pool".to_string());
 
         let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
         let (derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
@@ -1105,5 +1178,141 @@ mod tests {
             closed_warns, 1,
             "closed channel must be handled once, not spun on ({closed_warns} warns)"
         );
+    }
+
+    #[test]
+    fn no_route_found_with_reason_carries_reason() {
+        use crate::algorithm::NoPathReason;
+        let err = SolveError::no_route_found_with_reason(
+            "order-1",
+            NoPathReason::DestinationTokenNotInGraph,
+        );
+        match err {
+            SolveError::NoRouteFound { order_id, reason } => {
+                assert_eq!(order_id, "order-1");
+                assert_eq!(reason, Some(NoPathReason::DestinationTokenNotInGraph));
+            }
+            other => panic!("expected NoRouteFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_route_found_defaults_to_no_reason() {
+        match SolveError::no_route_found("order-1") {
+            SolveError::NoRouteFound { reason, .. } => assert_eq!(reason, None),
+            other => panic!("expected NoRouteFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_pickup_metrics_recorded() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_task_pickup_metrics("test_pool", std::time::Duration::from_millis(25), 3);
+        });
+
+        let mut wait_seen = false;
+        let mut depth_seen = false;
+        for (key, _unit, _description, value) in snapshotter.snapshot().into_vec() {
+            let key = key.key();
+            let pool_label = key
+                .labels()
+                .find(|label| label.key() == "pool")
+                .map(|label| label.value().to_string());
+            match key.name() {
+                "worker_pool_queue_wait_seconds" => {
+                    assert_eq!(pool_label.as_deref(), Some("test_pool"));
+                    let DebugValue::Histogram(samples) = value else {
+                        panic!("expected histogram, got {value:?}");
+                    };
+                    assert_eq!(samples.len(), 1);
+                    assert!((samples[0].into_inner() - 0.025).abs() < 1e-9);
+                    wait_seen = true;
+                }
+                "worker_pool_queue_depth" => {
+                    assert_eq!(pool_label.as_deref(), Some("test_pool"));
+                    let DebugValue::Gauge(depth) = value else {
+                        panic!("expected gauge, got {value:?}");
+                    };
+                    assert!((depth.into_inner() - 3.0).abs() < f64::EPSILON);
+                    depth_seen = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(wait_seen, "queue wait histogram not recorded");
+        assert!(depth_seen, "queue depth gauge not recorded");
+    }
+
+    #[test]
+    fn solve_duration_metric_recorded() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_solve_duration("test_pool", std::time::Duration::from_millis(120));
+        });
+
+        let mut solve_seen = false;
+        for (key, _unit, _description, value) in snapshotter.snapshot().into_vec() {
+            let key = key.key();
+            if key.name() != "worker_pool_solve_duration_seconds" {
+                continue;
+            }
+            let pool_label = key
+                .labels()
+                .find(|label| label.key() == "pool")
+                .map(|label| label.value().to_string());
+            assert_eq!(pool_label.as_deref(), Some("test_pool"));
+            let DebugValue::Histogram(samples) = value else {
+                panic!("expected histogram, got {value:?}");
+            };
+            assert_eq!(samples.len(), 1);
+            assert!((samples[0].into_inner() - 0.120).abs() < 1e-9);
+            solve_seen = true;
+        }
+        assert!(solve_seen, "solve duration histogram not recorded");
+    }
+
+    #[test]
+    fn test_algorithm_error_maps_data_not_found_to_missing_data() {
+        let err = crate::AlgorithmError::DataNotFound { kind: "gas price", id: None };
+        let mapped = solve_error_from_algorithm_error("o1", &num_bigint::BigUint::from(5u64), err);
+        assert!(matches!(mapped, SolveError::MissingData(_)), "got {mapped:?}");
+    }
+
+    #[test]
+    fn test_algorithm_error_maps_simulation_failed() {
+        let err = crate::AlgorithmError::SimulationFailed {
+            component_id: "pool-1".to_string(),
+            error: "revert".to_string(),
+        };
+        let mapped = solve_error_from_algorithm_error("o1", &num_bigint::BigUint::from(5u64), err);
+        assert!(matches!(mapped, SolveError::SimulationFailed(_)), "got {mapped:?}");
+    }
+
+    #[test]
+    fn test_algorithm_error_maps_insufficient_liquidity() {
+        let err = crate::AlgorithmError::InsufficientLiquidity;
+        let mapped = solve_error_from_algorithm_error("o1", &num_bigint::BigUint::from(5u64), err);
+        assert!(matches!(mapped, SolveError::InsufficientLiquidity { .. }), "got {mapped:?}");
+    }
+
+    #[test]
+    fn test_algorithm_error_other_stays_algorithm_error() {
+        let err = crate::AlgorithmError::Other("boom".to_string());
+        let mapped = solve_error_from_algorithm_error("o1", &num_bigint::BigUint::from(5u64), err);
+        assert!(matches!(mapped, SolveError::AlgorithmError(_)), "got {mapped:?}");
+    }
+
+    #[test]
+    fn test_algorithm_error_timeout_stays_timeout() {
+        let err = crate::AlgorithmError::Timeout { elapsed_ms: 7 };
+        let mapped = solve_error_from_algorithm_error("o1", &num_bigint::BigUint::from(5u64), err);
+        assert!(matches!(mapped, SolveError::Timeout { elapsed_ms: 7 }), "got {mapped:?}");
     }
 }

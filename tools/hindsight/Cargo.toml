@@ -34,6 +34,7 @@ alloy = { workspace = true, features = [
     "provider-debug-api",
     "rpc-types-eth",
     "rpc-types-trace",
+    "network",
 ] }
 
 # HTTP (for RPC URL parsing) + metrics server
@@ -53,6 +54,11 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+
+[dev-dependencies]
+# Test-only route fixtures (resolve::test_support): a throwaway ProtocolComponent's creation
+# timestamp needs a concrete NaiveDateTime.
+chrono = { workspace = true }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

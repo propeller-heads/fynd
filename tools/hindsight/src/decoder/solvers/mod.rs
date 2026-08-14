@@ -1,22 +1,31 @@
-//! Solver-specific calldata knowledge: the routers Fynd competes with.
+//! Solver-specific knowledge: the routers Fynd competes with.
 //!
-//! A module here holds one solver's quirks — the off-chain quote it embeds in calldata
-//! (kyberswap, paraswap) or a matching veto for order shapes that are not same-chain swaps
-//! (lifi's bridge orders). Solver addresses live in the address book's `[solvers]` section.
+//! Solver addresses live in the address book's `[solvers]` section, and for most solvers that
+//! line is all that is needed: matching, attribution, and gas isolation work from the address
+//! alone. A solver whose transactions carry more information than that gets a module here with a
+//! `SolverKnowledge` impl registered in `IMPLEMENTATIONS`: an off-chain quote embedded in
+//! calldata, or a matching veto for order shapes that are not same-chain swaps.
 
 pub(crate) mod attribution;
 pub(crate) mod kyberswap;
 pub(crate) mod lifi;
 pub(crate) mod paraswap;
+pub(crate) mod zeroex;
 
-use alloy::{primitives::U256, rpc::types::Log};
+use std::collections::HashSet;
+
+use alloy::{
+    primitives::{Address, U256},
+    rpc::types::Log,
+};
+
+use crate::decoder::{registry::Registry, transfer_ledger::TransferLedger, veto::Veto};
 
 /// A solver's own off-chain quote for the swap, recovered from calldata.
 ///
 /// This is the number the venue compared against at decision time — what the solver's API
 /// promised — as opposed to the settled amount, which is what execution delivered. The fields
-/// carry no solver name (the record's `solver` column already says who); see
-/// [`embedded_quote`] for which solvers declare one and how.
+/// carry no solver name; the record's `solver` column already says who.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct SolverQuote {
     /// Quoted output in `token_out` native units.
@@ -30,27 +39,114 @@ pub(crate) struct SolverQuote {
     pub timestamp: Option<u64>,
 }
 
-/// The reason a matched transaction must be skipped instead of decoded, if any.
+/// Solver-specific knowledge beyond the address-book entry.
+///
+/// Every method has a default meaning "this solver has nothing to add", so a solver only
+/// implements the capabilities it has; most solvers need no code at all.
+pub(crate) trait SolverKnowledge: Send + Sync {
+    /// The solver's off-chain quote declared in the transaction's calldata, when it embeds one.
+    fn embedded_quote(&self, _input: &[u8], _amount_in: U256) -> Option<SolverQuote> {
+        None
+    }
+
+    /// The veto this solver's logs place on a matched transaction that is not decodable as a
+    /// swap. Checked at match time — before attribution names the solver, and before the
+    /// transaction costs a trace.
+    fn solver_veto(&self, _logs: &[Log]) -> Option<Veto> {
+        None
+    }
+
+    /// The order-flow integrator tag this solver records in its logs, when it exposes one. A
+    /// solver that fronts other apps (`LiFi`'s Diamond) carries the frontend's integrator string in
+    /// its swap event; venue attribution maps that tag to a venue (see
+    /// `crate::decoder::venue_attribution`).
+    fn integrator(&self, _logs: &[Log]) -> Option<String> {
+        None
+    }
+
+    /// The fee recipients this solver's calldata names, for routers that let an integrator take a
+    /// cut of the swap. Only who is paid — `declared_output_fee` reads how much off the ledger.
+    fn fee_recipients(&self, _input: &[u8]) -> Vec<Address> {
+        Vec::new()
+    }
+}
+
+/// The solvers with a `SolverKnowledge` implementation, by address-book name. A solver absent
+/// here needs none — its address-book entry alone is complete.
+const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
+    ("0x", &zeroex::ZeroEx),
+    ("kyberswap", &kyberswap::Kyberswap),
+    ("lifi", &lifi::Lifi),
+    ("paraswap", &paraswap::Paraswap),
+];
+
+/// The veto a solver places on a matched transaction that must be skipped instead of decoded,
+/// if any.
 ///
 /// Some solver routers also settle orders that are not same-chain swaps; decoding those would
-/// fabricate phantom trades, so they are vetoed from their logs before the transaction costs a
-/// trace. Each solver contributes one check here, keeping the matching in `strategy`
-/// solver-agnostic.
-pub(crate) fn match_veto(logs: &[Log]) -> Option<&'static str> {
-    if lifi::started_bridge_order(logs) {
-        return Some("cross-chain bridge order");
+/// record trades that never happened. A solver's veto is consulted only when that solver is
+/// part of the transaction — as its entry point or as a log emitter — so a veto can never
+/// affect another solver's trades.
+pub(crate) fn solver_veto(logs: &[Log], entry_point: Address, registry: &Registry) -> Option<Veto> {
+    for (name, knowledge) in IMPLEMENTATIONS {
+        let present = registry.solver_name(entry_point) == Some(name) ||
+            logs.iter()
+                .any(|log| registry.solver_name(log.address()) == Some(name));
+        if present {
+            if let Some(veto) = knowledge.solver_veto(logs) {
+                return Some(veto);
+            }
+        }
     }
     None
 }
 
+/// The order-flow integrator tag declared in a transaction's logs, from whichever solver records
+/// one. Only a solver that fronts other apps (`LiFi`) returns a tag; the rest default to `None`, so
+/// the first hit is the answer.
+pub(crate) fn integrator(logs: &[Log]) -> Option<String> {
+    IMPLEMENTATIONS
+        .iter()
+        .find_map(|(_, knowledge)| knowledge.integrator(logs))
+}
+
 /// The solver's off-chain quote declared in the transaction's calldata, when the attributed
-/// solver is known to embed one. Adding a solver is one match arm.
+/// solver is known to embed one.
 pub(crate) fn embedded_quote(solver: &str, input: &[u8], amount_in: U256) -> Option<SolverQuote> {
-    match solver {
-        "kyberswap" => kyberswap::embedded_quote(input),
-        "paraswap" => paraswap::embedded_quote(input, amount_in),
-        _ => None,
-    }
+    let (_, knowledge) = IMPLEMENTATIONS
+        .iter()
+        .find(|(name, _)| *name == solver)?;
+    knowledge.embedded_quote(input, amount_in)
+}
+
+/// The output-token fee the solver's declared fee recipients were paid, when its calldata names
+/// any and they received some of the bought token.
+///
+/// The calldata says who is paid; the ledger says how much they got. Taking the amount from the
+/// ledger keeps this clear of each router's fee encoding — `KyberSwap` declares a bps rate, not an
+/// amount — and of whether the router paid the cut in the swap token or unwrapped it first.
+///
+/// A frontend's cut is not visible to the address book unless its wallet is registered, so without
+/// this every such trade reports the settled output short by exactly the fee, and Fynd — re-solved
+/// gross — appears to win by that much.
+pub(crate) fn declared_output_fee(
+    solver: &str,
+    input: &[u8],
+    ledger: &TransferLedger,
+    token_out: Address,
+) -> Option<U256> {
+    let (_, knowledge) = IMPLEMENTATIONS
+        .iter()
+        .find(|(name, _)| *name == solver)?;
+    let recipients: HashSet<Address> = knowledge
+        .fee_recipients(input)
+        .into_iter()
+        .collect();
+    ledger
+        .received_by(&recipients)
+        .get(&token_out)
+        .copied()
+        .filter(|fee| !fee.is_zero())
 }
 
 /// Whether a quoted output is in the same units as the settled one.
@@ -75,24 +171,58 @@ mod tests {
     };
 
     use super::*;
-    use crate::decoder::test_utils::{addr, make_transfer_log};
+    use crate::decoder::{
+        registry::Registry,
+        test_utils::{addr, make_transfer_log},
+    };
 
     #[test]
-    fn match_veto_flags_bridge_orders_only() {
+    fn test_implementation_names_against_the_address_book() {
+        // A typo'd name here would compile and silently never match, so the registration list
+        // gets the same validation as venue bindings: every name must exist in the book.
+        let registry = Registry::ethereum();
+        for (name, _) in IMPLEMENTATIONS {
+            assert!(
+                registry.is_solver_name(name),
+                "IMPLEMENTATIONS entry '{name}' is not a solver name in the address book"
+            );
+        }
+    }
+
+    /// A bridge-shaped log emitted by the registered `LiFi` router.
+    fn bridge_log(emitter: Address) -> Log {
         let primitive = PrimitiveLog::new_unchecked(
-            addr(70),
+            emitter,
             vec![lifi::LiFiTransferStarted::SIGNATURE_HASH],
             Bytes::default(),
         );
-        let bridge_logs = vec![Log { inner: primitive, ..Default::default() }];
-        assert_eq!(match_veto(&bridge_logs), Some("cross-chain bridge order"));
-
-        let swap_logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1000))];
-        assert_eq!(match_veto(&swap_logs), None);
+        Log { inner: primitive, ..Default::default() }
     }
 
     #[test]
-    fn plausible_quote_accepts_slippage_and_rejects_unit_mismatch() {
+    fn test_solver_veto_bridge_orders() {
+        let registry = Registry::ethereum();
+        let lifi_router: Address = "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae"
+            .parse()
+            .unwrap();
+        let bridge_logs = vec![bridge_log(lifi_router)];
+        assert_eq!(solver_veto(&bridge_logs, addr(1), &registry), Some(Veto::BridgeOrder));
+
+        let swap_logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1000))];
+        assert_eq!(solver_veto(&swap_logs, lifi_router, &registry), None);
+    }
+
+    #[test]
+    fn test_solver_veto_scoped_to_the_solver_present() {
+        // The same bridge-shaped log from an address that is not the LiFi router: LiFi is not
+        // part of the transaction, so its veto is never consulted.
+        let registry = Registry::ethereum();
+        let bridge_logs = vec![bridge_log(addr(70))];
+        assert_eq!(solver_veto(&bridge_logs, addr(1), &registry), None);
+    }
+
+    #[test]
+    fn test_plausible_quote_slippage_and_unit_mismatch() {
         let quote = |amount: u128| SolverQuote {
             amount_out: U256::from(amount),
             source: None,
@@ -109,7 +239,53 @@ mod tests {
     }
 
     #[test]
-    fn embedded_quote_dispatches_by_solver() {
+    fn test_declared_output_fee_reads_the_integrator_cut() {
+        // Base tx 0x78c70ca6…: KyberSwap's calldata names a frontend's wallet, which took 10% of
+        // the ETH the trader bought. Without backing it out the settled output is 10% short and
+        // Fynd, re-solved gross, wins by 1111 bps on every one of that frontend's trades.
+        let collector = addr(41);
+        let trader = addr(1);
+        let router = addr(50);
+        let token_out = Address::ZERO;
+        let native = [
+            (router, trader, U256::from(45_157_884_343_657_075u64)),
+            (router, collector, U256::from(5_017_542_704_850_786u64)),
+        ];
+        let ledger = TransferLedger::from_transaction(&[], &native);
+        let input = kyberswap::swap_calldata(vec![collector]);
+
+        assert_eq!(
+            declared_output_fee("kyberswap", &input, &ledger, token_out),
+            Some(U256::from(5_017_542_704_850_786u64))
+        );
+        // Dispatched on the attributed solver: the same calldata under another solver's name
+        // declares nothing.
+        assert_eq!(declared_output_fee("1inch", &input, &ledger, token_out), None);
+        // A swap that names no fee recipient has no fee to back out.
+        assert_eq!(
+            declared_output_fee(
+                "kyberswap",
+                &kyberswap::swap_calldata(Vec::new()),
+                &ledger,
+                token_out
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_declared_output_fee_ignores_other_tokens() {
+        // The recipient was paid, but in a token the trade did not buy — that is not this swap's
+        // output fee.
+        let collector = addr(41);
+        let logs = vec![make_transfer_log(addr(10), addr(50), collector, U256::from(85))];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let input = kyberswap::swap_calldata(vec![collector]);
+        assert_eq!(declared_output_fee("kyberswap", &input, &ledger, addr(11)), None);
+    }
+
+    #[test]
+    fn test_embedded_quote_dispatch() {
         // A ParaSwap-shaped word triple only parses when the attributed solver is paraswap;
         // an unlisted solver never yields a quote from the same bytes.
         let amount_in = U256::from(171_521_496u64);

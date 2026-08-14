@@ -1,7 +1,7 @@
-//! Pool depth computation.
+//! Component depth computation.
 //!
-//! Computes liquidity depths for all pools using `query_pool_swap`, falling back to
-//! the generic Brent solver from tycho-simulation when the pool doesn't implement it natively.
+//! Computes liquidity depths for all components using `query_pool_swap`, falling back to
+//! the generic Brent solver from tycho-simulation when the component doesn't implement it natively.
 //! Depth represents the maximum input amount before reaching the configured slippage
 //! threshold from the spot price.
 //!
@@ -25,6 +25,7 @@ use tycho_simulation::{
 };
 
 use crate::{
+    algorithm::sim_guard::GuardedProtocolSim,
     derived::{
         computation::{
             ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
@@ -34,30 +35,30 @@ use crate::{
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
-        types::PoolDepths,
+        types::ComponentDepths,
     },
     feed::market_data::{MarketData, MarketState},
     types::ComponentId,
 };
 
-/// Computes pool depths for all pools in all directions.
+/// Computes component depths for all components in all directions.
 ///
-/// For each pool and token pair, uses `query_pool_swap` (with Brent solver fallback)
+/// For each component and token pair, uses `query_pool_swap` (with Brent solver fallback)
 /// to find the maximum input amount that results in at most the configured slippage
 /// from spot price.
 #[derive(Debug)]
-pub struct PoolDepthComputation {
+pub struct ComponentDepthComputation {
     slippage_threshold: f64,
 }
 
-impl Default for PoolDepthComputation {
+impl Default for ComponentDepthComputation {
     fn default() -> Self {
         Self { slippage_threshold: 0.01 }
     }
 }
 
-impl PoolDepthComputation {
-    /// Creates a new PoolDepthComputation with the given slippage threshold.
+impl ComponentDepthComputation {
+    /// Creates a new ComponentDepthComputation with the given slippage threshold.
     ///
     /// # Arguments
     /// * `slippage_threshold` - Value between 0 and 1 exclusive (e.g., 0.01 for 1%)
@@ -75,9 +76,11 @@ impl PoolDepthComputation {
 }
 
 #[async_trait]
-impl DerivedComputation for PoolDepthComputation {
-    type Output = PoolDepths;
+impl DerivedComputation for ComponentDepthComputation {
+    type Output = ComponentDepths;
 
+    // Legacy ID: this string is the `computation` label value on Prometheus metrics
+    // (derived_computation_* series), so renaming it would break existing dashboards.
     const ID: ComputationId = "pool_depths";
 
     fn requirements(&self) -> ComputationRequirements {
@@ -90,10 +93,10 @@ impl DerivedComputation for PoolDepthComputation {
         block: u64,
         is_full_recompute: bool,
     ) {
-        store.set_pool_depths(output.data, output.failed_items, block, is_full_recompute);
+        store.set_component_depths(output.data, output.failed_items, block, is_full_recompute);
     }
 
-    #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_pool_depths))]
+    #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_component_depths))]
     async fn compute(
         &self,
         market: &MarketData,
@@ -101,7 +104,7 @@ impl DerivedComputation for PoolDepthComputation {
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
         // Read derived data from store
-        let (spot_prices, mut pool_depths) = {
+        let (spot_prices, mut component_depths) = {
             let store_guard = store.read().await;
             // Get precomputed spot prices (required dependency).
             let spot_prices = store_guard
@@ -109,20 +112,20 @@ impl DerivedComputation for PoolDepthComputation {
                 .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))?
                 .clone();
             // Start with existing depths (or empty for full recompute).
-            let pool_depths = if changed.is_full_recompute {
-                PoolDepths::new()
+            let component_depths = if changed.is_full_recompute {
+                ComponentDepths::new()
             } else {
                 store_guard
-                    .pool_depths()
+                    .component_depths()
                     .cloned()
                     .unwrap_or_default()
             };
-            (spot_prices, pool_depths)
+            (spot_prices, component_depths)
         };
 
-        // Remove pool depths for removed components.
+        // Remove component depths for removed components.
         for component_id in &changed.removed {
-            pool_depths.retain(|key, _| &key.0 != component_id);
+            component_depths.retain(|key, _| &key.0 != component_id);
         }
 
         // Snapshot market data under brief lock.
@@ -169,8 +172,8 @@ impl DerivedComputation for PoolDepthComputation {
             };
 
             let Some(sim_state) = snapshot.get_simulation_state(component_id) else {
-                warn!(component_id, "missing simulation state, skipping pool");
-                pool_depths.retain(|key, _| &key.0 != component_id);
+                warn!(component_id, "missing simulation state, skipping component");
+                component_depths.retain(|key, _| &key.0 != component_id);
                 for perm in token_addresses.iter().permutations(2) {
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
@@ -180,13 +183,13 @@ impl DerivedComputation for PoolDepthComputation {
                 continue;
             };
 
-            let pool_tokens: Result<Vec<_>, _> = token_addresses
+            let component_tokens: Result<Vec<_>, _> = token_addresses
                 .iter()
                 .map(|addr| tokens.get(addr).ok_or(addr))
                 .collect();
-            let Ok(pool_tokens) = pool_tokens else {
-                warn!(component_id, "missing token metadata, skipping pool");
-                pool_depths.retain(|key, _| &key.0 != component_id);
+            let Ok(component_tokens) = component_tokens else {
+                warn!(component_id, "missing token metadata, skipping component");
+                component_depths.retain(|key, _| &key.0 != component_id);
                 for perm in token_addresses.iter().permutations(2) {
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
@@ -196,7 +199,7 @@ impl DerivedComputation for PoolDepthComputation {
                 continue;
             };
 
-            for perm in pool_tokens.iter().permutations(2) {
+            for perm in component_tokens.iter().permutations(2) {
                 let (token_in, token_out) = (*perm[0], *perm[1]);
                 let key =
                     (component_id.clone(), token_in.address.clone(), token_out.address.clone());
@@ -209,7 +212,7 @@ impl DerivedComputation for PoolDepthComputation {
                         token_out = %token_out.address,
                         "missing spot price, skipping pair"
                     );
-                    pool_depths.remove(&key);
+                    component_depths.remove(&key);
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
                         error: FailedItemError::MissingSpotPrice,
@@ -234,7 +237,7 @@ impl DerivedComputation for PoolDepthComputation {
                         "extreme decimal mismatch ({}→{}), skipping pair",
                         token_in.decimals, token_out.decimals
                     );
-                    pool_depths.remove(&key);
+                    component_depths.remove(&key);
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
                         error: FailedItemError::ExtremeDecimalMismatch {
@@ -256,7 +259,7 @@ impl DerivedComputation for PoolDepthComputation {
                         spot_price,
                         "spot price too small to compute depth, skipping pair"
                     );
-                    pool_depths.remove(&key);
+                    component_depths.remove(&key);
                     failed_items.push(FailedItem {
                         key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
                         error: FailedItemError::SpotPriceTooSmall(*spot_price),
@@ -301,13 +304,15 @@ impl DerivedComputation for PoolDepthComputation {
 
                 match depth_result {
                     Ok(depth) => {
-                        pool_depths.insert(key, depth);
+                        component_depths.insert(key, depth);
                         succeeded += 1;
                     }
                     Err(e) => {
-                        // Diagnostic: probe with 1 unit to understand why depth search failed
+                        // Diagnostic: probe with 1 unit to understand why depth search failed.
+                        // Guarded so a panicking component degrades to a diagnostic string instead
+                        // of killing the computation worker.
                         let probe_info = sim_state
-                            .get_amount_out(BigUint::from(1u32), token_in, token_out)
+                            .get_amount_out_guarded(BigUint::from(1u32), token_in, token_out)
                             .map(|r| format!("amount_out={}", r.amount))
                             .unwrap_or_else(|e| format!("sim_error={e}"));
                         let limits_info = sim_state
@@ -323,9 +328,9 @@ impl DerivedComputation for PoolDepthComputation {
                             probe_info,
                             limits_info,
                             error = %e,
-                            "pool depth failed, skipping pair"
+                            "component depth failed, skipping pair"
                         );
-                        pool_depths.remove(&key);
+                        component_depths.remove(&key);
                         failed_items.push(FailedItem {
                             key: format!(
                                 "{}/{}/{}",
@@ -343,12 +348,12 @@ impl DerivedComputation for PoolDepthComputation {
         debug!(
             succeeded,
             failed = failed_items.len(),
-            total = pool_depths.len(),
-            "pool depth computation complete"
+            total = component_depths.len(),
+            "component depth computation complete"
         );
-        Span::current().record("updated_pool_depths", pool_depths.len());
+        Span::current().record("updated_component_depths", component_depths.len());
 
-        Ok(ComputationOutput::with_failures(pool_depths, failed_items))
+        Ok(ComputationOutput::with_failures(component_depths, failed_items))
     }
 }
 
@@ -367,19 +372,19 @@ mod tests {
         derived::{
             computation::FailedItemError,
             store::DerivedData,
-            types::{PoolDepthKey, SpotPrices},
+            types::{ComponentDepthKey, SpotPrices},
         },
         feed::market_data::MarketData,
     };
 
     #[test]
     fn computation_id() {
-        assert_eq!(PoolDepthComputation::ID, "pool_depths");
+        assert_eq!(ComponentDepthComputation::ID, "pool_depths");
     }
 
     #[test]
     fn default_slippage_is_one_percent() {
-        let comp = PoolDepthComputation::default();
+        let comp = ComponentDepthComputation::default();
         assert!((comp.slippage_threshold - 0.01).abs() < f64::EPSILON);
     }
 
@@ -389,7 +394,7 @@ mod tests {
     #[case(0.5)]
     #[case(0.99)]
     fn new_with_valid_slippage(#[case] threshold: f64) {
-        let comp = PoolDepthComputation::new(threshold).unwrap();
+        let comp = ComponentDepthComputation::new(threshold).unwrap();
         assert!((comp.slippage_threshold - threshold).abs() < f64::EPSILON);
     }
 
@@ -401,7 +406,7 @@ mod tests {
     #[case(f64::NAN, "NaN")]
     #[case(f64::INFINITY, "infinity")]
     fn new_with_invalid_slippage(#[case] threshold: f64, #[case] _desc: &str) {
-        let result = PoolDepthComputation::new(threshold);
+        let result = ComponentDepthComputation::new(threshold);
         assert!(
             matches!(result, Err(ComputationError::InvalidConfiguration(_))),
             "expected InvalidConfiguration for {_desc}, got {result:?}"
@@ -418,7 +423,7 @@ mod tests {
             .set_spot_prices(SpotPrices::new(), vec![], 0, true);
         let changed = ChangedComponents::default();
 
-        let output = PoolDepthComputation::default()
+        let output = ComponentDepthComputation::default()
             .compute(&market, &derived, &changed)
             .await
             .unwrap();
@@ -432,11 +437,11 @@ mod tests {
         let usdc = token(1, "USDC");
 
         let (market, _) =
-            setup_market_weighted(vec![("pool", &eth, &usdc, MockProtocolSim::new(2000.0))]);
+            setup_market_weighted(vec![("component", &eth, &usdc, MockProtocolSim::new(2000.0))]);
         let derived = DerivedData::new_shared(); // No spot prices
         let changed = ChangedComponents::default();
 
-        let result = PoolDepthComputation::default()
+        let result = ComponentDepthComputation::default()
             .compute(&market, &derived, &changed)
             .await;
 
@@ -463,7 +468,7 @@ mod tests {
         let usdc = token_with_decimals(1, "USDC", decimals_out);
 
         let (market, _) = setup_market_weighted(vec![(
-            "pool",
+            "component",
             &eth,
             &usdc,
             MockProtocolSim::new(spot_price)
@@ -474,7 +479,7 @@ mod tests {
         let spot_comp = SpotPriceComputation::new();
         let changed = ChangedComponents {
             added: std::collections::HashMap::from([(
-                "pool".to_string(),
+                "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
             removed: vec![],
@@ -490,19 +495,21 @@ mod tests {
             .unwrap()
             .set_spot_prices(spot_output.data, vec![], 0, true);
 
-        let pool_depths_output = PoolDepthComputation::default()
+        let component_depths_output = ComponentDepthComputation::default()
             .compute(&market, &derived, &changed)
             .await
             .expect("computation should succeed");
-        let pool_depths = pool_depths_output.data;
+        let component_depths = component_depths_output.data;
 
-        assert_eq!(pool_depths.len(), 2, "should have depths for both directions");
+        assert_eq!(component_depths.len(), 2, "should have depths for both directions");
 
-        let key_eth_usdc: PoolDepthKey = ("pool".into(), eth.address.clone(), usdc.address.clone());
-        let key_usdc_eth: PoolDepthKey = ("pool".into(), usdc.address.clone(), eth.address.clone());
+        let key_eth_usdc: ComponentDepthKey =
+            ("component".into(), eth.address.clone(), usdc.address.clone());
+        let key_usdc_eth: ComponentDepthKey =
+            ("component".into(), usdc.address.clone(), eth.address.clone());
 
-        assert!(pool_depths.contains_key(&key_eth_usdc), "should have depth for ETH→USDC");
-        assert!(pool_depths.contains_key(&key_usdc_eth), "should have depth for USDC→ETH");
+        assert!(component_depths.contains_key(&key_eth_usdc), "should have depth for ETH→USDC");
+        assert!(component_depths.contains_key(&key_usdc_eth), "should have depth for USDC→ETH");
 
         let expected_depth = |sell_token: &Token, buy_token: &Token| -> BigUint {
             let effective_price =
@@ -516,12 +523,16 @@ mod tests {
             }
         };
         assert_eq!(
-            pool_depths.get(&key_eth_usdc).unwrap(),
+            component_depths
+                .get(&key_eth_usdc)
+                .unwrap(),
             &expected_depth(&eth, &usdc),
             "ETH→USDC depth"
         );
         assert_eq!(
-            pool_depths.get(&key_usdc_eth).unwrap(),
+            component_depths
+                .get(&key_usdc_eth)
+                .unwrap(),
             &expected_depth(&usdc, &eth),
             "USDC→ETH depth"
         );
@@ -609,22 +620,22 @@ mod tests {
         );
     }
 
-    /// Exercises the Brent solver fallback path with realistic UniV2 pool states to verify
+    /// Exercises the Brent solver fallback path with realistic UniV2 component states to verify
     /// it produces sensible depth values. This validates that the Price construction
     /// approach in compute() is correct across a range of real-world token pairs.
     ///
-    /// Three pools covering the key decimal configurations encountered in production:
+    /// Three components covering the key decimal configurations encountered in production:
     ///   - WETH/USDC: 18/6 decimals, ~$2000 price, ~$10M liquidity
     ///   - WETH/WBTC: 18/8 decimals, ~15 price, ~$5M liquidity
     ///   - USDC/USDT: 6/6 decimals, ~1 price, ~$50M liquidity
     #[test]
-    fn test_brent_solver_with_realistic_pools() {
+    fn test_brent_solver_with_realistic_components() {
         use alloy::primitives::U256;
         use tycho_simulation::evm::{
             protocol::uniswap_v2::state::UniswapV2State, query_pool_swap::query_pool_swap,
         };
 
-        struct PoolCase {
+        struct ComponentCase {
             name: &'static str,
             token_in: tycho_simulation::tycho_core::models::token::Token,
             token_out: tycho_simulation::tycho_core::models::token::Token,
@@ -636,21 +647,21 @@ mod tests {
         // WETH reserve ~333 ETH, WBTC reserve ~5000 WBTC  → ~15 WBTC/WETH, ~$5M TVL
         // USDC reserve ~25M, USDT reserve ~25M            → ~1:1, ~$50M TVL
         let cases = vec![
-            PoolCase {
+            ComponentCase {
                 name: "WETH(18)/USDC(6)",
                 token_in: token_with_decimals(0x01, "WETH", 18),
                 token_out: token_with_decimals(0x02, "USDC", 6),
                 reserve_in_human: 5_000,
                 reserve_out_human: 10_000_000,
             },
-            PoolCase {
+            ComponentCase {
                 name: "WETH(18)/WBTC(8)",
                 token_in: token_with_decimals(0x01, "WETH", 18),
                 token_out: token_with_decimals(0x02, "WBTC", 8),
                 reserve_in_human: 5_000,
                 reserve_out_human: 333,
             },
-            PoolCase {
+            ComponentCase {
                 name: "USDC(6)/USDT(6)",
                 token_in: token_with_decimals(0x01, "USDC", 6),
                 token_out: token_with_decimals(0x02, "USDT", 6),
@@ -751,7 +762,7 @@ mod tests {
         let usdc = token(0x02, "USDC");
 
         let (market, _) = setup_market_weighted(vec![(
-            "pool",
+            "component",
             &eth,
             &usdc,
             MockProtocolSim::new(2000.0)
@@ -762,7 +773,7 @@ mod tests {
 
         // Provide spot price for only one direction so the other becomes a FailedItem
         let mut partial_spot = SpotPrices::new();
-        let key_eth_usdc = ("pool".to_string(), eth.address.clone(), usdc.address.clone());
+        let key_eth_usdc = ("component".to_string(), eth.address.clone(), usdc.address.clone());
         partial_spot.insert(key_eth_usdc, 2000.0);
         derived
             .try_write()
@@ -771,7 +782,7 @@ mod tests {
 
         let changed = ChangedComponents {
             added: std::collections::HashMap::from([(
-                "pool".to_string(),
+                "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
             removed: vec![],
@@ -779,7 +790,7 @@ mod tests {
             is_full_recompute: true,
         };
 
-        let output = PoolDepthComputation::default()
+        let output = ComponentDepthComputation::default()
             .compute(&market, &derived, &changed)
             .await
             .expect("should succeed with partial results");
@@ -787,11 +798,12 @@ mod tests {
         assert!(output.has_failures(), "missing USDC→ETH spot price should produce a failed item");
 
         // ETH→USDC direction should succeed
-        let key_eth_usdc: PoolDepthKey = ("pool".into(), eth.address.clone(), usdc.address.clone());
+        let key_eth_usdc: ComponentDepthKey =
+            ("component".into(), eth.address.clone(), usdc.address.clone());
         assert!(output.data.contains_key(&key_eth_usdc), "ETH→USDC depth should be present");
 
         // USDC→ETH direction should be in failed_items
-        let usdc_eth_key = format!("pool/{}/{}", usdc.address, eth.address);
+        let usdc_eth_key = format!("component/{}/{}", usdc.address, eth.address);
         assert!(
             output
                 .failed_items
@@ -817,7 +829,7 @@ mod tests {
 
         let changed = ChangedComponents {
             added: std::collections::HashMap::from([(
-                "phantom_pool".to_string(),
+                "phantom_component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
             removed: vec![],
@@ -825,15 +837,15 @@ mod tests {
             is_full_recompute: false,
         };
 
-        let output = PoolDepthComputation::default()
+        let output = ComponentDepthComputation::default()
             .compute(&market, &derived, &changed)
             .await
             .expect("should succeed with partial results");
 
         assert!(output.has_failures());
 
-        let eth_usdc_key = format!("phantom_pool/{}/{}", eth.address, usdc.address);
-        let usdc_eth_key = format!("phantom_pool/{}/{}", usdc.address, eth.address);
+        let eth_usdc_key = format!("phantom_component/{}/{}", eth.address, usdc.address);
+        let usdc_eth_key = format!("phantom_component/{}/{}", usdc.address, eth.address);
         assert!(
             output
                 .failed_items
@@ -853,14 +865,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compute_partial_failure_pool_depth_computation() {
+    async fn test_compute_partial_failure_component_depth_computation() {
         // Without .with_tokens(), get_limits doesn't scale by decimals,
         // but get_amount_out does — causing a liquidity overflow on swap.
         let token_in = token_with_decimals(0x01, "A", 6);
         let token_out = token_with_decimals(0x02, "B", 18);
 
         let (market, _) = setup_market_weighted(vec![(
-            "pool",
+            "component",
             &token_in,
             &token_out,
             MockProtocolSim::new(1.0).with_liquidity(100),
@@ -869,7 +881,7 @@ mod tests {
 
         let changed = ChangedComponents {
             added: std::collections::HashMap::from([(
-                "pool".to_string(),
+                "component".to_string(),
                 vec![token_in.address.clone(), token_out.address.clone()],
             )]),
             removed: vec![],
@@ -886,7 +898,7 @@ mod tests {
             .unwrap()
             .set_spot_prices(spot_output.data, vec![], 0, true);
 
-        let output = PoolDepthComputation::default()
+        let output = ComponentDepthComputation::default()
             .compute(&market, &derived, &changed)
             .await
             .expect("should succeed with partial results");
@@ -899,7 +911,7 @@ mod tests {
             output
                 .failed_items
                 .iter()
-                .any(|item| item.key.starts_with("pool/") &&
+                .any(|item| item.key.starts_with("component/") &&
                     matches!(&item.error, FailedItemError::SimulationFailed(_))),
             "should have ComputationFailed failure, got: {:?}",
             output.failed_items

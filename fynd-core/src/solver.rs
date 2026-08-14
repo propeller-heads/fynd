@@ -35,6 +35,7 @@ use crate::{
         events::{MarketEvent, MarketEventHandler},
         gas::GasPriceFetcher,
         market_data::MarketData,
+        metrics_sampler::MetricsSampler,
         tycho_feed::TychoFeed,
         TychoFeedConfig,
     },
@@ -47,7 +48,10 @@ use crate::{
         pool::{WorkerPool, WorkerPoolBuilder},
         registry::UnknownAlgorithmError,
     },
-    worker_pool_router::{config::WorkerPoolRouterConfig, SolverPoolHandle, WorkerPoolRouter},
+    worker_pool_router::{
+        config::WorkerPoolRouterConfig, ExclusiveAccess, LiquidityScope, SolverPoolHandle,
+        WorkerPoolRouter,
+    },
     Algorithm, Quote, QuoteRequest, SolveError,
 };
 
@@ -63,10 +67,13 @@ pub mod defaults {
     pub const MIN_TOKEN_QUALITY: i32 = 100;
     /// Maximum age (in days) of trading history required for a token to be considered liquid.
     pub const TRADED_N_DAYS_AGO: u64 = 3;
-    /// Multiplier applied to a pool's TVL when estimating available liquidity.
+    /// Multiplier applied to a component's (liquidity pool's) TVL when estimating available
+    /// liquidity.
     pub const TVL_BUFFER_RATIO: f64 = 1.1;
     /// How often the gas price is refreshed from the RPC node.
     pub const GAS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+    /// How often per-protocol market metrics are sampled and exported.
+    pub const METRICS_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
     /// How often router fees are refreshed from the on-chain FeeCalculator contract.
     pub const ROUTER_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
     /// Delay before reconnecting to the Tycho feed after a disconnect.
@@ -80,7 +87,7 @@ pub mod defaults {
     pub const POOL_MIN_HOPS: usize = 1;
     /// Maximum number of hops allowed in a route.
     pub const POOL_MAX_HOPS: usize = 3;
-    /// Per-pool solve timeout in milliseconds.
+    /// Per-worker-pool solve timeout in milliseconds.
     pub const POOL_TIMEOUT_MS: u64 = 100;
 }
 
@@ -125,16 +132,16 @@ fn parse_connector_tokens(
     Ok(Some(set))
 }
 
-/// Per-pool configuration for [`FyndBuilder::add_pool`].
+/// Configuration for one worker pool, used by [`FyndBuilder::add_pool`].
 #[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolConfig {
-    /// Algorithm name for this pool (e.g., `"most_liquid"`).
+    /// Algorithm name for this worker pool (e.g., `"most_liquid"`).
     algorithm: String,
-    /// Number of worker threads for this pool.
+    /// Number of worker threads for this worker pool.
     #[serde(default = "num_cpus::get")]
     num_workers: usize,
-    /// Task queue capacity for this pool.
+    /// Task queue capacity for this worker pool.
     #[serde(default = "default_task_queue_capacity")]
     task_queue_capacity: usize,
     /// Minimum hops to search (must be >= 1).
@@ -153,10 +160,14 @@ pub struct PoolConfig {
     /// Absent = no restriction. Typically 3–10 entries (e.g. WETH, USDC, USDT, DAI).
     #[serde(default)]
     connector_tokens: Option<Vec<String>>,
+    /// Which liquidity this worker pool routes through.
+    #[serde(default)]
+    liquidity_scope: Option<LiquidityScope>,
 }
 
 impl PoolConfig {
-    /// Creates a new pool config with the given algorithm name and defaults for all other fields.
+    /// Creates a new worker pool config with the given algorithm name and defaults for all other
+    /// fields.
     pub fn new(algorithm: impl Into<String>) -> Self {
         Self {
             algorithm: algorithm.into(),
@@ -167,12 +178,24 @@ impl PoolConfig {
             timeout_ms: defaults::POOL_TIMEOUT_MS,
             max_routes: None,
             connector_tokens: None,
+            liquidity_scope: None,
         }
     }
 
     /// Returns the algorithm name.
     pub fn algorithm(&self) -> &str {
         &self.algorithm
+    }
+
+    /// Returns the worker pool's liquidity scope.
+    pub fn liquidity_scope(&self) -> Option<LiquidityScope> {
+        self.liquidity_scope
+    }
+
+    /// Sets the worker pool's liquidity scope.
+    pub fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
+        self.liquidity_scope = Some(scope);
+        self
     }
 
     /// Returns the number of worker threads.
@@ -280,7 +303,7 @@ pub enum SolverBuildError {
     /// The router fee fetcher could not be created (e.g. malformed RPC URL).
     #[error("failed to create router fee fetcher: {0}")]
     RouterFeeFetcher(String),
-    /// A pool referenced an algorithm name that is not registered.
+    /// A worker pool referenced an algorithm name that is not registered.
     #[error(transparent)]
     UnknownAlgorithm(#[from] UnknownAlgorithmError),
     /// No native gas token is defined for the requested chain.
@@ -289,6 +312,14 @@ pub enum SolverBuildError {
     /// [`FyndBuilder::build`] was called without configuring any worker pools.
     #[error("no worker pools configured")]
     NoPools,
+    /// Every worker pool is `liquidity_scope = "include_exclusive"`, so a request without the
+    /// exclusive access would be served by no worker pool at all. At least one worker
+    /// pool must route public liquidity.
+    #[error(
+        "every worker pool sets liquidity_scope = \"include_exclusive\"; requests without \
+         exclusive access would be served by no pool. Configure at least one public_only pool"
+    )]
+    NoPublicPool,
     /// A recorded update failed to replay through the feed.
     #[cfg(feature = "test-utils")]
     #[error("replay failed: {0}")]
@@ -310,7 +341,7 @@ pub enum SolverBuildError {
     StepControllerChannelClosed,
 }
 
-/// Internal pool entry — either a built-in algorithm (by name) or a custom one.
+/// Internal worker pool entry — either a built-in algorithm (by name) or a custom one.
 enum PoolEntry {
     BuiltIn {
         name: String,
@@ -322,11 +353,22 @@ enum PoolEntry {
         timeout_ms: u64,
         max_routes: Option<usize>,
         connector_tokens: Option<HashSet<Address>>,
+        liquidity_scope: Option<LiquidityScope>,
     },
     Custom(CustomPoolEntry),
 }
 
-/// Pool entry backed by a custom [`Algorithm`] implementation.
+impl PoolEntry {
+    /// Returns the configured liquidity scope for this worker pool.
+    fn liquidity_scope(&self) -> Option<LiquidityScope> {
+        match self {
+            PoolEntry::BuiltIn { liquidity_scope, .. } => *liquidity_scope,
+            PoolEntry::Custom(custom) => custom.liquidity_scope,
+        }
+    }
+}
+
+/// Worker pool entry backed by a custom [`Algorithm`] implementation.
 struct CustomPoolEntry {
     name: String,
     num_workers: usize,
@@ -335,6 +377,7 @@ struct CustomPoolEntry {
     max_hops: usize,
     timeout_ms: u64,
     max_routes: Option<usize>,
+    liquidity_scope: Option<LiquidityScope>,
     /// Applies the custom algorithm to a `WorkerPoolBuilder`.
     configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
 }
@@ -344,7 +387,7 @@ struct CustomPoolEntry {
 struct BuiltComponents {
     tycho_feed: TychoFeed,
     gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
-    router_fee_fetcher: RouterFeeFetcher,
+    router_fee_fetcher: Option<RouterFeeFetcher>,
     computation_manager: ComputationManager,
     computation_event_rx: broadcast::Receiver<MarketEvent>,
     computation_shutdown_tx: broadcast::Sender<()>,
@@ -355,7 +398,7 @@ struct BuiltComponents {
     derived_data: SharedDerivedDataRef,
     router_fees: SharedRouterFees,
     chain: Chain,
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
     market_event_tx: broadcast::Sender<MarketEvent>,
 }
@@ -453,7 +496,7 @@ impl FyndBuilder {
         self
     }
 
-    /// Filters out pools whose last trade is older than `days` days (default: 3).
+    /// Filters out components whose last trade is older than `days` days (default: 3).
     pub fn traded_n_days_ago(mut self, days: u64) -> Self {
         self.traded_n_days_ago = days;
         self
@@ -485,7 +528,7 @@ impl FyndBuilder {
 
     /// Enables partial block (flashblock) updates from the Tycho stream (default: `false`).
     ///
-    /// When enabled, the stream delivers pool state updates mid-block rather than only at
+    /// When enabled, the stream delivers component state updates mid-block rather than only at
     /// finalization, reducing latency. Only supported for on-chain protocols; RFQ streams are
     /// unaffected.
     pub fn partial_blocks(mut self, enabled: bool) -> Self {
@@ -511,7 +554,7 @@ impl FyndBuilder {
         self
     }
 
-    /// Shorthand: adds a single pool named `"default"` using a built-in algorithm by name.
+    /// Shorthand: adds a single worker pool named `"default"` using a built-in algorithm by name.
     pub fn algorithm(mut self, algorithm: impl Into<String>) -> Self {
         self.pools.push(PoolEntry::BuiltIn {
             name: "default".to_string(),
@@ -523,11 +566,12 @@ impl FyndBuilder {
             timeout_ms: defaults::POOL_TIMEOUT_MS,
             max_routes: None,
             connector_tokens: None,
+            liquidity_scope: None,
         });
         self
     }
 
-    /// Shorthand: adds a single pool with a custom [`Algorithm`] implementation.
+    /// Shorthand: adds a single worker pool with a custom [`Algorithm`] implementation.
     ///
     /// The `factory` closure is called once per worker thread.
     pub fn with_algorithm<A, F>(mut self, name: impl Into<String>, factory: F) -> Self
@@ -549,6 +593,7 @@ impl FyndBuilder {
                 max_hops: defaults::POOL_MAX_HOPS,
                 timeout_ms: defaults::POOL_TIMEOUT_MS,
                 max_routes: None,
+                liquidity_scope: None,
                 configure,
             }));
         self
@@ -604,7 +649,7 @@ impl FyndBuilder {
         self
     }
 
-    /// Adds a named pool using the given [`PoolConfig`].
+    /// Adds a named worker pool using the given [`PoolConfig`].
     ///
     /// # Errors
     ///
@@ -626,6 +671,7 @@ impl FyndBuilder {
             timeout_ms: config.timeout_ms(),
             max_routes: config.max_routes(),
             connector_tokens,
+            liquidity_scope: config.liquidity_scope(),
         });
         Ok(self)
     }
@@ -635,6 +681,17 @@ impl FyndBuilder {
     fn assemble_components(mut self) -> Result<BuiltComponents, SolverBuildError> {
         if self.pools.is_empty() {
             return Err(SolverBuildError::NoPools);
+        }
+
+        // Exclusive-access worker pools only serve requests granted access, so a deployment made
+        // entirely of them would allocate no worker pool at all to everyone else. Caught here
+        // rather than per request: it is a configuration mistake, not a runtime condition.
+        if self
+            .pools
+            .iter()
+            .all(|p| p.liquidity_scope() == Some(LiquidityScope::IncludeExclusive))
+        {
+            return Err(SolverBuildError::NoPublicPool);
         }
 
         // Add built-in providers if none were explicitly registered.
@@ -681,16 +738,23 @@ impl FyndBuilder {
         let derived_data: SharedDerivedDataRef = computation_manager.store();
         let derived_event_tx = computation_manager.event_sender();
 
-        // Subscribe event channels before spawning (one for computation manager + one per pool)
+        // Subscribe event channels before spawning (one for computation manager + one per worker
+        // pool)
         let computation_event_rx = tycho_feed.subscribe();
         let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
 
-        for pool_entry in self.pools {
+        let pools = std::mem::take(&mut self.pools);
+
+        for pool_entry in pools {
             let pool_event_rx = tycho_feed.subscribe();
             let derived_rx = derived_event_tx.subscribe();
+
+            let pool_scope = pool_entry
+                .liquidity_scope()
+                .unwrap_or_default();
 
             let (worker_pool, task_handle) = match pool_entry {
                 PoolEntry::BuiltIn {
@@ -703,6 +767,7 @@ impl FyndBuilder {
                     timeout_ms,
                     max_routes,
                     connector_tokens,
+                    liquidity_scope: _,
                 } => {
                     let mut algo_cfg = AlgorithmConfig::new(
                         min_hops,
@@ -713,18 +778,19 @@ impl FyndBuilder {
                     if let Some(tokens) = connector_tokens {
                         algo_cfg = algo_cfg.with_connector_tokens(tokens);
                     }
-                    WorkerPoolBuilder::new()
+                    let builder = WorkerPoolBuilder::new()
                         .name(name)
                         .algorithm(algorithm)
                         .algorithm_config(algo_cfg)
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
-                        .build(
-                            market_data.clone(),
-                            Arc::clone(&derived_data),
-                            pool_event_rx,
-                            derived_rx,
-                        )?
+                        .liquidity_scope(pool_scope);
+                    builder.build(
+                        market_data.clone(),
+                        Arc::clone(&derived_data),
+                        pool_event_rx,
+                        derived_rx,
+                    )?
                 }
                 PoolEntry::Custom(custom) => {
                     let algo_cfg = AlgorithmConfig::new(
@@ -737,7 +803,8 @@ impl FyndBuilder {
                         .name(custom.name)
                         .algorithm_config(algo_cfg)
                         .num_workers(custom.num_workers)
-                        .task_queue_capacity(custom.task_queue_capacity);
+                        .task_queue_capacity(custom.task_queue_capacity)
+                        .liquidity_scope(pool_scope);
                     let builder = (custom.configure)(builder);
                     builder.build(
                         market_data.clone(),
@@ -748,7 +815,10 @@ impl FyndBuilder {
                 }
             };
 
-            solver_pool_handles.push(SolverPoolHandle::new(worker_pool.name(), task_handle));
+            solver_pool_handles.push(
+                SolverPoolHandle::new(worker_pool.name(), task_handle)
+                    .with_liquidity_scope(pool_scope),
+            );
             worker_pools.push(worker_pool);
         }
 
@@ -764,16 +834,27 @@ impl FyndBuilder {
         };
 
         let chain = self.chain;
-        let router_address = encoder.router_address().clone();
+        let router_address = encoder.router_address().cloned();
         let router_fees = encoder.router_fees();
 
-        let router_fee_fetcher = RouterFeeFetcher::new(
-            self.rpc_url.as_str(),
-            &router_address,
-            router_fees.clone(),
-            defaults::ROUTER_FEE_REFRESH_INTERVAL,
-        )
-        .map_err(|e| SolverBuildError::RouterFeeFetcher(e.to_string()))?;
+        let router_fee_fetcher = match &router_address {
+            Some(addr) => Some(
+                RouterFeeFetcher::new(
+                    self.rpc_url.as_str(),
+                    addr,
+                    router_fees.clone(),
+                    defaults::ROUTER_FEE_REFRESH_INTERVAL,
+                )
+                .map_err(|e| SolverBuildError::RouterFeeFetcher(e.to_string()))?,
+            ),
+            None => {
+                tracing::warn!(
+                    %chain,
+                    "no Tycho router for this chain; running quote-only (encoding disabled)"
+                );
+                None
+            }
+        };
 
         // Only start price providers when the guard is enabled.
         // When disabled, per-request attempts to enable the guard return an error.
@@ -823,15 +904,20 @@ impl FyndBuilder {
 
         let feed_handle = tokio::spawn(async move {
             if let Err(e) = c.tycho_feed.run().await {
+                metrics::counter!("tycho_feed_failures_total").increment(1);
                 tracing::error!(error = %e, "tycho feed error");
             }
         });
         let gas_price_handle = tokio::spawn(async move {
             c.gas_price_fetcher.run().await;
         });
-        let router_fee_handle = tokio::spawn(async move {
-            c.router_fee_fetcher.run().await;
-        });
+        let metrics_sampler =
+            MetricsSampler::new(c.market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
+        let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
+        let router_fee_handle = match c.router_fee_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -846,6 +932,7 @@ impl FyndBuilder {
             router_fees: c.router_fees,
             feed_handle,
             gas_price_handle,
+            metrics_sampler_handle,
             router_fee_handle,
             computation_handle,
             computation_shutdown_tx: c.computation_shutdown_tx,
@@ -881,15 +968,20 @@ impl FyndBuilder {
                 .run_with_pending(pending_tx, pending_indexers)
                 .await
             {
+                metrics::counter!("tycho_feed_failures_total").increment(1);
                 tracing::error!(error = %e, "tycho feed error");
             }
         });
         let gas_price_handle = tokio::spawn(async move {
             c.gas_price_fetcher.run().await;
         });
-        let router_fee_handle = tokio::spawn(async move {
-            c.router_fee_fetcher.run().await;
-        });
+        let metrics_sampler =
+            MetricsSampler::new(c.market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
+        let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
+        let router_fee_handle = match c.router_fee_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -910,6 +1002,7 @@ impl FyndBuilder {
                 router_fees: c.router_fees,
                 feed_handle,
                 gas_price_handle,
+                metrics_sampler_handle,
                 router_fee_handle,
                 computation_handle,
                 computation_shutdown_tx: c.computation_shutdown_tx,
@@ -956,9 +1049,13 @@ impl FyndBuilder {
         let gas_price_handle = tokio::spawn(async move {
             c.gas_price_fetcher.run().await;
         });
-        let router_fee_handle = tokio::spawn(async move {
-            c.router_fee_fetcher.run().await;
-        });
+        let metrics_sampler =
+            MetricsSampler::new(c.market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
+        let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
+        let router_fee_handle = match c.router_fee_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -979,6 +1076,7 @@ impl FyndBuilder {
                 router_fees: c.router_fees,
                 feed_handle,
                 gas_price_handle,
+                metrics_sampler_handle,
                 router_fee_handle,
                 computation_handle,
                 computation_shutdown_tx: c.computation_shutdown_tx,
@@ -1000,11 +1098,12 @@ pub struct Solver {
     router_fees: SharedRouterFees,
     feed_handle: JoinHandle<()>,
     gas_price_handle: JoinHandle<()>,
+    metrics_sampler_handle: JoinHandle<()>,
     router_fee_handle: JoinHandle<()>,
     computation_handle: JoinHandle<()>,
     computation_shutdown_tx: broadcast::Sender<()>,
     chain: Chain,
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     market_event_tx: broadcast::Sender<MarketEvent>,
 }
 
@@ -1012,6 +1111,11 @@ impl Solver {
     /// Returns a clone of the shared market data reference.
     pub fn market_data(&self) -> MarketData {
         self.market_data.clone()
+    }
+
+    /// Returns the Tycho Router contract address, or `None` on a quote-only chain.
+    pub fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     /// Returns a clone of the shared derived data reference.
@@ -1029,19 +1133,25 @@ impl Solver {
 
     /// Submits a [`QuoteRequest`] to the worker pools and returns the best [`Quote`].
     ///
+    /// Grants `ExclusiveAccess::Granted`: a library embedder configures its own pools, so there
+    /// is no untrusted caller to gate here. Access is decided at the HTTP boundary, where
+    /// requests do come from untrusted callers.
+    ///
     /// # Errors
     ///
-    /// Returns [`SolveError`] if all pools fail or the router timeout elapses.
+    /// Returns [`SolveError`] if all worker pools fail or the router timeout elapses.
     pub async fn quote(&self, request: QuoteRequest) -> Result<Quote, SolveError> {
-        self.router.quote(request).await
+        self.router
+            .quote(request, ExclusiveAccess::Granted)
+            .await
     }
 
     /// Waits until the solver is ready to answer quotes.
     ///
     /// Ready means:
     /// - The Tycho feed has delivered at least one market snapshot.
-    /// - The computation manager has completed at least one derived-data cycle (spot prices, pool
-    ///   depths, token gas prices).
+    /// - The computation manager has completed at least one derived-data cycle (spot prices,
+    ///   component depths, token gas prices).
     /// - Router fees have been loaded from the on-chain FeeCalculator at least once.
     ///
     /// The method polls every 500 ms and returns as soon as all conditions are
@@ -1090,7 +1200,7 @@ impl Solver {
     /// then [`quote`](Self::quote).
     ///
     /// VM-backed protocol states that couldn't be serialized will be absent from
-    /// the recording. Pools without states will be registered as components but
+    /// the recording. Components without states will still be registered but
     /// won't contribute to routing.
     ///
     /// Requires the `test-utils` feature.
@@ -1203,7 +1313,7 @@ impl Solver {
             Encoder::new(chain, registry).map_err(|e| SolverBuildError::Encoder(e.to_string()))?
         };
 
-        let router_address = encoder.router_address().clone();
+        let router_address = encoder.router_address().cloned();
         // Replay mode has no FeeCalculator to read; seed a zero-fee config at the standard
         // 8-decimal scale so the recording-based solver reports ready (integration tests do
         // not exercise encoding).
@@ -1235,10 +1345,11 @@ impl Solver {
             tracing::warn!("no receivers for initial MarketUpdated broadcast");
         }
 
-        // Dummy handles for feed/gas/router-fees (not running in replay mode). The market
+        // Dummy handles for feed/gas/metrics/router-fees (not running in replay mode). The market
         // event channel stays alive through the `market_event_tx` field on `Solver`.
         let feed_handle = tokio::spawn(futures::future::pending::<()>());
         let gas_price_handle = tokio::spawn(async { /* no-op */ });
+        let metrics_sampler_handle = tokio::spawn(async { /* no-op */ });
         let router_fee_handle = tokio::spawn(async { /* no-op */ });
 
         Ok(Solver {
@@ -1249,6 +1360,7 @@ impl Solver {
             router_fees,
             feed_handle,
             gas_price_handle,
+            metrics_sampler_handle,
             router_fee_handle,
             computation_handle,
             computation_shutdown_tx,
@@ -1266,6 +1378,7 @@ impl Solver {
         }
         self.feed_handle.abort();
         self.gas_price_handle.abort();
+        self.metrics_sampler_handle.abort();
         self.router_fee_handle.abort();
     }
 
@@ -1279,6 +1392,7 @@ impl Solver {
             router_fees: self.router_fees,
             feed_handle: self.feed_handle,
             gas_price_handle: self.gas_price_handle,
+            metrics_sampler_handle: self.metrics_sampler_handle,
             router_fee_handle: self.router_fee_handle,
             computation_handle: self.computation_handle,
             computation_shutdown_tx: self.computation_shutdown_tx,
@@ -1294,7 +1408,7 @@ impl Solver {
 pub struct SolverParts {
     /// Routes quote requests across worker pools.
     router: WorkerPoolRouter,
-    /// One [`WorkerPool`] per configured algorithm pool.
+    /// One [`WorkerPool`] per entry configured via [`FyndBuilder::add_pool`].
     worker_pools: Vec<WorkerPool>,
     /// Live market snapshot shared across all components.
     market_data: MarketData,
@@ -1306,6 +1420,8 @@ pub struct SolverParts {
     feed_handle: JoinHandle<()>,
     /// Background task polling the RPC node for gas prices.
     gas_price_handle: JoinHandle<()>,
+    /// Background task exporting per-protocol market metrics.
+    metrics_sampler_handle: JoinHandle<()>,
     /// Background task refreshing router fees from the on-chain FeeCalculator.
     router_fee_handle: JoinHandle<()>,
     /// Background task running the computation manager.
@@ -1314,8 +1430,8 @@ pub struct SolverParts {
     computation_shutdown_tx: broadcast::Sender<()>,
     /// Chain this solver is configured for.
     chain: Chain,
-    /// Address of the Tycho Router contract on this chain.
-    router_address: Bytes,
+    /// Address of the Tycho Router contract on this chain, or `None` on a quote-only chain.
+    router_address: Option<Bytes>,
 }
 
 impl SolverParts {
@@ -1324,9 +1440,9 @@ impl SolverParts {
         self.chain
     }
 
-    /// Returns the Tycho Router contract address for this chain.
-    pub fn router_address(&self) -> &Bytes {
-        &self.router_address
+    /// Returns the Tycho Router contract address for this chain, or `None` on a quote-only chain.
+    pub fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     /// Returns a reference to the worker pools.
@@ -1367,6 +1483,7 @@ impl SolverParts {
         JoinHandle<()>,
         JoinHandle<()>,
         JoinHandle<()>,
+        JoinHandle<()>,
         broadcast::Sender<()>,
     ) {
         (
@@ -1376,9 +1493,49 @@ impl SolverParts {
             self.derived_data,
             self.feed_handle,
             self.gas_price_handle,
+            self.metrics_sampler_handle,
             self.router_fee_handle,
             self.computation_handle,
             self.computation_shutdown_tx,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unscoped pool resolves to `PublicOnly` — exclusive components are filtered out unless
+    /// a pool explicitly opts in with `IncludeExclusive`.
+    #[test]
+    fn test_unscoped_pool_resolves_to_public_only() {
+        let config = PoolConfig::new("most_liquid");
+        assert_eq!(config.liquidity_scope(), None);
+        assert_eq!(
+            config
+                .liquidity_scope()
+                .unwrap_or_default(),
+            LiquidityScope::PublicOnly
+        );
+    }
+
+    /// A deployment of nothing but exclusive-access pools would serve requests without access
+    /// from no pool at all.
+    #[test]
+    fn test_build_all_exclusive_pools() {
+        let config =
+            PoolConfig::new("most_liquid").with_liquidity_scope(LiquidityScope::IncludeExclusive);
+        let result = FyndBuilder::new(
+            Chain::Ethereum,
+            "wss://example.invalid",
+            "https://example.invalid",
+            vec!["uniswap_v2".to_string()],
+            100.0,
+        )
+        .add_pool("exclusive", &config)
+        .expect("add_pool should accept the config")
+        .build();
+
+        assert!(matches!(result, Err(SolverBuildError::NoPublicPool)));
     }
 }

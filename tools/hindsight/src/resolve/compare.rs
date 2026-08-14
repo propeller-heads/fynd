@@ -17,7 +17,7 @@ fn to_biguint(amount: U256) -> BigUint {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub(crate) struct Deltas {
     /// `fynd amount_out` vs the settled amount, both gross of gas — always like-for-like, and
-    /// the basis of the headline [`Verdict`].
+    /// the basis of the headline `Verdict`.
     pub raw_bps: Option<f64>,
     /// Secondary, recorded for later gas analysis: `fynd amount_out_net_gas` vs the settled
     /// amount net of the gas the trader paid for it. Asymmetric when the settled gas is unknown
@@ -30,11 +30,39 @@ impl Deltas {
     const NONE: Self = Self { raw_bps: None, net_bps: None };
 }
 
+/// Slippage of the top-of-block route re-executed at back-of-block: how the route's output moved
+/// between quote time (N-1) and execution time (N). Positive = the route produced more than
+/// quoted — the surplus we would keep if we charged positive slippage.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub(crate) struct Slippage {
+    /// Re-executed output vs the quoted output, in bps (positive = surplus).
+    pub bps: f64,
+    /// The top-of-block quoted output the slippage is measured against.
+    pub quoted_amount_out: U256,
+    /// The same route's re-executed output at back-of-block.
+    pub reexecuted_amount_out: U256,
+}
+
+/// Slippage between the top-of-block quote and its re-execution at back-of-block. `None` when
+/// either side is unsolved (no route quoted, or the re-execution failed) or the quoted output
+/// is zero.
+pub(crate) fn slippage(top: &Outcome, back: &Outcome) -> Option<Slippage> {
+    let (Outcome::Solved(top), Outcome::Solved(back)) = (top, back) else {
+        return None;
+    };
+    let bps = raw_bps_diff(&to_biguint(back.amount_out), &to_biguint(top.amount_out))?;
+    Some(Slippage {
+        bps,
+        quoted_amount_out: top.amount_out,
+        reexecuted_amount_out: back.amount_out,
+    })
+}
+
 /// Win/loss classification for a single trade, judged at one block state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Verdict {
-    /// Fynd's gross output strictly beats the gross settled output ([`Deltas::raw_bps`] > 0).
+    /// Fynd's gross output strictly beats the gross settled output (`Deltas::raw_bps` > 0).
     Win,
     /// Fynd's output was equal to or worse than settled, or it could not be compared.
     Loss,
@@ -55,12 +83,20 @@ pub(crate) enum Verdict {
 /// loss. Without this cut, a single un-fillable whale trade dominates the USD aggregate.
 const MIN_FILL_RATIO: f64 = 0.5;
 
+/// Settled USD notional below which a trade is left out of the unweighted views: the win rate and
+/// the bps quantiles. USD-weighted views keep every trade, as does a trade too small to price.
+///
+/// Below a dollar a few wei of rounding is thousands of bps, which carries an unweighted median.
+/// Above it the spread is real — small trades are genuinely easier to beat — so the floor sits
+/// just past the rounding noise rather than where the win rate stops moving.
+pub(crate) const MIN_NOTIONAL_USD: f64 = 10.0;
+
 /// Reclassify a Fynd quote that covers far less than the settled amount as a coverage miss.
 ///
 /// Fynd does not do price-constrained partial fills, but when liquidity is thin it can return a
 /// route for only part of the requested size. Both amounts are in `token_out` units, so their
-/// ratio is unit-free. A `Solved` outcome whose raw output is below [`MIN_FILL_RATIO`] of the
-/// settled amount becomes [`Outcome::Partial`]; every other outcome passes through unchanged.
+/// ratio is unit-free. A `Solved` outcome whose raw output is below `MIN_FILL_RATIO` of the
+/// settled amount becomes `Outcome::Partial`; every other outcome passes through unchanged.
 pub(crate) fn served(outcome: Outcome, settled_amount_out: U256) -> Outcome {
     let Outcome::Solved(ref solved) = outcome else {
         return outcome;
@@ -101,7 +137,7 @@ pub(crate) fn compare(
 /// Gross-vs-gross is the one comparison that is always like-for-like: the settled route's gas is
 /// often legitimately unattributable (most Relay settlements are submitted by Relay's own
 /// operators, so the trader paid no gas), and a net-vs-gross fallback would mix comparison bases
-/// across records. The net numbers are still recorded ([`Deltas::net_bps`]) for later analysis.
+/// across records. The net numbers are still recorded (`Deltas::net_bps`) for later analysis.
 pub(crate) fn verdict(outcome: &Outcome, deltas: &Deltas) -> Verdict {
     if let Outcome::Partial(_) = outcome {
         return Verdict::CoverageMiss;
@@ -123,7 +159,9 @@ mod tests {
             amount_out: U256::from(amount_out),
             amount_out_net_gas: U256::from(net),
             gas_estimate: U256::from(21_000),
+            algorithm: String::new(),
             quote_json: None,
+            solved_route: None,
         })
     }
 
@@ -133,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_fynd_better_is_positive() {
+    fn test_compare_fynd_better() {
         let (settled, net) = gross(10_000);
         let d = compare(&solved(10_100, 10_050), settled, net);
         assert!((d.raw_bps.unwrap() - 100.0).abs() < 0.01);
@@ -141,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_fynd_worse_is_negative() {
+    fn test_compare_fynd_worse() {
         let (settled, net) = gross(10_000);
         let d = compare(&solved(9_900, 9_800), settled, net);
         assert!(d.raw_bps.unwrap() < 0.0);
@@ -149,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_settled_gas_is_deducted_from_net_only() {
+    fn test_compare_with_settled_gas() {
         // Settled 10_000 gross but its trader paid 100 in gas: raw still compares gross vs
         // gross; net compares 10_050 vs 9_900.
         let d = compare(&solved(10_100, 10_050), U256::from(10_000u64), U256::from(9_900u64));
@@ -158,27 +196,27 @@ mod tests {
     }
 
     #[test]
-    fn compare_unsolvable_is_none() {
+    fn test_compare_unsolvable() {
         let (settled, net) = gross(10_000);
         let d = compare(&Outcome::Unsolvable("no route".into()), settled, net);
         assert_eq!(d, Deltas::NONE);
     }
 
     #[test]
-    fn compare_zero_settled_is_none() {
+    fn test_compare_zero_settled() {
         let d = compare(&solved(10_000, 10_000), U256::ZERO, U256::ZERO);
         assert_eq!(d.raw_bps, None);
     }
 
     #[test]
-    fn verdict_win_only_when_net_positive() {
+    fn test_verdict_win_threshold() {
         let (settled, net) = gross(10_000);
         let outcome = solved(10_100, 10_050);
         assert_eq!(verdict(&outcome, &compare(&outcome, settled, net)), Verdict::Win);
     }
 
     #[test]
-    fn verdict_is_gross_even_when_net_is_worse() {
+    fn test_verdict_gross_better_net_worse() {
         // Gross output wins even though Fynd's own gas would eat the edge: the headline verdict
         // compares gross vs gross, and the net delta stays available as a secondary number.
         let (settled, net) = gross(10_000);
@@ -187,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn verdict_ignores_settled_gas() {
+    fn test_verdict_with_settled_gas() {
         // The settled trader's gas does not move the verdict in either direction — only the
         // gross outputs do.
         let fynd = solved(10_050, 9_990);
@@ -199,14 +237,14 @@ mod tests {
     }
 
     #[test]
-    fn verdict_unsolvable_passthrough() {
+    fn test_verdict_unsolvable() {
         let (settled, net) = gross(10_000);
         let outcome = Outcome::Unsolvable("missing token".into());
         assert_eq!(verdict(&outcome, &compare(&outcome, settled, net)), Verdict::Unsolvable);
     }
 
     #[test]
-    fn served_reclassifies_partial_route_as_partial() {
+    fn test_served_partial_route() {
         // Fynd covered only 40% of the settled size → coverage miss, not a loss.
         let outcome = served(solved(400, 390), U256::from(1_000u64));
         assert!(matches!(outcome, Outcome::Partial(_)));
@@ -215,18 +253,45 @@ mod tests {
     }
 
     #[test]
-    fn served_keeps_adequate_fill() {
+    fn test_served_adequate_fill() {
         // 90% coverage is a real (worse) quote, not a coverage miss; the floor is kept.
         assert!(matches!(served(solved(900, 880), U256::from(1_000u64)), Outcome::Solved(_)));
         assert!(matches!(served(solved(500, 490), U256::from(1_000u64)), Outcome::Solved(_)));
     }
 
     #[test]
-    fn served_passes_through_unsolvable_and_zero_settled() {
+    fn test_served_unsolvable_and_zero_settled() {
         assert!(matches!(
             served(Outcome::Unsolvable("x".into()), U256::from(1_000u64)),
             Outcome::Unsolvable(_)
         ));
         assert!(matches!(served(solved(1, 1), U256::ZERO), Outcome::Solved(_)));
+    }
+
+    #[test]
+    fn slippage_positive_when_reexecution_beats_the_quote() {
+        // Quoted 10_000 at top, re-executed to 10_050 at back → +50 bps surplus.
+        let s = slippage(&solved(10_000, 9_900), &solved(10_050, 9_950)).unwrap();
+        assert!((s.bps - 50.0).abs() < 0.01, "expected +50 bps, got {}", s.bps);
+        assert_eq!(s.quoted_amount_out, U256::from(10_000u64));
+        assert_eq!(s.reexecuted_amount_out, U256::from(10_050u64));
+    }
+
+    #[test]
+    fn slippage_negative_when_reexecution_underperforms() {
+        let s = slippage(&solved(10_000, 9_900), &solved(9_900, 9_800)).unwrap();
+        assert!((s.bps + 100.0).abs() < 0.01, "expected -100 bps, got {}", s.bps);
+    }
+
+    #[test]
+    fn slippage_none_when_either_side_unsolved() {
+        let failed = Outcome::Unsolvable("re-execution failed".into());
+        assert_eq!(slippage(&failed, &solved(10_000, 9_900)), None);
+        assert_eq!(slippage(&solved(10_000, 9_900), &failed), None);
+    }
+
+    #[test]
+    fn slippage_none_for_zero_quoted_output() {
+        assert_eq!(slippage(&solved(0, 0), &solved(10, 10)), None);
     }
 }

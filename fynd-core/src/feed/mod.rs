@@ -4,9 +4,13 @@ use tycho_simulation::tycho_common::models::Chain;
 
 /// Market events broadcast by the Tycho feed on every block update.
 pub mod events;
+/// Exclusive-component classification and per-worker graph filtering.
+pub mod exclusivity;
 pub(crate) mod gas;
 /// Shared market data store (`MarketState`, `MarketData`).
 pub mod market_data;
+/// Background sampler exporting per-protocol market metrics.
+pub(crate) mod metrics_sampler;
 /// Protocol system registry: maps protocol names to their Tycho identifiers.
 pub mod protocol_registry;
 /// Tycho WebSocket feed: connects to the Tycho data stream and populates `MarketState`.
@@ -45,8 +49,9 @@ pub(crate) struct TychoFeedConfig {
     /// Component IDs to exclude from the Tycho stream.
     pub(crate) blocklisted_components: HashSet<String>,
     /// Enable partial block (flashblock) updates from the Tycho stream.
-    /// When enabled, pool state updates are delivered mid-block rather than only at finalization,
-    /// reducing effective latency at the cost of processing more frequent, smaller updates.
+    /// When enabled, component state updates are delivered mid-block rather than only at
+    /// finalization, reducing effective latency at the cost of processing more frequent,
+    /// smaller updates.
     pub(crate) partial_blocks: bool,
 }
 

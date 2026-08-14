@@ -34,23 +34,18 @@ jobs:
         env:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
+          # Breaking changes are declared with the conventional `!` marker (e.g. feat!:).
+          # release-plz derives the bump from it: minor on 0.x.x, major on v1+.
           MAJOR=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\([0-9]*\)\.[0-9]*\.[0-9]*".*/\1/')
           if [ "$MAJOR" = "0" ]; then
-            # 0.x.x: breaking changes bump the minor version, declared with feat:
             echo "pre_v1=true" >> "$GITHUB_OUTPUT"
-            if echo "$TITLE" | grep -qE '^feat(\(.+\))?:'; then
-              echo "declared=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "declared=false" >> "$GITHUB_OUTPUT"
-            fi
           else
-            # v1+: breaking changes bump the major version, declared with breaking: type
             echo "pre_v1=false" >> "$GITHUB_OUTPUT"
-            if echo "$TITLE" | grep -qE '^breaking(\(.+\))?:'; then
-              echo "declared=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "declared=false" >> "$GITHUB_OUTPUT"
-            fi
+          fi
+          if echo "$TITLE" | grep -qE '^[a-z]+(\(.+\))?!:'; then
+            echo "declared=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "declared=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Setup toolchain
@@ -183,12 +178,14 @@ jobs:
                 : raw;
               const hint = preV1
                 ? [
-                    'Either fix the breaking changes, or update the PR title to signal intent:',
-                    '- Use `feat: ...` to bump the minor version (breaking changes on 0.x.x)',
+                    'Either fix the breaking changes, or declare them:',
+                    '- Append `!` to the PR title type (e.g. `feat!: ...`) and make sure a `!`-marked commit',
+                    '  lands on main — release-plz bumps the minor version for breaking changes on 0.x.x.',
                   ]
                 : [
-                    'Either fix the breaking changes, or update the PR title to signal intent:',
-                    '- Use `breaking: ...` to declare a major version bump',
+                    'Either fix the breaking changes, or declare them:',
+                    '- Append `!` to the PR title type (e.g. `feat!: ...`) and make sure a `!`-marked commit',
+                    '  lands on main — release-plz bumps the major version for breaking changes.',
                   ];
               body = [
                 marker,
@@ -212,8 +209,8 @@ jobs:
                 ? raw.slice(0, MAX_OUTPUT) + '\n\n[output truncated]'
                 : raw;
               const versionNote = preV1
-                ? 'Ensure the minor version is bumped before merging (breaking changes on 0.x.x bump the minor).'
-                : 'Ensure the major version is bumped before merging.';
+                ? 'release-plz derives the bump from commits: verify a `!`-marked commit is in this PR so the release PR shows a minor bump (breaking changes on 0.x.x bump the minor).'
+                : 'release-plz derives the bump from commits: verify a `!`-marked commit is in this PR so the release PR shows a major bump.';
               body = [
                 marker,
                 '## Breaking API Changes (Intentional)',
@@ -231,9 +228,7 @@ jobs:
               ].join('\n');
             } else {
               // !breaking && declared
-              const titleHint = preV1
-                ? 'Otherwise, consider using `fix:` instead of `feat:` in the PR title.'
-                : 'Otherwise, consider removing the `breaking` type from the PR title.';
+              const titleHint = 'Otherwise, consider removing the `!` marker from the PR title.';
               body = [
                 marker,
                 '## No API Breaking Changes Detected',

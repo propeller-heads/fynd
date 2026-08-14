@@ -1,7 +1,7 @@
 //! Derived data computation system.
 //!
 //! This module provides a framework for computing derived market data
-//! (token prices, pool depths, spot prices, etc.) from raw market data.
+//! (token prices, component depths, spot prices, etc.) from raw market data.
 //!
 //! # Architecture
 //!
@@ -19,14 +19,14 @@
 //! `DerivedComputation::requirements`, and the manager runs them in dependency order:
 //!
 //! ```text
-//!                 SpotPriceComputation
-//!                    /           \
-//!                   v             v
-//!    PoolDepthComputation    TokenGasPriceComputation
+//!                     SpotPriceComputation
+//!                   /                       \
+//!                  v                         v
+//!    ComponentDepthComputation    TokenGasPriceComputation
 //! ```
 //!
-//! - **SpotPriceComputation**: No dependencies, computes spot prices for all pools
-//! - **PoolDepthComputation**: Depends on `spot_prices`
+//! - **SpotPriceComputation**: No dependencies, computes spot prices for all components
+//! - **ComponentDepthComputation**: Depends on `spot_prices`
 //! - **TokenGasPriceComputation**: Depends on `spot_prices` and `gas_price` (from market data)
 //!
 //! # Example
@@ -59,7 +59,9 @@ mod store;
 pub(crate) mod tracker;
 pub(crate) mod types;
 
-// Only export the public API: manager, config, store, and shared reference type
+// Only export the public API: manager, config, store, shared reference type, and the
+// map aliases the store getters already expose in their signatures
 pub use computation::FailedItemError;
 pub use manager::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef};
 pub use store::DerivedData;
+pub use types::{ComponentDepths, TokenGasPrices};

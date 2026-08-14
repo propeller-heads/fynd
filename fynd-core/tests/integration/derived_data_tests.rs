@@ -14,7 +14,7 @@ async fn test_all_derived_fields_computed() {
     let derived = derived_ref.read().await;
 
     assert!(derived.spot_prices().is_some(), "spot_prices should be computed");
-    assert!(derived.pool_depths().is_some(), "pool_depths should be computed");
+    assert!(derived.component_depths().is_some(), "component_depths should be computed");
     assert!(derived.token_prices().is_some(), "token_prices should be computed");
 }
 
@@ -40,15 +40,15 @@ async fn test_derived_data_matches_expected() {
     let spot_prices = derived
         .spot_prices()
         .expect("spot prices not computed");
-    let actual_spot_price_pools: std::collections::HashSet<_> = spot_prices
+    let actual_components_with_spot_prices: std::collections::HashSet<_> = spot_prices
         .keys()
         .map(|(id, _, _)| id.clone())
         .collect();
 
-    let pool_depths = derived
-        .pool_depths()
-        .expect("pool depths not computed");
-    let actual_pool_depth_pools: std::collections::HashSet<_> = pool_depths
+    let component_depths = derived
+        .component_depths()
+        .expect("component depths not computed");
+    let actual_components_with_depths: std::collections::HashSet<_> = component_depths
         .keys()
         .map(|(id, _, _)| id.clone())
         .collect();
@@ -59,8 +59,8 @@ async fn test_derived_data_matches_expected() {
 
     assert_eq!(
         market.component_topology().len(),
-        expected_file.metadata.num_pools,
-        "pool count mismatch"
+        expected_file.metadata.num_components,
+        "component count mismatch"
     );
     assert_eq!(
         market.token_registry_ref().len(),
@@ -68,14 +68,14 @@ async fn test_derived_data_matches_expected() {
         "token count mismatch"
     );
     assert_eq!(
-        actual_spot_price_pools.len(),
-        expected.spot_price_pools,
-        "spot_price pool count mismatch"
+        actual_components_with_spot_prices.len(),
+        expected.components_with_spot_prices,
+        "spot-price component count mismatch"
     );
     assert_eq!(
-        actual_pool_depth_pools.len(),
-        expected.pool_depth_pools,
-        "pool_depth pool count mismatch"
+        actual_components_with_depths.len(),
+        expected.components_with_depths,
+        "component-depth component count mismatch"
     );
     assert_eq!(token_prices.len(), expected.token_prices, "token_prices count mismatch");
 }

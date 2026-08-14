@@ -9,33 +9,50 @@ infrastructure.
 |---|---|
 | `builder.rs` | `FyndRPCBuilder` wraps `FyndBuilder`, adds HTTP server config. `FyndRPC` struct runs the server with graceful shutdown |
 | `config.rs` | `WorkerPoolsConfig` (TOML loader), `BlocklistConfig`, `defaults` module re-exporting `fynd-core` defaults + HTTP-specific ones |
-| `protocols.rs` | `fetch_protocol_systems()` — paginated Tycho RPC call to discover available protocols; `resolve_protocols()` — higher-level wrapper used by `serve` and `scale` that expands `all_onchain`/`native_onchain` tokens and applies min-TVL filtering |
+| `protocols.rs` | `fetch_protocol_systems()` — Tycho RPC call to discover available protocols; `resolve_protocols()` — higher-level wrapper used by `serve` and `scale` that parses each explicit entry into a `ProtocolSpec` (before the RPC call, so a bad `exclusive:` prefix fails fast), expands `all_onchain`/`native_onchain` tokens, and merges the two by protocol system — one entry per system, exclusive winning over public regardless of order |
 | `api/` | HTTP endpoint handlers and OpenAPI documentation |
 
 ## Features
 
 | Feature | Effect |
 |---|---|
-| `experimental` | Enables `GET /v1/prices` endpoint and derived data access in `AppState` |
+| `experimental` | Enables the `GET /v1/prices` and `GET /v1/tokens` endpoints plus derived/market data access in `AppState` |
 
 ## API Endpoints
 
 | Endpoint | Handler | Description |
 |---|---|---|
-| `POST /v1/quote` | `handlers::quote` | Submit orders, receive optimal routes |
-| `GET /v1/health` | `handlers::health` | Health check (data freshness, derived data readiness, gas-price staleness, pool count). Returns 503 when market data is stale, derived data is not ready, or the gas price is stale |
+| `POST /v1/quote` | `handlers::quote` | Submit orders, receive optimal routes. The `x-exclusive-access: true` request header (set by the authenticating proxy, never by the caller) allocates exclusive-access worker pools to the request; any other value or none restricts it to public pools. Only meaningful when the server is unreachable except through that proxy |
+| `GET /v1/health` | `handlers::health` | Health check (data freshness, derived data readiness, gas-price staleness, solver pool count). Returns 503 when market data is stale, derived data is not ready, or the gas price is stale |
 | `GET /v1/info` | `handlers::info` | Static metadata about this Fynd instance (version, chain, spender address) |
-| `GET /v1/prices` | `handlers::get_prices` | Token prices, spot prices, pool depths (experimental feature only) |
+| `GET /v1/prices` | `handlers::get_prices` | Token prices, spot prices, component depths (experimental feature only) |
+| `GET /v1/tokens` | `handlers::get_tokens` | Graph tokens with metadata and liquidity/degree ranking, lazily cached per derived-data update (experimental feature only) |
+
+## API Documentation
+
+Up to two Swagger UIs are served, both built from the same `ApiDoc` annotations:
+
+| Path | Spec | Describes |
+|---|---|---|
+| `/docs/` | `/api-docs/openapi.json` | Self-hosted deployments: `/v1/quote` on the origin it is reached at, no authentication. Always served |
+| `/docs/hosted/` | `/api-docs/hosted/openapi.json` | The hosted gateway: `/v1/{chain}/quote` with a `chain` path parameter and an API key sent as the raw `Authorization` header value. Only served when a gateway URL is set via `--hosted-swagger-url` / `FYND_HOSTED_SWAGGER_URL` |
+
+`api/docs.rs` derives the hosted spec from the self-hosted one at startup, so endpoint
+annotations live in one place.
 
 ## API Module (`api/`)
 
 | File | Purpose |
 |---|---|
 | `mod.rs` | `configure_app()`, `AppState`, `HealthTracker`, `ApiDoc` (utoipa OpenAPI) |
+| `docs.rs` | Builds the self-hosted and hosted OpenAPI specs and registers both Swagger UIs |
 | `handlers.rs` | Request handlers for `/v1/quote`, `/v1/health`, and `/v1/info` |
 | `dto.rs` | Re-exports wire types from `fynd-rpc-types` (conversions to `fynd-core` types live in `fynd-rpc-types` via the `core` feature) |
 | `error.rs` | `ApiError` type with HTTP status code mapping |
-| `prices.rs` | Types and helpers for `GET /v1/prices`: query params, response DTOs (`PricesResponse`, `TokenPriceEntry`, etc.), `price_to_f64` conversion |
+| `exclusive_access.rs` | Reads the `x-exclusive-access` header into `fynd_core::ExclusiveAccess` |
+| `prices.rs` | Types and helpers for `GET /v1/prices`: query params, response DTOs (`PricesResponse`, `TokenPriceEntry`, etc.), `price_to_decimal_string` exact decimal serialization |
+| `tokens.rs` | Types and helpers for `GET /v1/tokens`: `TokensResponse`/`GraphTokenEntry` DTOs, `build_token_entries` ranking fold, `TokensCache` |
+| `middleware.rs` | HTTP metrics middleware: records `http_request_duration_seconds` (histogram) and `http_requests_total` (counter with per-client `user_identity`/`user_plan`/`client_version` labels sourced from proxy-injected headers) |
 
 ## Builder Pattern
 

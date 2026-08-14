@@ -22,17 +22,18 @@ use tracing::info;
 use crate::{
     algorithm::{
         path_frank_wolfe::PathFrankWolfeConfig, AlgorithmConfig, BellmanFordAlgorithm,
-        MostLiquidAlgorithm, PathFrankWolfeAlgorithm,
+        MostLiquidAlgorithm, PathFrankWolfeAlgorithm, WaterFillAlgorithm,
     },
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{events::MarketEvent, market_data::MarketData},
     types::internal::SolveTask,
     worker_pool::worker::SolverWorker,
+    worker_pool_router::LiquidityScope,
 };
 
 /// List of available built-in algorithm names (for registry-based dispatch).
 pub(crate) const AVAILABLE_ALGORITHMS: &[&str] =
-    &["most_liquid", "bellman_ford", "path_frank_wolfe"];
+    &["most_liquid", "bellman_ford", "path_frank_wolfe", "water_fill"];
 
 /// Default algorithm to use if none specified.
 pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
@@ -41,6 +42,8 @@ pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
 pub(crate) struct SpawnWorkersParams {
     /// Algorithm name (e.g., "most_liquid") — used for thread naming and logging.
     pub algorithm: String,
+    /// Worker pool name from configuration (used as the `pool` metric label).
+    pub pool_name: String,
     /// Number of worker threads to spawn.
     pub num_workers: usize,
     /// Configuration for the algorithm used by each worker.
@@ -49,7 +52,7 @@ pub(crate) struct SpawnWorkersParams {
     pub task_rx: async_channel::Receiver<SolveTask>,
     /// Shared market data reference.
     pub market_data: MarketData,
-    /// Shared derived data reference (pool depths, token prices).
+    /// Shared derived data reference (component depths, token prices).
     pub derived_data: SharedDerivedDataRef,
     /// Broadcast receiver for market events.
     pub event_rx: broadcast::Receiver<MarketEvent>,
@@ -57,6 +60,8 @@ pub(crate) struct SpawnWorkersParams {
     pub derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
     /// Sender for shutdown signals.
     pub shutdown_tx: broadcast::Sender<()>,
+    /// Liquidity scope applied to every worker in this worker pool.
+    pub liquidity_scope: LiquidityScope,
 }
 
 /// Error returned when algorithm registration fails.
@@ -114,6 +119,7 @@ impl AlgorithmSpawner {
                 "most_liquid" => Ok(spawn_most_liquid_workers(params)),
                 "bellman_ford" => Ok(spawn_bellman_ford_workers(params)),
                 "path_frank_wolfe" => Ok(spawn_path_frank_wolfe_workers(params)),
+                "water_fill" => Ok(spawn_water_fill_workers(params)),
                 _ => Err(UnknownAlgorithmError { name: algorithm }),
             },
             Self::Custom { spawner, .. } => Ok(spawner(params)),
@@ -159,7 +165,9 @@ where
         let algorithm_config = params.algorithm_config.clone();
         let shutdown_rx = params.shutdown_tx.subscribe();
         let algorithm_name = params.algorithm.clone();
+        let pool_name = params.pool_name.clone();
         let factory = factory.clone();
+        let liquidity_scope = params.liquidity_scope;
 
         let handle = thread::Builder::new()
             .name(format!("{}-worker-{}", algorithm_name, worker_id))
@@ -172,8 +180,14 @@ where
                 rt.block_on(async move {
                     let algorithm = factory(algorithm_config);
 
-                    let mut worker =
-                        SolverWorker::new(market_data, derived_data, algorithm, worker_id);
+                    let mut worker = SolverWorker::new(
+                        market_data,
+                        derived_data,
+                        algorithm,
+                        worker_id,
+                        pool_name,
+                    )
+                    .with_liquidity_scope(liquidity_scope);
 
                     worker.initialize_graph().await;
                     worker
@@ -218,6 +232,15 @@ fn spawn_path_frank_wolfe_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<
     spawn_workers_generic(params, &factory)
 }
 
+/// Spawns workers for the water-fill portfolio split-routing algorithm.
+fn spawn_water_fill_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+    let factory = |config: AlgorithmConfig| {
+        WaterFillAlgorithm::with_config(config)
+            .expect("invalid worker configuration for WaterFillAlgorithm")
+    };
+    spawn_workers_generic(params, &factory)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -234,6 +257,7 @@ mod tests {
         let (shutdown_tx, _) = broadcast::channel(1);
         SpawnWorkersParams {
             algorithm: algorithm.to_string(),
+            pool_name: "test_pool".to_string(),
             num_workers,
             algorithm_config: AlgorithmConfig::default(),
             task_rx,
@@ -242,6 +266,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx,
+            liquidity_scope: LiquidityScope::default(),
         }
     }
 
@@ -271,6 +296,7 @@ mod tests {
 
         let params = SpawnWorkersParams {
             algorithm: "most_liquid".to_string(),
+            pool_name: "test_pool".to_string(),
             num_workers: 3,
             algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50), None).unwrap(),
             task_rx,
@@ -279,6 +305,7 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
+            liquidity_scope: LiquidityScope::default(),
         };
 
         let workers =
@@ -311,6 +338,7 @@ mod tests {
         let registry_err = AlgorithmSpawner::Registry { algorithm: "my_custom_algo".to_string() }
             .spawn(SpawnWorkersParams {
                 algorithm: "my_custom_algo".to_string(),
+                pool_name: "test_pool".to_string(),
                 num_workers: 1,
                 algorithm_config: AlgorithmConfig::default(),
                 task_rx: task_rx.clone(),
@@ -319,6 +347,7 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
+                liquidity_scope: LiquidityScope::default(),
             });
         assert!(registry_err.is_err());
 
@@ -336,6 +365,7 @@ mod tests {
         let workers = AlgorithmSpawner::Custom { algorithm: "my_custom_algo".to_string(), spawner }
             .spawn(SpawnWorkersParams {
                 algorithm: "my_custom_algo".to_string(),
+                pool_name: "test_pool".to_string(),
                 num_workers: 2,
                 algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50), None)
                     .unwrap(),
@@ -345,6 +375,7 @@ mod tests {
                 event_rx: event_tx.subscribe(),
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
+                liquidity_scope: LiquidityScope::default(),
             });
 
         assert!(workers.is_ok());
@@ -364,6 +395,7 @@ mod tests {
 
         let params = SpawnWorkersParams {
             algorithm: "path_frank_wolfe".to_string(),
+            pool_name: "test_pool".to_string(),
             num_workers: 1,
             algorithm_config: AlgorithmConfig::default(),
             task_rx,
@@ -372,10 +404,43 @@ mod tests {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
+            liquidity_scope: LiquidityScope::default(),
         };
 
         let workers =
             AlgorithmSpawner::Registry { algorithm: "path_frank_wolfe".to_string() }.spawn(params);
+        assert!(workers.is_ok());
+        assert_eq!(workers.unwrap().len(), 1);
+
+        let _ = shutdown_tx.send(());
+        drop(event_tx);
+    }
+
+    #[test]
+    fn test_registry_spawns_water_fill() {
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let (_task_tx, task_rx) = async_channel::bounded(10);
+        let market_data = MarketData::new_shared();
+        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
+        let (event_tx, event_rx) = broadcast::channel(10);
+        let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
+
+        let params = SpawnWorkersParams {
+            algorithm: "water_fill".to_string(),
+            pool_name: "test_pool".to_string(),
+            num_workers: 1,
+            algorithm_config: AlgorithmConfig::default(),
+            task_rx,
+            market_data,
+            derived_data,
+            event_rx,
+            derived_event_rx,
+            shutdown_tx: shutdown_tx.clone(),
+            liquidity_scope: LiquidityScope::default(),
+        };
+
+        let workers =
+            AlgorithmSpawner::Registry { algorithm: "water_fill".to_string() }.spawn(params);
         assert!(workers.is_ok());
         assert_eq!(workers.unwrap().len(), 1);
 

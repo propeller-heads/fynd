@@ -61,6 +61,42 @@ fynd serve \
 
 * RFQ protocols require API keys passed via environment variables. Check the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the specific variables each protocol needs.
 
+### Self-hosted Tycho
+
+By default `--tycho-url` points at the [Fynd hosted endpoint](https://docs.propellerheads.xyz/tycho/for-solvers/hosted-endpoints#tycho-fynd) for the selected chain. Fynd talks to Tycho purely over its RPC/WebSocket API, so whether that Tycho is PropellerHeads-hosted or one you run yourself is transparent to Fynd — you only change where it points.
+
+Run your own Tycho when a chain has no hosted Substreams endpoint. The Tycho Indexer can stream from a self-hosted Firehose + Substreams stack; see [Self-Hosted EVM Chain](https://docs.propellerheads.xyz/tycho/for-solvers/self-hosted-evm-chain) for how to stand it up. Once it is serving, point Fynd at it:
+
+```bash
+fynd serve \
+  --chain base \
+  --tycho-url your-self-hosted-tycho.example.com \
+  --rpc-url https://your-node
+```
+
+Notes:
+
+* **TLS** — hosted endpoints use TLS; a local or plain-HTTP Tycho does not. Add `--disable-tls` when your endpoint is not served over TLS.
+* **API key** — the self-hosted indexer's RPC key is its `AUTH_API_KEY` (default `local-dev-key`). Pass it with `--tycho-api-key` / `TYCHO_API_KEY` if your deployment sets one.
+* **Built-in chains** — Fynd's built-in chains are `ethereum`, `base`, `unichain`, `arbitrum`, `polygon`, `bsc`, `starknet`, `zksync`. Self-hosting Tycho for one of these works out of the box.
+
+#### Custom chains
+
+Fynd can also run against a chain that isn't one of Tycho's built-ins, as long as your self-hosted Tycho indexer declares it. Point Fynd at the same `chains.yaml` the indexer uses with `--chains-config` / `TYCHO_CHAINS_CONFIG`, and pass `--tycho-url` and `--rpc-url` explicitly — custom chains have no built-in defaults, so omitting either is an error:
+
+```bash
+fynd serve \
+  --chain tempo \
+  --chains-config ./chains.yaml \
+  --tycho-url your-self-hosted-tycho.example.com \
+  --rpc-url https://your-node \
+  --disable-tls
+```
+
+See Tycho's [Self-Hosted EVM Chain](https://docs.propellerheads.xyz/tycho/for-solvers/self-hosted-evm-chain) guide for the "Declaring a custom chain" (`chains.yaml`) and "Consuming the custom chain" sections.
+
+**Quote-only until the router is deployed** — a custom chain has no Tycho router/executor contracts until ops deploys them. Until then, Fynd runs quote-only for that chain: `GET /v1/info` reports `router_address: null`, and a quote request with `encoding_options` set returns `501 Not Implemented`. Once the router/executor contracts are deployed, encoding works as usual.
+
 ## Flag reference
 
 Run `fynd serve --help` for the full list.
@@ -78,6 +114,7 @@ Run `fynd serve --help` for the full list.
 | `--rpc-url`                        | `RPC_URL`             | `https://eth.llamarpc.com` | Node RPC endpoint for the target chain. Use a dedicated endpoint in production.                                                                                                                                |
 | `--tycho-url`                      | `TYCHO_URL`           | _(chain-specific)_         | Tycho URL. Defaults to the [Fynd hosted endpoint](https://docs.propellerheads.xyz/tycho/for-solvers/hosted-endpoints#tycho-fynd) for the selected chain.                                                       |
 | `--chain`                          | —                     | `Ethereum`                 | Target chain                                                                                                                                                                                                   |
+| `--chains-config`                  | `TYCHO_CHAINS_CONFIG` | _(none)_                   | Path to the custom-chains `chains.yaml`. Required for a chain Tycho does not know as a built-in.                                                                                                              |
 | `-p, --protocols`                  | —                     | _(all on-chain)_           | Protocols to index (comma-separated). If omitted, all on-chain protocols available on your configured Tycho endpoint are fetched. Use `all_onchain` to combine auto-fetched protocols with explicit entries (e.g. `all_onchain,rfq:bebop`). |
 | `--http-host`                      | `HTTP_HOST`           | `0.0.0.0`                  | HTTP bind address                                                                                                                                                                                              |
 | `--http-port`                      | `HTTP_PORT`           | `3000`                     | API port                                                                                                                                                                                                       |
@@ -121,7 +158,7 @@ All pools solve every incoming order in parallel. Fynd picks the best result acr
 
 | Field | Default | <div style="width:40%">Description</div> |
 | ----- | ------- | ---------------------------------------- |
-| `algorithm`           | _(required)_    | Algorithm used for the pool (`"most_liquid"`, `"bellman_ford"`, or `"path_frank_wolfe"`) |
+| `algorithm`           | _(required)_    | Algorithm used for the pool (`"most_liquid"`, `"bellman_ford"`, `"path_frank_wolfe"`, or `"water_fill"`) |
 | `num_workers`         | CPU count       | Number of OS threads dedicated to this pool                            |
 | `task_queue_capacity` | `1000`          | Maximum number of orders that can be queued simultaneously             |
 | `min_hops`            | `1`             | Minimum number of hops required for routing                            |
@@ -150,6 +187,11 @@ connector_tokens = [
     "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",  # wstETH
 ]
 ```
+
+> **Anchor tokens are not configured.** The `water_fill` algorithm's discovery uses a soft anchor
+> preference when no `connector_tokens` allowlist is set — it prefers to route through the most
+> connected tokens plus the native-ETH sentinel. This set is derived per solve from the live graph,
+> so it stays correct on every chain automatically and needs no configuration.
 
 Use `fynd derive-connector-tokens` to generate a ranked list for your chain from live Tycho data:
 

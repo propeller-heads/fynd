@@ -7,7 +7,7 @@
 //!
 //! The optimisation objective is output net of gas, evaluated by simulating
 //! paths sequentially against a shared post-swap state map — paths that share
-//! a pool see its depleted reserves instead of double-counting liquidity. The
+//! a component see its depleted reserves instead of double-counting liquidity. The
 //! single-path route is a floor: any failure while optimising the split falls
 //! back to it rather than failing the solve.
 
@@ -155,10 +155,10 @@ impl PathFrankWolfeAlgorithm {
     /// Finds the next candidate routing path for the Frank-Wolfe algorithm.
     ///
     /// Builds a post-swap market state that reflects `current_allocations` (applying each
-    /// allocation's simulated pool outputs as overrides), then runs Bellman-Ford at
+    /// allocation's simulated component outputs as overrides), then runs Bellman-Ford at
     /// `probe_amount` to discover the best remaining route.
     ///
-    /// Pools already present in `current_allocations` are promoted to zero-gas so their
+    /// Components already present in `current_allocations` are promoted to zero-gas so their
     /// committed gas cost is not counted again as marginal cost for the new path.
     ///
     /// Returns an ordered sequence of [`SimulatedHop`]s representing the discovered path,
@@ -171,10 +171,10 @@ impl PathFrankWolfeAlgorithm {
     ) -> Result<Vec<SimulatedHop>, AlgorithmError> {
         let mut overrides = build_post_swap_overrides(current_allocations, &ctx.market_data)?;
 
-        // Pools committed in the current solution are executed once on-chain — their gas is
+        // Components committed in the current solution are executed once on-chain — their gas is
         // already priced into the combined transaction. Zero out protocol gas so BF doesn't
         // double-charge them when evaluating extensions. We track by (component_id, token_in,
-        // token_out) because different token pairs through the same pool are separate on-chain
+        // token_out) because different token pairs through the same component are separate on-chain
         // swaps with independent gas costs.
         for alloc in current_allocations {
             for hop in &alloc.hops {
@@ -430,7 +430,7 @@ impl PathFrankWolfeAlgorithm {
 
     /// Applies a Frank-Wolfe step: shifts `step_size` fraction of flow to the
     /// candidate path, re-simulates all paths sequentially against a shared
-    /// post-swap state map (so shared pools see depleted reserves), and drops
+    /// post-swap state map (so shared components see depleted reserves), and drops
     /// any path whose fraction falls below `config.min_split` (renormalizing
     /// the remainder).
     fn apply_step(
@@ -636,8 +636,8 @@ impl PathFrankWolfeAlgorithm {
     /// Returns `true` if `candidate` has the same ordered sequence of
     /// `(component_id, token_in, token_out)` as any existing allocation.
     ///
-    /// Both the pool and the token pair must match at every hop — the same pool used with
-    /// different tokens (e.g. in a multi-token pool) is a distinct path.
+    /// Both the component and the token pair must match at every hop — the same component used with
+    /// different tokens (e.g. in a multi-token component) is a distinct path.
     ///
     /// Paths that share only a prefix but diverge at a later hop are **not** duplicates — the
     /// shared hops are handled by `build_split_route`, which emits a single combined swap for
@@ -744,7 +744,7 @@ mod tests {
                 order, setup_market_unweighted, token, token_with_decimals, ConstantProductSim,
                 MockProtocolSim,
             },
-            AlgorithmConfig,
+            AlgorithmConfig, NoPathReason,
         },
         derived::{types::TokenGasPrices, DerivedData, SharedDerivedDataRef},
         graph::GraphManager,
@@ -768,7 +768,7 @@ mod tests {
     /// Builds a `SharedDerivedDataRef` with token prices for the given tokens.
     ///
     /// Price is set so gas costs are small but non-zero relative to test trade
-    /// amounts. With `setup_market_unweighted` (gas_price=100 wei) and pool
+    /// amounts. With `setup_market_unweighted` (gas_price=100 wei) and component
     /// gas=50,000, each hop costs ~5 output tokens.
     fn derived_with_token_prices(tokens: &[&Token]) -> SharedDerivedDataRef {
         let mut prices = TokenGasPrices::new();
@@ -877,7 +877,7 @@ mod tests {
     #[test]
     fn test_average_price_impact_redistribution() {
         // Splitting flow across more paths should reduce average price impact.
-        // Uses constant-product pool outputs (reserve_in=1M, reserve_out=2M) to construct
+        // Uses constant-product component outputs (reserve_in=1M, reserve_out=2M) to construct
         // allocations at 1, 2, and 3 paths.
         let hops = dummy_hops(18, 18);
         let iter_0 = [PathAllocation {
@@ -995,7 +995,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pi_exit_criterion_with_high_gas() {
-        // Three parallel pools, each A→B:
+        // Three parallel components, each A→B:
         //
         //        ┌──[P1]──┐
         //   A ───┼──[P2]──┼─── B
@@ -1003,11 +1003,11 @@ mod tests {
         //
         // High gas costs relative to trade size mean that after the first split
         // lowers PI, `compute_probe_amount` returns None before iteration 2 can
-        // discover the third pool → the loop exits via PI criterion at 2 swaps
+        // discover the third component → the loop exits via PI criterion at 2 swaps
         // instead of the 3 it would produce with lower gas.
         //
         // Math (constant-product, reserves R=5000, trade=2000):
-        //   Initial PI (full amount, one pool): 2000/7000 ≈ 0.286
+        //   Initial PI (full amount, one component): 2000/7000 ≈ 0.286
         //   After ~50/50 split (1000 each):     1000/6000 ≈ 0.167
         //   gas_cost = 1_000_000 × 100 / 1_000_000 = 100 output tokens
         //   PI threshold = gas_cost / (total × max_probe) = 100 / 500 = 0.2
@@ -1051,9 +1051,9 @@ mod tests {
             "PI exit should stop the loop after the first split"
         );
 
-        // Lower-gas control: same pools but gas_cost=50 output tokens.
+        // Lower-gas control: same components but gas_cost=50 output tokens.
         // PI threshold = 50 / 500 = 0.1, below post-split PI (~0.167),
-        // so PI exit never fires and the algorithm discovers all three pools.
+        // so PI exit never fires and the algorithm discovers all three components.
         let (market_lo, gm_lo) = setup_market_unweighted(vec![
             ("P1", &token_a, &token_b, cp(500_000)),
             ("P2", &token_a, &token_b, cp(500_000)),
@@ -1069,13 +1069,13 @@ mod tests {
         assert_eq!(
             result_lo.route().swaps().len(),
             3,
-            "without PI exit, all three pools should be used"
+            "without PI exit, all three components should be used"
         );
     }
 
     #[tokio::test]
     async fn test_step_size_rejects_gas_losing_candidate() {
-        // Two identical parallel pools; the candidate's gas is so large that
+        // Two identical parallel components; the candidate's gas is so large that
         // splitting improves gross output but loses net of gas. The net-aware
         // line search must return a step below min_split, while a normal-gas
         // candidate on the same market is worth a real step.
@@ -1108,8 +1108,8 @@ mod tests {
             .await
             .unwrap();
 
-        let hop = |pool: &str| {
-            HopDescriptor::new(pool.to_string(), token_a.clone(), token_b.clone())
+        let hop = |component: &str| {
+            HopDescriptor::new(component.to_string(), token_a.clone(), token_b.clone())
                 .with_amounts(BigUint::ZERO, BigUint::ZERO)
         };
         let allocations = [PathAllocation {
@@ -1131,7 +1131,7 @@ mod tests {
             algo.optimize_step_size(&allocations, &[hop("P3_cheap")], ord.amount(), &ctx);
         assert!(
             cheap_step >= algo.config.min_split,
-            "identical cheap pool should get a real allocation, got step {cheap_step}"
+            "identical cheap component should get a real allocation, got step {cheap_step}"
         );
     }
 
@@ -1197,11 +1197,11 @@ mod tests {
     }
 
     #[test]
-    fn test_is_duplicate_path_same_pool_different_tokens() {
+    fn test_is_duplicate_path_same_component_different_tokens() {
         // Existing:  A──[P1]──B
         // Candidate: A──[P1]──C
         //
-        // Same pool but different output tokens → not a duplicate.
+        // Same component but different output tokens → not a duplicate.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -1220,8 +1220,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shared_first_pool_two_outputs() {
-        // Diamond topology — two paths share the entry pool:
+    async fn test_shared_first_component_two_outputs() {
+        // Diamond topology — two paths share the entry component:
         //
         //                ┌──[P2]──┐
         //   A ──[P1]── B ┤        ├ C
@@ -1376,7 +1376,7 @@ mod tests {
             marginal_price_product: 2.0,
         };
 
-        // P1 is the only pool — BF returns it again.
+        // P1 is the only component — BF returns it again.
         let second_path = algo
             .find_candidate_path(&ctx, std::slice::from_ref(&first_alloc), &probe_amount)
             .unwrap();
@@ -1419,8 +1419,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_amount_too_small_surfaces_from_inner_bf() {
+        // Reachable component, but rate 0.5 on a 1-unit input floors to 0 output.
+        // find_best_route propagates the inner BF error with `?`, so
+        // AmountTooSmall reaches the caller unchanged.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, graph_manager) = setup_market_unweighted(vec![(
+            "component_ab",
+            &token_a,
+            &token_b,
+            Box::new(MockProtocolSim::new(0.5)) as Box<dyn ProtocolSim>,
+        )]);
+
+        let algo = pfw_algo(3);
+        let ord = order(&token_a, &token_b, 1, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(graph_manager.graph(), market, None, None, &ord)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn test_single_path_no_split() {
-        // Only one pool exists → the loop terminates via duplicate detection and
+        // Only one component exists → the loop terminates via duplicate detection and
         // returns the single-path result unchanged.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1451,12 +1479,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_two_parallel_pools_symmetric() {
+    async fn test_two_parallel_components_symmetric() {
         //        ┌──[P1]──┐
         //   A ───┤        ├─── B
         //        └──[P2]──┘
         //
-        // Two identical pools → should split ~50/50.
+        // Two identical components → should split ~50/50.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -1491,7 +1519,7 @@ mod tests {
             .unwrap();
 
         let swaps = result.route().swaps();
-        assert_eq!(swaps.len(), 2, "should use both pools");
+        assert_eq!(swaps.len(), 2, "should use both components");
         let ids: Vec<&str> = swaps
             .iter()
             .map(|s| s.component_id())
@@ -1499,7 +1527,7 @@ mod tests {
         assert!(ids.contains(&"P1"));
         assert!(ids.contains(&"P2"));
 
-        // Both pools are identical → amounts should be roughly equal (within 10%).
+        // Both components are identical → amounts should be roughly equal (within 10%).
         let amounts: Vec<f64> = swaps
             .iter()
             .map(|s| s.amount_in().to_f64().unwrap())
@@ -1513,7 +1541,7 @@ mod tests {
 
     #[tokio::test]
     async fn find_best_route_reports_price_impact_for_split() {
-        // Two identical pools force a split route; path_frank_wolfe must report the price
+        // Two identical components force a split route; path_frank_wolfe must report the price
         // impact it computes for it. (Single-path routes are linear and get their price
         // impact from the worker's spot-price fallback instead.)
         let token_a = token(0x01, "A");
@@ -1554,12 +1582,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_two_parallel_pools_asymmetric() {
+    async fn test_two_parallel_components_asymmetric() {
         //        ┌──[deep: 200k]───┐
         //   A ───┤                  ├─── B
         //        └──[shallow: 50k]──┘
         //
-        // Large trade should favor the deep pool but still use the shallow one.
+        // Large trade should favor the deep component but still use the shallow one.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -1594,7 +1622,7 @@ mod tests {
             .unwrap();
 
         let swaps = result.route().swaps();
-        assert_eq!(swaps.len(), 2, "should use both pools");
+        assert_eq!(swaps.len(), 2, "should use both components");
 
         let deep_swap = swaps
             .iter()
@@ -1607,7 +1635,7 @@ mod tests {
 
         assert!(
             deep_swap.amount_in() > shallow_swap.amount_in(),
-            "deep pool should get more flow: deep={}, shallow={}",
+            "deep component should get more flow: deep={}, shallow={}",
             deep_swap.amount_in(),
             shallow_swap.amount_in()
         );
@@ -1619,7 +1647,7 @@ mod tests {
         //   A ───┤              ├─── B
         //        └──[P2: 100k]──┘
         //
-        // Large trade (50k) through two parallel pools should produce more
+        // Large trade (50k) through two parallel components should produce more
         // output than routing everything through just one.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1646,7 +1674,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        // Large trade: 50% of each pool's reserves → significant price impact.
+        // Large trade: 50% of each component's reserves → significant price impact.
         let derived = derived_with_token_prices(&[&token_a, &token_b]);
         let ord = order(&token_a, &token_b, 50_000, OrderSide::Sell);
 
@@ -1661,7 +1689,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Single-path: route everything through one pool.
+        // Single-path: route everything through one component.
         let single_algo =
             pfw_algo_with_config(2, PathFrankWolfeConfig { max_paths: 1, ..Default::default() });
         let single_result = single_algo
@@ -1731,7 +1759,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shared_pool_degradation() {
+    async fn test_shared_component_degradation() {
         //        ┌──[P1]──┐
         //   A ───┤        ├─── B ──[P_shared]── C
         //        └──[P2]──┘
@@ -1739,7 +1767,7 @@ mod tests {
         // Path 1: A─[P1]─B─[P_shared]─C
         // Path 2: A─[P2]─B─[P_shared]─C
         //
-        // Both routes share the interior pool P_shared. Sequential simulation
+        // Both routes share the interior component P_shared. Sequential simulation
         // through P_shared must degrade state correctly.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1807,12 +1835,12 @@ mod tests {
             .map(|s| s.component_id())
             .collect();
 
-        // Should use both entry pools plus the shared pool.
-        assert!(ids.contains(&"P1") && ids.contains(&"P2"), "should use both entry pools");
-        assert!(ids.contains(&"P_shared"), "must use shared B→C pool");
+        // Should use both entry components plus the shared component.
+        assert!(ids.contains(&"P1") && ids.contains(&"P2"), "should use both entry components");
+        assert!(ids.contains(&"P_shared"), "must use shared B→C component");
 
         // Output should be better than single-path (which goes through one entry
-        // pool and hits P_shared with the full amount).
+        // component and hits P_shared with the full amount).
         let single_algo =
             pfw_algo_with_config(3, PathFrankWolfeConfig { max_paths: 1, ..Default::default() });
         let single_result = single_algo
@@ -1832,11 +1860,11 @@ mod tests {
     async fn test_timeout_mid_iteration() {
         //        ┌──[P0]──┐
         //        ├──[P1]──┤
-        //   A ───┼──[P2]──┼─── B     (8 identical parallel pools)
+        //   A ───┼──[P2]──┼─── B     (8 identical parallel components)
         //        ├── ⋯  ──┤
         //        └──[P7]──┘
         //
-        // With a generous timeout the algo splits across all pools.
+        // With a generous timeout the algo splits across all components.
         // With a near-zero timeout it returns fewer paths, proving the FW loop
         // was cut short while still producing a valid result.
         let token_a = token(0x01, "A");
@@ -1850,18 +1878,18 @@ mod tests {
             })
         };
 
-        let pool_names: [&str; 8] = ["P0", "P1", "P2", "P3", "P4", "P5", "P6", "P7"];
+        let component_names: [&str; 8] = ["P0", "P1", "P2", "P3", "P4", "P5", "P6", "P7"];
 
         let pfw_config =
             PathFrankWolfeConfig { max_paths: 8, min_split: 0.001, ..Default::default() };
         let ord = order(&token_a, &token_b, 80_000, OrderSide::Sell);
 
-        // Generous timeout — should split across many pools.
-        let pools: Vec<_> = pool_names
+        // Generous timeout — should split across many components.
+        let components: Vec<_> = component_names
             .iter()
             .map(|id| (*id, &token_a, &token_b, cp(100_000)))
             .collect();
-        let (market, graph_manager) = setup_market_unweighted(pools);
+        let (market, graph_manager) = setup_market_unweighted(components);
         let generous_algo = pfw_algo_with_config(2, pfw_config.clone());
         let derived = derived_with_token_prices(&[&token_a, &token_b]);
         let generous_result = generous_algo
@@ -1871,11 +1899,11 @@ mod tests {
         let generous_swaps = generous_result.route().swaps().len();
 
         // Near-zero timeout — should produce a valid result with fewer paths.
-        let pools: Vec<_> = pool_names
+        let components: Vec<_> = component_names
             .iter()
             .map(|id| (*id, &token_a, &token_b, cp(100_000)))
             .collect();
-        let (market, graph_manager) = setup_market_unweighted(pools);
+        let (market, graph_manager) = setup_market_unweighted(components);
         let timeout_algo = PathFrankWolfeAlgorithm::new(
             AlgorithmConfig::new(1, 2, StdDuration::from_millis(1), None).unwrap(),
             pfw_config,

@@ -7,6 +7,7 @@
 
 * [Overview](README.md)
 * [Quickstart](get-started/quickstart/README.md)
+* [Hosted Fynd API (Beta)](get-started/hosted-api.md)
 
 ## Guides
 
@@ -25,6 +26,7 @@
 * [Most Liquid](algorithms/most-liquid.md)
 * [Bellman-Ford](algorithms/bellman-ford.md)
 * [Path Frank-Wolfe](algorithms/path-frank-wolfe.md)
+* [Water-fill](algorithms/water-fill.md)
 
 ## Reference
 

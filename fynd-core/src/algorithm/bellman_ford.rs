@@ -1,7 +1,7 @@
 //! Bellman-Ford algorithm with SPFA optimization for simulation-driven routing.
 //!
-//! Runs actual pool simulations (`get_amount_out()`) during edge relaxation to find
-//! optimal A-to-B routes that account for slippage, fees, and pool mechanics at the
+//! Runs actual component simulations (`get_amount_out()`) during edge relaxation to find
+//! optimal A-to-B routes that account for slippage, fees, and component mechanics at the
 //! given trade size.
 //!
 //! Key features:
@@ -11,7 +11,7 @@
 //! - **Subgraph extraction**: BFS prunes the graph to nodes reachable within `max_hops`
 //! - **SPFA (Shortest Path Faster Algorithm) queuing**: Only re-relaxes edges from nodes whose
 //!   amount improved
-//! - **Forbid revisits**: Skips edges that would revisit a token or pool already in the path
+//! - **Forbid revisits**: Skips edges that would revisit a token or component already in the path
 //!
 //! # Known limitation: SPFA order-dependence
 //!
@@ -41,6 +41,7 @@ use super::{
     split_primitives::MarketOverrides, Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason,
 };
 use crate::{
+    algorithm::sim_guard::GuardedProtocolSim,
     derived::{
         computation::ComputationRequirements,
         types::{SpotPrices, TokenGasPrices},
@@ -59,7 +60,8 @@ type Subgraph =
 ///
 /// Built once by `build_context`, which acquires the market and derived locks and snapshots all
 /// relevant states. `find_single_route` uses this snapshot directly — no lock re-acquisition — so
-/// all route evaluations within one order see a consistent view of the same block's pool states.
+/// all route evaluations within one order see a consistent view of the same block's component
+/// states.
 pub(crate) struct BellmanFordContext {
     pub(crate) token_in_node: NodeIndex,
     pub(crate) token_out_node: NodeIndex,
@@ -85,7 +87,8 @@ pub(crate) enum RouteScoringMode {
 /// Per-call overrides for `find_single_route`.
 #[derive(Default)]
 pub(crate) struct FindRouteOptions {
-    /// Pool state overrides: degrade or zero-gas specific pools without modifying market data.
+    /// Component state overrides: degrade or zero-gas specific components without modifying market
+    /// data.
     pub(crate) overrides: MarketOverrides,
 }
 
@@ -93,18 +96,21 @@ pub(crate) struct FindRouteOptions {
 struct SPFAResult {
     /// Best gross output amount reachable at each node index.
     amount: Vec<BigUint>,
-    /// The (predecessor node, pool) that last improved each node's amount.
+    /// The (predecessor node, component) that last improved each node's amount.
     predecessor: Vec<Option<(NodeIndex, ComponentId)>>,
     /// Gas consumed by the edge that last improved each node's amount.
     edge_gas: Vec<BigUint>,
     /// Cumulative spot-price product from token_in to each node (for gas fallback).
     spot_product: Vec<f64>,
+    /// True if some hop's input couldn't cover that hop's own gas (gas-aware) or a sim
+    /// produced a literal zero output (gas-unaware) — i.e. the amount is dust, not unroutable.
+    input_below_hop_gas: bool,
 }
 
 /// Bellman-Ford algorithm with SPFA optimisation for simulation-driven DEX routing.
 ///
-/// Finds optimal A→B routes by running actual pool simulations during edge relaxation,
-/// accounting for slippage, fees, and pool mechanics at the requested trade size.
+/// Finds optimal A→B routes by running actual component simulations during edge relaxation,
+/// accounting for slippage, fees, and component mechanics at the requested trade size.
 /// Gas costs are subtracted when price data is available.
 pub struct BellmanFordAlgorithm {
     max_hops: usize,
@@ -134,7 +140,7 @@ impl BellmanFordAlgorithm {
     /// Validates the order, extracts the subgraph, acquires the market and derived data
     /// locks exactly once, and snapshots all state into a [`BellmanFordContext`]. All
     /// subsequent `find_single_route` calls on the returned context use the same block's
-    /// pool states.
+    /// component states.
     pub(crate) async fn build_context(
         &self,
         graph: &StableDiGraph<()>,
@@ -250,9 +256,9 @@ impl BellmanFordAlgorithm {
     /// Runs the SPFA relaxation loop and reconstructs the best route from a pre-built context.
     ///
     /// This is the repeatable, synchronous solve phase. Call it multiple times with different
-    /// `opts.overrides` to evaluate alternative pool states without redoing the setup in `ctx`.
-    /// Overrides shadow the corresponding pool in `ctx.market_data` for both relaxation and route
-    /// construction.
+    /// `opts.overrides` to evaluate alternative component states without redoing the setup in
+    /// `ctx`. Overrides shadow the corresponding component in `ctx.market_data` for both
+    /// relaxation and route construction.
     pub(crate) fn find_single_route(
         &self,
         ctx: &BellmanFordContext,
@@ -265,10 +271,18 @@ impl BellmanFordAlgorithm {
 
         let out_idx = ctx.token_out_node.index();
         if spfa.amount[out_idx].is_zero() {
+            // Dust (a hop's input below its own gas) -> AmountTooSmall; everything else
+            // (unreachable, filtered, sim error incl. too-large, missing state, timeout)
+            // -> NoGraphPath.
+            let reason = if spfa.input_below_hop_gas {
+                NoPathReason::AmountTooSmall
+            } else {
+                NoPathReason::NoGraphPath
+            };
             return Err(AlgorithmError::NoPath {
                 from: order.token_in().clone(),
                 to: order.token_out().clone(),
-                reason: NoPathReason::NoGraphPath,
+                reason,
             });
         }
 
@@ -339,6 +353,8 @@ impl BellmanFordAlgorithm {
         let mut spot_product: Vec<f64> = vec![0.0; ctx.max_idx];
         spot_product[ctx.token_in_node.index()] = 1.0;
 
+        let mut input_below_hop_gas = false;
+
         let gas_aware = matches!(ctx.scoring, RouteScoringMode::NetOutput) &&
             ctx.gas_price_wei.is_some() &&
             ctx.token_prices.is_some();
@@ -374,22 +390,15 @@ impl BellmanFordAlgorithm {
                 for (v, component_id) in edges {
                     let v_idx = v.index();
 
-                    // Single predecessor walk: skip if target token or pool already in path
+                    // Single predecessor walk: skip if target token or component already in path
                     if Self::path_has_conflict(u, *v, component_id, &predecessor) {
                         continue;
                     }
 
                     // Skip disallowed connector tokens. Endpoints (token_in / token_out) are
                     // always permitted regardless of the allowlist.
-                    if let (Some(tokens), Some(v_addr)) =
-                        (&self.connector_tokens, ctx.node_address.get(v))
-                    {
-                        if v_addr != order.token_in() &&
-                            v_addr != order.token_out() &&
-                            !tokens.contains(v_addr)
-                        {
-                            continue;
-                        }
+                    if !self.connector_allows(ctx, order, *v) {
+                        continue;
                     }
 
                     let Some(token_v) = ctx.token_map.get(v) else { continue };
@@ -404,17 +413,18 @@ impl BellmanFordAlgorithm {
                             continue;
                         };
 
-                    let result = match sim.get_amount_out(amount[u_idx].clone(), token_u, token_v) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            trace!(
-                                component_id,
-                                error = %e,
-                                "simulation failed, skipping edge"
-                            );
-                            continue;
-                        }
-                    };
+                    let result =
+                        match sim.get_amount_out_guarded(amount[u_idx].clone(), token_u, token_v) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                trace!(
+                                    component_id,
+                                    error = %e,
+                                    "simulation failed, skipping edge"
+                                );
+                                continue;
+                            }
+                        };
 
                     let candidate_cumul_gas = &cumul_gas[u_idx] + &result.gas;
 
@@ -442,6 +452,27 @@ impl BellmanFordAlgorithm {
                             ctx.gas_price_wei.as_ref().unwrap(),
                             v_price.as_ref(),
                         );
+                        // Dust signal: this hop's input can't cover its own gas. Input-side, so
+                        // healthy and too-large orders (large inputs) never trip it. Gated on
+                        // net_candidate <= 0 (implied by input < hop gas) to keep the extra
+                        // price lookup off the hot path.
+                        if !input_below_hop_gas && net_candidate <= BigInt::ZERO {
+                            let u_price = Self::resolve_token_price(
+                                ctx.node_address.get(&u),
+                                ctx.token_prices.as_ref(),
+                                spot_product[u_idx],
+                                ctx.node_address.get(&ctx.token_in_node),
+                            );
+                            if Self::gas_adjusted_amount(
+                                &amount[u_idx],
+                                &result.gas,
+                                ctx.gas_price_wei.as_ref().unwrap(),
+                                u_price.as_ref(),
+                            ) <= BigInt::ZERO
+                            {
+                                input_below_hop_gas = true;
+                            }
+                        }
                         let net_existing = Self::gas_adjusted_amount(
                             &amount[v_idx],
                             &cumul_gas[v_idx],
@@ -450,6 +481,9 @@ impl BellmanFordAlgorithm {
                         );
                         net_candidate > net_existing
                     } else {
+                        if result.amount.is_zero() {
+                            input_below_hop_gas = true;
+                        }
                         result.amount > amount[v_idx]
                     };
 
@@ -472,7 +506,17 @@ impl BellmanFordAlgorithm {
             active_nodes.sort_unstable();
         }
 
-        SPFAResult { amount, predecessor, edge_gas, spot_product }
+        SPFAResult { amount, predecessor, edge_gas, spot_product, input_below_hop_gas }
+    }
+
+    /// Whether the connector-token allowlist permits routing *into* node `v`.
+    /// Endpoints (token_in / token_out) are always permitted. No allowlist => all allowed.
+    fn connector_allows(&self, ctx: &BellmanFordContext, order: &Order, v: NodeIndex) -> bool {
+        let (Some(tokens), Some(v_addr)) = (&self.connector_tokens, ctx.node_address.get(&v))
+        else {
+            return true;
+        };
+        v_addr == order.token_in() || v_addr == order.token_out() || tokens.contains(v_addr)
     }
 
     /// Constructs a [`Route`] from a reconstructed path and SPFA output arrays.
@@ -508,7 +552,8 @@ impl BellmanFordAlgorithm {
                     kind: "component",
                     id: Some(component_id.clone()),
                 })?;
-            // Use the override's sim state if available so the route reflects overridden pools.
+            // Use the override's sim state if available so the route reflects overridden
+            // components.
             let sim_state = overrides
                 .get(component_id)
                 .or_else(|| {
@@ -624,12 +669,12 @@ impl BellmanFordAlgorithm {
         None
     }
 
-    /// Checks whether the target node or pool conflicts with the existing path to `from`.
+    /// Checks whether the target node or component conflicts with the existing path to `from`.
     /// Walks the predecessor chain once, checking both conditions simultaneously.
     pub(crate) fn path_has_conflict(
         from: NodeIndex,
         target_node: NodeIndex,
-        target_pool: &ComponentId,
+        target_component: &ComponentId,
         predecessor: &[Option<(NodeIndex, ComponentId)>],
     ) -> bool {
         let mut current = from;
@@ -639,7 +684,7 @@ impl BellmanFordAlgorithm {
             }
             match &predecessor[current.index()] {
                 Some((prev, cid)) => {
-                    if cid == target_pool {
+                    if cid == target_component {
                         return true;
                     }
                     current = *prev;
@@ -856,7 +901,7 @@ mod tests {
 
     /// Sets up market and graph with `()` edge weights for BellmanFord tests.
     fn setup_market_bf(
-        pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
+        components: Vec<(&str, &Token, &Token, MockProtocolSim)>,
     ) -> (MarketData, PetgraphStableDiGraphManager<()>) {
         let mut market = MarketState::new();
 
@@ -868,11 +913,14 @@ mod tests {
         });
         market.update_last_updated(crate::types::BlockInfo::new(1, "0x00".into(), 0));
 
-        for (pool_id, token_in, token_out, state) in pools {
+        for (component_id, token_in, token_out, state) in components {
             let tokens = vec![token_in.clone(), token_out.clone()];
-            let comp = component(pool_id, &tokens);
+            let comp = component(component_id, &tokens);
             market.upsert_components(std::iter::once(comp));
-            market.update_states([(pool_id.to_string(), Box::new(state) as Box<dyn ProtocolSim>)]);
+            market.update_states([(
+                component_id.to_string(),
+                Box::new(state) as Box<dyn ProtocolSim>,
+            )]);
             market.upsert_tokens(tokens);
         }
 
@@ -916,9 +964,9 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(4.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(4.0)),
         ]);
 
         let algo = bf_algorithm(4, 1000);
@@ -945,10 +993,10 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(3.0)),
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(4.0)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(1.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(3.0)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(4.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(1.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
@@ -961,20 +1009,20 @@ mod tests {
 
         // A->B->D: 100*2*3=600 is better than A->C->D: 100*4*1=400
         assert_eq!(result.route().swaps().len(), 2);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ab");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_bd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_bd");
         assert_eq!(result.route().swaps()[1].amount_out(), &BigUint::from(600u64));
     }
 
     #[tokio::test]
-    async fn test_parallel_pools() {
-        // Two pools between A and B with different multipliers
+    async fn test_parallel_components() {
+        // Two components between A and B with different multipliers
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool2", &token_a, &token_b, MockProtocolSim::new(5.0)),
+            ("component1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component2", &token_a, &token_b, MockProtocolSim::new(5.0)),
         ]);
 
         let algo = bf_algorithm(2, 1000);
@@ -986,7 +1034,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.route().swaps().len(), 1);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool2");
+        assert_eq!(result.route().swaps()[0].component_id(), "component2");
         assert_eq!(result.route().swaps()[0].amount_out(), &BigUint::from(500u64));
     }
 
@@ -998,7 +1046,7 @@ mod tests {
 
         // A-B connected, C disconnected
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         // Add token_c to market without connecting it
         {
@@ -1022,7 +1070,7 @@ mod tests {
         let token_x = token(0x99, "X");
 
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_x, &token_b, 100, OrderSide::Sell);
@@ -1037,13 +1085,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_amount_too_small_when_reachable_but_zero_output() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        // Reachable component, but rate 0.5 on a 1-unit input floors to 0 output.
+        let (market, manager) =
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(0.5))]);
+        let algo = bf_algorithm(3, 1000);
+        let ord = order(&token_a, &token_b, 1, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, None, &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_amount_too_small_when_dust_occurs_mid_route() {
+        // A->B floors 1*0.5 to 0 one hop before token_out: dust mid-route must still
+        // be AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let (market, manager) = setup_market_bf(vec![
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(0.5)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+        let algo = bf_algorithm(3, 1000);
+        let ord = order(&token_a, &token_c, 1, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, None, &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_amount_too_large_for_liquidity() {
+        // Output 2000 exceeds liquidity 500, so the sim errors: a too-large amount must
+        // never be mislabeled AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, manager) = setup_market_bf(vec![(
+            "component_ab",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0).with_liquidity(500),
+        )]);
+        let algo = bf_algorithm(2, 1000);
+        let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, None, &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_unreachable_within_hops() {
+        // A->B->C exists, but max_hops=1 leaves C out of the subgraph.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let (market, manager) = setup_market_bf(vec![
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+        let algo = bf_algorithm(1, 1000);
+        let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, None, &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_connector_tokens_exclude_intermediate() {
+        // B is not in the connector allowlist, so SPFA never simulates into it:
+        // policy exclusion reads as NoGraphPath, not AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market_bf(vec![
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+
+        let algo = BellmanFordAlgorithm::with_config(
+            AlgorithmConfig::new(1, 3, Duration::from_millis(1000), None)
+                .unwrap()
+                .with_connector_tokens(HashSet::new()),
+        );
+        let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, None, &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn test_destination_not_in_graph() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_x = token(0x99, "X");
 
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_a, &token_x, 100, OrderSide::Sell);
@@ -1066,9 +1231,9 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(4.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(4.0)),
         ]);
 
         let algo = bf_algorithm(2, 1000);
@@ -1092,8 +1257,8 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
         ]);
 
         let algo = bf_algorithm(4, 1000);
@@ -1106,8 +1271,8 @@ mod tests {
 
         // Should find exactly the 2-hop path A->B->C = 100*2*3 = 600
         assert_eq!(result.route().swaps().len(), 2);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ab");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_bc");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_bc");
         assert_eq!(result.route().swaps()[1].amount_out(), &BigUint::from(600u64));
     }
 
@@ -1121,10 +1286,10 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
-            ("pool_cb", &token_c, &token_b, MockProtocolSim::new(100.0)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(2.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_cb", &token_c, &token_b, MockProtocolSim::new(100.0)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(2.0)),
         ]);
 
         let algo = bf_algorithm(4, 1000);
@@ -1138,8 +1303,8 @@ mod tests {
         // Should find A->B->D = 100*2*2 = 400 (the direct 2-hop path)
         // The 4-hop revisit path A->B->C->B->D is blocked
         assert_eq!(result.route().swaps().len(), 2, "should use direct 2-hop path");
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ab");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_bd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_bd");
         assert_eq!(result.route().swaps()[1].amount_out(), &BigUint::from(400u64));
     }
 
@@ -1151,8 +1316,8 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
@@ -1174,7 +1339,7 @@ mod tests {
         let token_b = token(0x02, "B");
 
         let (market, manager) = setup_market_bf(vec![(
-            "pool1",
+            "component1",
             &token_a,
             &token_b,
             MockProtocolSim::new(2.0).with_gas(10),
@@ -1204,8 +1369,8 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
         ]);
 
         // 0ms timeout
@@ -1238,9 +1403,9 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        // Pool with 10% fee
+        // Component with 10% fee
         let (market, manager) = setup_market_bf(vec![(
-            "pool1",
+            "component1",
             &token_a,
             &token_b,
             MockProtocolSim::new(2.0).with_fee(0.1),
@@ -1263,9 +1428,9 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        // Pool with limited liquidity (500 tokens)
+        // Component with limited liquidity (500 tokens)
         let (market, manager) = setup_market_bf(vec![(
-            "pool1",
+            "component1",
             &token_a,
             &token_b,
             MockProtocolSim::new(2.0).with_liquidity(500),
@@ -1280,7 +1445,7 @@ mod tests {
             .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { .. })),
-            "Should fail when trade exceeds pool liquidity"
+            "Should fail when trade exceeds component liquidity"
         );
     }
 
@@ -1293,8 +1458,8 @@ mod tests {
         let token_e = token(0x05, "E");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_de", &token_d, &token_e, MockProtocolSim::new(4.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_de", &token_d, &token_e, MockProtocolSim::new(4.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
@@ -1311,17 +1476,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_spfa_skips_failed_simulations() {
-        // Pool that will fail simulation (liquidity=0 would cause error for any amount)
+        // Component that will fail simulation (liquidity=0 would cause error for any amount)
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_bf(vec![
-            // Direct path with failing pool
-            ("pool_ab_bad", &token_a, &token_b, MockProtocolSim::new(2.0).with_liquidity(0)),
+            // Direct path with failing component
+            ("component_ab_bad", &token_a, &token_b, MockProtocolSim::new(2.0).with_liquidity(0)),
             // Alternative path that works
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(2.0)),
-            ("pool_cb", &token_c, &token_b, MockProtocolSim::new(3.0)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(2.0)),
+            ("component_cb", &token_c, &token_b, MockProtocolSim::new(3.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
@@ -1341,7 +1506,7 @@ mod tests {
             }
             Err(AlgorithmError::NoPath { .. }) => {
                 // Also acceptable if liquidity=0 blocks all paths through B
-                // (since the failing pool might also block the reverse B->A edge)
+                // (since the failing component might also block the reverse B->A edge)
             }
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
@@ -1355,8 +1520,8 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
@@ -1416,10 +1581,10 @@ mod tests {
         let low_gas: u64 = 100;
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(3.0).with_gas(high_gas)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(2.0).with_gas(high_gas)),
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(2.0).with_gas(low_gas)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(2.0).with_gas(low_gas)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(3.0).with_gas(high_gas)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(2.0).with_gas(high_gas)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(2.0).with_gas(low_gas)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(2.0).with_gas(low_gas)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
@@ -1440,8 +1605,8 @@ mod tests {
 
         // Gas-aware relaxation should pick the cheaper path A -> C -> D
         assert_eq!(result.route().swaps().len(), 2);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ac");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_cd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ac");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_cd");
     }
 
     #[tokio::test]
@@ -1457,10 +1622,10 @@ mod tests {
         let low_gas: u64 = 100;
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(3.0).with_gas(high_gas)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(2.0).with_gas(high_gas)),
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(2.0).with_gas(low_gas)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(2.0).with_gas(low_gas)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(3.0).with_gas(high_gas)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(2.0).with_gas(high_gas)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(2.0).with_gas(low_gas)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(2.0).with_gas(low_gas)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
@@ -1474,8 +1639,65 @@ mod tests {
 
         // Without gas awareness, picks the higher-gross path A -> B -> D
         assert_eq!(result.route().swaps().len(), 2);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ab");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_bd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_bd");
+    }
+
+    #[tokio::test]
+    async fn test_amount_too_small_when_net_uneconomic_after_gas() {
+        // Gas-aware branch: the 1-unit input (worth 1 at 1:1) is far below the hop's
+        // gas cost of 1000 -> AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_bf(vec![(
+            "component_ab",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0).with_gas(10),
+        )]);
+
+        let algo = bf_algorithm(2, 1000);
+        let ord = order(&token_a, &token_b, 1, OrderSide::Sell);
+        let derived =
+            setup_derived_with_token_prices(&[token_a.address.clone(), token_b.address.clone()]);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, Some(derived), &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_output_uneconomic_but_input_economic() {
+        // Output value (500) is below the hop's gas (1000) so the solve fails, but the
+        // input (10_000) covers it: a healthy-sized order on a low-rate component must read
+        // NoGraphPath, not AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_bf(vec![(
+            "component_ab",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(0.05).with_gas(10),
+        )]);
+
+        let algo = bf_algorithm(1, 1000);
+        let ord = order(&token_a, &token_b, 10_000, OrderSide::Sell);
+        let derived =
+            setup_derived_with_token_prices(&[token_a.address.clone(), token_b.address.clone()]);
+
+        let result = algo
+            .find_best_route(manager.graph(), market, None, Some(derived), &ord)
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+        ));
     }
 
     // ==================== Connector token tests ====================
@@ -1507,10 +1729,10 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(2.0)),
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(3.0)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(3.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(2.0)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(3.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(3.0)),
         ]);
 
         let connectors: HashSet<Address> = [token_c.address.clone()].into();
@@ -1524,8 +1746,8 @@ mod tests {
 
         // Only A->C->D is reachable; B was pruned.
         assert_eq!(result.route().swaps().len(), 2);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ac");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_cd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ac");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_cd");
     }
 
     #[tokio::test]
@@ -1535,7 +1757,7 @@ mod tests {
         let token_b = token(0x02, "B");
 
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         // Empty allowlist — no intermediate tokens allowed, but direct hop A->B should work.
         let algo = bf_algorithm_with_connectors(1, 1000, HashSet::new());
@@ -1559,10 +1781,10 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(3.0)),
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(1.0)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(1.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(3.0)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(1.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(1.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
@@ -1574,17 +1796,17 @@ mod tests {
             .unwrap();
 
         // Best path is A->B->D = 100*2*3 = 600
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ab");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_bd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_bd");
         assert_eq!(result.route().swaps()[1].amount_out(), &BigUint::from(600u64));
     }
 
     #[test]
-    fn test_path_has_conflict_detects_node_and_pool() {
-        // Path: 0 -[pool_a]-> 1 -[pool_b]-> 2
+    fn test_path_has_conflict_detects_node_and_component() {
+        // Path: 0 -[component_a]-> 1 -[component_b]-> 2
         let mut pred: Vec<Option<(NodeIndex, ComponentId)>> = vec![None; 4];
-        pred[1] = Some((NodeIndex::new(0), "pool_a".into()));
-        pred[2] = Some((NodeIndex::new(1), "pool_b".into()));
+        pred[1] = Some((NodeIndex::new(0), "component_a".into()));
+        pred[2] = Some((NodeIndex::new(1), "component_b".into()));
 
         // Node conflicts: node 0 is in path, node 3 is not
         assert!(BellmanFordAlgorithm::path_has_conflict(
@@ -1607,23 +1829,23 @@ mod tests {
             &pred
         ));
 
-        // Pool conflicts: pool_a and pool_b are used, pool_c is not
+        // Component conflicts: component_a and component_b are used, component_c is not
         assert!(BellmanFordAlgorithm::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
-            &"pool_a".into(),
+            &"component_a".into(),
             &pred
         ));
         assert!(BellmanFordAlgorithm::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
-            &"pool_b".into(),
+            &"component_b".into(),
             &pred
         ));
         assert!(!BellmanFordAlgorithm::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
-            &"pool_c".into(),
+            &"component_c".into(),
             &pred
         ));
     }
@@ -1634,7 +1856,7 @@ mod tests {
         let token_b = token(0x02, "B");
 
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         let algo = bf_algorithm(2, 1000);
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
@@ -1650,10 +1872,10 @@ mod tests {
             .unwrap();
         assert_eq!(normal.route().swaps()[0].amount_out(), &BigUint::from(2000u64));
 
-        // Override pool_ab with a degraded sim (multiplier 1.0): 1000 * 1.0 = 1000
+        // Override component_ab with a degraded sim (multiplier 1.0): 1000 * 1.0 = 1000
         let opts = FindRouteOptions {
             overrides: MarketOverrides::empty()
-                .with_override("pool_ab".to_string(), Box::new(MockProtocolSim::new(1.0))),
+                .with_override("component_ab".to_string(), Box::new(MockProtocolSim::new(1.0))),
         };
         let overridden = algo
             .find_single_route(&ctx, &ord, opts)
@@ -1673,7 +1895,7 @@ mod tests {
         let token_b = token(0x02, "B");
 
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         let algo = bf_algorithm(2, 1000);
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);

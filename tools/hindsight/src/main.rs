@@ -1,4 +1,5 @@
 mod decoder;
+mod report;
 mod resolve;
 mod telemetry;
 mod usd;
@@ -9,8 +10,17 @@ use std::time::Instant;
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
-use tracing::{info, warn};
+use fynd_core::types::parse_chain;
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+use tycho_simulation::tycho_common::models::Chain;
+
+use crate::{
+    decoder::{DecodedTrade, Decoder, Registry},
+    report::ReportArgs,
+    resolve::monitor::MonitorArgs,
+    verify::allium::AlliumClient,
+};
 
 #[derive(Parser)]
 #[command(name = "hindsight", about = "Decode solver swaps from on-chain data")]
@@ -27,14 +37,16 @@ enum Command {
     Verify(VerifyArgs),
     /// Live monitor: drive an in-process solver block-by-block, re-solving each block's settled
     /// trades at top-of-block (N-1) and back-of-block (N).
-    Monitor(resolve::monitor::MonitorArgs),
+    Monitor(MonitorArgs),
+    /// Render an offline HTML report from a monitor run's comparison JSONL.
+    Report(ReportArgs),
 }
 
 /// Chain selection shared by every subcommand: which chain to operate on and how to reach it.
 /// Chain-specific configuration beyond the RPC endpoint and address book belongs here too.
 #[derive(Args)]
 pub(crate) struct ChainArgs {
-    /// Chain to operate on — selects the decoder's address book (only ethereum is built in)
+    /// Chain to operate on — selects the decoder's address book
     #[arg(long = "chain", value_name = "CHAIN", default_value = "ethereum")]
     pub name: String,
 
@@ -45,6 +57,26 @@ pub(crate) struct ChainArgs {
     /// Decoder address-book TOML (defaults to the chain's built-in book)
     #[arg(long, env = "HINDSIGHT_REGISTRY")]
     pub registry: Option<std::path::PathBuf>,
+}
+
+impl ChainArgs {
+    /// The decoder address book for this run: `--registry`'s file when given, otherwise the book
+    /// built in for `--chain`.
+    ///
+    /// The file wins, and is read without parsing the chain name at all, so a chain with no
+    /// built-in book — or one Tycho does not know — is still decodable by supplying its book.
+    pub(crate) fn load_registry(&self) -> anyhow::Result<Registry> {
+        match self.registry.as_deref() {
+            Some(path) => Registry::from_file(path),
+            None => Registry::builtin(self.chain()?),
+        }
+    }
+
+    /// The parsed `--chain`, so a chain name is turned into a `Chain` once, by `fynd_core`'s
+    /// parser, rather than being matched on as a string wherever it is needed.
+    pub(crate) fn chain(&self) -> anyhow::Result<Chain> {
+        parse_chain(&self.name).map_err(|e| anyhow::anyhow!("invalid --chain '{}': {e}", self.name))
+    }
 }
 
 /// Block selection shared by the decode and verify subcommands.
@@ -123,19 +155,28 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
-    match Cli::parse().command {
+    let result = match Cli::parse().command {
         Command::Decode(args) => run_decode(args).await,
         Command::Verify(args) => run_verify(args).await,
         Command::Monitor(args) => resolve::monitor::run(args).await,
+        Command::Report(args) => report::run(args),
+    };
+
+    // Log the failure before returning it: the fmt subscriber above writes to stdout, whereas a
+    // `main` that returns `Err` prints only to stderr, so log pipelines that follow stdout show a
+    // run that stops mid-startup with no reason. Returning the error too keeps the exit code.
+    if let Err(error) = &result {
+        error!(error = format!("{error:#}"), "hindsight exited with an error");
     }
+    result
 }
 
 #[expect(clippy::print_stdout)]
 async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.chain.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
-    let registry = decoder::Registry::load(&args.chain.name, args.chain.registry.as_deref())?;
-    let mut decoder = decoder::Decoder::new(provider, registry);
+    let registry = args.chain.load_registry()?;
+    let mut decoder = Decoder::new(provider, registry);
 
     let mut all_trades = Vec::new();
     for block_number in &blocks {
@@ -173,9 +214,9 @@ async fn run_decode(args: DecodeArgs) -> anyhow::Result<()> {
 async fn run_verify(args: VerifyArgs) -> anyhow::Result<()> {
     let provider = provider_from(&args.chain.rpc_url)?;
     let blocks = resolve_blocks(&provider, args.blocks.block, args.blocks.range.as_deref()).await?;
-    let allium = verify::allium::AlliumClient::new(args.allium_key, args.allium_query_id);
-    let registry = decoder::Registry::load(&args.chain.name, args.chain.registry.as_deref())?;
-    let mut decoder = decoder::Decoder::new(provider, registry);
+    let allium = AlliumClient::new(args.allium_key, args.allium_query_id);
+    let registry = args.chain.load_registry()?;
+    let mut decoder = Decoder::new(provider, registry);
 
     info!(blocks = blocks.len(), "verifying decoded trades against Allium");
     let start = Instant::now();
@@ -216,7 +257,7 @@ pub(crate) async fn resolve_blocks<P: Provider>(
 }
 
 #[expect(clippy::print_stdout)]
-fn print_trades(trades: &[decoder::DecodedTrade]) {
+fn print_trades(trades: &[DecodedTrade]) {
     if trades.is_empty() {
         println!("No solver trades found.");
         return;
@@ -271,30 +312,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_range_valid() {
+    fn test_parse_range_valid() {
         let blocks = parse_range("100-105").unwrap();
         assert_eq!(blocks, vec![100, 101, 102, 103, 104, 105]);
     }
 
     #[test]
-    fn parse_range_single_block() {
+    fn test_parse_range_single_block() {
         let blocks = parse_range("100-100").unwrap();
         assert_eq!(blocks, vec![100]);
     }
 
     #[test]
-    fn parse_range_invalid_format() {
+    fn test_parse_range_invalid_format() {
         assert!(parse_range("100").is_err());
         assert!(parse_range("100-200-300").is_err());
     }
 
     #[test]
-    fn parse_range_reversed() {
+    fn test_parse_range_reversed() {
         assert!(parse_range("200-100").is_err());
     }
 
     #[test]
-    fn parse_range_too_large() {
+    fn test_parse_range_too_large() {
         assert!(parse_range("0-1001").is_err());
     }
 }

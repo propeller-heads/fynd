@@ -2,26 +2,30 @@
 //!
 //! Terminology — three tiers, two of which appear in every record:
 //! - **venue** (`venues/`): the contract the user entered through (`tx.to`) — Relay, `MetaMask`.
-//!   Order-flow owners; they pick a solver and may skim a fee.
+//!   Order-flow owners; they pick a solver and may take a fee.
 //! - **solver** (`solvers/`): the router that computed and settled the route — `KyberSwap`, 1inch,
 //!   0x. These are Fynd's competitors. Datasets recorded before run6 call this tier `aggregator` in
 //!   their column names; the two words mean the same thing.
 //! - **liquidity venues**: the pools and makers a route executes against (Uniswap, Curve,
 //!   prop-AMMs). Not modeled here; they only appear inside traces.
 //!
-//! The pipeline is match → trace → decode → guard → record: `strategy` picks how a matched
-//! transaction is decoded, `ledger` answers all value-flow questions, `guards` vetoes shapes that
-//! are not comparable trades, and `registry` is the address book behind matching.
+//! The pipeline is match → trace → decode → veto → record: `matching` filters a block down to
+//! solver trades, `decode` recovers each trade's swap (picking the decoders for the matched
+//! entity), `transfer_ledger` answers all value-flow questions, `veto` rejects shapes that are not
+//! comparable trades, and `registry` is the address book behind matching.
 
-mod guards;
-mod intent;
-mod ledger;
+mod decode;
+mod intents;
+mod matching;
+mod netting_decoders;
 mod registry;
 mod sandwich;
 mod solvers;
-mod strategy;
 mod trace;
+mod transfer_ledger;
+mod venue_attribution;
 pub(crate) mod venues;
+mod veto;
 
 #[cfg(test)]
 mod test_utils;
@@ -29,18 +33,21 @@ mod test_utils;
 use std::collections::HashMap;
 
 use alloy::{
+    eips::BlockId,
+    network::AnyTransactionReceipt,
     primitives::{Address, TxHash, U256},
     providers::Provider,
     rpc::types::trace::geth::CallFrame,
 };
 use anyhow::Context;
-use futures::stream::{StreamExt, TryStreamExt};
+use futures::stream::StreamExt;
 use tracing::{debug, warn};
 
 use crate::decoder::{
-    ledger::TransferLedger,
-    strategy::{DecodeContext, Matched},
+    decode::{recover, DecodeContext, GasScope},
+    matching::MatchedSolverTrade,
     trace::{collect_native_transfers, fetch_trace, route_gas},
+    transfer_ledger::TransferLedger,
 };
 pub(crate) use crate::decoder::{
     registry::Registry,
@@ -50,7 +57,7 @@ pub(crate) use crate::decoder::{
 
 /// A decoded solver trade: what token went in, what came out.
 ///
-/// Native ETH is represented as [`Address::ZERO`].
+/// Native ETH is represented as `Address::ZERO`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct DecodedTrade {
     pub tx_hash: TxHash,
@@ -60,25 +67,28 @@ pub(crate) struct DecodedTrade {
     pub tx_index: u64,
     pub venue: String,
     pub solver: String,
-    /// The evidence tier the solver label came from (see [`solvers::attribution`]). Downstream
+    /// The evidence tier the solver label came from (see `solvers::attribution`). Downstream
     /// analysis weighs low-trust tiers (`largest_call`, fallback) differently — e.g. when judging
     /// an embedded quote.
     pub solver_source: AttributionSource,
+    /// Which decoder recovered this trade (see `decode`). Once several decoders can carry a
+    /// venue's trades this measures how often each one carries a trade the others could not.
+    pub decoder: &'static str,
     pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
-    /// Input amount that actually entered the swap — a venue fee skimmed from the input (see
-    /// `venue_fee`) is already subtracted, so a re-solve compares like-for-like.
+    /// Input amount that actually entered the swap — a venue fee taken from the input (see
+    /// `venue_fee_in`) is already subtracted, so a re-solve compares like-for-like.
     pub amount_in: U256,
-    /// Gross swap output — a venue fee skimmed from the output (see `venue_fee_out`) is added
+    /// Gross swap output — a venue fee taken from the output (see `venue_fee_out`) is added
     /// back, so the settled amount is the full swap proceeds, comparable to Fynd's gross output.
     pub amount_out: U256,
-    /// Venue fee skimmed from the input token before swapping (e.g. Relay's fee), in `token_in`
+    /// Venue fee taken from the input token before swapping (e.g. Relay's fee), in `token_in`
     /// units. `None` when no known fee collector took a cut. Recorded for transparency; it is
     /// already excluded from `amount_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub venue_fee: Option<U256>,
-    /// Venue fee skimmed from the output token after swapping, in `token_out` units. `None` when
+    pub venue_fee_in: Option<U256>,
+    /// Venue fee taken from the output token after swapping, in `token_out` units. `None` when
     /// no known fee collector took a cut. Recorded for transparency; it is already added back into
     /// `amount_out`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,18 +96,18 @@ pub(crate) struct DecodedTrade {
     /// Wei cost of the gas the trader paid for the settled route (`gas_used ×
     /// effective_gas_price`). For venue-wrapped entries (Relay, `MetaMask`) the venue's own
     /// overhead is excluded — it is charged whichever router the venue picks, like the venue
-    /// fee. `None` when the trader did not pay the transaction's gas (maker fills, solver
+    /// fee. `None` when the trader did not pay the transaction's gas (intent fills, solver
     /// rebalances) or the route's gas could not be isolated from the trace.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_gas: Option<U256>,
     /// The solver's own off-chain quote for this swap, recovered from calldata (see
-    /// [`solvers::embedded_quote`] for the solvers that declare one). Informational — it is what
+    /// `solvers::embedded_quote` for the solvers that declare one). Informational — it is what
     /// the venue compared against at decision time, as opposed to `amount_out`, which is what
     /// execution delivered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quote: Option<SolverQuote>,
     /// Evidence that a front-run and a back-run bracketed this trade (see
-    /// [`sandwich::detect`]). `None` when no bracket pair was found.
+    /// `sandwich::detect`). `None` when no bracket pair was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandwich: Option<SandwichEvidence>,
 }
@@ -115,7 +125,7 @@ pub(crate) struct Decoder<P> {
     /// Whether an address had contract code when first checked, kept for the
     /// life of the decoder. An address gaining code mid-run (a deploy or an
     /// EIP-7702 delegation) keeps its stale answer until restart — acceptable
-    /// for distinguishing maker EOAs from pools.
+    /// for distinguishing swapper EOAs from pools.
     code_cache: HashMap<Address, bool>,
 }
 
@@ -130,7 +140,7 @@ impl<P: Provider> Decoder<P> {
         &self.provider
     }
 
-    /// The decoder's address registry, for label vocabulary shared with telemetry.
+    /// The decoder's address registry, for the label names shared with telemetry.
     pub(crate) fn registry(&self) -> &Registry {
         &self.registry
     }
@@ -148,9 +158,17 @@ impl<P: Provider> Decoder<P> {
         &mut self,
         block_number: u64,
     ) -> anyhow::Result<Vec<DecodedTrade>> {
-        let receipts = self
+        // Fetch receipts as `AnyTransactionReceipt` rather than the Ethereum-typed default:
+        // OP-stack chains (Base) put a system deposit transaction (type `0x7e`) first in
+        // every block, which the Ethereum receipt enum rejects — failing the whole
+        // `eth_getBlockReceipts` batch. The `Any` receipt tolerates unknown transaction
+        // types.
+        let receipts: Vec<AnyTransactionReceipt> = self
             .provider
-            .get_block_receipts(block_number.into())
+            .raw_request::<_, Option<Vec<AnyTransactionReceipt>>>(
+                "eth_getBlockReceipts".into(),
+                (BlockId::from(block_number),),
+            )
             .await
             .with_context(|| format!("failed to fetch receipts for block {block_number}"))?
             .ok_or_else(|| anyhow::anyhow!("block {block_number} not found"))?;
@@ -158,11 +176,11 @@ impl<P: Provider> Decoder<P> {
         // Paired with each receipt's position in the slice, since that position — not the
         // transaction_index field, which the RPC may omit — is what "neighbor" means for the
         // sandwich scan below: receipts are already in block order.
-        let matched: Vec<(usize, Matched)> = receipts
+        let matched: Vec<(usize, MatchedSolverTrade)> = receipts
             .iter()
             .enumerate()
             .filter_map(|(index, receipt)| {
-                strategy::select(receipt, &self.registry).map(|matched| (index, matched))
+                matching::select(receipt, &self.registry).map(|matched| (index, matched))
             })
             .collect();
 
@@ -170,21 +188,38 @@ impl<P: Provider> Decoder<P> {
         // collected in block order for deterministic output. Wall-clock cost is
         // one receipts call plus the slowest trace wave — not the sum of every
         // request — so a block stays well inside its block time.
+        //
+        // Failures are collected per transaction rather than aborting the wave: one transaction the
+        // RPC cannot trace costs that trade, not the whole block. Failing the block instead drops
+        // its every trade from the aggregates, and the surviving sample is selected by which
+        // transactions the RPC happened to serve.
         let traces = futures::stream::iter(
             matched
                 .iter()
                 .map(|(_, m)| fetch_trace(&self.provider, m.receipt.transaction_hash)),
         )
         .buffered(TRACE_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
+        .collect::<Vec<_>>()
+        .await;
 
         let mut trades = Vec::with_capacity(matched.len());
-        for ((index, matched), root) in matched.into_iter().zip(traces) {
+        for ((index, matched), trace) in matched.into_iter().zip(traces) {
             let tx_index = matched
                 .receipt
                 .transaction_index
                 .unwrap_or(index as u64);
+            let root = match trace {
+                Ok(root) => root,
+                Err(e) => {
+                    warn!(
+                        block = block_number,
+                        tx = %matched.receipt.transaction_hash,
+                        "skipping untraceable transaction: {e}"
+                    );
+                    crate::telemetry::record_untraced_transaction();
+                    continue;
+                }
+            };
             if let Some(mut trade) = self
                 .decode_transaction(matched, &root, block_number, tx_index)
                 .await
@@ -197,46 +232,44 @@ impl<P: Provider> Decoder<P> {
         Ok(trades)
     }
 
-    /// Decode one matched transaction from its trace: build the ledger, run the trader
-    /// strategy, guard the result, attribute the solver, and account gas and quote.
+    /// Decode one matched transaction from its trace: build the transfer ledger, run the decoders
+    /// for its entity, veto non-trades, attribute the solver, and account gas and quote.
     async fn decode_transaction(
         &mut self,
-        matched: Matched<'_>,
+        matched: MatchedSolverTrade<'_>,
         root: &CallFrame,
         block_number: u64,
         tx_index: u64,
     ) -> Option<DecodedTrade> {
         let Self { provider, registry, code_cache } = self;
-        let Matched { receipt, entry_point, strategy } = matched;
+        let MatchedSolverTrade { receipt, entry_point } = matched;
         let logs = receipt.logs();
         let sender = receipt.from;
 
         let mut native = Vec::new();
         collect_native_transfers(root, &mut native);
-        let ledger = TransferLedger::from_transaction(logs, &native);
+        let transfer_ledger = TransferLedger::from_transaction(logs, &native);
 
-        let flow = strategy
-            .decode(DecodeContext {
-                provider,
-                registry,
-                code_cache,
-                ledger: &ledger,
-                input: &root.input,
-                sender,
-                entry_point,
-            })
-            .await;
-
-        let Some(mut flow) = flow else {
+        let mut ctx = DecodeContext {
+            provider,
+            registry,
+            code_cache,
+            receipt,
+            entry_point,
+            transfer_ledger: &transfer_ledger,
+            input: &root.input,
+            venue: None,
+        };
+        let Some((decoder, mut flow)) = recover(&mut ctx).await else {
             warn!(
                 tx = %receipt.transaction_hash,
                 venue = %registry.label(entry_point),
-                "no token or native ETH flow found"
+                "no decoder recovered a trade from this transaction"
             );
             return None;
         };
 
-        if let Some(veto) = guards::veto(&flow, logs, registry) {
+        if let Some(veto) = veto::check(&flow, &transfer_ledger, logs, registry) {
             debug!(
                 tx = %receipt.transaction_hash,
                 venue = %registry.label(entry_point),
@@ -246,6 +279,21 @@ impl<P: Provider> Decoder<P> {
             return None;
         }
 
+        // A venue fingerprint (owning trader, CoW appData tag, fee wallet, or integrator tag — see
+        // `venue_attribution`) overrides the entry-point label, backing any venue fee out before
+        // the quote check reads the grossed output. The appData tag is read from a batch settler's
+        // calldata; other transactions carry none.
+        let integrator = solvers::integrator(logs);
+        let app_data = intents::venue_tag(registry, entry_point, &root.input);
+        let venue = venue_attribution::attribute(
+            registry,
+            &mut flow,
+            &transfer_ledger,
+            integrator.as_deref(),
+            app_data,
+        )
+        .unwrap_or_else(|| registry.label(entry_point));
+
         let attribution = solvers::attribution::attribute(
             flow.solver_override.take(),
             root,
@@ -254,21 +302,27 @@ impl<P: Provider> Decoder<P> {
             registry,
         );
 
-        // Gas the trader paid for the settled route, as a wei cost. Only charged when the
-        // tracked trader sent the transaction; for venue-wrapped entries the route's gas is
-        // read from the solver call's trace frame so the wrapper's overhead stays out of the
-        // comparison on both sides.
-        let settled_gas = flow
-            .trader_paid_gas
-            .then(|| {
-                if strategy.routes_via_wrapper() {
-                    route_gas(root, registry)
-                } else {
-                    Some(U256::from(receipt.gas_used))
-                }
-            })
-            .flatten()
-            .map(|units| units * U256::from(receipt.effective_gas_price));
+        // A frontend routing through the solver can take a cut of the output without owning a
+        // venue section, declaring its fee recipients in the solver's own calldata. Backed out
+        // here so the settled output is gross, like Fynd's re-solve; a no-op when a venue
+        // fingerprint already accounted an output fee.
+        if let Some(fee) = solvers::declared_output_fee(
+            &attribution.solver,
+            &root.input,
+            &transfer_ledger,
+            flow.swap.token_out,
+        ) {
+            flow.gross_output_fee(fee);
+        }
+
+        // Gas the trader paid for the settled route, as a wei cost. The flow's gas scope says
+        // which gas that is — see `GasScope`.
+        let settled_gas = match flow.gas_scope {
+            GasScope::WholeTransaction => Some(U256::from(receipt.gas_used)),
+            GasScope::SolverFrame => route_gas(root, registry),
+            GasScope::NotCharged => None,
+        }
+        .map(|units| units * U256::from(receipt.effective_gas_price));
 
         // The solver's off-chain quote, when its calldata declares one. Dispatched on the
         // attributed solver so a lookalike blob from another router cannot masquerade as a
@@ -280,15 +334,16 @@ impl<P: Provider> Decoder<P> {
             tx_hash: receipt.transaction_hash,
             block_number,
             tx_index,
-            venue: registry.label(entry_point),
+            venue,
             solver: attribution.solver,
             solver_source: attribution.source,
+            decoder,
             sender: flow.tracked,
             token_in: flow.swap.token_in,
             token_out: flow.swap.token_out,
             amount_in: flow.swap.amount_in,
             amount_out: flow.swap.amount_out,
-            venue_fee: flow.venue_fee,
+            venue_fee_in: flow.venue_fee_in,
             venue_fee_out: flow.venue_fee_out,
             settled_gas,
             quote,
@@ -296,5 +351,58 @@ impl<P: Provider> Decoder<P> {
             // transaction); the caller (`decode_block`) fills this in once decoding succeeds.
             sandwich: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::{
+        primitives::{address, U256},
+        providers::{mock::Asserter, ProviderBuilder},
+    };
+
+    use super::*;
+    use crate::decoder::test_utils::{addr, frame, make_transfer_log, receipt, tx_hash};
+
+    /// 1inch v6 — a `[solvers]` entry in the ethereum address book, so a transaction into it
+    /// matches on its entry point alone.
+    const ONEINCH: Address = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+
+    /// A sender-netting swap through `ONEINCH`: `sender` pays one token and is paid another.
+    fn swap_receipt(hash: TxHash, sender: Address) -> AnyTransactionReceipt {
+        let pool = addr(0x50);
+        receipt(
+            hash,
+            sender,
+            Some(ONEINCH),
+            vec![
+                make_transfer_log(addr(0xaa), sender, pool, U256::from(1_000)),
+                make_transfer_log(addr(0xbb), pool, sender, U256::from(2_000)),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn test_untraceable_transaction_does_not_drop_the_block() {
+        let asserter = Asserter::new();
+        asserter.push_success(&vec![
+            swap_receipt(tx_hash(1), addr(1)),
+            swap_receipt(tx_hash(2), addr(2)),
+        ]);
+        asserter.push_failure_msg("debug_traceTransaction unavailable");
+        asserter.push_success(&frame("CALL", addr(2), ONEINCH, 0));
+
+        let mut decoder = Decoder::new(
+            ProviderBuilder::default().connect_mocked_client(asserter),
+            Registry::ethereum(),
+        );
+        let trades = decoder
+            .decode_block(21_000_000)
+            .await
+            .expect("an untraceable transaction must not fail the block");
+
+        // Only the untraceable transaction is lost; before, it took the whole block with it.
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].tx_hash, tx_hash(2));
     }
 }

@@ -55,16 +55,18 @@ See [`docs/guides/swap-cli.md`](../docs/guides/swap-cli.md) for usage instructio
 
 See [`tools/hindsight/CLAUDE.md`](hindsight/CLAUDE.md) for the full module overview.
 
-Three subcommands via `cargo run -p hindsight --release --`:
+Four subcommands via `cargo run -p hindsight --release --`:
 
 - **`decode`** — Fetch block receipts, match and trace solver transactions, emit decoded trades
   (token in/out, amounts, client, solver, settled gas). Accepts `--block N`, `--range START-END`
   (max 1000 blocks), or defaults to the latest block.
 - **`verify`** — Diff decoded trades against Allium's `aggregator_trades` ground truth. Requires 
   `ALLIUM_API_KEY` and `ALLIUM_QUERY_ID`.
-- **`monitor`** — Live mode: drives an in-process `fynd-core` solver block-by-block, re-solving
-  each settled trade at top-of-block (N-1) and back-of-block (N). Emits JSONL and exposes
-  Prometheus metrics.
+- **`monitor`** — Live mode: drives an in-process `fynd-core` solver block-by-block, solving
+  each settled trade at top-of-block (N-1) and again at back-of-block (N), where the top route
+  is also re-executed to measure slippage. Emits JSONL and exposes Prometheus metrics.
+- **`report`** — Offline: render a self-contained HTML report from a `monitor` run's comparison
+  JSONL (`--comparisons-dir`). No chain or network access.
 
 ---
 
@@ -77,6 +79,6 @@ the integration tests in `fynd-core/tests/integration/`.
 
 Shared fixture types live in the `fynd-test-fixtures` crate. Worker pool configuration comes from
 the production `worker_pools.toml`; its SHA-256 is stored in the recording metadata so tests can
-detect drift. VM-backed protocol states (e.g. `vm:*` pools) cannot be serialized and are skipped.
+detect drift. VM-backed protocol states (e.g. `vm:*` components) cannot be serialized and are skipped.
 
 See [`tools/record-market/README.md`](record-market/README.md) for usage.

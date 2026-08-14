@@ -23,27 +23,39 @@ num_workers = 3
 task_queue_capacity = 1000
 max_hops = 2
 timeout_ms = 500
+
+# Example: an exclusive-access worker pool whose workers also route through exclusive components
+# to capture surplus above the committed public reference (see repo-root worker_pools.toml).
+# Worker pools with the key omitted default to "public_only": their workers drop exclusive
+# components. Only requests granted exclusive access are dispatched to such a worker pool, so
+# size num_workers to that share of flow.
+# [pools.exclusive_access]
+# algorithm = "bellman_ford"
+# num_workers = 3
+# max_hops = 2
+# timeout_ms = 500
+# liquidity_scope = "include_exclusive"
 "#;
 
 /// Worker pools configuration loaded from TOML file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerPoolsConfig {
-    /// Pool configurations (at least one pool must be specified)
+    /// Worker pool configurations (at least one worker pool must be specified)
     pools: HashMap<String, PoolConfig>,
 }
 
 impl WorkerPoolsConfig {
-    /// Creates a new config from a pools map.
+    /// Creates a new config from a map of worker pool configs.
     pub fn new(pools: HashMap<String, PoolConfig>) -> Self {
         Self { pools }
     }
 
-    /// Returns the pool configurations.
+    /// Returns the worker pool configurations.
     pub fn pools(&self) -> &HashMap<String, PoolConfig> {
         &self.pools
     }
 
-    /// Consumes the config and returns the pools map.
+    /// Consumes the config and returns the map of worker pool configs.
     pub fn into_pools(self) -> HashMap<String, PoolConfig> {
         self.pools
     }
@@ -68,7 +80,7 @@ impl WorkerPoolsConfig {
 /// Blocklist configuration for excluding components from the Tycho stream.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlocklistConfig {
-    /// Component IDs to exclude (e.g., pool addresses with simulation issues).
+    /// Component IDs to exclude (e.g., component addresses with simulation issues).
     #[serde(default)]
     components: HashSet<String>,
 }
@@ -104,6 +116,8 @@ impl BlocklistConfig {
 
 #[cfg(test)]
 mod tests {
+    use fynd_core::LiquidityScope;
+
     use super::*;
 
     #[test]
@@ -141,6 +155,7 @@ mod tests {
             max_hops = 4
             timeout_ms = 200
             max_routes = 50
+            liquidity_scope = "include_exclusive"
         "#;
         let config: WorkerPoolsConfig = toml::from_str(toml).unwrap();
         let pool = &config.pools()["custom"];
@@ -151,6 +166,7 @@ mod tests {
         assert_eq!(pool.max_hops(), 4);
         assert_eq!(pool.timeout_ms(), 200);
         assert_eq!(pool.max_routes(), Some(50));
+        assert_eq!(pool.liquidity_scope(), Some(LiquidityScope::IncludeExclusive));
     }
 }
 

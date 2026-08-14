@@ -111,7 +111,7 @@ function fromWireRoute(wire: WireRoute): Route {
 
 function fromWireSwap(wire: WireSwap): Swap {
     return {
-        poolId: wire.component_id,
+        componentId: wire.component_id,
         protocol: wire.protocol,
         tokenIn: wire.token_in as Address,
         tokenOut: wire.token_out as Address,
@@ -199,7 +199,7 @@ export function fromWireHealth(wire: WireHealthStatus): HealthStatus {
 
 export function fromWireInstanceInfo(wire: WireInstanceInfo): InstanceInfo {
   return {
-    routerAddress:  wire.router_address as Address,
+    routerAddress:  (wire.router_address ?? null) as Address | null,
     permit2Address: wire.permit2_address as Address,
     chainId:        wire.chain_id,
   };

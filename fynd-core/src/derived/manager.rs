@@ -2,18 +2,19 @@
 //!
 //! The ComputationManager:
 //! - Subscribes to MarketEvents from TychoFeed
-//! - Runs derived computations (token prices, spot prices, pool depths)
+//! - Runs derived computations (token prices, spot prices, component depths)
 //! - Updates DerivedDataStore (exclusive write access)
 //! - Provides read access to workers via shared store reference
 
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
 use futures::future::join_all;
+use metrics::{counter, gauge, histogram};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info, trace, warn};
 use tycho_simulation::tycho_common::models::Address;
@@ -37,18 +38,6 @@ pub struct ChangedComponents {
 }
 
 impl ChangedComponents {
-    /// Creates a marker for full recompute where all components are considered changed.
-    ///
-    /// Used for startup and lag recovery scenarios.
-    pub fn all(market: MarketDataView) -> Self {
-        Self {
-            added: market.component_topology().clone(),
-            removed: vec![],
-            updated: vec![],
-            is_full_recompute: true,
-        }
-    }
-
     /// Returns true if this update changes the graph topology (adds or removes components).
     pub fn is_topology_change(&self) -> bool {
         !self.added.is_empty() || !self.removed.is_empty()
@@ -64,9 +53,59 @@ impl ChangedComponents {
     }
 }
 
+/// Coalesces a drained batch of [`MarketEvent`]s into a single incremental
+/// [`ChangedComponents`], applying net semantics: a component that is added
+/// then removed within the batch nets to removed; an add supersedes a prior
+/// update; a remove supersedes a prior add/update.
+///
+/// Returns `None` when the batch carries no net changes. The result always has
+/// `is_full_recompute: false` — this is the bounded lag-recovery path, never a
+/// whole-topology recompute.
+fn coalesce_market_events(events: &[MarketEvent]) -> Option<ChangedComponents> {
+    let mut added: HashMap<ComponentId, Vec<Address>> = HashMap::new();
+    let mut removed: HashSet<ComponentId> = HashSet::new();
+    let mut updated: HashSet<ComponentId> = HashSet::new();
+
+    for event in events {
+        match event {
+            MarketEvent::MarketUpdated {
+                added_components,
+                removed_components,
+                updated_components,
+            } => {
+                for (id, tokens) in added_components {
+                    removed.remove(id);
+                    updated.remove(id);
+                    added.insert(id.clone(), tokens.clone());
+                }
+                for id in removed_components {
+                    added.remove(id);
+                    updated.remove(id);
+                    removed.insert(id.clone());
+                }
+                for id in updated_components {
+                    if !added.contains_key(id) && !removed.contains(id) {
+                        updated.insert(id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if added.is_empty() && removed.is_empty() && updated.is_empty() {
+        return None;
+    }
+    Some(ChangedComponents {
+        added,
+        removed: removed.into_iter().collect(),
+        updated: updated.into_iter().collect(),
+        is_full_recompute: false,
+    })
+}
+
 use super::{
     computation::{ComputationId, ComputationRequirements, DerivedComputation},
-    computations::{PoolDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
+    computations::{ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
     error::ComputationError,
     events::DerivedDataEvent,
     registry::ErasedComputation,
@@ -74,7 +113,7 @@ use super::{
 };
 use crate::feed::{
     events::{EventError, MarketEvent, MarketEventHandler},
-    market_data::{MarketData, MarketDataView},
+    market_data::MarketData,
 };
 
 /// Thread-safe handle to shared derived data store.
@@ -87,7 +126,7 @@ pub struct ComputationManagerConfig {
     gas_token: Address,
     /// Max hop count for token gas price computation.
     max_hop: usize,
-    /// Slippage threshold for pool depth computation (0.0 < threshold < 1.0).
+    /// Slippage threshold for component depth computation (0.0 < threshold < 1.0).
     depth_slippage_threshold: f64,
 }
 
@@ -97,7 +136,7 @@ impl ComputationManagerConfig {
         Self::default()
     }
 
-    /// Sets the slippage threshold for pool depth computation.
+    /// Sets the slippage threshold for component depth computation.
     pub fn with_depth_slippage_threshold(mut self, threshold: f64) -> Self {
         self.depth_slippage_threshold = threshold;
         self
@@ -174,7 +213,7 @@ impl ComputationManager {
                 .with_max_hops(config.max_hop)
                 .with_gas_token(config.gas_token),
         )?;
-        manager.register(PoolDepthComputation::new(config.depth_slippage_threshold)?)?;
+        manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
         Ok((manager, event_rx))
     }
 
@@ -264,12 +303,13 @@ impl ComputationManager {
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(
                                 skipped,
-                                "computation manager lagged, skipped {} events. Recomputing from current state.",
-                                skipped
+                                "computation manager lagged; draining buffered events and \
+                                 recomputing changed components incrementally"
                             );
-                            let market = self.market_data.read().await;
-                            let changed = ChangedComponents::all(market);
-                            self.compute_all(&changed).await;
+                            counter!("derived_manager_lag_recoveries_total").increment(1);
+                            counter!("derived_manager_lagged_events_total")
+                                .increment(skipped);
+                            self.recover_from_lag(&mut event_rx).await;
                         }
                     }
                 }
@@ -313,6 +353,12 @@ impl ComputationManager {
         for &idx in &schedule.unscheduled {
             let computation_id = nodes[idx].0;
             error!(computation = computation_id, "computation skipped: requirement cycle");
+            counter!(
+                "derived_computation_failures_total",
+                "computation" => computation_id,
+                "reason" => "cycle"
+            )
+            .increment(1);
             let _ = self
                 .event_tx
                 .send(DerivedDataEvent::ComputationFailed { computation_id, block });
@@ -338,12 +384,16 @@ impl ComputationManager {
                     if fresh_ready && stale_ready {
                         runnable.push(idx);
                     } else {
+                        let computation_id = nodes[idx].0;
+                        counter!(
+                            "derived_computation_failures_total",
+                            "computation" => computation_id,
+                            "reason" => "upstream_failed"
+                        )
+                        .increment(1);
                         let _ = self
                             .event_tx
-                            .send(DerivedDataEvent::ComputationFailed {
-                                computation_id: nodes[idx].0,
-                                block,
-                            });
+                            .send(DerivedDataEvent::ComputationFailed { computation_id, block });
                     }
                 }
             }
@@ -369,6 +419,16 @@ impl ComputationManager {
                 match result {
                     Ok(write) => {
                         (write.persist)(&mut store);
+                        histogram!(
+                            "derived_computation_duration_seconds",
+                            "computation" => computation_id
+                        )
+                        .record(elapsed.as_secs_f64());
+                        gauge!(
+                            "derived_last_success_timestamp_seconds",
+                            "computation" => computation_id
+                        )
+                        .set(unix_now_seconds());
                         info!(
                             computation = computation_id,
                             failed = write.failed_items.len(),
@@ -385,6 +445,12 @@ impl ComputationManager {
                         succeeded.insert(computation_id);
                     }
                     Err(e) => {
+                        counter!(
+                            "derived_computation_failures_total",
+                            "computation" => computation_id,
+                            "reason" => "error"
+                        )
+                        .increment(1);
                         warn!(
                             error = ?e,
                             computation = computation_id,
@@ -405,6 +471,42 @@ impl ComputationManager {
             "all derived computations complete"
         );
     }
+
+    ////// Recovers from a broadcast lag without a full-topology recompute.
+    ///
+    /// Drains the events still buffered in `event_rx` (returning the receiver to the live tail so
+    /// it cannot immediately re-lag), coalesces them into one incremental `ChangedComponents`,
+    /// and recomputes just that union.
+    ///
+    /// Components lost in the dropped window are not recomputed. Added and updated ones
+    /// self-correct on their next `MarketUpdated`; removed ones never reappear, leaving stale
+    /// `spot_prices`/`pool_depths` entries for the life of the process. Routing is unaffected:
+    /// derived data is only read per graph edge, and a removed component has no edges.
+    async fn recover_from_lag(&self, event_rx: &mut broadcast::Receiver<MarketEvent>) {
+        let mut drained = Vec::new();
+        loop {
+            match event_rx.try_recv() {
+                Ok(event) => drained.push(event),
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    counter!("derived_manager_lagged_events_total").increment(n);
+                    continue;
+                }
+                Err(broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+        if let Some(changed) = coalesce_market_events(&drained) {
+            self.compute_all(&changed).await;
+        }
+    }
+}
+
+/// Seconds since the Unix epoch, for freshness gauges consumed as `time() - <gauge>`.
+fn unix_now_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Computes the dependency-ordered execution plan for `nodes` (id paired with its
@@ -541,6 +643,114 @@ mod tests {
         events
     }
 
+    // --- coalesce_market_events: net semantics over a drained batch (pure) ---------
+
+    #[test]
+    fn coalesce_empty_batch_returns_none() {
+        assert!(coalesce_market_events(&[]).is_none());
+    }
+
+    #[test]
+    fn coalesce_unions_added_and_updated_across_events() {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let e1 = MarketEvent::MarketUpdated {
+            added_components: HashMap::from([(
+                "eth_usdc".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed_components: vec![],
+            updated_components: vec![],
+        };
+        let e2 = MarketEvent::MarketUpdated {
+            added_components: HashMap::new(),
+            removed_components: vec![],
+            updated_components: vec!["eth_usdc".to_string(), "dai_usdc".to_string()],
+        };
+        let c = coalesce_market_events(&[e1, e2]).expect("net changes present");
+        assert!(!c.is_full_recompute);
+        // eth_usdc was added, so it stays in `added` (not double-counted in `updated`)
+        assert!(c.added.contains_key("eth_usdc"));
+        assert!(!c
+            .updated
+            .contains(&"eth_usdc".to_string()));
+        // dai_usdc only ever appeared as updated
+        assert!(c
+            .updated
+            .contains(&"dai_usdc".to_string()));
+    }
+
+    #[test]
+    fn coalesce_add_then_remove_nets_to_removed() {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let add = MarketEvent::MarketUpdated {
+            added_components: HashMap::from([(
+                "eth_usdc".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed_components: vec![],
+            updated_components: vec![],
+        };
+        let remove = MarketEvent::MarketUpdated {
+            added_components: HashMap::new(),
+            removed_components: vec!["eth_usdc".to_string()],
+            updated_components: vec![],
+        };
+        let c = coalesce_market_events(&[add, remove]).expect("net removal present");
+        assert!(!c.added.contains_key("eth_usdc"));
+        assert!(c
+            .removed
+            .contains(&"eth_usdc".to_string()));
+        assert!(!c
+            .updated
+            .contains(&"eth_usdc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn lag_recovery_recomputes_incrementally_and_drains_to_tail() {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let (market, _) = setup_market_weighted(vec![(
+            "eth_usdc",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(2000.0).with_gas(0),
+        )]);
+        let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
+        let (manager, _out_rx) = ComputationManager::new(config, market).unwrap();
+
+        // Capacity-2 input channel; send 5 without reading to force Lagged on recv.
+        let (tx, mut rx) = broadcast::channel::<MarketEvent>(2);
+        for _ in 0..5 {
+            tx.send(MarketEvent::MarketUpdated {
+                added_components: HashMap::from([(
+                    "eth_usdc".to_string(),
+                    vec![eth.address.clone(), usdc.address.clone()],
+                )]),
+                removed_components: vec![],
+                updated_components: vec![],
+            })
+            .unwrap();
+        }
+        let err = rx
+            .recv()
+            .await
+            .expect_err("receiver must have lagged");
+        assert!(matches!(err, broadcast::error::RecvError::Lagged(_)));
+
+        manager.recover_from_lag(&mut rx).await;
+
+        // Recovery recomputed the coalesced change incrementally...
+        let store = manager.store();
+        let guard = store.read().await;
+        assert!(guard.spot_prices().is_some());
+        assert!(guard.token_prices().is_some());
+        drop(guard);
+        // ...and the receiver is back at the live tail (buffer drained).
+        assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+    }
+
     // --- build_schedule: dependency staging (pure) --------------------------------
 
     #[test]
@@ -581,7 +791,7 @@ mod tests {
 
     #[test]
     fn schedule_diamond_places_join_after_both_parents() {
-        // a <- {b, c} <- d; mirrors fynd's spot -> {token, pool} fan-out.
+        // a <- {b, c} <- d; mirrors fynd's spot -> {token, component} fan-out.
         let schedule = build_schedule(&[
             ("a", ComputationRequirements::none()),
             ("b", ComputationRequirements::fresh(["a"])),
@@ -1115,30 +1325,30 @@ mod tests {
     fn market_with_component_no_sim_state() -> MarketData {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
-        let pool = component("pool", &[eth.clone(), usdc.clone()]);
+        let component = component("component", &[eth.clone(), usdc.clone()]);
 
         let mut market = MarketState::new();
         market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
-        market.upsert_components(std::iter::once(pool));
+        market.upsert_components(std::iter::once(component));
         // Note: no update_states() — simulation state is intentionally absent
         market.upsert_tokens([eth, usdc]);
         MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
 
-    /// Creates a market with two pools: one with sim state (pool succeeds) and one without (pool
-    /// fails). Used to trigger partial spot price failure.
+    /// Creates a market with two components: one with sim state (component succeeds) and one
+    /// without (component fails). Used to trigger partial spot price failure.
     fn market_with_mixed_sim_states() -> MarketData {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
         let dai = token(3, "DAI");
 
-        let pool1 = component("eth_usdc", &[eth.clone(), usdc.clone()]);
-        let pool2 = component("eth_dai", &[eth.clone(), dai.clone()]);
+        let component1 = component("eth_usdc", &[eth.clone(), usdc.clone()]);
+        let component2 = component("eth_dai", &[eth.clone(), dai.clone()]);
 
         let mut market = MarketState::new();
         market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
-        market.upsert_components([pool1, pool2]);
-        // Only pool1 has simulation state; pool2 intentionally has none
+        market.upsert_components([component1, component2]);
+        // Only component1 has simulation state; component2 intentionally has none
         market
             .update_states([("eth_usdc".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
         market.upsert_tokens([eth, usdc, dai]);
@@ -1152,13 +1362,16 @@ mod tests {
     fn market_with_sim_state_no_gas_price() -> MarketData {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
-        let pool = component("pool", &[eth.clone(), usdc.clone()]);
+        let component = component("component", &[eth.clone(), usdc.clone()]);
 
         let mut market = MarketState::new();
         // Note: no update_gas_price() — gas price is intentionally absent
         market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
-        market.upsert_components(std::iter::once(pool));
-        market.update_states([("pool".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
+        market.upsert_components(std::iter::once(component));
+        market.update_states([(
+            "component".to_string(),
+            Box::new(MockProtocolSim::new(2000.0)) as _,
+        )]);
         market.upsert_tokens([eth, usdc]);
         MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
@@ -1195,7 +1408,7 @@ mod tests {
         // handle_event with added components — spot_price succeeds, token_price fails
         let event = MarketEvent::MarketUpdated {
             added_components: HashMap::from([(
-                "pool".to_string(),
+                "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
             removed_components: vec![],
@@ -1239,7 +1452,7 @@ mod tests {
 
     #[tokio::test]
     async fn partial_spot_price_failure_broadcasts_computation_complete() {
-        // market_with_mixed_sim_states has pool1 (with sim state) and pool2 (without)
+        // market_with_mixed_sim_states has component1 (with sim state) and component2 (without)
         // → spot price computation partially succeeds → ComputationComplete with failed_items
         let market = market_with_mixed_sim_states();
         let config = ComputationManagerConfig::new();
@@ -1250,7 +1463,7 @@ mod tests {
 
         let events = drain_events(&mut event_rx);
 
-        // Should broadcast ComputationComplete (not ComputationFailed) because pool1 succeeds
+        // Should broadcast ComputationComplete (not ComputationFailed) because component1 succeeds
         assert!(
             events.iter().any(|e| matches!(
                 e,
@@ -1266,19 +1479,19 @@ mod tests {
             "should not broadcast ComputationFailed for partial failure"
         );
 
-        // The ComputationComplete event should carry the failed item for pool2
+        // The ComputationComplete event should carry the failed item for component2
         let complete = events.iter().find(|e| {
             matches!(e, DerivedDataEvent::ComputationComplete { computation_id: "spot_prices", .. })
         });
         if let Some(DerivedDataEvent::ComputationComplete { failed_items, .. }) = complete {
             assert!(
                 !failed_items.is_empty(),
-                "ComputationComplete should carry failed_items for pool2"
+                "ComputationComplete should carry failed_items for component2"
             );
         }
 
-        // The store should persist the failure reason for the failed pool.
-        // market_with_mixed_sim_states uses token(1, "ETH") and token(3, "DAI") for pool2.
+        // The store should persist the failure reason for the failed component.
+        // market_with_mixed_sim_states uses token(1, "ETH") and token(3, "DAI") for component2.
         let eth = token(1, "ETH");
         let dai = token(3, "DAI");
         let store = manager.store();
@@ -1294,5 +1507,165 @@ mod tests {
                     .is_some(),
             "store should persist failure reason for eth_dai (missing sim state)"
         );
+    }
+
+    // --- metrics ---------------------------------------------------------------------
+
+    /// Mirrors `CounterComputation`, but always fails, to exercise the failure-counter path.
+    struct FailingComputation;
+
+    #[async_trait::async_trait]
+    impl DerivedComputation for FailingComputation {
+        type Output = ();
+        const ID: ComputationId = "failing";
+
+        async fn compute(
+            &self,
+            _market: &MarketData,
+            _store: &SharedDerivedDataRef,
+            _changed: &ChangedComponents,
+        ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+            Err(ComputationError::InvalidConfiguration("always fails".to_string()))
+        }
+    }
+
+    /// Finds the debug value recorded for `name` carrying every label in `labels`.
+    fn find_metric<'a>(
+        recorded: &'a [(
+            metrics_util::CompositeKey,
+            Option<metrics::Unit>,
+            Option<metrics::SharedString>,
+            metrics_util::debugging::DebugValue,
+        )],
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> &'a metrics_util::debugging::DebugValue {
+        recorded
+            .iter()
+            .find(|(key, _, _, _)| {
+                key.key().name() == name &&
+                    labels
+                        .iter()
+                        .all(|(label_key, label_value)| {
+                            key.key()
+                                .labels()
+                                .any(|l| l.key() == *label_key && l.value() == *label_value)
+                        })
+            })
+            .map(|(_, _, _, value)| value)
+            .unwrap_or_else(|| panic!("missing {name}{labels:?}, got {recorded:?}"))
+    }
+
+    #[test]
+    fn compute_all_records_derived_metrics() {
+        use metrics_util::debugging::DebugValue;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime builds");
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+                manager
+                    .register(CounterComputation)
+                    .unwrap();
+                manager
+                    .compute_all(&ChangedComponents {
+                        is_full_recompute: true,
+                        ..Default::default()
+                    })
+                    .await;
+            })
+        });
+
+        let recorded = snapshotter.snapshot().into_vec();
+        let recorded_names: Vec<(String, Vec<String>)> = recorded
+            .iter()
+            .map(|(key, _, _, _)| {
+                (
+                    key.key().name().to_string(),
+                    key.key()
+                        .labels()
+                        .map(|l| format!("{}={}", l.key(), l.value()))
+                        .collect(),
+                )
+            })
+            .collect();
+        for expected in
+            ["derived_computation_duration_seconds", "derived_last_success_timestamp_seconds"]
+        {
+            assert!(
+                recorded_names
+                    .iter()
+                    .any(|(name, labels)| name == expected &&
+                        labels.contains(&"computation=counter".to_string())),
+                "missing {expected}{{computation=counter}}, got {recorded_names:?}"
+            );
+        }
+
+        match find_metric(
+            &recorded,
+            "derived_last_success_timestamp_seconds",
+            &[("computation", "counter")],
+        ) {
+            DebugValue::Gauge(value) => {
+                assert!(value.0 > 1.7e9, "gauge value {} not a sane unix timestamp", value.0);
+            }
+            other => panic!("derived_last_success_timestamp_seconds is not a gauge: {other:?}"),
+        }
+
+        match find_metric(
+            &recorded,
+            "derived_computation_duration_seconds",
+            &[("computation", "counter")],
+        ) {
+            DebugValue::Histogram(samples) => {
+                assert!(!samples.is_empty(), "expected at least one recorded duration sample");
+            }
+            other => panic!("derived_computation_duration_seconds is not a histogram: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_all_records_failure_metric() {
+        use metrics_util::debugging::DebugValue;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime builds");
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let (mut manager, _event_rx) = ComputationManager::empty(market_with_block());
+                manager
+                    .register(FailingComputation)
+                    .unwrap();
+                manager
+                    .compute_all(&ChangedComponents {
+                        is_full_recompute: true,
+                        ..Default::default()
+                    })
+                    .await;
+            })
+        });
+
+        let recorded = snapshotter.snapshot().into_vec();
+        match find_metric(
+            &recorded,
+            "derived_computation_failures_total",
+            &[("computation", "failing"), ("reason", "error")],
+        ) {
+            DebugValue::Counter(value) => {
+                assert!(*value >= 1, "expected failure counter >= 1, got {value}");
+            }
+            other => panic!("derived_computation_failures_total is not a counter: {other:?}"),
+        }
     }
 }

@@ -1,11 +1,11 @@
 //! Worker pool for processing solve tasks.
 //!
 //! The worker pool manages multiple dedicated OS threads for CPU-bound route finding.
-//! Each pool owns multiple SolverWorker instances that compete for tasks from the queue.
-//! A pool is configured with a specific algorithm (by name), allowing multiple pools
-//! with different algorithms to compete via the WorkerPoolRouter.
+//! Each worker pool owns multiple SolverWorker instances that compete for tasks from the queue.
+//! A worker pool is configured with a specific algorithm (by name), allowing multiple worker
+//! pools with different algorithms to compete via the WorkerPoolRouter.
 //!
-//! Pools can use either a built-in algorithm (by name via [`WorkerPoolBuilder::algorithm`])
+//! Worker pools can use either a built-in algorithm (by name via [`WorkerPoolBuilder::algorithm`])
 //! or a custom [`Algorithm`](crate::algorithm::Algorithm) implementation (via
 //! [`WorkerPoolBuilder::with_algorithm`]).
 use std::thread::JoinHandle;
@@ -29,13 +29,15 @@ use crate::{
         },
         task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle},
     },
+    worker_pool_router::LiquidityScope,
 };
 
 /// Configuration for the worker pool.
 #[derive(Debug)]
 pub struct WorkerPoolConfig {
-    /// Human-readable name for this pool (used in logging/metrics).
-    /// Can differ from algorithm to distinguish pools with same algorithm but different configs.
+    /// Human-readable name for this worker pool (used in logging/metrics).
+    /// Can differ from algorithm to distinguish worker pools with same algorithm but different
+    /// configs.
     name: String,
     /// How to spawn workers — either a built-in registry lookup or a custom factory.
     spawner: AlgorithmSpawner,
@@ -45,10 +47,12 @@ pub struct WorkerPoolConfig {
     algorithm_config: AlgorithmConfig,
     /// Task queue capacity (maximum number of pending tasks).
     task_queue_capacity: usize,
+    /// Which liquidity this worker pool's workers ingest.
+    liquidity_scope: LiquidityScope,
 }
 
 impl WorkerPoolConfig {
-    /// Returns the algorithm name for this pool.
+    /// Returns the algorithm name for this worker pool.
     pub fn algorithm_name(&self) -> &str {
         self.spawner.algorithm_name()
     }
@@ -62,18 +66,19 @@ impl Default for WorkerPoolConfig {
             num_workers: num_cpus::get(),
             algorithm_config: AlgorithmConfig::default(),
             task_queue_capacity: 1000,
+            liquidity_scope: LiquidityScope::default(),
         }
     }
 }
 
 /// A pool of worker threads for processing solve tasks.
 ///
-/// Each pool is dedicated to a specific algorithm. Workers in the pool
+/// Each worker pool is dedicated to a specific algorithm. Workers in the pool
 /// compete for tasks from the shared queue.
 pub struct WorkerPool {
-    /// Human-readable name for this pool.
+    /// Human-readable name for this worker pool.
     name: String,
-    /// Algorithm name for this pool.
+    /// Algorithm name for this worker pool.
     algorithm: String,
     /// Handles to worker threads.
     workers: Vec<JoinHandle<()>>,
@@ -89,7 +94,7 @@ impl WorkerPool {
     /// * `config` - Worker pool configuration
     /// * `task_rx` - Receiver for tasks from the queue
     /// * `market_data` - Shared market data reference
-    /// * `derived_data` - Shared derived data reference (pool depths, token prices)
+    /// * `derived_data` - Shared derived data reference (component depths, token prices)
     /// * `event_rx` - Broadcast receiver for market events (workers subscribe to this)
     /// * `derived_event_rx` - Broadcast receiver for derived data events (resubscribed per worker)
     ///
@@ -112,8 +117,10 @@ impl WorkerPool {
             .to_string();
 
         // Spawn workers
+        let liquidity_scope = config.liquidity_scope;
         let params = SpawnWorkersParams {
             algorithm: algorithm.clone(),
+            pool_name: name.clone(),
             num_workers: config.num_workers,
             algorithm_config: config.algorithm_config,
             task_rx,
@@ -122,6 +129,7 @@ impl WorkerPool {
             event_rx,
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
+            liquidity_scope,
         };
         let workers = config.spawner.spawn(params)?;
 
@@ -135,12 +143,12 @@ impl WorkerPool {
         Ok(Self { name, algorithm, workers, shutdown_tx })
     }
 
-    /// Returns the pool name.
+    /// Returns the worker pool name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Returns the algorithm name for this pool.
+    /// Returns the algorithm name for this worker pool.
     pub fn algorithm(&self) -> &str {
         &self.algorithm
     }
@@ -196,7 +204,7 @@ impl WorkerPoolBuilder {
         Self { config: WorkerPoolConfig::default() }
     }
 
-    /// Sets the pool name.
+    /// Sets the worker pool name.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.config.name = name.into();
         self
@@ -204,7 +212,8 @@ impl WorkerPoolBuilder {
 
     /// Sets the algorithm by name (built-in registry lookup).
     ///
-    /// Available built-in algorithms: `"most_liquid"`.
+    /// Available built-in algorithms: `"most_liquid"`, `"bellman_ford"`, `"path_frank_wolfe"`,
+    /// and `"water_fill"`.
     pub fn algorithm(mut self, algorithm: impl Into<String>) -> Self {
         self.config.spawner = AlgorithmSpawner::Registry { algorithm: algorithm.into() };
         self
@@ -249,6 +258,12 @@ impl WorkerPoolBuilder {
     /// Sets the task queue capacity.
     pub fn task_queue_capacity(mut self, capacity: usize) -> Self {
         self.config.task_queue_capacity = capacity;
+        self
+    }
+
+    /// Sets which liquidity this pool's workers ingest.
+    pub fn liquidity_scope(mut self, scope: LiquidityScope) -> Self {
+        self.config.liquidity_scope = scope;
         self
     }
 

@@ -21,8 +21,9 @@
 pub mod bellman_ford;
 pub mod most_liquid;
 pub mod path_frank_wolfe;
-#[allow(dead_code)]
+pub(crate) mod sim_guard;
 pub(crate) mod split_primitives;
+pub mod water_fill;
 
 #[cfg(test)]
 pub mod split_test_harness;
@@ -35,6 +36,7 @@ pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 pub use path_frank_wolfe::PathFrankWolfeAlgorithm;
 use tycho_simulation::tycho_core::models::Address;
+pub use water_fill::WaterFillAlgorithm;
 
 use crate::{
     derived::{computation::ComputationRequirements, SharedDerivedDataRef},
@@ -190,7 +192,7 @@ pub trait Algorithm: Send + Sync {
     /// * `market` - Shared reference to market data for state lookups (algorithms acquire their own
     ///   locks)
     /// * `label` - Optional overlay label; when `Some`, the algorithm reads market state through
-    ///   the named overlay so per-request pool overrides are applied during solving
+    ///   the named overlay so per-request component overrides are applied during solving
     /// * `derived` - Optional shared reference to derived data (token prices, etc.)
     /// * `order` - The order to solve
     ///
@@ -270,7 +272,7 @@ pub enum AlgorithmError {
     #[non_exhaustive]
     #[error("simulation failed for {component_id}: {error}")]
     SimulationFailed {
-        /// ID of the pool component that failed.
+        /// ID of the component (liquidity pool) that failed.
         component_id: String,
         /// Underlying simulation error message.
         error: String,
@@ -309,6 +311,13 @@ pub enum NoPathReason {
     NoGraphPath,
     /// Paths exist but none could be scored (e.g., missing edge weights).
     NoScorablePaths,
+    /// The requested amount is too small to route (dust). Detection depends
+    /// on scoring mode: gas-unaware scoring reports this when an explored
+    /// hop's output floors to zero; gas-aware scoring reports it when an
+    /// explored hop's input cannot cover that hop's gas cost. The signal
+    /// latches on any explored edge, so a usable path to the destination may
+    /// not have existed.
+    AmountTooSmall,
 }
 
 impl std::fmt::Display for NoPathReason {
@@ -318,6 +327,7 @@ impl std::fmt::Display for NoPathReason {
             Self::DestinationTokenNotInGraph => write!(f, "destination token not in graph"),
             Self::NoGraphPath => write!(f, "no connecting path in graph"),
             Self::NoScorablePaths => write!(f, "no paths with valid scores"),
+            Self::AmountTooSmall => write!(f, "amount too small to route"),
         }
     }
 }

@@ -21,7 +21,7 @@ nothing and reports zero tests.
 | `test_quality_within_expected_baseline` | Output amounts stay within 1% of baseline (regressions only) |
 | `test_quality_invariants` | Successful quotes have positive output, gas, and a route |
 | `test_unknown_token_returns_error` | Fake token addresses return error, not panic |
-| `test_all_derived_fields_computed` | Spot prices, pool depths, token prices all present |
+| `test_all_derived_fields_computed` | Spot prices, component depths, token prices all present |
 | `test_derived_data_matches_expected` | Exact equality of derived data counts vs baseline |
 | `test_solve_time_p95_within_threshold` | P95 solve time within 3x of baseline |
 | `test_no_solve_exceeds_absolute_cap` | No solve exceeds max pool timeout + 1s margin |

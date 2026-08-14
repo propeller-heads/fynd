@@ -1,12 +1,12 @@
 //! Spot price computation.
 //!
-//! Computes spot prices for all pools in both directions using `ProtocolSim::spot_price()`.
+//! Computes spot prices for all components in both directions using `ProtocolSim::spot_price()`.
 //! Spot prices are the instantaneous exchange rates without slippage.
 //!
-//! `ProtocolSim::spot_price()` is cheap for all pool types: VM pools return a pre-computed
-//! HashMap lookup, native pools do simple arithmetic. This means the read lock hold time is
-//! negligible (microseconds per pool), so we hold it for the full loop rather than paying the
-//! cost of cloning simulation states via `extract_subset()`.
+//! `ProtocolSim::spot_price()` is cheap for all component types: VM components return a
+//! pre-computed HashMap lookup, native components do simple arithmetic. This means the read lock
+//! hold time is negligible (microseconds per component), so we hold it for the full loop rather
+//! than paying the cost of cloning simulation states via `extract_subset()`.
 
 use async_trait::async_trait;
 use itertools::Itertools;
@@ -25,9 +25,9 @@ use crate::{
     feed::market_data::MarketData,
 };
 
-/// Computes spot prices for all pools.
+/// Computes spot prices for all components.
 ///
-/// For each pool with tokens A and B, computes:
+/// For each component with tokens A and B, computes:
 /// - Spot price A -> B
 /// - Spot price B -> A
 ///
@@ -112,7 +112,7 @@ impl DerivedComputation for SpotPriceComputation {
             };
 
             let Some(sim_state) = market_guard.get_simulation_state(component_id) else {
-                warn!(component_id, "missing simulation state, skipping pool");
+                warn!(component_id, "missing simulation state, skipping component");
                 spot_prices.retain(|key, _| &key.0 != component_id);
                 for perm in token_addresses.iter().permutations(2) {
                     failed_items.push(FailedItem {
@@ -123,12 +123,12 @@ impl DerivedComputation for SpotPriceComputation {
                 continue;
             };
 
-            let pool_tokens: Result<Vec<_>, _> = token_addresses
+            let component_tokens: Result<Vec<_>, _> = token_addresses
                 .iter()
                 .map(|addr| tokens.get(addr).ok_or(addr))
                 .collect();
-            let Ok(pool_tokens) = pool_tokens else {
-                warn!(component_id, "missing token metadata, skipping pool");
+            let Ok(component_tokens) = component_tokens else {
+                warn!(component_id, "missing token metadata, skipping component");
                 spot_prices.retain(|key, _| &key.0 != component_id);
                 for perm in token_addresses.iter().permutations(2) {
                     failed_items.push(FailedItem {
@@ -139,7 +139,7 @@ impl DerivedComputation for SpotPriceComputation {
                 continue;
             };
 
-            for perm in pool_tokens.iter().permutations(2) {
+            for perm in component_tokens.iter().permutations(2) {
                 let (token_in, token_out) = (*perm[0], *perm[1]);
                 let key =
                     (component_id.clone(), token_in.address.clone(), token_out.address.clone());
@@ -226,20 +226,20 @@ mod tests {
 
     #[tokio::test]
     async fn partial_failure_yields_ok_with_failed_items() {
-        // pool1: has sim state → spot prices computed
-        // pool2: no sim state → FailedItem
+        // component1: has sim state → spot prices computed
+        // component2: no sim state → FailedItem
         let eth = token(0x01, "ETH");
         let usdc = token(0x02, "USDC");
         let dai = token(0x03, "DAI");
 
         let (market, _) =
-            setup_market_weighted(vec![("pool1", &eth, &usdc, MockProtocolSim::new(2000.0))]);
+            setup_market_weighted(vec![("component1", &eth, &usdc, MockProtocolSim::new(2000.0))]);
 
-        // Add pool2 without sim state
+        // Add component2 without sim state
         {
             let mut m = market.write().await;
-            let pool2 = component("pool2", &[eth.clone(), dai.clone()]);
-            m.upsert_components(std::iter::once(pool2));
+            let component2 = component("component2", &[eth.clone(), dai.clone()]);
+            m.upsert_components(std::iter::once(component2));
             m.upsert_tokens([dai.clone()]);
         }
 
@@ -249,24 +249,24 @@ mod tests {
         let output = SpotPriceComputation::new()
             .compute(&market, &derived, &changed)
             .await
-            .expect("should not be total failure since pool1 succeeds");
+            .expect("should not be total failure since component1 succeeds");
 
-        assert!(output.has_failures(), "pool2 missing sim state should produce a failed item");
+        assert!(output.has_failures(), "component2 missing sim state should produce a failed item");
 
-        let key_eth_usdc = ("pool1".to_string(), eth.address.clone(), usdc.address.clone());
-        let key_usdc_eth = ("pool1".to_string(), usdc.address.clone(), eth.address.clone());
+        let key_eth_usdc = ("component1".to_string(), eth.address.clone(), usdc.address.clone());
+        let key_usdc_eth = ("component1".to_string(), usdc.address.clone(), eth.address.clone());
         assert!(output.data.contains_key(&key_eth_usdc), "ETH→USDC price should be present");
         assert!(output.data.contains_key(&key_usdc_eth), "USDC→ETH price should be present");
 
         // Component-level failures are expanded to pair-level keys
-        let key_eth_dai = format!("pool2/{}/{}", eth.address, dai.address);
-        let key_dai_eth = format!("pool2/{}/{}", dai.address, eth.address);
+        let key_eth_dai = format!("component2/{}/{}", eth.address, dai.address);
+        let key_dai_eth = format!("component2/{}/{}", dai.address, eth.address);
         assert!(
             output
                 .failed_items
                 .iter()
                 .any(|item| item.key == key_eth_dai || item.key == key_dai_eth),
-            "pool2 pair keys should appear in failed_items"
+            "component2 pair keys should appear in failed_items"
         );
     }
 

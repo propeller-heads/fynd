@@ -10,8 +10,8 @@ use fynd_core::{
     encoding::encoder::Encoder, worker_pool::pool::WorkerPool, FyndBuilder, SolverBuildError,
 };
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
-use tycho_simulation::tycho_common::models::{Chain, TvlThresholdTier};
+use tracing::{error, info};
+use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Chain};
 
 use crate::{
     api::{configure_app, AppState, HealthTracker},
@@ -28,6 +28,9 @@ pub struct FyndRPCBuilder {
     http_port: u16,
     /// Gas price staleness threshold. Health returns 503 when exceeded. Disabled by default.
     gas_price_stale_threshold: Option<Duration>,
+    /// Hosted gateway URL advertised by the `/docs/hosted/` Swagger UI. Unset by default, which
+    /// leaves that UI unregistered.
+    hosted_swagger_url: Option<String>,
 }
 
 impl FyndRPCBuilder {
@@ -38,8 +41,8 @@ impl FyndRPCBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`SolverBuildError`] if any pool's `connector_tokens` contains a malformed hex
-    /// address.
+    /// Returns [`SolverBuildError`] if any worker pool's `connector_tokens` contains a malformed
+    /// hex address.
     pub fn new(
         chain: Chain,
         pools: HashMap<String, PoolConfig>,
@@ -67,6 +70,7 @@ impl FyndRPCBuilder {
             http_host: defaults::HTTP_HOST.to_owned(),
             http_port: defaults::HTTP_PORT,
             gas_price_stale_threshold: None,
+            hosted_swagger_url: None,
         })
     }
 
@@ -165,7 +169,7 @@ impl FyndRPCBuilder {
 
     /// Enables partial block (flashblock) updates from the Tycho stream (default: `false`).
     ///
-    /// When enabled, the stream delivers pool state updates mid-block rather than only at
+    /// When enabled, the stream delivers component state updates mid-block rather than only at
     /// finalization, reducing latency. Only supported for on-chain protocols; RFQ streams are
     /// unaffected.
     pub fn partial_blocks(mut self, enabled: bool) -> Self {
@@ -184,6 +188,15 @@ impl FyndRPCBuilder {
     /// Sets the gas price staleness threshold. Health returns 503 when exceeded.
     pub fn gas_price_stale_threshold(mut self, threshold: Option<Duration>) -> Self {
         self.gas_price_stale_threshold = threshold;
+        self
+    }
+
+    /// Sets the hosted gateway URL the `/docs/hosted/` Swagger UI sends requests to.
+    ///
+    /// Leaving it unset (the default) leaves that UI unregistered, so self-hosted deployments
+    /// only serve `/docs/`.
+    pub fn hosted_swagger_url(mut self, url: Option<String>) -> Self {
+        self.hosted_swagger_url = url;
         self
     }
 
@@ -226,7 +239,7 @@ impl FyndRPCBuilder {
 
         let chain = parts.chain();
         let chain_id = chain.id();
-        let router_address = parts.router_address().clone();
+        let router_address = parts.router_address().cloned();
         let permit2_address = {
             use fynd_core::encoding::encoder::PERMIT2_ADDRESS;
             let hex = PERMIT2_ADDRESS
@@ -254,6 +267,7 @@ impl FyndRPCBuilder {
             _derived_data,
             feed_handle,
             gas_price_handle,
+            metrics_sampler_handle,
             router_fee_handle,
             computation_handle,
             computation_shutdown_tx,
@@ -269,12 +283,18 @@ impl FyndRPCBuilder {
             Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]
             gas_token,
+            #[cfg(feature = "experimental")]
+            _market_data.clone(),
         );
 
+        let hosted_swagger_url = self.hosted_swagger_url;
         let server = HttpServer::new(move || {
             App::new()
                 .wrap(tracing_actix_web::TracingLogger::default())
-                .configure(|cfg| configure_app(cfg, app_state.clone()))
+                .wrap(actix_web::middleware::from_fn(
+                    crate::api::middleware::http_metrics_middleware,
+                ))
+                .configure(|cfg| configure_app(cfg, app_state.clone(), hosted_swagger_url.clone()))
         })
         .bind((self.http_host.as_str(), self.http_port))
         .context("failed to bind HTTP server")?
@@ -293,6 +313,7 @@ impl FyndRPCBuilder {
             worker_pools,
             feed_handle,
             gas_price_worker_handle: gas_price_handle,
+            metrics_sampler_handle,
             router_fee_worker_handle: router_fee_handle,
             computation_manager_handle: computation_handle,
             computation_shutdown_tx,
@@ -308,6 +329,7 @@ pub struct FyndRPC {
     worker_pools: Vec<WorkerPool>,
     feed_handle: JoinHandle<()>,
     gas_price_worker_handle: JoinHandle<()>,
+    metrics_sampler_handle: JoinHandle<()>,
     router_fee_worker_handle: JoinHandle<()>,
     computation_manager_handle: JoinHandle<()>,
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
@@ -327,12 +349,16 @@ impl FyndRPC {
             worker_pools,
             mut feed_handle,
             mut gas_price_worker_handle,
+            metrics_sampler_handle,
             router_fee_worker_handle,
             mut computation_manager_handle,
             computation_shutdown_tx,
         } = self;
 
         info!("HTTP server started");
+
+        // Set when a monitored task exits in a way that should fail the process (non-zero exit).
+        let mut fatal_error: Option<std::io::Error> = None;
 
         // Monitor server, feed, and gas price worker. If any errors, shutdown everything.
         tokio::select! {
@@ -368,12 +394,22 @@ impl FyndRPC {
                 info!("shutting down: gas price error path");
             }
             _ = &mut computation_manager_handle => {
-                // Computation manager completed unexpectedly
-                warn!("Computation manager stopped unexpectedly");
-                // Continue running - derived data won't be updated but solver can still work
+                // The derived-data pipeline task ended (event channel closed, shutdown, or a
+                // panic). It is never respawned, so continuing here would serve quotes on
+                // frozen derived data indefinitely with no path to recovery. Treat it as fatal,
+                // mirroring the feed/gas arms: stop the server gracefully and exit non-zero so
+                // the orchestrator restarts the instance (crash-only).
+                error!("Computation manager stopped unexpectedly, shutting down solver");
+                server_handle.stop(true).await;
+                server_task.await.ok();
+                feed_handle.abort();
+                gas_price_worker_handle.abort();
+                fatal_error =
+                    Some(std::io::Error::other("computation manager stopped unexpectedly"));
             }
         }
 
+        metrics_sampler_handle.abort();
         router_fee_worker_handle.abort();
 
         info!("shutting down worker pools");
@@ -385,6 +421,10 @@ impl FyndRPC {
         }
 
         info!("shutdown complete");
-        Ok(())
+
+        match fatal_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 }

@@ -17,6 +17,10 @@
 //! # Or specify protocols explicitly:
 //! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
 //!            --protocols uniswap_v2,uniswap_v3
+//!
+//! # Opt a protocol into streaming its exclusive pools:
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
+//!            --protocols all_onchain,exclusive:ekubo_v3
 //! ```
 //!
 //! `--rpc-url` defaults to a chain-specific public endpoint. For production, provide a dedicated
@@ -45,7 +49,7 @@ mod cli;
 mod commands;
 use cli::{Cli, Commands};
 #[cfg(feature = "metrics")]
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::TracerProvider;
@@ -56,14 +60,15 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use tycho_simulation::{tycho_common::models::TvlThresholdTier, utils::default_blocklist};
+use tycho_simulation::{
+    tycho_common::models::chain_config::TvlThresholdTier, utils::default_blocklist,
+};
 
 fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Openapi => {
-            use utoipa::OpenApi as _;
-            let spec = fynd_rpc::api::ApiDoc::openapi();
+            let spec = fynd_rpc::api::openapi_spec();
             // Safety: OpenAPI spec serialization only fails on non-string map keys,
             // which utoipa never produces.
             let json = serde_json::to_string_pretty(&spec).expect("spec serialization cannot fail");
@@ -71,12 +76,19 @@ fn main() -> Result<(), anyhow::Error> {
             Ok(())
         }
         Commands::Serve(serve_args) => {
-            run_solver(*serve_args).map_err(|e| anyhow!("{}", e))?;
+            // Log the failure before returning it: the fmt layer writes to stdout, whereas a
+            // `main` that returns `Err` prints only to stderr, so log pipelines that follow stdout
+            // show a run that stops mid-startup with no reason. Returning the error too keeps the
+            // exit code.
+            run_solver(*serve_args).map_err(|e| {
+                error!(error = %e, "Fynd exited with an error");
+                anyhow!("{}", e)
+            })?;
             Ok(())
         }
         Commands::DeriveConnectorTokens(args) => tokio::runtime::Runtime::new()
             .expect("failed to create tokio runtime")
-            .block_on(commands::derive_connector_tokens::run(args)),
+            .block_on(commands::derive_connector_tokens::run(*args)),
     }
 }
 
@@ -151,15 +163,35 @@ fn create_tracing_subscriber() -> Option<TracerProvider> {
 
 /// Creates and runs the Prometheus metrics exporter using Actix Web.
 ///
-/// Exposes `/metrics` on a dedicated HTTP server bound to `port`.
+/// Exposes `/metrics` on a dedicated HTTP server bound to `port`. Every metric carries a
+/// global `chain` label so multi-chain fleets can aggregate without pod-name regexes.
+/// All `*_seconds` histograms render as bucketed Prometheus histograms (aggregatable
+/// across pods, unlike summary quantiles); `worker_router_solver_responses` is a count
+/// distribution and gets its own 0..=6 buckets.
 /// Compiled only when the `metrics` feature is enabled.
 #[cfg(feature = "metrics")]
-fn create_metrics_exporter(port: u16) -> tokio::task::JoinHandle<()> {
-    let exporter_builder = PrometheusBuilder::new();
-    let handle = exporter_builder
+fn create_metrics_exporter(host: &str, port: u16, chain: &str) -> tokio::task::JoinHandle<()> {
+    const LATENCY_BUCKETS_SECONDS: &[f64] =
+        &[0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+    const SOLVER_RESPONSE_BUCKETS: &[f64] = &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+
+    let handle = PrometheusBuilder::new()
+        // Normalize: `--chain` is free-form ("Ethereum" == "ethereum" after parse_chain),
+        // but differing label case would fragment the per-chain series.
+        .add_global_label("chain", chain.to_lowercase())
+        .set_buckets_for_metric(Matcher::Suffix("_seconds".to_string()), LATENCY_BUCKETS_SECONDS)
+        .expect("static bucket list is non-empty")
+        .set_buckets_for_metric(
+            Matcher::Full("worker_router_solver_responses".to_string()),
+            SOLVER_RESPONSE_BUCKETS,
+        )
+        .expect("static bucket list is non-empty")
         .install_recorder()
         .expect("Failed to install Prometheus recorder");
 
+    record_build_info();
+
+    let bind_host = host.to_string();
     tokio::spawn(async move {
         async fn metrics_handler(handle: PrometheusHandle) -> impl Responder {
             let metrics = handle.render();
@@ -177,7 +209,7 @@ fn create_metrics_exporter(port: u16) -> tokio::task::JoinHandle<()> {
                 }),
             )
         })
-        .bind(("0.0.0.0", port))
+        .bind((bind_host.as_str(), port))
         .expect("Failed to bind metrics server")
         .run()
         .await
@@ -185,6 +217,17 @@ fn create_metrics_exporter(port: u16) -> tokio::task::JoinHandle<()> {
             error!("Metrics server failed: {}", e);
         }
     })
+}
+
+/// Records a constant-1 gauge labelled with the Fynd binary version, so operators can see which
+/// build a running instance is on. The value carries no meaning; the version lives in the label.
+#[cfg(feature = "metrics")]
+fn record_build_info() {
+    metrics::describe_gauge!(
+        "fynd_build_info",
+        "Fynd build information exposed as a constant-1 gauge labelled by version."
+    );
+    metrics::gauge!("fynd_build_info", "version" => env!("CARGO_PKG_VERSION")).set(1.0);
 }
 
 /// Resolves the Tycho WebSocket URL: uses the override if provided, otherwise looks up the
@@ -236,6 +279,12 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
             })?
         };
 
+    if let Some(path) = &args.chains_config {
+        fynd_rpc::init_chain_registry_from_file(path)
+            .map_err(|e| SolverError::SetupError(format!("failed to load chains config: {e}")))?;
+        info!(?path, "installed custom chain registry");
+    }
+
     // Parse chain
     let chain = parse_chain(&args.chain)
         .map_err(|e| SolverError::SetupError(format!("failed to parse chain: {}", e)))?;
@@ -275,7 +324,8 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
             .gas_price_stale_threshold(
                 args.gas_price_stale_threshold_secs
                     .map(Duration::from_secs),
-            );
+            )
+            .hosted_swagger_url(args.hosted_swagger_url.clone());
 
     if args.disable_tls {
         builder = builder.disable_tls();
@@ -310,7 +360,7 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
     info!("Starting Fynd");
 
     #[cfg(feature = "metrics")]
-    let _metrics_task = create_metrics_exporter(args.metrics_port);
+    let _metrics_task = create_metrics_exporter(&args.metrics_host, args.metrics_port, &args.chain);
 
     // Setup solver, but allow SIGINT to cancel it for fast exit during startup
     let solver = tokio::select! {
@@ -369,4 +419,24 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
         let _ = provider.shutdown();
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod tests {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+
+    #[test]
+    fn record_build_info_emits_versioned_gauge() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, super::record_build_info);
+        let rendered = handle.render();
+        assert!(
+            rendered.contains(&format!(
+                "fynd_build_info{{version=\"{}\"}} 1",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "unexpected metrics output:\n{rendered}"
+        );
+    }
 }

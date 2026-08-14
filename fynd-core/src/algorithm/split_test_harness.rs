@@ -5,26 +5,36 @@ use std::{collections::HashMap, sync::Arc};
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use tokio::sync::RwLock;
-use tycho_simulation::tycho_core::{
-    models::{token::Token, Address},
-    simulation::protocol_sim::{Price, ProtocolSim},
+use tycho_simulation::{
+    tycho_core::{
+        models::{token::Token, Address},
+        simulation::protocol_sim::{Price, ProtocolSim},
+    },
+    tycho_ethereum::gas::{BlockGasPrice, GasPrice},
 };
 
 use crate::{
-    algorithm::{test_utils::setup_market_unweighted, Algorithm},
+    algorithm::{
+        most_liquid::DepthAndPrice,
+        test_utils::{component, setup_market_unweighted, token_with_decimals, ConstantProductSim},
+        Algorithm,
+    },
     derived::{DerivedData, SharedDerivedDataRef},
-    feed::market_data::MarketData,
+    feed::market_data::{MarketData, MarketState},
     graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
-    types::quote::{Order, OrderSide, Route},
+    types::{
+        quote::{Order, OrderSide, Route},
+        BlockInfo, RouteResult,
+    },
 };
 
-/// Returns `(fraction_for_pool_1, total_output)` — the theoretically optimal output when
-/// splitting `trade_amount` between two constant-product pools with no fees.
+/// Returns `(fraction_for_component_1, total_output)` — the theoretically optimal output when
+/// splitting `trade_amount` between two constant-product components with no fees.
 ///
-/// Finds the split where both pools offer the same marginal rate on the last unit traded.
+/// Finds the split where both components offer the same marginal rate on the last unit traded.
 /// Negative allocations are clamped to `0` — a clamped value means the full trade routes through
-/// the other pool.
-pub(crate) fn optimal_two_pool_output(
+/// the other component.
+pub(crate) fn optimal_two_component_output(
     reserve_in_1: f64,
     reserve_out_1: f64,
     reserve_in_2: f64,
@@ -43,10 +53,123 @@ pub(crate) fn optimal_two_pool_output(
     (fraction_1, out_1 + out_2)
 }
 
+// ==================== Weighted two-component market for split-algorithm tests ====================
+
+/// A WETH/USDC market for the `DepthAndPrice` split algorithm (`split`). The two
+/// components are fee-free constant-product components, so their optimal split matches
+/// [`optimal_two_component_output`]. One `MarketState` backs the whole market.
+pub(crate) struct WeightedSplitMarket {
+    pub market: MarketData,
+    pub weighted: PetgraphStableDiGraphManager<DepthAndPrice>,
+    pub derived: SharedDerivedDataRef,
+    pub weth: Address,
+    pub usdc: Address,
+}
+
+/// Per-component reserves for [`two_equal_weth_usdc`], in whole tokens (WETH has 18 decimals, USDC
+/// 6).
+pub(crate) const TWO_EQUAL_WETH_RESERVE: u128 = 1000;
+pub(crate) const TWO_EQUAL_USDC_RESERVE: u128 = 3_000_000;
+
+fn weth_usdc_component() -> ConstantProductSim {
+    ConstantProductSim {
+        // reserve_0 is the lower-address token (WETH, 0x01); reserve_1 is USDC (0x02).
+        reserve_0: BigUint::from(TWO_EQUAL_WETH_RESERVE) * BigUint::from(10u64).pow(18),
+        reserve_1: BigUint::from(TWO_EQUAL_USDC_RESERVE) * BigUint::from(10u64).pow(6),
+        gas: 50_000,
+    }
+}
+
+/// Builds two equally-deep, fee-free WETH/USDC constant-product components (1000 WETH / 3,000,000
+/// USDC each) at `gas_price` wei/gas. Derived data carries unit token gas prices so the split
+/// algorithms deduct gas in output-token terms.
+pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
+    let weth = token_with_decimals(0x01, "WETH", 18);
+    let usdc = token_with_decimals(0x02, "USDC", 6);
+
+    let mut market = MarketState::new();
+    market.update_gas_price(BlockGasPrice {
+        block_number: 1,
+        block_hash: Default::default(),
+        block_timestamp: 0,
+        pricing: GasPrice::Legacy { gas_price: BigUint::from(gas_price) },
+    });
+    market.update_last_updated(BlockInfo::new(1, "0x01".to_string(), 0));
+
+    let tokens = [weth.clone(), usdc.clone()];
+    let mut edge_weights = Vec::new();
+    for component_id in ["component_a", "component_b"] {
+        let sim = weth_usdc_component();
+        let weight_to = DepthAndPrice::from_protocol_sim(&sim, &weth, &usdc).unwrap();
+        let weight_from = DepthAndPrice::from_protocol_sim(&sim, &usdc, &weth).unwrap();
+        market.upsert_components(std::iter::once(component(component_id, &tokens)));
+        market.update_states([(component_id.to_string(), Box::new(sim) as Box<dyn ProtocolSim>)]);
+        market.upsert_tokens(tokens.clone());
+        edge_weights.push((component_id, weight_to, weight_from));
+    }
+
+    let mut weighted = PetgraphStableDiGraphManager::<DepthAndPrice>::default();
+    weighted.initialize_graph(&market.component_topology());
+    for (component_id, weight_to, weight_from) in edge_weights {
+        weighted
+            .set_edge_weight(
+                &component_id.to_string(),
+                &weth.address,
+                &usdc.address,
+                weight_to,
+                false,
+            )
+            .unwrap();
+        weighted
+            .set_edge_weight(
+                &component_id.to_string(),
+                &usdc.address,
+                &weth.address,
+                weight_from,
+                false,
+            )
+            .unwrap();
+    }
+
+    let unit_price = Price::new(BigUint::from(1u64), BigUint::from(1u64));
+    let mut token_prices = HashMap::new();
+    token_prices.insert(weth.address.clone(), unit_price.clone());
+    token_prices.insert(usdc.address.clone(), unit_price);
+    let mut derived = DerivedData::new();
+    derived.set_token_prices(token_prices, vec![], 1, true);
+
+    WeightedSplitMarket {
+        weth: weth.address.clone(),
+        usdc: usdc.address.clone(),
+        market: MarketData::new(Arc::new(RwLock::new(market))),
+        weighted,
+        derived: Arc::new(RwLock::new(derived)),
+    }
+}
+
+/// Extracts `(net_amount_out, path_count, gross_output)` from a split result. `path_count` counts
+/// swaps consuming `token_in` (one per parallel leg); `gross` sums swaps producing `token_out`.
+pub(crate) fn split_metrics(
+    result: &RouteResult,
+    token_in: &Address,
+    token_out: &Address,
+) -> (BigInt, usize, BigUint) {
+    let swaps = result.route().swaps();
+    let path_count = swaps
+        .iter()
+        .filter(|s| s.token_in() == token_in)
+        .count();
+    let gross = swaps
+        .iter()
+        .filter(|s| s.token_out() == token_out)
+        .fold(BigUint::zero(), |acc, s| acc + s.amount_out());
+    (result.net_amount_out().clone(), path_count, gross)
+}
+
 // ==================== Scenario harness ====================
 
-/// A pool entry in a `TestScenario`.
-pub(crate) struct ScenarioPool {
+/// A component entry in a `TestScenario`.
+pub(crate) struct ScenarioComponent {
     pub id: &'static str,
     pub token_1: Token,
     pub token_2: Token,
@@ -61,26 +184,84 @@ pub(crate) struct ScenarioPool {
 pub(crate) struct TestScenario {
     pub name: &'static str,
     pub description: &'static str,
-    pub pools: Vec<ScenarioPool>,
+    pub components: Vec<ScenarioComponent>,
     pub token_in: Token,
     pub token_out: Token,
     pub trade_amount: BigUint,
     /// Floor: the algorithm must produce at least this much net output.
     pub lower_bound: BigInt,
-    /// Target: the best net output achievable under the scenario's simplified pool model. A
+    /// Target: the best net output achievable under the scenario's simplified component model. A
     /// quality ceiling to measure against, not a hard constraint.
     pub analytical_optimum: BigInt,
 }
 
 impl TestScenario {
-    /// Builds an unweighted `MarketData` + graph manager from this scenario's pool definitions.
+    /// Builds an unweighted `MarketData` + graph manager from this scenario's component
+    /// definitions.
     pub(crate) fn build_market(&self) -> (MarketData, PetgraphStableDiGraphManager<()>) {
-        let pools = self
-            .pools
+        let components = self
+            .components
             .iter()
             .map(|p| (p.id, &p.token_1, &p.token_2, p.sim.clone_box()))
             .collect();
-        setup_market_unweighted(pools)
+        setup_market_unweighted(components)
+    }
+
+    /// Builds a `DepthAndPrice`-weighted `MarketData` + graph manager from this scenario's
+    /// component definitions, for algorithms that route on the weighted graph (`water_fill`,
+    /// Most Liquid). Uses the same fixed gas assumptions as
+    /// [`build_market`](Self::build_market) (100 wei/gas).
+    pub(crate) fn build_market_weighted(
+        &self,
+    ) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+        let mut market = MarketState::new();
+        market.update_gas_price(BlockGasPrice {
+            block_number: 1,
+            block_hash: Default::default(),
+            block_timestamp: 0,
+            pricing: GasPrice::Legacy { gas_price: BigUint::from(100u64) },
+        });
+        market.update_last_updated(BlockInfo::new(1, "0x00".to_string(), 0));
+
+        let mut edge_weights = Vec::new();
+        for scenario in &self.components {
+            let tokens = [scenario.token_1.clone(), scenario.token_2.clone()];
+            let weight_to = DepthAndPrice::from_protocol_sim(
+                scenario.sim.as_ref(),
+                &scenario.token_1,
+                &scenario.token_2,
+            )
+            .unwrap();
+            let weight_from = DepthAndPrice::from_protocol_sim(
+                scenario.sim.as_ref(),
+                &scenario.token_2,
+                &scenario.token_1,
+            )
+            .unwrap();
+            market.upsert_components(std::iter::once(component(scenario.id, &tokens)));
+            market.update_states([(scenario.id.to_string(), scenario.sim.clone_box())]);
+            market.upsert_tokens(tokens.to_vec());
+            edge_weights.push((
+                scenario.id,
+                scenario.token_1.address.clone(),
+                scenario.token_2.address.clone(),
+                weight_to,
+                weight_from,
+            ));
+        }
+
+        let mut weighted = PetgraphStableDiGraphManager::<DepthAndPrice>::default();
+        weighted.initialize_graph(&market.component_topology());
+        for (component_id, addr_1, addr_2, weight_to, weight_from) in edge_weights {
+            weighted
+                .set_edge_weight(&component_id.to_string(), &addr_1, &addr_2, weight_to, false)
+                .unwrap();
+            weighted
+                .set_edge_weight(&component_id.to_string(), &addr_2, &addr_1, weight_from, false)
+                .unwrap();
+        }
+
+        (MarketData::new(Arc::new(RwLock::new(market))), weighted)
     }
 
     /// Builds a `SharedDerivedDataRef` with unit token-gas-prices for every token in this
@@ -92,12 +273,12 @@ impl TestScenario {
 
         token_prices.insert(self.token_in.address.clone(), unit_price.clone());
         token_prices.insert(self.token_out.address.clone(), unit_price.clone());
-        for pool in &self.pools {
+        for component in &self.components {
             token_prices
-                .entry(pool.token_1.address.clone())
+                .entry(component.token_1.address.clone())
                 .or_insert_with(|| unit_price.clone());
             token_prices
-                .entry(pool.token_2.address.clone())
+                .entry(component.token_2.address.clone())
                 .or_insert_with(|| unit_price.clone());
         }
 
@@ -119,7 +300,7 @@ pub(crate) struct ScenarioResult {
     pub net_output: BigInt,
     /// Best single-route net output. `net_output` must be >= this.
     pub lower_bound: BigInt,
-    /// Net analytical optimum for the scenario's simplified pool model. A reference value for
+    /// Net analytical optimum for the scenario's simplified component model. A reference value for
     /// measuring quality — the algorithm is not required to reach it.
     pub analytical_optimum: BigInt,
     /// Number of swaps consuming `token_in`. 1 for single-route, N for a split.
@@ -237,19 +418,19 @@ where
 pub(crate) mod split_scenarios {
     use num_bigint::{BigInt, BigUint};
 
-    use super::{ScenarioPool, TestScenario};
+    use super::{ScenarioComponent, TestScenario};
     use crate::algorithm::test_utils::{token, ConstantProductSim, ONE_ETH};
 
     /// Valid Ethereum addresses the swap encoder registry recognizes
-    const POOL_ADDR_1: &str = "0xaB00000000000000000000000000000000000001";
-    const POOL_ADDR_2: &str = "0xaB00000000000000000000000000000000000002";
-    const POOL_ADDR_3: &str = "0xaB00000000000000000000000000000000000003";
-    const POOL_ADDR_4: &str = "0xaB00000000000000000000000000000000000004";
+    const COMPONENT_ADDR_1: &str = "0xaB00000000000000000000000000000000000001";
+    const COMPONENT_ADDR_2: &str = "0xaB00000000000000000000000000000000000002";
+    const COMPONENT_ADDR_3: &str = "0xaB00000000000000000000000000000000000003";
+    const COMPONENT_ADDR_4: &str = "0xaB00000000000000000000000000000000000004";
 
-    /// S1: two identical A→B pools; 50/50 split is optimal.
+    /// S1: two identical A→B components; 50/50 split is optimal.
     ///
-    /// `analytical_optimum`: `optimal_two_pool_output` with equal reserves — exact mathematical
-    /// optimum (50/50).
+    /// `analytical_optimum`: `optimal_two_component_output` with equal reserves — exact
+    /// mathematical optimum (50/50).
     pub(crate) fn symmetric_split() -> TestScenario {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
@@ -257,10 +438,10 @@ pub(crate) mod split_scenarios {
 
         TestScenario {
             name: "SYMMETRIC_SPLIT",
-            description: "Two identical A→B pools. 50/50 split is optimal.",
-            pools: vec![
-                ScenarioPool {
-                    id: POOL_ADDR_1,
+            description: "Two identical A→B components. 50/50 split is optimal.",
+            components: vec![
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_1,
                     token_1: token_a.clone(),
                     token_2: token_b.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -269,8 +450,8 @@ pub(crate) mod split_scenarios {
                         gas: 50_000,
                     }),
                 },
-                ScenarioPool {
-                    id: POOL_ADDR_2,
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_2,
                     token_1: token_a.clone(),
                     token_2: token_b.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -283,17 +464,17 @@ pub(crate) mod split_scenarios {
             token_in: token_a,
             token_out: token_b,
             trade_amount: BigUint::from(100_000u64) * BigUint::from(ONE_ETH),
-            // gross 90_909_090_909_090_909_090_909 − 1 pool × 50_000 gas × 100 wei/gas
+            // gross 90_909_090_909_090_909_090_909 − 1 component × 50_000 gas × 100 wei/gas
             lower_bound: BigInt::from(90_909_090_909_090_904_090_909u128),
-            // gross 95_238_095_238_095_236_709_344 − 2 pools × 50_000 gas × 100 wei/gas
+            // gross 95_238_095_238_095_236_709_344 − 2 components × 50_000 gas × 100 wei/gas
             analytical_optimum: BigInt::from(95_238_095_238_095_226_709_344u128),
         }
     }
 
-    /// S2: two A→B pools with reserves 1_000_000 and 500_000; optimal split favours the larger
-    /// pool.
+    /// S2: two A→B components with reserves 1_000_000 and 500_000; optimal split favours the larger
+    /// component.
     ///
-    /// `analytical_optimum`: `optimal_two_pool_output` with the asymmetric reserves — exact
+    /// `analytical_optimum`: `optimal_two_component_output` with the asymmetric reserves — exact
     /// mathematical optimum.
     pub(crate) fn asymmetric_split() -> TestScenario {
         let token_a = token(0x0A, "A");
@@ -304,10 +485,11 @@ pub(crate) mod split_scenarios {
 
         TestScenario {
             name: "ASYMMETRIC_SPLIT",
-            description: "Two A→B pools of unequal size. Optimal split favours the larger pool.",
-            pools: vec![
-                ScenarioPool {
-                    id: POOL_ADDR_1,
+            description:
+                "Two A→B components of unequal size. Optimal split favours the larger component.",
+            components: vec![
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_1,
                     token_1: token_a.clone(),
                     token_2: token_b.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -316,8 +498,8 @@ pub(crate) mod split_scenarios {
                         gas: 50_000,
                     }),
                 },
-                ScenarioPool {
-                    id: POOL_ADDR_2,
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_2,
                     token_1: token_a.clone(),
                     token_2: token_b.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -330,9 +512,9 @@ pub(crate) mod split_scenarios {
             token_in: token_a,
             token_out: token_b,
             trade_amount: BigUint::from(200_000u64) * &one_eth,
-            // gross 166_666_666_666_666_666_666_666 − 1 pool × 50_000 gas × 100 wei/gas
+            // gross 166_666_666_666_666_666_666_666 − 1 component × 50_000 gas × 100 wei/gas
             lower_bound: BigInt::from(166_666_666_666_666_661_666_666u128),
-            // gross 176_470_588_235_294_097_103_232 − 2 pools × 50_000 gas × 100 wei/gas
+            // gross 176_470_588_235_294_097_103_232 − 2 components × 50_000 gas × 100 wei/gas
             analytical_optimum: BigInt::from(176_470_588_235_294_087_103_232u128),
         }
     }
@@ -349,9 +531,9 @@ pub(crate) mod split_scenarios {
         TestScenario {
             name: "GAS_KILLS_SPLIT",
             description: "Split has a real gross benefit but the extra-hop gas exceeds it, making the split net-negative.",
-            pools: vec![
-                ScenarioPool {
-                    id: POOL_ADDR_1,
+            components: vec![
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_1,
                     token_1: token_a.clone(),
                     token_2: token_b.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -360,8 +542,8 @@ pub(crate) mod split_scenarios {
                         gas: 50_000,
                     }),
                 },
-                ScenarioPool {
-                    id: POOL_ADDR_2,
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_2,
                     token_1: token_a.clone(),
                     token_2: token_b.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -374,17 +556,17 @@ pub(crate) mod split_scenarios {
             token_in: token_a,
             token_out: token_b,
             trade_amount: BigUint::from(10_000_000u64),
-            // gross 6_666_666 − 1 pool × 50_000 gas × 100 wei/gas
+            // gross 6_666_666 − 1 component × 50_000 gas × 100 wei/gas
             lower_bound: BigInt::from(1_666_666i64),
             // optimal net strategy is single route; gross split output (8M) loses on net
             analytical_optimum: BigInt::from(1_666_666i64),
         }
     }
 
-    /// S4: single A→B pool only; no alternative path to split into.
+    /// S4: single A→B component only; no alternative path to split into.
     ///
-    /// `analytical_optimum`: equals `lower_bound`. With only one pool there is nothing to split
-    /// across; the analytical optimum is simply the single-route output.
+    /// `analytical_optimum`: equals `lower_bound`. With only one component there is nothing to
+    /// split across; the analytical optimum is simply the single-route output.
     pub(crate) fn no_alternative_path() -> TestScenario {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
@@ -393,9 +575,9 @@ pub(crate) mod split_scenarios {
         TestScenario {
             name: "NO_ALTERNATIVE_PATH",
             description:
-                "Single A→B pool. No pool to split into; algorithm must return single-route result.",
-            pools: vec![ScenarioPool {
-                id: POOL_ADDR_1,
+                "Single A→B component. No component to split into; algorithm must return single-route result.",
+            components: vec![ScenarioComponent {
+                id: COMPONENT_ADDR_1,
                 token_1: token_a.clone(),
                 token_2: token_b.clone(),
                 sim: Box::new(ConstantProductSim {
@@ -407,23 +589,23 @@ pub(crate) mod split_scenarios {
             token_in: token_a,
             token_out: token_b,
             trade_amount: BigUint::from(100_000u64) * BigUint::from(ONE_ETH),
-            // gross 90_909_090_909_090_909_090_909 − 1 pool × 50_000 gas × 100 wei/gas
+            // gross 90_909_090_909_090_909_090_909 − 1 component × 50_000 gas × 100 wei/gas
             lower_bound: BigInt::from(90_909_090_909_090_904_090_909u128),
-            // single pool only — no split possible; net optimum equals lower_bound
+            // single component only — no split possible; net optimum equals lower_bound
             analytical_optimum: BigInt::from(90_909_090_909_090_904_090_909u128),
         }
     }
 
-    /// S5: A→B (one pool) → C (two parallel pools); bottleneck is at the B→C hop.
+    /// S5: A→B (one component) → C (two parallel components); bottleneck is at the B→C hop.
     ///
     /// PathFrankWolfe discovers two complete paths [P_AB, P_BC1] and [P_AB, P_BC2]. Because both
     /// share P_AB, `build_split_route` emits one combined A→B swap followed by split B→C swaps,
     /// with P_AB's gas counted once.
     ///
-    /// `lower_bound`: best single 2-hop route A→B→C through the larger B→C pool.
-    /// `analytical_optimum`: only one A→B pool (P_AB) exists so the B amount is fixed;
-    /// `optimal_two_pool_output` gives the exact optimum for splitting that B across the two B→C
-    /// pools.
+    /// `lower_bound`: best single 2-hop route A→B→C through the larger B→C component.
+    /// `analytical_optimum`: only one A→B component (P_AB) exists so the B amount is fixed;
+    /// `optimal_two_component_output` gives the exact optimum for splitting that B across the two
+    /// B→C components.
     pub(crate) fn multi_hop_bottleneck() -> TestScenario {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
@@ -435,10 +617,10 @@ pub(crate) mod split_scenarios {
 
         TestScenario {
             name: "MULTI_HOP_BOTTLENECK",
-            description: "A→B→C with two parallel B→C pools. PathFrankWolfe discovers both paths sharing P_AB.",
-            pools: vec![
-                ScenarioPool {
-                    id: POOL_ADDR_1,
+            description: "A→B→C with two parallel B→C components. PathFrankWolfe discovers both paths sharing P_AB.",
+            components: vec![
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_1,
                     token_1: token_a.clone(),
                     token_2: token_b.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -447,8 +629,8 @@ pub(crate) mod split_scenarios {
                         gas: 50_000,
                     }),
                 },
-                ScenarioPool {
-                    id: POOL_ADDR_2,
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_2,
                     token_1: token_b.clone(),
                     token_2: token_c.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -457,8 +639,8 @@ pub(crate) mod split_scenarios {
                         gas: 50_000,
                     }),
                 },
-                ScenarioPool {
-                    id: POOL_ADDR_3,
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_3,
                     token_1: token_b.clone(),
                     token_2: token_c.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -471,19 +653,19 @@ pub(crate) mod split_scenarios {
             token_in: token_a,
             token_out: token_c,
             trade_amount: BigUint::from(200_000u64) * &one_eth,
-            // gross 163_934_426_229_508_196_721_311 − 2 pools × 50_000 gas × 100 wei/gas
+            // gross 163_934_426_229_508_196_721_311 − 2 components × 50_000 gas × 100 wei/gas
             lower_bound: BigInt::from(163_934_426_229_508_186_721_311u128),
-            // gross 173_410_404_624_277_463_881_280 − 3 pools × 50_000 gas × 100 wei/gas
+            // gross 173_410_404_624_277_463_881_280 − 3 components × 50_000 gas × 100 wei/gas
             analytical_optimum: BigInt::from(173_410_404_624_277_448_881_280u128),
         }
     }
 
-    /// S6: two A→B pools then two B→C pools; pool sizes mismatched between hops so the optimal
-    /// A→B and B→C splits differ. An algorithm that routes independent per-path hops without
-    /// pooling B first will use the wrong cross-allocations and miss the optimum.
+    /// S6: two A→B components then two B→C components; component sizes mismatched between hops so
+    /// the optimal A→B and B→C splits differ. An algorithm that routes independent per-path
+    /// hops without pooling B first will use the wrong cross-allocations and miss the optimum.
     ///
-    /// `lower_bound`: best single 2-hop path (larger pool at each hop).
-    /// `analytical_optimum`: chained `optimal_two_pool_output` across both hops.
+    /// `lower_bound`: best single 2-hop path (larger component at each hop).
+    /// `analytical_optimum`: chained `optimal_two_component_output` across both hops.
     pub(crate) fn double_split() -> TestScenario {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
@@ -496,12 +678,13 @@ pub(crate) mod split_scenarios {
 
         TestScenario {
             name: "DOUBLE_SPLIT",
-            description: "Two A→B pools (1M and 500k ETH) then two B→C pools (500k and 1.5M \
+            description:
+                "Two A→B components (1M and 500k ETH) then two B→C components (500k and 1.5M \
                           ETH). Optimal splits differ at each hop, forcing B to be pooled before \
                           re-splitting.",
-            pools: vec![
-                ScenarioPool {
-                    id: POOL_ADDR_1,
+            components: vec![
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_1,
                     token_1: token_a.clone(),
                     token_2: token_b.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -510,8 +693,8 @@ pub(crate) mod split_scenarios {
                         gas: 50_000,
                     }),
                 },
-                ScenarioPool {
-                    id: POOL_ADDR_2,
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_2,
                     token_1: token_a.clone(),
                     token_2: token_b.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -520,8 +703,8 @@ pub(crate) mod split_scenarios {
                         gas: 50_000,
                     }),
                 },
-                ScenarioPool {
-                    id: POOL_ADDR_3,
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_3,
                     token_1: token_b.clone(),
                     token_2: token_c.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -530,8 +713,8 @@ pub(crate) mod split_scenarios {
                         gas: 50_000,
                     }),
                 },
-                ScenarioPool {
-                    id: POOL_ADDR_4,
+                ScenarioComponent {
+                    id: COMPONENT_ADDR_4,
                     token_1: token_b.clone(),
                     token_2: token_c.clone(),
                     sim: Box::new(ConstantProductSim {
@@ -544,11 +727,11 @@ pub(crate) mod split_scenarios {
             token_in: token_a,
             token_out: token_c,
             trade_amount: BigUint::from(500_000u64) * &one_eth,
-            // gross floor(3×10²⁴/11) = 272_727_272_727_272_727_272_727 − 2 pools × 50_000 gas × 100
-            // wei/gas
+            // gross floor(3×10²⁴/11) = 272_727_272_727_272_727_272_727 − 2 components × 50_000 gas
+            // × 100 wei/gas
             lower_bound: BigInt::from(272_727_272_727_272_717_272_727u128),
-            // gross floor(6×10²⁴/19) = 315_789_473_684_210_526_315_789 − 4 pools × 50_000 gas × 100
-            // wei/gas
+            // gross floor(6×10²⁴/19) = 315_789_473_684_210_526_315_789 − 4 components × 50_000 gas
+            // × 100 wei/gas
             analytical_optimum: BigInt::from(315_789_473_684_210_526_295_789u128),
         }
     }
@@ -639,29 +822,32 @@ mod tests {
     }
 
     #[test]
-    fn test_optimal_two_pool_output_symmetric() {
-        // Identical pools → 50/50 split is always optimal
+    fn test_optimal_two_component_output_symmetric() {
+        // Identical components → 50/50 split is always optimal
         let (fraction, _) =
-            optimal_two_pool_output(10_000.0, 10_000.0, 10_000.0, 10_000.0, 1_000.0);
-        assert!(f64_eq(fraction, 0.5), "symmetric pools: expected fraction 0.5, got {fraction}");
+            optimal_two_component_output(10_000.0, 10_000.0, 10_000.0, 10_000.0, 1_000.0);
+        assert!(
+            f64_eq(fraction, 0.5),
+            "symmetric components: expected fraction 0.5, got {fraction}"
+        );
     }
 
     #[test]
-    fn test_optimal_two_pool_output_asymmetric() {
-        // Pool 1: reserve_in=100, reserve_out=400
-        // Pool 2: reserve_in=100, reserve_out=100
+    fn test_optimal_two_component_output_asymmetric() {
+        // Component 1: reserve_in=100, reserve_out=400
+        // Component 2: reserve_in=100, reserve_out=100
         // swap amount: 400
-        let (fraction, split_out) = optimal_two_pool_output(100.0, 400.0, 100.0, 100.0, 400.0);
+        let (fraction, split_out) = optimal_two_component_output(100.0, 400.0, 100.0, 100.0, 400.0);
 
         // Verify the split is correct
         assert!(f64_eq(fraction, 0.75), "expected fraction 0.75, got {fraction}");
         assert!(f64_eq(split_out, 350.0), "expected split output 350.0, got {split_out}");
 
         // Verify marginal prices are equal at the optimal split.
-        let pool_1_amount = fraction * 400.0;
-        let pool_2_amount = 400.0 - pool_1_amount;
-        let marginal_1 = (100.0 * 400.0) / (100.0 + pool_1_amount).powi(2);
-        let marginal_2 = (100.0 * 100.0) / (100.0 + pool_2_amount).powi(2);
+        let component_1_amount = fraction * 400.0;
+        let component_2_amount = 400.0 - component_1_amount;
+        let marginal_1 = (100.0 * 400.0) / (100.0 + component_1_amount).powi(2);
+        let marginal_2 = (100.0 * 100.0) / (100.0 + component_2_amount).powi(2);
         assert!(
             f64_eq(marginal_1, marginal_2),
             "marginal prices should equalise at the optimum: {marginal_1} vs {marginal_2}"
@@ -696,9 +882,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_shared_hop_split_lower_bound() {
-        // BF on double_split finds the best single 2-hop route via the largest pool at each hop
-        // (pool_ab_1 → pool_bc_2). Confirms the lower bound is set correctly before any
-        // split-routing algorithm is evaluated against it.
+        // BF on double_split finds the best single 2-hop route via the largest component at each
+        // hop (component_ab_1 → component_bc_2). Confirms the lower bound is set correctly
+        // before any split-routing algorithm is evaluated against it.
         let scenario = split_scenarios::double_split();
         let bf = BellmanFordAlgorithm::with_config(
             AlgorithmConfig::new(1, 4, Duration::from_millis(100), None).unwrap(),

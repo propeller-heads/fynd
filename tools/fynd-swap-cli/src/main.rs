@@ -144,14 +144,14 @@ async fn wait_for_health(client: &FyndClient, fynd_url: &str) -> anyhow::Result<
                 if tokio::time::Instant::now() >= deadline {
                     bail!(
                         "solver at {fynd_url} not healthy after 30s \
-                         (last update: {}ms ago, {} pools); \
+                         (last update: {}ms ago, {} solver pools); \
                          wait for market data to load",
                         h.last_update_ms(),
                         h.num_solver_pools()
                     );
                 }
                 info!(
-                    "Solver not ready yet ({} pools, last update {}ms ago), retrying...",
+                    "Solver not ready yet ({} solver pools, last update {}ms ago), retrying...",
                     h.num_solver_pools(),
                     h.last_update_ms()
                 );
@@ -336,14 +336,30 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             }
             let info = client.info().await?;
-            let router_addr = Address::try_from(info.router_address().as_ref())
-                .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
+            let router_addr = Address::try_from(
+                info.router_address()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "server has no router_address; encoding is unavailable on this chain"
+                        )
+                    })?
+                    .as_ref(),
+            )
+            .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
             (EncodingOptions::new(slippage), vec![router_addr])
         }
         TransferType::TransferFromPermit2 => {
             let info = client.info().await?;
-            let router_addr = Address::try_from(info.router_address().as_ref())
-                .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
+            let router_addr = Address::try_from(
+                info.router_address()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "server has no router_address; encoding is unavailable on this chain"
+                        )
+                    })?
+                    .as_ref(),
+            )
+            .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
             if cli.execute {
                 // Check against the swap amount but approve max — subsequent swaps won't
                 // need re-approval even after Permit2 deducts from the ERC-20 allowance.
@@ -414,7 +430,7 @@ async fn main() -> anyhow::Result<()> {
         println!("Route ({} hops):", route.swaps().len());
         for (i, swap) in route.swaps().iter().enumerate() {
             println!(
-                "  {}. 0x{} -> 0x{} via {} (pool: {})",
+                "  {}. 0x{} -> 0x{} via {} (component: {})",
                 i + 1,
                 hex::encode(swap.token_in()),
                 hex::encode(swap.token_out()),

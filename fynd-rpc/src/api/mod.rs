@@ -1,14 +1,25 @@
 //! HTTP API layer: endpoint handlers, OpenAPI docs, and shared application state.
 
+/// OpenAPI spec construction and Swagger UI registration.
+mod docs;
 /// Re-exports of wire-format DTO types from `fynd-rpc-types`.
 pub mod dto;
 /// [`ApiError`] type with HTTP status code mapping.
 pub mod error;
+/// Resolves the caller's access to exclusive liquidity from the request headers.
+pub(crate) mod exclusive_access;
 /// Request handlers for `/v1/quote`, `/v1/health`, and `/v1/info`.
 pub mod handlers;
+/// HTTP metrics middleware recording request duration and per-client usage.
+pub(crate) mod middleware;
 #[cfg(feature = "experimental")]
 /// Response types and handler for `GET /v1/prices` (experimental).
 pub mod prices;
+/// Builds re-issuable, signature-free representation of a quote request for replay logging.
+pub(crate) mod request_capture;
+#[cfg(feature = "experimental")]
+/// Response types and helpers for `GET /v1/tokens` (experimental).
+pub mod tokens;
 
 use std::{
     sync::Arc,
@@ -27,7 +38,6 @@ use handlers::configure_routes;
 use tycho_simulation::tycho_common::models::Address;
 use tycho_simulation::tycho_common::Bytes;
 use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
 use crate::api::error::ErrorResponse;
 
@@ -55,18 +65,47 @@ use crate::api::error::ErrorResponse;
 pub struct ApiDoc;
 
 #[cfg(feature = "experimental")]
-/// OpenAPI documentation bundle for experimental endpoints (`GET /v1/prices`).
+/// OpenAPI documentation bundle for experimental endpoints (`GET /v1/prices`,
+/// `GET /v1/tokens`).
 #[derive(OpenApi)]
 #[openapi(
-    paths(handlers::get_prices),
+    paths(handlers::get_prices, handlers::get_tokens),
     components(schemas(
         prices::PricesResponse,
         prices::TokenPriceEntry,
         prices::SpotPriceEntry,
-        prices::PoolDepthEntry,
+        prices::ComponentDepthEntry,
+        tokens::TokensResponse,
+        tokens::GraphTokenEntry,
     ))
 )]
 pub struct ExperimentalApiDoc;
+
+/// Builds the OpenAPI contract for every endpoint compiled into this crate.
+pub fn openapi_spec() -> utoipa::openapi::OpenApi {
+    #[allow(unused_mut)]
+    let mut openapi = ApiDoc::openapi();
+    #[cfg(feature = "experimental")]
+    {
+        openapi.merge(ExperimentalApiDoc::openapi());
+        // Mark experimental operations so spec consumers know the endpoint may not
+        // exist on a non-experimental (default) build.
+        for path in ["/v1/prices", "/v1/tokens"] {
+            if let Some(operation) = openapi
+                .paths
+                .paths
+                .get_mut(path)
+                .and_then(|path_item| path_item.get.as_mut())
+            {
+                operation
+                    .extensions
+                    .get_or_insert_with(Default::default)
+                    .insert("x-experimental".to_string(), serde_json::json!(true));
+            }
+        }
+    }
+    openapi
+}
 
 /// Simple tracker for service health metrics.
 ///
@@ -159,24 +198,30 @@ pub struct AppState {
     worker_router: Arc<WorkerPoolRouter>,
     health_tracker: HealthTracker,
     chain_id: u64,
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     permit2_address: Bytes,
     #[cfg(feature = "experimental")]
     pub(crate) derived_data: SharedDerivedDataRef,
     #[cfg(feature = "experimental")]
     pub(crate) gas_token: Address,
+    #[cfg(feature = "experimental")]
+    pub(crate) market_data: MarketData,
+    #[cfg(feature = "experimental")]
+    pub(crate) tokens_cache: Arc<tokio::sync::RwLock<Option<tokens::TokensCache>>>,
 }
 
 impl AppState {
     /// Creates new application state.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         worker_router: WorkerPoolRouter,
         health_tracker: HealthTracker,
         chain_id: u64,
-        router_address: Bytes,
+        router_address: Option<Bytes>,
         permit2_address: Bytes,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
         #[cfg(feature = "experimental")] gas_token: Address,
+        #[cfg(feature = "experimental")] market_data: MarketData,
     ) -> Self {
         Self {
             worker_router: Arc::new(worker_router),
@@ -188,6 +233,10 @@ impl AppState {
             derived_data,
             #[cfg(feature = "experimental")]
             gas_token,
+            #[cfg(feature = "experimental")]
+            market_data,
+            #[cfg(feature = "experimental")]
+            tokens_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -203,8 +252,8 @@ impl AppState {
         self.chain_id
     }
 
-    pub(crate) fn router_address(&self) -> &Bytes {
-        &self.router_address
+    pub(crate) fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     pub(crate) fn permit2_address(&self) -> &Bytes {
@@ -227,20 +276,41 @@ pub(crate) fn configure_error_handlers(cfg: &mut web::ServiceConfig) {
 }
 
 /// Configures the Actix Web application with routes and state.
-pub(crate) fn configure_app(cfg: &mut web::ServiceConfig, state: AppState) {
-    #[allow(unused_mut)]
-    let mut openapi = ApiDoc::openapi();
-    #[cfg(feature = "experimental")]
-    {
-        let experimental = ExperimentalApiDoc::openapi();
-        openapi.merge(experimental);
-    }
+///
+/// `hosted_swagger_url` names the hosted gateway the `/docs/hosted/` UI points at; when it is
+/// `None` that UI is not served.
+pub(crate) fn configure_app(
+    cfg: &mut web::ServiceConfig,
+    state: AppState,
+    hosted_swagger_url: Option<String>,
+) {
     cfg.configure(configure_error_handlers)
         .app_data(web::Data::new(state))
         .configure(configure_routes)
-        .service(SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", openapi))
+        .configure(|cfg| docs::configure_docs(cfg, hosted_swagger_url.as_deref()))
         .default_service(web::to(|| async {
             let body = ErrorResponse::new("not found".into(), "NOT_FOUND".into());
             HttpResponse::NotFound().json(body)
         }));
+}
+
+#[cfg(all(test, feature = "experimental"))]
+mod openapi_tests {
+    #[test]
+    fn test_openapi_spec_marks_prices_experimental() {
+        let spec = serde_json::to_value(super::openapi_spec()).unwrap();
+
+        assert!(spec["paths"]["/v1/prices"].is_object());
+        let price = &spec["components"]["schemas"]["TokenPriceEntry"]["properties"]["price"];
+        assert_eq!(price["type"], "string", "price must serialize as a decimal string");
+        assert_eq!(price["example"], "0.000000003");
+
+        // Experimental operations must be marked so spec consumers know they may not exist
+        // on a non-experimental build.
+        for path in ["/v1/prices", "/v1/tokens"] {
+            assert!(spec["paths"][path].is_object());
+            let ext = &spec["paths"][path]["get"]["x-experimental"];
+            assert_eq!(ext, true, "x-experimental extension must be true on {path}");
+        }
+    }
 }

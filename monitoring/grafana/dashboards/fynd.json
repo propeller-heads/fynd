@@ -14,17 +14,17 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "worker_router_solve_duration_seconds{quantile=\"0.5\"}",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(worker_router_solve_duration_seconds_bucket[1m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "worker_router_solve_duration_seconds{quantile=\"0.95\"}",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(worker_router_solve_duration_seconds_bucket[1m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "worker_router_solve_duration_seconds{quantile=\"0.99\"}",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(worker_router_solve_duration_seconds_bucket[1m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -87,12 +87,12 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "worker_router_solver_responses{quantile=\"0.5\"}",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(worker_router_solver_responses_bucket[1m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "worker_router_solver_responses{quantile=\"0.95\"}",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(worker_router_solver_responses_bucket[1m])))",
           "legendFormat": "p95",
           "refId": "B"
         }
@@ -211,13 +211,103 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum(increase(worker_router_best_solution_pool[5m])) by (pool)",
+          "expr": "sum(increase(worker_router_best_quote_pool[5m])) by (pool)",
           "legendFormat": "{{pool}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "Pools per Protocol",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "market_pools_per_protocol",
+          "legendFormat": "{{protocol}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "Protocol Sync Status",
+      "type": "status-history",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "max by (protocol) (market_protocol_sync_state)",
+          "legendFormat": "{{protocol}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showValue": "auto",
+        "rowHeight": 0.9,
+        "colWidth": 0.9,
+        "legend": { "showLegend": true, "displayMode": "list", "placement": "right" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 1, "fillOpacity": 70 },
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": { "text": "Started", "color": "blue", "index": 0 },
+                "2": { "text": "Ready", "color": "green", "index": 1 },
+                "3": { "text": "Delayed", "color": "orange", "index": 2 },
+                "4": { "text": "Stale", "color": "red", "index": 3 },
+                "5": { "text": "Advanced", "color": "purple", "index": 4 },
+                "6": { "text": "Ended", "color": "#808080", "index": 5 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "title": "Solve Duration by Pool (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, pool) (rate(worker_pool_solve_duration_seconds_bucket[1m])))",
+          "legendFormat": "{{pool}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
         "overrides": []
       }
     }

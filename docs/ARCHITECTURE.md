@@ -26,7 +26,7 @@ This modular architecture allows users to:
 * **Graph Management**: `GraphManager` trait with incremental updates from market events; built-in implementation uses `petgraph::StableDiGraph`
 * **Multi-Solver Competition**: Multiple worker pools with different configurations compete per request; WorkerPoolRouter selects the best result
 * **Output Format**: Structured `Quote` objects (routes, amounts, gas estimates) with optional encoded transaction
-* **Derived Data Pipeline**: Pre-computed spot prices, pool depths, and token gas prices fed to algorithms via a separate computation framework
+* **Derived Data Pipeline**: Pre-computed spot prices, component depths, and token gas prices fed to algorithms via a separate computation framework
 * **Observability**: Prometheus metrics on port 9898, structured tracing, health endpoint
 
 ***
@@ -109,23 +109,23 @@ This modular architecture allows users to:
               │ on event │   │ on event │   │ on event │
               └──────────┘   └──────────┘   └──────────┘
 
-┌──────────────────────────────────────────────────────────────────┐
-│                     Derived Data Pipeline                        │
-│                                                                  │
-│  TychoFeed events ──► ComputationManager                         │
-│                          │                                       │
-│                          ├─ SpotPriceComputation                 │
-│                          ├─ PoolDepthComputation (needs spots)   │
-│                          ├─ TokenGasPriceComputation(needs spots)│
-│                          │                                       │
-│                          ▼                                       │
-│                     DerivedData Store ──► broadcast events       │
-│                                              │                   │
-│                                    ┌─────────┼──────────┐        │
-│                                    ▼         ▼          ▼        │
-│                              Worker 1  Worker 2  Worker N        │
-│                              (update edge weights on graph)      │
-└──────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│                     Derived Data Pipeline                             │
+│                                                                       │
+│  TychoFeed events ──► ComputationManager                              │
+│                          │                                            │
+│                          ├─ SpotPriceComputation                      │
+│                          ├─ ComponentDepthComputation (needs spots)   │
+│                          ├─ TokenGasPriceComputation (needs spots)    │
+│                          │                                            │
+│                          ▼                                            │
+│                     DerivedData Store ──► broadcast events            │
+│                                              │                        │
+│                                    ┌─────────┼──────────┐             │
+│                                    ▼         ▼          ▼             │
+│                              Worker 1  Worker 2  Worker N             │
+│                              (update edge weights on graph)           │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ***
@@ -141,7 +141,7 @@ Actix Web HTTP handlers. Validates requests, delegates to WorkerPoolRouter, retu
 **Endpoints:**
 
 * `POST /v1/quote` -- Submit quote requests
-* `GET /v1/health` -- Health check (data freshness, derived data readiness, gas-price staleness, pool count)
+* `GET /v1/health` -- Health check (data freshness, derived data readiness, gas-price staleness, solver pool count)
 * `GET /v1/info` -- Instance info (chain ID, router address, Permit2 address)
 * `GET /metrics` -- Prometheus metrics (separate server, port 9898 by default)
 
@@ -153,12 +153,13 @@ Actix Web HTTP handlers. Validates requests, delegates to WorkerPoolRouter, retu
 
 Orchestrates quote requests across multiple worker pools:
 
-1. Fans out each order to all pools in parallel
-2. Manages per-request timeouts with optional early return
-3. Refines gas estimates using `estimate_gas_usage` (tycho-execution) before cross-pool ranking — algorithms use a fast naive estimate internally; this step applies a more accurate one that accounts for token transfers and protocol overhead
-4. Selects the best solution by refined `amount_out_net_gas`
-5. Optionally encodes winning solutions into on-chain transactions (when `EncodingOptions` are provided)
-6. Reports failures with error types and metrics
+1. Allocates the worker pools that serve each order, before dispatch. Each order is classified (`OrderClass`) and matched against each worker pool's configuration (`SolverPoolHandle::serves`) — today on the caller's access to exclusive liquidity, so a request without access is never dispatched to an exclusive-access worker pool
+2. Fans out each order to its allocated worker pools in parallel
+3. Manages per-request timeouts with optional early return
+4. Refines gas estimates using `estimate_gas_usage` (tycho-execution) before cross-pool ranking — algorithms use a fast naive estimate internally; this step applies a more accurate one that accounts for token transfers and protocol overhead
+5. Selects the best solution by refined `amount_out_net_gas`
+6. Optionally encodes winning solutions into on-chain transactions (when `EncodingOptions` are provided)
+7. Reports failures with error types and metrics
 
 ***
 
@@ -204,6 +205,7 @@ Pluggable interface for route-finding algorithms:
 * `MostLiquidAlgorithm` -- BFS path enumeration, depth-weighted scoring, ProtocolSim simulation, gas-adjusted ranking.
 * `BellmanFordAlgorithm` -- Bellman-Ford relaxation with gas-aware edge weights, configurable via `AlgorithmConfig.gas_aware`.
 * `PathFrankWolfeAlgorithm` -- Frank-Wolfe path-based optimization for multi-hop routing.
+* `WaterFillAlgorithm` -- portfolio split router: exhaustive plus bounded amount-aware candidate discovery, then the best net of a single path, a coarse disjoint floor, a refined 256-chunk disjoint split, and a shared-component fill-and-spill; gas-aware net ranking when derived token gas prices are available.
 
 ***
 
@@ -223,7 +225,7 @@ Graph management infrastructure:
 
 * `GraphManager` trait: initialize + incremental updates from events
 * `PetgraphStableDiGraphManager`: Implementation using `petgraph::StableDiGraph`
-* `EdgeWeightUpdaterWithDerived`: Updates edge weights from derived data (pool depths)
+* `EdgeWeightUpdaterWithDerived`: Updates edge weights from derived data (component depths)
 * `Path` type: Sequence of edges for route representation
 
 ***
@@ -252,8 +254,8 @@ Background task that connects to Tycho's WebSocket API, processes component/stat
 
 Pre-computes analytics from raw market data:
 
-* `SpotPriceComputation`: Spot prices for all pool pairs
-* `PoolDepthComputation`: Liquidity depth at configured slippage
+* `SpotPriceComputation`: Spot prices for all component pairs
+* `ComponentDepthComputation`: Liquidity depth at configured slippage
 * `TokenGasPriceComputation`: Token prices relative to gas token
 
 Computations run in dependency order. Workers use `ReadinessTracker` to wait for required data before solving.
@@ -295,7 +297,7 @@ Client POST /v1/quote
 RouterApi (validate)
     │
     ▼
-WorkerPoolRouter (fan-out to all pools)
+WorkerPoolRouter (allocate pools, then fan out)
     │
     ├──► Pool A Queue ──► Worker ──► Algorithm ──► Quote
     ├──► Pool B Queue ──► Worker ──► Algorithm ──► Quote
@@ -326,7 +328,7 @@ TychoFeed
     └──► Trigger Gas Price Fetcher
     └──► ComputationManager
             ├──► SpotPriceComputation
-            ├──► PoolDepthComputation
+            ├──► ComponentDepthComputation
             ├──► TokenGasPriceComputation
             └──► Broadcast DerivedDataEvent
                     └──► Workers (update edge weights + readiness)

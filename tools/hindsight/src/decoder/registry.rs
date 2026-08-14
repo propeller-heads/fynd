@@ -1,10 +1,10 @@
 //! The decoder's address book: which contracts are solvers, venues, batch settlers, and
 //! venue infrastructure on one chain.
 //!
-//! The data is pure configuration and lives in TOML — the built-in Ethereum address book is
-//! embedded from `registry/ethereum.toml`; `--registry <path>` loads a modified or per-chain
-//! address book without recompiling. This module only holds the lookups the decode strategies ask
-//! ([`Registry::is_solver`], [`Registry::is_batch_settler`], [`Registry::label`], …).
+//! The data is pure configuration and lives in TOML — the built-in address books are embedded
+//! from the `registry/` directory; `--registry <path>` loads a modified or per-chain
+//! address book without recompiling. This module only holds the lookups the decoders ask
+//! (`Registry::is_solver`, `Registry::is_batch_settler`, `Registry::label`, …).
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -12,13 +12,43 @@ use std::{
     path::Path,
 };
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, B256};
 use anyhow::Context;
 use serde::Deserialize;
+use tycho_simulation::tycho_common::models::Chain;
 
-/// The built-in Ethereum address book, embedded at compile time (validated by tests, so it
-/// cannot fail to parse at runtime).
+/// The built-in address books, embedded at compile time (validated by tests, so they cannot fail
+/// to parse at runtime).
 const ETHEREUM_TOML: &str = include_str!("registry/ethereum.toml");
+const BASE_TOML: &str = include_str!("registry/base.toml");
+const UNICHAIN_TOML: &str = include_str!("registry/unichain.toml");
+const ARBITRUM_TOML: &str = include_str!("registry/arbitrum.toml");
+const BSC_TOML: &str = include_str!("registry/bsc.toml");
+const POLYGON_TOML: &str = include_str!("registry/polygon.toml");
+
+/// The chains that have a built-in address book, only for enumerating them: the tests cover every
+/// book through this, and `Registry::builtin` names them when asked for a chain that has none.
+/// The lookup itself is `builtin_book`, so no list is walked to resolve a chain.
+const BUILTIN_CHAINS: [Chain; 6] =
+    [Chain::Ethereum, Chain::Base, Chain::Unichain, Chain::Arbitrum, Chain::Bsc, Chain::Polygon];
+
+/// The address book embedded for `chain`, or `None` for a chain Hindsight has none for.
+///
+/// Keyed on `Chain` rather than a chain name so the caller's string is parsed once, by
+/// `fynd_core`'s parser, instead of being matched against spellings here. The wildcard arm is
+/// forced: `Chain` is `#[non_exhaustive]`, so this cannot be an exhaustive match, which means a
+/// chain Tycho adds later reaches it as "no built-in book" rather than as a compile error.
+fn builtin_book(chain: Chain) -> Option<&'static str> {
+    match chain {
+        Chain::Ethereum => Some(ETHEREUM_TOML),
+        Chain::Base => Some(BASE_TOML),
+        Chain::Unichain => Some(UNICHAIN_TOML),
+        Chain::Arbitrum => Some(ARBITRUM_TOML),
+        Chain::Bsc => Some(BSC_TOML),
+        Chain::Polygon => Some(POLYGON_TOML),
+        _ => None,
+    }
+}
 
 /// On-disk shape of a chain's address book. Field meanings are documented in
 /// `registry/ethereum.toml`.
@@ -32,12 +62,30 @@ struct AddressBook {
     solvers: HashMap<Address, String>,
     venues: HashMap<String, VenueAddresses>,
     labels: HashMap<Address, String>,
+    /// Trader addresses that identify an order-flow venue (e.g. kpk's Safes on `CoW`). Absent in
+    /// books that have no owner-identified venues.
+    #[serde(default)]
+    venue_owners: HashMap<Address, String>,
+    /// Fee-wallet address → venue, for venues that route through a shared router and are only
+    /// identified by the fee transferred to their wallet (Phantom, Robinhood). Absent in books
+    /// with no fee-identified venues.
+    #[serde(default)]
+    venue_fees: HashMap<Address, String>,
+    /// Provider integrator tag → venue, for venues identified by the integrator string in a
+    /// provider's event (`LiFi` frontends: Infinex, Robinhood). Keys are lowercase. Absent in
+    /// books with no integrator-identified venues.
+    #[serde(default)]
+    venue_integrators: HashMap<String, String>,
+    /// `CoW` order `appData` hash → venue, for venues identified by the frontend tag (`appCode`)
+    /// committed into an order (`LlamaSwap`). Absent in books with no appData-identified venues.
+    #[serde(default)]
+    venue_appdata: HashMap<B256, String>,
 }
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
-/// collectors its fee skims land on, and its calldata solver vocabulary. Keyed by venue name in
-/// the address book; the name binds to a decode strategy at load time (see
-/// [`crate::decoder::venues::Venue::from_name`]).
+/// collectors its fees are sent to, and its calldata solver aliases. Keyed by venue name in
+/// the address book; the name binds to a decoder at load time (see
+/// `crate::decoder::venues::decoders_for`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VenueAddresses {
@@ -52,14 +100,14 @@ pub(crate) struct VenueAddresses {
 
 impl VenueAddresses {
     /// Normalize a solver id this venue declared in calldata to the address book's solver
-    /// vocabulary: the first alias needle (in alias order) contained in the lowercased id names
+    /// names: the first alias substring (in table order) contained in the lowercased id names
     /// the solver, trimming the venue's id decoration ("oneInchV6FeeDynamic" → "1inch") — not a
     /// 1:1 rename. Unmatched ids pass through as-is: still more informative than a raw executor
     /// address, and a signal to extend the address book.
     pub(crate) fn normalize_solver(&self, id: &str) -> String {
         let lower = id.to_lowercase();
-        for (needle, name) in &self.solver_aliases {
-            if lower.contains(needle) {
+        for (substring, name) in &self.solver_aliases {
+            if lower.contains(substring) {
                 return name.clone();
             }
         }
@@ -82,7 +130,7 @@ pub(crate) struct Registry {
     /// Display names for entry points that are neither venues nor solvers — market-maker
     /// fillers, solver contracts, bot routers. Label-only: these must NOT be in `names`,
     /// because `is_known` drives strategy selection and filler-entered transactions have to
-    /// keep matching via their solver logs (Maker), not sender netting.
+    /// keep matching via their solver logs (Intent), not sender netting.
     labels: HashMap<Address, String>,
     /// The chain's wrapped-native token (e.g. WETH), which appears in flows
     /// only as a wrap/unwrap intermediary.
@@ -95,28 +143,50 @@ pub(crate) struct Registry {
     usd_stablecoins: Vec<(Address, u32)>,
     /// Venue address sets, keyed by the venue name from the address book.
     venues: HashMap<String, VenueAddresses>,
+    /// Trader address → order-flow venue name, for venues identified by who owns the order
+    /// rather than by the entry point (e.g. kpk's Safes settling through `CoW`).
+    venue_owners: HashMap<Address, String>,
+    /// Fee-wallet address → venue name, for venues identified by the fee they take on a shared
+    /// router rather than by the entry point (Phantom, Robinhood).
+    venue_fees: HashMap<Address, String>,
+    /// Provider integrator tag (lowercase) → venue name, for venues identified by the integrator
+    /// string a provider records in its event (`LiFi` frontends: Infinex, Robinhood).
+    venue_integrators: HashMap<String, String>,
+    /// `CoW` order `appData` hash → venue name, for venues identified by the frontend tag
+    /// (`appCode`) committed into an order (`LlamaSwap`).
+    venue_appdata: HashMap<B256, String>,
 }
 
 impl Registry {
-    /// Load the address book for a chain, or from an explicit TOML file when given (which wins
-    /// over the chain name — the file says what it describes).
-    pub(crate) fn load(chain: &str, override_path: Option<&Path>) -> anyhow::Result<Self> {
-        if let Some(path) = override_path {
-            let text = fs::read_to_string(path)
-                .with_context(|| format!("failed to read registry file {}", path.display()))?;
-            return Self::from_toml(&text)
-                .with_context(|| format!("invalid registry file {}", path.display()));
-        }
-        match chain.to_lowercase().as_str() {
-            "ethereum" => Ok(Self::ethereum()),
-            other => anyhow::bail!(
-                "no built-in decoder address registry for chain '{other}' (only ethereum); \
+    /// The address book embedded for `chain`.
+    ///
+    /// # Errors
+    /// When Hindsight has no book for that chain; the caller can still supply one with
+    /// `Registry::from_file`.
+    pub(crate) fn builtin(chain: Chain) -> anyhow::Result<Self> {
+        let Some(text) = builtin_book(chain) else {
+            let known = BUILTIN_CHAINS
+                .map(|builtin| builtin.to_string())
+                .join(", ");
+            anyhow::bail!(
+                "no built-in decoder address registry for chain '{chain}' (only {known}); \
                  pass --registry with that chain's address book"
-            ),
-        }
+            );
+        };
+        Self::from_toml(text).with_context(|| format!("invalid built-in {chain} address book"))
     }
 
-    /// The built-in Ethereum address book.
+    /// The address book in an explicit TOML file. Takes no chain: the file says what it describes,
+    /// which is what lets a chain with no built-in book — or none Tycho knows — be decoded at all.
+    pub(crate) fn from_file(path: &Path) -> anyhow::Result<Self> {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("failed to read registry file {}", path.display()))?;
+        Self::from_toml(&text).with_context(|| format!("invalid registry file {}", path.display()))
+    }
+
+    /// The built-in Ethereum address book — the fixture the tests decode against. Production code
+    /// goes through `builtin`, which resolves the book from the parsed `--chain`.
+    #[cfg(test)]
     pub(crate) fn ethereum() -> Self {
         Self::from_toml(ETHEREUM_TOML).expect("embedded ethereum registry must parse")
     }
@@ -125,14 +195,14 @@ impl Registry {
         let mut book: AddressBook =
             toml::from_str(text).context("failed to parse address book TOML")?;
 
-        // A venue section only carries addresses; its behavior is bound by name in code. An
-        // unbound name (a typo, or a venue with no strategy yet) must fail here — silently
-        // never matching would just drop that venue's trades.
+        // A venue section only carries addresses; its decoders are bound by name in code. An
+        // unbound name (a typo, or a venue with no decoder yet) must fail here — silently never
+        // decoding would just drop that venue's trades.
         for name in book.venues.keys() {
-            if crate::decoder::venues::Venue::from_name(name).is_none() {
+            if !crate::decoder::venues::has_decoder(name) {
                 anyhow::bail!(
-                    "address book venue '{name}' has no decode strategy \
-                     (see venues::Venue for the recognized names)"
+                    "address book venue '{name}' has no decoder \
+                     (see venues::decoders_for for the recognized names)"
                 );
             }
         }
@@ -149,12 +219,12 @@ impl Registry {
             .into_iter()
             .collect();
         usd_stablecoins.sort_unstable();
-        // Alias needles match against lowercased ids, so a mixed-case needle in the address
+        // Alias substrings match against lowercased ids, so a mixed-case entry in the address
         // book would silently never match — canonicalize at load.
         for venue in book.venues.values_mut() {
             venue.solver_aliases = std::mem::take(&mut venue.solver_aliases)
                 .into_iter()
-                .map(|(needle, name)| (needle.to_lowercase(), name))
+                .map(|(substring, name)| (substring.to_lowercase(), name))
                 .collect();
         }
 
@@ -168,6 +238,14 @@ impl Registry {
             infrastructure: book.infrastructure,
             usd_stablecoins,
             venues: book.venues,
+            venue_owners: book.venue_owners,
+            venue_fees: book.venue_fees,
+            venue_integrators: book
+                .venue_integrators
+                .into_iter()
+                .map(|(tag, venue)| (tag.to_lowercase(), venue))
+                .collect(),
+            venue_appdata: book.venue_appdata,
         })
     }
 
@@ -180,15 +258,22 @@ impl Registry {
         self.solvers.contains_key(&address)
     }
 
+    /// The registered solver name for `address`, if any.
+    pub(crate) fn solver_name(&self, address: Address) -> Option<&str> {
+        self.solvers
+            .get(&address)
+            .map(String::as_str)
+    }
+
     /// Whether `name` is a registered solver's display name. Bounds the metric label
-    /// vocabulary: attribution can also produce raw addresses, venue names (fallback tier), and
-    /// calldata-declared names from a venue's own vocabulary (`MetaMask` aggregator ids).
+    /// names: attribution can also produce raw addresses, venue names (fallback tier), and
+    /// names a venue declared in calldata (`MetaMask` aggregator ids).
     pub(crate) fn is_solver_name(&self, name: &str) -> bool {
         self.solver_names.contains(name)
     }
 
     /// Whether `address` is a batch-settlement venue (e.g. `CoW`). Such trades
-    /// must be decoded by finding the order maker, not by tracking the
+    /// must be decoded by finding the swapper, not by tracking the
     /// sender: a solver settles many orders at once, so its net flow is not a
     /// single swap even when it happens to net to one token on each side.
     pub(crate) fn is_batch_settler(&self, address: Address) -> bool {
@@ -206,6 +291,17 @@ impl Registry {
         self.infrastructure.contains(&address) || address == self.wrapped_native
     }
 
+    /// Whether the address is a registered fee collector: a venue section's collector or a
+    /// fee-identified venue wallet. Fees paid to these are venue fees — backed out by the venue
+    /// decoders and `venue_attribution` — not token-level transfer fees (see
+    /// `veto::Veto::FeeOnTransfer`).
+    pub(crate) fn is_fee_collector(&self, address: Address) -> bool {
+        self.venue_fees.contains_key(&address) ||
+            self.venues
+                .values()
+                .any(|venue| venue.fee_collectors.contains(&address))
+    }
+
     /// The chain's `(stablecoin, decimals)` anchors for USD valuation.
     pub(crate) fn stablecoin_anchors(&self) -> &[(Address, u32)] {
         &self.usd_stablecoins
@@ -214,6 +310,36 @@ impl Registry {
     /// The named venue's address book section, when the book has one.
     pub(crate) fn venue(&self, name: &str) -> Option<&VenueAddresses> {
         self.venues.get(name)
+    }
+
+    /// The order-flow venue that owns trades from this trader address, if any. Used to attribute
+    /// venues identified by who owns the order (e.g. kpk's Safes) rather than by `tx.to`.
+    pub(crate) fn venue_for_owner(&self, address: Address) -> Option<&str> {
+        self.venue_owners
+            .get(&address)
+            .map(String::as_str)
+    }
+
+    /// Fee-wallet → venue map, for attributing venues identified only by their fee leg on a
+    /// shared router (see `crate::decoder::venue_attribution`).
+    pub(crate) fn venue_fees(&self) -> &HashMap<Address, String> {
+        &self.venue_fees
+    }
+
+    /// The venue for a provider integrator tag (case-insensitive), if one is registered. Used to
+    /// attribute `LiFi` frontends by the integrator string in the swap event.
+    pub(crate) fn venue_for_integrator(&self, integrator: &str) -> Option<&str> {
+        self.venue_integrators
+            .get(&integrator.to_lowercase())
+            .map(String::as_str)
+    }
+
+    /// The venue for a `CoW` order `appData` hash, if one is registered. Used to attribute
+    /// frontends by the `appCode` tag committed into the order (`LlamaSwap`).
+    pub(crate) fn venue_for_appdata(&self, app_data: B256) -> Option<&str> {
+        self.venue_appdata
+            .get(&app_data)
+            .map(String::as_str)
     }
 
     /// The venue whose entry point this address is, if any.
@@ -241,26 +367,92 @@ mod tests {
     use crate::decoder::test_utils::addr;
 
     #[test]
-    fn embedded_ethereum_book_parses() {
-        let registry = Registry::ethereum();
-        assert!(!registry.solvers.is_empty());
-        assert!(!registry
-            .venue("relay")
-            .unwrap()
-            .entry_points
-            .is_empty());
+    fn test_every_embedded_book_parses() {
+        // Every book is embedded and loaded by name, so a malformed one is a runtime panic in
+        // `load`. Parse them all here, and require the parts every chain must have: a wrapped
+        // native token, a USD anchor, solvers, and Relay (the one venue present on all of them).
+        for chain in BUILTIN_CHAINS {
+            // `load` names the chain in its error context, so unwrapping reports which book broke.
+            let registry = Registry::builtin(chain).unwrap();
+            assert!(!registry.wrapped_native.is_zero(), "{chain} has no wrapped native token");
+            assert!(!registry.usd_stablecoins.is_empty(), "{chain} has no USD anchor");
+            assert!(!registry.solvers.is_empty(), "{chain} has no solvers");
+            assert!(
+                !registry
+                    .venue("relay")
+                    .unwrap()
+                    .entry_points
+                    .is_empty(),
+                "{chain} has no relay entry points"
+            );
+        }
     }
 
     #[test]
-    fn load_selects_ethereum() {
-        assert!(Registry::load("ethereum", None).is_ok());
-        assert!(Registry::load("Ethereum", None).is_ok());
-        assert!(Registry::load("base", None).is_err());
+    fn test_builtin_chains_agrees_with_the_lookup() {
+        // BUILTIN_CHAINS only enumerates — for the error message and for the book coverage above —
+        // while `builtin_book` decides. Drift between them would drop a chain from the error and
+        // silently leave its book untested, so every chain Tycho names today is checked against
+        // both. `Chain` is non_exhaustive, hence the explicit list rather than a variant sweep.
+        let tycho_chains = [
+            Chain::Ethereum,
+            Chain::Starknet,
+            Chain::ZkSync,
+            Chain::Arbitrum,
+            Chain::Base,
+            Chain::Bsc,
+            Chain::Unichain,
+            Chain::Polygon,
+            Chain::Plasma,
+        ];
+        for chain in tycho_chains {
+            assert_eq!(
+                builtin_book(chain).is_some(),
+                BUILTIN_CHAINS.contains(&chain),
+                "{chain} is in one of BUILTIN_CHAINS / builtin_book but not the other"
+            );
+        }
     }
 
     #[test]
-    fn load_reports_unreadable_and_invalid_files() {
-        let missing = Registry::load("ethereum", Some(Path::new("/nonexistent/book.toml")));
+    fn test_builtin_book_is_keyed_on_the_chain_not_its_name() {
+        // Every supported chain resolves without any spelling of its name being involved.
+        for chain in BUILTIN_CHAINS {
+            assert!(builtin_book(chain).is_some(), "{chain} has no book");
+        }
+        // A chain Tycho knows but Hindsight has no book for falls through the wildcard arm.
+        assert!(builtin_book(Chain::Plasma).is_none());
+        assert!(builtin_book(Chain::Starknet).is_none());
+    }
+
+    #[test]
+    fn test_load_unknown_chain_lists_the_builtin_ones() {
+        let error = Registry::builtin(Chain::Plasma)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no built-in decoder address registry"), "{error}");
+        assert!(error.contains("polygon"), "the error must list the built-in chains: {error}");
+    }
+
+    #[test]
+    fn test_tycho_router_is_a_solver_on_every_chain() {
+        // Hindsight compares Fynd against what settled, so the chain's own Tycho router must be
+        // recognised — otherwise Fynd's own settled trades never match.
+        for chain in BUILTIN_CHAINS {
+            let registry = Registry::builtin(chain).unwrap();
+            assert!(
+                registry
+                    .solvers
+                    .values()
+                    .any(|name| name == "tycho"),
+                "{chain} has no tycho router"
+            );
+        }
+    }
+
+    #[test]
+    fn test_load_unreadable_and_invalid_files() {
+        let missing = Registry::from_file(Path::new("/nonexistent/book.toml"));
         assert!(missing
             .unwrap_err()
             .to_string()
@@ -270,7 +462,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("invalid.toml");
         std::fs::write(&path, "wrapped_native = \"not an address\"").unwrap();
-        let invalid = Registry::load("ethereum", Some(&path));
+        let invalid = Registry::from_file(&path);
         assert!(invalid
             .unwrap_err()
             .to_string()
@@ -278,14 +470,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_toml_key_is_rejected() {
+    fn test_unknown_toml_key() {
         // A typo'd section must fail loudly, not silently drop addresses.
         let text = format!("{ETHEREUM_TOML}\n[solverz]\n");
         assert!(Registry::from_toml(&text).is_err());
     }
 
     #[test]
-    fn registries_named() {
+    fn test_registries_named() {
         let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
         let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
@@ -295,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_solver_trims_metamask_ids_and_passes_unknown_through() {
+    fn test_normalize_solver_metamask_and_unknown_ids() {
         let registry = Registry::ethereum();
         let metamask = registry.venue("metamask").unwrap();
         assert_eq!(metamask.normalize_solver("oneInchV6FeeDynamic"), "1inch");
@@ -305,8 +497,8 @@ mod tests {
     }
 
     #[test]
-    fn solver_aliases_are_scoped_to_their_venue() {
-        // The alias table is one venue's calldata vocabulary; a venue without one passes every
+    fn test_solver_alias_venue_scoping() {
+        // The alias table is one venue's calldata names; a venue without one passes every
         // id through unchanged.
         let registry = Registry::ethereum();
         let relay = registry.venue("relay").unwrap();
@@ -314,8 +506,8 @@ mod tests {
     }
 
     #[test]
-    fn mixed_case_alias_needle_still_matches() {
-        // Needles are canonicalized to lowercase at load, so a capitalized needle in the
+    fn test_mixed_case_alias_substring() {
+        // Alias substrings are canonicalized to lowercase at load, so a capitalized entry in the
         // address book matches the same ids as a lowercase one.
         let book = ETHEREUM_TOML.replace(
             "[venues.metamask.solver_aliases]",
@@ -327,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn infrastructure_covers_permit2_and_wrapped_native() {
+    fn test_infrastructure_permit2_and_wrapped_native() {
         let registry = Registry::ethereum();
         let permit2 = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");
         assert!(registry.is_infrastructure(permit2));
@@ -336,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn cow_is_a_batch_settler() {
+    fn test_batch_settler_lookup() {
         let registry = Registry::ethereum();
         let cow = address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41");
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
@@ -346,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn venue_sections_resolve_by_name_and_entry_point() {
+    fn test_venue_section_lookup_by_name_and_entry_point() {
         let registry = Registry::ethereum();
         let relay = registry.venue("relay").unwrap();
         let collector = address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef");
@@ -367,19 +559,29 @@ mod tests {
     }
 
     #[test]
-    fn venue_without_strategy_is_rejected() {
-        // A venue section whose name has no decode strategy would silently never match, so the
+    fn test_is_fee_collector() {
+        let registry = Registry::ethereum();
+        let relay_collector = address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef");
+        let phantom_wallet = address!("0x2cffed5d56eb6a17662756ca0fdf350e732c9818");
+        assert!(registry.is_fee_collector(relay_collector));
+        assert!(registry.is_fee_collector(phantom_wallet));
+        assert!(!registry.is_fee_collector(addr(123)));
+    }
+
+    #[test]
+    fn test_venue_without_decoder() {
+        // A venue section whose name has no decoder would silently never decode, so the
         // address book must fail to load.
         let text =
             format!("{ETHEREUM_TOML}\n[venues.reiay]\nentry_points = []\nfee_collectors = []\n");
         let err = Registry::from_toml(&text)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("no decode strategy"), "unexpected error: {err}");
+        assert!(err.contains("no decoder"), "unexpected error: {err}");
     }
 
     #[test]
-    fn label_known_and_unknown() {
+    fn test_label_known_and_unknown() {
         let registry = Registry::ethereum();
         let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
         let unknown = addr(123);
@@ -388,9 +590,9 @@ mod tests {
     }
 
     #[test]
-    fn display_labels_resolve_without_becoming_known() {
+    fn test_display_label_resolution() {
         // Solver/filler labels are display-only: is_known drives strategy selection, and a
-        // filler-entered tx must keep matching via its solver logs (Maker), not as a
+        // filler-entered tx must keep matching via its solver logs (Intent), not as a
         // known-venue Sender flow.
         let registry = Registry::ethereum();
         let rizzolver = address!("0x225a38bc71102999dd13478bfabd7c4d53f2dc17");

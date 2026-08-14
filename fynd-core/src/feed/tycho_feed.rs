@@ -5,8 +5,9 @@
 //! - Updates MarketState (exclusive write access)
 //! - Broadcasts MarketEvents to Solvers
 
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Instant};
 
+use metrics::{gauge, histogram};
 use tokio::{
     sync::{broadcast, oneshot},
     task::JoinHandle,
@@ -81,10 +82,14 @@ impl TychoFeed {
         self.event_tx.clone()
     }
 
-    /// Runs the indexer event loop.
+    /// Runs the indexer event loop until the underlying Tycho stream ends or errors.
     ///
-    /// This method runs indefinitely, reconnecting on failures.
-    /// It is recommended to call this in a dedicated tokio task.
+    /// This method does not itself reconnect. Transient transport failures are absorbed
+    /// by tycho-client's internal reconnection, but a hard stream error propagates out as
+    /// an `Err` and a clean stream end returns `Ok(())`. In either case the feed stops,
+    /// which tears down the solver and exits the process (crash-only design — the
+    /// orchestrator is expected to restart it). It is recommended to call this in a
+    /// dedicated tokio task.
     pub(crate) async fn run(self) -> Result<(), DataFeedError> {
         info!(
             tycho_url = %self.config.tycho_url,
@@ -689,6 +694,10 @@ impl TychoFeed {
                 }
             })
             .max_by_key(|b| b.number());
+        // Captured before `latest_block_info` moves into the `apply_block_update` closure below.
+        let latest_block_fields = latest_block_info
+            .as_ref()
+            .map(|block_info| (block_info.number(), block_info.timestamp()));
 
         info!(
             "received block/timestamp {} with {} new components, {} removed, {} updated",
@@ -699,6 +708,9 @@ impl TychoFeed {
         );
         trace!("Updating market data");
         let new_block_number = msg.block_number_or_timestamp;
+        let update_start = Instant::now();
+        let mut latest_component_count = 0;
+        let mut token_count = 0;
         self.market_data
             .apply_block_update(new_block_number, |market_data| {
                 market_data.upsert_components(
@@ -736,10 +748,23 @@ impl TychoFeed {
                 if let Some(block_info) = latest_block_info {
                     market_data.update_last_updated(block_info);
                 }
+
+                latest_component_count = market_data.component_count();
+                token_count = market_data.token_count();
             })
             .instrument(span!(Level::DEBUG, "data_feed_write_lock"))
             .await;
         trace!("Market data updated");
+
+        histogram!("market_update_duration_seconds").record(update_start.elapsed().as_secs_f64());
+        // Counts components; the legacy "pools" metric name is kept so existing
+        // dashboards and alerts keep working.
+        gauge!("market_pools").set(latest_component_count as f64);
+        gauge!("market_tokens").set(token_count as f64);
+        if let Some((block_number, block_timestamp)) = latest_block_fields {
+            gauge!("market_current_block").set(block_number as f64);
+            gauge!("market_last_update_timestamp_seconds").set(block_timestamp as f64);
+        }
 
         // Only broadcast event if there are actual changes
         if !added_components.is_empty() ||
@@ -1555,5 +1580,81 @@ mod tests {
         }
 
         feed_handle.abort();
+    }
+
+    #[test]
+    fn handle_message_records_market_metrics() {
+        use metrics_util::debugging::DebugValue;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime builds");
+
+        let block_number = 12345u64;
+        let block_timestamp = 1_700_000_000u64;
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let market_data = new_shared_market_data();
+                let feed = TychoFeed::new(create_test_config(), market_data);
+                let _event_rx = feed.subscribe();
+                let token1 =
+                    create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+                let token2 =
+                    create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+                let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+                let mut new_pairs = HashMap::new();
+                new_pairs.insert(
+                    component_id.to_string(),
+                    create_test_component(component_id, vec![token1, token2]),
+                );
+                // Ready sync state is required for `latest_block_fields` to be `Some`, which
+                // gates the `market_current_block`/`market_last_update_timestamp_seconds` gauges.
+                let mut sync_states = HashMap::new();
+                sync_states.insert(
+                    "uniswap_v2".to_string(),
+                    SynchronizerState::Ready(tycho_simulation::tycho_client::feed::BlockHeader {
+                        number: block_number,
+                        timestamp: block_timestamp,
+                        ..Default::default()
+                    }),
+                );
+                let update = Update::new(block_number, HashMap::new(), new_pairs)
+                    .set_sync_states(sync_states);
+                feed.handle_tycho_message(update)
+                    .await
+                    .expect("message handled");
+            })
+        });
+
+        let recorded = snapshotter.snapshot().into_vec();
+        let find_value = |name: &str| -> &DebugValue {
+            recorded
+                .iter()
+                .find(|(key, _, _, _)| key.key().name() == name)
+                .map(|(_, _, _, value)| value)
+                .unwrap_or_else(|| panic!("missing {name}, got {recorded:?}"))
+        };
+        let gauge_value = |name: &str| -> f64 {
+            match find_value(name) {
+                DebugValue::Gauge(value) => value.0,
+                other => panic!("{name} is not a gauge: {other:?}"),
+            }
+        };
+
+        assert_eq!(gauge_value("market_pools"), 1.0);
+        assert_eq!(gauge_value("market_tokens"), 2.0);
+        assert_eq!(gauge_value("market_current_block"), block_number as f64);
+        assert_eq!(gauge_value("market_last_update_timestamp_seconds"), block_timestamp as f64);
+
+        match find_value("market_update_duration_seconds") {
+            DebugValue::Histogram(samples) => {
+                assert!(!samples.is_empty(), "expected at least one recorded sample");
+            }
+            other => panic!("market_update_duration_seconds is not a histogram: {other:?}"),
+        }
     }
 }
