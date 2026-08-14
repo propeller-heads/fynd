@@ -49,7 +49,8 @@ use crate::{
         registry::UnknownAlgorithmError,
     },
     worker_pool_router::{
-        config::WorkerPoolRouterConfig, LiquidityScope, SolverPoolHandle, WorkerPoolRouter,
+        config::WorkerPoolRouterConfig, ExclusiveAccess, LiquidityScope, SolverPoolHandle,
+        WorkerPoolRouter,
     },
     Algorithm, Quote, QuoteRequest, SolveError,
 };
@@ -311,6 +312,14 @@ pub enum SolverBuildError {
     /// [`FyndBuilder::build`] was called without configuring any worker pools.
     #[error("no worker pools configured")]
     NoPools,
+    /// Every worker pool is `liquidity_scope = "include_exclusive"`, so a request without the
+    /// exclusive access would be served by no worker pool at all. At least one worker
+    /// pool must route public liquidity.
+    #[error(
+        "every worker pool sets liquidity_scope = \"include_exclusive\"; requests without \
+         exclusive access would be served by no pool. Configure at least one public_only pool"
+    )]
+    NoPublicPool,
     /// A recorded update failed to replay through the feed.
     #[cfg(feature = "test-utils")]
     #[error("replay failed: {0}")]
@@ -672,6 +681,17 @@ impl FyndBuilder {
     fn assemble_components(mut self) -> Result<BuiltComponents, SolverBuildError> {
         if self.pools.is_empty() {
             return Err(SolverBuildError::NoPools);
+        }
+
+        // Exclusive-access worker pools only serve requests granted access, so a deployment made
+        // entirely of them would allocate no worker pool at all to everyone else. Caught here
+        // rather than per request: it is a configuration mistake, not a runtime condition.
+        if self
+            .pools
+            .iter()
+            .all(|p| p.liquidity_scope() == Some(LiquidityScope::IncludeExclusive))
+        {
+            return Err(SolverBuildError::NoPublicPool);
         }
 
         // Add built-in providers if none were explicitly registered.
@@ -1113,11 +1133,17 @@ impl Solver {
 
     /// Submits a [`QuoteRequest`] to the worker pools and returns the best [`Quote`].
     ///
+    /// Grants `ExclusiveAccess::Granted`: a library embedder configures its own pools, so there
+    /// is no untrusted caller to gate here. Access is decided at the HTTP boundary, where
+    /// requests do come from untrusted callers.
+    ///
     /// # Errors
     ///
     /// Returns [`SolveError`] if all worker pools fail or the router timeout elapses.
     pub async fn quote(&self, request: QuoteRequest) -> Result<Quote, SolveError> {
-        self.router.quote(request).await
+        self.router
+            .quote(request, ExclusiveAccess::Granted)
+            .await
     }
 
     /// Waits until the solver is ready to answer quotes.
@@ -1491,5 +1517,25 @@ mod tests {
                 .unwrap_or_default(),
             LiquidityScope::PublicOnly
         );
+    }
+
+    /// A deployment of nothing but exclusive-access pools would serve requests without access
+    /// from no pool at all.
+    #[test]
+    fn test_build_all_exclusive_pools() {
+        let config =
+            PoolConfig::new("most_liquid").with_liquidity_scope(LiquidityScope::IncludeExclusive);
+        let result = FyndBuilder::new(
+            Chain::Ethereum,
+            "wss://example.invalid",
+            "https://example.invalid",
+            vec!["uniswap_v2".to_string()],
+            100.0,
+        )
+        .add_pool("exclusive", &config)
+        .expect("add_pool should accept the config")
+        .build();
+
+        assert!(matches!(result, Err(SolverBuildError::NoPublicPool)));
     }
 }

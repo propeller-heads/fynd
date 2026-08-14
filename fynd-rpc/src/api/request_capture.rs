@@ -1,7 +1,7 @@
 //! Builds the routing-essential representation of a quote request for the
 //! replay-capture log emitted by the `/v1/quote` handler.
 
-use fynd_core::{NoPathReason, QuoteStatus, SolveError};
+use fynd_core::{ExclusiveAccess, NoPathReason, QuoteStatus, SolveError};
 use fynd_rpc_types::{Address, OrderSide, QuoteRequest};
 use serde::Serialize;
 use tracing::{info, warn};
@@ -35,19 +35,24 @@ struct ReplayOptions {
 ///
 /// Captured (the fields that determine the route): per order `token_in`,
 /// `token_out`, `amount`, `side`; plus the solve options `timeout_ms`,
-/// `min_responses`, `max_gas`. Everything else is dropped: `encoding_options`
-/// (slippage / transfer type / price guard, and every Permit2 / client-fee
-/// **signature**), the server-generated order `id`, and `sender` / `receiver`
+/// `min_responses`, `max_gas`; plus `exclusive_access` — the access the
+/// authenticating proxy granted, which decides the worker pool allocation.
+/// Everything else is dropped: `encoding_options` (slippage / transfer type /
+/// price guard, and every Permit2 / client-fee **signature**), the
+/// server-generated order `id`, and `sender` / `receiver`
 /// (routing-irrelevant and PII). Built from an explicit allowlist, so no
 /// request field can leak into the logs.
 ///
 /// This is NOT a full [`QuoteRequest`] — it omits the required `sender`, so a
-/// replay harness supplies a placeholder sender before re-issuing. An outcome
-/// that depended on `price_guard` may not reproduce on replay.
+/// replay harness supplies a placeholder sender before re-issuing.
+/// `exclusive_access` is not a body field either: a harness re-sends it as the
+/// `x-exclusive-access` header. An outcome that depended on `price_guard` may
+/// not reproduce on replay.
 #[derive(Serialize)]
 pub(crate) struct ReplayRequest {
     orders: Vec<ReplayOrder>,
     options: ReplayOptions,
+    exclusive_access: bool,
 }
 
 impl ReplayRequest {
@@ -55,7 +60,7 @@ impl ReplayRequest {
     /// few address clones and no JSON — so it is safe to run on the quote hot
     /// path; the serialization cost is deferred to [`ReplayRequest::to_json`],
     /// which the handler only calls off the response path.
-    pub(crate) fn capture(request: &QuoteRequest) -> Self {
+    pub(crate) fn capture(request: &QuoteRequest, access: ExclusiveAccess) -> Self {
         let orders = request
             .orders()
             .iter()
@@ -76,6 +81,7 @@ impl ReplayRequest {
                     .max_gas()
                     .map(ToString::to_string),
             },
+            exclusive_access: access == ExclusiveAccess::Granted,
         }
     }
 
@@ -88,8 +94,8 @@ impl ReplayRequest {
 /// Serializes `request` down to the routing-essential fields, as a JSON string.
 /// Convenience wrapper over [`ReplayRequest::capture`] + [`ReplayRequest::to_json`].
 #[cfg(test)]
-pub(crate) fn replay_json(request: &QuoteRequest) -> String {
-    ReplayRequest::capture(request).to_json()
+pub(crate) fn replay_json(request: &QuoteRequest, access: ExclusiveAccess) -> String {
+    ReplayRequest::capture(request, access).to_json()
 }
 
 /// Stable snake_case code for a per-order [`QuoteStatus`], matching the wire
@@ -270,6 +276,7 @@ mod tests {
         QuoteOptions, QuoteRequest,
     };
     use num_bigint::BigUint;
+    use rstest::rstest;
     use serde_json::Value;
     use tracing_subscriber::fmt::MakeWriter;
 
@@ -317,7 +324,7 @@ mod tests {
 
     #[test]
     fn replay_json_captures_only_routing_fields() {
-        let json = replay_json(&request_with_signatures());
+        let json = replay_json(&request_with_signatures(), ExclusiveAccess::Denied);
         // No encoding data or signatures.
         assert!(!json.contains("encoding_options"), "json was: {json}");
         assert!(!json.contains("signature"), "json was: {json}");
@@ -336,7 +343,7 @@ mod tests {
 
     #[test]
     fn replay_json_keeps_routing_essentials_and_options() {
-        let json = replay_json(&request_with_signatures());
+        let json = replay_json(&request_with_signatures(), ExclusiveAccess::Denied);
         let value: Value = serde_json::from_str(&json).unwrap();
         let order = &value["orders"][0];
         assert_eq!(order["token_in"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
@@ -352,7 +359,7 @@ mod tests {
     #[test]
     fn replay_json_output_keys_are_allowlisted() {
         let req = request_with_signatures();
-        let json = replay_json(&req);
+        let json = replay_json(&req, ExclusiveAccess::Denied);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let top_level: std::collections::BTreeSet<&str> = value
@@ -363,7 +370,9 @@ mod tests {
             .collect();
         assert_eq!(
             top_level,
-            ["orders", "options"].into_iter().collect(),
+            ["orders", "options", "exclusive_access"]
+                .into_iter()
+                .collect(),
             "unexpected top-level keys {top_level:?} — a new field may leak into replay logs; json: {json}"
         );
 
@@ -397,6 +406,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[rstest]
+    #[case::granted(ExclusiveAccess::Granted, true)]
+    #[case::denied(ExclusiveAccess::Denied, false)]
+    fn test_replay_json_captures_exclusive_access(
+        #[case] access: ExclusiveAccess,
+        #[case] expected: bool,
+    ) {
+        let json = replay_json(&request_with_signatures(), access);
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["exclusive_access"], expected, "json was: {json}");
     }
 
     #[test]

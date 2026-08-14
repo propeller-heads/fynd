@@ -10,7 +10,7 @@ applications.
 | `algorithm/`          | `Algorithm` trait + built-in `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`, `WaterFillAlgorithm`. Pluggable via associated graph types. `AlgorithmConfig` shared by built-ins |
 | `solver.rs`           | `FyndBuilder` assembles the full pipeline (feed + gas + computations + pools + encoder + router). `Solver` runs it                                                                 |
 | `worker_pool/`        | `WorkerPool` manages dedicated OS threads. `SolverWorker` runs a prioritized select loop (shutdown > market events > derived events > tasks). `TaskQueue` is `async_channel`-based |
-| `worker_pool_router/` | `WorkerPoolRouter` fans out orders to all pools, ranks candidates by `amount_out_net_gas` descending; price guard (if enabled) validates in rank order; optionally encodes          |
+| `worker_pool_router/` | `WorkerPoolRouter` allocates the worker pools that serve each order (`allocation`: `OrderClass` matched by `SolverPoolHandle::serves`), fans out to those, ranks candidates by `amount_out_net_gas` descending; price guard (if enabled) validates in rank order; optionally encodes |
 | `feed/`               | `TychoFeed` (WebSocket → MarketState), `GasPriceFetcher`, `MarketEvent` broadcasting, `ProtocolRegistry`                                                                           |
 | `derived/`            | `ComputationManager` runs `SpotPriceComputation`, `ComponentDepthComputation`, `TokenGasPriceComputation` in dependency order. `ReadinessTracker` gates workers until data is fresh     |
 | `graph/`              | `pub` — `GraphManager` trait (initialize + incremental update), `PetgraphStableDiGraphManager`, `StableDiGraph` (re-exported), `EdgeWeightUpdaterWithDerived`, `Path` type           |
@@ -92,14 +92,16 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
 
 **Solving** (`Solver::quote(request)`):
 
-1. `WorkerPoolRouter` fans out to all pools in parallel
+0. `WorkerPoolRouter` allocates the pools serving each order — today an exclusive-access pool is
+   allocated only to a request granted exclusive access
+1. `WorkerPoolRouter` fans out to the allocated pools in parallel
 2. Each pool dispatches to a `SolverWorker` → `Algorithm::find_best_route` → `RouteResult`
 3. Selects best by `amount_out_net_gas` → optional `Encoder` → `Quote`
 
 ## Exclusive Liquidity (restricted)
 
 A limited, opt-in service for specific deployments — **not** part of the normal routing path. With no
-`ExclusivityPolicy` configured (the default) every pool is `LiquidityScope::PublicOnly`, none of this
+pool's `liquidity_scope` set (the default) every pool is `LiquidityScope::PublicOnly`, none of this
 code runs, and the flows above are complete. Skip this section unless a task names it.
 
 Exclusive components must first be admitted to the stream. `feed/protocol_registry.rs` parses each
@@ -123,22 +125,26 @@ Pools are partitioned by `LiquidityScope` (`worker_pool_router/`, re-exported at
 
 - `PublicOnly` (default) — public liquidity only. Its best candidate is the **committed amount out**,
   the reference output the quote must at least deliver.
-- `All` — also routes through components the configured `ExclusivityPolicy`
-  (`feed/exclusivity.rs`) classifies as exclusive.
+- `IncludeExclusive` — no filtering: routes through whatever the stream delivers, exclusive
+  components included if the deployment opted them into the stream.
 
-Isolation is per worker, not per state: `MarketState` is never duplicated. `PublicOnly` workers hold
-`Some(policy)` and filter exclusive components out of their local graph topology and incoming
-`MarketEvent`s; `All` workers hold `None` and ingest everything.
+A component is classified exclusive by `is_exclusive` (`feed/exclusivity.rs`) — a fixed check for the
+`is_exclusive` static attribute on the component's Tycho data, applied generically to every ingested
+component. There is no per-deployment policy to configure.
 
-After public ranking, `combine_with_surplus` overlays any `All`-scope candidate that beats the
-committed amount and records the difference as `SurplusInfo` (`OrderQuote::surplus_amount()`,
-`committed_amount_out()`, `Swap::committed_amount_out()`). All are `#[serde(skip)]` — internal, not
-on the wire.
+Isolation is per worker, not per state: `MarketState` is never duplicated. `PublicOnly` workers filter
+exclusive components out of their local graph topology and incoming `MarketEvent`s (via
+`remove_exclusive_components`/`scope_event`); `IncludeExclusive` workers ingest everything.
 
-Enable with `FyndBuilder::exclusivity_policy(predicate)` (`Fn(&ProtocolComponent) -> bool`), then set
-the scope per pool via `PoolConfig::with_liquidity_scope()` or `liquidity_scope = "all"` in
-`worker_pools.toml`. A pool with a scope but no policy fails the build
-(`SolverBuildError::LiquidityScopeWithoutPolicy`).
+After public ranking, `combine_with_surplus` overlays any `IncludeExclusive`-scope candidate that
+beats the committed amount and records the difference as `SurplusInfo`
+(`OrderQuote::surplus_amount()`, `committed_amount_out()`, `Swap::committed_amount_out()`). All are
+`#[serde(skip)]` — internal, not on the wire.
+
+Enable by setting the scope per pool via `PoolConfig::with_liquidity_scope()` or
+`liquidity_scope = "include_exclusive"` in `worker_pools.toml`. A deployment where every pool sets it
+fails the build (`SolverBuildError::NoPublicPool`) — there would be no pool left to establish the
+committed reference output.
 
 Encoding a committed leg is protocol-specific: `encoding/exclusive_swap.rs` is Ekubo-only. It signs
 an EIP-712 authorization with `EXCLUSIVE_SWAP_CONTROLLER_KEY` and packs it, plus a derived Q32 fee,

@@ -1,4 +1,27 @@
 
+
+
+## [0.99.3](https://github.com/propeller-heads/fynd/compare/0.99.2...0.99.3) (2026-08-11)
+
+### Features
+
+* **rpc:** add offset pagination to GET /v1/tokens ([da05b88](https://github.com/propeller-heads/fynd/commit/da05b88a06864b47088c01379e3d3736784202be))
+* **rpc:** add experimental GET /v1/tokens graph token endpoint ([efdc327](https://github.com/propeller-heads/fynd/commit/efdc327d569a053a8d38a9ff8f66e5dc1113befd))
+
+
+## [0.99.2](https://github.com/propeller-heads/fynd/compare/0.99.1...0.99.2) (2026-08-11)
+
+### Features
+
+* **rpc:** drop price unit contract and fix decimal truncation ([d6a81c0](https://github.com/propeller-heads/fynd/commit/d6a81c007a6d2728865ea2054211c8ddf4f02743))
+* **prices:** expose decimal string unit contract ([9b570c0](https://github.com/propeller-heads/fynd/commit/9b570c0db472e1dac62b312c6abbfb6b1bf59817))
+* **rpc:** define stable price unit contract ([55e7788](https://github.com/propeller-heads/fynd/commit/55e7788eab7ffb5450084eeff7d3cb6c05297c85))
+
+### Bug Fixes
+
+* **ci:** align OpenAPI drift contract ([cbc8177](https://github.com/propeller-heads/fynd/commit/cbc8177a106f6d4a4f7445c86ae03843e32d4045))
+
+
 ## [0.99.1](https://github.com/propeller-heads/fynd/compare/0.98.0...0.99.1) (2026-08-07)
 
 ### Features
