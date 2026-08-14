@@ -10,7 +10,7 @@
 //! every Uniswap v4, Balancer, Curve and Maverick pool in the recorded fixture is a component with
 //! no state, and so unroutable. Captured live they are all there.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fynd_core::feed::protocol_registry::register_exchanges_for_recording;
 use num_bigint::BigUint;
@@ -28,6 +28,34 @@ use tycho_simulation::{
 };
 
 use super::{header_line, Market, MarketSource};
+
+/// Times each step of the capture and prints what it cost.
+///
+/// A live start spends minutes between two lines of output and the lines alone do not say which
+/// step is the slow one. Every step is timed rather than the ones currently suspected, so the
+/// answer does not depend on having guessed right.
+struct Steps {
+    started: Instant,
+    step: Instant,
+}
+
+impl Steps {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self { started: now, step: now }
+    }
+
+    /// Prints how long the step just finished took, and starts timing the next one.
+    fn done(&mut self, label: &str) {
+        header_line(label, format!("{:.1}s", self.step.elapsed().as_secs_f64()));
+        self.step = Instant::now();
+    }
+
+    /// Seconds since the capture began.
+    fn total(&self) -> f64 {
+        self.started.elapsed().as_secs_f64()
+    }
+}
 
 /// Strips a scheme and any trailing slash from a Tycho host.
 ///
@@ -72,12 +100,14 @@ pub struct LiveOptions {
 /// Returns a message for a failed connection, an unusable filter, or a snapshot that does not
 /// arrive inside `capture_timeout_secs`.
 pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
+    let mut steps = Steps::new();
     header_line("tycho", &opts.tycho_host);
     let protocols = match &opts.protocols {
         Some(list) if !list.is_empty() => list.clone(),
         _ => discover_protocols(&opts.tycho_host, &opts.tycho_api_key, opts.chain).await?,
     };
     header_line("protocols", protocols.join(", "));
+    steps.done("protocols in");
 
     let tokens = load_all_tokens(
         &opts.tycho_host,
@@ -91,6 +121,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     .await
     .map_err(|e| format!("failed to load the token list: {e}"))?;
     header_line("tokens", tokens.len());
+    steps.done("token list in");
 
     let filter = ComponentFilter::with_tvl_range(opts.min_tvl, opts.min_tvl);
     let builder = register_exchanges_for_recording(
@@ -100,16 +131,23 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     )
     .map_err(|e| format!("failed to register exchanges: {e}"))?;
 
+    // Split from the build because the two fail differently on a slow start: handing the token
+    // list over is local work over 8k tokens, while the build reaches out for every VM protocol's
+    // contract code.
+    let builder = builder
+        .auth_key(Some(opts.tycho_api_key.clone()))
+        .skip_state_decode_failures(true)
+        .set_tokens(tokens)
+        .await;
+    steps.done("tokens set in");
+
     let mut stream = Box::pin(
         builder
-            .auth_key(Some(opts.tycho_api_key.clone()))
-            .skip_state_decode_failures(true)
-            .set_tokens(tokens)
-            .await
             .build()
             .await
             .map_err(|e| format!("failed to build the Tycho stream: {e}"))?,
     );
+    steps.done("stream built in");
 
     header_line("waiting", format!("for the snapshot, up to {}s", opts.capture_timeout_secs));
     let snapshot =
@@ -131,6 +169,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     let components = snapshot.new_pairs.len();
     let states = snapshot.states.len();
     header_line("captured block", format!("{block} ({components} components, {states} states)"));
+    steps.done("snapshot in");
 
     // A protocol that was streamed but brought no pool is either unindexed on this endpoint or
     // filtered out by --min-tvl. Either way it is worth saying, because the market silently
@@ -156,6 +195,8 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
         Some(url) => fetch_gas_price_wei(url).await,
         None => None,
     };
+    steps.done("gas price in");
+    header_line("captured in", format!("{:.1}s", steps.total()));
 
     Ok(Market {
         chain: opts.chain,

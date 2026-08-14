@@ -243,6 +243,11 @@
   /* ---------- shared tables ---------- */
   /* A faint bar behind each usage cell, grown from the right so it sits under the number:
      the shape of an algorithm's protocol mix reads without comparing rows one by one. */
+  /* winner is a derived series, not a config: ruled off and tinted so it does not read as
+     just another algorithm sitting in the same list. */
+  .winner-col { border-left: 1px solid var(--line-2); background-color: var(--surface-2); }
+  thead th.winner-col { color: var(--ink); }
+
   .usage {
     background: linear-gradient(to left, var(--accent-soft) var(--fill, 0%), transparent 0);
     /* content-box keeps the fill off the cell padding, so neighbouring columns stay separate
@@ -639,6 +644,8 @@
   const fmtUsd = v => v === null || v === undefined ? "—"
     : v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M`
     : v >= 1e3 ? `$${(v / 1e3).toFixed(1)}k` : `$${v.toFixed(0)}`;
+  const fmtUsdDiff = v => v === null || v === undefined ? "—"
+    : `${v > 0 ? "+" : v < 0 ? "\u2212" : ""}${fmtUsd(Math.abs(v))}`;
   const ms = us => us >= 1000 ? `${(us / 1000).toFixed(1)} ms` : `${Math.round(us)} µs`;
   const cls = v => v === null || v === undefined ? "none" : v > 0 ? "gain" : v < 0 ? "loss" : "tie";
   const outcomeCls = o =>
@@ -735,12 +742,15 @@
     const byConfig = {};
     CONFIGS.forEach(c => {
       let solved = 0, only = 0, missed = 0, w = 0, l = 0, t = 0;
+      // Volume this config actually routed, so a strong bps on tiny orders is not mistaken
+      // for a strong bps on the flow that matters. Orders with no usd value are left out.
+      let usd = 0;
       const bpsVals = [], times = [];
       rows.forEach(o => {
         const base = o.res[BASELINE], me = o.res[c];
         if (!me) return;
         times.push(me.us);
-        if (me.solved) solved++;
+        if (me.solved) { solved++; if (o.usd !== null) usd += o.usd; }
         if (me.solved && base && !base.solved) only++;
         if (!me.solved && base && base.solved) missed++;
         if (me.outcome === "better") w++;
@@ -752,7 +762,7 @@
       });
       times.sort((a, b) => a - b);
       const raw = bpsVals.map(v => v.bps);
-      byConfig[c] = { solved, only, missed, w, l, t, compared: bpsVals.length, bpsVals,
+      byConfig[c] = { solved, only, missed, w, l, t, usd, compared: bpsVals.length, bpsVals,
         mean: meanOf(raw), median: medianOf(raw),
         p50: pct(times, 0.5), p95: pct(times, 0.95) };
     });
@@ -1006,6 +1016,7 @@
     </div>`;
 
     const tot = d.w + d.l + d.t || 1;
+    const usdDiff = d.usd - byConfig[BASELINE].usd;
     const card = `<article class="card ${isBase ? "is-baseline" : ""}">
       <div class="card-name">${config}${isBase ? '<span class="baseline-tag">baseline</span>' : ""}</div>
       <div class="card-hero">
@@ -1021,6 +1032,8 @@
       <div class="card-rows">
         <div class="card-row"><span>best / behind field</span><b>${nBest.toLocaleString()} / ${nBehind.toLocaleString()}</b></div>
         <div class="card-row"><span>solved</span><b>${d.solved.toLocaleString()} / ${rows.length}</b></div>
+        <div class="card-row"><span>volume settled</span><b>${fmtUsd(d.usd)}</b></div>
+        <div class="card-row"><span>vs baseline</span><b class="${isBase ? "none" : cls(usdDiff)}">${isBase ? "\u2014" : fmtUsdDiff(usdDiff)}</b></div>
         <div class="card-row"><span>only / missed</span><b>${isBase ? "—" : `${d.only} / ${d.missed}`}</b></div>
         <div class="card-row"><span>p50 / p95 solve</span><b>${ms(d.p50)} / ${ms(d.p95)}</b></div>
       </div>
@@ -1222,6 +1235,7 @@
     const cards = CONFIGS.map(c => {
       const d = byConfig[c], isBase = c === BASELINE;
       const tot = d.w + d.l + d.t || 1;
+      const usdDiff = d.usd - byConfig[BASELINE].usd;
       return `<article class="card ${isBase ? "is-baseline" : ""}">
         <div class="card-name">${c}${isBase ? '<span class="baseline-tag">baseline</span>' : ""}</div>
         <div class="card-hero">
@@ -1236,6 +1250,8 @@
         ${isBase ? "" : `<div class="wlt-legend" aria-hidden="true"><b class="w">${d.w.toLocaleString()}</b><i>/</i><b class="l">${d.l.toLocaleString()}</b><i>/</i><b class="t">${d.t.toLocaleString()}</b></div>`}
         <div class="card-rows">
           <div class="card-row"><span>solved</span><b>${d.solved.toLocaleString()} / ${rows.length}</b></div>
+          <div class="card-row"><span>volume settled</span><b>${fmtUsd(d.usd)}</b></div>
+          <div class="card-row"><span>vs baseline</span><b class="${isBase ? "none" : cls(usdDiff)}">${isBase ? "\u2014" : fmtUsdDiff(usdDiff)}</b></div>
           <div class="card-row"><span>only / missed</span><b>${isBase ? "—" : `${d.only} / ${d.missed}`}</b></div>
           <div class="card-row"><span>p50 solve</span><b>${ms(d.p50)}</b></div>
         </div>
@@ -1373,6 +1389,10 @@
     }
 
     const metric = PROTO_METRICS.find(m => m.key === state.protoMetric) ?? PROTO_METRICS[0];
+    // `winner` is not a config, so it is not in run.json; it is present only when the bench
+    // wrote it, which older runs did not.
+    const hasWinner = state.protocols.some(r => r.config === "winner");
+    const columns = hasWinner ? [...CONFIGS, "winner"] : [...CONFIGS];
     const byProtocol = new Map();
     for (const r of state.protocols) {
       if (!byProtocol.has(r.protocol)) {
@@ -1396,25 +1416,26 @@
     const rows = [...byProtocol.values()].sort((a, b) => total(b) - total(a) || b.pools - a.pools);
     // Scaled per column, so a bar shows where one algorithm's liquidity went rather than how two
     // algorithms compare on one protocol — the columns already sit side by side for that.
-    const peak = Object.fromEntries(CONFIGS.map(c =>
+    const peak = Object.fromEntries(columns.map(c =>
       [c, Math.max(...rows.map(p => p.m[c]?.[metric.key] ?? 0), 1)]));
 
     const table = `<div class="table-wrap"><table>
       <thead><tr>
         <th>protocol</th><th>pools</th><th>simulatable</th>
-        ${CONFIGS.map(c => `<th>${c}</th>`).join("")}
+        ${columns.map(c => `<th${c === "winner" ? ' class="winner-col"' : ""}>${c}</th>`).join("")}
       </tr></thead>
       <tbody>${rows.map(p => `<tr>
         <td>${p.protocol}</td>
         <td>${p.pools.toLocaleString()}</td>
         <td>${p.sim.toLocaleString()}</td>
-        ${CONFIGS.map(c => {
+        ${columns.map(c => {
           const v = p.m[c]?.[metric.key];
           // A protocol an algorithm never touched is the interesting case, so an untouched zero
           // is greyed rather than dropped.
-          if (v === undefined) return `<td class="none">—</td>`;
-          if (v === 0) return `<td class="none">${metric.fmt(v)}</td>`;
-          return `<td class="usage" style="--fill:${v / peak[c] * 100}%">${metric.fmt(v)}</td>`;
+          const win = c === "winner" ? " winner-col" : "";
+          if (v === undefined) return `<td class="none${win}">—</td>`;
+          if (v === 0) return `<td class="none${win}">${metric.fmt(v)}</td>`;
+          return `<td class="usage${win}" style="--fill:${v / peak[c] * 100}%">${metric.fmt(v)}</td>`;
         }).join("")}
       </tr>`).join("")}</tbody>
     </table></div>`;
@@ -1422,7 +1443,7 @@
     return `<div>
       <div class="section-title"><h2>By protocol</h2>
         <p>Which liquidity each algorithm actually used. Over the whole run, so the trade-size
-           slicer does not apply.</p>
+           slicer does not apply.${hasWinner ? " <code>winner</code> is the route that won each order." : ""}</p>
         <div class="chips">${PROTO_METRICS.map(m =>
           `<button type="button" data-proto-metric="${m.key}"
              aria-pressed="${m.key === state.protoMetric}">${m.label}</button>`).join("")}</div>

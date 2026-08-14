@@ -13,7 +13,7 @@ pub mod trades;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use fynd_core::{derived::DerivedData, PoolConfig, Solver};
@@ -25,7 +25,31 @@ use tycho_simulation::{
     tycho_common::models::{Address, Chain},
 };
 
+use tracing_subscriber::EnvFilter;
+
 use self::trades::TradeOrder;
+
+/// Filter used by `--logs` when `RUST_LOG` is not set.
+const DEFAULT_LOG_FILTER: &str = "fynd_core=debug";
+
+/// Installs the log subscriber behind `--logs`.
+///
+/// `tracing` macros are dropped until a subscriber exists, so without this neither tool prints
+/// anything the solver logs. `RUST_LOG` sets the filter when it is present — e.g.
+/// `RUST_LOG=fynd_core::algorithm=trace` — and [`DEFAULT_LOG_FILTER`] applies otherwise.
+///
+/// Logging costs time in the solve it reports on. Under a profiler the formatting and the writes
+/// land in the flamegraph alongside the algorithm.
+pub fn init_logging(enabled: bool) {
+    if !enabled {
+        return;
+    }
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .init();
+}
 
 /// Gas price both tools solve at unless `--gas-price-gwei` says otherwise.
 ///
@@ -126,6 +150,77 @@ pub fn load_blocked_tokens() -> BlockedTokens {
         }
     }
     BlockedTokens { addresses, symbols, dropped_component_count: 0 }
+}
+
+/// Every `protocol_system` present in the market, sorted, for validating `--exclude-protocols`.
+pub fn market_protocol_names(updates: &[Update]) -> Vec<String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut names: Vec<String> = Vec::new();
+    for update in updates {
+        for component in update.new_pairs.values() {
+            if seen.insert(component.protocol_system.as_str()) {
+                names.push(component.protocol_system.clone());
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+/// Drops every component belonging to one of `excluded`, and the states that belong to them.
+///
+/// Applied to the market rather than to a config, so it lands on every algorithm equally and an
+/// offline fixture can be narrowed the same way a live capture can.
+pub fn exclude_protocol_components(updates: &mut [Update], excluded: &HashSet<String>) -> usize {
+    if excluded.is_empty() {
+        return 0;
+    }
+    let mut dropped: HashSet<String> = HashSet::new();
+    for update in updates.iter_mut() {
+        update
+            .new_pairs
+            .retain(|id, component| {
+                let keep = !excluded.contains(component.protocol_system.as_str());
+                if !keep {
+                    dropped.insert(id.clone());
+                }
+                keep
+            });
+    }
+    // A state whose component is gone would otherwise linger as an orphan the graph cannot place.
+    for update in updates.iter_mut() {
+        update
+            .states
+            .retain(|id, _| !dropped.contains(id));
+        update
+            .removed_pairs
+            .retain(|id, _| !dropped.contains(id));
+    }
+    dropped.len()
+}
+
+/// Drops the requested protocols from the market, returning how many components went.
+///
+/// An unknown name stops the run. Excluding a protocol changes every number a run reports, so a
+/// typo that quietly left it in would produce results that look valid and are not.
+pub fn exclude_requested_protocols(market: &mut Market, requested: &[String]) -> usize {
+    if requested.is_empty() {
+        return 0;
+    }
+    let available = market_protocol_names(&market.updates);
+    let unknown: Vec<&str> = requested
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !available.iter().any(|a| a == name))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "--exclude-protocols: no protocol named {} in this market.\nAvailable: {}",
+        unknown.join(", "),
+        available.join(", ")
+    );
+    let excluded: HashSet<String> = requested.iter().cloned().collect();
+    exclude_protocol_components(&mut market.updates, &excluded)
 }
 
 /// Drops every component holding a blocked token, and the states that belong to them.
@@ -533,6 +628,10 @@ pub async fn build_solver(
     timeout_ms: u64,
     gas_price_gwei: f64,
 ) -> Result<Solver, String> {
+    // The two halves of a slow start: replaying the market into a solver, then waiting for the
+    // derived data every worker needs before it may answer. They are timed apart because the
+    // second is the one that grows with the size of the market.
+    let replaying = Instant::now();
     let solver = Solver::from_recording(
         market.chain,
         market.updates.clone(),
@@ -541,11 +640,14 @@ pub async fn build_solver(
     )
     .await
     .map_err(|error| error.to_string())?;
+    header_line("replayed in", format!("{:.1}s", replaying.elapsed().as_secs_f64()));
 
+    let readying = Instant::now();
     solver
         .wait_until_ready(READY_TIMEOUT)
         .await
         .map_err(|error| format!("solver never became ready: {error}"))?;
+    header_line("derived data in", format!("{:.1}s", readying.elapsed().as_secs_f64()));
     Ok(solver)
 }
 

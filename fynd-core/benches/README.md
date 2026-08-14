@@ -68,6 +68,7 @@ Useful options:
 | `--jobs N` | Orders solved at once. Defaults to one per core |
 | `--timeout-ms N` | How long one solve may take |
 | `--gas-price-gwei X` | Gas price the run solves at. Fractions allowed: `0.1` is roughly what the fixture's own block sat at |
+| `--logs` | Print the solver's own logs. Slows every config, so leave it off when reading timings |
 
 `--help-bench` lists them all with the benchmark's own defaults; `--help` describes the script.
 Anything the script does not consume is forwarded unchanged, so the benchmark validates its own
@@ -132,6 +133,10 @@ listed.
 | `orders` / `orders_pct` | solves whose route touched the protocol at least once |
 | `usd` | dataset USD of those orders |
 
+A final `winner` block carries the same columns over whichever route won each order, so the
+mix a deployment running every config side by side would execute can be read off directly.
+Ties keep the earlier config, which puts the baseline first.
+
 `orders` and `usd` count a route once per protocol it crosses, so across protocols they sum to more
 than the run. `legs` and `pools_used` do not double count.
 
@@ -162,11 +167,25 @@ the flamegraph is the solve and almost nothing else.
 | `--order ID` | Profile one order. `2073` finds `2073_00000000_ae7ab965` |
 | `--orders N` | Profile the first N instead |
 | `--repeats N` | More passes, more samples, same work measured |
+| `--jobs N` | Orders solved at once, on that many workers. One by default |
+| `--logs` | Print the solver's own logs. Pair with `--no-record` |
 | `--no-record` | Run without `samply`, for timings only |
 | `--save-only` | Write `profile.json` without opening the browser |
 
 `--help-profile` lists the rest, including `--verbose`, `--timeout-ms`, `--gas-price-gwei` and
 `--trades`.
+
+`--logs` and `--jobs N` both change what the flamegraph shows. Logging puts its formatting and
+writes next to the algorithm; `--jobs N` spreads the solve over N threads, which gets through a run
+faster but leaves the timings measuring wall clock under load. Either way the default — one thread,
+no logs — is what a readable profile wants.
+
+Both tools take the filter from `RUST_LOG` when it is set, and use `fynd_core=debug` otherwise:
+
+```bash
+RUST_LOG=fynd_core::algorithm=trace ./scripts/profile.sh \
+  --config water_fill_d3 --order 2073 --logs --no-record
+```
 
 Options for `samply` itself go after a bare `--`:
 

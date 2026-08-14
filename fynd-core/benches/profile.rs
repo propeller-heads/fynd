@@ -1,4 +1,4 @@
-//! One algorithm, one thread, the orders you name — shaped for a profiler.
+//! One algorithm, the orders you name — shaped for a profiler.
 //!
 //! Deliberately not the benchmark. `algorithm_bench` compares configurations and writes a report;
 //! this runs a single configuration and writes nothing, so a flamegraph contains the solve and
@@ -15,9 +15,12 @@
 //!
 //! # Reading the flamegraph
 //!
-//! Three threads. The main thread mostly waits on a channel; a tokio thread carries the feed and
-//! the derived-data computations; the one that matters is the single solver worker, where
+//! Three threads by default. The main thread mostly waits on a channel; a tokio thread carries the
+//! feed and the derived-data computations; the one that matters is the single solver worker, where
 //! everything under `find_best_route` is the algorithm.
+//!
+//! `--jobs N` runs N orders at a time on N workers, which finishes a run faster at the cost of a
+//! flamegraph spread over N solving threads and timings measured under load.
 //!
 //! Setup is not free — building the solver replays the recording, builds the graph and runs the
 //! derived computations before the first order. Those frames sit under `Solver::from_recording`.
@@ -35,10 +38,12 @@ mod common;
 use std::{path::PathBuf, time::Instant};
 
 use clap::Parser;
+use futures::stream::StreamExt;
+
 use common::{
-    available_configs, block_components, build_market, build_solver, format_micros,
-    load_bench_config, load_blocked_tokens, print_protocol_breakdown, protocol_breakdown,
-    resolved_gas_price_gwei, symbol_table, timings_of, token_label,
+    available_configs, block_components, build_market, build_solver, exclude_requested_protocols,
+    format_micros, load_bench_config, load_blocked_tokens, print_protocol_breakdown,
+    protocol_breakdown, resolved_gas_price_gwei, symbol_table, timings_of, token_label,
     trades::{load_trade_orders, recorded_tokens, TradeOrder},
     LiveFlags, MarketSource,
 };
@@ -69,6 +74,12 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     repeats: usize,
 
+    /// Orders in flight at once, on that many solver workers. One by default, so the flamegraph
+    /// has a single solving thread to read. Raise it to get through a run faster, and read the
+    /// timings as wall clock under load rather than as per-solve cost.
+    #[arg(long, default_value_t = 1)]
+    jobs: usize,
+
     /// Per-solve budget in milliseconds.
     #[arg(long, default_value_t = 5000)]
     timeout_ms: u64,
@@ -82,6 +93,12 @@ struct Args {
     #[command(flatten)]
     live: LiveFlags,
 
+    /// Protocol systems to drop from the market before solving, comma separated, e.g.
+    /// `vm:balancer_v2,uniswap_v4_hooks`. Names must match the market's own exactly; a name that
+    /// matches nothing stops the run. Applies to a fixture and a live capture alike.
+    #[arg(long, value_delimiter = ',')]
+    exclude_protocols: Option<Vec<String>>,
+
     /// Trade dataset path.
     #[arg(long)]
     trades: Option<PathBuf>,
@@ -89,6 +106,12 @@ struct Args {
     /// Print each solve as it finishes rather than only the summary.
     #[arg(long)]
     verbose: bool,
+
+    /// Emit the solver's own logs. `RUST_LOG` picks the filter, e.g.
+    /// `RUST_LOG=fynd_core::algorithm=trace`; without it `fynd_core=debug`. Pair with
+    /// `--no-record`: logging shows up in the flamegraph as its own cost.
+    #[arg(long)]
+    logs: bool,
 }
 
 /// Slowest solves listed at the end, so the next run can aim at one with `--order`.
@@ -158,6 +181,7 @@ fn select_orders(
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+    common::init_logging(args.logs);
 
     let config = load_bench_config(&args.config)
         .unwrap_or_else(|reason| panic!("{reason}. Available: {}", available_configs().join(", ")));
@@ -170,6 +194,11 @@ async fn main() {
         }
     };
     let gas_price_gwei = resolved_gas_price_gwei(args.gas_price_gwei, &market);
+    let excluded_protocols = args
+        .exclude_protocols
+        .clone()
+        .unwrap_or_default();
+    let excluded_components = exclude_requested_protocols(&mut market, &excluded_protocols);
     let market_protocols = protocol_breakdown(&market.updates);
     let blocked = load_blocked_tokens();
     let blocked_components = block_components(&mut market.updates, &blocked.addresses);
@@ -183,6 +212,9 @@ async fn main() {
         load_trade_orders(&trades, &known_tokens, 0).unwrap_or_else(|error| panic!("{error}"));
     let orders = select_orders(all, args.order.as_deref(), args.orders);
     let repeats = args.repeats.max(1);
+    let jobs = args.jobs.max(1);
+    // More workers than cores costs setup time and memory without adding throughput.
+    let workers = jobs.min(num_cpus::get());
 
     let symbols = symbol_table();
     let pair_of = |order: &TradeOrder| {
@@ -202,6 +234,7 @@ async fn main() {
         }
     }
     println!("  dataset            {} of {} eligible", summary.kept, summary.eligible);
+    println!("  jobs / workers     {jobs} / {workers}");
     println!("  timeout            {}ms", args.timeout_ms);
     match &market.source {
         MarketSource::Offline { chain_name, .. } => {
@@ -214,6 +247,13 @@ async fn main() {
     }
     println!("  gas price          {gas_price_gwei} gwei");
     print_protocol_breakdown(&market_protocols);
+    if !excluded_protocols.is_empty() {
+        println!(
+            "\n  excluded           {} ({} pools dropped)",
+            excluded_protocols.join(", "),
+            excluded_components
+        );
+    }
     if !blocked.symbols.is_empty() {
         println!(
             "  blocked            {} ({blocked_components} pools)",
@@ -223,8 +263,7 @@ async fn main() {
     println!("\nbuilding solver ...");
 
     let setup = Instant::now();
-    // One worker, so the flamegraph has a single solving thread to read.
-    let solver = build_solver(&config, &market, 1, args.timeout_ms, gas_price_gwei)
+    let solver = build_solver(&config, &market, workers, args.timeout_ms, gas_price_gwei)
         .await
         .unwrap_or_else(|reason| panic!("could not build {}: {reason}", config.label));
     let setup_ms = setup.elapsed().as_millis();
@@ -233,8 +272,10 @@ async fn main() {
     let mut solves: Vec<Solve> = Vec::with_capacity(orders.len() * repeats);
     let solving = Instant::now();
     for pass in 0..repeats {
-        for order in &orders {
-            let result = solve(&solver, order).await;
+        let mut results = futures::stream::iter(orders.iter())
+            .map(|order| solve(&solver, order))
+            .buffer_unordered(jobs);
+        while let Some(result) = results.next().await {
             if args.verbose {
                 println!(
                     "  {:<28} {:>10}  {}",
@@ -266,6 +307,9 @@ async fn main() {
         .count();
 
     println!("\n=== {} solves ===", solves.len());
+    if jobs > 1 {
+        println!("  timings are wall clock with {jobs} orders in flight, not per-solve cost");
+    }
     println!("  solved       {solved}/{}", solves.len());
     println!("  setup        {setup_ms}ms");
     println!("  solving      {solving_ms}ms");

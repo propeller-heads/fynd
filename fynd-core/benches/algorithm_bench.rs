@@ -57,9 +57,9 @@ mod common;
 use chrono::Utc;
 use clap::Parser;
 use common::{
-    available_configs, block_components, build_market, build_solver, load_bench_config,
-    load_blocked_tokens, mean_and_median, print_protocol_breakdown, protocol_breakdown,
-    resolved_gas_price_gwei, symbol_table, timings_of, token_label,
+    available_configs, block_components, build_market, build_solver, exclude_requested_protocols,
+    load_bench_config, load_blocked_tokens, mean_and_median, print_protocol_breakdown,
+    protocol_breakdown, resolved_gas_price_gwei, symbol_table, timings_of, token_label,
     trades::{load_trade_orders, recorded_tokens, TradeLoadSummary, TradeOrder},
     usd_out, wei_per_token, BenchConfig, BlockedTokens, LiveFlags, Market, MarketSource,
     ProtocolCount,
@@ -180,6 +180,13 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     repeats: usize,
 
+    /// Protocol systems to drop from the market before solving, comma separated, e.g.
+    /// `vm:balancer_v2,uniswap_v4_hooks`. Names must match the market's own exactly; a name that
+    /// matches nothing stops the run rather than silently leaving the protocol in. Applies to a
+    /// fixture and a live capture alike, and to every config equally.
+    #[arg(long, value_delimiter = ',')]
+    exclude_protocols: Option<Vec<String>>,
+
     /// Trade dataset path.
     #[arg(long)]
     trades: Option<PathBuf>,
@@ -188,6 +195,12 @@ struct Args {
     /// these are results to keep and compare, and `cargo clean` would take them.
     #[arg(long, default_value = "bench-results")]
     out_dir: PathBuf,
+
+    /// Emit the solver's own logs. `RUST_LOG` picks the filter, e.g.
+    /// `RUST_LOG=fynd_core::algorithm=trace`; without it `fynd_core=debug`. The logging costs time
+    /// in every config, so a run that reports timings should leave it off.
+    #[arg(long)]
+    logs: bool,
 }
 
 /// The configs a run covers, and the ones it could not.
@@ -253,6 +266,9 @@ struct Run {
     repeats: usize,
     trades: PathBuf,
     out_dir: PathBuf,
+    /// Protocol systems dropped from the market, in the order given. Recorded so a run says what
+    /// it left out: two runs are only comparable when this matches.
+    excluded_protocols: Vec<String>,
 }
 
 impl Run {
@@ -274,6 +290,9 @@ impl Run {
             repeats: args.repeats.max(1),
             trades,
             out_dir,
+            excluded_protocols: args
+                .exclude_protocols
+                .unwrap_or_default(),
         };
         (run, configs)
     }
@@ -638,6 +657,9 @@ struct BenchOutcome<'a> {
     symbols: &'a HashMap<Address, String>,
     wei: &'a HashMap<Address, f64>,
     blocked: &'a BlockedTokens,
+    /// Protocols dropped from the market before solving, and how many components that removed.
+    excluded_protocols: &'a [String],
+    excluded_components: usize,
     summary: &'a TradeLoadSummary,
 }
 
@@ -764,6 +786,8 @@ fn run_json(outcome: &BenchOutcome<'_>) -> String {
             "eligible": outcome.summary.eligible,
             "kept": outcome.summary.kept,
         },
+        "excluded_protocols": outcome.excluded_protocols,
+        "excluded_components": outcome.excluded_components,
         "blocked_tokens": outcome.blocked.symbols,
         "blocked_components": outcome.blocked.dropped_component_count,
     })
@@ -872,6 +896,9 @@ fn orders_csv(outcome: &BenchOutcome<'_>) -> String {
 ///
 /// `orders` and `usd` count a route once per protocol it crosses, so they overlap across
 /// protocols; `legs` and `pools_used` do not. The columns are described in `benches/README.md`.
+///
+/// A final `winner` block reports the same numbers over the route that actually won each order,
+/// which is the mix a deployment running all these configs side by side would execute.
 fn protocols_csv(outcome: &BenchOutcome<'_>) -> String {
     let mut csv = String::from(
         "config,algorithm,protocol,pools_in_market,pools_simulatable,pools_used,legs,legs_pct,\
@@ -879,77 +906,148 @@ fn protocols_csv(outcome: &BenchOutcome<'_>) -> String {
     );
 
     for (config, config_run) in outcome.results {
-        // Every protocol in the market gets a row, used or not: a zero is the interesting answer
-        // when an algorithm never touches liquidity that was available to it.
-        let mut pools_used: HashMap<&str, HashSet<&str>> = HashMap::new();
-        let mut legs: HashMap<&str, usize> = HashMap::new();
-        let mut orders: HashMap<&str, usize> = HashMap::new();
-        let mut usd: HashMap<&str, f64> = HashMap::new();
-        let (mut total_legs, mut solved_orders) = (0usize, 0usize);
+        let usage = protocol_usage(
+            config_run
+                .measurements
+                .iter()
+                .enumerate(),
+            outcome.orders,
+        );
+        write_protocol_rows(&mut csv, &config.label, &config.algorithm, &usage, outcome);
+    }
 
-        for (index, measurement) in config_run
-            .measurements
-            .iter()
-            .enumerate()
-        {
-            if measurement.net_out.is_none() {
-                continue;
-            }
-            solved_orders += 1;
-            let mut seen: HashSet<&str> = HashSet::new();
-            for edge in &measurement.edges {
-                total_legs += 1;
-                *legs.entry(&edge.protocol).or_default() += 1;
-                pools_used
-                    .entry(&edge.protocol)
-                    .or_default()
-                    .insert(&edge.component_id);
-                seen.insert(&edge.protocol);
-            }
-            for protocol in seen {
-                *orders.entry(protocol).or_default() += 1;
-                if let Some(amount) = outcome.orders[index].amount_usd {
-                    *usd.entry(protocol).or_default() += amount;
-                }
-            }
+    let winners = winning_measurements(outcome.results);
+    write_protocol_rows(
+        &mut csv,
+        "winner",
+        "winner",
+        &protocol_usage(winners.into_iter(), outcome.orders),
+        outcome,
+    );
+    csv
+}
+
+/// Per-protocol tallies over one set of solved orders.
+#[derive(Default)]
+struct ProtocolUsage<'a> {
+    pools_used: HashMap<&'a str, HashSet<&'a str>>,
+    legs: HashMap<&'a str, usize>,
+    orders: HashMap<&'a str, usize>,
+    usd: HashMap<&'a str, f64>,
+    total_legs: usize,
+    solved_orders: usize,
+}
+
+/// Folds `(order index, measurement)` pairs into per-protocol tallies. Unsolved orders are
+/// skipped, so the percentages are over what actually routed.
+fn protocol_usage<'a>(
+    measurements: impl Iterator<Item = (usize, &'a Measurement)>,
+    orders: &[TradeOrder],
+) -> ProtocolUsage<'a> {
+    let mut usage = ProtocolUsage::default();
+    for (index, measurement) in measurements {
+        if measurement.net_out.is_none() {
+            continue;
         }
-
-        // Market order, so every config's block reads the same way down the file.
-        for row in outcome.market_protocols {
-            let protocol = row.protocol.as_str();
-            let legs_count = legs.get(protocol).copied().unwrap_or(0);
-            let orders_count = orders
-                .get(protocol)
-                .copied()
-                .unwrap_or(0);
-            let pct = |part: usize, whole: usize| {
-                if whole == 0 {
-                    0.0
-                } else {
-                    part as f64 / whole as f64 * 100.0
-                }
-            };
-            csv.push_str(&format!(
-                "{},{},{},{},{},{},{},{:.1},{},{:.1},{:.0}\n",
-                config.label,
-                config.algorithm,
-                protocol,
-                row.components,
-                row.with_state,
-                pools_used
-                    .get(protocol)
-                    .map_or(0, HashSet::len),
-                legs_count,
-                pct(legs_count, total_legs),
-                orders_count,
-                pct(orders_count, solved_orders),
-                usd.get(protocol)
-                    .copied()
-                    .unwrap_or(0.0),
-            ));
+        usage.solved_orders += 1;
+        let mut seen: HashSet<&str> = HashSet::new();
+        for edge in &measurement.edges {
+            usage.total_legs += 1;
+            *usage
+                .legs
+                .entry(&edge.protocol)
+                .or_default() += 1;
+            usage
+                .pools_used
+                .entry(&edge.protocol)
+                .or_default()
+                .insert(&edge.component_id);
+            seen.insert(&edge.protocol);
+        }
+        for protocol in seen {
+            *usage
+                .orders
+                .entry(protocol)
+                .or_default() += 1;
+            if let Some(amount) = orders[index].amount_usd {
+                *usage.usd.entry(protocol).or_default() += amount;
+            }
         }
     }
-    csv
+    usage
+}
+
+/// The best-scoring measurement for each order, by output net of gas.
+///
+/// Ties keep the earlier config, which puts the baseline first: with nothing to choose between
+/// two routes, attributing the win to the incumbent is the conservative reading.
+fn winning_measurements(results: &[(BenchConfig, ConfigRun)]) -> Vec<(usize, &Measurement)> {
+    let Some((_, first)) = results.first() else {
+        return Vec::new();
+    };
+    (0..first.measurements.len())
+        .filter_map(|index| {
+            results
+                .iter()
+                .filter_map(|(_, run)| run.measurements.get(index))
+                .filter(|m| m.net_out.is_some())
+                .max_by(|a, b| a.net_out.cmp(&b.net_out))
+                .map(|winner| (index, winner))
+        })
+        .collect()
+}
+
+/// Writes one row per protocol in the market, used or not: a zero is the interesting answer when
+/// an algorithm never touches liquidity that was available to it.
+fn write_protocol_rows(
+    csv: &mut String,
+    label: &str,
+    algorithm: &str,
+    usage: &ProtocolUsage<'_>,
+    outcome: &BenchOutcome<'_>,
+) {
+    // Market order, so every block reads the same way down the file.
+    for row in outcome.market_protocols {
+        let protocol = row.protocol.as_str();
+        let legs_count = usage
+            .legs
+            .get(protocol)
+            .copied()
+            .unwrap_or(0);
+        let orders_count = usage
+            .orders
+            .get(protocol)
+            .copied()
+            .unwrap_or(0);
+        let pct = |part: usize, whole: usize| {
+            if whole == 0 {
+                0.0
+            } else {
+                part as f64 / whole as f64 * 100.0
+            }
+        };
+        csv.push_str(&format!(
+            "{},{},{},{},{},{},{},{:.1},{},{:.1},{:.0}\n",
+            label,
+            algorithm,
+            protocol,
+            row.components,
+            row.with_state,
+            usage
+                .pools_used
+                .get(protocol)
+                .map_or(0, HashSet::len),
+            legs_count,
+            pct(legs_count, usage.total_legs),
+            orders_count,
+            pct(orders_count, usage.solved_orders),
+            usage
+                .usd
+                .get(protocol)
+                .copied()
+                .unwrap_or(0.0),
+        ));
+    }
 }
 
 /// One row per token pair and config.
@@ -1039,6 +1137,13 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
         outcome.summary.dropped_unknown_token,
         outcome.summary.dropped_malformed
     ));
+    if !outcome.excluded_protocols.is_empty() {
+        out.push_str(&format!(
+            "| excluded protocols | {} — {} pools dropped from the market |\n",
+            outcome.excluded_protocols.join(", "),
+            outcome.excluded_components
+        ));
+    }
     if !outcome.blocked.symbols.is_empty() {
         out.push_str(&format!(
             "| blocked tokens | {} — {} pools dropped from the market, see \
@@ -1176,6 +1281,7 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+    common::init_logging(args.logs);
 
     let mut market = match build_market(args.live.clone()).await {
         Ok(market) => market,
@@ -1186,6 +1292,8 @@ async fn main() {
     };
     let source = market.source.clone();
     let (run, mut configs) = Run::resolve(args, &market);
+
+    let excluded_components = exclude_requested_protocols(&mut market, &run.excluded_protocols);
 
     let mut blocked = load_blocked_tokens();
     blocked.dropped_component_count = block_components(&mut market.updates, &blocked.addresses);
@@ -1218,6 +1326,13 @@ async fn main() {
     println!("  gas price          {} gwei", run.gas_price_gwei);
     let market_protocols = protocol_breakdown(&market.updates);
     print_protocol_breakdown(&market_protocols);
+    if !run.excluded_protocols.is_empty() {
+        println!(
+            "\n  excluded           {} ({} pools dropped)",
+            run.excluded_protocols.join(", "),
+            excluded_components
+        );
+    }
     if !blocked.symbols.is_empty() {
         println!(
             "\n  blocked            {} ({} pools dropped)",
@@ -1311,6 +1426,8 @@ async fn main() {
         symbols: &symbols,
         wei: &wei,
         blocked: &blocked,
+        excluded_protocols: &run.excluded_protocols,
+        excluded_components,
         summary: &summary,
     };
 
