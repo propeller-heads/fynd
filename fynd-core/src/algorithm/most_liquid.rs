@@ -249,6 +249,12 @@ struct HopResult {
     gas: BigUint,
 }
 
+impl HopResult {
+    fn new(pool_ix: usize, result: GetAmountOutResult) -> Self {
+        HopResult { pool_ix, amount_out: result.amount, gas: result.gas }
+    }
+}
+
 /// Algorithm that selects routes based on expected output after gas.
 pub struct MostLiquidAlgorithm {
     /// The hop bounds and connector tokens every route search runs under. Owned, so a solve hands
@@ -850,18 +856,18 @@ impl Algorithm for MostLiquidAlgorithm {
 /// Remembering nothing is a valid state: [`PoolSwapsCache::new`] takes a flag, and with it off
 /// every hop asks every pool, which is the answer the cache is an approximation of.
 struct PoolSwapsCache {
-    pairs: FxHashMap<(NodeIndex, NodeIndex), PairChoice>,
+    pairs: FxHashMap<(NodeIndex, NodeIndex), PairCacheEntry>,
     enabled: bool,
 }
 
-/// The pool that won a pair, and what it paid at each amount seen so far.
-struct PairChoice {
+/// One pair's entry: the pool that won it, and what it paid at each amount seen so far.
+struct PairCacheEntry {
     /// Where the pool that last won this pair sits in its pool list.
     pool_ix: usize,
     /// Keyed by the amount that went in. Each outcome names the pool it came from, which is not
     /// always `pool_ix`: a later amount can be won by a different pool, and the outcomes already
     /// recorded still belong to whichever pool produced them.
-    outcomes: FxHashMap<BigUint, HopResult>,
+    outcomes_by_amount: FxHashMap<BigUint, HopResult>,
 }
 
 impl PoolSwapsCache {
@@ -884,7 +890,7 @@ impl PoolSwapsCache {
         mut simulate: impl FnMut(&ComponentId) -> Option<(GetAmountOutResult, BigInt)>,
     ) -> Option<HopResult> {
         if let Some(choice) = self.pairs.get(&pair) {
-            if let Some(outcome) = choice.outcomes.get(amount_in) {
+            if let Some(outcome) = choice.outcomes_by_amount.get(amount_in) {
                 return Some(outcome.clone());
             }
             // The pool is known but not at this amount. A pool that won once wins again -- which
@@ -895,7 +901,9 @@ impl PoolSwapsCache {
                 .get(pool_ix)
                 .and_then(|edge| simulate(&edge.component_id))
             {
-                return Some(self.record(pair, pool_ix, amount_in, result));
+                let hop_result = HopResult::new(pool_ix, result);
+                self.record(pair, amount_in, &hop_result);
+                return Some(hop_result);
             }
         }
 
@@ -914,34 +922,31 @@ impl PoolSwapsCache {
         }
 
         let (pool_ix, result, _) = best?;
-        Some(self.record(pair, pool_ix, amount_in, result))
+        let hop_result = HopResult::new(pool_ix, result);
+        self.record(pair, amount_in, &hop_result);
+        Some(hop_result)
     }
 
-    /// Builds the outcome to return, and remembers it unless the cache is off.
+    /// Remembers what a pool paid for one amount on one pair, unless the cache is off.
     ///
     /// This is the only place anything is written, so an off cache stays empty and every lookup in
     /// [`PoolSwapsCache::swap`] misses.
-    fn record(
-        &mut self,
-        pair: (NodeIndex, NodeIndex),
-        pool_ix: usize,
-        amount_in: &BigUint,
-        result: GetAmountOutResult,
-    ) -> HopResult {
-        let outcome = HopResult { pool_ix, amount_out: result.amount, gas: result.gas };
+    fn record(&mut self, pair: (NodeIndex, NodeIndex), amount_in: &BigUint, result: &HopResult) {
         if !self.enabled {
-            return outcome;
+            return;
         }
 
         let choice = self
             .pairs
             .entry(pair)
-            .or_insert_with(|| PairChoice { pool_ix, outcomes: FxHashMap::default() });
-        choice.pool_ix = pool_ix;
+            .or_insert_with(|| PairCacheEntry {
+                pool_ix: result.pool_ix,
+                outcomes_by_amount: FxHashMap::default(),
+            });
+        choice.pool_ix = result.pool_ix;
         choice
-            .outcomes
-            .insert(amount_in.clone(), outcome.clone());
-        outcome
+            .outcomes_by_amount
+            .insert(amount_in.clone(), result.clone());
     }
 }
 
