@@ -15,7 +15,7 @@
 //! orders to fast algorithms and large ones to algorithms that handle them better — is the next
 //! one: a field on [`OrderClass`], a matching condition in [`SolverPoolHandle::serves`].
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use super::{LiquidityScope, SolverPoolHandle};
 
@@ -76,7 +76,7 @@ pub(crate) struct Allocation<'a> {
     /// Selected worker pools, in configuration order.
     worker_pools: Vec<&'a SolverPoolHandle>,
     /// Liquidity scope of each selected worker pool, keyed by worker pool name.
-    scopes: HashMap<String, LiquidityScope>,
+    scopes: FxHashMap<String, LiquidityScope>,
     /// Whether an exclusive-scope worker pool is selected — the single fact that early-return
     /// gating and the ranking split branch on. See [`Allocation::exclusive_routing_active`].
     exclusive_routing_active: bool,
@@ -89,7 +89,7 @@ impl<'a> Allocation<'a> {
     }
 
     /// Returns the liquidity scope of each selected worker pool, keyed by worker pool name.
-    pub(crate) fn scopes(&self) -> &HashMap<String, LiquidityScope> {
+    pub(crate) fn scopes(&self) -> &FxHashMap<String, LiquidityScope> {
         &self.scopes
     }
 
@@ -120,7 +120,7 @@ pub(crate) fn allocate(worker_pools: &[SolverPoolHandle], class: OrderClass) -> 
         .filter(|worker_pool| worker_pool.serves(class))
         .collect();
 
-    let scopes: HashMap<String, LiquidityScope> = worker_pools
+    let scopes: FxHashMap<String, LiquidityScope> = worker_pools
         .iter()
         .map(|worker_pool| (worker_pool.name().to_string(), worker_pool.liquidity_scope()))
         .collect();

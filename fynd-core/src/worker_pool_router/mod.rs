@@ -35,8 +35,8 @@ use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
-use rustc_hash::{FxHashMap, FxHashSet};
 use num_traits::ToPrimitive;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use tycho_execution::encoding::{
@@ -1116,11 +1116,9 @@ fn derive_strategy(quote: &OrderQuote) -> Strategy {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
     };
 
     use rstest::rstest;

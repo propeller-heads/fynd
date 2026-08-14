@@ -577,7 +577,7 @@ mod tests {
         let mut state = make_test_state();
         state.gas_token =
             tycho_simulation::tycho_common::models::Address::from_str(gas_token).unwrap();
-        let mut token_prices = std::collections::HashMap::new();
+        let mut token_prices = rustc_hash::FxHashMap::default();
         for (address, numerator, denominator) in
             cases.map(|(address, numerator, denominator, _)| (address, numerator, denominator))
         {
@@ -623,7 +623,7 @@ mod tests {
     #[actix_web::test]
     async fn test_prices_handler_skips_non_serializable_prices() {
         let state = make_test_state();
-        let mut token_prices = std::collections::HashMap::new();
+        let mut token_prices = rustc_hash::FxHashMap::default();
         let valid = tycho_simulation::tycho_common::models::Address::from([1u8; 20]);
         token_prices.insert(valid.clone(), Price::new(1u8.into(), 2u8.into()));
         // Struct literal because Price::new panics on a zero numerator — this state is
