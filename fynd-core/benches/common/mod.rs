@@ -20,12 +20,11 @@ use fynd_core::{derived::DerivedData, PoolConfig, Solver};
 use fynd_test_fixtures::read_recording;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
+use tracing_subscriber::EnvFilter;
 use tycho_simulation::{
     protocol::models::Update,
     tycho_common::models::{Address, Chain},
 };
-
-use tracing_subscriber::EnvFilter;
 
 use self::trades::TradeOrder;
 

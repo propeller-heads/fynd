@@ -38,8 +38,6 @@ mod common;
 use std::{path::PathBuf, time::Instant};
 
 use clap::Parser;
-use futures::stream::StreamExt;
-
 use common::{
     available_configs, block_components, build_market, build_solver, exclude_requested_protocols,
     format_micros, load_bench_config, load_blocked_tokens, print_protocol_breakdown,
@@ -47,6 +45,7 @@ use common::{
     trades::{load_trade_orders, recorded_tokens, TradeOrder},
     LiveFlags, MarketSource,
 };
+use futures::stream::StreamExt;
 use fynd_core::{types::QuoteStatus, QuoteOptions, QuoteRequest, Solver};
 
 #[derive(Parser, Debug)]
