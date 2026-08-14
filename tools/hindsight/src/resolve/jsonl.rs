@@ -172,8 +172,6 @@ fn comparison_record(
         "token_out": format!("{:#x}", range.token_out),
         "amount_in": range.amount_in.to_string(),
         "settled_amount_out": range.settled_amount_out.to_string(),
-        "settled_amount_out_net_gas": range.settled_amount_out_net_gas.to_string(),
-        "settled_gas_cost": range.settled_gas.map(|gas| gas.to_string()),
         "min_amount_out": range.min_amount_out.map(|amount| amount.to_string()),
         "quoted_amount_out": range.declared_quote.map(|amount| amount.to_string()),
         "quote_timestamp": range.quote_timestamp,
@@ -209,7 +207,6 @@ fn state_record(
     let fynd_value_usd = solved.and_then(|s| prices.value_usd(token_out, s.amount_out));
     serde_json::json!({
         "verdict": state.verdict,
-        "net_bps": state.deltas.net_bps,
         "raw_bps": state.deltas.raw_bps,
         "fynd_amount_out": solved.map(|s| s.amount_out.to_string()),
         "fynd_amount_out_net_gas": solved.map(|s| s.amount_out_net_gas.to_string()),
@@ -342,7 +339,6 @@ mod tests {
             amount_out: U256::from(69_996_280_564u64),
             venue_fee_in: None,
             venue_fee_out: None,
-            settled_gas: None,
             min_amount_out: Some(U256::from(69_996_280_564u64)),
             declared_quote: Some(U256::from(70_400_409_935u64)),
             quote_timestamp: Some(1_783_421_726),
@@ -350,7 +346,6 @@ mod tests {
         };
         let range = build_range(
             &trade,
-            &empty_prices(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
             &Outcome::Unsolvable("x".into()),
@@ -420,7 +415,6 @@ mod tests {
             amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
             venue_fee_in: None,
             venue_fee_out: None,
-            settled_gas: None,
             min_amount_out: None,
             declared_quote: None,
             quote_timestamp: None,
@@ -456,7 +450,7 @@ mod tests {
             quote_json: quote,
             solved_route: Some(solved_route),
         });
-        let range = build_range(&trade, &prices, top, back.clone(), &back);
+        let range = build_range(&trade, top, back.clone(), &back);
 
         comparison_record(&range, &prices, &prices)
     }
@@ -491,7 +485,7 @@ mod tests {
             .unwrap();
         assert!((slippage_usd + 8.0).abs() < 1e-3, "slippage_usd={slippage_usd}");
         assert!(
-            rec.pointer("/back/net_bps")
+            rec.pointer("/back/raw_bps")
                 .unwrap()
                 .as_f64()
                 .unwrap() >
@@ -544,7 +538,6 @@ mod tests {
             amount_out: U256::from(1_000u64),
             venue_fee_in: None,
             venue_fee_out: None,
-            settled_gas: None,
             min_amount_out: None,
             declared_quote: None,
             quote_timestamp: None,
@@ -553,7 +546,6 @@ mod tests {
         // A coverage gap: Fynd could not solve at either state.
         let range = build_range(
             &trade,
-            &empty_prices(),
             Outcome::Unsolvable("missing token in Tycho".into()),
             Outcome::Unsolvable("missing token in Tycho".into()),
             &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
@@ -603,7 +595,6 @@ mod tests {
             amount_out: U256::from(1_000u64),
             venue_fee_in: None,
             venue_fee_out: None,
-            settled_gas: None,
             min_amount_out: None,
             declared_quote: None,
             quote_timestamp: None,
@@ -627,8 +618,7 @@ mod tests {
                 solved_route: None,
             })
         };
-        let range =
-            build_range(&trade, &empty_prices(), solved(1_100), solved(1_050), &solved(1_050));
+        let range = build_range(&trade, solved(1_100), solved(1_050), &solved(1_050));
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
 
         assert_eq!(rec.pointer("/tx_index").unwrap(), 42);

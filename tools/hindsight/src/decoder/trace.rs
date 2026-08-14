@@ -57,28 +57,6 @@ fn transfers_value(call_type: &str) -> bool {
     matches!(call_type, "CALL" | "CALLCODE" | "CREATE" | "CREATE2" | "SELFDESTRUCT")
 }
 
-/// Gas consumed by the settled route inside a venue-wrapped transaction (Relay, `MetaMask`), in
-/// gas units.
-///
-/// The venue's own gas — fee transfers, forwarding, the base transaction cost — is charged
-/// whichever router the venue picks, so like the venue fee it is excluded from the comparison. Each
-/// trace frame's `gas_used` includes its whole subtree, so the call into the solver carries the
-/// full routing cost. Prefers the first call into a known solver; falls back to the most
-/// gas-consuming direct child, since in a wrapped transaction the routing work dwarfs the
-/// bookkeeping calls. `None` when no usable frame exists — the caller then skips the gas
-/// deduction rather than guess.
-pub(crate) fn route_gas(root: &CallFrame, registry: &Registry) -> Option<U256> {
-    if let Some(frame) = find_solver_frame(root, registry) {
-        return Some(frame.gas_used);
-    }
-    root.calls
-        .iter()
-        .filter(|child| child.error.is_none())
-        .map(|child| child.gas_used)
-        .max()
-        .filter(|gas| !gas.is_zero())
-}
-
 /// Depth-first search for the first call frame into a known solver, skipping reverted frames
 /// (and their subtrees), which settle nothing.
 ///
@@ -177,96 +155,6 @@ mod tests {
         let mut out = Vec::new();
         collect_native_transfers(&root, &mut out);
         assert_eq!(out, vec![(from, to, U256::from(1000))]);
-    }
-
-    fn with_gas(mut call: CallFrame, gas_used: u64) -> CallFrame {
-        call.gas_used = U256::from(gas_used);
-        call
-    }
-
-    #[test]
-    fn test_route_gas_known_venue() {
-        // Mirrors the audited Relay tx 0xf25ceafd…: two small wrapper self-calls around the
-        // KyberSwap router call, whose frame carries the full routing cost.
-        //
-        //   relay (1,271,689 total)
-        //   ├── relay self-call        15,066
-        //   ├── kyberswap router    1,067,571   <- the route
-        //   └── relay self-call        18,802
-        let registry = Registry::ethereum();
-        let sender = addr(1);
-        let relay = addr(2);
-        let kyber = address!("0x6131b5fae19ea4f9d964eac0408e4408b66337b5");
-
-        let mut root = with_gas(frame("CALL", sender, relay, 0), 1_271_689);
-        root.calls = vec![
-            with_gas(frame("CALL", relay, relay, 0), 15_066),
-            with_gas(frame("CALL", relay, kyber, 0), 1_067_571),
-            with_gas(frame("CALL", relay, relay, 0), 18_802),
-        ];
-
-        assert_eq!(route_gas(&root, &registry), Some(U256::from(1_067_571u64)));
-    }
-
-    #[test]
-    fn test_route_gas_unknown_venue() {
-        // Unknown venue: no registry match, so the most gas-consuming child is the route.
-        let registry = Registry::ethereum();
-        let client = addr(2);
-
-        let mut root = with_gas(frame("CALL", addr(1), client, 0), 500_000);
-        root.calls = vec![
-            with_gas(frame("CALL", client, addr(50), 0), 30_000),
-            with_gas(frame("CALL", client, addr(51), 0), 400_000),
-        ];
-
-        assert_eq!(route_gas(&root, &registry), Some(U256::from(400_000u64)));
-    }
-
-    #[test]
-    fn test_route_gas_reverted_and_empty() {
-        let registry = Registry::ethereum();
-        let client = addr(2);
-
-        let mut reverted = with_gas(frame("CALL", client, addr(50), 0), 400_000);
-        reverted.error = Some("execution reverted".to_string());
-        let mut root = with_gas(frame("CALL", addr(1), client, 0), 500_000);
-        root.calls = vec![reverted];
-        assert_eq!(route_gas(&root, &registry), None);
-
-        let leaf = frame("CALL", addr(1), client, 0);
-        assert_eq!(route_gas(&leaf, &registry), None);
-    }
-
-    #[test]
-    fn test_route_gas_real_relay_kyberswap_trace() {
-        // Real callTracer output of tx 0xf25ceafd… (block 25480207, 39.67 ETH -> USDT via
-        // Relay + KyberSwap), payload fields stripped. The route's gas is the KyberSwap router
-        // frame; Relay's wrapper overhead (1,271,689 total) stays out.
-        let root: CallFrame =
-            serde_json::from_str(include_str!("fixtures/trace_relay_kyberswap_0xf25ceafd.json"))
-                .unwrap();
-        assert_eq!(root.gas_used, U256::from(1_271_689u64));
-        assert_eq!(route_gas(&root, &Registry::ethereum()), Some(U256::from(1_067_571u64)));
-    }
-
-    #[test]
-    fn test_route_gas_real_metamask_oneinch_trace() {
-        // Real callTracer output of tx 0xe815e2b5… (block 25476433, a $3.4k MetaMask swap
-        // routed via 1inch), payload fields stripped. The 1inch frame sits three levels deep:
-        //
-        //   metamask router        185,699
-        //   └── spender            180,406   <- largest child: wrapper, NOT the route
-        //       └── adapter        175,635   (delegatecall)
-        //           ├── 1inch v6   115,795   <- the route
-        //           └── fee wallet   6,329   (MetaMask's fee, correctly excluded)
-        //
-        // so the known-venue search must win over the largest-child fallback.
-        let root: CallFrame =
-            serde_json::from_str(include_str!("fixtures/trace_metamask_1inch_0xe815e2b5.json"))
-                .unwrap();
-        assert_eq!(root.gas_used, U256::from(185_699u64));
-        assert_eq!(route_gas(&root, &Registry::ethereum()), Some(U256::from(115_795u64)));
     }
 
     #[test]

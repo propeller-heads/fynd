@@ -44,10 +44,10 @@ use futures::stream::StreamExt;
 use tracing::{debug, warn};
 
 use crate::decoder::{
-    decode::{recover, DecodeContext, GasScope, TraderFlow},
+    decode::{recover, DecodeContext, TraderFlow},
     matching::MatchedSolverTrade,
     solvers::SwapIntent,
-    trace::{collect_native_transfers, fetch_trace, route_gas},
+    trace::{collect_native_transfers, fetch_trace},
     transfer_ledger::TransferLedger,
 };
 pub(crate) use crate::decoder::{
@@ -92,13 +92,6 @@ pub(crate) struct DecodedTrade {
     /// `amount_out`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub venue_fee_out: Option<U256>,
-    /// Wei cost of the gas the trader paid for the settled route (`gas_used ×
-    /// effective_gas_price`). For venue-wrapped entries (Relay, `MetaMask`) the venue's own
-    /// overhead is excluded — it is charged whichever router the venue picks, like the venue
-    /// fee. `None` when the trader did not pay the transaction's gas (intent fills, solver
-    /// rebalances) or the route's gas could not be isolated from the trace.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub settled_gas: Option<U256>,
     /// The on-chain enforced floor declared in the settling solver frame's own calldata (see
     /// `solvers::swap_intent` for the solvers that declare one). A settled trade cleared this by
     /// construction; it is recorded so avoidance analysis has the same field on both settled and
@@ -389,15 +382,6 @@ impl<P: Provider> Decoder<P> {
             flow.gross_output_fee(fee);
         }
 
-        // Gas the trader paid for the settled route, as a wei cost. The flow's gas scope says
-        // which gas that is — see `GasScope`.
-        let settled_gas = match flow.gas_scope {
-            GasScope::WholeTransaction => Some(U256::from(receipt.gas_used)),
-            GasScope::SolverFrame => route_gas(root, registry),
-            GasScope::NotCharged => None,
-        }
-        .map(|units| units * U256::from(receipt.effective_gas_price));
-
         // The calldata-declared swap terms (see `solver_intent`). Only the netting amounts above
         // stay authoritative for what actually settled; these are informational.
         let intent = solver_intent(
@@ -426,7 +410,6 @@ impl<P: Provider> Decoder<P> {
             amount_out: flow.swap.amount_out,
             venue_fee_in: flow.venue_fee_in,
             venue_fee_out: flow.venue_fee_out,
-            settled_gas,
             min_amount_out,
             declared_quote,
             quote_timestamp,

@@ -21,10 +21,7 @@ use fynd_core::types::{Route, Swap};
 use serde::Serialize;
 use tycho_simulation::tycho_common::models::Address as CoreAddress;
 
-use crate::{
-    decoder::{AttributionSource, DecodedTrade, SandwichEvidence},
-    usd::Prices,
-};
+use crate::decoder::{AttributionSource, DecodedTrade, SandwichEvidence};
 
 /// One route leg, reduced to what rendering needs. A `Swap` also carries a `ProtocolComponent`
 /// and a boxed `ProtocolSim` that a route string has no use for and that cannot be built outside
@@ -212,9 +209,9 @@ pub(crate) struct StateResult {
 }
 
 impl StateResult {
-    fn new(outcome: Outcome, settled_amount_out: U256, settled_net_gas: U256) -> Self {
+    fn new(outcome: Outcome, settled_amount_out: U256) -> Self {
         let outcome = compare::served(outcome, settled_amount_out);
-        let deltas = compare::compare(&outcome, settled_amount_out, settled_net_gas);
+        let deltas = compare::compare(&outcome, settled_amount_out);
         let verdict = compare::verdict(&outcome, &deltas);
         Self { outcome, deltas, verdict }
     }
@@ -236,12 +233,6 @@ pub(crate) struct RangeComparison {
     pub token_out: Address,
     pub amount_in: U256,
     pub settled_amount_out: U256,
-    /// Settled output after the gas the trader paid for the route, in `token_out` units. Equals
-    /// `settled_amount_out` when that gas is unknown, was paid by someone else, or the output
-    /// token is unpriced.
-    pub settled_amount_out_net_gas: U256,
-    /// Wei cost of the settled route's gas, when the trader paid it (from the decoder).
-    pub settled_gas: Option<U256>,
     /// The on-chain enforced floor declared in the settling solver frame's own calldata (from
     /// the decoder).
     pub min_amount_out: Option<U256>,
@@ -284,11 +275,6 @@ pub(crate) trait SteppingSolver {
 /// back-of-block solve, and the top route's re-execution at back-of-block (which feeds only the
 /// `slippage` field).
 ///
-/// When the decoder isolated the gas the trader paid for the settled route, its cost is converted
-/// into `token_out` units at the `prices` snapshot (top-of-block — a fine approximation for a gas
-/// deduction) and subtracted from the settled output, so both sides of the net comparison carry
-/// their own gas.
-///
 /// When the decoder flagged the trade as sandwiched, each *solved* state's verdict becomes
 /// `Verdict::Sandwiched`: its win or loss measures the MEV that moved the settled output, not
 /// routing quality. Unsolved states keep their verdicts — a sandwich explains the settled price,
@@ -297,20 +283,15 @@ pub(crate) trait SteppingSolver {
 /// stays studyable offline.
 pub(crate) fn build_range(
     trade: &DecodedTrade,
-    prices: &Prices,
     top: Outcome,
     back: Outcome,
     reexecuted: &Outcome,
 ) -> RangeComparison {
-    let settled_net_gas = trade
-        .settled_gas
-        .and_then(|gas| prices.gas_in_token(gas, trade.token_out))
-        .map_or(trade.amount_out, |gas_out| trade.amount_out.saturating_sub(gas_out));
     // Computed from the raw outcomes: the coverage-miss reclassification below discards the
     // solved amounts the slippage is measured from.
     let slippage = compare::slippage(&top, reexecuted);
-    let mut top = StateResult::new(top, trade.amount_out, settled_net_gas);
-    let mut back = StateResult::new(back, trade.amount_out, settled_net_gas);
+    let mut top = StateResult::new(top, trade.amount_out);
+    let mut back = StateResult::new(back, trade.amount_out);
     if trade.sandwich.is_some() {
         for state in [&mut top, &mut back] {
             if let Outcome::Solved(_) = state.outcome {
@@ -331,8 +312,6 @@ pub(crate) fn build_range(
         token_out: trade.token_out,
         amount_in: trade.amount_in,
         settled_amount_out: trade.amount_out,
-        settled_amount_out_net_gas: settled_net_gas,
-        settled_gas: trade.settled_gas,
         min_amount_out: trade.min_amount_out,
         declared_quote: trade.declared_quote,
         quote_timestamp: trade.quote_timestamp,
@@ -352,7 +331,6 @@ pub(crate) fn build_range(
 pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
     solver: &S,
     trades: &[DecodedTrade],
-    prices: &Prices,
 ) -> anyhow::Result<Vec<RangeComparison>> {
     let mut tops = Vec::with_capacity(trades.len());
     for trade in trades {
@@ -376,7 +354,7 @@ pub(crate) async fn resolve_block_range<S: SteppingSolver + ?Sized>(
         let back = solver
             .solve(trade.token_in, trade.token_out, trade.amount_in)
             .await;
-        ranges.push(build_range(trade, prices, top, back, &reexecuted));
+        ranges.push(build_range(trade, top, back, &reexecuted));
     }
     Ok(ranges)
 }
@@ -386,11 +364,6 @@ mod tests {
     use alloy::primitives::TxHash;
 
     use super::*;
-    use crate::decoder::Registry;
-
-    fn empty_prices() -> Prices {
-        Prices::new(&Registry::ethereum())
-    }
 
     fn trade(settled: u64) -> DecodedTrade {
         DecodedTrade {
@@ -408,7 +381,6 @@ mod tests {
             amount_out: U256::from(settled),
             venue_fee_in: None,
             venue_fee_out: None,
-            settled_gas: None,
             min_amount_out: None,
             declared_quote: None,
             quote_timestamp: None,
@@ -469,7 +441,6 @@ mod tests {
     fn test_build_range_headline() {
         let range = build_range(
             &trade(10_000),
-            &empty_prices(),
             solved(10_200, 10_100),
             solved(10_010, 9_990),
             &solved(10_010, 9_990),
@@ -483,13 +454,12 @@ mod tests {
         // Fynd fills only 10% of a 10_000 settled trade → reclassified as a coverage miss.
         let range = build_range(
             &trade(10_000),
-            &empty_prices(),
             solved(1_000, 990),
             solved(1_000, 990),
             &solved(1_000, 990),
         );
         assert_eq!(range.verdict, Verdict::CoverageMiss);
-        assert_eq!(range.top.deltas, Deltas { raw_bps: None, net_bps: None });
+        assert_eq!(range.top.deltas, Deltas { raw_bps: None });
         assert!(matches!(range.top.outcome, Outcome::Partial(_)));
     }
 
@@ -504,7 +474,6 @@ mod tests {
         });
         let range = build_range(
             &sandwiched,
-            &empty_prices(),
             solved(10_200, 10_100),
             solved(9_800, 9_700),
             &solved(9_800, 9_700),
@@ -531,7 +500,6 @@ mod tests {
         });
         let range = build_range(
             &sandwiched,
-            &empty_prices(),
             solved(10_200, 10_100),
             Outcome::Unsolvable("missing token in Tycho".into()),
             &Outcome::Unsolvable("re-execution failed".into()),
@@ -540,45 +508,6 @@ mod tests {
         assert_eq!(range.top.verdict, Verdict::Sandwiched);
         assert_eq!(range.back.verdict, Verdict::Unsolvable);
         assert_eq!(range.verdict, Verdict::Sandwiched); // headline follows top
-    }
-
-    #[test]
-    fn test_build_range_priced_gas() {
-        // The settled trader paid 200 token_out units of gas (100 wei at a price of 2 units/wei):
-        // the secondary net column carries the deduction; the verdict stays gross vs gross.
-        let mut with_gas = trade(10_000);
-        with_gas.settled_gas = Some(U256::from(100u64));
-        let mut prices = empty_prices();
-        prices.insert(with_gas.token_out, 2.0);
-
-        let range = build_range(
-            &with_gas,
-            &prices,
-            solved(10_050, 9_990),
-            solved(10_050, 9_990),
-            &solved(10_050, 9_990),
-        );
-        assert_eq!(range.settled_amount_out_net_gas, U256::from(9_800u64));
-        assert_eq!(range.settled_amount_out, U256::from(10_000u64));
-        assert_eq!(range.verdict, Verdict::Win);
-    }
-
-    #[test]
-    fn test_build_range_unpriced_gas() {
-        // token_out is not in the price map → no deduction. The secondary net column stays
-        // gross; the verdict is unaffected either way (gross 10_050 beats gross 10_000).
-        let mut with_gas = trade(10_000);
-        with_gas.settled_gas = Some(U256::from(100u64));
-
-        let range = build_range(
-            &with_gas,
-            &empty_prices(),
-            solved(10_050, 9_990),
-            solved(10_050, 9_990),
-            &solved(10_050, 9_990),
-        );
-        assert_eq!(range.settled_amount_out_net_gas, U256::from(10_000u64));
-        assert_eq!(range.verdict, Verdict::Win);
     }
 
     #[tokio::test]
@@ -592,7 +521,7 @@ mod tests {
             reexecuted: solved(9_900, 9_800),
         };
         let trades = [trade(10_000), trade(10_000)];
-        let ranges = resolve_block_range(&solver, &trades, &empty_prices())
+        let ranges = resolve_block_range(&solver, &trades)
             .await
             .unwrap();
 
@@ -619,7 +548,7 @@ mod tests {
             reexecuted: solved(10_100, 10_000),
         };
         let trades = [trade(10_000)];
-        let ranges = resolve_block_range(&solver, &trades, &empty_prices())
+        let ranges = resolve_block_range(&solver, &trades)
             .await
             .unwrap();
 
@@ -634,7 +563,6 @@ mod tests {
         // back solve is a different route and plays no part in the slippage.
         let range = build_range(
             &trade(10_000),
-            &empty_prices(),
             solved(10_000, 9_900),
             solved(10_500, 10_400),
             &solved(10_050, 9_950),
@@ -649,7 +577,6 @@ mod tests {
         // route still re-executed: the slippage must survive independently of `back`.
         let range = build_range(
             &trade(10_000),
-            &empty_prices(),
             solved(10_000, 9_900),
             Outcome::Unsolvable("no route at back-of-block".into()),
             &solved(10_050, 9_950),
@@ -666,7 +593,6 @@ mod tests {
         // re-execution must still be measured from the raw outcomes.
         let range = build_range(
             &trade(10_000),
-            &empty_prices(),
             solved(1_000, 990),
             solved(1_010, 1_000),
             &solved(1_010, 1_000),

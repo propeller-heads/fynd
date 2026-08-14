@@ -18,7 +18,7 @@ use alloy::{
 use async_trait::async_trait;
 
 use crate::decoder::{
-    decode::{DecodeContext, GasScope, TradeDecoder, TraderFlow},
+    decode::{DecodeContext, TradeDecoder, TraderFlow},
     netting_decoders::venue_flow,
     solvers, trace,
     transfer_ledger::{NetSwap, TransferLedger, RESIDUE_GROSS_RATIO},
@@ -82,21 +82,8 @@ impl<P: Provider> TradeDecoder<P> for RelayCalldata {
             .copied()
             .filter(|fee| !fee.is_zero());
 
-        // A trader-sent Relay transaction charges the solver frame's gas (see `GasScope`); a
-        // solver-initiated rebalance charges nothing. Ledger-derived rather than assumed: the
-        // sender net-sending the input token is what "trader-funded" means here.
-        let sender = ctx.receipt.from;
-        let net_sent = ctx
-            .transfer_ledger
-            .group_net_sent(&HashSet::from([sender]));
-        let gas_scope = if net_sent.contains_key(&intent.token_in) {
-            GasScope::SolverFrame
-        } else {
-            GasScope::NotCharged
-        };
-
         Some(TraderFlow {
-            tracked: sender,
+            tracked: ctx.receipt.from,
             swap: NetSwap {
                 token_in: intent.token_in,
                 amount_in: intent.amount_in,
@@ -106,7 +93,6 @@ impl<P: Provider> TradeDecoder<P> for RelayCalldata {
             venue_fee_in,
             venue_fee_out,
             solver_override: None,
-            gas_scope,
         })
     }
 }
@@ -243,7 +229,6 @@ mod tests {
 
     use super::*;
     use crate::decoder::{
-        decode::GasScope,
         registry::Registry,
         test_utils::{addr, frame, make_transfer_log, receipt, swap, tx_hash},
     };
@@ -478,7 +463,6 @@ mod tests {
         assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
         assert_eq!(flow.venue_fee_in, Some(U256::from(40)));
         assert_eq!(flow.venue_fee_out, None);
-        assert_eq!(flow.gas_scope, GasScope::SolverFrame);
     }
 
     #[tokio::test]
@@ -527,7 +511,6 @@ mod tests {
         assert_eq!(flow.swap, swap(token_in, 1000, token_out, 2000));
         assert_eq!(flow.venue_fee_in, None);
         assert_eq!(flow.venue_fee_out, None);
-        assert_eq!(flow.gas_scope, GasScope::NotCharged);
     }
 
     mod relay_calldata {
@@ -608,7 +591,6 @@ mod tests {
             assert_eq!(flow.swap.token_out, Address::ZERO);
             assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
             assert_eq!(flow.swap.amount_out, U256::from(MIN_AMOUNT_OUT + 1_000));
-            assert_eq!(flow.gas_scope, GasScope::SolverFrame);
         }
 
         #[tokio::test]
@@ -684,9 +666,9 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_decode_collector_funded_is_not_charged_gas() {
+        async fn test_decode_collector_funded_rebalance() {
             // The fee collector, not the sender, net-sends the input token: a solver-initiated
-            // rebalance, which charges no gas to any trader.
+            // rebalance still decodes from the calldata, with the intent's own amounts.
             let registry = Registry::ethereum();
             let sender = addr(1);
             let collector = relay_collector(&registry);
@@ -698,7 +680,8 @@ mod tests {
             let flow = decode_calldata(&registry, &root, &ledger, sender, ROUTER)
                 .await
                 .unwrap();
-            assert_eq!(flow.gas_scope, GasScope::NotCharged);
+            assert_eq!(flow.tracked, sender);
+            assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
         }
 
         #[tokio::test]

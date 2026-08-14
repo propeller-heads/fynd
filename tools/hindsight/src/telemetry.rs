@@ -592,7 +592,6 @@ mod tests {
             amount_out: U256::from(settled),
             venue_fee_in: None,
             venue_fee_out: None,
-            settled_gas: None,
             min_amount_out: None,
             declared_quote: None,
             quote_timestamp: None,
@@ -642,7 +641,6 @@ mod tests {
         let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         let range = build_range(
             &trade(usdc, 1_000_000_000),
-            &empty_prices(),
             solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
             solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
             &Outcome::Unsolvable("x".into()),
@@ -683,7 +681,6 @@ mod tests {
         // missing sample), so it needs a label value — and it must not be blank.
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
-            &empty_prices(),
             Outcome::Unsolvable("missing token in Tycho".into()),
             Outcome::Unsolvable("missing token in Tycho".into()),
             &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
@@ -740,7 +737,6 @@ mod tests {
         // Top wins (net 1005 USDC vs 1000 settled); back loses (net 995).
         let range = build_range(
             &trade(usdc, 1_000_000_000),
-            &empty_prices(),
             solved(1_010_000_000, 1_005_000_000),
             solved(998_000_000, 995_000_000),
             &solved(998_000_000, 995_000_000),
@@ -795,7 +791,6 @@ mod tests {
         // Quoted 1000 USDC at top, re-executed to 1005 USDC at back → +50 bps, +$5 surplus.
         let range = build_range(
             &trade(usdc, 1_000_000_000),
-            &empty_prices(),
             solved(1_000_000_000, 995_000_000),
             solved(1_005_000_000, 1_000_000_000),
             &solved(1_005_000_000, 1_000_000_000),
@@ -838,7 +833,6 @@ mod tests {
         // positive-only USD surplus does not.
         let range = build_range(
             &trade(usdc, 1_000_000_000),
-            &empty_prices(),
             solved(1_000_000_000, 995_000_000),
             solved(995_000_000, 990_000_000),
             &solved(995_000_000, 990_000_000),
@@ -879,7 +873,6 @@ mod tests {
         // The fresh back solve succeeded — slippage must come from the re-execution alone.
         let range = build_range(
             &trade(usdc, 1_000_000_000),
-            &empty_prices(),
             solved(1_000_000_000, 995_000_000),
             solved(1_002_000_000, 997_000_000),
             &Outcome::Unsolvable("re-execution failed: no simulation state".into()),
@@ -928,13 +921,8 @@ mod tests {
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
         t.venue = "0xD720183DdA64a8CDb424B5c13aF73baf713521f8".to_string();
         t.solver = "0xB6F54cAed61C318027c022c47B94BAF139a99Dab".to_string();
-        let range = build_range(
-            &t,
-            &empty_prices(),
-            solved(1_100, 1_050),
-            solved(1_100, 1_050),
-            &solved(1_100, 1_050),
-        );
+        let range =
+            build_range(&t, solved(1_100, 1_050), solved(1_100, 1_050), &solved(1_100, 1_050));
 
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -961,13 +949,8 @@ mod tests {
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
         t.solver = "relay".to_string();
         t.solver_source = AttributionSource::Fallback;
-        let range = build_range(
-            &t,
-            &empty_prices(),
-            solved(1_100, 1_050),
-            solved(1_100, 1_050),
-            &solved(1_100, 1_050),
-        );
+        let range =
+            build_range(&t, solved(1_100, 1_050), solved(1_100, 1_050), &solved(1_100, 1_050));
 
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -996,7 +979,6 @@ mod tests {
         t.amount_in = U256::from(1_000_000_000u64); // 1000 USDC
         let range = build_range(
             &t,
-            &empty_prices(),
             Outcome::Unsolvable("no route".into()),
             Outcome::Unsolvable("no route".into()),
             &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
@@ -1023,7 +1005,6 @@ mod tests {
     fn test_record_range_unsolvable() {
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
-            &empty_prices(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
             &Outcome::Unsolvable("x".into()),
@@ -1060,7 +1041,6 @@ mod tests {
         prices.insert(usdc, 2e-9);
         let range = build_range(
             &sandwiched,
-            &prices,
             solved(1_100_000_000, 1_090_000_000),
             solved(1_100_000_000, 1_090_000_000),
             &solved(1_100_000_000, 1_090_000_000),
@@ -1092,7 +1072,6 @@ mod tests {
         // whose bps and win count would swamp the unweighted metrics if it were recorded.
         let range = build_range(
             &trade(usdc, 1_000_000),
-            &empty_prices(),
             solved(1_005_000, 1_005_000),
             solved(1_005_000, 1_005_000),
             &solved(1_005_000, 1_005_000),
@@ -1123,7 +1102,6 @@ mod tests {
         // its count and (solved) bps still land in the metrics.
         let range = build_range(
             &trade(Address::repeat_byte(0x42), 1_000),
-            &empty_prices(),
             solved(1_100, 1_050),
             solved(1_100, 1_050),
             &solved(1_100, 1_050),
