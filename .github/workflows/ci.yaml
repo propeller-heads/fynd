@@ -37,9 +37,13 @@ jobs:
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Compile
-        run: cargo nextest run --workspace --all-targets --all-features --no-run --locked
+        run: >-
+          cargo nextest run --workspace --all-targets --all-features --no-run --locked
+          -E 'not binary(algorithm_bench) and not binary(profile)'
       - name: Test
-        run: cargo nextest run --workspace --all-targets --all-features
+        run: >-
+          cargo nextest run --workspace --all-targets --all-features
+          -E 'not binary(algorithm_bench) and not binary(profile)'
 
   lint:
     name: Code Lint
