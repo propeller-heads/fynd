@@ -1,4 +1,17 @@
 
+## [0.99.6](https://github.com/propeller-heads/fynd/compare/0.99.5...0.99.6) (2026-08-14)
+
+### Features
+
+* Address PR reviews, add a LIVE mode, and UI improvements. ([78d072e](https://github.com/propeller-heads/fynd/commit/78d072e4078a36e28b1842c485bc64e502aa306d))
+* Add an offline benchmark and a profiling tool ([34f367c](https://github.com/propeller-heads/fynd/commit/34f367c0afc31c2d868a1c79cf6bc3d5ec91c2c3))
+* A few more iterations on benchmark following usage ([cd2d86e](https://github.com/propeller-heads/fynd/commit/cd2d86e464ee0b2f82e35a0d7ef8933118fd7e37))
+
+### Bug Fixes
+
+* **rpc:** invert liquidity unit conversion in GET /v1/tokens ([03147a2](https://github.com/propeller-heads/fynd/commit/03147a2390f345632e984d962d11bcf9bf11b9f4))
+
+
 
 
 ## [0.99.3](https://github.com/propeller-heads/fynd/compare/0.99.2...0.99.3) (2026-08-11)
