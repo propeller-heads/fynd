@@ -271,6 +271,10 @@ struct ComponentOutcome {
     computed: Vec<(ComponentDepthKey, BigUint)>,
     /// Pairs whose stored depth no longer holds and has to go.
     cleared: Vec<ComponentDepthKey>,
+    /// Set when the component itself is unusable, in which case every stored depth keyed by it
+    /// goes — not only the pairs of its current token list. A component that has dropped a token
+    /// would otherwise leave a depth behind for a pair it can no longer serve.
+    cleared_whole: Option<ComponentId>,
     /// Why each cleared pair produced nothing.
     failed: Vec<FailedItem>,
 }
@@ -278,10 +282,8 @@ struct ComponentOutcome {
 impl ComponentOutcome {
     /// Records one pair as failed, dropping whatever depth it had.
     fn fail(&mut self, key: ComponentDepthKey, error: FailedItemError) {
-        self.failed.push(FailedItem {
-            key: format!("{}/{}/{}", key.0, key.1, key.2),
-            error,
-        });
+        self.failed
+            .push(FailedItem { key: format!("{}/{}/{}", key.0, key.1, key.2), error });
         self.cleared.push(key);
     }
 
@@ -294,11 +296,9 @@ impl ComponentOutcome {
         token_addresses: &[Address],
         error: &FailedItemError,
     ) {
+        self.cleared_whole = Some(component_id.clone());
         for perm in token_addresses.iter().permutations(2) {
-            self.fail(
-                (component_id.clone(), perm[0].clone(), perm[1].clone()),
-                error.clone(),
-            );
+            self.fail((component_id.clone(), perm[0].clone(), perm[1].clone()), error.clone());
         }
     }
 }
@@ -401,6 +401,13 @@ impl DerivedComputation for ComponentDepthComputation {
 
         let mut succeeded = 0usize;
         let mut failed_items: Vec<FailedItem> = Vec::new();
+        let unusable: FxHashSet<ComponentId> = outcomes
+            .iter()
+            .filter_map(|outcome| outcome.cleared_whole.clone())
+            .collect();
+        if !unusable.is_empty() {
+            component_depths.retain(|(component_id, _, _), _| !unusable.contains(component_id));
+        }
         for outcome in outcomes {
             for key in outcome.cleared {
                 component_depths.remove(&key);
