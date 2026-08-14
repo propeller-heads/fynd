@@ -18,7 +18,7 @@ use alloy::{primitives::Address, providers::Provider};
 use async_trait::async_trait;
 
 use crate::decoder::{
-    decode::{DecodeContext, GasScope, TradeDecoder, TraderFlow},
+    decode::{DecodeContext, TradeDecoder, TraderFlow},
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
@@ -35,10 +35,7 @@ pub(crate) fn sender_flow(
 ) -> Option<TraderFlow> {
     transfer_ledger
         .net_swap(sender)
-        .map(|swap| TraderFlow {
-            gas_scope: GasScope::WholeTransaction,
-            ..TraderFlow::without_fees(sender, swap)
-        })
+        .map(|swap| TraderFlow::without_fees(sender, swap))
         .or_else(|| {
             transfer_ledger
                 .net_swap(entry_point)
@@ -62,10 +59,7 @@ pub(crate) fn venue_flow(
     entry_point: Address,
     fee_collectors: &HashSet<Address>,
 ) -> Option<TraderFlow> {
-    let mut flow = sender_flow(transfer_ledger, sender, entry_point)?;
-    if flow.gas_scope == GasScope::WholeTransaction {
-        flow.gas_scope = GasScope::SolverFrame;
-    }
+    let flow = sender_flow(transfer_ledger, sender, entry_point)?;
     if fee_collectors.contains(&flow.tracked) {
         return Some(flow);
     }
@@ -102,7 +96,6 @@ fn back_out_venue_fees(
         venue_fee_in,
         venue_fee_out,
         solver_override: flow.solver_override,
-        gas_scope: flow.gas_scope,
     }
 }
 

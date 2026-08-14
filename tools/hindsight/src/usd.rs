@@ -95,24 +95,6 @@ impl Prices {
         usd.is_finite().then_some(usd)
     }
 
-    /// Convert a native gas cost (wei of the gas token) into `token` native units at the
-    /// snapshot price.
-    ///
-    /// `price[token]` is the token's native-unit amount per wei, so the conversion is one
-    /// multiplication. Returns `None` when `token` is not priced. The f64 round-trip loses
-    /// wei-level precision, which is acceptable for a gas deduction — the cost itself is exact but
-    /// its value in the output token is an estimate by nature.
-    // Truncation is intentional: whole token units are sufficient for a gas estimate.
-    // Sign loss is impossible: gas_wei is from a U256 and price_of only returns positive values.
-    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub(crate) fn gas_in_token(&self, gas_wei: U256, token: Address) -> Option<U256> {
-        let price = self.price_of(token)?;
-        let units = u256_to_f64(gas_wei) * price;
-        units
-            .is_finite()
-            .then(|| U256::from(units as u128))
-    }
-
     /// Signed USD savings of Fynd's output vs the settled amount (positive = Fynd better).
     ///
     /// Both amounts are `token_out` native units, valued in USD via `Prices::value_usd`; the
@@ -243,21 +225,6 @@ mod tests {
             .value_usd(WETH, one_weth)
             .unwrap();
         assert!((v - 2_000.0).abs() < 1e-3, "expected $2000, got {v}");
-    }
-
-    #[test]
-    fn test_gas_in_token_at_snapshot_price() {
-        // 0.001 ETH of gas, USDC at 2e-9 native units per wei (ETH = $2000) → 2 USDC.
-        let gas_wei = U256::from(10u64).pow(U256::from(15u64));
-        let got = prices()
-            .gas_in_token(gas_wei, USDC)
-            .unwrap();
-        assert_eq!(got, U256::from(2_000_000u64));
-    }
-
-    #[test]
-    fn test_gas_in_token_unpriced() {
-        assert_eq!(prices().gas_in_token(U256::from(1u64), Address::repeat_byte(0x42)), None);
     }
 
     #[test]

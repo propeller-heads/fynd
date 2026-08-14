@@ -429,7 +429,6 @@ mod tests {
             amount_out: U256::from(2000),
             venue_fee_in: None,
             venue_fee_out: None,
-            settled_gas: None,
             min_amount_out: None,
             declared_quote: None,
             quote_timestamp: None,

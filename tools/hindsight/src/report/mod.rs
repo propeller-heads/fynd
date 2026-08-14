@@ -144,7 +144,7 @@ mod tests {
         serde_json::json!({
             "block": block, "settled_tx": format!("0x{block:064x}"),
             "venue": "relay", "solver": "1inch", "token_in": "0xaaa", "token_out": "0xbbb",
-            "top": {"verdict": verdict, "net_bps": 1.0, "improvement_usd": 1.0, "settled_value_usd": 1.0},
+            "top": {"verdict": verdict, "raw_bps": 1.0, "improvement_usd": 1.0, "settled_value_usd": 1.0},
         })
         .to_string()
     }
@@ -182,7 +182,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "block": 1, "settled_tx": "0x1", "venue": venue, "solver": "1inch",
             "token_in": "0xaaa", "token_out": "0xbbb",
-            "top": {"verdict": "win", "net_bps": 1.0, "improvement_usd": 1.0, "settled_value_usd": 1.0},
+            "top": {"verdict": "win", "raw_bps": 1.0, "improvement_usd": 1.0, "settled_value_usd": 1.0},
         }))
         .unwrap()
     }

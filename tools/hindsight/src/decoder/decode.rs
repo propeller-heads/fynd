@@ -140,22 +140,8 @@ pub(crate) struct DecodeContext<'a, P> {
     pub venue: Option<&'a VenueAddresses>,
 }
 
-/// Which part of the transaction's gas counts as the settled route's cost. Decided by the
-/// decoder — only it knows who sent the transaction and what wraps the route.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GasScope {
-    /// The trader sent the transaction: all of its gas is the route's cost.
-    WholeTransaction,
-    /// The trade runs inside a venue's contract: only the solver call's trace frame counts,
-    /// keeping the venue's own overhead out of the comparison.
-    SolverFrame,
-    /// Someone other than the trader paid the gas (intent fills, solver rebalances): none of it
-    /// is charged.
-    NotCharged,
-}
-
 /// The trader's side of a matched transaction: the swap, plus the corrections that make it
-/// comparable (venue fees backed out, gas scope).
+/// comparable (venue fees backed out).
 pub(crate) struct TraderFlow {
     /// The address whose net flow the swap was read from.
     pub tracked: Address,
@@ -167,8 +153,6 @@ pub(crate) struct TraderFlow {
     /// Solver label asserted by the decoder itself (e.g. `MetaMask` declares its solver in
     /// calldata), overriding trace-based attribution.
     pub solver_override: Option<String>,
-    /// How the settled route's gas is charged against the settled output.
-    pub gas_scope: GasScope,
 }
 
 impl TraderFlow {
@@ -179,7 +163,6 @@ impl TraderFlow {
             venue_fee_in: None,
             venue_fee_out: None,
             solver_override: None,
-            gas_scope: GasScope::NotCharged,
         }
     }
 

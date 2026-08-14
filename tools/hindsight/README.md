@@ -59,7 +59,7 @@ All take `--chain` (selects the address book) and `--registry` /
            ┌─────────────────┐   swap_intent    ┌─────────────────┐
            │ post-processing │ ───────────────▶ │ SolverKnowledge │
            └────────┬────────┘                  └─────────────────┘
-                    │  veto → venue attribution → solver attribution → gas → intent → sandwich scan
+                    │  veto → venue attribution → solver attribution → intent → sandwich scan
                     ▼
               DecodedTrade
 ```
@@ -123,8 +123,8 @@ match role {
      (venues/relay.rs)              (venues/metamask.rs)
 
    direct call vs a solver-settled intent order — SAME solver, DIFFERENT decoder:
-     0x called directly             → Sender → [ SenderNetting ]        (your own tx, your gas)
-     0x settling your intent order  → Intent → intents::decoders_for()  (a solver settles for you)
+     0x called directly             → Sender → [ SenderNetting ]     (your own transaction)
+     0x settling your intent order  → Intent → the intent decoders   (a solver settles for you)
    an intent source with a richer signal gets its own decoder ahead of the netting fallback —
    CoW reads its Trade event (intents/cow.rs), then IntentNetting catches the rest. Relay is the
    same shape: RelayCalldata reads the settling solver's own calldata (SwapIntent) plus a
