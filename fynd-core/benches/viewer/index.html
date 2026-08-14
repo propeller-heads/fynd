@@ -1,0 +1,1848 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fynd routing benchmark — run viewer</title>
+<style>
+  :root {
+    --ground: #f6f7f9;
+    --surface: #ffffff;
+    --surface-2: #eef0f4;
+    --ink: #14171c;
+    --ink-2: #464e5b;
+    --ink-3: #79828f;
+    --line: #dce0e7;
+    --line-2: #c6ccd6;
+    --accent: #a1651a;
+    --accent-soft: #f0e3d0;
+    --gain: #2e7d5b;
+    --gain-soft: #d8ebe2;
+    --loss: #a8433b;
+    --loss-soft: #f2dedc;
+    --tie: #8a929d;
+    --tie-soft: #e2e5ea;
+    --p1: #3f6f9c;
+    --p2: #7a5ea8;
+    --p3: #2f8079;
+    --p4: #a06a2c;
+    --p5: #9a4f6e;
+    --p6: #5c7a3f;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --r: 3px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #14171c; --surface: #1b1f26; --surface-2: #232832;
+      --ink: #e7eaef; --ink-2: #aeb6c2; --ink-3: #7b8492;
+      --line: #2b313b; --line-2: #3a424f;
+      --accent: #d59a4a; --accent-soft: #33291b;
+      --gain: #5cb98d; --gain-soft: #1e3830;
+      --loss: #d97b72; --loss-soft: #3a2523;
+      --tie: #79818d; --tie-soft: #2a2f38;
+      --p1: #6fa3d0; --p2: #a58cd4; --p3: #55b0a6;
+      --p4: #cf9a54; --p5: #c9829c; --p6: #8fad68;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #14171c; --surface: #1b1f26; --surface-2: #232832;
+    --ink: #e7eaef; --ink-2: #aeb6c2; --ink-3: #7b8492;
+    --line: #2b313b; --line-2: #3a424f;
+    --accent: #d59a4a; --accent-soft: #33291b;
+    --gain: #5cb98d; --gain-soft: #1e3830;
+    --loss: #d97b72; --loss-soft: #3a2523;
+    --tie: #79818d; --tie-soft: #2a2f38;
+    --p1: #6fa3d0; --p2: #a58cd4; --p3: #55b0a6;
+    --p4: #cf9a54; --p5: #c9829c; --p6: #8fad68;
+  }
+  :root[data-theme="light"] {
+    --ground: #f6f7f9; --surface: #ffffff; --surface-2: #eef0f4;
+    --ink: #14171c; --ink-2: #464e5b; --ink-3: #79828f;
+    --line: #dce0e7; --line-2: #c6ccd6;
+    --accent: #a1651a; --accent-soft: #f0e3d0;
+    --gain: #2e7d5b; --gain-soft: #d8ebe2;
+    --loss: #a8433b; --loss-soft: #f2dedc;
+    --tie: #8a929d; --tie-soft: #e2e5ea;
+    --p1: #3f6f9c; --p2: #7a5ea8; --p3: #2f8079;
+    --p4: #a06a2c; --p5: #9a4f6e; --p6: #5c7a3f;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 14px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .num { font-variant-numeric: tabular-nums; font-family: var(--mono); }
+  .lbl {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--ink-3);
+  }
+  .gain { color: var(--gain); }
+  .loss { color: var(--loss); }
+  .tie  { color: var(--tie); }
+  .none { color: var(--ink-3); }
+
+  /* ---------- run strip ---------- */
+  header {
+    border-bottom: 1px solid var(--line); background: var(--surface);
+    padding: 12px 20px 0; display: flex; flex-direction: column; gap: 12px;
+  }
+  .head-top { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center; }
+  .brand { font-family: var(--mono); font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+  .run-btn {
+    font-family: var(--mono); font-size: 13px; font-weight: 600;
+    padding: 4px 10px; border: 1px solid var(--line-2); border-radius: var(--r);
+    background: var(--ground); color: var(--accent); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .run-btn::after { content: "▾"; color: var(--ink-3); font-size: 11px; }
+  .run-btn:hover { border-color: var(--accent); }
+  .run-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-left: auto; }
+  .fact { display: flex; flex-direction: column; gap: 1px; }
+  .fact b { font-family: var(--mono); font-weight: 500; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+
+  .tabs { display: flex; gap: 2px; }
+  .tabs button {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 7px 14px; border: 0; border-bottom: 2px solid transparent;
+    background: transparent; color: var(--ink-3); cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  .tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+  /* ---------- overview ---------- */
+  .overview { padding: 20px; display: flex; flex-direction: column; gap: 26px; }
+  .section-title { display: flex; align-items: baseline; gap: 12px; }
+  .section-title h2 {
+    margin: 0; font-family: var(--mono); font-size: 13px; font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .section-title p { margin: 0; color: var(--ink-3); font-size: 12.5px; }
+
+  .scorecards { display: grid; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr)); gap: 12px; }
+  .card {
+    border: 1px solid var(--line); border-radius: var(--r); background: var(--surface);
+    padding: 13px 15px; display: flex; flex-direction: column; gap: 9px;
+  }
+  .card.is-baseline { border-style: dashed; }
+  .card-name { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+  .card-hero { display: flex; align-items: center; gap: 9px; }
+  .card-hero b {
+    font-family: var(--mono); font-size: 27px; font-weight: 600;
+    letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  /* Always two lines, so every card breaks in the same place whatever its numbers. Two 11px
+     lines come to about the height of the 27px figure beside them. */
+  .card-hero-label {
+    display: flex; flex-direction: column; gap: 1px; line-height: 1.25;
+    font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+  }
+  .card-hero-label span { white-space: nowrap; }
+  .wlt { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--tie-soft); }
+  .wlt i { display: block; }
+  .wlt i.w { background: var(--gain); }
+  .wlt i.l { background: var(--loss); }
+  .wlt i.t { background: var(--tie); opacity: 0.5; }
+  /* The counts sit under the bar in its colours: a label plus three numbers does not fit a card
+     width without wrapping mid-value. */
+  .wlt-legend {
+    display: flex; align-items: baseline; gap: 5px; margin-top: -4px;
+    font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums;
+  }
+  .wlt-legend b { font-weight: 600; }
+  .wlt-legend .w { color: var(--gain); }
+  .wlt-legend .l { color: var(--loss); }
+  .wlt-legend .t { color: var(--tie); }
+  .wlt-legend i { color: var(--ink-3); font-style: normal; opacity: 0.55; }
+
+  .card-rows { display: flex; flex-direction: column; gap: 3px; }
+  .card-row { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
+  .card-row span { color: var(--ink-3); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+  .card-row b { font-family: var(--mono); font-weight: 500; font-variant-numeric: tabular-nums; font-size: 12px; }
+
+  .bars {
+    display: flex; flex-direction: column; gap: 11px;
+    border: 1px solid var(--line); border-radius: var(--r); background: var(--surface);
+    padding: 15px 16px;
+  }
+  .bar-row { display: grid; grid-template-columns: 150px 1fr auto; gap: 12px; align-items: center; }
+  .bar-row > span:first-child { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .bar-track { background: var(--surface-2); border-radius: 2px; height: 22px; position: relative; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--accent); opacity: 0.75; border-radius: 2px; }
+  .bar-fill.p95 { background: var(--accent); opacity: 0.3; }
+  /* nowrap: in the narrow column the p95 label would otherwise wrap and rows would lose their
+     shared height, making the bars hard to compare down the list. */
+  .bar-row > b { font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 76px; text-align: right; white-space: nowrap; }
+
+  /* ---------- distribution ---------- */
+  .slicer {
+    display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: flex-end;
+    padding: 12px 15px; border: 1px solid var(--line); border-radius: var(--r);
+    background: var(--surface); position: sticky; top: 0; z-index: 3;
+  }
+  .slice-tag {
+    font-family: var(--mono); font-size: 11.5px; color: var(--accent);
+    border: 1px solid var(--accent); border-radius: 9px; padding: 2px 9px;
+  }
+  .slice-tag.muted { color: var(--ink-3); border-color: var(--line-2); }
+  .range { display: flex; flex-direction: column; gap: 2px; min-width: 260px; flex: 1; max-width: 460px; }
+  .range-track { position: relative; height: 22px; }
+  .range input[type="range"] {
+    position: absolute; inset: 0; width: 100%; margin: 0; height: 22px;
+    background: none; pointer-events: none; -webkit-appearance: none; appearance: none;
+  }
+  .range input[type="range"]::-webkit-slider-runnable-track { height: 4px; background: var(--surface-2); border-radius: 2px; }
+  .range input[type="range"]::-moz-range-track { height: 4px; background: var(--surface-2); border-radius: 2px; }
+  .range input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; pointer-events: auto; width: 14px; height: 14px; margin-top: -5px;
+    border-radius: 50%; background: var(--surface); border: 2px solid var(--accent); cursor: grab;
+  }
+  .range input[type="range"]::-moz-range-thumb {
+    pointer-events: auto; width: 14px; height: 14px; border-radius: 50%;
+    background: var(--surface); border: 2px solid var(--accent); cursor: grab;
+  }
+  .range input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .range-read { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .range-read b { font-weight: 600; }
+
+  .toggle {
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--ink-3); border: 1px solid var(--line-2); border-radius: var(--r); padding: 2px 8px;
+  }
+  .toggle:hover { color: var(--ink); }
+  .toggle:has(input:checked) { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+  .toggle input { accent-color: var(--accent); margin: 0; }
+  .toggle:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  /* Distribution and speed share a row: the histograms want width and the speed bars read fine
+     narrow, so side by side fills a wide screen that either alone would leave half empty. */
+  .report-split { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+  @media (max-width: 1400px) { .report-split { grid-template-columns: minmax(0, 1fr); } }
+
+  .hists { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 12px; }
+  .hist { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; }
+  .hist-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .hist-name { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+  .hist-stat { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .hist-stat b { font-weight: 600; }
+  .hist-bars { display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px; align-items: end; height: 92px; }
+  .hist-bars > div { display: flex; flex-direction: column; justify-content: flex-end; height: 100%; }
+  .hist-bars i { display: block; border-radius: 2px 2px 0 0; min-height: 1px; }
+  .hist-bars i.b-loss { background: var(--loss); }
+  .hist-bars i.b-tie { background: var(--tie); opacity: 0.55; }
+  .hist-bars i.b-gain { background: var(--gain); }
+  .hist-bars i.b-time { background: var(--accent); opacity: 0.6; }
+  .rows-click tbody tr { cursor: pointer; }
+  .hist-axis { display: grid; grid-template-columns: repeat(9, 1fr); gap: 3px; }
+  .hist-axis span { font-family: var(--mono); font-size: 9px; color: var(--ink-3); text-align: center; letter-spacing: -0.02em; }
+
+  /* ---------- shared tables ---------- */
+  /* A faint bar behind each usage cell, grown from the right so it sits under the number:
+     the shape of an algorithm's protocol mix reads without comparing rows one by one. */
+  /* winner is a derived series, not a config: ruled off and tinted so it does not read as
+     just another algorithm sitting in the same list. */
+  .winner-col { border-left: 1px solid var(--line-2); background-color: var(--surface-2); }
+  thead th.winner-col { color: var(--ink); }
+
+  .usage {
+    background: linear-gradient(to left, var(--accent-soft) var(--fill, 0%), transparent 0);
+    /* content-box keeps the fill off the cell padding, so neighbouring columns stay separate
+       instead of reading as one band running across the row. */
+    background-clip: content-box;
+  }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { padding: 8px 12px; text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 500; border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: var(--surface); z-index: 1;
+  }
+  thead th.sortable { cursor: pointer; user-select: none; }
+  thead th.sortable:hover { color: var(--ink); }
+  thead th[aria-sort] { color: var(--accent); }
+  thead th[aria-sort]::after { content: " ↓"; }
+  tbody tr + tr td { border-top: 1px solid var(--line); }
+  tbody td { font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12.5px; }
+  tbody tr:hover td { background: var(--surface-2); }
+  .bps-cell { font-weight: 600; }
+  .pill {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 1px 6px; border-radius: 8px; border: 1px solid currentColor;
+  }
+  .pill.no-route { color: var(--loss); }
+  .baseline-tag {
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--ink-3); border: 1px solid var(--line-2); border-radius: 2px;
+    padding: 1px 4px; margin-left: 7px;
+  }
+
+  /* ---------- shell / orders ---------- */
+  .shell { display: grid; grid-template-columns: minmax(280px, 336px) minmax(0, 1fr); }
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: 1fr; }
+    .list-pane { max-height: 360px; border-right: 0; border-bottom: 1px solid var(--line); }
+  }
+  .list-pane {
+    border-right: 1px solid var(--line); background: var(--surface);
+    display: flex; flex-direction: column; max-height: calc(100vh - 104px);
+  }
+  .list-head { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+  .list-head .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  input[type="search"] {
+    width: 100%; padding: 6px 8px; border: 1px solid var(--line-2); border-radius: var(--r);
+    background: var(--ground); color: var(--ink); font-family: var(--mono); font-size: 12px;
+  }
+  input[type="search"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .chips { display: flex; gap: 4px; }
+  .chips button {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 3px 7px; border: 1px solid var(--line-2); border-radius: var(--r);
+    background: transparent; color: var(--ink-3); cursor: pointer;
+  }
+  .chips button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+  .chips button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .orders { overflow-y: auto; flex: 1; }
+  .order-row {
+    width: 100%; text-align: left; display: grid; grid-template-columns: 1fr auto;
+    gap: 2px 10px; padding: 9px 14px; border: 0; border-bottom: 1px solid var(--line);
+    border-left: 2px solid transparent; background: transparent; color: inherit; cursor: pointer; font: inherit;
+  }
+  .order-row:hover { background: var(--surface-2); }
+  .order-row[aria-current="true"] { background: var(--surface-2); border-left-color: var(--accent); }
+  .order-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .order-pair { font-family: var(--mono); font-size: 12.5px; font-weight: 500; }
+  .order-usd { font-family: var(--mono); font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .spark { grid-column: 1 / -1; display: flex; gap: 2px; margin-top: 3px; height: 4px; }
+  .spark i { flex: 1; border-radius: 1px; background: var(--tie); opacity: 0.45; }
+  .spark i.s-gain { background: var(--gain); opacity: 1; }
+  .spark i.s-loss { background: var(--loss); opacity: 1; }
+  .spark i.s-none { background: var(--line-2); opacity: 1; }
+
+  .detail { padding: 20px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+  .order-head { display: flex; flex-wrap: wrap; gap: 6px 28px; align-items: baseline; }
+  .order-title { font-family: var(--mono); font-size: 21px; font-weight: 600; letter-spacing: -0.02em; }
+  .order-title em { font-style: normal; color: var(--ink-3); padding: 0 5px; }
+
+  /* ---------- route cards ---------- */
+  .routes { display: flex; flex-direction: column; gap: 14px; }
+  .route-card { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); overflow: hidden; }
+  .route-card.winner { border-color: var(--accent); }
+  .route-head {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px;
+    padding: 9px 14px; border-bottom: 1px solid var(--line); background: var(--surface-2);
+  }
+  .route-name { font-family: var(--mono); font-size: 13.5px; font-weight: 600; }
+  .route-meta { font-family: var(--mono); font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .route-meta b { color: var(--ink); font-weight: 600; }
+  .flow-wrap { overflow-x: auto; padding: 8px 0; }
+  svg.flow { display: block; }
+  svg.flow text { font-family: var(--mono); }
+  .node-box { fill: var(--surface-2); stroke: var(--line-2); }
+  .node-box.endpoint { fill: var(--accent-soft); stroke: var(--accent); }
+  .node-sym { fill: var(--ink); font-size: 14px; font-weight: 600; }
+  .node-amt { fill: var(--ink-3); font-size: 11px; }
+  .edge-label, .edge-split {
+    paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round;
+  }
+  .edge-label { fill: var(--ink-2); font-size: 12px; }
+  .edge-split { fill: var(--ink); font-size: 12px; font-weight: 700; }
+  .empty-route { padding: 16px 14px; color: var(--ink-3); font-family: var(--mono); font-size: 12.5px; }
+  .leg { cursor: default; }
+  .leg .leg-line { opacity: 0.72; transition: opacity 120ms, stroke-width 120ms; }
+  .leg:hover .leg-line, .leg:focus-visible .leg-line { opacity: 1; }
+  .flow-wrap.hovering .leg .leg-line { opacity: 0.22; }
+  .flow-wrap.hovering .leg:hover .leg-line,
+  .flow-wrap.hovering .leg.on .leg-line { opacity: 1; }
+  .leg:focus-visible { outline: none; }
+  .leg:focus-visible .leg-line { stroke-dasharray: 5 4; }
+  .leg-readout {
+    display: flex; flex-wrap: wrap; gap: 3px 18px; align-items: baseline;
+    padding: 7px 14px; border-top: 1px dashed var(--line); min-height: 34px;
+    font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums;
+  }
+  .leg-readout b { font-weight: 600; }
+  .leg-readout .muted { color: var(--ink-3); }
+  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; vertical-align: baseline; }
+  tbody tr.on td { background: var(--accent-soft); }
+  .legs { border-top: 1px solid var(--line); }
+  details > summary {
+    cursor: pointer; padding: 7px 14px; font-family: var(--mono); font-size: 10px;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3);
+  }
+  details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .protokey { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
+  .protokey span { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); }
+  .protokey i { width: 13px; height: 3px; border-radius: 2px; display: inline-block; }
+
+  footer { padding: 6px 20px 28px; color: var(--ink-3); font-size: 12px; max-width: 80ch; }
+  code { font-family: var(--mono); font-size: 0.92em; background: var(--surface-2); padding: 1px 4px; border-radius: 2px; }
+  [hidden] { display: none !important; }
+  .boot {
+    position: fixed; inset: 0; display: none; place-items: center; padding: 30px;
+    background: var(--ground); z-index: 20;
+  }
+  .boot.show { display: grid; }
+
+  /* ---------- run picker ---------- */
+  /* The scroll cap sits on the table, not the dialog: a `flex: 1` pane inside a fit-content-height
+     dialog resolves its 0% basis to nothing in some engines and the table renders zero-high. */
+  #run-modal {
+    width: min(1240px, calc(100vw - 40px)); padding: 0; overflow: hidden;
+    border: 1px solid var(--line-2); border-radius: var(--r);
+    background: var(--surface); color: var(--ink);
+  }
+  #run-modal::backdrop { background: rgba(10, 12, 16, 0.45); }
+  .modal-head {
+    display: flex; align-items: center; gap: 14px;
+    padding: 11px 14px; border-bottom: 1px solid var(--line);
+  }
+  .modal-head h2 {
+    margin: 0; font-family: var(--mono); font-size: 11px; font-weight: 500;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3);
+  }
+  .modal-head input[type="search"] { width: auto; flex: 1; max-width: 280px; }
+  /* One kind of run at a time: offline and live are not comparable, so the picker never mixes
+     them. */
+  .source-toggle { display: flex; margin-left: auto; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+  .source-toggle button {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 4px 10px; border: 0; background: transparent; color: var(--ink-3); cursor: pointer;
+  }
+  .source-toggle button + button { border-left: 1px solid var(--line); }
+  .source-toggle button:hover { color: var(--ink-1); }
+  .source-toggle button.on { background: var(--accent-soft); color: var(--ink-1); }
+  #run-table td.market { font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+  .modal-hint { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+  #run-table { max-height: min(70vh, 660px); overflow: auto; border: 0; border-radius: 0; }
+  #run-table tbody tr { cursor: pointer; }
+  #run-table tbody tr.on td { background: var(--accent-soft); }
+  #run-table tbody tr.cursor td { background: var(--surface-2); }
+  #run-table tbody tr.cursor td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+  /* Configs are the widest cell and the one that tells runs apart, so it gets the slack column and
+     packs left; without a width it squeezes to one chip per line and a row grows past 200px. */
+  #run-table th, #run-table td { padding: 6px 10px; }
+  #run-table th.configs, #run-table td.configs { width: 42%; white-space: normal; text-align: left; }
+  #run-table td.dataset { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+  .cfg-list { display: flex; flex-wrap: wrap; gap: 3px; }
+  .cfg {
+    font-family: var(--mono); font-size: 10px; padding: 1px 6px; border-radius: 8px;
+    background: var(--surface-2); color: var(--ink-2);
+  }
+  .cfg.base { background: var(--accent-soft); color: var(--accent); }
+  .modal-empty { padding: 24px 16px; font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); }
+  .boot-card {
+    max-width: 68ch; border: 1px solid var(--line); border-radius: var(--r);
+    background: var(--surface); padding: 22px 26px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .boot-card h1 { margin: 0; font-family: var(--mono); font-size: 15px; letter-spacing: -0.01em; }
+  .boot-card p { margin: 0; color: var(--ink-2); font-size: 13.5px; }
+  .boot-card pre {
+    margin: 0; background: var(--surface-2); border-radius: var(--r); padding: 10px 12px;
+    font-family: var(--mono); font-size: 12.5px; overflow-x: auto;
+  }
+  .boot-card .err { color: var(--loss); font-family: var(--mono); font-size: 12.5px; }
+  .loading { padding: 30px 20px; color: var(--ink-3); font-family: var(--mono); font-size: 12.5px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="head-top">
+    <span class="brand">algorithm_bench</span>
+    <button type="button" class="run-btn" id="run-open" aria-haspopup="dialog">run</button>
+    <div class="facts" id="facts"></div>
+  </div>
+  <div class="tabs" role="tablist">
+    <button role="tab" data-tab="report" aria-selected="true">Report</button>
+    <button role="tab" data-tab="orders" aria-selected="false">Orders</button>
+    <button role="tab" data-tab="algos" aria-selected="false">Algorithms</button>
+  </div>
+</header>
+
+<section id="tab-report" class="overview"></section>
+<section id="tab-algos" class="overview" hidden></section>
+
+<div id="tab-orders" class="shell" hidden>
+  <aside class="list-pane">
+    <div class="list-head">
+      <input type="search" id="filter" placeholder="filter by pair, token or pool…" aria-label="Filter orders" />
+      <div class="row">
+        <div class="lbl" id="count"></div>
+        <div class="chips" role="group" aria-label="Sort orders">
+          <button data-sort="spread" aria-pressed="true">spread</button>
+          <button data-sort="size" aria-pressed="false">size</button>
+          <button data-sort="index" aria-pressed="false">index</button>
+        </div>
+      </div>
+    </div>
+    <div class="orders" id="orders"></div>
+  </aside>
+  <main class="detail" id="detail"></main>
+</div>
+
+<dialog id="run-modal" aria-label="Choose a run">
+  <div class="modal-head">
+    <h2 id="run-count">Runs</h2>
+    <span class="modal-hint">↑↓ move · enter open · esc close</span>
+    <div class="source-toggle" id="source-toggle" role="group" aria-label="Market">
+      <button type="button" data-source="offline">offline</button>
+      <button type="button" data-source="live">live</button>
+    </div>
+    <input type="search" id="run-filter" placeholder="filter runs…" aria-label="Filter runs" />
+  </div>
+  <div class="table-wrap" id="run-table"></div>
+</dialog>
+
+<div id="boot" class="boot"></div>
+
+<footer>
+  The Orders tab reads <code>bench-results/&lt;name&gt;/routes.jsonl</code>; the Report tab derives
+  its figures from <code>orders.csv</code>, so they follow the trade-size slice.
+</footer>
+
+<script>
+  // ---------------------------------------------------------------------------- loading
+  // The bench writes bench-results/; this page reads it. Nothing is bundled, so a new run shows up
+  // on refresh. Paths are relative to this file, which sits at fynd-core/benches/viewer/.
+  const ROOT = "../../../bench-results";
+
+  const state = {
+    run: null, runs: [], facts: {}, tab: "report",
+    orders: [],          // one per order, folded from orders.csv
+    routes: null,        // lazily fetched routes.jsonl, keyed by order id
+    routesError: null,
+    selected: null, sort: "spread", query: "",
+    pairSort: "orders", usdLo: null, usdHi: null, hideTies: false,
+    runQuery: "", runCursor: 0, runSource: "offline",
+    algo: null, algoOutcome: "all", algoField: "all",
+    protocols: null,     // rows of protocols.csv, or null when the run predates it
+    protoMetric: "legs_pct",
+  };
+
+  let BASELINE = "";
+  let CONFIGS = [];
+  let RIVALS = [];
+
+  const boot = (html) => {
+    const el = document.getElementById("boot");
+    el.className = html ? "boot show" : "boot";
+    el.innerHTML = html ? `<div class="boot-card">${html}</div>` : "";
+  };
+
+  async function getText(url) {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} — ${url}`);
+    return res.text();
+  }
+  const getJson = async url => JSON.parse(await getText(url));
+
+  // Minimal CSV reader: the bench writes plain values with no embedded commas or quotes.
+  function parseCsv(text) {
+    const lines = text.trim().split("\n");
+    const head = lines[0].split(",");
+    return lines.slice(1).map(line => {
+      const cells = line.split(",");
+      return Object.fromEntries(head.map((h, i) => [h, cells[i] ?? ""]));
+    });
+  }
+  const numOrNull = v => (v === "" || v === undefined ? null : Number(v));
+
+  async function loadIndex() {
+    const index = await getJson(`${ROOT}/index.json`);
+    state.runs = index.runs || [];
+    if (!state.runs.length) throw new Error("no runs in index.json");
+  }
+
+  async function loadRun(name) {
+    state.run = name;
+    state.facts = {};
+    state.routes = null;
+    state.routesError = null;
+    state.selected = null;
+    document.getElementById("tab-report").innerHTML = `<div class="loading">loading ${name} …</div>`;
+
+    const facts = await getJson(`${ROOT}/${name}/run.json`);
+    state.facts = facts;
+    BASELINE = facts.baseline;
+    CONFIGS = facts.configs;
+    RIVALS = CONFIGS.filter(c => c !== BASELINE);
+    // a run switch can drop the config the Algorithms tab was showing
+    if (!CONFIGS.includes(state.algo)) state.algo = RIVALS[0] ?? CONFIGS[0];
+
+    await loadTokenMeta();
+    const ordersCsv = await getText(`${ROOT}/${name}/orders.csv`);
+
+    // orders.csv is one row per order and config; fold it into one record per order
+    const byOrder = new Map();
+    parseCsv(ordersCsv).forEach(r => {
+      const key = r.order;
+      if (!byOrder.has(key)) {
+        byOrder.set(key, {
+          name: key, token_in: r.token_in, token_out: r.token_out,
+          amount_in: r.amount_in, usd: numOrNull(r.amount_usd), res: {},
+        });
+      }
+      // runs written before the config/component_id rename spell these `variant`, `name` and
+      // `pool`; reading both keeps older bench-results loadable
+      byOrder.get(key).res[r.config ?? r.variant] = {
+        solved: r.solved === "true",
+        net: r.net_out ? BigInt(r.net_out) : null,
+        swaps: numOrNull(r.swaps),
+        us: numOrNull(r.elapsed_us) ?? 0,
+        // decided on the exact integers by the bench
+        outcome: r.outcome || "",
+      };
+    });
+    // protocols.csv arrived later than the other outputs, so an older run simply has none.
+    // A missing file is expected here, not an error worth failing the whole load over.
+    try {
+      state.protocols = parseCsv(await getText(`${ROOT}/${name}/protocols.csv`));
+    } catch {
+      state.protocols = null;
+    }
+
+    state.orders = [...byOrder.values()];
+    // bps is recomputed here rather than read from the csv's rounded column, so this page and
+    // report.md put the same number under the same label
+    state.orders.forEach(o => {
+      const base = o.res[BASELINE];
+      CONFIGS.forEach(c => { if (o.res[c]) o.res[c].bps = diffBps(o.res[c].net, base?.net); });
+    });
+
+    // the slicer spans whatever sizes this run actually holds
+    const sizes = state.orders.map(o => o.usd).filter(v => v !== null && v > 0);
+    USD_MIN_E = sizes.length ? Math.log10(Math.min(...sizes)) : 3;
+    USD_MAX_E = sizes.length ? Math.log10(Math.max(...sizes)) : 6;
+    if (USD_MAX_E - USD_MIN_E < 0.2) USD_MAX_E = USD_MIN_E + 0.2;
+    state.usdLo = USD_MIN_E;
+    state.usdHi = USD_MAX_E;
+  }
+
+  // routes.jsonl is the big file, so it is only fetched when the Orders tab is first opened.
+  async function loadRoutes() {
+    if (state.routes || state.routesError) return;
+    try {
+      const text = await getText(`${ROOT}/${state.run}/routes.jsonl`);
+      state.routes = new Map(text.trim().split("\n")
+        .filter(Boolean).map(l => JSON.parse(l)).map(r => [r.order.id ?? r.order.name, r]));
+    } catch (error) {
+      state.routesError = error.message;
+    }
+  }
+
+  // ---------------------------------------------------------------------------- helpers
+  let USD_MIN_E = 3, USD_MAX_E = 6.6;
+  const eToUsd = e => Math.round(Math.pow(10, e));
+  const fmtUsd = v => v === null || v === undefined ? "—"
+    : v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M`
+    : v >= 1e3 ? `$${(v / 1e3).toFixed(1)}k` : `$${v.toFixed(0)}`;
+  const fmtUsdDiff = v => v === null || v === undefined ? "—"
+    : `${v > 0 ? "+" : v < 0 ? "\u2212" : ""}${fmtUsd(Math.abs(v))}`;
+  const ms = us => us >= 1000 ? `${(us / 1000).toFixed(1)} ms` : `${Math.round(us)} µs`;
+  const cls = v => v === null || v === undefined ? "none" : v > 0 ? "gain" : v < 0 ? "loss" : "tie";
+  const outcomeCls = o =>
+    o === "better" ? "gain" : o === "worse" ? "loss" : o === "tie" ? "tie" : "none";
+  const fmtBps = v => v === null || v === undefined ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
+  const shortPool = p => `${p.slice(0, 6)}…${p.slice(-4)}`;
+  // `pool` is what runs written before the rename call it
+  const legPool = e => e.component_id ?? e.pool;
+
+  // What fraction of the order's value the route actually bought. A route can be the best on
+  // offer and still destroy most of the value, which the bps figure alone will never show.
+  const valueKept = (order, route) =>
+    order.usd && route.usd_out ? route.usd_out / order.usd : null;
+  const valueCls = (order, route) => {
+    const k = valueKept(order, route);
+    return k === null ? "" : k < 0.9 ? "loss" : k < 0.99 ? "" : "gain";
+  };
+  const valueNote = (order, route) => {
+    const k = valueKept(order, route);
+    if (k === null || k >= 0.9) return "";
+    return ` <span class="pill no-route">−${((1 - k) * 100).toFixed(1)}%</span>`;
+  };
+
+  // symbols come from each routes.jsonl line; decimals from benches/tokens.json, fetched once
+  const SYMBOLS = new Map();
+  const DECIMALS = new Map();
+  const sym = a => SYMBOLS.get(a) || (a ? `${a.slice(2, 10)}` : "?");
+
+  // Raw on-chain integer to a readable amount. Without decimals an amount is unreadable and, worse,
+  // not comparable: a 9-decimal token next to an 18-decimal one looks like a rounding error.
+  function amount(addr, raw) {
+    if (raw === null || raw === undefined || raw === "") return "—";
+    const d = DECIMALS.get(addr);
+    if (d === undefined) return `${raw} (raw)`;
+    const s = String(raw).padStart(d + 1, "0");
+    const whole = s.slice(0, s.length - d) || "0";
+    const frac = d ? s.slice(s.length - d).replace(/0+$/, "") : "";
+    const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    return frac ? `${grouped}.${frac}` : grouped;
+  }
+
+  async function loadTokenMeta() {
+    if (DECIMALS.size) return;
+    try {
+      const table = await getJson("../tokens.json");
+      Object.entries(table).forEach(([addr, [symbol, decimals]]) => {
+        SYMBOLS.set(addr, symbol);
+        DECIMALS.set(addr, decimals);
+      });
+    } catch {
+      // labels fall back to short addresses and amounts stay raw; not worth failing the page
+    }
+  }
+  const pairLabel = o => `${sym(o.token_in)}→${sym(o.token_out)}`;
+
+  const PROTO_COLORS = {};
+  const RAMP = ["--p1", "--p2", "--p3", "--p4", "--p5", "--p6"];
+  const protoColor = p => (PROTO_COLORS[p] ||=
+    `var(${RAMP[Object.keys(PROTO_COLORS).length % RAMP.length]})`);
+
+  const BINS = [
+    { lo: -Infinity, hi: -100, label: "<-100", k: "loss" },
+    { lo: -100, hi: -20, label: "-100", k: "loss" },
+    { lo: -20, hi: -5, label: "-20", k: "loss" },
+    { lo: -5, hi: -1, label: "-5", k: "loss" },
+    { lo: -1, hi: 1, label: "0", k: "tie" },
+    { lo: 1, hi: 5, label: "+5", k: "gain" },
+    { lo: 5, hi: 20, label: "+20", k: "gain" },
+    { lo: 20, hi: 100, label: "+100", k: "gain" },
+    { lo: 100, hi: Infinity, label: ">100", k: "gain" },
+  ];
+  const pct = (sorted, f) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.round((sorted.length - 1) * f))] : 0;
+  // averages the two middle values on an even count, matching median in benches/common/mod.rs —
+  // otherwise this page and report.md disagree on roughly half of all runs
+  const medianOf = v => {
+    if (!v.length) return null;
+    const t = [...v].sort((a, b) => a - b), m = t.length >> 1;
+    return t.length % 2 ? t[m] : (t[m - 1] + t[m]) / 2;
+  };
+  const meanOf = v => v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+
+  // Mirrors diff_bps in algorithm_bench.rs: the subtraction happens on the integers, because at
+  // these magnitudes the difference between two outputs is often smaller than the gap between
+  // adjacent doubles. Only the ratio is taken in floating point.
+  function diffBps(net, base) {
+    if (net === null || base === null || base === undefined || base === 0n) return null;
+    const sign = net >= base ? 1 : -1;
+    const magnitude = Number(net >= base ? net - base : base - net);
+    return sign * magnitude / Number(base) * 10000;
+  }
+
+  // Everything the report shows, over whatever slice is selected.
+  function aggregate(rows) {
+    const byConfig = {};
+    CONFIGS.forEach(c => {
+      let solved = 0, only = 0, missed = 0, w = 0, l = 0, t = 0;
+      // Volume this config actually routed, so a strong bps on tiny orders is not mistaken
+      // for a strong bps on the flow that matters. Orders with no usd value are left out.
+      let usd = 0;
+      const bpsVals = [], times = [];
+      rows.forEach(o => {
+        const base = o.res[BASELINE], me = o.res[c];
+        if (!me) return;
+        times.push(me.us);
+        if (me.solved) { solved++; if (o.usd !== null) usd += o.usd; }
+        if (me.solved && base && !base.solved) only++;
+        if (!me.solved && base && base.solved) missed++;
+        if (me.outcome === "better") w++;
+        else if (me.outcome === "worse") l++;
+        else if (me.outcome === "tie") t++;
+        if (["better", "worse", "tie"].includes(me.outcome) && me.bps !== null) {
+          bpsVals.push({ bps: me.bps, outcome: me.outcome });
+        }
+      });
+      times.sort((a, b) => a - b);
+      const raw = bpsVals.map(v => v.bps);
+      byConfig[c] = { solved, only, missed, w, l, t, usd, compared: bpsVals.length, bpsVals,
+        mean: meanOf(raw), median: medianOf(raw),
+        p50: pct(times, 0.5), p95: pct(times, 0.95) };
+    });
+
+    const pairs = {};
+    rows.forEach(o => {
+      const key = pairLabel(o);
+      const p = (pairs[key] ||= { pair: key, orders: 0, vals: {} });
+      p.orders++;
+      RIVALS.forEach(c => {
+        const base = o.res[BASELINE], me = o.res[c];
+        if (me?.solved && base?.solved && me.bps !== null) (p.vals[c] ||= []).push(me.bps);
+      });
+    });
+    const byPair = Object.values(pairs).map(p => ({
+      pair: p.pair, orders: p.orders,
+      m: Object.fromEntries(RIVALS.map(c => [c, meanOf(p.vals[c] || [])])),
+    }));
+
+    return { byConfig, byPair };
+  }
+
+  // orders.csv carries the first pass only, so with --repeats > 1 these cover fewer solves than
+  // report.md's timing table, which accumulates every pass
+  function speedBasis() {
+    const jobs = state.facts.jobs, repeats = state.facts.repeats ?? 1;
+    const load = jobs > 1 ? ` Wall clock under ${jobs}-way concurrency.` : " One solve at a time.";
+    return load + (repeats > 1 ? ` report.md covers all ${repeats} passes.` : "");
+  }
+
+  function bps(order, config) { return order.res[config]?.bps ?? null; }
+  const spreadOf = o => {
+    const v = CONFIGS.map(c => bps(o, c)).filter(x => x !== null);
+    return v.length ? Math.max(...v) - Math.min(...v) : -1;
+  };
+
+  // ---------------------------------------------------------------- header
+  function renderHeader() {
+    document.getElementById("run-open").textContent = state.run ?? "run";
+    const f = state.facts || {};
+    if (!f.baseline) {
+      document.getElementById("facts").innerHTML = "";
+      return;
+    }
+    const market = f.market ?? {};
+    const facts = {
+      market: runSource(f) === "live"
+        ? `live · ${market.chain_name ?? "?"} #${market.block ?? "?"}`
+        : "offline fixture",
+      orders: (f.orders ?? 0).toLocaleString(),
+      pairs: (f.pairs ?? 0).toLocaleString(),
+      baseline: f.baseline ?? "—",
+      gas: `${f.gas_price_gwei ?? "?"} gwei`,
+      timeout: `${(f.timeout_ms ?? 0).toLocaleString()} ms`,
+      jobs: `${f.jobs ?? "?"}×`,
+    };
+    document.getElementById("facts").innerHTML = Object.entries(facts)
+      .map(([k, v]) => `<div class="fact"><div class="lbl">${k}</div><b>${v}</b></div>`).join("");
+  }
+
+  // ---------------------------------------------------------------- run picker
+  // index.json carries each run's whole run.json, so the picker can show what a run was without
+  // reading anything else. Listed newest first, on the same name ordering the page opens with.
+  const datasetName = run => (run.dataset ?? "").split("/").pop() || "—";
+
+  // The kind lives on the market object. Runs written before live capture existed carry no
+  // market at all, and they were all offline.
+  const runSource = run => ((run.market?.source ?? run.source) === "live" ? "live" : "offline");
+
+  // A live run is one block of one chain; an offline run is the fixture. Shown in the picker so
+  // the two are never confused at a glance.
+  function marketCell(run) {
+    const market = run.market ?? {};
+    if (runSource(run) !== "live") return "fixture";
+    const block = market.block === undefined ? "—" : `#${market.block}`;
+    return `${market.chain_name ?? "?"} ${block}`;
+  }
+
+  const runTime = run => {
+    const at = Date.parse(run.finished_at ?? "");
+    return Number.isNaN(at) ? null : at;
+  };
+
+  function runWhen(run) {
+    const at = runTime(run);
+    if (at === null) return "—";
+    const d = new Date(at), pad = n => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  // Newest first. `finished_at` was added after runs already existed, so a run without one keeps
+  // its old reverse-name position, below everything that can be dated.
+  function runList() {
+    const dated = [], undated = [];
+    state.runs.forEach(r => (runTime(r) === null ? undated : dated).push(r));
+    dated.sort((a, b) => runTime(b) - runTime(a));
+    return [...dated, ...undated.reverse()];
+  }
+
+  function matchingRuns() {
+    const ofKind = runList().filter(r => runSource(r) === state.runSource);
+    const query = state.runQuery.trim().toLowerCase();
+    if (!query) return ofKind;
+    return ofKind.filter(r =>
+      [r.name, runWhen(r), r.baseline, ...(r.configs ?? []), datasetName(r)]
+        .join(" ").toLowerCase().includes(query));
+  }
+
+  function renderRunTable() {
+    const rows = matchingRuns();
+    const wrap = document.getElementById("run-table");
+    const kind = state.runSource;
+    const ofKind = state.runs.filter(r => runSource(r) === kind).length;
+    document.getElementById("run-count").textContent = rows.length === ofKind
+      ? `${rows.length} ${kind} runs`
+      : `${rows.length} of ${ofKind} ${kind} runs`;
+    document.querySelectorAll("#source-toggle button").forEach(b =>
+      b.classList.toggle("on", b.dataset.source === kind));
+    if (!rows.length) {
+      wrap.innerHTML = state.runQuery
+        ? `<div class="modal-empty">No ${kind} run matches “${state.runQuery}”.</div>`
+        : `<div class="modal-empty">No ${kind} runs yet.</div>`;
+      return;
+    }
+    state.runCursor = Math.min(state.runCursor, rows.length - 1);
+    wrap.innerHTML = `<table>
+      <thead><tr>
+        <th>run</th><th>when</th><th>market</th><th>orders</th><th>pairs</th>
+        <th class="configs">configs</th>
+        <th>jobs</th><th>passes</th><th>timeout</th><th>gas</th><th>dataset</th>
+      </tr></thead>
+      <tbody>${rows.map((r, i) => {
+        const configs = (r.configs ?? []).map(c =>
+          `<span class="cfg${c === r.baseline ? " base" : ""}">${c}</span>`).join("");
+        const classes = [r.name === state.run ? "on" : "", i === state.runCursor ? "cursor" : ""]
+          .filter(Boolean).join(" ");
+        return `<tr data-run="${r.name}" data-i="${i}" class="${classes}">
+          <td>${r.name}</td>
+          <td>${runWhen(r)}</td>
+          <td class="market">${marketCell(r)}</td>
+          <td>${(r.orders ?? 0).toLocaleString()}</td>
+          <td>${(r.pairs ?? 0).toLocaleString()}</td>
+          <td class="configs"><div class="cfg-list">${configs}</div></td>
+          <td>${r.jobs ?? "?"}×</td>
+          <td>${r.repeats ?? 1}</td>
+          <td>${(r.timeout_ms ?? 0).toLocaleString()} ms</td>
+          <td>${r.gas_price_gwei ?? "?"} gwei</td>
+          <td class="dataset" title="${r.dataset ?? ""}">${datasetName(r)}</td>
+        </tr>`;
+      }).join("")}</tbody></table>`;
+
+    wrap.querySelectorAll("tbody tr").forEach(tr =>
+      tr.addEventListener("click", () => chooseRun(tr.dataset.run)));
+    wrap.querySelector("tbody tr.cursor")?.scrollIntoView({ block: "nearest" });
+  }
+
+  function openRunPicker() {
+    state.runQuery = "";
+    // Show the kind the open run is, so opening the picker never hides what is on screen.
+    const open = state.runs.find(r => r.name === state.run);
+    if (open) state.runSource = runSource(open);
+    state.runCursor = Math.max(0, matchingRuns().findIndex(r => r.name === state.run));
+    document.getElementById("run-filter").value = "";
+    renderRunTable();
+    document.getElementById("run-modal").showModal();
+  }
+
+  function chooseRun(name) {
+    document.getElementById("run-modal").close();
+    if (name !== state.run) openRun(name);
+  }
+
+  function moveRunCursor(delta) {
+    const rows = matchingRuns();
+    if (!rows.length) return;
+    state.runCursor = (state.runCursor + delta + rows.length) % rows.length;
+    renderRunTable();
+  }
+
+  // ---------------------------------------------------------------- algorithms tab
+  // Nine bins, because .hist-bars is a nine-column grid shared with the bps histogram.
+  const TIME_BINS = [
+    { lo: 0, hi: 1, label: "<1" }, { lo: 1, hi: 2, label: "1–2" }, { lo: 2, hi: 5, label: "2–5" },
+    { lo: 5, hi: 10, label: "5–10" }, { lo: 10, hi: 25, label: "10–25" }, { lo: 25, hi: 50, label: "25–50" },
+    { lo: 50, hi: 100, label: "50–100" }, { lo: 100, hi: 250, label: "100–250" },
+    { lo: 250, hi: Infinity, label: ">250" },
+  ];
+  const OUTCOMES = [["all", "all"], ["better", "won"], ["worse", "lost"], ["tie", "tied"]];
+  const FIELD = [["all", "all"], ["best", "best"], ["behind", "behind"]];
+
+  // The most any config found for this order, and which ones found it. Compared on the exact
+  // integers the bench recorded, like the baseline outcome is.
+  function fieldBest(order) {
+    let net = null, winners = [];
+    CONFIGS.forEach(c => {
+      const r = order.res[c];
+      if (!r?.solved || r.net === null) return;
+      if (net === null || r.net > net) { net = r.net; winners = [c]; }
+      else if (r.net === net) winners.push(c);
+    });
+    return { net, winners };
+  }
+
+  // Where one config stands against the whole field, which is a different question from how it did
+  // against the baseline: a config can tie the baseline to the wei and still be behind, because
+  // some other algorithm found more on that order.
+  function fieldStanding(order, config) {
+    const me = order.res[config];
+    const { net, winners } = fieldBest(order);
+    if (net === null) return { key: "none", gap: null, winner: null };
+    if (me?.solved && me.net !== null && me.net === net) return { key: "best", gap: 0, winner: null };
+    return {
+      key: "behind",
+      gap: me?.solved && me.net !== null ? diffBps(me.net, net) : null,
+      winner: winners[0] ?? null,
+    };
+  }
+
+  function histCard(name, stat, counts, bins, kindOf, footer) {
+    const peak = Math.max(1, ...counts);
+    return `<article class="hist">
+      <div class="hist-head">
+        <span class="hist-name">${name}</span>
+        <span class="hist-stat">${stat}</span>
+      </div>
+      <div class="hist-bars" role="img" aria-label="${name}">
+        ${counts.map((n, i) => `<div title="${bins[i].label}: ${n} orders">
+           <i class="b-${kindOf(i)}" style="height:${n / peak * 100}%"></i></div>`).join("")}
+      </div>
+      <div class="hist-axis">${bins.map(b => `<span>${b.label}</span>`).join("")}</div>
+      <div class="hist-stat">${footer}</div>
+    </article>`;
+  }
+
+  function renderAlgos() {
+    const config = state.algo;
+    const { lo, hi, rows } = slice();
+    const { byConfig } = aggregate(rows);
+    const d = byConfig[config];
+    const isBase = config === BASELINE;
+
+    // Two independent axes: how the config did against the baseline, and where it stands in the
+    // field. Filtering on both is how "tied the baseline but another algorithm beat it" is reached.
+    const ran = rows.filter(o => o.res[config]);
+    const standings = new Map(ran.map(o => [o.name, fieldStanding(o, config)]));
+    const nBest = ran.filter(o => standings.get(o.name).key === "best").length;
+    const nBehind = ran.filter(o => standings.get(o.name).key === "behind").length;
+
+    const picker = `<div class="chips" role="group" aria-label="Algorithm">
+      ${CONFIGS.map(c => `<button data-algo="${c}" aria-pressed="${c === config}">${c}</button>`).join("")}
+    </div>`;
+
+    const tot = d.w + d.l + d.t || 1;
+    const usdDiff = d.usd - byConfig[BASELINE].usd;
+    const card = `<article class="card ${isBase ? "is-baseline" : ""}">
+      <div class="card-name">${config}${isBase ? '<span class="baseline-tag">baseline</span>' : ""}</div>
+      <div class="card-hero">
+        <b class="${isBase ? "none" : cls(d.mean)}">${isBase ? "—" : fmtBps(d.mean)}</b>
+        <span class="card-hero-label"><span>mean bps</span>${isBase ? "" : `<span>median ${fmtBps(d.median)}</span>`}</span>
+      </div>
+      <div class="wlt" role="img" aria-label="${d.w} won, ${d.l} lost, ${d.t} tied">
+        <i class="w" style="width:${d.w / tot * 100}%"></i>
+        <i class="l" style="width:${d.l / tot * 100}%"></i>
+        <i class="t" style="width:${d.t / tot * 100}%"></i>
+      </div>
+      ${isBase ? "" : `<div class="wlt-legend" aria-hidden="true"><b class="w">${d.w.toLocaleString()}</b><i>/</i><b class="l">${d.l.toLocaleString()}</b><i>/</i><b class="t">${d.t.toLocaleString()}</b></div>`}
+      <div class="card-rows">
+        <div class="card-row"><span>best / behind field</span><b>${nBest.toLocaleString()} / ${nBehind.toLocaleString()}</b></div>
+        <div class="card-row"><span>solved</span><b>${d.solved.toLocaleString()} / ${rows.length}</b></div>
+        <div class="card-row"><span>volume settled</span><b>${fmtUsd(d.usd)}</b></div>
+        <div class="card-row"><span>vs baseline</span><b class="${isBase ? "none" : cls(usdDiff)}">${isBase ? "\u2014" : fmtUsdDiff(usdDiff)}</b></div>
+        <div class="card-row"><span>only / missed</span><b>${isBase ? "—" : `${d.only} / ${d.missed}`}</b></div>
+        <div class="card-row"><span>p50 / p95 solve</span><b>${ms(d.p50)} / ${ms(d.p95)}</b></div>
+      </div>
+    </article>`;
+
+    const shownBps = state.hideTies ? d.bpsVals.filter(v => v.outcome !== "tie") : d.bpsVals;
+    const bpsCounts = BINS.map(b => shownBps.filter(v => v.bps >= b.lo && v.bps < b.hi).length);
+    const bpsVals = shownBps.map(v => v.bps);
+    const bpsCard = isBase
+      ? `<article class="hist"><div class="hist-head"><span class="hist-name">bps</span></div>
+           <div class="empty-route">${config} is the baseline every bps is measured against.</div></article>`
+      : histCard("bps vs baseline",
+          `median <b class="${cls(medianOf(bpsVals))}">${fmtBps(medianOf(bpsVals))}</b> · mean <b class="${cls(meanOf(bpsVals))}">${fmtBps(meanOf(bpsVals))}</b>`,
+          bpsCounts, BINS, i => BINS[i].k,
+          `${shownBps.length} shown${state.hideTies ? ` · ${d.t} ties hidden` : ""}${d.missed ? ` · ${d.missed} no route` : ""}`);
+
+    const timesMs = rows.map(o => o.res[config]).filter(Boolean).map(r => r.us / 1000);
+    const timeCounts = TIME_BINS.map(b => timesMs.filter(v => v >= b.lo && v < b.hi).length);
+    const timeCard = histCard("solve time (ms)",
+      `p50 <b>${ms(d.p50)}</b> · p95 <b>${ms(d.p95)}</b>`,
+      timeCounts, TIME_BINS, () => "time", `${timesMs.length} solves.${speedBasis()}`);
+
+    const matchesOutcome = o => state.algoOutcome === "all" || o.res[config].outcome === state.algoOutcome;
+    const matchesField = o => state.algoField === "all" || standings.get(o.name).key === state.algoField;
+
+    const picked = ran.filter(o => matchesOutcome(o) && matchesField(o));
+    const sorted = [...picked].sort((a, b) => {
+      // behind-the-field is read worst-first, like a loss against the baseline
+      if (state.algoField === "behind") {
+        const x = standings.get(a.name).gap, y = standings.get(b.name).gap;
+        return (x ?? -Infinity) - (y ?? -Infinity);
+      }
+      const x = a.res[config].bps, y = b.res[config].bps;
+      if (x === null || y === null) return (y ?? -Infinity) - (x ?? -Infinity);
+      return state.algoOutcome === "worse" ? x - y : y - x;
+    });
+
+    // Each group counts what you would get by clicking it, with the other group's filter still on.
+    const outcomeChips = `<div class="chips" role="group" aria-label="Against the baseline">
+      <span class="lbl">vs baseline</span>
+      ${OUTCOMES.map(([key, label]) => {
+        const n = ran.filter(o => (key === "all" || o.res[config].outcome === key) && matchesField(o)).length;
+        return `<button data-outcome="${key}" aria-pressed="${key === state.algoOutcome}">${label} ${n}</button>`;
+      }).join("")}
+    </div>`;
+
+    const fieldChips = `<div class="chips" role="group" aria-label="Against the field">
+      <span class="lbl">vs field</span>
+      ${FIELD.map(([key, label]) => {
+        const n = ran.filter(o => (key === "all" || standings.get(o.name).key === key) && matchesOutcome(o)).length;
+        return `<button data-field="${key}" aria-pressed="${key === state.algoField}">${label} ${n}</button>`;
+      }).join("")}
+    </div>`;
+
+    const filterLabel = () => {
+      const parts = [];
+      if (state.algoOutcome !== "all") parts.push(`${OUTCOMES.find(([k]) => k === state.algoOutcome)[1]} against the baseline`);
+      if (state.algoField !== "all") parts.push(`${state.algoField} the field`);
+      return parts.length ? parts.join(" and ") : "covered by this config";
+    };
+
+    const CAP = 500;
+    const table = `<div class="table-wrap"><table class="rows-click">
+      <thead><tr><th>pair</th><th>size</th><th>vs baseline</th><th>vs best</th><th>beaten by</th>
+        <th>solve</th><th>swaps</th></tr></thead>
+      <tbody>${sorted.slice(0, CAP).map(o => {
+        const me = o.res[config], f = standings.get(o.name);
+        return `<tr data-order="${o.name}">
+          <td>${pairLabel(o)}</td>
+          <td>${fmtUsd(o.usd)}</td>
+          <td class="bps-cell ${me.solved ? cls(me.bps) : "none"}">${me.solved ? fmtBps(me.bps) : "no route"}</td>
+          <td class="bps-cell ${f.key === "best" ? "gain" : cls(f.gap)}">${f.key === "best" ? "best" : fmtBps(f.gap)}</td>
+          <td class="${f.winner ? "" : "none"}">${f.winner ?? "—"}</td>
+          <td>${ms(me.us)}</td>
+          <td>${me.swaps ?? "—"}</td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table></div>`;
+
+    document.getElementById("tab-algos").innerHTML = `
+      ${slicerHtml({ lo, hi, rows })}
+      <div>
+        <div class="section-title"><h2>Algorithm</h2>
+          <p>Everything below covers this one config over the selected trade sizes.</p></div>
+        <div style="margin-top:12px; display:flex; flex-direction:column; gap:14px">
+          ${picker}
+          <div class="scorecards" style="max-width:480px">${card}</div>
+        </div>
+      </div>
+      <div>
+        <div class="section-title"><h2>Distribution</h2>
+          <p>Per-order bps against <code>${BASELINE}</code>, and wall-clock solve time.</p>
+          <label class="toggle">
+            <input type="checkbox" id="algo-hide-ties" ${state.hideTies ? "checked" : ""} />
+            hide ties
+          </label></div>
+        <div class="hists" style="margin-top:12px">${bpsCard}${timeCard}</div>
+      </div>
+      <div>
+        <div class="section-title"><h2>Orders</h2>
+          <p>${sorted.length.toLocaleString()} order${sorted.length === 1 ? "" : "s"}${sorted.length > CAP ? ` · showing ${CAP}` : ""}.
+             <code>vs baseline</code> is against <code>${BASELINE}</code>; <code>vs field</code> is against the best
+             any config found on that order, so tying the baseline and being behind the field is a real
+             combination. Orders no config solved have no standing, which is why best and behind need not
+             add up to all. Pick a row to open it on the Orders tab.</p></div>
+        <div style="margin-top:12px; display:flex; flex-direction:column; gap:12px">
+          ${outcomeChips}
+          ${fieldChips}
+          ${sorted.length ? table : `<div class="empty-route">No order in this slice is ${filterLabel()}.</div>`}
+        </div>
+      </div>`;
+
+    wireSlicer(renderAlgos);
+    document.getElementById("algo-hide-ties")?.addEventListener("change", e => {
+      state.hideTies = e.target.checked;
+      renderAlgos();
+      document.getElementById("algo-hide-ties")?.focus();
+    });
+    document.querySelectorAll("[data-algo]").forEach(b =>
+      b.addEventListener("click", () => { state.algo = b.dataset.algo; renderAlgos(); }));
+    document.querySelectorAll("[data-outcome]").forEach(b =>
+      b.addEventListener("click", () => { state.algoOutcome = b.dataset.outcome; renderAlgos(); }));
+    document.querySelectorAll("[data-field]").forEach(b =>
+      b.addEventListener("click", () => { state.algoField = b.dataset.field; renderAlgos(); }));
+    document.querySelectorAll("[data-order]").forEach(tr =>
+      tr.addEventListener("click", () => {
+        state.selected = tr.dataset.order;
+        state.query = "";
+        document.getElementById("filter").value = "";
+        selectTab("orders");
+      }));
+  }
+
+  // ---------------------------------------------------------------- report tab
+  // ---------------------------------------------------------------- trade-size slice
+  // Report and Algorithms read the same slice, so moving it on one tab moves it on the other.
+  function slice() {
+    const lo = eToUsd(state.usdLo), hi = state.usdHi >= USD_MAX_E ? Infinity : eToUsd(state.usdHi);
+    // orders without a recorded size stay in the unsliced view rather than vanishing silently
+    const rows = state.orders.filter(o => o.usd === null ? !sliceActive() : (o.usd >= lo && o.usd <= hi));
+    return { lo, hi, rows };
+  }
+
+  function slicerHtml({ lo, hi, rows }) {
+    const note = sliceActive()
+      ? `<span class="slice-tag">${fmtUsd(lo)} – ${hi === Infinity ? "∞" : fmtUsd(hi)} · ${rows.length} of ${state.orders.length} orders</span>`
+      : `<span class="slice-tag muted">all ${state.orders.length} orders</span>`;
+    return `<div class="slicer">
+      <div class="range">
+        <div class="lbl">trade size</div>
+        <div class="range-track">
+          <input type="range" id="usd-lo" min="${USD_MIN_E}" max="${USD_MAX_E}" step="0.05"
+                 value="${state.usdLo}" aria-label="Minimum trade size" />
+          <input type="range" id="usd-hi" min="${USD_MIN_E}" max="${USD_MAX_E}" step="0.05"
+                 value="${state.usdHi}" aria-label="Maximum trade size" />
+        </div>
+        <div class="range-read">
+          <b>${fmtUsd(lo)}</b>
+          <span class="lbl">${rows.length} orders</span>
+          <b>${hi === Infinity ? "no cap" : fmtUsd(hi)}</b>
+        </div>
+      </div>
+      <div class="chips" role="group" aria-label="Size presets">
+        ${[["all", USD_MIN_E, USD_MAX_E], ["1k–10k", 3, 4], ["10k–100k", 4, 5], ["100k+", 5, USD_MAX_E]]
+          .map(([l, a, b]) => `<button data-usd="${a},${b}"
+            aria-pressed="${Math.abs(state.usdLo - a) < 0.01 && Math.abs(state.usdHi - b) < 0.01}">${l}</button>`).join("")}
+      </div>
+      ${note}
+    </div>`;
+  }
+
+  function wireSlicer(rerender) {
+    const loEl = document.getElementById("usd-lo"), hiEl = document.getElementById("usd-hi");
+    if (!loEl || !hiEl) return;
+    const wasFocused = document.activeElement === loEl ? "usd-lo" : document.activeElement === hiEl ? "usd-hi" : null;
+    const onDrag = e => {
+      // the thumbs share a track, so stop them crossing
+      let l = +loEl.value, h = +hiEl.value;
+      if (l > h - 0.1) { if (e.target === loEl) l = Math.max(USD_MIN_E, h - 0.1); else h = Math.min(USD_MAX_E, l + 0.1); }
+      state.usdLo = l; state.usdHi = h;
+      rerender();
+      document.getElementById(e.target.id)?.focus();
+    };
+    loEl.addEventListener("input", onDrag);
+    hiEl.addEventListener("input", onDrag);
+    if (wasFocused) document.getElementById(wasFocused)?.focus();
+    document.querySelectorAll("[data-usd]").forEach(b =>
+      b.addEventListener("click", () => {
+        const [a, z] = b.dataset.usd.split(",").map(Number);
+        state.usdLo = a; state.usdHi = z; rerender();
+      }));
+  }
+
+  function renderReport() {
+    const { lo, hi, rows } = slice();
+    const { byConfig, byPair } = aggregate(rows);
+    const maxP95 = Math.max(1, ...CONFIGS.map(c => byConfig[c].p95));
+
+    const cards = CONFIGS.map(c => {
+      const d = byConfig[c], isBase = c === BASELINE;
+      const tot = d.w + d.l + d.t || 1;
+      const usdDiff = d.usd - byConfig[BASELINE].usd;
+      return `<article class="card ${isBase ? "is-baseline" : ""}">
+        <div class="card-name">${c}${isBase ? '<span class="baseline-tag">baseline</span>' : ""}</div>
+        <div class="card-hero">
+          <b class="${isBase ? "none" : cls(d.mean)}">${isBase ? "—" : fmtBps(d.mean)}</b>
+          <span class="card-hero-label"><span>mean bps</span>${isBase ? "" : `<span>median ${fmtBps(d.median)}</span>`}</span>
+        </div>
+        <div class="wlt" role="img" aria-label="${d.w} better, ${d.l} worse, ${d.t} tie">
+          <i class="w" style="width:${d.w / tot * 100}%"></i>
+          <i class="l" style="width:${d.l / tot * 100}%"></i>
+          <i class="t" style="width:${d.t / tot * 100}%"></i>
+        </div>
+        ${isBase ? "" : `<div class="wlt-legend" aria-hidden="true"><b class="w">${d.w.toLocaleString()}</b><i>/</i><b class="l">${d.l.toLocaleString()}</b><i>/</i><b class="t">${d.t.toLocaleString()}</b></div>`}
+        <div class="card-rows">
+          <div class="card-row"><span>solved</span><b>${d.solved.toLocaleString()} / ${rows.length}</b></div>
+          <div class="card-row"><span>volume settled</span><b>${fmtUsd(d.usd)}</b></div>
+          <div class="card-row"><span>vs baseline</span><b class="${isBase ? "none" : cls(usdDiff)}">${isBase ? "\u2014" : fmtUsdDiff(usdDiff)}</b></div>
+          <div class="card-row"><span>only / missed</span><b>${isBase ? "—" : `${d.only} / ${d.missed}`}</b></div>
+          <div class="card-row"><span>p50 solve</span><b>${ms(d.p50)}</b></div>
+        </div>
+      </article>`;
+    }).join("");
+
+    const hists = RIVALS.map(c => {
+      const d = byConfig[c];
+      // ties are exact: same output to the wei. They dominate the middle bin and flatten
+      // everything either side of it, so hiding them is how the tails become readable.
+      const shown = state.hideTies ? d.bpsVals.filter(v => v.outcome !== "tie") : d.bpsVals;
+      const counts = BINS.map(b => shown.filter(v => v.bps >= b.lo && v.bps < b.hi).length);
+      const peak = Math.max(1, ...counts);
+      const vals = shown.map(v => v.bps);
+      const median = medianOf(vals), mean = meanOf(vals);
+      return `<article class="hist">
+        <div class="hist-head">
+          <span class="hist-name">${c}</span>
+          <span class="hist-stat">median <b class="${cls(median)}">${fmtBps(median)}</b> · mean <b class="${cls(mean)}">${fmtBps(mean)}</b></span>
+        </div>
+        <div class="hist-bars" role="img" aria-label="Distribution of bps for ${c}">
+          ${counts.map((n, i) => `<div title="${BINS[i].label}: ${n} orders">
+             <i class="b-${BINS[i].k}" style="height:${n / peak * 100}%"></i></div>`).join("")}
+        </div>
+        <div class="hist-axis">${BINS.map(b => `<span>${b.label}</span>`).join("")}</div>
+        <div class="hist-stat">${shown.length} shown${state.hideTies ? ` · ${d.t} ties hidden` : ""}${d.missed ? ` · ${d.missed} no route` : ""}</div>
+      </article>`;
+    }).join("");
+
+    const speed = CONFIGS.map(c => {
+      const d = byConfig[c];
+      return `<div class="bar-row">
+        <span>${c}</span>
+        <div class="bar-track" role="img" aria-label="p50 ${ms(d.p50)}, p95 ${ms(d.p95)}">
+          <div class="bar-fill p95" style="width:${d.p95 / maxP95 * 100}%"></div>
+          <div class="bar-fill" style="width:${d.p50 / maxP95 * 100}%; margin-top:-22px"></div>
+        </div>
+        <b>${ms(d.p50)} <span class="lbl">p95 ${ms(d.p95)}</span></b>
+      </div>`;
+    }).join("");
+
+    const MIN_ORDERS = 5;
+    const shown = byPair.filter(p => p.orders >= MIN_ORDERS);
+    const spreadOfPair = p => {
+      const v = Object.values(p.m).filter(x => x !== null);
+      return v.length ? Math.max(...v) - Math.min(...v) : null;
+    };
+    const sortedPairs = [...shown].sort((a, b) => {
+      if (state.pairSort === "orders") return b.orders - a.orders;
+      if (state.pairSort === "spread") return (spreadOfPair(b) ?? -Infinity) - (spreadOfPair(a) ?? -Infinity);
+      return (b.m[state.pairSort] ?? -Infinity) - (a.m[state.pairSort] ?? -Infinity);
+    });
+
+    const pairTable = `<div class="table-wrap"><table>
+      <thead><tr>
+        <th class="sortable" data-psort="orders" ${state.pairSort === "orders" ? 'aria-sort="descending"' : ""}>pair</th>
+        <th class="sortable" data-psort="orders" ${state.pairSort === "orders" ? 'aria-sort="descending"' : ""}>orders</th>
+        ${RIVALS.map(c => `<th class="sortable" data-psort="${c}" ${state.pairSort === c ? 'aria-sort="descending"' : ""}>${c}</th>`).join("")}
+        <th class="sortable" data-psort="spread" ${state.pairSort === "spread" ? 'aria-sort="descending"' : ""}>spread</th>
+      </tr></thead>
+      <tbody>${sortedPairs.map(p => {
+        const sp = spreadOfPair(p);
+        return `<tr>
+          <td>${p.pair}</td><td>${p.orders}</td>
+          ${RIVALS.map(c => `<td class="bps-cell ${cls(p.m[c])}">${fmtBps(p.m[c])}</td>`).join("")}
+          <td class="${sp === null ? "none" : ""}">${sp === null ? "—" : sp.toFixed(1)}</td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table></div>`;
+
+    document.getElementById("tab-report").innerHTML = `
+      ${slicerHtml({ lo, hi, rows })}
+
+      <div>
+        <div class="section-title"><h2>By algorithm</h2>
+          <p>Against <code>${BASELINE}</code>, over the orders both solved.</p></div>
+        <div class="scorecards" style="margin-top:12px">${cards}</div>
+      </div>
+      <div class="report-split">
+        <div>
+          <div class="section-title"><h2>Distribution</h2>
+            <p>Per-order bps against the baseline. Bins are log-spaced.</p>
+            <label class="toggle">
+              <input type="checkbox" id="hide-ties" ${state.hideTies ? "checked" : ""} />
+              hide ties
+            </label></div>
+          <div class="hists" style="margin-top:12px">${hists}</div>
+        </div>
+        <div>
+          <div class="section-title"><h2>Speed</h2>
+            <p>Solid is p50, faded is p95, over the first pass.${speedBasis()}</p></div>
+          <div class="bars" style="margin-top:12px">${speed}</div>
+        </div>
+      </div>
+      ${protocolSection()}
+      <div>
+        <div class="section-title"><h2>By token pair</h2>
+          <p>Mean bps. Pairs with fewer than ${MIN_ORDERS} orders in the slice are left out.</p></div>
+        <div style="margin-top:12px">${pairTable}</div>
+      </div>`;
+
+    wireSlicer(renderReport);
+
+    document.getElementById("hide-ties")?.addEventListener("change", e => {
+      state.hideTies = e.target.checked;
+      renderReport();
+      document.getElementById("hide-ties")?.focus();
+    });
+    document.querySelectorAll("[data-proto-metric]").forEach(b =>
+      b.addEventListener("click", () => {
+        state.protoMetric = b.dataset.protoMetric;
+        renderReport();
+      }));
+    document.querySelectorAll("[data-psort]").forEach(th =>
+      th.addEventListener("click", () => { state.pairSort = th.dataset.psort; renderReport(); }));
+  }
+
+
+  // ------------------------------------------------------------ protocols
+  // protocols.csv is aggregated over the whole run, so unlike every other section here it does
+  // not follow the trade-size slicer. The subtitle says so rather than letting it look filtered.
+  const PROTO_METRICS = [
+    { key: "legs_pct",   label: "legs %",     fmt: v => `${v.toFixed(1)}%` },
+    { key: "orders_pct", label: "orders %",   fmt: v => `${v.toFixed(1)}%` },
+    { key: "pools_used", label: "pools used", fmt: v => v.toLocaleString() },
+    { key: "usd",        label: "usd",        fmt: v => fmtUsd(v) },
+  ];
+
+  function protocolSection() {
+    if (!state.protocols?.length) {
+      return `<div>
+        <div class="section-title"><h2>By protocol</h2>
+          <p class="none">No <code>protocols.csv</code> in this run.</p></div>
+      </div>`;
+    }
+
+    const metric = PROTO_METRICS.find(m => m.key === state.protoMetric) ?? PROTO_METRICS[0];
+    // `winner` is not a config, so it is not in run.json; it is present only when the bench
+    // wrote it, which older runs did not.
+    const hasWinner = state.protocols.some(r => r.config === "winner");
+    const columns = hasWinner ? [...CONFIGS, "winner"] : [...CONFIGS];
+    const byProtocol = new Map();
+    for (const r of state.protocols) {
+      if (!byProtocol.has(r.protocol)) {
+        byProtocol.set(r.protocol, {
+          protocol: r.protocol,
+          pools: numOrNull(r.pools_in_market) ?? 0,
+          sim: numOrNull(r.pools_simulatable) ?? 0,
+          m: {},
+        });
+      }
+      byProtocol.get(r.protocol).m[r.config] = {
+        legs_pct: numOrNull(r.legs_pct) ?? 0,
+        orders_pct: numOrNull(r.orders_pct) ?? 0,
+        pools_used: numOrNull(r.pools_used) ?? 0,
+        usd: numOrNull(r.usd) ?? 0,
+      };
+    }
+
+    // Sorted by the metric on show, so switching it floats the protocols that metric cares about.
+    const total = p => CONFIGS.reduce((sum, c) => sum + (p.m[c]?.[metric.key] ?? 0), 0);
+    const rows = [...byProtocol.values()].sort((a, b) => total(b) - total(a) || b.pools - a.pools);
+    // Scaled per column, so a bar shows where one algorithm's liquidity went rather than how two
+    // algorithms compare on one protocol — the columns already sit side by side for that.
+    const peak = Object.fromEntries(columns.map(c =>
+      [c, Math.max(...rows.map(p => p.m[c]?.[metric.key] ?? 0), 1)]));
+
+    const table = `<div class="table-wrap"><table>
+      <thead><tr>
+        <th>protocol</th><th>pools</th><th>simulatable</th>
+        ${columns.map(c => `<th${c === "winner" ? ' class="winner-col"' : ""}>${c}</th>`).join("")}
+      </tr></thead>
+      <tbody>${rows.map(p => `<tr>
+        <td>${p.protocol}</td>
+        <td>${p.pools.toLocaleString()}</td>
+        <td>${p.sim.toLocaleString()}</td>
+        ${columns.map(c => {
+          const v = p.m[c]?.[metric.key];
+          // A protocol an algorithm never touched is the interesting case, so an untouched zero
+          // is greyed rather than dropped.
+          const win = c === "winner" ? " winner-col" : "";
+          if (v === undefined) return `<td class="none${win}">—</td>`;
+          if (v === 0) return `<td class="none${win}">${metric.fmt(v)}</td>`;
+          return `<td class="usage${win}" style="--fill:${v / peak[c] * 100}%">${metric.fmt(v)}</td>`;
+        }).join("")}
+      </tr>`).join("")}</tbody>
+    </table></div>`;
+
+    return `<div>
+      <div class="section-title"><h2>By protocol</h2>
+        <p>Which liquidity each algorithm actually used. Over the whole run, so the trade-size
+           slicer does not apply.${hasWinner ? " <code>winner</code> is the route that won each order." : ""}</p>
+        <div class="chips">${PROTO_METRICS.map(m =>
+          `<button type="button" data-proto-metric="${m.key}"
+             aria-pressed="${m.key === state.protoMetric}">${m.label}</button>`).join("")}</div>
+      </div>
+      <div style="margin-top:12px">${table}</div>
+    </div>`;
+  }
+
+  // ---------------------------------------------------------------- orders tab
+  function visible() {
+    const q = state.query.trim().toLowerCase();
+    const rows = state.orders.filter(o => {
+      if (!q) return true;
+      const route = state.routes?.get(o.name);
+      const hay = [pairLabel(o), o.name, o.token_in, o.token_out,
+        ...(route ? Object.values(route.routes).flatMap(r => r.edges.map(e => `${legPool(e)} ${e.protocol}`)) : [])];
+      return hay.join(" ").toLowerCase().includes(q);
+    });
+    // ids read `<index>_<token_in>_<token_out>`, so the leading integer is the dataset position;
+    // sorting the id as text would put order 10 before order 2
+    const by = {
+      spread: o => -spreadOf(o),
+      size: o => -(o.usd ?? 0),
+      index: o => { const n = parseInt(o.name, 10); return Number.isNaN(n) ? o.name : n; },
+    };
+    return rows.sort((a, b) => {
+      const x = by[state.sort](a), y = by[state.sort](b);
+      return typeof x === "string" ? x.localeCompare(y) : x - y;
+    });
+  }
+
+  function renderList() {
+    const rows = visible();
+    document.getElementById("count").textContent =
+      `${rows.length} order${rows.length === 1 ? "" : "s"}${rows.length > 500 ? " · showing 500" : ""}`;
+    if (!state.selected && rows.length) state.selected = rows[0].name;
+    document.getElementById("orders").innerHTML = rows.slice(0, 500).map(o => `
+      <button class="order-row" data-index="${o.name}" aria-current="${o.name === state.selected}">
+        <span class="order-pair">${pairLabel(o)}</span>
+        <span class="order-usd">${fmtUsd(o.usd)}</span>
+        <span class="spark" aria-hidden="true">
+          ${RIVALS.map(c => `<i class="s-${cls(bps(o, c))}"></i>`).join("")}
+        </span>
+      </button>`).join("");
+    document.querySelectorAll(".order-row").forEach(el =>
+      el.addEventListener("click", () => { state.selected = el.dataset.index; renderList(); renderDetail(); }));
+  }
+
+  function flowSvg(route) {
+    const edges = route.edges;
+    if (!edges.length) return "";
+    const tokens = [...new Set(edges.flatMap(e => [e.token_in, e.token_out]))];
+
+    const depth = Object.fromEntries(tokens.map(t => [t, 0]));
+    for (let pass = 0; pass < tokens.length; pass++) {
+      let moved = false;
+      edges.forEach(e => {
+        if (depth[e.token_out] < depth[e.token_in] + 1) { depth[e.token_out] = depth[e.token_in] + 1; moved = true; }
+      });
+      if (!moved) break;
+    }
+
+    const cols = {};
+    tokens.forEach(t => { (cols[depth[t]] ||= []).push(t); });
+    const nCols = Math.max(...Object.keys(cols).map(Number)) + 1;
+
+    // Two pools on the same pair are two edges between the same nodes. Bowing them apart is the
+    // only way that split is visible at all, so the canvas is sized around the widest bundle.
+    const lanes = {};
+    edges.forEach(e => { (lanes[`${e.token_in}>${e.token_out}`] ||= []).push(e); });
+    const widest = Math.max(1, ...Object.values(lanes).map(g => g.length));
+    const LANE = widest > 4 ? 26 : 34;
+
+    // A leg can skip a column — a split that trades A→C directly while its other half goes A→B→C.
+    // Drawn flat it runs under the node it bypasses and is invisible, so it arcs over instead and
+    // the canvas gains the headroom that arc needs.
+    const spanOf = e => depth[e.token_out] - depth[e.token_in];
+    const widestSpan = Math.max(1, ...edges.map(spanOf));
+
+    const NW = 118, NH = 48, GAPX = 200, GAPY = 40, PAD = 22;
+    const liftOf = span => (span > 1 ? NH * 0.9 + 16 + (span - 2) * 14 : 0);
+    const rows = Math.max(...Object.values(cols).map(c => c.length));
+    const bundleRoom = (widest - 1) * LANE;
+    const skipRoom = liftOf(widestSpan) ? liftOf(widestSpan) + 20 : 0;
+    const W = PAD * 2 + nCols * NW + (nCols - 1) * GAPX;
+    const H = PAD * 2 + rows * NH + (rows - 1) * GAPY + bundleRoom + skipRoom;
+
+    const colX = d => PAD + d * (NW + GAPX);
+    const pos = {};
+    Object.entries(cols).forEach(([d, ts]) => {
+      const colH = ts.length * NH + (ts.length - 1) * GAPY;
+      ts.forEach((t, i) => { pos[t] = { x: colX(Number(d)), y: PAD + (H - PAD * 2 - colH) / 2 + i * (NH + GAPY) }; });
+    });
+
+    const outflow = {};
+    edges.forEach(e => { outflow[e.token_in] = (outflow[e.token_in] || 0) + Number(e.amount_in); });
+    const laneOf = new Map();
+    Object.values(lanes).forEach(group => group.forEach((e, i) => laneOf.set(e, { i, n: group.length })));
+
+    const paths = edges.map((e, idx) => {
+      const a = pos[e.token_in], b = pos[e.token_out];
+      const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2;
+      const span = spanOf(e), lift = liftOf(span);
+      const pull = lift ? (x2 - x1) * 0.28 : GAPX * 0.45;
+      const cx1 = x1 + pull, cx2 = x2 - pull;
+      const lane = laneOf.get(e);
+      const bow = (lane.i - (lane.n - 1) / 2) * LANE - lift;
+
+      // Share of what leaves the source token. Read off the amounts rather than the solver's
+      // `split`, which is 0 on legs that carry the remainder.
+      const share = Number(e.amount_in) / (outflow[e.token_in] || 1);
+      const w = Math.max(2.5, Math.min(14, 2.5 + share * 11));
+
+      return `
+        <g class="leg" data-leg="${idx}" tabindex="0" role="listitem"
+           aria-label="${sym(e.token_in)} to ${sym(e.token_out)} through ${e.protocol}, ${Math.round(share * 100)} percent">
+          <title>${sym(e.token_in)} → ${sym(e.token_out)} · ${e.protocol} · ${Math.round(share * 100)}%</title>
+          <path class="leg-hit" d="M${x1},${y1} C${cx1},${y1 + bow} ${cx2},${y2 + bow} ${x2},${y2}"
+                fill="none" stroke="transparent" stroke-width="${Math.max(16, w + 12)}" />
+          <path class="leg-line" d="M${x1},${y1} C${cx1},${y1 + bow} ${cx2},${y2 + bow} ${x2},${y2}"
+                fill="none" stroke="${protoColor(e.protocol)}" stroke-width="${w.toFixed(2)}"
+                stroke-linecap="round" />
+        </g>`;
+    }).join("");
+
+    const nodes = tokens.map(t => {
+      const p = pos[t], endpoint = depth[t] === 0 || depth[t] === nCols - 1;
+      return `<g>
+        <rect class="node-box ${endpoint ? "endpoint" : ""}" x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="3" />
+        <text class="node-sym" x="${p.x + NW / 2}" y="${p.y + 21}" text-anchor="middle">${sym(t)}</text>
+        <text class="node-amt" x="${p.x + NW / 2}" y="${p.y + 36}" text-anchor="middle">${t.slice(0, 8)}…</text>
+      </g>`;
+    }).join("");
+
+    return `<svg class="flow" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="list"
+             aria-label="Token flow, ${edges.length} legs">${paths}${nodes}</svg>`;
+  }
+
+  // Legs, in the order the solver returned them, with the share each carries.
+  function legRows(route) {
+    const outflow = {};
+    route.edges.forEach(e => { outflow[e.token_in] = (outflow[e.token_in] || 0) + Number(e.amount_in); });
+    return route.edges.map((e, idx) => {
+      const share = Number(e.amount_in) / (outflow[e.token_in] || 1);
+      return { idx, e, share };
+    });
+  }
+
+  function renderDetail() {
+    const target = document.getElementById("detail");
+    if (state.routesError) {
+      target.innerHTML = `<div class="loading">could not read routes.jsonl — ${state.routesError}</div>`;
+      return;
+    }
+    if (!state.routes) { target.innerHTML = `<div class="loading">loading routes …</div>`; return; }
+    const o = state.orders.find(x => x.name === state.selected);
+    if (!o) { target.innerHTML = `<div class="loading">pick an order</div>`; return; }
+    const line = state.routes.get(o.name);
+    if (!line) { target.innerHTML = `<div class="loading">no route record for ${o.name}</div>`; return; }
+    Object.entries(line.tokens || {}).forEach(([addr, s]) => SYMBOLS.set(addr, s));
+    const R = line.routes;
+    const best = CONFIGS.filter(c => R[c]?.solved)
+      .sort((a, b) => parseFloat(R[b].amount_out_net_gas) - parseFloat(R[a].amount_out_net_gas))[0];
+
+    const table = `<div class="table-wrap"><table>
+      <thead><tr><th>config</th><th>out</th><th>net of gas</th><th>gas</th><th>legs</th><th>solve</th><th>vs baseline</th></tr></thead>
+      <tbody>${CONFIGS.map(c => {
+        const r = R[c] || { solved: false, edges: [], elapsed_us: 0 }, v = bps(o, c);
+        return `<tr>
+          <td>${c}${c === BASELINE ? '<span class="baseline-tag">baseline</span>' : ""}</td>
+          <td>${r.solved ? amount(o.token_out, r.amount_out) : '<span class="pill no-route">no route</span>'}</td>
+          <td>${r.solved ? amount(o.token_out, r.amount_out_net_gas) : "—"}</td>
+          <td>${r.solved ? Number(r.gas).toLocaleString() : "—"}</td>
+          <td>${r.solved ? r.edges.length : "—"}</td>
+          <td>${ms(r.elapsed_us)}</td>
+          <td class="bps-cell ${cls(v)}">${c === BASELINE ? "—" : fmtBps(v)}</td>
+        </tr>`;
+      }).join("")}</tbody></table></div>`;
+
+    const cards = CONFIGS.map(c => {
+      const r = R[c] || { solved: false, edges: [], elapsed_us: 0 }, v = bps(o, c);
+      const body = r.solved
+        ? `<div class="flow-wrap" data-flow="${c}">${flowSvg(r)}</div>
+           <div class="leg-readout" data-readout="${c}">
+             <span class="lbl">hover a leg</span>
+           </div>
+           <details class="legs"><summary>${r.edges.length} legs</summary>
+             <div class="table-wrap" style="border:0;border-radius:0"><table>
+               <thead><tr><th>hop</th><th>protocol</th><th>pool</th><th>share</th><th>in</th><th>out</th></tr></thead>
+               <tbody>${legRows(r).map(({ idx, e, share }) => `<tr data-legrow="${c}:${idx}">
+                 <td><i class="swatch" style="background:${protoColor(e.protocol)}"></i>${sym(e.token_in)} → ${sym(e.token_out)}</td>
+                 <td>${e.protocol}</td>
+                 <td>${shortPool(legPool(e))}</td>
+                 <td>${(share * 100).toFixed(share < 0.1 ? 1 : 0)}%</td>
+                 <td>${amount(e.token_in, e.amount_in)}</td>
+                 <td>${amount(e.token_out, e.amount_out)}</td></tr>`).join("")}</tbody>
+             </table></div></details>`
+        : `<div class="empty-route">no route found${r.elapsed_us >= (state.facts.timeout_ms || 5000) * 1000 ? ` — hit the ${state.facts.timeout_ms} ms budget` : ""}</div>`;
+
+      return `<section class="route-card ${c === best ? "winner" : ""}">
+        <div class="route-head">
+          <span class="route-name">${c}</span>
+          ${c === BASELINE ? '<span class="lbl">baseline</span>'
+            : `<span class="route-meta ${cls(v)}"><b>${fmtBps(v)}</b> bps</span>`}
+          <span class="route-meta">bought <b class="${valueCls(o, r)}">${fmtUsd(r.usd_out)}</b><span class="muted"> of ${fmtUsd(o.usd)}</span>${valueNote(o, r)}</span>
+          <span class="route-meta">net <b>${r.solved ? amount(o.token_out, r.amount_out_net_gas) : "—"}</b> ${sym(o.token_out)}</span>
+          <span class="route-meta">gas <b>${r.solved ? Number(r.gas).toLocaleString() : "—"}</b></span>
+          <span class="route-meta">${ms(r.elapsed_us)}</span>
+        </div>${body}</section>`;
+    }).join("");
+
+    const protos = [...new Set(Object.values(R).flatMap(r => r.edges.map(e => e.protocol)))].sort();
+
+    document.getElementById("detail").innerHTML = `
+      <div class="order-head">
+        <div class="order-title">${sym(o.token_in)} <em>→</em> ${sym(o.token_out)}</div>
+        <div class="fact"><div class="lbl">order</div><b class="num">${o.name}</b></div>
+        <div class="fact"><div class="lbl">amount in</div><b class="num">${amount(o.token_in, o.amount_in)} ${sym(o.token_in)}</b></div>
+        <div class="fact"><div class="lbl">size</div><b class="num">${fmtUsd(o.usd)}</b></div>
+      </div>
+      ${table}
+      <div class="protokey"><span class="lbl">protocols</span>
+        ${protos.map(p => `<span><i style="background:${PROTO_COLORS[p]}"></i>${p}</span>`).join("")}</div>
+      <div class="routes">${cards}</div>`;
+
+    wireLegs(line);
+  }
+
+  // Hovering a leg dims the rest and names it underneath; the matching row in the legs table
+  // highlights too, so the picture and the numbers stay tied together.
+  function wireLegs(line) {
+    document.querySelectorAll("[data-flow]").forEach(wrap => {
+      const config = wrap.dataset.flow;
+      const route = line.routes[config];
+      if (!route) return;
+      const rows = legRows(route);
+      const readout = document.querySelector(`[data-readout="${config}"]`);
+
+      const show = idx => {
+        const { e, share } = rows[idx];
+        wrap.classList.add("hovering");
+        readout.innerHTML = `
+          <span><i class="swatch" style="background:${protoColor(e.protocol)}"></i><b>${e.protocol}</b></span>
+          <span>${sym(e.token_in)} → ${sym(e.token_out)}</span>
+          <span class="muted">pool</span><span>${legPool(e)}</span>
+          <span class="muted">share</span><span><b>${(share * 100).toFixed(share < 0.1 ? 1 : 0)}%</b></span>
+          <span class="muted">in</span><span>${amount(e.token_in, e.amount_in)} ${sym(e.token_in)}</span>
+          <span class="muted">out</span><span>${amount(e.token_out, e.amount_out)} ${sym(e.token_out)}</span>
+          <span class="muted">gas</span><span>${Number(e.gas).toLocaleString()}</span>`;
+        document.querySelector(`[data-legrow="${config}:${idx}"]`)?.classList.add("on");
+      };
+      const clear = () => {
+        wrap.classList.remove("hovering");
+        readout.innerHTML = `<span class="lbl">hover a leg</span>`;
+        document.querySelectorAll(`[data-legrow^="${config}:"]`).forEach(r => r.classList.remove("on"));
+      };
+
+      wrap.querySelectorAll(".leg").forEach(leg => {
+        const idx = +leg.dataset.leg;
+        leg.addEventListener("mouseenter", () => show(idx));
+        leg.addEventListener("focus", () => show(idx));
+        leg.addEventListener("mouseleave", clear);
+        leg.addEventListener("blur", clear);
+      });
+
+      // the table works the other way round: hovering a row lights its leg
+      document.querySelectorAll(`[data-legrow^="${config}:"]`).forEach(row => {
+        const idx = +row.dataset.legrow.split(":")[1];
+        row.addEventListener("mouseenter", () => {
+          wrap.classList.add("hovering");
+          wrap.querySelector(`[data-leg="${idx}"]`)?.classList.add("on");
+          show(idx);
+        });
+        row.addEventListener("mouseleave", () => {
+          wrap.querySelectorAll(".leg").forEach(l => l.classList.remove("on"));
+          clear();
+        });
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------- wiring
+  const sliceActive = () =>
+    state.usdLo > USD_MIN_E + 1e-9 || state.usdHi < USD_MAX_E - 1e-9;
+
+  async function openRun(name) {
+    try {
+      await loadRun(name);
+      boot("");
+      renderHeader();
+      renderReport();
+      if (state.tab === "orders") await showOrders();
+      if (state.tab === "algos") renderAlgos();
+    } catch (error) {
+      // The index is rebuilt by each run, so a directory deleted since then still appears in it.
+      // Say so in the page and leave every other run one click away.
+      state.run = name;
+      boot("");
+      renderHeader();
+      selectTab("report");   // the message lands in the Report pane, so make sure it is the visible one
+      document.getElementById("detail").innerHTML = "";
+      const others = state.runs.filter(r => r.name !== name);
+      document.getElementById("tab-report").innerHTML = `
+        <div class="boot-card">
+          <h1>Could not read run “${name}”</h1>
+          <p class="err">${error.message}</p>
+          <p>It is listed in <code>index.json</code> but its files are missing — most likely the
+             directory was deleted. The index is rebuilt by the next benchmark run.</p>
+          ${others.length ? `<p>Other runs:</p><div class="chips">${others.map(r =>
+              `<button data-openrun="${r.name}">${r.name}</button>`).join("")}</div>`
+            : `<p>No other runs are listed.</p>`}
+        </div>`;
+      document.querySelectorAll("[data-openrun]").forEach(b =>
+        b.addEventListener("click", () => openRun(b.dataset.openrun)));
+    }
+  }
+
+  async function showOrders() {
+    document.getElementById("detail").innerHTML = `<div class="loading">loading routes …</div>`;
+    renderList();
+    await loadRoutes();
+    renderList();
+    renderDetail();
+  }
+
+  document.getElementById("run-open").addEventListener("click", openRunPicker);
+  document.getElementById("source-toggle").addEventListener("click", e => {
+    const button = e.target.closest("button[data-source]");
+    if (!button || button.dataset.source === state.runSource) return;
+    state.runSource = button.dataset.source;
+    state.runCursor = 0;
+    renderRunTable();
+  });
+  document.getElementById("run-filter").addEventListener("input", e => {
+    state.runQuery = e.target.value;
+    state.runCursor = 0;
+    renderRunTable();
+  });
+  document.getElementById("run-modal").addEventListener("keydown", e => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      moveRunCursor(e.key === "ArrowDown" ? 1 : -1);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const row = matchingRuns()[state.runCursor];
+      if (row) chooseRun(row.name);
+    }
+  });
+  async function selectTab(tab) {
+    state.tab = tab;
+    document.querySelectorAll('[role="tab"]').forEach(b =>
+      b.setAttribute("aria-selected", b.dataset.tab === tab));
+    document.getElementById("tab-report").hidden = tab !== "report";
+    document.getElementById("tab-orders").hidden = tab !== "orders";
+    document.getElementById("tab-algos").hidden = tab !== "algos";
+    if (tab === "orders") await showOrders();
+    if (tab === "algos") renderAlgos();
+  }
+
+  document.querySelectorAll('[role="tab"]').forEach(btn =>
+    btn.addEventListener("click", () => selectTab(btn.dataset.tab)));
+  document.getElementById("filter").addEventListener("input", e => { state.query = e.target.value; renderList(); });
+  document.querySelectorAll(".chips button[data-sort]").forEach(b =>
+    b.addEventListener("click", () => {
+      state.sort = b.dataset.sort;
+      document.querySelectorAll(".chips button[data-sort]").forEach(x => x.setAttribute("aria-pressed", x === b));
+      renderList();
+    }));
+
+  (async function start() {
+    boot(`<h1>Loading…</h1>`);
+    try {
+      await loadIndex();
+    } catch (error) {
+      boot(`<h1>No benchmark runs found</h1>
+        <p class="err">${error.message}</p>
+        <p>This page reads <code>bench-results/</code> at the repo root. Run the benchmark, then refresh:</p>
+        <pre>./scripts/bench.sh --name my-run --orders 500</pre>
+        <p>If a run exists but this still fails, the page is probably being opened straight from disk.
+           <code>file://</code> blocks the reads it needs — serve the repo instead:</p>
+        <pre>./scripts/bench-viewer.sh</pre>`);
+      return;
+    }
+    for (const candidate of runList()) {
+      try {
+        await loadRun(candidate.name);
+        state.runSource = runSource(candidate);
+        boot("");
+        renderHeader();
+        renderReport();
+        return;
+      } catch {
+        // listed but unreadable; try the next one before giving up
+      }
+    }
+    // nothing loaded: show the newest one's error, with the others offered
+    await openRun(runList()[0].name);
+  })();
+</script>
+
+</body>
+</html>

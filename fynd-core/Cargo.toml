@@ -45,9 +45,23 @@ test-utils = []
 experimental = []
 
 [dev-dependencies]
+clap.workspace = true
 rstest.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 fynd-test-fixtures.workspace = true
 tracing-subscriber.workspace = true
 metrics-util.workspace = true
+
+# Offline algorithm comparison. `harness = false` because this is a report generator with its own
+# CLI, not a set of timed micro-benchmarks; `cargo bench` gives it an optimised build.
+[[bench]]
+name = "algorithm_bench"
+harness = false
+required-features = ["test-utils"]
+
+# Single algorithm, single thread, no output files -- the one to run under a profiler.
+[[bench]]
+name = "profile"
+harness = false
+required-features = ["test-utils"]

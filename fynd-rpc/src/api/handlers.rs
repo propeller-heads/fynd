@@ -1,18 +1,21 @@
 //! HTTP request handlers for the solver API.
 
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use tracing::instrument;
 #[cfg(feature = "experimental")]
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::{dto, ApiError, AppState};
 #[cfg(feature = "experimental")]
 use crate::api::prices::{
-    price_to_f64, ComponentDepthEntry, ComputationBlocks, IncludeField, PricesQuery,
+    price_to_decimal_string, ComponentDepthEntry, ComputationBlocks, IncludeField, PricesQuery,
     PricesResponse, SpotPriceEntry, TokenPriceEntry,
 };
+#[cfg(feature = "experimental")]
+use crate::api::tokens::{build_token_entries, TokensCache, TokensQuery, TokensResponse};
 use crate::api::{
     error::{solve_error_code, ErrorResponse},
+    exclusive_access,
     request_capture::{
         self, failure_reason_slug, log_request_capture, log_slow_solve, quote_status_code,
         RequestOutcome,
@@ -26,7 +29,9 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/health", web::get().to(health))
         .route("/info", web::get().to(info));
     #[cfg(feature = "experimental")]
-    let scope = scope.route("/prices", web::get().to(get_prices));
+    let scope = scope
+        .route("/prices", web::get().to(get_prices))
+        .route("/tokens", web::get().to(get_tokens));
     cfg.service(scope);
 }
 
@@ -54,11 +59,13 @@ pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
         (status = 503, description = "Queue full, overloaded, stale data, or timeout", body = ErrorResponse),
     )
 )]
-#[instrument(skip(state, request), fields(num_orders = request.orders().len()))]
+#[instrument(skip(state, request, http_request), fields(num_orders = request.orders().len()))]
 pub(crate) async fn quote(
     state: web::Data<AppState>,
     request: web::Json<dto::QuoteRequest>,
+    http_request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
+    let access = exclusive_access::from_headers(http_request.headers());
     let dto_request = request.into_inner();
 
     // Validate request
@@ -70,7 +77,7 @@ pub(crate) async fn quote(
     // conversion consumes `dto_request`. This is cheap (no serialization); the
     // JSON encoding is deferred to the failure-only task below.
     let num_orders = dto_request.orders().len();
-    let replay_capture = request_capture::ReplayRequest::capture(&dto_request);
+    let replay_capture = request_capture::ReplayRequest::capture(&dto_request, access);
 
     // Convert DTO to core types
     let core_request: fynd_core::QuoteRequest = dto_request.into();
@@ -84,7 +91,7 @@ pub(crate) async fn quote(
 
     let result = state
         .worker_router()
-        .quote(core_request)
+        .quote(core_request, access)
         .await;
 
     let outcome = match &result {
@@ -220,8 +227,10 @@ const DEFAULT_PRICES_LIMIT: usize = 1000;
 #[cfg(feature = "experimental")]
 /// GET /v1/prices - Return derived token prices and optional market data.
 ///
-/// By default returns token gas prices only. Use `include` query parameter
-/// to add spot prices and/or component depths.
+/// By default returns token gas prices only. Each `prices[].price` is a plain decimal string
+/// holding raw target-token units divided by raw gas-token units; consumers must normalize
+/// both tokens' decimals before using it. Use `include` query parameter to add spot prices
+/// and/or component depths.
 ///
 /// # Query Parameters
 ///
@@ -274,21 +283,31 @@ pub async fn get_prices(
 
     // Convert token gas prices
     let mut prices = Vec::new();
+    let mut skipped_tokens = 0usize;
     if let Some(token_prices) = &token_prices {
         for (address, price) in token_prices {
-            match price_to_f64(&price.numerator, &price.denominator) {
-                Some(f) => {
-                    prices.push(TokenPriceEntry { token: address.clone(), price: f });
+            match price_to_decimal_string(&price.numerator, &price.denominator) {
+                Some(price) => {
+                    prices.push(TokenPriceEntry { token: address.clone(), price });
                 }
                 None => {
-                    warn!(
+                    debug!(
                         token = %address,
-                        "skipping token with unconvertible price (zero denom or overflow)"
+                        "cannot serialize token price (zero or oversized numerator/denominator)"
                     );
+                    skipped_tokens += 1;
                 }
             }
         }
     }
+    if skipped_tokens > 0 {
+        warn!(
+            skipped_tokens,
+            "skipped tokens with unrepresentable prices (zero or oversized numerator/denominator)"
+        );
+    }
+    // Sort for a deterministic wire order; HashMap iteration order varies per process.
+    prices.sort_by(|a, b| a.token.cmp(&b.token));
     // Convert spot prices if requested (sorted for deterministic limit)
     let spot_prices = if want_spot {
         let mut entries: Vec<SpotPriceEntry> = spot_prices_data
@@ -361,8 +380,113 @@ pub async fn get_prices(
     Ok(HttpResponse::Ok().json(response))
 }
 
+#[cfg(feature = "experimental")]
+/// Default maximum number of tokens returned by GET /v1/tokens.
+const DEFAULT_TOKENS_LIMIT: usize = 1000;
+
+#[cfg(feature = "experimental")]
+/// GET /v1/tokens - Return the tokens currently in the routing graph, ranked by usefulness.
+///
+/// Serves metadata (symbol, decimals, tax, gas, quality) for exactly the tokens present in
+/// the routing graph, sorted by approximate routable `liquidity` in raw gas-token units
+/// (descending), then `component_count`, then address. The list is recomputed lazily at
+/// most once per derived-data update and cached; nothing runs on the quote path.
+///
+/// Paginate with `offset`/`limit` (e.g. `?limit=100&offset=1000` returns tokens ranked
+/// #1001-#1100). Pages are consistent while the response `block` is unchanged; restart
+/// from offset 0 when it advances mid-pagination.
+///
+/// # Query Parameters
+///
+/// - `limit` - Maximum number of tokens returned (default: 1000)
+/// - `offset` - Number of tokens to skip from the start of the ranked list (default: 0)
+#[utoipa::path(
+    get,
+    path = "/v1/tokens",
+    tag = "tokens",
+    params(TokensQuery),
+    responses(
+        (status = 200, description = "Graph tokens returned", body = TokensResponse),
+        (status = 503, description = "Data not yet available", body = ErrorResponse),
+    )
+)]
+#[instrument(skip(state))]
+pub async fn get_tokens(
+    state: web::Data<AppState>,
+    query: web::Query<TokensQuery>,
+) -> Result<HttpResponse, ApiError> {
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_TOKENS_LIMIT);
+    let offset = query.offset.unwrap_or(0);
+
+    let cache_key = {
+        let store = state.derived_data.read().await;
+        let token_prices_block = store
+            .token_prices_block()
+            .ok_or(ApiError::StaleData { age_ms: u64::MAX })?;
+        (token_prices_block, store.component_depths_block())
+    };
+
+    if let Some(cache) = state.tokens_cache.read().await.as_ref() {
+        if cache.key == cache_key {
+            return Ok(tokens_response(cache, limit, offset));
+        }
+    }
+
+    // Re-derive the key together with the data so the cache entry matches what it holds,
+    // even if a computation lands between the check above and this clone.
+    let (key, token_prices, depths) = {
+        let store = state.derived_data.read().await;
+        let token_prices_block = store
+            .token_prices_block()
+            .ok_or(ApiError::StaleData { age_ms: u64::MAX })?;
+        (
+            (token_prices_block, store.component_depths_block()),
+            store.token_prices().cloned(),
+            store.component_depths().cloned(),
+        )
+    };
+
+    // Snapshot under the read guard and rank outside it, so the per-block feed writer
+    // is never blocked by the fold over the full topology.
+    let (topology, token_registry) = {
+        let market = state.market_data.read().await;
+        (market.component_topology(), market.token_registry_ref().clone())
+    };
+    let entries =
+        build_token_entries(&topology, &token_registry, depths.as_ref(), token_prices.as_ref());
+
+    let cache = TokensCache { key, entries: std::sync::Arc::new(entries) };
+    let response = tokens_response(&cache, limit, offset);
+    info!(num_tokens = cache.entries.len(), block = key.0, "tokens list recomputed");
+    *state.tokens_cache.write().await = Some(cache);
+
+    Ok(response)
+}
+
+#[cfg(feature = "experimental")]
+/// Serializes one page of a cached token list: `offset` skips into the ranked
+/// list, `limit` sizes the page. An offset past the end yields an empty page.
+fn tokens_response(cache: &TokensCache, limit: usize, offset: usize) -> HttpResponse {
+    let tokens: Vec<_> = cache
+        .entries
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .cloned()
+        .collect();
+    HttpResponse::Ok().json(TokensResponse {
+        total: cache.entries.len(),
+        block: cache.key.0,
+        tokens,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "experimental")]
+    use std::str::FromStr;
     use std::sync::Arc;
 
     use actix_web::{test, web, App, HttpResponse};
@@ -375,6 +499,8 @@ mod tests {
     use serde_json::Value;
     use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
     use tycho_simulation::tycho_common::{models::Chain, Bytes};
+    #[cfg(feature = "experimental")]
+    use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
     use crate::api::{dto::QuoteRequest, AppState, HealthTracker};
 
@@ -432,7 +558,301 @@ mod tests {
             derived_data,
             #[cfg(feature = "experimental")]
             tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
+            #[cfg(feature = "experimental")]
+            market_data,
         )
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_serializes_decimal_strings() {
+        let gas_token = "0x0000000000000000000000000000000000000001";
+        // (address, numerator, denominator, expected decimal string), pre-sorted by address
+        // because the handler sorts entries for a deterministic wire order.
+        let cases = [
+            ("0x0000000000000000000000000000000000000006", 3u128, 1_000_000_000u128, "0.000000003"),
+            ("0x0000000000000000000000000000000000000008", 5, 1_000_000_000_000, "0.000000000005"),
+            ("0x0000000000000000000000000000000000000018", 1500, 1, "1500"),
+        ];
+        let mut state = make_test_state();
+        state.gas_token =
+            tycho_simulation::tycho_common::models::Address::from_str(gas_token).unwrap();
+        let mut token_prices = std::collections::HashMap::new();
+        for (address, numerator, denominator) in
+            cases.map(|(address, numerator, denominator, _)| (address, numerator, denominator))
+        {
+            token_prices.insert(
+                tycho_simulation::tycho_common::models::Address::from_str(address).unwrap(),
+                Price::new(numerator.into(), denominator.into()),
+            );
+        }
+        state
+            .derived_data
+            .write()
+            .await
+            .set_token_prices(token_prices, vec![], 19_000_000, true);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+        let request = test::TestRequest::get()
+            .uri("/v1/prices")
+            .to_request();
+        let body: Value = test::call_and_read_body_json(&app, request).await;
+
+        assert_eq!(body["blocks"]["token_prices"], 19_000_000);
+        assert!(body["gas_token"]
+            .as_str()
+            .unwrap()
+            .eq_ignore_ascii_case(gas_token));
+        let response_prices = body["prices"].as_array().unwrap();
+        assert_eq!(response_prices.len(), cases.len());
+        for (entry, (address, _, _, expected_price)) in response_prices.iter().zip(cases) {
+            assert!(entry["token"]
+                .as_str()
+                .unwrap()
+                .eq_ignore_ascii_case(address));
+            assert_eq!(entry["price"].as_str().unwrap(), expected_price);
+        }
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_skips_non_serializable_prices() {
+        let state = make_test_state();
+        let mut token_prices = std::collections::HashMap::new();
+        let valid = tycho_simulation::tycho_common::models::Address::from([1u8; 20]);
+        token_prices.insert(valid.clone(), Price::new(1u8.into(), 2u8.into()));
+        // Struct literal because Price::new panics on a zero numerator — this state is
+        // constructor-unreachable, and the skip path is exercised defensively.
+        token_prices.insert(
+            tycho_simulation::tycho_common::models::Address::from([2u8; 20]),
+            Price { numerator: 0u8.into(), denominator: 1u8.into() },
+        );
+        token_prices.insert(
+            tycho_simulation::tycho_common::models::Address::from([3u8; 20]),
+            Price::new(num_bigint::BigUint::from(10u8).pow(400), 1u8.into()),
+        );
+        token_prices.insert(
+            tycho_simulation::tycho_common::models::Address::from([4u8; 20]),
+            Price::new(1u8.into(), num_bigint::BigUint::from(10u8).pow(400)),
+        );
+        state
+            .derived_data
+            .write()
+            .await
+            .set_token_prices(token_prices, vec![], 19_000_000, true);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+        let body: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+
+        let prices = body["prices"].as_array().unwrap();
+        assert_eq!(prices.len(), 1);
+        assert!(prices[0]["token"]
+            .as_str()
+            .unwrap()
+            .eq_ignore_ascii_case(&valid.to_string()));
+        assert_eq!(prices[0]["price"], "0.5");
+    }
+
+    #[cfg(feature = "experimental")]
+    fn test_addr(byte: u8) -> tycho_simulation::tycho_common::models::Address {
+        tycho_simulation::tycho_common::models::Address::from([byte; 20])
+    }
+
+    #[cfg(feature = "experimental")]
+    fn test_token(
+        byte: u8,
+        symbol: &str,
+        decimals: u32,
+    ) -> tycho_simulation::tycho_common::models::token::Token {
+        tycho_simulation::tycho_common::models::token::Token {
+            address: test_addr(byte),
+            symbol: symbol.to_string(),
+            decimals,
+            tax: 0,
+            gas: vec![],
+            chain: Chain::Ethereum,
+            quality: 100,
+        }
+    }
+
+    #[cfg(feature = "experimental")]
+    fn test_component(
+        id: &str,
+        token_bytes: &[u8],
+    ) -> tycho_simulation::tycho_common::models::protocol::ProtocolComponent {
+        tycho_simulation::tycho_common::models::protocol::ProtocolComponent::new(
+            id,
+            "uniswap_v2",
+            "swap",
+            Chain::Ethereum,
+            token_bytes
+                .iter()
+                .map(|byte| test_addr(*byte))
+                .collect(),
+            vec![],
+            std::collections::HashMap::new(),
+            tycho_simulation::tycho_common::models::ChangeType::Creation,
+            Default::default(),
+            Default::default(),
+        )
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_tokens_handler_returns_ranked_graph_tokens() {
+        use num_bigint::BigUint;
+        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
+
+        let addr = test_addr;
+        let state = make_test_state();
+        {
+            let mut market = state.market_data.write().await;
+            market.upsert_tokens([
+                test_token(0x0a, "WETH", 18),
+                test_token(0x0b, "USDC", 6),
+                test_token(0x0c, "OBSCURE", 8),
+            ]);
+            market.upsert_components([
+                test_component("c1", &[0x0a, 0x0b]),
+                test_component("c2", &[0x0a, 0x0c]),
+            ]);
+        }
+        {
+            let mut store = state.derived_data.write().await;
+            store.set_token_prices(
+                [
+                    (addr(0x0a), Price::new(BigUint::from(1u8), BigUint::from(1u8))),
+                    (addr(0x0b), Price::new(BigUint::from(2u8), BigUint::from(1u8))),
+                ]
+                .into_iter()
+                .collect(),
+                vec![],
+                19_000_000,
+                true,
+            );
+            store.set_component_depths(
+                [
+                    (("c1".to_string(), addr(0x0a), addr(0x0b)), BigUint::from(100u32)),
+                    (("c1".to_string(), addr(0x0b), addr(0x0a)), BigUint::from(400u32)),
+                ]
+                .into_iter()
+                .collect(),
+                vec![],
+                19_000_000,
+                true,
+            );
+        }
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/tokens", web::get().to(super::get_tokens)),
+        )
+        .await;
+        let body: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/tokens")
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(body["block"], 19_000_000);
+        assert_eq!(body["total"], 3);
+        let tokens = body["tokens"].as_array().unwrap();
+        assert_eq!(tokens.len(), 3);
+        // USDC: 400 raw units deep at 2 USDC per gas unit = 200 gas units; WETH: 100 at 1 = 100.
+        assert_eq!(tokens[0]["symbol"], "USDC");
+        assert_eq!(tokens[0]["liquidity"], 200.0);
+        assert_eq!(tokens[0]["component_count"], 1);
+        assert_eq!(tokens[0]["decimals"], 6);
+        assert_eq!(tokens[0]["quality"], 100);
+        assert_eq!(tokens[1]["symbol"], "WETH");
+        assert_eq!(tokens[1]["liquidity"], 100.0);
+        assert_eq!(tokens[1]["component_count"], 2);
+        // Unpriced token ranks last and omits the liquidity field.
+        assert_eq!(tokens[2]["symbol"], "OBSCURE");
+        assert!(tokens[2].get("liquidity").is_none());
+
+        // Same derived state: a second request is served from the cache with a limit applied.
+        let limited: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/tokens?limit=1")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(limited["total"], 3);
+        assert_eq!(
+            limited["tokens"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(limited["tokens"][0]["symbol"], "USDC");
+
+        // Offset pages into the ranked list: limit=1&offset=1 is the #2 token.
+        let paged: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/tokens?limit=1&offset=1")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(paged["total"], 3);
+        assert_eq!(paged["tokens"][0]["symbol"], "WETH");
+
+        // An offset past the end yields an empty page, not an error.
+        let past_end: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/tokens?offset=5")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(past_end["total"], 3);
+        assert!(past_end["tokens"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_tokens_handler_returns_503_before_derived_data() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/tokens", web::get().to(super::get_tokens)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/tokens")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 503);
     }
 
     // ── Unknown route (default_service) ────────────────────────────────────

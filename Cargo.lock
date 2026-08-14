@@ -3118,7 +3118,7 @@ dependencies = [
 
 [[package]]
 name = "erc20-overrides"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3420,7 +3420,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
 name = "fynd"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "actix-web",
  "alloy",
@@ -3457,7 +3457,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-benchmark"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3481,7 +3481,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-client"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "alloy",
  "bytes",
@@ -3499,12 +3499,13 @@ dependencies = [
 
 [[package]]
 name = "fynd-core"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "alloy",
  "async-channel",
  "async-trait",
  "chrono",
+ "clap",
  "futures 0.3.32",
  "fynd-test-fixtures",
  "itertools 0.14.0",
@@ -3536,7 +3537,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-gas-audit"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3561,7 +3562,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3592,7 +3593,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc-types"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "bytes",
  "fynd-core",
@@ -3608,7 +3609,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-swap-cli"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3625,7 +3626,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-test-fixtures"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "anyhow",
  "fynd-core",
@@ -3643,7 +3644,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-tools-common"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3903,7 +3904,7 @@ dependencies = [
 
 [[package]]
 name = "hindsight"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "actix-web",
  "alloy",
@@ -5877,7 +5878,7 @@ dependencies = [
 
 [[package]]
 name = "record-market"
-version = "0.99.1"
+version = "0.99.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -7906,9 +7907,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.354.0"
+version = "0.356.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "418ae2ea3fbf0376cddf77b43421ac7e08bde342e7753fa9cb7fc79a2ebde206"
+checksum = "201efd6fbee8d147b8618d8172d95a10ece41849fb0dc83da4fe33dc1321a021"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7936,9 +7937,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.354.0"
+version = "0.356.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c519ddd22ea7a8e5277e3be5faa72942ff28f36916751aeb471dc1e381442f1"
+checksum = "84a79decf01f50919f440055f5eff3be35a9a39ca9fe19f2929370ee54a8b447"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -7965,9 +7966,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.354.0"
+version = "0.356.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66f561027877004ef4f6794be51c8f5890b04bec0373ff3765416053faa19e72"
+checksum = "8d62dbcece72e1aca907b4fcee6d794621b35a2e495a0dfc565f3ecbd6d4a584"
 dependencies = [
  "alloy",
  "async-trait",
@@ -7987,9 +7988,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.354.0"
+version = "0.356.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b39c8c20fcf2825f5a589745b16200aa013c69d76f6626c4c244979450fee00b"
+checksum = "5d8f223a1cf8c3efac6d2428a0e9fbc84d9d61735867f40fac81d27ad36eead1"
 dependencies = [
  "alloy",
  "chrono",
@@ -8009,9 +8010,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.354.0"
+version = "0.356.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b2d6dd42e10a0c48a14df8b4ab5fccf5acb332926d93fece8bd42eb30d5efb2"
+checksum = "b8ae288e2bc78ad1266103e9be9f413b26b345c5ddeb9858703fc9e271649db2"
 dependencies = [
  "alloy",
  "alloy-chains",

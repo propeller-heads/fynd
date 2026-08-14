@@ -291,6 +291,17 @@ impl Registry {
         self.infrastructure.contains(&address) || address == self.wrapped_native
     }
 
+    /// Whether the address is a registered fee collector: a venue section's collector or a
+    /// fee-identified venue wallet. Fees paid to these are venue fees — backed out by the venue
+    /// decoders and `venue_attribution` — not token-level transfer fees (see
+    /// `veto::Veto::FeeOnTransfer`).
+    pub(crate) fn is_fee_collector(&self, address: Address) -> bool {
+        self.venue_fees.contains_key(&address) ||
+            self.venues
+                .values()
+                .any(|venue| venue.fee_collectors.contains(&address))
+    }
+
     /// The chain's `(stablecoin, decimals)` anchors for USD valuation.
     pub(crate) fn stablecoin_anchors(&self) -> &[(Address, u32)] {
         &self.usd_stablecoins
@@ -545,6 +556,16 @@ mod tests {
         );
         assert_eq!(registry.venue_name(collector), None);
         assert!(registry.venue("kyberswap").is_none());
+    }
+
+    #[test]
+    fn test_is_fee_collector() {
+        let registry = Registry::ethereum();
+        let relay_collector = address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef");
+        let phantom_wallet = address!("0x2cffed5d56eb6a17662756ca0fdf350e732c9818");
+        assert!(registry.is_fee_collector(relay_collector));
+        assert!(registry.is_fee_collector(phantom_wallet));
+        assert!(!registry.is_fee_collector(addr(123)));
     }
 
     #[test]

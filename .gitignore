@@ -3,6 +3,18 @@
 /.vscode/
 clients/typescript/client/dist/
 clients/typescript/node_modules/
+# Benchmark run output. Regenerate it with ./scripts/bench.sh; paste report.md into a pull request
+# rather than committing the directory.
+bench-results/**/*.csv
+bench-results/**/*.jsonl
+bench-results/**/*.md
+bench-results/**/*.json
+
+# Profiler output, written into the repo root by `./scripts/profile.sh --save-only`.
+profile.json*
+
+# Benchmark trade datasets: tens of MB, rebuildable from fynd-core/benches/dataset.sql
+aggregator_trades*.json
 comparison_results.json
 scale_results*.json
 .env
