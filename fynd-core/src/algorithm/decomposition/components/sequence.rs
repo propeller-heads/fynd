@@ -9,7 +9,7 @@ use crate::algorithm::decomposition::components::*;
 
 // ===================== SequentialRoute =====================
 
-/// One parallel branch of a [`SolutionGraph`]: a token path with one [`Hop`] per leg.
+/// One parallel branch of a [`DecompositionGraph`]: a token path with one [`Hop`] per leg.
 ///
 /// Equivalent of defibot's `SequentialRoute` (`routes/sequential.py`). Composed attributes are
 /// products (prices), sums (gas) or minima (inertia) over the hops.

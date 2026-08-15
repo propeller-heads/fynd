@@ -45,25 +45,11 @@ use crate::algorithm::{
 /// alternative carrying flow, so the search costs `alternatives² × evaluations` sells at worst.
 const LINE_SEARCH_EVALS: usize = 12;
 
-/// Splits a sell amount by moving flow into one alternative at a time.
-pub(crate) struct FrankWolfe;
-
-impl SplitOptimizerT for FrankWolfe {
-    fn optimize<S: Sellable>(
-        &self,
-        routes: &mut [S],
-        sell_amount: &BigUint,
-        gas_prices: &GasPrices,
-    ) -> Result<SplitSolution, DecompositionError> {
-        split_by_frank_wolfe(routes, sell_amount, gas_prices)
-    }
-}
-
 /// # Errors
 ///
 /// [`DecompositionError::InvalidStructure`] when `sell_amount` is zero — every share in the search
 /// is a fraction of it. Any non-recoverable failure raised while selling is propagated.
-fn split_by_frank_wolfe<S: Sellable>(
+pub(crate) fn split_by_frank_wolfe<S: Sellable>(
     routes: &mut [S],
     sell_amount: &BigUint,
     gas_prices: &GasPrices,

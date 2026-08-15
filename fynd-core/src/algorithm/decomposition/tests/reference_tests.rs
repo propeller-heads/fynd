@@ -69,7 +69,7 @@ fn build(
     graph: &StableDiGraph<DepthAndPrice>,
     market: &MarketData,
     params: &ReferenceParams<'_>,
-) -> Option<SolutionGraph> {
+) -> Option<DecompositionGraph> {
     build_for(graph, market, params, &BigUint::from(1_000u32))
 }
 
@@ -78,7 +78,7 @@ fn build_for(
     market: &MarketData,
     params: &ReferenceParams<'_>,
     sell_amount: &BigUint,
-) -> Option<SolutionGraph> {
+) -> Option<DecompositionGraph> {
     build_for_allowed(graph, market, params, sell_amount, None)
 }
 
@@ -89,7 +89,7 @@ fn build_for_allowed(
     params: &ReferenceParams<'_>,
     sell_amount: &BigUint,
     connector_tokens: Option<&FxHashSet<Address>>,
-) -> Option<SolutionGraph> {
+) -> Option<DecompositionGraph> {
     let view = market_read(market);
     let gas_price_wei = BigUint::zero();
     let graph = TokenGraph::new(
@@ -100,7 +100,7 @@ fn build_for_allowed(
             endpoints: [&params.sell_token.address, &params.buy_token.address],
         },
     );
-    build_reference_solution(
+    solve_reference_solution(
         &graph,
         view.base_market_state(),
         None,
@@ -113,7 +113,7 @@ fn build_for_allowed(
 }
 
 /// Token sequence of every branch, rendered as `"A->W->B"`.
-fn branch_labels(graph: &SolutionGraph) -> Vec<String> {
+fn branch_labels(graph: &DecompositionGraph) -> Vec<String> {
     graph
         .branches()
         .iter()

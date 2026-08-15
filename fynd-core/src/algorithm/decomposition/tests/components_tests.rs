@@ -336,7 +336,7 @@ mod unit {
         let mut hop = hop_ab(vec![cp_pool("p1", 1_000_000, 2_000_000)]);
         hop.set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        let mut graph = SolutionGraph::from_routes(vec![route_ab(hop)], vec![Fraction::one()])
+        let mut graph = DecompositionGraph::from_routes(vec![route_ab(hop)], vec![Fraction::one()])
             .expect("branches share endpoints");
 
         assert_eq!(graph.new_marginal_price(), None);
@@ -351,7 +351,7 @@ mod unit {
     // ---------- Unsolved outer splits ----------
 
     /// Two solved single-hop branches: price 2 / inertia 1, and price 4 / inertia 3.
-    fn two_branch_graph(outer_splits: Vec<Fraction>) -> SolutionGraph {
+    fn two_branch_graph(outer_splits: Vec<Fraction>) -> DecompositionGraph {
         let mut cheap = hop_ab(vec![cp_pool_with_depth("p1", 1_000, 2_000, depth(1))]);
         cheap
             .set_splits(vec![Fraction::one()])
@@ -359,7 +359,7 @@ mod unit {
         let mut rich = hop_ab(vec![cp_pool_with_depth("p2", 1_000, 4_000, depth(3))]);
         rich.set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        SolutionGraph::from_routes(vec![route_ab(cheap), route_ab(rich)], outer_splits)
+        DecompositionGraph::from_routes(vec![route_ab(cheap), route_ab(rich)], outer_splits)
             .expect("branches share endpoints")
     }
 
@@ -454,8 +454,10 @@ mod unit {
         hop.set_splits(vec![Fraction::one()])
             .expect("one split per pool");
 
-        let result =
-            SolutionGraph::from_routes(vec![route_ab(hop)], vec![Fraction::one(), Fraction::one()]);
+        let result = DecompositionGraph::from_routes(
+            vec![route_ab(hop)],
+            vec![Fraction::one(), Fraction::one()],
+        );
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
@@ -697,7 +699,7 @@ mod unit {
         second_hop
             .set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        let mut graph = SolutionGraph::from_routes(
+        let mut graph = DecompositionGraph::from_routes(
             vec![route_ab(first_hop), route_ab(second_hop)],
             vec![
                 Fraction::from_ratio(1, 4).expect("non-zero denominator"),
@@ -832,7 +834,7 @@ mod unit {
     fn test_graph_sell_amount_limit_sums_branches() {
         let first_hop = hop_ab(vec![mock_pool("p1", 1.0, 0.0, 1_000)]);
         let second_hop = hop_ab(vec![mock_pool("p2", 1.0, 0.0, 3_000)]);
-        let mut graph = SolutionGraph::from_routes(
+        let mut graph = DecompositionGraph::from_routes(
             vec![route_ab(first_hop), route_ab(second_hop)],
             vec![Fraction::one(), Fraction::one()],
         )
@@ -919,8 +921,8 @@ mod defibot_routes {
     use crate::algorithm::{
         decomposition::{
             components::{
-                Branch, BranchSide, DecompositionError, Fraction, Hop, PoolRef, SellLimitKind,
-                SequentialRoute, SolutionGraph, SPLIT_PRECISION,
+                Branch, BranchSide, DecompositionError, DecompositionGraph, Fraction, Hop, PoolRef,
+                SellLimitKind, SequentialRoute, SPLIT_PRECISION,
             },
             solve::sell_with_coupled_paths,
             test_fixtures::{
@@ -1432,7 +1434,7 @@ mod defibot_routes {
             vec![single_pool_hop(token_c(), token_b(), tenfold_pool("cb"))],
         );
 
-        let result = SolutionGraph::from_routes(vec![first, second], vec![split(1, 2); 2]);
+        let result = DecompositionGraph::from_routes(vec![first, second], vec![split(1, 2); 2]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
@@ -1449,7 +1451,7 @@ mod defibot_routes {
             vec![single_pool_hop(token_b(), token_c(), tenfold_pool("bc"))],
         );
 
-        let result = SolutionGraph::from_routes(vec![first, second], vec![split(1, 2); 2]);
+        let result = DecompositionGraph::from_routes(vec![first, second], vec![split(1, 2); 2]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
@@ -2330,7 +2332,7 @@ mod defibot_routes {
 
     #[test]
     fn test_branch_rejects_a_tail_that_does_not_start_where_the_head_ends() {
-        let result = Branch::new(
+        let result = Branch::head(
             single_pool_hop(token_a(), token_b(), tenfold_pool("ab")),
             vec![route(
                 vec![token_c(), token_d()],
@@ -2408,7 +2410,7 @@ mod defibot_routes {
     #[test]
     fn test_tail_grouped_branch_reports_the_outer_tokens() {
         let (a, b, c, _d, x) = five_tokens();
-        let branch = Branch::new_tail_grouped(
+        let branch = Branch::tail(
             solved_leg("cx", &c, &x),
             vec![token_path(&[a.clone(), b, c], &["ab", "bc"])],
             Vec::new(),
@@ -2423,7 +2425,7 @@ mod defibot_routes {
     #[test]
     fn test_tail_grouped_branch_walks_its_hops_in_flow_order() {
         let (a, b, c, _d, x) = five_tokens();
-        let branch = Branch::new_tail_grouped(
+        let branch = Branch::tail(
             solved_leg("cx", &c, &x),
             vec![token_path(&[a, b, c], &["ab", "bc"])],
             Vec::new(),
@@ -2442,7 +2444,7 @@ mod defibot_routes {
     #[test]
     fn test_tail_grouped_label_renders_the_sequences_before_the_hop() {
         let (a, b, c, d, x) = five_tokens();
-        let branch = Branch::new_tail_grouped(
+        let branch = Branch::tail(
             solved_leg("dx", &d, &x),
             vec![
                 token_path(&[a.clone(), b, d.clone()], &["ab", "bd"]),
@@ -2458,7 +2460,7 @@ mod defibot_routes {
     #[test]
     fn test_tail_grouped_branch_rejects_a_sequence_that_ends_elsewhere() {
         let (a, b, c, d, x) = five_tokens();
-        let result = Branch::new_tail_grouped(
+        let result = Branch::tail(
             solved_leg("dx", &d, &x),
             vec![token_path(&[a, b, c], &["ab", "bc"])],
             Vec::new(),
@@ -2473,7 +2475,7 @@ mod defibot_routes {
     #[test]
     fn test_tail_grouped_branch_rejects_an_empty_sequence_set() {
         let (_a, _b, _c, d, x) = five_tokens();
-        let result = Branch::new_tail_grouped(solved_leg("dx", &d, &x), Vec::new(), Vec::new());
+        let result = Branch::tail(solved_leg("dx", &d, &x), Vec::new(), Vec::new());
 
         assert!(
             matches!(result, Err(DecompositionError::InvalidStructure { .. })),
@@ -2484,7 +2486,7 @@ mod defibot_routes {
     #[test]
     fn test_tail_grouped_branch_sells_its_hop_once_for_the_whole_flow() {
         let (a, b, c, d, x) = five_tokens();
-        let mut branch = Branch::new_tail_grouped(
+        let mut branch = Branch::tail(
             solved_leg("dx", &d, &x),
             vec![
                 token_path(&[a.clone(), b, d.clone()], &["ab", "bd"]),

@@ -18,7 +18,7 @@ use crate::algorithm::decomposition::components::*;
 /// The outer splits are over **branches, not token paths**. Two token paths that leave the sell
 /// token through the same pool belong to one branch, so no pool the two share can be allocated
 /// twice at this level (`order_solver.py:517-554`).
-pub(crate) struct SolutionGraph {
+pub(crate) struct DecompositionGraph {
     branches: Vec<Branch>,
     outer_splits: Vec<Fraction>,
     sell_amount: BigUint,
@@ -26,12 +26,12 @@ pub(crate) struct SolutionGraph {
     limit_cache: Option<(BigUint, Vec<ComponentId>)>,
 }
 
-impl SolutionGraph {
+impl DecompositionGraph {
     /// Builds a solution graph over parallel branches.
     ///
     /// Pass an empty `outer_splits` to build the graph unsolved — candidate discovery assembles
     /// the top-level parallel route before any splits exist and ranks it on
-    /// [`SolutionGraph::weight`], which must take the unsolved branch.
+    /// [`DecompositionGraph::weight`], which must take the unsolved branch.
     ///
     /// # Errors
     ///
@@ -84,7 +84,7 @@ impl SolutionGraph {
     ///
     /// # Errors
     ///
-    /// Whatever [`Branch::from_route`] and [`SolutionGraph::new`] raise.
+    /// Whatever [`Branch::from_route`] and [`DecompositionGraph::new`] raise.
     #[cfg(test)]
     pub(crate) fn from_routes(
         routes: Vec<SequentialRoute>,
@@ -163,12 +163,12 @@ impl SolutionGraph {
         self.branches[0].buy_token()
     }
 
-    /// Amount of [`SolutionGraph::sell_token`] the last sell consumed.
+    /// Amount of [`DecompositionGraph::sell_token`] the last sell consumed.
     pub(crate) fn sell_amount(&self) -> &BigUint {
         &self.sell_amount
     }
 
-    /// Amount of [`SolutionGraph::buy_token`] the last sell produced.
+    /// Amount of [`DecompositionGraph::buy_token`] the last sell produced.
     pub(crate) fn buy_amount(&self) -> &BigUint {
         &self.buy_amount
     }
@@ -187,8 +187,8 @@ impl SolutionGraph {
     /// Mean of the branch prices while unsolved, split-weighted sum once solved
     /// (`routes/parallel.py:76-86`).
     ///
-    /// Parity-only, like [`SolutionGraph::inertia`] and [`SolutionGraph::weight`]. The solve
-    /// reaches a graph through [`Sellable`](super::optimizers::Sellable), which asks for
+    /// Parity-only, like [`DecompositionGraph::inertia`] and [`DecompositionGraph::weight`]. The
+    /// solve reaches a graph through [`Sellable`](super::optimizers::Sellable), which asks for
     /// `marginal_price`, `minimum_gas`, `executed_price` and `sell` and nothing else. These three
     /// composition rules are ported and tested against defibot's numbers so a future optimizer
     /// working at the graph level inherits them correct, but nothing reads them today, so they are
@@ -238,7 +238,7 @@ impl SolutionGraph {
 
     /// Gas of only the branches the outer splits activate (`routes/parallel.py:281-286`).
     ///
-    /// See [`Hop::minimum_gas`] for why this differs from [`SolutionGraph::gas`].
+    /// See [`Hop::minimum_gas`] for why this differs from [`DecompositionGraph::gas`].
     pub(crate) fn minimum_gas(&self) -> BigUint {
         let mut total = BigUint::zero();
         for (branch, split) in self
@@ -296,7 +296,7 @@ impl SolutionGraph {
     /// Records amounts produced by a sell this graph did not drive itself.
     ///
     /// Coupled-path selling walks the branches one at a time instead of going through
-    /// [`SolutionGraph::sell`], and writes the totals back the same way defibot does
+    /// [`DecompositionGraph::sell`], and writes the totals back the same way defibot does
     /// (`utils.py:43-44`).
     pub(crate) fn record_sell(&mut self, sell_amount: BigUint, buy_amount: BigUint) {
         self.sell_amount = sell_amount;
@@ -304,7 +304,7 @@ impl SolutionGraph {
     }
 
     /// Liquidity depth proxy: pessimistically the deepest branch while unsolved
-    /// (`routes/parallel.py:148-151`). Parity-only; see [`SolutionGraph::route_price`].
+    /// (`routes/parallel.py:148-151`). Parity-only; see [`DecompositionGraph::route_price`].
     #[cfg(test)]
     pub(crate) fn inertia(&self) -> f64 {
         if !self.solved() {
@@ -326,7 +326,7 @@ impl SolutionGraph {
     }
 
     /// Ranking score: maximum over branches while unsolved, split-weighted once solved
-    /// (`routes/parallel.py:136-146`). Parity-only; see [`SolutionGraph::route_price`].
+    /// (`routes/parallel.py:136-146`). Parity-only; see [`DecompositionGraph::route_price`].
     #[cfg(test)]
     pub(crate) fn weight(&self) -> Result<f64, DecompositionError> {
         if !self.solved() {
@@ -398,7 +398,7 @@ impl SolutionGraph {
     }
 
     /// Largest amount the graph can absorb: the sum over its parallel branches
-    /// (`routes/parallel.py:216-222`). Cached until [`SolutionGraph::invalidate`].
+    /// (`routes/parallel.py:216-222`). Cached until [`DecompositionGraph::invalidate`].
     pub(crate) fn sell_amount_limit(
         &mut self,
     ) -> Result<(BigUint, Vec<ComponentId>), DecompositionError> {

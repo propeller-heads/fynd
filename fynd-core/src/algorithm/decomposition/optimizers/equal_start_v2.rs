@@ -86,47 +86,10 @@ const DEFAULT_MAX_MOVE_ITERATIONS: usize = 500;
 pub enum RankingMetric {
     /// Post-trade marginal price. The quantity the walk equalises, and defibot's configured value
     /// in both configurations (`propeller-solver-core/core/defibot.yaml:638`).
-    #[default]
     MarginalPrice,
     /// Price the alternative's last sell achieved, net of gas.
+    #[default]
     ExecutedPrice,
-}
-
-/// Splits a sell amount by starting every alternative equal and moving flow to the best one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EqualStartV2 {
-    ranking_metric: RankingMetric,
-    max_move_iterations: Option<usize>,
-}
-
-impl EqualStartV2 {
-    /// The optimizer ranking on `ranking_metric`, with this port's default iteration budget.
-    pub(crate) fn new(ranking_metric: RankingMetric) -> Self {
-        Self { ranking_metric, max_move_iterations: Some(DEFAULT_MAX_MOVE_ITERATIONS) }
-    }
-
-    /// Caps how many moves one resolution pass may make, or lifts the cap entirely with `None`.
-    ///
-    /// This is defibot's `max_splits` optimizer argument, which is **not** the solver's
-    /// route-count cap of the same name — see [`DecompositionConfig::max_parallel_routes`].
-    ///
-    /// [`DecompositionConfig::max_parallel_routes`]: crate::algorithm::decomposition::DecompositionConfig::max_parallel_routes
-    #[cfg(test)]
-    pub(crate) fn with_max_move_iterations(mut self, iterations: Option<usize>) -> Self {
-        self.max_move_iterations = iterations;
-        self
-    }
-}
-
-impl SplitOptimizerT for EqualStartV2 {
-    fn optimize<S: Sellable>(
-        &self,
-        routes: &mut [S],
-        sell_amount: &BigUint,
-        gas_prices: &GasPrices,
-    ) -> Result<SplitSolution, DecompositionError> {
-        split_equal_start_v2(self, routes, sell_amount, gas_prices)
-    }
 }
 
 /// Entry point (`equal_start_v2.py:20-107`).
@@ -136,8 +99,8 @@ impl SplitOptimizerT for EqualStartV2 {
 /// [`DecompositionError::InvalidStructure`] when `sell_amount` is zero — every split is a ratio
 /// over it, and defibot raises `ZeroDivisionError` on the same input (`:255`). Any non-recoverable
 /// failure raised while selling is propagated.
-fn split_equal_start_v2<S: Sellable>(
-    optimizer: &EqualStartV2,
+pub(crate) fn split_equal_start_v2<S: Sellable>(
+    ranking_metric: RankingMetric,
     routes: &mut [S],
     sell_amount: &BigUint,
     gas_prices: &GasPrices,
@@ -161,7 +124,8 @@ fn split_equal_start_v2<S: Sellable>(
 
     let buy_token = routes[0].buy_token().clone();
     for step in steps() {
-        let pass = find_best_splits(optimizer, routes, sell_amount, &splits, gas_prices, &step)?;
+        let pass =
+            find_best_splits(ranking_metric, routes, sell_amount, &splits, gas_prices, &step)?;
         splits = pass.splits;
         let cost = gas_prices.cost_in_token(&pass.gas, &buy_token.address);
         let net = BigInt::from(pass.bought.clone()) - BigInt::from(cost);
@@ -263,7 +227,7 @@ struct Evaluation {
 /// receiver marked saturated (`:164-167`), so the second-best receives next. The search stops when
 /// no unvisited split vector is reachable, or when the iteration budget runs out.
 fn find_best_splits<S: Sellable>(
-    optimizer: &EqualStartV2,
+    ranking_metric: RankingMetric,
     routes: &mut [S],
     sell_amount: &BigUint,
     start_splits: &[Fraction],
@@ -278,10 +242,7 @@ fn find_best_splits<S: Sellable>(
     let mut last_receiver: Option<usize> = None;
     let mut iterations = 0usize;
 
-    while optimizer
-        .max_move_iterations
-        .is_none_or(|budget| iterations <= budget)
-    {
+    while iterations <= DEFAULT_MAX_MOVE_ITERATIONS {
         iterations += 1;
         let evaluation = evaluate(routes, sell_amount, &splits, gas_prices)?;
 
@@ -301,7 +262,7 @@ fn find_best_splits<S: Sellable>(
         }
         previous = Some((splits.clone(), evaluation.total_net.clone()));
 
-        let ranking = match optimizer.ranking_metric {
+        let ranking = match ranking_metric {
             RankingMetric::MarginalPrice => &evaluation.marginal_prices,
             RankingMetric::ExecutedPrice => &evaluation.executed_prices,
         };

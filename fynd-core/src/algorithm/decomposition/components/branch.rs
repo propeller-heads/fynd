@@ -9,7 +9,7 @@ use crate::algorithm::decomposition::components::*;
 
 // ===================== Branch =====================
 
-/// One parallel branch of a [`SolutionGraph`]: a shared first [`Hop`] feeding parallel tails.
+/// One parallel branch of a [`DecompositionGraph`]: a shared first [`Hop`] feeding parallel tails.
 ///
 /// Port of the shape `_group_by_neighbour_token` builds (`order_solver.py:517-554`):
 /// `Sequential[first_hop, Parallel[tails]]`, one per distinct token following the sell token. Its
@@ -40,7 +40,7 @@ use crate::algorithm::decomposition::components::*;
 ///
 /// [`Branch::tail_splits`] divides the *head's output* across the tails — it is the inner parallel
 /// split, one level below the graph's outer split over branches. An empty vector means unsolved,
-/// the same encoding [`Hop::splits`] and [`SolutionGraph::outer_splits`] use. A branch with no
+/// the same encoding [`Hop::splits`] and [`DecompositionGraph::outer_splits`] use. A branch with no
 /// tails has nothing to split and is solved as soon as its head is.
 /// Which end of a [`Branch`] its [`Hop`] sits at.
 ///
@@ -67,6 +67,9 @@ pub(crate) struct Branch {
     /// See [`SequentialRoute::prices`].
     prices: Option<Arc<TokenGasPrices>>,
     sequences: Vec<SequentialRoute>,
+
+    // CZ: Can we have something like a enum state for whether the objects are solved or not? Like
+    // Unsolved;Solved{splits, sell, buy}
     splits: Vec<Fraction>,
     sell_amount: BigUint,
     buy_amount: BigUint,
@@ -84,7 +87,7 @@ impl Branch {
     /// [`DecompositionError::InvalidStructure`] when a sequence does not start where the hop ends,
     /// when the sequences disagree on the buy token, or when a non-empty `splits` does not match
     /// the sequence count.
-    pub(crate) fn new(
+    pub(crate) fn head(
         hop: Hop,
         sequences: Vec<SequentialRoute>,
         splits: Vec<Fraction>,
@@ -134,15 +137,15 @@ impl Branch {
 
     /// Builds a tail-grouped branch: sequences that all end where `hop` begins.
     ///
-    /// The mirror of [`Branch::new`]. `sequences` must all start at the same sell token and all end
-    /// at `hop`'s input token.
+    /// The mirror of [`Branch::head`]. `sequences` must all start at the same sell token and all
+    /// end at `hop`'s input token.
     ///
     /// # Errors
     ///
     /// [`DecompositionError::InvalidStructure`] when a sequence does not end where the hop starts,
     /// when the sequences disagree on the sell token, when `sequences` is empty, or when a
     /// non-empty `splits` does not match the sequence count.
-    pub(crate) fn new_tail_grouped(
+    pub(crate) fn tail(
         hop: Hop,
         sequences: Vec<SequentialRoute>,
         splits: Vec<Fraction>,
@@ -156,6 +159,7 @@ impl Branch {
                 ),
             });
         }
+
         let Some(first) = sequences.first() else {
             // A hop with nothing feeding it is a head-grouped branch with no sequences, not a
             // tail-grouped one; the caller has the wrong shape.
@@ -222,12 +226,12 @@ impl Branch {
         let (tokens, mut hops) = route.into_parts();
         let head = hops.remove(0);
         if hops.is_empty() {
-            return Self::new(head, Vec::new(), Vec::new());
+            return Self::head(head, Vec::new(), Vec::new());
         }
 
         let tail = SequentialRoute::new(tokens[1..].to_vec(), hops)?;
         let tail_splits = if tail.solved() { vec![Fraction::one()] } else { Vec::new() };
-        Self::new(head, vec![tail], tail_splits)
+        Self::head(head, vec![tail], tail_splits)
     }
 
     /// The hop every sequence of this branch passes through.

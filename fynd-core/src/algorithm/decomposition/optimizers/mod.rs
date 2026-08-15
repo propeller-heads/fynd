@@ -9,7 +9,7 @@
 //! defibot's optimizers accept `list[FractalRoute]`, so the same code splits a hop's pools, a
 //! branch's tails and a solution's parallel branches — the recursion made all three look
 //! identical. This port replaced the recursion with a fixed structure
-//! ([`SolutionGraph`](super::components::SolutionGraph) holds [`Branch`]es, a [`Branch`] holds
+//! ([`SolutionGraph`](super::components::DecompositionGraph) holds [`Branch`]es, a [`Branch`] holds
 //! [`SequentialRoute`] tails, a [`Hop`] holds [`PoolRef`]s), so the polymorphism has to come from
 //! somewhere else.
 //!
@@ -35,12 +35,18 @@ use tycho_simulation::tycho_core::{
 };
 
 use crate::{
-    algorithm::decomposition::components::{
-        Branch, DecompositionError, Fraction, Hop, PoolRef, SequentialRoute, SolutionGraph,
+    algorithm::decomposition::{
+        components::{
+            Branch, DecompositionError, DecompositionGraph, Fraction, Hop, PoolRef, SequentialRoute,
+        },
+        optimizers::{
+            equal_start_v2::split_equal_start_v2, frank_wolfe::split_by_frank_wolfe,
+            pair_comparison::split_by_pair_comparison,
+        },
+        RankingMetric,
     },
     derived::types::TokenGasPrices,
 };
-
 // ===================== Sellable =====================
 
 /// Something an optimizer can sell on and rank against its peers.
@@ -249,45 +255,45 @@ impl Sellable for Hop {
 
 /// The whole graph is an alternative in its own right in the single-branch case of
 /// `recursive_solve_splits` (`order_solver.py:661-671`), which backs the graph off as one unit.
-impl Sellable for SolutionGraph {
+impl Sellable for DecompositionGraph {
     fn sell_token(&self) -> &Token {
-        SolutionGraph::sell_token(self)
+        DecompositionGraph::sell_token(self)
     }
 
     fn buy_token(&self) -> &Token {
-        SolutionGraph::buy_token(self)
+        DecompositionGraph::buy_token(self)
     }
 
     fn solved(&self) -> bool {
-        SolutionGraph::solved(self)
+        DecompositionGraph::solved(self)
     }
 
     fn sell_amount(&self) -> &BigUint {
-        SolutionGraph::sell_amount(self)
+        DecompositionGraph::sell_amount(self)
     }
 
     fn buy_amount(&self) -> &BigUint {
-        SolutionGraph::buy_amount(self)
+        DecompositionGraph::buy_amount(self)
     }
 
     fn minimum_gas(&self) -> BigUint {
-        SolutionGraph::minimum_gas(self)
+        DecompositionGraph::minimum_gas(self)
     }
 
     fn marginal_price(&self) -> Result<f64, DecompositionError> {
-        SolutionGraph::marginal_price(self)
+        DecompositionGraph::marginal_price(self)
     }
 
     fn new_marginal_price(&self) -> Result<Option<f64>, DecompositionError> {
-        Ok(SolutionGraph::new_marginal_price(self))
+        Ok(DecompositionGraph::new_marginal_price(self))
     }
 
     fn executed_price(&self) -> f64 {
-        SolutionGraph::executed_price(self)
+        DecompositionGraph::executed_price(self)
     }
 
     fn sell(&mut self, amount: &BigUint) -> Result<(BigUint, BigUint), DecompositionError> {
-        SolutionGraph::sell(self, amount)
+        DecompositionGraph::sell(self, amount)
     }
 }
 
@@ -375,8 +381,8 @@ impl Sellable for HopPool<'_> {
 /// gas price in wei, and [`TokenGasPrices`] mapping a token to its wei ratio.
 #[derive(Clone)]
 pub(crate) struct GasPrices {
-    gas_price_wei: BigUint,
-    token_prices: Option<Arc<TokenGasPrices>>,
+    pub(crate) gas_price_wei: BigUint,
+    pub(crate) token_prices: Option<Arc<TokenGasPrices>>,
 }
 
 impl GasPrices {
@@ -388,11 +394,6 @@ impl GasPrices {
     /// happens to be, which means something different for every token.
     pub(crate) fn new(gas_price_wei: BigUint, token_prices: Option<Arc<TokenGasPrices>>) -> Self {
         Self { gas_price_wei, token_prices }
-    }
-
-    /// The derived prices this was built from, for the callers that price a whole route.
-    pub(crate) fn token_prices(&self) -> Option<&Arc<TokenGasPrices>> {
-        self.token_prices.as_ref()
     }
 
     /// Cost of `gas` gas units in on-chain units of `token`, or zero when no price is known.
@@ -690,5 +691,58 @@ mod tests {
         let amount = BigUint::from(10u8).pow(18) * BigUint::from(1_234u32);
 
         assert!((to_human(&amount, 18) - 1_234.0).abs() < 1e-9);
+    }
+}
+
+/// A split optimizer: how an amount is divided between parallel alternatives.
+///
+/// The first two are defibot's `solver.order_solver.decomposition.optimizer`; the third is not in
+/// defibot. Each one's module says what it does and what it measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitOptimizer {
+    /// Pairwise line search (`optimizers/pair_comparison.rs`).
+    PairComparison,
+    /// Equal-start gradient walk (`optimizers/equal_start_v2.rs`).
+    EqualStartV2 { equalize: RankingMetric },
+    /// Frank-Wolfe line search (`optimizers/frank_wolfe.rs`).
+    FrankWolfe,
+}
+
+impl SplitOptimizer {
+    pub fn split<S: Sellable>(
+        &self,
+        routes: &mut [S],
+        sell_amount: &BigUint,
+        gas_prices: &GasPrices,
+    ) -> Result<SplitSolution, DecompositionError> {
+        match self {
+            SplitOptimizer::PairComparison => {
+                split_by_pair_comparison(routes, sell_amount, gas_prices)
+            }
+            SplitOptimizer::EqualStartV2 { equalize } => {
+                split_equal_start_v2(*equalize, routes, sell_amount, gas_prices)
+            }
+            SplitOptimizer::FrankWolfe => split_by_frank_wolfe(routes, sell_amount, gas_prices),
+        }
+    }
+}
+
+/// Which optimizer runs at which level of the solve.
+///
+/// A solve splits twice. The outer split hands the order to the branches; the inner splits hand a
+/// branch's share to its sequences, and a hop's share to its pools. They do not have to use the
+/// same optimizer, and on the recorded fixture they should not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitOptimizerConfig {
+    /// Splits the order across the graph's branches.
+    pub outer: SplitOptimizer,
+    /// Splits inside a branch: its sequences, and the pools of a hop.
+    pub inner: SplitOptimizer,
+}
+
+impl Default for SplitOptimizerConfig {
+    /// Pairwise over the branches, Frank-Wolfe inside them.
+    fn default() -> Self {
+        Self { outer: SplitOptimizer::PairComparison, inner: SplitOptimizer::FrankWolfe }
     }
 }

@@ -23,8 +23,8 @@ use tycho_simulation::tycho_core::{
 use crate::{
     algorithm::{
         decomposition::components::{
-            Branch, DecompositionError, Fraction, Hop, PoolRef, SellLimitKind, SequentialRoute,
-            SolutionGraph,
+            Branch, DecompositionError, DecompositionGraph, Fraction, Hop, PoolRef, SellLimitKind,
+            SequentialRoute,
         },
         test_utils::token_with_decimals,
     },
@@ -300,13 +300,16 @@ pub(crate) fn route(tokens: Vec<Token>, hops: Vec<Hop>) -> SequentialRoute {
 }
 
 /// A solution graph whose branches are one token path each — the ungrouped shape.
-pub(crate) fn graph(routes: Vec<SequentialRoute>, outer_splits: Vec<Fraction>) -> SolutionGraph {
-    SolutionGraph::from_routes(routes, outer_splits).expect("branches share endpoints")
+pub(crate) fn graph(
+    routes: Vec<SequentialRoute>,
+    outer_splits: Vec<Fraction>,
+) -> DecompositionGraph {
+    DecompositionGraph::from_routes(routes, outer_splits).expect("branches share endpoints")
 }
 
 /// A branch: one shared head hop, the tails hanging off it, and the split between them.
 pub(crate) fn branch(head: Hop, tails: Vec<SequentialRoute>, tail_splits: Vec<Fraction>) -> Branch {
-    Branch::new(head, tails, tail_splits).expect("tails hang off the head")
+    Branch::head(head, tails, tail_splits).expect("tails hang off the head")
 }
 
 /// An exact split, panicking on a zero denominator.
@@ -348,7 +351,7 @@ pub(crate) fn tenfold_route(prefix: &str, tokens: Vec<Token>) -> SequentialRoute
 /// the same component id appears in more than one branch here too. Fynd's [`PoolRef`] owns its
 /// simulation state, so the repeated ids are *separate* states: this fixture reproduces defibot's
 /// topology, not its aliasing.
-pub(crate) fn diamond_graph() -> SolutionGraph {
+pub(crate) fn diamond_graph() -> DecompositionGraph {
     let branches = vec![
         route(
             vec![wbtc(), usdc()],

@@ -7,7 +7,7 @@ use crate::algorithm::decomposition::components::*;
 
 // ===================== Errors =====================
 
-/// Failures raised while composing or selling on a [`SolutionGraph`].
+/// Failures raised while composing or selling on a [`DecompositionGraph`].
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DecompositionError {
     /// The requested sell amount exceeds what the route can absorb.
@@ -50,6 +50,12 @@ pub(crate) enum DecompositionError {
     InvalidStructure {
         /// What was wrong with the input.
         reason: String,
+    },
+    GraphBuildFailure,
+    InvalidInput,
+    SolveError,
+    RouteBuildFailure {
+        error: AlgorithmError,
     },
 }
 

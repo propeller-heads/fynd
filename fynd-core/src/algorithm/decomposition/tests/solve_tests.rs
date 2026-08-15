@@ -29,7 +29,7 @@ fn free_gas() -> BigUint {
     BigUint::zero()
 }
 
-fn solve(graph: &mut SolutionGraph, sell_amount: &BigUint) {
+fn solve(graph: &mut DecompositionGraph, sell_amount: &BigUint) {
     solve_graph(
         graph,
         sell_amount,
@@ -50,7 +50,7 @@ fn solve_branch(route: &mut SequentialRoute, sell_amount: u64) {
     .expect("the fixtures solve");
 }
 
-fn solve_all(graph: &mut SolutionGraph, sell_amount: &BigUint) -> (BigUint, BigUint) {
+fn solve_all(graph: &mut DecompositionGraph, sell_amount: &BigUint) -> (BigUint, BigUint) {
     solve_solution_graph(
         graph,
         sell_amount,
@@ -264,7 +264,7 @@ fn test_limit_restart_amount_floors_a_zero_limit_at_zero() {
 /// four-token diamond spelled in the fixtures' tokens: `a -> b -> c -> d` against
 /// `a -> c -> b -> d`. The second branch traverses `c -> b`, the reverse of a pair the first
 /// branch already claimed.
-fn looping_graph(reversed_first: bool) -> SolutionGraph {
+fn looping_graph(reversed_first: bool) -> DecompositionGraph {
     let forward = build_route(
         vec![token_a(), token_b(), token_c(), token_d()],
         vec![
@@ -480,7 +480,7 @@ fn test_second_pass_leaves_zero_split_branches_alone() {
 // ===================== Coupled paths (utils.py:18-47) =====================
 
 /// Two branches over the *same* pools, the shape of defibot's `test_sell_with_coupled_paths`.
-fn coupled_graph() -> SolutionGraph {
+fn coupled_graph() -> DecompositionGraph {
     let branch = || {
         build_route(
             vec![token_a(), token_b(), token_c()],
@@ -559,7 +559,7 @@ fn capacity_branch(id: &str, multiple: u64, sell_limit: u64) -> SequentialRoute 
     )
 }
 
-fn without_splits(graph: &mut SolutionGraph, sell_amount: u64) {
+fn without_splits(graph: &mut DecompositionGraph, sell_amount: u64) {
     solve_without_splits(graph, &BigUint::from(sell_amount), &GasPrices::new(free_gas(), None))
         .expect("the fixtures sell");
 }
@@ -655,7 +655,7 @@ fn test_solve_without_splits_zeroes_branches_past_the_exhaustion_point() {
 // ===================== The final comparison (order_solver.py:300-310) =====================
 
 /// A solved one-branch graph that has already sold `sell_amount`.
-fn sold_graph(id: &str, multiple: u64, sell_amount: u64) -> SolutionGraph {
+fn sold_graph(id: &str, multiple: u64, sell_amount: u64) -> DecompositionGraph {
     let mut graph = build_graph(
         vec![build_route(
             vec![token_a(), token_b()],

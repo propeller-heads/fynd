@@ -43,28 +43,10 @@ use crate::algorithm::decomposition::{
 /// schedule is a successive refinement: 1/2 finds the neighbourhood, 1/500 finds the point.
 const STEPS: [(i64, i64); 5] = [(1, 2), (1, 5), (1, 10), (1, 50), (1, 500)];
 
-/// Splits a sell amount by comparing alternatives two at a time.
-pub(crate) struct PairComparison;
-
-impl SplitOptimizerT for PairComparison {
-    fn optimize<S: Sellable>(
-        &self,
-        routes: &mut [S],
-        sell_amount: &BigUint,
-        gas_prices: &GasPrices,
-    ) -> Result<SplitSolution, DecompositionError> {
-        split_by_pair_comparison(routes, sell_amount, gas_prices)
-    }
-}
-
-/// Entry point (`pair_comparison.py:14-106`).
-///
-/// # Errors
-///
 /// [`DecompositionError::InvalidStructure`] when `sell_amount` is zero — every split in the search
 /// is a ratio over it, and defibot raises `ZeroDivisionError` on the same input. Any
 /// non-recoverable failure raised while selling is propagated.
-fn split_by_pair_comparison<S: Sellable>(
+pub(crate) fn split_by_pair_comparison<S: Sellable>(
     routes: &mut [S],
     sell_amount: &BigUint,
     gas_prices: &GasPrices,

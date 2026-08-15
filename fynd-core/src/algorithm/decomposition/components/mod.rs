@@ -6,7 +6,7 @@
 //! production use showed that solutions always collapse to the same three levels, so the recursion
 //! is replaced here by a fixed structure:
 //!
-//! * [`SolutionGraph`] — the outer `ParallelRoute` over one order.
+//! * [`DecompositionGraph`] — the outer `ParallelRoute` over one order.
 //! * [`Branch`] — one outer split: a shared first [`Hop`] plus the parallel tails hanging off it.
 //! * [`SequentialRoute`] — one tail: a token path with one [`Hop`] per leg.
 //! * [`Hop`] — the inner `ParallelRoute` of `SimpleRoute`s at one leg, holding [`PoolRef`]s.
@@ -137,7 +137,7 @@ mod split;
 
 pub(crate) use branch::{Branch, BranchSide};
 pub(crate) use error::DecompositionError;
-pub(crate) use graph::SolutionGraph;
+pub(crate) use graph::DecompositionGraph;
 pub(crate) use hop::Hop;
 pub(crate) use pool::{PoolRef, SellLimitKind};
 pub(crate) use sequence::SequentialRoute;

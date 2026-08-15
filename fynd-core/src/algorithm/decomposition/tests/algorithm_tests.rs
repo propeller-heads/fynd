@@ -6,8 +6,11 @@ use tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim;
 
 use super::*;
 use crate::{
-    algorithm::test_utils::{
-        market_read, order, setup_market_weighted_petgraph, token, ConstantProductSim,
+    algorithm::{
+        decomposition::optimizers::SplitOptimizer,
+        test_utils::{
+            market_read, order, setup_market_weighted_petgraph, token, ConstantProductSim,
+        },
     },
     graph::GraphManager,
     replay::replay_route,
@@ -37,7 +40,7 @@ fn algorithm(
 ) -> DecompositionAlgorithm {
     let config = AlgorithmConfig::new(1, max_hops, Duration::from_millis(100), max_routes)
         .expect("valid algorithm config");
-    DecompositionAlgorithm::with_configs(config, decomposition).expect("valid decomposition config")
+    DecompositionAlgorithm::new(config, decomposition).expect("valid decomposition config")
 }
 
 /// Components the returned route swaps on.
@@ -220,8 +223,8 @@ async fn test_timeout_still_returns_a_complete_reference_route() {
     let order = order(&a, &b, 100_000, OrderSide::Sell);
     let config = AlgorithmConfig::new(1, 3, Duration::ZERO, None).expect("valid algorithm config");
     let decomposition = DecompositionConfig::default().with_connector_token(c.address.clone());
-    let algorithm = DecompositionAlgorithm::with_configs(config, decomposition)
-        .expect("valid decomposition config");
+    let algorithm =
+        DecompositionAlgorithm::new(config, decomposition).expect("valid decomposition config");
 
     // The deadline is already in the past when the candidate stage is reached, so the candidate
     // subgraph is skipped entirely. Path enumeration itself reads the clock only every
@@ -309,7 +312,7 @@ async fn reference_only_route(
     decomposition: DecompositionConfig,
     order: &Order,
 ) -> Result<RouteResult, AlgorithmError> {
-    DecompositionAlgorithm::with_configs(algorithm_config, decomposition)
+    DecompositionAlgorithm::new(algorithm_config, decomposition)
         .expect("valid decomposition config")
         .find_best_route(manager.graph(), market, None, None, order)
         .await
@@ -410,7 +413,7 @@ fn test_with_config_carries_algorithm_config() {
 fn test_algorithm_max_routes_overrides_the_decomposition_cap() {
     let config =
         AlgorithmConfig::new(1, 3, Duration::from_millis(100), Some(7)).expect("valid config");
-    let algorithm = DecompositionAlgorithm::with_configs(config, DecompositionConfig::default())
+    let algorithm = DecompositionAlgorithm::new(config, DecompositionConfig::default())
         .expect("valid decomposition config");
 
     assert_eq!(algorithm.effective_max_routes(), 7);
@@ -431,7 +434,7 @@ fn test_zero_caps_are_rejected() {
         DecompositionConfig::default().with_max_parallel_routes(0),
         DecompositionConfig::default().with_max_enumerated_paths(0),
     ] {
-        match DecompositionAlgorithm::with_configs(config.clone(), decomposition) {
+        match DecompositionAlgorithm::new(config.clone(), decomposition) {
             Err(AlgorithmError::InvalidConfiguration { .. }) => {}
             Err(other) => panic!("expected InvalidConfiguration, got {other:?}"),
             Ok(_) => panic!("a zero cap has no answer to give"),

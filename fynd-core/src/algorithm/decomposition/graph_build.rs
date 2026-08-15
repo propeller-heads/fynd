@@ -2,8 +2,8 @@
 //!
 //! Port of `build_routes_subgraph` and `_create_one_hop_route`
 //! (`defibot/solver/order_solver/decomposition/order_solver.py:387-515` and `:556-573`). The
-//! output is an unsolved [`SolutionGraph`]: every pool-level alternative that survives filtering,
-//! arranged into the fixed three-level shape the optimizers later assign splits to.
+//! output is an unsolved [`DecompositionGraph`]: every pool-level alternative that survives
+//! filtering, arranged into the fixed three-level shape the optimizers later assign splits to.
 //!
 //! The pipeline is:
 //!
@@ -14,7 +14,7 @@
 //! 3. Group the surviving paths by their token sequence. One group becomes one [`SequentialRoute`];
 //!    the pools the group offers at leg *i* become that leg's [`Hop`].
 //! 4. Rank those token paths on [`SequentialRoute::weight`].
-//! 5. Group them again, by the first token after the sell token ([`group_by_neighbour_token`],
+//! 5. Group them again, by the first token after the sell token ([`group_by_head_token`],
 //!    `order_solver.py:517-554`). One group becomes one [`Branch`]: a single shared first hop plus
 //!    one tail per member.
 //! 6. Keep the best [`SubgraphParams::max_routes`] branches.
@@ -79,7 +79,8 @@ use tycho_simulation::tycho_common::models::{token::Token, Address};
 use crate::{
     algorithm::decomposition::{
         components::{
-            Branch, DecompositionError, Hop, PoolRef, SellLimitKind, SequentialRoute, SolutionGraph,
+            Branch, DecompositionError, DecompositionGraph, Hop, PoolRef, SellLimitKind,
+            SequentialRoute,
         },
         token_graph::DirectPath,
     },
@@ -89,7 +90,7 @@ use crate::{
     AlgorithmError,
 };
 
-/// Inputs to [`build_routes_subgraph`].
+/// Inputs to [`build_decomposition_graph`].
 pub(crate) struct SubgraphParams {
     /// Cap on parallel alternatives kept, applied both to the branches of the graph and to the
     /// pools of a single hop.
@@ -104,8 +105,8 @@ pub(crate) struct SubgraphParams {
 
 /// Builds the unsolved candidate graph between the order's endpoints.
 ///
-/// The returned [`SolutionGraph`] has no outer splits and no hop splits: it is a menu of
-/// alternatives, and [`SolutionGraph::weight`] must therefore take its unsolved
+/// The returned [`DecompositionGraph`] has no outer splits and no hop splits: it is a menu of
+/// alternatives, and [`DecompositionGraph::weight`] must therefore take its unsolved
 /// (maximum-over-branches) branch when the caller ranks it.
 ///
 /// `depths` is the derived [`ComponentDepths`] store, or `None` when depths have not been computed.
@@ -118,45 +119,40 @@ pub(crate) struct SubgraphParams {
 /// # Errors
 ///
 /// [`AlgorithmError::InvalidConfiguration`] when `max_routes` is zero.
-pub(crate) fn build_routes_subgraph(
+pub(crate) fn build_decomposition_graph(
     market: &MarketState,
     depths: Option<&ComponentDepths>,
     params: &SubgraphParams,
-    paths: &[DirectPath],
-) -> Result<Option<SolutionGraph>, AlgorithmError> {
-    if params.max_routes == 0 {
-        return Err(AlgorithmError::InvalidConfiguration {
-            reason: "max_routes must be at least 1".to_string(),
-        });
-    }
-
+    paths: Vec<DirectPath>,
+) -> Result<DecompositionGraph, DecompositionError> {
     if paths.is_empty() {
         debug!("decomposition found no candidate path");
-        return Ok(None);
+        return Err(DecompositionError::GraphBuildFailure);
     }
 
-    let mut token_path_routes = Vec::new();
-    for group in group_by_token_sequence(market, paths, params) {
+    let mut sequences: Vec<SequentialRoute> = Vec::new();
+    for group in group_by_token_sequence(market, &paths, params) {
         if let Some(route) = build_branch(market, depths, &group, params.max_routes)? {
-            token_path_routes.push(route);
+            sequences.push(route);
         }
     }
-    if token_path_routes.is_empty() {
+    if sequences.is_empty() {
         debug!(paths = paths.len(), "decomposition priced no candidate path");
-        return Ok(None);
+        return Err(DecompositionError::GraphBuildFailure);
     }
 
     // defibot ranks the token paths and only then groups them (`order_solver.py:503-514`), so a
     // group's first member — the one whose first hop becomes the shared head — is its heaviest.
-    let token_path_routes = rank_desc(token_path_routes, SequentialRoute::weight)?;
-    let token_paths = token_path_routes.len();
-    let mut branches = group_fewest_branches(token_path_routes, params.max_routes)?;
+    let ranked_sequences = rank_subgraph(sequences, SequentialRoute::weight)?;
+    let n_ranked = ranked_sequences.len();
+    let mut branches = group_into_branches(ranked_sequences, params.max_routes)?;
 
     let grouped = branches.len();
     branches.truncate(params.max_routes);
+
     debug!(
         enumerated_paths = paths.len(),
-        token_paths,
+        n_ranked,
         grouped_branches = grouped,
         kept_branches = branches.len(),
         max_routes = params.max_routes,
@@ -167,6 +163,7 @@ pub(crate) fn build_routes_subgraph(
             .unwrap_or(0),
         "decomposition candidate subgraph built"
     );
+
     if grouped > branches.len() {
         debug!(
             dropped = grouped - branches.len(),
@@ -176,9 +173,7 @@ pub(crate) fn build_routes_subgraph(
     } else {
         debug!("decomposition kept every branch; paths: {}", branch_paths(&branches));
     }
-    SolutionGraph::new(branches, Vec::new())
-        .map(Some)
-        .map_err(structure_error)
+    DecompositionGraph::new(branches, Vec::new())
 }
 
 // ===================== Grouping by neighbour token =====================
@@ -231,23 +226,23 @@ pub(crate) fn build_routes_subgraph(
 /// so the choice has to be made per order, not once for the algorithm.
 ///
 /// Ties keep the head grouping, which is defibot's shape (`order_solver.py:517-554`).
-fn group_fewest_branches(
-    routes: Vec<SequentialRoute>,
-    max_routes: usize,
-) -> Result<Vec<Branch>, AlgorithmError> {
-    let head_groups = distinct_neighbours(&routes, NeighbourEnd::Head);
-    let tail_groups = distinct_neighbours(&routes, NeighbourEnd::Tail);
+fn group_into_branches(
+    sequences: Vec<SequentialRoute>,
+    max_branches: usize,
+) -> Result<Vec<Branch>, DecompositionError> {
+    let head_groups = distinct_neighbours(&sequences, NeighbourEnd::Head);
+    let tail_groups = distinct_neighbours(&sequences, NeighbourEnd::Tail);
     debug!(
-        token_paths = routes.len(),
+        token_paths = sequences.len(),
         head_groups,
         tail_groups,
         grouping = if tail_groups < head_groups { "tail" } else { "head" },
         "grouping the token paths at whichever end yields fewer branches"
     );
     if tail_groups < head_groups {
-        group_by_tail_neighbour_token(routes, max_routes)
+        group_by_tail_token(sequences, max_branches)
     } else {
-        group_by_neighbour_token(routes, max_routes)
+        group_by_head_token(sequences, max_branches)
     }
 }
 
@@ -276,7 +271,7 @@ fn distinct_neighbours(routes: &[SequentialRoute], end: NeighbourEnd) -> usize {
 
 /// Groups token paths by the token immediately *before* the buy token.
 ///
-/// The mirror of [`group_by_neighbour_token`]. One group becomes one [`Branch`] whose hop is the
+/// The mirror of [`group_by_head_token`]. One group becomes one [`Branch`] whose hop is the
 /// group's shared last leg and whose sequences are what precedes it in each member.
 ///
 /// A direct `sell -> buy` path has nothing before its last hop, so it contributes no sequence; a
@@ -287,10 +282,10 @@ fn distinct_neighbours(routes: &[SequentialRoute], end: NeighbourEnd) -> usize {
 ///
 /// Whatever [`SequentialRoute`] and [`Branch`] construction raise, and [`SequentialRoute::weight`]
 /// through the ranking.
-fn group_by_tail_neighbour_token(
+fn group_by_tail_token(
     routes: Vec<SequentialRoute>,
     max_routes: usize,
-) -> Result<Vec<Branch>, AlgorithmError> {
+) -> Result<Vec<Branch>, DecompositionError> {
     let mut order: Vec<Address> = Vec::new();
     let mut members: FxHashMap<Address, Vec<SequentialRoute>> = FxHashMap::default();
     for route in routes {
@@ -313,16 +308,16 @@ fn group_by_tail_neighbour_token(
         let group = members
             .remove(&neighbour)
             .unwrap_or_default();
-        branches.push(build_tail_group(group, max_routes)?);
+        branches.push(build_tail_branch(group, max_routes)?);
     }
     Ok(branches)
 }
 
-/// Turns one tail-neighbour group into a [`Branch`]. The mirror of [`build_group`].
-fn build_tail_group(
+/// Turns one tail-neighbour group into a [`Branch`]. The mirror of [`build_head_branch`].
+fn build_tail_branch(
     group: Vec<SequentialRoute>,
     max_routes: usize,
-) -> Result<Branch, AlgorithmError> {
+) -> Result<Branch, DecompositionError> {
     let mut shared_hop = None;
     let mut sequences = Vec::with_capacity(group.len());
     for route in group {
@@ -338,30 +333,30 @@ fn build_tail_group(
             continue;
         }
         let leading = tokens[..tokens.len() - 1].to_vec();
-        sequences.push(SequentialRoute::new(leading, hops).map_err(structure_error)?);
+        sequences.push(SequentialRoute::new(leading, hops)?);
     }
 
     let Some(shared_hop) = shared_hop else {
-        return Err(AlgorithmError::Other(
-            "decomposition grouped an empty tail-neighbour group".to_string(),
-        ));
+        return Err(DecompositionError::InvalidStructure {
+            reason: "decomposition grouped an empty tail-neighbour group".to_string(),
+        });
     };
 
     if sequences.is_empty() {
         // Every member was the shared hop alone: a one-hop branch, where both shapes agree.
-        return Branch::new(shared_hop, Vec::new(), Vec::new()).map_err(structure_error);
+        return Branch::head(shared_hop, Vec::new(), Vec::new());
     }
 
-    let mut sequences = rank_desc(sequences, SequentialRoute::weight)?;
+    let mut sequences = rank_subgraph(sequences, SequentialRoute::weight)?;
     sequences.truncate(max_routes);
     remove_duplicated_routes(&mut sequences);
-    Branch::new_tail_grouped(shared_hop, sequences, Vec::new()).map_err(structure_error)
+    Branch::tail(shared_hop, sequences, Vec::new())
 }
 
-fn group_by_neighbour_token(
+fn group_by_head_token(
     routes: Vec<SequentialRoute>,
     max_routes: usize,
-) -> Result<Vec<Branch>, AlgorithmError> {
+) -> Result<Vec<Branch>, DecompositionError> {
     let mut order: Vec<Address> = Vec::new();
     let mut members: FxHashMap<Address, Vec<SequentialRoute>> = FxHashMap::default();
     for route in routes {
@@ -383,13 +378,16 @@ fn group_by_neighbour_token(
         let group = members
             .remove(&neighbour)
             .unwrap_or_default();
-        branches.push(build_group(group, max_routes)?);
+        branches.push(build_head_branch(group, max_routes)?);
     }
     Ok(branches)
 }
 
 /// Turns one neighbour-token group into a [`Branch`] (`order_solver.py:538-553`).
-fn build_group(group: Vec<SequentialRoute>, max_routes: usize) -> Result<Branch, AlgorithmError> {
+fn build_head_branch(
+    group: Vec<SequentialRoute>,
+    max_routes: usize,
+) -> Result<Branch, DecompositionError> {
     let mut head = None;
     let mut tails = Vec::with_capacity(group.len());
     for route in group {
@@ -403,19 +401,19 @@ fn build_group(group: Vec<SequentialRoute>, max_routes: usize) -> Result<Branch,
             // member contributes no tail; if every member is like this the branch is one hop.
             continue;
         }
-        tails.push(SequentialRoute::new(tokens[1..].to_vec(), hops).map_err(structure_error)?);
+        tails.push(SequentialRoute::new(tokens[1..].to_vec(), hops)?);
     }
 
     let Some(head) = head else {
-        return Err(AlgorithmError::Other(
-            "decomposition grouped an empty neighbour-token group".to_string(),
-        ));
+        return Err(DecompositionError::InvalidStructure {
+            reason: "decomposition grouped an empty neighbour-token group".to_string(),
+        });
     };
 
-    let mut tails = rank_desc(tails, SequentialRoute::weight)?;
+    let mut tails = rank_subgraph(tails, SequentialRoute::weight)?;
     tails.truncate(max_routes);
     remove_duplicated_routes(&mut tails);
-    Branch::new(head, tails, Vec::new()).map_err(structure_error)
+    Branch::head(head, tails, Vec::new())
 }
 
 /// Drops pools that appear in more than one tail of the same group
@@ -611,16 +609,16 @@ fn build_branch(
     depths: Option<&ComponentDepths>,
     group: &TokenSequenceGroup<'_>,
     max_routes: usize,
-) -> Result<Option<SequentialRoute>, AlgorithmError> {
+) -> Result<SequentialRoute, DecompositionError> {
     let mut seen_pools: FxHashSet<&ComponentId> = FxHashSet::default();
     let mut hops = Vec::with_capacity(group.tokens.len() - 1);
 
-    for (leg, pair) in group.tokens.windows(2).enumerate() {
+    for (hop, pair) in group.tokens.windows(2).enumerate() {
         let (token_in, token_out) = (&pair[0], &pair[1]);
         let mut pools = Vec::new();
 
         for components in &group.component_paths {
-            let component_id = &components[leg];
+            let component_id = &components[hop];
             if seen_pools.contains(component_id) {
                 continue;
             }
@@ -645,19 +643,21 @@ fn build_branch(
         }
 
         if pools.is_empty() {
-            return Ok(None);
+            // CZ: No pools at the current hop. should never happen.
+            return Err(DecompositionError::GraphBuildFailure);
         }
 
         // defibot's `_create_one_hop_route` (`order_solver.py:556-573`): deduplicate, rank, cap.
         // Deduplication already happened above via `seen_pools`.
-        let mut pools = rank_desc(pools, |pool| pool.weight(token_in, token_out))?;
+
+        // CZ: cant we just continue in case the statement below fails? I think not because this is
+        // a hop so it would break the path
+        let mut pools = rank_subgraph(pools, |pool| pool.weight(token_in, token_out))?;
         pools.truncate(max_routes);
-        hops.push(Hop::new(token_in.clone(), token_out.clone(), pools).map_err(structure_error)?);
+        hops.push(Hop::new(token_in.clone(), token_out.clone(), pools)?);
     }
 
     SequentialRoute::new(group.tokens.clone(), hops)
-        .map(Some)
-        .map_err(structure_error)
 }
 
 /// Depth of `component_id` for the direction `token_in -> token_out`.
@@ -681,13 +681,13 @@ fn lookup_depth(
 ///
 /// A NaN score sorts last rather than first, which `f64::total_cmp` alone would do for a positive
 /// NaN. Scores are computed once up front because they are simulation calls, not comparisons.
-fn rank_desc<T, F>(items: Vec<T>, score: F) -> Result<Vec<T>, AlgorithmError>
+fn rank_subgraph<T, F>(items: Vec<T>, score: F) -> Result<Vec<T>, DecompositionError>
 where
     F: Fn(&T) -> Result<f64, DecompositionError>,
 {
     let mut scored = Vec::with_capacity(items.len());
     for item in items {
-        let value = score(&item).map_err(structure_error)?;
+        let value = score(&item)?;
         let value = if value.is_nan() { f64::NEG_INFINITY } else { value };
         scored.push((value, item));
     }
@@ -696,11 +696,6 @@ where
         .into_iter()
         .map(|(_, item)| item)
         .collect())
-}
-
-/// Wraps a structural failure from the solution types as an algorithm error.
-fn structure_error(error: DecompositionError) -> AlgorithmError {
-    AlgorithmError::Other(format!("decomposition graph build failed: {error}"))
 }
 
 #[cfg(test)]

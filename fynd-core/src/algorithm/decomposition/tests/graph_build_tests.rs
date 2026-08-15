@@ -79,7 +79,7 @@ fn open_graph<'a>(
 }
 
 /// Token sequence of every branch, in ranked order, rendered as `"A->C->B"`.
-fn branch_labels(graph: &SolutionGraph) -> Vec<String> {
+fn branch_labels(graph: &DecompositionGraph) -> Vec<String> {
     graph
         .branches()
         .iter()
@@ -105,10 +105,10 @@ fn build(
     buy: &Token,
     params: &SubgraphParams,
     bounds: &SearchBounds,
-) -> Option<SolutionGraph> {
+) -> Option<DecompositionGraph> {
     let paths = graph.paths_between(&sell.address, &buy.address, bounds);
     let view = market_read(market);
-    build_routes_subgraph(view.base_market_state(), depths, params, &paths)
+    build_decomposition_graph(view.base_market_state(), depths, params, &paths)
         .expect("the fixtures build")
 }
 
@@ -169,7 +169,7 @@ fn test_pool_reused_across_hops_is_skipped() {
 
     let graph = open_graph(manager.graph(), &a, &c);
     let paths = graph.paths_between(&a.address, &c.address, &bounds(2));
-    let solution = build_routes_subgraph(&market, None, &params(), &paths)
+    let solution = build_decomposition_graph(&market, None, &params(), &paths)
         .expect("the fixtures build")
         .expect("a route");
 
@@ -424,7 +424,7 @@ fn test_max_routes_zero_is_rejected() {
     let graph = open_graph(manager.graph(), &a, &b);
     let paths = graph.paths_between(&a.address, &b.address, &bounds(2));
     let view = market_read(&market);
-    let result = build_routes_subgraph(view.base_market_state(), None, &params, &paths);
+    let result = build_decomposition_graph(view.base_market_state(), None, &params, &paths);
 
     assert!(matches!(result, Err(AlgorithmError::InvalidConfiguration { .. })));
 }
@@ -671,7 +671,7 @@ fn test_grouping_picks_the_end_with_fewer_branches() {
         path(&[a, c, d, x], &["ac", "cd", "dx2"]),
     ];
 
-    let branches = group_fewest_branches(routes, 10).expect("grouping succeeds");
+    let branches = group_into_branches(routes, 10).expect("grouping succeeds");
 
     assert_eq!(branches.len(), 1);
     assert_eq!(branches[0].side(), BranchSide::Tail);
@@ -687,7 +687,7 @@ fn test_grouping_keeps_the_head_end_when_it_is_no_worse() {
         path(&[a, b, d, x], &["ab2", "bd", "dx"]),
     ];
 
-    let branches = group_fewest_branches(routes, 10).expect("grouping succeeds");
+    let branches = group_into_branches(routes, 10).expect("grouping succeeds");
 
     assert_eq!(branches.len(), 1);
     assert_eq!(branches[0].side(), BranchSide::Head);
@@ -713,7 +713,7 @@ fn test_grouping_breaks_a_tie_towards_the_head() {
     assert_eq!(distinct_neighbours(&routes, NeighbourEnd::Head), 2);
     assert_eq!(distinct_neighbours(&routes, NeighbourEnd::Tail), 2);
 
-    let branches = group_fewest_branches(routes, 10).expect("grouping succeeds");
+    let branches = group_into_branches(routes, 10).expect("grouping succeeds");
     assert!(branches
         .iter()
         .all(|branch| branch.side() == BranchSide::Head));
@@ -726,7 +726,7 @@ fn test_a_direct_path_groups_as_a_one_hop_branch() {
     // sequence out of it.
     let routes = vec![path(&[a.clone(), x.clone()], &["ax"]), path(&[a, b, x], &["ab", "bx"])];
 
-    let branches = group_by_tail_neighbour_token(routes, 10).expect("grouping succeeds");
+    let branches = group_by_tail_token(routes, 10).expect("grouping succeeds");
 
     let direct = branches
         .iter()

@@ -59,7 +59,7 @@ impl SellLimitKind {
 /// `u256::MAX`, which every on-chain token amount fits inside, so no comparison against a real
 /// amount can ever bind. Limits are only ever compared, summed, minimised and cast — never
 /// converted back to a `U256` or handed to a simulation — so the sums this produces at [`Hop`] and
-/// [`SolutionGraph`] level are free to exceed it.
+/// [`DecompositionGraph`] level are free to exceed it.
 fn unbounded_sell_limit() -> BigUint {
     (BigUint::from(1u8) << 256u32) - BigUint::from(1u8)
 }

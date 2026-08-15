@@ -81,6 +81,7 @@ pub(crate) struct SearchBounds {
     /// The solve clock: the caller passes `start + timeout` so the search cannot eat the budget
     /// the solve and the assembly still need.
     pub(crate) deadline: Option<Instant>,
+    pub(crate) connector_tokens: Vec<Address>,
 }
 
 /// The routing graph for the length of one solve.
@@ -204,11 +205,11 @@ impl<'a> TokenGraph<'a> {
     /// The token with the most pools that `accept` allows.
     ///
     /// Ties break on the address, so the same graph always answers the same way.
-    pub(crate) fn highest_degree_token(
+    pub(crate) fn highest_degree_tokens(
         &self,
         accept: impl Fn(&Address) -> bool,
-    ) -> Option<&'a Address> {
-        let mut best: Option<(usize, &Address)> = None;
+    ) -> Vec<&'a Address> {
+        let mut best: Vec<(usize, &Address)> = Vec::new();
         for node in self.graph.node_indices() {
             let token = &self.graph[node];
             if !accept(token) {
@@ -216,10 +217,12 @@ impl<'a> TokenGraph<'a> {
             }
             let degree = self.graph.edges(node).count();
             if best.is_none_or(|(current, address)| (degree, token) > (current, address)) {
-                best = Some((degree, token));
+                best.push((degree, token));
             }
         }
-        best.map(|(_, address)| address)
+        best.iter()
+            .map(|(_, address)| address)
+            .collect()
     }
 }
 

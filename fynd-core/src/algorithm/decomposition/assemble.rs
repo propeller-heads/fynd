@@ -1,4 +1,4 @@
-//! Turning a solved [`SolutionGraph`] into an encodable Fynd [`Route`].
+//! Turning a solved [`DecompositionGraph`] into an encodable Fynd [`Route`].
 //!
 //! The decomposition's three-level structure and the encoder's flat swap list describe the same
 //! trade in different shapes, and they do not agree on amounts by construction. This module owns
@@ -56,7 +56,7 @@ use tracing::debug;
 use crate::{
     algorithm::{
         decomposition::{
-            components::{Branch, BranchSide, Hop, SolutionGraph},
+            components::{Branch, BranchSide, DecompositionGraph, Hop},
             optimizers::GasPrices,
         },
         split_primitives::{build_split_route, HopDescriptor, PathAllocation, SimulatedHop},
@@ -112,12 +112,11 @@ struct PartialPath {
 /// [`AlgorithmError::InsufficientLiquidity`] when the solution activates no pool at all, whatever
 /// `build_split_route` raises while simulating, and the validation error when the assembled route
 /// is not encodable.
-pub(crate) fn build_route_result(
-    graph: &SolutionGraph,
+pub(crate) fn cast_into_route(
+    graph: &DecompositionGraph,
     market: &MarketState,
     order: &Order,
     gas_prices: &GasPrices,
-    gas_price_wei: &BigUint,
 ) -> Result<RouteResult, AlgorithmError> {
     let allocations = solution_allocations(graph);
     if allocations.is_empty() {
@@ -161,7 +160,7 @@ pub(crate) fn build_route_result(
         "decomposition assembled route; quote re-derived from the assembled swaps"
     );
 
-    Ok(RouteResult::new(route, net, gas_price_wei.clone()))
+    Ok(RouteResult::new(route, net, gas_prices.gas_price_wei))
 }
 
 /// Expands every branch of the graph into the linear paths the encoder consumes.
@@ -170,7 +169,7 @@ pub(crate) fn build_route_result(
 /// combination's share of the whole order. Only [`build_split_route`]'s `hops` and `flow_fraction`
 /// are read, so the simulation-derived fields are left at zero: `execute_split_plan` recomputes
 /// them against the merged, topologically ordered plan.
-fn solution_allocations(graph: &SolutionGraph) -> Vec<PathAllocation> {
+fn solution_allocations(graph: &DecompositionGraph) -> Vec<PathAllocation> {
     let mut allocations = Vec::new();
     for (branch, split) in graph
         .branches()
