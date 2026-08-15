@@ -13,7 +13,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::StreamExt;
-use tracing::{debug, info, instrument, span, trace, Instrument, Level};
+use tracing::{debug, info, instrument, span, trace, warn, Instrument, Level};
 #[cfg(feature = "experimental")]
 use tycho_simulation::evm::stream::BlockStepController;
 use tycho_simulation::{
@@ -645,6 +645,23 @@ impl TychoFeed {
     /// Handles a message from Tycho stream.
     #[instrument(skip(self, msg))]
     pub(crate) async fn handle_tycho_message(&self, msg: Update) -> Result<(), DataFeedError> {
+        let new_block_number = msg.block_number_or_timestamp;
+
+        // Check for delayed/stale block messages to prevent state regression.
+        let stale_check = {
+            let market = self.market_data.read().await;
+            market.last_updated().map(|b| (new_block_number < b.number(), b.number()))
+        };
+
+        if let Some((true, current_block_num)) = stale_check {
+            warn!(
+                new_block = new_block_number,
+                current_block = current_block_num,
+                "Received stale block update from Tycho, ignoring to prevent state regression"
+            );
+            return Ok(());
+        }
+
         // Collect variables for market shared data update
         let Update {
             new_pairs: added_components,
@@ -654,17 +671,19 @@ impl TychoFeed {
             ..
         } = msg;
 
+        // We filter out added components from updated_components_ids.
+        // There is no need to emit newly added components in both added_components and
+        // updated_components, as doing so would cause downstream computations (like
+        // SpotPriceComputation and PoolDepthComputation) to perform redundant work on the same pool.
         let updated_components_ids: HashSet<_> = updated_or_new_states
             .keys()
-            .filter(|id| !added_components.contains_key(id.as_str())) // TODO: Should we still emit as updated if the component is new?
+            .filter(|id| !added_components.contains_key(id.as_str()))
             .cloned()
             .collect();
 
         let maybe_new_tokens = added_components
             .values()
             .flat_map(|component| component.tokens.iter().cloned());
-        // TODO: how do we handle delayed and stale states? Should the feed or the solvers handle
-        // this?
         let latest_block_info = sync_states
             .values()
             .filter_map(|status| {
@@ -1385,6 +1404,55 @@ mod tests {
                 // Expected - no event should be broadcast for empty updates
             }
             Ok(_) => panic!("Should not broadcast event for empty update"),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_stale_block() {
+        let config = create_test_config();
+        let market_data = new_shared_market_data();
+
+        // Preset market_data's last_updated block to 12345
+        {
+            let mut writer = market_data.write().await;
+            writer.update_last_updated(BlockInfo::new(12345, "0xhash".to_string(), 100));
+        }
+
+        let feed = TychoFeed::new(config, market_data.clone());
+        let mut event_rx = feed.subscribe();
+
+        // Create a component that the update will attempt to add
+        let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+        let test_component =
+            create_test_component(component_id, vec![token1.clone(), token2.clone()]);
+
+        let mut new_pairs = HashMap::new();
+        new_pairs.insert(component_id.to_string(), test_component);
+
+        // Send a stale update (block 12344 < 12345)
+        let update = Update::new(12344, HashMap::new(), new_pairs);
+
+        // Handle the message (should be ignored successfully)
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to handle message");
+
+        // Verify component was NOT added to market data
+        let reader = market_data.read().await;
+        assert!(
+            reader.get_component(component_id).is_none(),
+            "Component should not be in market data because update is stale"
+        );
+
+        // Verify no event was broadcast
+        match event_rx.try_recv() {
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                // Expected - no event should be broadcast
+            }
+            Ok(_) => panic!("Should not broadcast event for stale update"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
     }
