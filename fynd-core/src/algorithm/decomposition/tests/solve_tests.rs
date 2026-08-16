@@ -14,7 +14,7 @@ use super::*;
 use crate::algorithm::{
     decomposition::{
         components::{PoolRef, SellLimitKind},
-        optimizers::pair_comparison::PairComparison,
+        optimizers::{SplitOptimizer, SplitOptimizerConfig},
         test_fixtures::{
             graph as build_graph, hop as build_hop, pool, route as build_route, single_pool_hop,
             split, tenfold_pool, token_a, token_b, token_c, token_d, FixedRateSim,
@@ -29,23 +29,25 @@ fn free_gas() -> BigUint {
     BigUint::zero()
 }
 
+/// Pair comparison at both levels, which is what these fixtures were written against.
+fn pair_comparison() -> SplitOptimizerConfig {
+    SplitOptimizerConfig {
+        outer: SplitOptimizer::PairComparison,
+        inner: SplitOptimizer::PairComparison,
+    }
+}
+
 fn solve(graph: &mut DecompositionGraph, sell_amount: &BigUint) {
-    solve_graph(
-        graph,
-        sell_amount,
-        &PairComparison,
-        &PairComparison,
-        &GasPrices::new(free_gas(), None),
-    )
-    .expect("the fixtures solve");
+    solve_graph(graph, sell_amount, pair_comparison(), &TokenPriceData::new(free_gas(), None))
+        .expect("the fixtures solve");
 }
 
 fn solve_branch(route: &mut SequentialRoute, sell_amount: u64) {
     solve_route(
         route,
         &BigUint::from(sell_amount),
-        &PairComparison,
-        &GasPrices::new(free_gas(), None),
+        SplitOptimizer::PairComparison,
+        &TokenPriceData::new(free_gas(), None),
     )
     .expect("the fixtures solve");
 }
@@ -54,9 +56,8 @@ fn solve_all(graph: &mut DecompositionGraph, sell_amount: &BigUint) -> (BigUint,
     solve_solution_graph(
         graph,
         sell_amount,
-        &PairComparison,
-        &PairComparison,
-        &GasPrices::new(free_gas(), None),
+        pair_comparison(),
+        &TokenPriceData::new(free_gas(), None),
     )
     .expect("the fixtures solve")
 }
@@ -560,8 +561,12 @@ fn capacity_branch(id: &str, multiple: u64, sell_limit: u64) -> SequentialRoute 
 }
 
 fn without_splits(graph: &mut DecompositionGraph, sell_amount: u64) {
-    solve_without_splits(graph, &BigUint::from(sell_amount), &GasPrices::new(free_gas(), None))
-        .expect("the fixtures sell");
+    solve_without_splits(
+        graph,
+        &BigUint::from(sell_amount),
+        &TokenPriceData::new(free_gas(), None),
+    )
+    .expect("the fixtures sell");
 }
 
 #[test]
@@ -674,7 +679,8 @@ fn test_choose_solution_returns_the_reference_when_the_candidate_buys_less() {
     let candidate = sold_graph("candidate", 5, 100);
     let reference = sold_graph("reference", 10, 100);
 
-    let choice = choose_solution(&candidate, Some(&reference), &GasPrices::new(free_gas(), None));
+    let choice =
+        choose_solution(&candidate, Some(&reference), &TokenPriceData::new(free_gas(), None));
 
     assert_eq!(choice, SolutionChoice::Reference);
 }
@@ -684,7 +690,8 @@ fn test_choose_solution_keeps_the_candidate_when_it_ties() {
     let candidate = sold_graph("candidate", 10, 100);
     let reference = sold_graph("reference", 10, 100);
 
-    let choice = choose_solution(&candidate, Some(&reference), &GasPrices::new(free_gas(), None));
+    let choice =
+        choose_solution(&candidate, Some(&reference), &TokenPriceData::new(free_gas(), None));
 
     assert_eq!(choice, SolutionChoice::Candidate);
 }
@@ -694,7 +701,7 @@ fn test_choose_solution_without_a_reference_keeps_the_candidate() {
     let candidate = sold_graph("candidate", 1, 100);
 
     assert_eq!(
-        choose_solution(&candidate, None, &GasPrices::new(free_gas(), None)),
+        choose_solution(&candidate, None, &TokenPriceData::new(free_gas(), None)),
         SolutionChoice::Candidate
     );
 }
@@ -710,7 +717,7 @@ fn test_net_of_gas_charges_the_graph_gas() {
 
     // One unit of gas at 100 wei, priced one-for-one into the buy token, against 1000 bought.
     let net =
-        net_of_gas(&graph, &GasPrices::new(wei.clone(), Some(Arc::new(token_prices.clone()))));
+        net_of_gas(&graph, &TokenPriceData::new(wei.clone(), Some(Arc::new(token_prices.clone()))));
 
     assert_eq!(net, BigInt::from(900));
 }

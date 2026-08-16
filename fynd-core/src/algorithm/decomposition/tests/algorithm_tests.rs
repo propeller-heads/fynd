@@ -2,7 +2,7 @@
 
 use num_bigint::{BigInt, BigUint};
 use rustc_hash::FxHashSet;
-use tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim;
+use tycho_simulation::tycho_core::{models::token::Token, simulation::protocol_sim::ProtocolSim};
 
 use super::*;
 use crate::{
@@ -40,6 +40,23 @@ fn algorithm(
 ) -> DecompositionAlgorithm {
     let config = AlgorithmConfig::new(1, max_hops, Duration::from_millis(100), max_routes)
         .expect("valid algorithm config");
+    DecompositionAlgorithm::new(config, decomposition).expect("valid decomposition config")
+}
+
+/// [`algorithm`] restricted to one connector token.
+///
+/// The reference's intermediate is no longer configurable on its own — it is derived, as the
+/// highest-degree tokens the operator's allowlist admits. Naming one token in the allowlist is how
+/// a test pins which token that is.
+fn algorithm_through(
+    max_hops: usize,
+    max_routes: Option<usize>,
+    decomposition: DecompositionConfig,
+    connector: &Token,
+) -> DecompositionAlgorithm {
+    let config = AlgorithmConfig::new(1, max_hops, Duration::from_millis(100), max_routes)
+        .expect("valid algorithm config")
+        .with_connector_tokens(FxHashSet::from_iter([connector.address.clone()]));
     DecompositionAlgorithm::new(config, decomposition).expect("valid decomposition config")
 }
 
@@ -112,8 +129,8 @@ async fn test_equal_start_v2_splits_an_order_across_parallel_pools() {
     ]);
     let order = order(&a, &b, 400_000, OrderSide::Sell);
     let config = DecompositionConfig::default().with_optimizers(SplitOptimizerConfig {
-        outer: SplitOptimizer::EqualStartV2,
-        inner: SplitOptimizer::EqualStartV2,
+        outer: SplitOptimizer::EqualStartV2 { equalize: RankingMetric::default() },
+        inner: SplitOptimizer::EqualStartV2 { equalize: RankingMetric::default() },
     });
 
     let result = algorithm(1, None, config)
@@ -143,9 +160,9 @@ async fn test_candidate_beats_the_reference_on_a_path_the_reference_cannot_see()
         ("db", &d, &b, pool(10_000_000, 10_000_000)),
     ]);
     let order = order(&a, &b, 50_000, OrderSide::Sell);
-    let config = DecompositionConfig::default().with_connector_token(c.address.clone());
+    let config = DecompositionConfig::default();
 
-    let result = algorithm(2, None, config)
+    let result = algorithm_through(2, None, config, &c)
         .find_best_route(manager.graph(), market, None, None, &order)
         .await
         .expect("the order routes");
@@ -174,9 +191,9 @@ async fn test_reference_wins_when_the_candidate_ranks_a_worse_branch_first() {
         ("cb", &c, &b, pool(144_000, 120_000)),
     ]);
     let order = order(&a, &b, 40_000, OrderSide::Sell);
-    let config = DecompositionConfig::default().with_connector_token(c.address.clone());
+    let config = DecompositionConfig::default();
 
-    let result = algorithm(2, Some(1), config)
+    let result = algorithm_through(2, Some(1), config, &c)
         .find_best_route(manager.graph(), market, None, None, &order)
         .await
         .expect("the order routes");
@@ -221,8 +238,10 @@ async fn test_timeout_still_returns_a_complete_reference_route() {
         ("db", &d, &b, pool(1_000_000, 1_000_000)),
     ]);
     let order = order(&a, &b, 100_000, OrderSide::Sell);
-    let config = AlgorithmConfig::new(1, 3, Duration::ZERO, None).expect("valid algorithm config");
-    let decomposition = DecompositionConfig::default().with_connector_token(c.address.clone());
+    let config = AlgorithmConfig::new(1, 3, Duration::ZERO, None)
+        .expect("valid algorithm config")
+        .with_connector_tokens(FxHashSet::from_iter([c.address.clone()]));
+    let decomposition = DecompositionConfig::default();
     let algorithm =
         DecompositionAlgorithm::new(config, decomposition).expect("valid decomposition config");
 
@@ -262,9 +281,9 @@ async fn test_quoted_amounts_match_the_route_that_would_be_encoded() {
         ("db", &d, &b, pool(1_500_011, 1_499_983)),
     ]);
     let order = order(&a, &b, 333_333, OrderSide::Sell);
-    let config = DecompositionConfig::default().with_connector_token(c.address.clone());
+    let config = DecompositionConfig::default();
 
-    let result = algorithm(2, None, config)
+    let result = algorithm_through(2, None, config, &c)
         .find_best_route(manager.graph(), market.clone(), None, None, &order)
         .await
         .expect("the order routes");
@@ -348,8 +367,10 @@ async fn test_explicit_connector_token_beats_the_derived_default() {
     let (a, b, _, d) = tokens();
     let (market, manager) = two_connector_market();
     let order = order(&a, &b, 100_000, OrderSide::Sell);
-    let config = AlgorithmConfig::new(1, 2, Duration::ZERO, None).expect("valid algorithm config");
-    let decomposition = DecompositionConfig::default().with_connector_token(d.address.clone());
+    let config = AlgorithmConfig::new(1, 2, Duration::ZERO, None)
+        .expect("valid algorithm config")
+        .with_connector_tokens(FxHashSet::from_iter([d.address.clone()]));
+    let decomposition = DecompositionConfig::default();
 
     let result = reference_only_route(market, &manager, config, decomposition, &order)
         .await
@@ -401,30 +422,24 @@ fn test_with_config_carries_algorithm_config() {
     let algorithm =
         DecompositionAlgorithm::with_config(config).expect("valid decomposition config");
 
-    assert_eq!(algorithm.min_hops(), 2);
     assert_eq!(algorithm.max_hops(), 4);
     assert_eq!(algorithm.timeout(), Duration::from_millis(750));
-    assert_eq!(algorithm.max_routes(), Some(64));
     assert_eq!(algorithm.connector_tokens(), Some(&connectors));
     assert_eq!(algorithm.config(), &DecompositionConfig::default());
 }
 
+/// The parallel-alternative cap comes from `DecompositionConfig` alone.
+///
+/// `AlgorithmConfig::max_routes` no longer overrides it — a pool that sets `max_routes` in
+/// `worker_pools.toml` does not change how many branches decomposition keeps.
 #[test]
-fn test_algorithm_max_routes_overrides_the_decomposition_cap() {
+fn test_the_cap_comes_from_the_decomposition_config() {
     let config =
         AlgorithmConfig::new(1, 3, Duration::from_millis(100), Some(7)).expect("valid config");
     let algorithm = DecompositionAlgorithm::new(config, DecompositionConfig::default())
         .expect("valid decomposition config");
 
-    assert_eq!(algorithm.effective_max_routes(), 7);
-}
-
-#[test]
-fn test_decomposition_cap_applies_without_an_algorithm_cap() {
-    assert_eq!(
-        algorithm(3, None, DecompositionConfig::default()).effective_max_routes(),
-        DEFAULT_MAX_PARALLEL_ROUTES
-    );
+    assert_eq!(algorithm.config().max_parallel_routes, DEFAULT_MAX_PARALLEL_ROUTES);
 }
 
 #[test]

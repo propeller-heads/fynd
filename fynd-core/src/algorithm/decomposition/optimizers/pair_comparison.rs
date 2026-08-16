@@ -31,10 +31,8 @@ use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::decomposition::{
     components::{DecompositionError, Fraction},
-    optimizers::{
-        decrease_until_sell, scale, split_of, to_human, GasPrices, Sellable, SplitOptimizerT,
-        SplitSolution,
-    },
+    models::TokenPriceData,
+    optimizers::{decrease_until_sell, scale, split_of, to_human, Sellable, SplitSolution},
 };
 
 /// Fractions of the sell amount the line search moves per iteration, coarsest first.
@@ -49,7 +47,7 @@ const STEPS: [(i64, i64); 5] = [(1, 2), (1, 5), (1, 10), (1, 50), (1, 500)];
 pub(crate) fn split_by_pair_comparison<S: Sellable>(
     routes: &mut [S],
     sell_amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<SplitSolution, DecompositionError> {
     if routes.is_empty() {
         return Ok(SplitSolution {
@@ -110,7 +108,7 @@ pub(crate) fn split_by_pair_comparison<S: Sellable>(
 fn sort_routes<S: Sellable>(
     routes: &mut [S],
     sell_amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
     buy_token: &Token,
 ) -> Result<Vec<(usize, BigInt)>, DecompositionError> {
     let mut ranked = Vec::with_capacity(routes.len());
@@ -152,7 +150,7 @@ fn prune<S: Sellable>(
     routes: &mut [S],
     ranked: &[(usize, BigInt)],
     sell_amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
     sell_token: &Token,
     buy_token: &Token,
 ) -> Result<(Vec<usize>, Vec<usize>), DecompositionError> {
@@ -221,7 +219,7 @@ fn loop_through_pairs<S: Sellable>(
     routes: &mut [S],
     members: &[usize],
     sell_amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<(BigUint, BigUint, Vec<Fraction>), DecompositionError> {
     let mut sender = members[0];
     let mut receiver = members[1];
@@ -346,7 +344,7 @@ fn move_funds<S: Sellable>(
     routes: &mut [S],
     pair: (usize, usize),
     sell_amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
     split_step: &BigRational,
     initial_splits: &[Fraction; 2],
 ) -> Result<(usize, usize), DecompositionError> {
@@ -464,7 +462,7 @@ fn order_by_sell_amount<S: Sellable>(routes: &[S], pair: (usize, usize)) -> (usi
 fn sell_with_gas<S: Sellable>(
     route: &mut S,
     amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<BigInt, DecompositionError> {
     let buy_token = route.buy_token().address.clone();
     let (bought, gas) = route.sell(amount)?;
@@ -575,17 +573,16 @@ mod tests {
         SequentialRoute::new(vec![token_a, token_b], vec![hop]).expect("route matches its path")
     }
 
-    fn free_gas(gas_price_wei: &BigUint) -> GasPrices {
-        GasPrices::new(gas_price_wei.clone(), None)
+    fn free_gas(gas_price_wei: &BigUint) -> TokenPriceData {
+        TokenPriceData::new(gas_price_wei.clone(), None)
     }
 
     fn optimize<S: Sellable>(
         routes: &mut [S],
         sell_amount: &BigUint,
-        gas_prices: &GasPrices,
+        gas_prices: &TokenPriceData,
     ) -> SplitSolution {
-        PairComparison
-            .optimize(routes, sell_amount, gas_prices)
+        split_by_pair_comparison(routes, sell_amount, gas_prices)
             .expect("pair comparison succeeds on well-formed pools")
     }
 
@@ -660,7 +657,7 @@ mod tests {
     fn partition<S: Sellable>(
         routes: &mut [S],
         sell_amount: &BigUint,
-        gas_prices: &GasPrices,
+        gas_prices: &TokenPriceData,
     ) -> (Vec<usize>, Vec<usize>) {
         let sell_token = routes[0].sell_token().clone();
         let ranked =
@@ -724,7 +721,7 @@ mod tests {
         );
         let gas_price_wei = BigUint::one();
         let gas_prices =
-            GasPrices::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone())));
+            TokenPriceData::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone())));
         decrease_until_sell(&mut routes[0], &sell_amount).expect("incumbent sells");
 
         let ranked = vec![(0, BigInt::one()), (1, BigInt::one())];
@@ -811,7 +808,7 @@ mod tests {
         let charged = optimize(
             &mut charged_routes,
             &sell_amount,
-            &GasPrices::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone()))),
+            &TokenPriceData::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone()))),
         );
 
         assert!(!free.splits[1].is_zero(), "gas-free control should use both routes");
@@ -867,9 +864,9 @@ mod tests {
         let mut routes = vec![route("a", 1_000_000, 1_000_000), route("b", 1_000_000, 1_000_000)];
         let gas_price_wei = BigUint::zero();
 
-        let error = PairComparison
-            .optimize(&mut routes, &BigUint::zero(), &free_gas(&gas_price_wei))
-            .expect_err("a zero sell amount has no splits");
+        let error =
+            split_by_pair_comparison(&mut routes, &BigUint::zero(), &free_gas(&gas_price_wei))
+                .expect_err("a zero sell amount has no splits");
 
         assert!(matches!(error, DecompositionError::InvalidStructure { .. }));
     }

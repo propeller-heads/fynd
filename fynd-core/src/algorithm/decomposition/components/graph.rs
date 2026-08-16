@@ -20,7 +20,7 @@ use crate::algorithm::decomposition::components::*;
 /// twice at this level (`order_solver.py:517-554`).
 pub(crate) struct DecompositionGraph {
     branches: Vec<Branch>,
-    outer_splits: Vec<Fraction>,
+    branch_splits: Vec<Fraction>,
     sell_amount: BigUint,
     buy_amount: BigUint,
     limit_cache: Option<(BigUint, Vec<ComponentId>)>,
@@ -72,7 +72,7 @@ impl DecompositionGraph {
         }
         Ok(Self {
             branches,
-            outer_splits,
+            branch_splits: outer_splits,
             sell_amount: BigUint::zero(),
             buy_amount: BigUint::zero(),
             limit_cache: None,
@@ -85,6 +85,7 @@ impl DecompositionGraph {
     /// # Errors
     ///
     /// Whatever [`Branch::from_route`] and [`DecompositionGraph::new`] raise.
+    #[cfg(test)]
     #[cfg(test)]
     pub(crate) fn from_routes(
         routes: Vec<SequentialRoute>,
@@ -107,14 +108,10 @@ impl DecompositionGraph {
         &mut self.branches
     }
 
-    /// Consumes the graph into its branches, so they can be recombined into another graph.
-    pub(crate) fn into_branches(self) -> Vec<Branch> {
-        self.branches
-    }
 
     /// Share of the order each branch carries.
     pub(crate) fn outer_splits(&self) -> &[Fraction] {
-        &self.outer_splits
+        &self.branch_splits
     }
 
     /// Assigns one split per branch, or an empty vector to mark the graph unsolved again.
@@ -149,7 +146,7 @@ impl DecompositionGraph {
                 ),
             });
         }
-        self.outer_splits = outer_splits;
+        self.branch_splits = outer_splits;
         Ok(())
     }
 
@@ -176,12 +173,12 @@ impl DecompositionGraph {
     /// A graph is solved once its outer splits are set and every branch is solved
     /// (`routes/parallel.py:52-57`).
     pub(crate) fn solved(&self) -> bool {
-        !self.outer_splits.is_empty() && self.branches.iter().all(Branch::solved)
+        !self.branch_splits.is_empty() && self.branches.iter().all(Branch::solved)
     }
 
     /// Whether unsolved estimates apply (`routes/parallel.py:78`).
     fn use_estimate(&self) -> bool {
-        !self.solved() || splits_sum(&self.outer_splits) < BigRational::one()
+        !self.solved() || splits_sum(&self.branch_splits) < BigRational::one()
     }
 
     /// Mean of the branch prices while unsolved, split-weighted sum once solved
@@ -214,7 +211,7 @@ impl DecompositionGraph {
         for (branch, split) in self
             .branches
             .iter()
-            .zip(&self.outer_splits)
+            .zip(&self.branch_splits)
         {
             if split.is_zero() {
                 continue;
@@ -244,7 +241,7 @@ impl DecompositionGraph {
         for (branch, split) in self
             .branches
             .iter()
-            .zip(&self.outer_splits)
+            .zip(&self.branch_splits)
         {
             if split.is_zero() {
                 continue;
@@ -288,7 +285,7 @@ impl DecompositionGraph {
             }
         }
         self.branches = kept;
-        self.outer_splits.clear();
+        self.branch_splits.clear();
         self.limit_cache = None;
         Ok(())
     }
@@ -318,7 +315,7 @@ impl DecompositionGraph {
         for (branch, split) in self
             .branches
             .iter()
-            .zip(&self.outer_splits)
+            .zip(&self.branch_splits)
         {
             total += branch.inertia() * split.to_f64();
         }
@@ -340,7 +337,7 @@ impl DecompositionGraph {
         for (branch, split) in self
             .branches
             .iter()
-            .zip(&self.outer_splits)
+            .zip(&self.branch_splits)
         {
             total += branch.weight()? * split.to_f64();
         }
@@ -367,7 +364,7 @@ impl DecompositionGraph {
         &mut self,
         amount: &BigUint,
     ) -> Result<(BigUint, BigUint), DecompositionError> {
-        if self.outer_splits.is_empty() {
+        if self.branch_splits.is_empty() {
             return Err(DecompositionError::Unsolved {
                 token_in: self.sell_token().address.clone(),
                 token_out: self.buy_token().address.clone(),
@@ -386,7 +383,7 @@ impl DecompositionGraph {
         let mut total_bought = BigUint::zero();
         let mut total_gas = BigUint::zero();
         for index in 0..self.branches.len() {
-            let branch_amount = self.outer_splits[index].apply(amount);
+            let branch_amount = self.branch_splits[index].apply(amount);
             let (bought, gas) = self.branches[index].sell(&branch_amount)?;
             total_bought += bought;
             total_gas += gas;
@@ -437,7 +434,7 @@ impl DecompositionGraph {
         for (branch, split) in self
             .branches
             .iter()
-            .zip(&self.outer_splits)
+            .zip(&self.branch_splits)
         {
             total += quantity(branch)? * split.to_f64();
         }

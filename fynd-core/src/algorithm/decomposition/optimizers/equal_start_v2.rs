@@ -30,7 +30,8 @@
 //!   test cannot exercise the other branch. It is a constructor parameter here — see
 //!   [`RankingMetric`].
 //! * defibot's `max_splits` parameter is an *iteration budget*, colliding in name with the solver's
-//!   route-count cap of the same name. It is [`EqualStartV2::max_move_iterations`] here.
+//!   route-count cap of the same name. It is [`DEFAULT_MAX_MOVE_ITERATIONS`] here, and is not
+//!   configurable.
 //! * defibot leaves the budget unset in production, relying on the `visited` set alone to
 //!   terminate. The default here is a finite budget: the walk visits a lattice whose size is
 //!   exponential in the number of alternatives, and this optimizer runs on a worker thread that
@@ -62,9 +63,8 @@ use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::decomposition::{
     components::{DecompositionError, Fraction},
-    optimizers::{
-        decrease_until_sell, split_of, GasPrices, Sellable, SplitOptimizerT, SplitSolution,
-    },
+    models::TokenPriceData,
+    optimizers::{decrease_until_sell, split_of, Sellable, SplitSolution},
 };
 
 /// Fractions of the order moved per iteration, coarsest first (`equal_start_v2.py:66-74`).
@@ -103,7 +103,7 @@ pub(crate) fn split_equal_start_v2<S: Sellable>(
     ranking_metric: RankingMetric,
     routes: &mut [S],
     sell_amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<SplitSolution, DecompositionError> {
     if routes.is_empty() {
         return Ok(SplitSolution {
@@ -231,7 +231,7 @@ fn find_best_splits<S: Sellable>(
     routes: &mut [S],
     sell_amount: &BigUint,
     start_splits: &[Fraction],
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
     step: &BigRational,
 ) -> Result<Pass, DecompositionError> {
     let mut splits = start_splits.to_vec();
@@ -301,7 +301,7 @@ fn evaluate<S: Sellable>(
     routes: &mut [S],
     sell_amount: &BigUint,
     splits: &[Fraction],
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<Evaluation, DecompositionError> {
     let sell_token = routes[0].sell_token().clone();
     let buy_token = routes[0].buy_token().clone();
@@ -626,17 +626,16 @@ mod tests {
         SequentialRoute::new(vec![token_a, token_b], vec![hop]).expect("route matches its path")
     }
 
-    fn free_gas(gas_price_wei: &BigUint) -> GasPrices {
-        GasPrices::new(gas_price_wei.clone(), None)
+    fn free_gas(gas_price_wei: &BigUint) -> TokenPriceData {
+        TokenPriceData::new(gas_price_wei.clone(), None)
     }
 
     fn optimize<S: Sellable>(
         routes: &mut [S],
         sell_amount: &BigUint,
-        gas_prices: &GasPrices,
+        gas_prices: &TokenPriceData,
     ) -> SplitSolution {
-        EqualStartV2::new(RankingMetric::MarginalPrice)
-            .optimize(routes, sell_amount, gas_prices)
+        split_equal_start_v2(RankingMetric::MarginalPrice, routes, sell_amount, gas_prices)
             .expect("equal start succeeds on well-formed pools")
     }
 
@@ -768,9 +767,13 @@ mod tests {
         let mut routes = vec![route("a", 1_000_000, 1_000_000), route("b", 1_000_000, 1_000_000)];
         let gas_price_wei = BigUint::zero();
 
-        let error = EqualStartV2::new(RankingMetric::MarginalPrice)
-            .optimize(&mut routes, &BigUint::zero(), &free_gas(&gas_price_wei))
-            .expect_err("a zero sell amount has no splits");
+        let error = split_equal_start_v2(
+            RankingMetric::MarginalPrice,
+            &mut routes,
+            &BigUint::zero(),
+            &free_gas(&gas_price_wei),
+        )
+        .expect_err("a zero sell amount has no splits");
 
         assert!(matches!(error, DecompositionError::InvalidStructure { .. }));
     }
@@ -805,9 +808,13 @@ mod tests {
         let sell_amount = whole(1_000);
         let gas_price_wei = BigUint::zero();
 
-        let solution = EqualStartV2::new(RankingMetric::ExecutedPrice)
-            .optimize(&mut routes, &sell_amount, &free_gas(&gas_price_wei))
-            .expect("executed-price ranking succeeds");
+        let solution = split_equal_start_v2(
+            RankingMetric::ExecutedPrice,
+            &mut routes,
+            &sell_amount,
+            &free_gas(&gas_price_wei),
+        )
+        .expect("executed-price ranking succeeds");
 
         assert_eq!(solution.splits, vec![half(), half()]);
     }
@@ -1009,7 +1016,6 @@ mod tests {
         // losing move saturates the route it was offered to, so the receiver list shrinks by one
         // per failure and the pass closes in nine evaluations. Without the rule the walk keeps
         // offering the same receivers from each remaining sender and takes thirteen.
-        let optimizer = EqualStartV2::new(RankingMetric::MarginalPrice);
         let mut routes = (0..4)
             .map(|index| route(&format!("p{index}"), 1_000_000, 1_000_000))
             .collect::<Vec<_>>();
@@ -1017,7 +1023,7 @@ mod tests {
         let start = initial_splits(routes.len());
 
         let pass = find_best_splits(
-            &optimizer,
+            RankingMetric::MarginalPrice,
             &mut routes,
             &whole(100_000),
             &start,
@@ -1035,7 +1041,6 @@ mod tests {
         // Four pools of increasing depth, refined at a tenth of the order per move. Here the rule
         // is not just a shortcut: it steers the walk away from a receiver that already failed, and
         // the pass lands on a different — better — allocation than it would without it.
-        let optimizer = EqualStartV2::new(RankingMetric::MarginalPrice);
         let reserves = [10_000u64, 40_000, 90_000, 160_000];
         let mut routes = reserves
             .iter()
@@ -1046,7 +1051,7 @@ mod tests {
         let start = initial_splits(routes.len());
 
         let pass = find_best_splits(
-            &optimizer,
+            RankingMetric::MarginalPrice,
             &mut routes,
             &whole(100_000),
             &start,
@@ -1086,7 +1091,7 @@ mod tests {
         let charged = optimize(
             &mut charged_routes,
             &sell_amount,
-            &GasPrices::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone()))),
+            &TokenPriceData::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone()))),
         );
 
         assert_eq!(free.splits, vec![half(), half()]);
@@ -1098,21 +1103,5 @@ mod tests {
         assert!(charged_routes[0]
             .sell_amount()
             .is_zero());
-    }
-
-    #[test]
-    fn test_the_iteration_budget_stops_the_search_at_the_equal_start() {
-        // Unequal pools: the search normally walks away from the equal start. A budget of zero
-        // leaves it no move to make, so every pass returns what it was seeded with.
-        let mut routes = vec![route("shallow", 100_000, 100_000), route("deep", 900_000, 900_000)];
-        let sell_amount = whole(50_000);
-        let gas_price_wei = BigUint::zero();
-
-        let solution = EqualStartV2::new(RankingMetric::MarginalPrice)
-            .with_max_move_iterations(Some(0))
-            .optimize(&mut routes, &sell_amount, &free_gas(&gas_price_wei))
-            .expect("a spent budget is not an error");
-
-        assert_eq!(solution.splits, vec![half(), half()]);
     }
 }

@@ -23,29 +23,22 @@ pub(crate) mod equal_start_v2;
 pub(crate) mod frank_wolfe;
 pub(crate) mod pair_comparison;
 
-use std::sync::Arc;
-
 use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
 use num_traits::{Signed, ToPrimitive, Zero};
 use tracing::debug;
-use tycho_simulation::tycho_core::{
-    models::{token::Token, Address},
-    simulation::protocol_sim::Price,
-};
+use tycho_simulation::tycho_core::models::token::Token;
 
-use crate::{
-    algorithm::decomposition::{
-        components::{
-            Branch, DecompositionError, DecompositionGraph, Fraction, Hop, PoolRef, SequentialRoute,
-        },
-        optimizers::{
-            equal_start_v2::split_equal_start_v2, frank_wolfe::split_by_frank_wolfe,
-            pair_comparison::split_by_pair_comparison,
-        },
-        RankingMetric,
+use crate::algorithm::decomposition::{
+    components::{
+        Branch, DecompositionError, DecompositionGraph, Fraction, Hop, PoolRef, SequentialRoute,
     },
-    derived::types::TokenGasPrices,
+    models::TokenPriceData,
+    optimizers::{
+        equal_start_v2::split_equal_start_v2, frank_wolfe::split_by_frank_wolfe,
+        pair_comparison::split_by_pair_comparison,
+    },
+    RankingMetric,
 };
 // ===================== Sellable =====================
 
@@ -308,6 +301,7 @@ pub(crate) struct HopPool<'a> {
     token_out: Token,
 }
 
+// CZ: sounds completely unnecessary to have this wrapper
 impl<'a> HopPool<'a> {
     /// Binds every pool of `hop` to the hop's token pair.
     ///
@@ -374,49 +368,6 @@ impl Sellable for HopPool<'_> {
 
 // ===================== Gas pricing =====================
 
-/// Gas cost expressed in a token.
-///
-/// defibot passes `dict[symbol, Decimal]` holding, per token, the price of one gas unit denominated
-/// in that token (`optimizers/interface.py:13`). Fynd splits the same quantity in two: the block's
-/// gas price in wei, and [`TokenGasPrices`] mapping a token to its wei ratio.
-#[derive(Clone)]
-pub(crate) struct GasPrices {
-    pub(crate) gas_price_wei: BigUint,
-    pub(crate) token_prices: Option<Arc<TokenGasPrices>>,
-}
-
-impl GasPrices {
-    /// Builds a gas model from a block gas price and the derived token prices.
-    ///
-    /// With `None` for `token_prices` every cost is zero and the optimizer ranks on gross output.
-    /// defibot instead falls back to a `DEFAULT_GAS_PRICE` of `1e-6`
-    /// (`defibot/solver/models.py:29`), a constant in human units of whatever the buy token
-    /// happens to be, which means something different for every token.
-    pub(crate) fn new(gas_price_wei: BigUint, token_prices: Option<Arc<TokenGasPrices>>) -> Self {
-        Self { gas_price_wei, token_prices }
-    }
-
-    /// Cost of `gas` gas units in on-chain units of `token`, or zero when no price is known.
-    ///
-    /// `token` is the alternative's *own* buy token, which is the order's buy token only at the
-    /// branch level: a hop's alternatives produce the hop's output token, and a tail-grouped
-    /// branch's sequences produce the token feeding its shared hop.
-    pub(crate) fn cost_in_token(&self, gas: &BigUint, token: &Address) -> BigUint {
-        let Some(price) = self
-            .token_prices
-            .as_ref()
-            .and_then(|prices| prices.get(token))
-        else {
-            return BigUint::zero();
-        };
-        let Price { numerator, denominator } = price;
-        if denominator.is_zero() {
-            return BigUint::zero();
-        }
-        gas * &self.gas_price_wei * numerator / denominator
-    }
-}
-
 // ===================== SplitOptimizer =====================
 
 /// The result of splitting one sell amount over a set of alternatives.
@@ -437,33 +388,6 @@ pub(crate) struct SplitSolution {
 }
 
 /// Decides how a sell amount is divided between parallel alternatives.
-///
-/// Port of defibot's `SplitOptimizer` Protocol (`optimizers/interface.py:8-32`). defibot's
-/// `**kwargs` channel is gone: the one keyword any caller passed was `initial_splits`, which
-/// `split_by_pair_comparison` rejects at runtime (`optimizers/pair_comparison.py:34-38`). Leaving
-/// it out of the signature turns that runtime rejection into a compile error.
-///
-/// The method is generic rather than taking `&mut [&mut dyn Sellable]`, so this trait is not
-/// object-safe. There is one implementation; a second one is selected by matching on config, not by
-/// boxing.
-pub(crate) trait SplitOptimizerT {
-    /// Splits `sell_amount` over `routes`, selling on them as it searches.
-    ///
-    /// `routes` is left holding the amounts of the chosen split, which is how callers recover the
-    /// per-alternative sell and buy amounts.
-    ///
-    /// # Errors
-    ///
-    /// [`DecompositionError::InvalidStructure`] for a zero `sell_amount`, and any non-recoverable
-    /// failure raised while selling.
-    fn optimize<S: Sellable>(
-        &self,
-        routes: &mut [S],
-        sell_amount: &BigUint,
-        gas_prices: &GasPrices,
-    ) -> Result<SplitSolution, DecompositionError>;
-}
-
 // ===================== Shared helpers =====================
 
 /// Sells `sell_amount`, shrinking the amount by 10% on every recoverable failure until it succeeds
@@ -582,12 +506,18 @@ fn to_human(amount: &BigUint, decimals: u32) -> f64 {
 #[cfg(test)]
 mod tests {
 
+    use std::sync::Arc;
+
     use rustc_hash::FxHashMap;
+    use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
     use super::*;
-    use crate::algorithm::{
-        decomposition::components::{Hop, SellLimitKind},
-        test_utils::{token, ConstantProductSim},
+    use crate::{
+        algorithm::{
+            decomposition::components::{Hop, SellLimitKind},
+            test_utils::{token, ConstantProductSim},
+        },
+        derived::types::TokenGasPrices,
     };
 
     fn pool(id: &str, reserve_0: u64, reserve_1: u64) -> PoolRef {
@@ -658,7 +588,7 @@ mod tests {
     #[test]
     fn test_gas_prices_without_token_prices_are_free() {
         let gas_price_wei = BigUint::from(1_000u32);
-        let prices = GasPrices::new(gas_price_wei.clone(), None);
+        let prices = TokenPriceData::new(gas_price_wei.clone(), None);
 
         assert!(prices
             .cost_in_token(&BigUint::from(100_000u32), &token(0x0B, "B").address)
@@ -672,7 +602,8 @@ mod tests {
         token_prices
             .insert(buy_token.address.clone(), Price::new(BigUint::from(3u8), BigUint::from(2u8)));
         let gas_price_wei = BigUint::from(10u8);
-        let prices = GasPrices::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone())));
+        let prices =
+            TokenPriceData::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone())));
 
         // 100 gas * 10 wei/gas * 3/2 token-per-wei.
         assert_eq!(
@@ -709,11 +640,11 @@ pub enum SplitOptimizer {
 }
 
 impl SplitOptimizer {
-    pub fn split<S: Sellable>(
+    pub(crate) fn split<S: Sellable>(
         &self,
         routes: &mut [S],
         sell_amount: &BigUint,
-        gas_prices: &GasPrices,
+        gas_prices: &TokenPriceData,
     ) -> Result<SplitSolution, DecompositionError> {
         match self {
             SplitOptimizer::PairComparison => {

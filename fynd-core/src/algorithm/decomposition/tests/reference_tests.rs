@@ -2,18 +2,29 @@
 //!
 //! defibot has no test for `_build_reference_solution`; the cases here are built from the shapes
 //! the Python enumerates (`order_solver.py:344-380`).
+//!
+//! The reference no longer searches for its own paths — `DecompositionAlgorithm::search_graph`
+//! enumerates them alongside the candidate paths and hands them over. So what is tested here is
+//! only what the function still decides: whether the paths it was given produce a graph, whether
+//! that graph solves, and whether it can state a post-trade price. Which paths reach it is decided
+//! in `mod.rs` and covered by `algorithm_tests`.
 
 use num_bigint::BigUint;
 use num_traits::Zero;
-use rustc_hash::FxHashSet;
-use tycho_simulation::tycho_core::{models::Address, simulation::protocol_sim::ProtocolSim};
+use tycho_simulation::tycho_core::{
+    models::{token::Token, Address},
+    simulation::protocol_sim::ProtocolSim,
+};
 
 use super::*;
 use crate::{
     algorithm::{
         decomposition::{
-            optimizers::pair_comparison::PairComparison,
+            components::Branch,
+            models::DirectPath,
+            optimizers::SplitOptimizerConfig,
             token_graph::{AllowedTokens, TokenGraph},
+            SolveRequest,
         },
         most_liquid::DepthAndPrice,
         test_utils::{market_read, setup_market_unweighted, token, MockProtocolSim},
@@ -23,6 +34,7 @@ use crate::{
         petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
         GraphManager,
     },
+    types::{Order, OrderSide},
 };
 
 /// `(component_id, token_in, token_out, spot_price)` for a fee-free mock pool.
@@ -56,58 +68,53 @@ fn market_with(
     (market, manager)
 }
 
-fn params<'a>(
-    sell_token: &'a Token,
-    buy_token: &'a Token,
-    intermediate_token: &'a Token,
-) -> ReferenceParams<'a> {
-    ReferenceParams { sell_token, buy_token, intermediate_token, max_routes: 30, deadline: None }
+/// One path, named by the tokens it visits and the component traded at each hop.
+fn path(tokens: &[&Token], components: &[&str]) -> DirectPath {
+    DirectPath {
+        tokens: tokens
+            .iter()
+            .map(|token| token.address.clone())
+            .collect(),
+        components: components
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect(),
+    }
 }
 
-/// Builds and solves the reference for a 1000-unit order at zero gas cost.
+fn order(sell_token: &Token, buy_token: &Token, amount: u32) -> Order {
+    Order::new(
+        sell_token.address.clone(),
+        buy_token.address.clone(),
+        BigUint::from(amount),
+        OrderSide::Sell,
+        Address::from([0u8; 20]),
+    )
+}
+
+/// Builds and solves the reference over `paths` at zero gas cost.
 fn build(
     graph: &StableDiGraph<DepthAndPrice>,
     market: &MarketData,
-    params: &ReferenceParams<'_>,
-) -> Option<DecompositionGraph> {
-    build_for(graph, market, params, &BigUint::from(1_000u32))
-}
-
-fn build_for(
-    graph: &StableDiGraph<DepthAndPrice>,
-    market: &MarketData,
-    params: &ReferenceParams<'_>,
-    sell_amount: &BigUint,
-) -> Option<DecompositionGraph> {
-    build_for_allowed(graph, market, params, sell_amount, None)
-}
-
-/// [`build_for`] with an allowlist of the tokens a route may pass through.
-fn build_for_allowed(
-    graph: &StableDiGraph<DepthAndPrice>,
-    market: &MarketData,
-    params: &ReferenceParams<'_>,
-    sell_amount: &BigUint,
-    connector_tokens: Option<&FxHashSet<Address>>,
+    order: &Order,
+    paths: Vec<DirectPath>,
 ) -> Option<DecompositionGraph> {
     let view = market_read(market);
-    let gas_price_wei = BigUint::zero();
-    let graph = TokenGraph::new(
+    let token_graph = TokenGraph::new(
         graph,
         &AllowedTokens {
-            connector_tokens,
+            connector_tokens: None,
             prices: None,
-            endpoints: [&params.sell_token.address, &params.buy_token.address],
+            endpoints: [order.token_in(), order.token_out()],
         },
     );
+    let input = SolveRequest::new(order, token_graph, None, SplitOptimizerConfig::default());
     solve_reference_solution(
-        &graph,
+        &input,
+        paths,
+        30,
         view.base_market_state(),
-        None,
-        params,
-        sell_amount,
-        &PairComparison,
-        &GasPrices::new(gas_price_wei.clone(), None),
+        &TokenPriceData::new(BigUint::zero(), None),
     )
     .expect("the fixtures build")
 }
@@ -121,124 +128,65 @@ fn branch_labels(graph: &DecompositionGraph) -> Vec<String> {
         .collect()
 }
 
+/// The direct pool and the route through the intermediate become one branch each.
 #[test]
-fn test_reference_is_the_direct_pool_plus_the_leg_through_the_intermediate() {
-    let (a, b, w) = (token(0x0A, "A"), token(0x0B, "B"), token(0x0F, "W"));
-    let c = token(0x0C, "C");
+fn test_reference_keeps_every_path_it_is_given() {
+    let (a, w, b) = (token(0x0A, "A"), token(0x0C, "W"), token(0x0B, "B"));
     let (market, manager) = market_with(vec![
-        ("ab", a.clone(), b.clone(), 2.0),
-        ("aw", a.clone(), w.clone(), 3.0),
-        ("wb", w.clone(), b.clone(), 4.0),
-        // A path the reference must ignore: it goes through a token that is not the intermediate.
-        ("ac", a.clone(), c.clone(), 5.0),
-        ("cb", c.clone(), b.clone(), 5.0),
+        ("direct", a.clone(), b.clone(), 2.0),
+        ("a_w", a.clone(), w.clone(), 2.0),
+        ("w_b", w.clone(), b.clone(), 2.0),
     ]);
 
-    let reference = build(manager.graph(), &market, &params(&a, &b, &w)).expect("both legs exist");
+    let reference = build(
+        manager.graph(),
+        &market,
+        &order(&a, &b, 1_000),
+        vec![path(&[&a, &b], &["direct"]), path(&[&a, &w, &b], &["a_w", "w_b"])],
+    )
+    .expect("both paths price");
 
-    assert_eq!(branch_labels(&reference), ["A->B", "A->W->B"]);
+    let labels = branch_labels(&reference);
+    assert_eq!(labels.len(), 2, "one branch per path, got {labels:?}");
 }
 
+/// A solved reference carries splits and a post-trade price, which is what makes it usable as the
+/// candidate filter's floor.
 #[test]
 fn test_reference_is_solved_and_priced() {
-    let (a, b, w) = (token(0x0A, "A"), token(0x0B, "B"), token(0x0F, "W"));
-    let (market, manager) = market_with(vec![
-        ("ab", a.clone(), b.clone(), 2.0),
-        ("aw", a.clone(), w.clone(), 3.0),
-        ("wb", w.clone(), b.clone(), 4.0),
-    ]);
+    let (a, b) = (token(0x0A, "A"), token(0x0B, "B"));
+    let (market, manager) = market_with(vec![("direct", a.clone(), b.clone(), 2.0)]);
 
-    let reference = build(manager.graph(), &market, &params(&a, &b, &w)).expect("both legs exist");
+    let reference =
+        build(manager.graph(), &market, &order(&a, &b, 1_000), vec![path(&[&a, &b], &["direct"])])
+            .expect("the direct pool prices");
 
-    assert!(!reference.outer_splits().is_empty());
-    assert!(!reference.buy_amount().is_zero());
-    // The post-trade marginal price is what filters candidate paths, so it has to be available.
-    assert!(reference.new_marginal_price().is_some());
+    assert!(reference.solved(), "the reference is returned solved");
+    assert!(reference.new_marginal_price().is_some(), "and able to state its post-trade price");
+    assert!(!reference.buy_amount().is_zero(), "and to say what it bought");
 }
 
+/// No paths means no reference, and that is not an error — a thinly connected pair legitimately has
+/// neither a direct pool nor a route through a connector, and the caller then solves without one.
 #[test]
-fn test_reference_without_a_post_trade_price_is_dropped() {
-    // `order_solver.py:228-235`. Nothing was traded, so no pool has a post-trade state and the
-    // reference cannot state the price it exists to provide. Keeping it would hand the caller a
-    // filter floor and a comparison baseline built on a price that is not there.
-    let (a, b, w) = (token(0x0A, "A"), token(0x0B, "B"), token(0x0F, "W"));
-    let (market, manager) = market_with(vec![("ab", a.clone(), b.clone(), 2.0)]);
+fn test_reference_is_none_without_paths() {
+    let (a, b) = (token(0x0A, "A"), token(0x0B, "B"));
+    let (market, manager) = market_with(vec![("direct", a.clone(), b.clone(), 2.0)]);
 
-    let reference = build_for(manager.graph(), &market, &params(&a, &b, &w), &BigUint::zero());
+    let reference = build(manager.graph(), &market, &order(&a, &b, 1_000), Vec::new());
 
     assert!(reference.is_none());
 }
 
+/// A path naming a component the market does not hold prices nothing, so the reference is dropped
+/// rather than built from an empty graph.
 #[test]
-fn test_reference_falls_back_to_the_two_hop_leg_without_a_direct_pool() {
-    let (a, b, w) = (token(0x0A, "A"), token(0x0B, "B"), token(0x0F, "W"));
-    let (market, manager) =
-        market_with(vec![("aw", a.clone(), w.clone(), 3.0), ("wb", w.clone(), b.clone(), 4.0)]);
-
-    let reference = build(manager.graph(), &market, &params(&a, &b, &w)).expect("one leg exists");
-
-    assert_eq!(branch_labels(&reference), ["A->W->B"]);
-}
-
-#[test]
-fn test_reference_is_the_direct_pool_alone_when_the_intermediate_leg_is_missing() {
-    let (a, b, w) = (token(0x0A, "A"), token(0x0B, "B"), token(0x0F, "W"));
-    let (market, manager) =
-        market_with(vec![("ab", a.clone(), b.clone(), 2.0), ("aw", a.clone(), w.clone(), 3.0)]);
-
-    let reference = build(manager.graph(), &market, &params(&a, &b, &w)).expect("one leg exists");
-
-    assert_eq!(branch_labels(&reference), ["A->B"]);
-}
-
-#[test]
-fn test_reference_is_none_when_neither_leg_exists() {
-    let (a, b, w) = (token(0x0A, "A"), token(0x0B, "B"), token(0x0F, "W"));
-    let c = token(0x0C, "C");
-    // A and B are connected, but only through a token that is not the intermediate one.
-    let (market, manager) =
-        market_with(vec![("ac", a.clone(), c.clone(), 2.0), ("cb", c.clone(), b.clone(), 2.0)]);
-
-    assert!(build(manager.graph(), &market, &params(&a, &b, &w)).is_none());
-}
-
-#[test]
-fn test_reference_with_the_intermediate_as_an_endpoint_skips_the_two_hop_leg() {
-    // Selling the intermediate token itself: the two-hop leg would revisit an endpoint, so defibot
-    // asks for a plain depth-2 subgraph instead (`order_solver.py:377-380`).
-    let (b, w) = (token(0x0B, "B"), token(0x0F, "W"));
-    let c = token(0x0C, "C");
-    let (market, manager) = market_with(vec![
-        ("wb", w.clone(), b.clone(), 4.0),
-        ("wc", w.clone(), c.clone(), 2.0),
-        ("cb", c.clone(), b.clone(), 2.0),
-    ]);
+fn test_reference_is_none_when_no_path_prices() {
+    let (a, b) = (token(0x0A, "A"), token(0x0B, "B"));
+    let (market, manager) = market_with(vec![("direct", a.clone(), b.clone(), 2.0)]);
 
     let reference =
-        build(manager.graph(), &market, &params(&w, &b, &w)).expect("the direct pool exists");
+        build(manager.graph(), &market, &order(&a, &b, 1_000), vec![path(&[&a, &b], &["ghost"])]);
 
-    assert!(branch_labels(&reference).contains(&"W->B".to_string()));
-}
-
-#[test]
-fn test_reference_honours_the_token_allowlist() {
-    let (a, b, w) = (token(0x0A, "A"), token(0x0B, "B"), token(0x0F, "W"));
-    let (market, manager) = market_with(vec![
-        ("ab", a.clone(), b.clone(), 2.0),
-        ("aw", a.clone(), w.clone(), 3.0),
-        ("wb", w.clone(), b.clone(), 4.0),
-    ]);
-    // `W` is the intermediate the reference would use, and the allowlist keeps it out.
-    let allowed = FxHashSet::from_iter([a.address.clone(), b.address.clone()]);
-
-    let reference = build_for_allowed(
-        manager.graph(),
-        &market,
-        &params(&a, &b, &w),
-        &BigUint::from(1_000u32),
-        Some(&allowed),
-    )
-    .expect("the direct pool");
-
-    assert_eq!(branch_labels(&reference), ["A->B"]);
+    assert!(reference.is_none());
 }

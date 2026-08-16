@@ -59,7 +59,7 @@ fn params() -> SubgraphParams {
 
 /// Search bounds that only the hop limit constrains.
 fn bounds(max_hops: usize) -> SearchBounds {
-    SearchBounds { max_hops, max_paths: usize::MAX, deadline: None }
+    SearchBounds { max_hops, max_paths: usize::MAX, deadline: None, connector_tokens: None }
 }
 
 /// A graph every token may be routed through.
@@ -108,8 +108,13 @@ fn build(
 ) -> Option<DecompositionGraph> {
     let paths = graph.paths_between(&sell.address, &buy.address, bounds);
     let view = market_read(market);
-    build_decomposition_graph(view.base_market_state(), depths, params, &paths)
-        .expect("the fixtures build")
+    // `GraphBuildFailure` is "nothing routable here", which several cases assert; anything else is
+    // a broken fixture and should stop the test rather than read as an empty result.
+    match build_decomposition_graph(view.base_market_state(), depths, params, paths) {
+        Ok(solution) => Some(solution),
+        Err(DecompositionError::GraphBuildFailure) => None,
+        Err(error) => panic!("the fixtures build: {error}"),
+    }
 }
 
 #[test]
@@ -169,9 +174,7 @@ fn test_pool_reused_across_hops_is_skipped() {
 
     let graph = open_graph(manager.graph(), &a, &c);
     let paths = graph.paths_between(&a.address, &c.address, &bounds(2));
-    let solution = build_decomposition_graph(&market, None, &params(), &paths)
-        .expect("the fixtures build")
-        .expect("a route");
+    let solution = build_decomposition_graph(&market, None, &params(), paths).expect("a route");
 
     assert_eq!(branch_labels(&solution), ["A->C"]);
 }
@@ -424,9 +427,9 @@ fn test_max_routes_zero_is_rejected() {
     let graph = open_graph(manager.graph(), &a, &b);
     let paths = graph.paths_between(&a.address, &b.address, &bounds(2));
     let view = market_read(&market);
-    let result = build_decomposition_graph(view.base_market_state(), None, &params, &paths);
+    let result = build_decomposition_graph(view.base_market_state(), None, &params, paths);
 
-    assert!(matches!(result, Err(AlgorithmError::InvalidConfiguration { .. })));
+    assert!(matches!(result, Err(DecompositionError::InvalidInput { .. })));
 }
 
 // ===================== Grouping by neighbour token =====================

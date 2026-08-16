@@ -8,8 +8,8 @@
 //! # Passes, not a recursion
 //!
 //! defibot's `recursive_solve_splits` walks an arbitrarily deep `FractalRoute` tree and dispatches
-//! on the node type. The fixed structure ([`DecompositionGraph`] / [`Branch`] / [`SequentialRoute`] /
-//! [`Hop`]) turns that into explicit functions — [`solve_graph`], [`solve_branch`],
+//! on the node type. The fixed structure ([`DecompositionGraph`] / [`Branch`] / [`SequentialRoute`]
+//! / [`Hop`]) turns that into explicit functions — [`solve_graph`], [`solve_branch`],
 //! [`solve_route`] and [`solve_hop`] — that call each other in one direction only. The semantics
 //! are unchanged, including the part that looks like a mistake: [`solve_graph`] solves every branch
 //! as if it were going to receive the *whole* order (`order_solver.py:673-677`). That is what makes
@@ -38,15 +38,16 @@ use tycho_simulation::tycho_core::{models::Address, simulation::protocol_sim::Pr
 use crate::{
     algorithm::decomposition::{
         components::{
-            Branch, BranchSide, DecompositionError, Fraction, Hop, SequentialRoute, DecompositionGraph,
+            Branch, BranchSide, DecompositionError, DecompositionGraph, Fraction, Hop,
+            SequentialRoute,
         },
+        models::TokenPriceData,
         optimizers::{
-            decrease_until_sell, split_of, GasPrices, HopPool, Sellable, SplitOptimizerT,
+            decrease_until_sell, split_of, HopPool, Sellable, SplitOptimizer, SplitOptimizerConfig,
         },
     },
     types::ComponentId,
 };
-use crate::algorithm::decomposition::optimizers::{SplitOptimizer, SplitOptimizerConfig};
 
 /// Share of a route's own sell limit the solver is willing to use, as `(numerator, denominator)`.
 ///
@@ -79,7 +80,7 @@ pub(crate) fn solve_graph(
     graph: &mut DecompositionGraph,
     sell_amount: &BigUint,
     optimizers: SplitOptimizerConfig,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<(), DecompositionError> {
     let (limit, _) = graph.sell_amount_limit()?;
     let amount = clamp_to_limit(sell_amount, &limit);
@@ -169,11 +170,11 @@ pub(crate) fn solve_graph(
 /// # Errors
 ///
 /// Whatever the optimizer or the underlying sells raise, once the size is no longer the problem.
-pub(crate) fn solve_branch<O: SplitOptimizerT>(
+pub(crate) fn solve_branch(
     branch: &mut Branch,
     sell_amount: &BigUint,
     optimizer: SplitOptimizer,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<(), DecompositionError> {
     let mut requested = sell_amount.clone();
 
@@ -208,11 +209,11 @@ pub(crate) fn solve_branch<O: SplitOptimizerT>(
 ///
 /// Returns `None` when the attempt succeeded, or `Some(amount)` to restart the branch at a smaller
 /// size.
-fn solve_hop_then_sequences<O: SplitOptimizerT>(
+fn solve_hop_then_sequences(
     branch: &mut Branch,
     amount: &BigUint,
     optimizer: SplitOptimizer,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<Option<BigUint>, DecompositionError> {
     {
         let amount = amount;
@@ -258,11 +259,11 @@ fn solve_hop_then_sequences<O: SplitOptimizerT>(
 /// converge on one pool from each being priced as though they owned it.
 ///
 /// Returns `None` when the attempt succeeded, or `Some(amount)` to restart at a smaller size.
-fn solve_sequences_then_hop<O: SplitOptimizerT>(
+fn solve_sequences_then_hop(
     branch: &mut Branch,
     amount: &BigUint,
     optimizer: SplitOptimizer,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<Option<BigUint>, DecompositionError> {
     // Leg one: the parallel sequences, splitting the branch's own amount. Their limits are already
     // in the branch's sell token, so a refusal needs no cast back.
@@ -314,11 +315,11 @@ fn solve_sequences_then_hop<O: SplitOptimizerT>(
 ///
 /// Whatever the optimizer or the tail sells raise, with limits denominated in the head's output
 /// token so the caller can cast them back.
-fn solve_sequences<O: SplitOptimizerT>(
+fn solve_sequences(
     branch: &mut Branch,
     amount: &BigUint,
     optimizer: SplitOptimizer,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<(), DecompositionError> {
     // A branch with no tails ends at its head; there is nothing below it to split.
     if branch.sequences().is_empty() {
@@ -382,11 +383,11 @@ fn shrink_below(candidate: &BigUint, attempted: &BigUint) -> BigUint {
 /// # Errors
 ///
 /// Whatever the optimizer or the underlying sells raise, once the size is no longer the problem.
-pub(crate) fn solve_route<O: SplitOptimizerT>(
+pub(crate) fn solve_route(
     route: &mut SequentialRoute,
     sell_amount: &BigUint,
     optimizer: SplitOptimizer,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<(), DecompositionError> {
     let mut requested = sell_amount.clone();
 
@@ -445,11 +446,11 @@ pub(crate) fn solve_route<O: SplitOptimizerT>(
 /// # Errors
 ///
 /// Whatever the optimizer or the underlying pool sells raise.
-pub(crate) fn solve_hop<O: SplitOptimizerT>(
+pub(crate) fn solve_hop(
     hop: &mut Hop,
     sell_amount: &BigUint,
     optimizer: SplitOptimizer,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<(), DecompositionError> {
     let (limit, _) = hop.sell_amount_limit()?;
     let amount = clamp_to_limit(sell_amount, &limit);
@@ -542,8 +543,8 @@ fn limit_restart_amount(
 pub(crate) fn solve_solution_graph(
     graph: &mut DecompositionGraph,
     sell_amount: &BigUint,
-    optimizers: SplitOptimizerConfig
-    gas_prices: &GasPrices,
+    optimizers: SplitOptimizerConfig,
+    gas_prices: &TokenPriceData,
 ) -> Result<(BigUint, BigUint), DecompositionError> {
     solve_graph(graph, sell_amount, optimizers, gas_prices)?;
 
@@ -723,7 +724,9 @@ fn sell_branches_in_sequence(
 ///
 /// Two branches holding the same component hold separate copies of its state; they start out equal,
 /// so keeping the first is enough to restore both (`utils.py:28`).
-fn snapshot_pool_states(graph: &DecompositionGraph) -> FxHashMap<ComponentId, Box<dyn ProtocolSim>> {
+fn snapshot_pool_states(
+    graph: &DecompositionGraph,
+) -> FxHashMap<ComponentId, Box<dyn ProtocolSim>> {
     let mut snapshot: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
     for pool in graph_pools(graph) {
         snapshot
@@ -861,7 +864,7 @@ fn minus_one(value: &BigUint) -> BigUint {
 pub(crate) fn solve_without_splits(
     graph: &mut DecompositionGraph,
     sell_amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<(), DecompositionError> {
     for branch in graph.branches_mut() {
         decrease_until_sell(branch, sell_amount)?;
@@ -947,7 +950,7 @@ pub(crate) enum SolutionChoice {
 /// (`order_solver.py:300-302`).
 ///
 /// Signed: a route can cost more gas than it buys.
-pub(crate) fn net_of_gas(graph: &DecompositionGraph, gas_prices: &GasPrices) -> BigInt {
+pub(crate) fn net_of_gas(graph: &DecompositionGraph, gas_prices: &TokenPriceData) -> BigInt {
     let cost = gas_prices.cost_in_token(&graph.gas(), &graph.buy_token().address);
     BigInt::from(graph.buy_amount().clone()) - BigInt::from(cost)
 }
@@ -960,7 +963,7 @@ pub(crate) fn net_of_gas(graph: &DecompositionGraph, gas_prices: &GasPrices) -> 
 pub(crate) fn choose_solution(
     candidate: &DecompositionGraph,
     reference: Option<&DecompositionGraph>,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> SolutionChoice {
     let Some(reference) = reference else {
         return SolutionChoice::Candidate;

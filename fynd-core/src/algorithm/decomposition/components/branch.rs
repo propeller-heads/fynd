@@ -212,6 +212,7 @@ impl Branch {
         self.side
     }
 
+
     /// Splits a token path into its first hop and the remainder — the one-tail case of the table in
     /// [`Branch`].
     ///
@@ -222,6 +223,7 @@ impl Branch {
     /// # Errors
     ///
     /// [`DecompositionError::InvalidStructure`] when the remaining hops do not form a valid route.
+    #[cfg(test)]
     pub(crate) fn from_route(route: SequentialRoute) -> Result<Self, DecompositionError> {
         let (tokens, mut hops) = route.into_parts();
         let head = hops.remove(0);
@@ -244,13 +246,6 @@ impl Branch {
         &mut self.hop
     }
 
-    /// Consumes a tail-less branch into its only hop.
-    ///
-    /// Reference-route assembly stitches two independently built one-hop subgraphs into a two-hop
-    /// branch (`order_solver.py:366-368`), which needs the hop itself rather than a view of it.
-    pub(crate) fn into_hop(self) -> Hop {
-        self.hop
-    }
 
     /// The parallel sequences hanging off the hop, empty for a one-hop branch.
     pub(crate) fn sequences(&self) -> &[SequentialRoute] {

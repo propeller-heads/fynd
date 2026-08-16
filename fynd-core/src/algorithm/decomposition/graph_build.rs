@@ -82,12 +82,11 @@ use crate::{
             Branch, DecompositionError, DecompositionGraph, Hop, PoolRef, SellLimitKind,
             SequentialRoute,
         },
-        token_graph::DirectPath,
+        models::DirectPath,
     },
     derived::types::ComponentDepths,
     feed::market_data::MarketState,
     types::ComponentId,
-    AlgorithmError,
 };
 
 /// Inputs to [`build_decomposition_graph`].
@@ -125,6 +124,14 @@ pub(crate) fn build_decomposition_graph(
     params: &SubgraphParams,
     paths: Vec<DirectPath>,
 ) -> Result<DecompositionGraph, DecompositionError> {
+    if params.max_routes == 0 {
+        // Every cap below truncates to this, so zero would empty each hop and report the emptiness
+        // as a structural failure two layers down. `DecompositionConfig::new` rejects it at
+        // startup; this covers a caller that builds `SubgraphParams` by hand.
+        return Err(DecompositionError::InvalidInput {
+            reason: "max_routes must be at least 1".to_string(),
+        });
+    }
     if paths.is_empty() {
         debug!("decomposition found no candidate path");
         return Err(DecompositionError::GraphBuildFailure);
@@ -132,8 +139,13 @@ pub(crate) fn build_decomposition_graph(
 
     let mut sequences: Vec<SequentialRoute> = Vec::new();
     for group in group_by_token_sequence(market, &paths, params) {
-        if let Some(route) = build_branch(market, depths, &group, params.max_routes)? {
-            sequences.push(route);
+        match build_branch(market, depths, &group, params.max_routes) {
+            Ok(route) => sequences.push(route),
+            // One token sequence has a leg no pool is left to trade. The others are unaffected.
+            Err(DecompositionError::EmptyHop { token_in, token_out }) => {
+                debug!(%token_in, %token_out, "dropping a token sequence with an untradable leg");
+            }
+            Err(error) => return Err(error),
         }
     }
     if sequences.is_empty() {
@@ -644,7 +656,14 @@ fn build_branch(
 
         if pools.is_empty() {
             // CZ: No pools at the current hop. should never happen.
-            return Err(DecompositionError::GraphBuildFailure);
+            //
+            // It can: `seen_pools` gives a pool claimed by an earlier leg to that leg only, so a
+            // leg whose every pool went that way is left with none. Only this token sequence is
+            // affected, which is why the caller drops it and keeps the others.
+            return Err(DecompositionError::EmptyHop {
+                token_in: token_in.address.clone(),
+                token_out: token_out.address.clone(),
+            });
         }
 
         // defibot's `_create_one_hop_route` (`order_solver.py:556-573`): deduplicate, rank, cap.

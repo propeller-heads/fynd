@@ -3,7 +3,7 @@
 use num_bigint::BigUint;
 use tycho_simulation::tycho_core::models::Address;
 
-use crate::algorithm::decomposition::components::*;
+use crate::{algorithm::decomposition::components::*, AlgorithmError};
 
 // ===================== Errors =====================
 
@@ -51,10 +51,49 @@ pub(crate) enum DecompositionError {
         /// What was wrong with the input.
         reason: String,
     },
+    /// No candidate route survived the build.
+    ///
+    /// Either the search found no path, or every path it found was filtered out before a branch
+    /// could be made from it. The build site logs which.
+    #[error("no candidate route could be built")]
     GraphBuildFailure,
-    InvalidInput,
+
+    /// A leg of a token sequence ended up with no pool to trade it.
+    ///
+    /// Only that one sequence is unroutable, so the caller drops it and keeps the rest. Reachable
+    /// through `seen_pools`: a pool claimed by an earlier leg cannot serve a later one, and a leg
+    /// whose only pool goes that way is left empty.
+    #[error("no pool left to trade {token_in} -> {token_out}")]
+    EmptyHop {
+        /// Leg input token.
+        token_in: Address,
+        /// Leg output token.
+        token_out: Address,
+    },
+
+    /// The order cannot be solved as asked.
+    #[error("cannot solve this order: {reason}")]
+    InvalidInput {
+        /// What about the order or the graph makes it unsolvable.
+        reason: String,
+    },
+
+    /// The market state a solve needs could not be read.
+    #[error("could not read market state: {reason}")]
+    MarketRead {
+        /// Which read failed and why.
+        reason: String,
+    },
+
+    /// The solve produced no solution to return.
+    #[error("no solution to return")]
     SolveError,
+
+    /// A solved graph could not be turned into a `Route`.
+    #[error("solution did not assemble into a route: {error}")]
     RouteBuildFailure {
+        /// Why the assembly failed.
+        #[source]
         error: AlgorithmError,
     },
 }
@@ -68,7 +107,14 @@ impl DecompositionError {
     pub(crate) fn is_recoverable(&self) -> bool {
         match self {
             Self::SellAmountLimit { .. } | Self::Simulation { .. } => true,
-            Self::Unsolved { .. } | Self::InvalidStructure { .. } => false,
+            Self::Unsolved { .. } |
+            Self::InvalidStructure { .. } |
+            Self::GraphBuildFailure |
+            Self::EmptyHop { .. } |
+            Self::InvalidInput { .. } |
+            Self::MarketRead { .. } |
+            Self::SolveError |
+            Self::RouteBuildFailure { .. } => false,
         }
     }
 }

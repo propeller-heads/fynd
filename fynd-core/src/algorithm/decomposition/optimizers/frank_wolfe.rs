@@ -32,9 +32,8 @@ use tycho_simulation::tycho_core::models::token::Token;
 use crate::algorithm::{
     decomposition::{
         components::{DecompositionError, Fraction},
-        optimizers::{
-            decrease_until_sell, split_of, GasPrices, Sellable, SplitOptimizerT, SplitSolution,
-        },
+        models::TokenPriceData,
+        optimizers::{decrease_until_sell, split_of, Sellable, SplitSolution},
     },
     split_primitives::golden_section_search,
 };
@@ -52,7 +51,7 @@ const LINE_SEARCH_EVALS: usize = 12;
 pub(crate) fn split_by_frank_wolfe<S: Sellable>(
     routes: &mut [S],
     sell_amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<SplitSolution, DecompositionError> {
     if routes.is_empty() {
         return Ok(SplitSolution {
@@ -136,7 +135,7 @@ fn search_step<S: Sellable>(
     shares: &[f64],
     candidate: usize,
     sell_amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
     buy_token: &Token,
 ) -> Result<f64, DecompositionError> {
     // The search wants an `f64` per trial, so a failed sell is reported as the worst possible
@@ -183,7 +182,7 @@ fn evaluate<S: Sellable>(
     routes: &mut [S],
     shares: &[f64],
     sell_amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
     buy_token: &Token,
 ) -> Result<BigInt, DecompositionError> {
     let mut bought = BigUint::zero();
@@ -208,7 +207,7 @@ fn evaluate<S: Sellable>(
 fn rank<S: Sellable>(
     routes: &mut [S],
     sell_amount: &BigUint,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
     buy_token: &Token,
 ) -> Result<Vec<usize>, DecompositionError> {
     let mut scored = Vec::with_capacity(routes.len());

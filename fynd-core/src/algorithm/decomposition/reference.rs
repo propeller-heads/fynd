@@ -3,56 +3,48 @@
 //! Port of `_build_reference_solution` (`order_solver.py:326-385`) and the part of `_solve` that
 //! consumes it (`:226-248`, `:300-310`).
 //!
-//! The reference is one direct pool set plus one two-hop path through a well-connected intermediate
-//! token, solved the ordinary way. It does three jobs:
+//! The reference is the direct pools plus the paths through a well-connected intermediate token,
+//! solved the ordinary way. It does three jobs:
 //!
 //! 1. Its post-trade marginal price is the floor candidate paths must clear (`:240-242`).
 //! 2. It is the answer if the full candidate subgraph cannot be built at all (`:244-248`).
 //! 3. It is the baseline the candidate must beat on output net of gas (`:304-308`), which
 //!    [`choose_solution`](super::solve::choose_solution) applies.
 //!
+//! The paths themselves are not searched here. `DecompositionAlgorithm::search_graph` enumerates
+//! them alongside the candidate paths, under one pass over the graph, and hands them over.
+//!
 //! # Deviations from defibot
 //!
 //! * defibot hard-codes WETH as the intermediate token (`constants.WRAPPED_TOKEN`,
 //!   `order_solver.py:344`). Fynd runs on chains whose wrapped native token differs and whose
-//!   deepest connector is not always the wrapped native token at all, so the token is a parameter.
-//!   Pass the chain's most liquid connector; the reference is only as safe as that choice.
+//!   deepest connector is not always the wrapped native token at all, so the intermediates are the
+//!   graph's own highest-degree tokens.
 //! * defibot prints the route scheme to stdout from inside the warning path (`:234`). A solver
 //!   worker has no stdout worth writing to; the warning carries the same information through
 //!   `tracing`.
 
-use std::time::Instant;
-
-use num_bigint::BigUint;
 use tracing::{debug, warn};
-use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::{
     algorithm::decomposition::{
-        components::{Branch, DecompositionError, DecompositionGraph, SequentialRoute},
+        components::{DecompositionError, DecompositionGraph},
         graph_build::{build_decomposition_graph, SubgraphParams},
-        optimizers::{GasPrices, SplitOptimizer, SplitOptimizerConfig, SplitOptimizerT},
+        models::{DirectPath, TokenPriceData},
         solve::solve_graph,
-        token_graph::{DirectPath, SearchBounds, TokenGraph},
-        SolveInput,
+        SolveRequest,
     },
-    derived::types::ComponentDepths,
     feed::market_data::MarketState,
-    AlgorithmError,
 };
-
-/// Cap on paths enumerated per reference leg.
-///
-/// A leg is a single hop between two fixed tokens, so every path it can find is one edge and the
-/// count is the number of pools on that pair. The bound only exists so the reference cannot be the
-/// thing that runs the solve clock out.
-const REFERENCE_MAX_PATHS: usize = 1024;
 
 /// Builds and solves the reference route, or `None` when no safe route exists.
 ///
 /// A `None` return is not an error: an order between two thinly connected tokens legitimately has
-/// neither a direct pool nor a path through the intermediate token, and the caller then falls back
+/// neither a direct pool nor a path through an intermediate token, and the caller then falls back
 /// to the candidate subgraph alone.
+///
+/// `paths` is the reference path set — the direct pools and the routes through the connector
+/// tokens. `max_routes` caps the parallel alternatives kept, as it does for the candidate graph.
 ///
 /// The solved graph's [`DecompositionGraph::new_marginal_price`] is the price floor for candidate
 /// filtering. defibot drops the reference entirely when that price is unavailable (`:228-235`),
@@ -61,26 +53,42 @@ const REFERENCE_MAX_PATHS: usize = 1024;
 ///
 /// # Errors
 ///
-/// [`AlgorithmError`] for a structural failure while assembling or solving. Missing paths are
-/// reported as `Ok(None)`.
+/// [`DecompositionError`] for a structural failure while building or solving. An absent reference
+/// is reported as `Ok(None)`.
+/// CZ: use most liquid to find single best path at 2 hops and maybe also at 3 hops
 pub(crate) fn solve_reference_solution(
-    solve_input: &SolveInput,
+    solve_input: &SolveRequest,
     paths: Vec<DirectPath>,
+    max_routes: usize,
     market_state: &MarketState,
-    gas_prices: &GasPrices,
-) -> Result<Option<DecompositionGraph>, AlgorithmError> {
-    let Some(mut reference) = build_reference_graph(graph, market, depths)? else {
-        return Ok(None);
+    gas_prices: &TokenPriceData,
+) -> Result<Option<DecompositionGraph>, DecompositionError> {
+    // The reference is the floor other candidates must clear, so it has none of its own.
+    let params = SubgraphParams { max_routes, minimum_price: 0.0 };
+    let mut reference = match build_decomposition_graph(
+        market_state,
+        solve_input.depths.as_ref(),
+        &params,
+        paths,
+    ) {
+        Ok(reference) => reference,
+        Err(DecompositionError::GraphBuildFailure) => {
+            debug!(
+                sell_token = %solve_input.order.token_in(),
+                buy_token = %solve_input.order.token_out(),
+                "no reference route between these tokens"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
     };
 
-    // The reference is one or two branches, so the level split is the same optimizer as below it.
     solve_graph(
         &mut reference,
         solve_input.order.amount(),
         solve_input.split_optimizers,
         gas_prices,
-    )
-    .map_err(cast_error)?;
+    )?;
 
     if reference.new_marginal_price().is_none() {
         warn!(
@@ -93,118 +101,6 @@ pub(crate) fn solve_reference_solution(
     }
 
     Ok(Some(reference))
-}
-
-/// Builds the unsolved reference graph (`order_solver.py:344-380`).
-fn build_reference_graph(
-    graph: &TokenGraph<'_>,
-    market: &MarketState,
-    depths: Option<&ComponentDepths>,
-) -> Result<Option<DecompositionGraph>, AlgorithmError> {
-    let intermediate = &params.intermediate_token.address;
-    if &params.sell_token.address == intermediate || &params.buy_token.address == intermediate {
-        // The two-hop leg would revisit an endpoint. defibot still asks for depth 2 here
-        // (`:378-380`), which admits a path through some other token — the reference stays a
-        // small subgraph because it is built without a minimum price and capped like any other.
-        return subgraph(graph, market, depths, params, params.sell_token, params.buy_token, 2);
-    }
-
-    let direct = subgraph(graph, market, depths, params, params.sell_token, params.buy_token, 1)?;
-    let through = through_intermediate(graph, market, depths, params)?;
-
-    let mut branches: Vec<Branch> = Vec::new();
-    if let Some(direct) = direct {
-        branches.extend(direct.into_branches());
-    }
-    if let Some(through) = through {
-        branches.push(Branch::from_route(through).map_err(cast_error)?);
-    }
-    if branches.is_empty() {
-        return Ok(None);
-    }
-
-    DecompositionGraph::new(branches, Vec::new())
-        .map(Some)
-        .map_err(cast_error)
-}
-
-/// The `sell -> intermediate -> buy` branch, or `None` when either leg is missing
-/// (`order_solver.py:353-370`).
-fn through_intermediate(
-    graph: &TokenGraph<'_>,
-    market: &MarketState,
-    depths: Option<&ComponentDepths>,
-    params: &ReferenceParams<'_>,
-) -> Result<Option<SequentialRoute>, AlgorithmError> {
-    let first =
-        subgraph(graph, market, depths, params, params.sell_token, params.intermediate_token, 1)?;
-    let second =
-        subgraph(graph, market, depths, params, params.intermediate_token, params.buy_token, 1)?;
-    let (Some(first), Some(second)) = (first, second) else {
-        return Ok(None);
-    };
-
-    let (Some(first), Some(second)) = (single_hop(first), single_hop(second)) else {
-        // A one-hop subgraph between a fixed token pair has exactly one token sequence and so
-        // exactly one branch of one leg. Anything else means the builder changed shape; the
-        // reference is a best-effort fallback, so it is dropped rather than failing the order.
-        warn!("reference leg was not a single hop; skipping the route through the intermediate");
-        return Ok(None);
-    };
-
-    let tokens = vec![
-        params.sell_token.clone(),
-        params.intermediate_token.clone(),
-        params.buy_token.clone(),
-    ];
-    SequentialRoute::new(tokens, vec![first, second])
-        .map(Some)
-        .map_err(cast_error)
-}
-
-/// The single leg of a one-hop subgraph, or `None` when it has any other shape.
-///
-/// A one-hop subgraph's single branch has no tails, so its head *is* the leg.
-fn single_hop(graph: DecompositionGraph) -> Option<super::components::Hop> {
-    let mut branches = graph.into_branches();
-    if branches.len() != 1 {
-        return None;
-    }
-    let branch = branches.remove(0);
-    if !branch.sequences().is_empty() {
-        return None;
-    }
-    Some(branch.into_hop())
-}
-
-/// One leg's subgraph, or `None` when it has no route.
-///
-/// defibot catches `NoPathsFound` and `UnavailableRouteError` around each leg
-/// (`order_solver.py:350-351`, `:369-370`).
-fn subgraph(
-    graph: &TokenGraph<'_>,
-    market: &MarketState,
-    depths: Option<&ComponentDepths>,
-    params: &ReferenceParams<'_>,
-    sell_token: &Token,
-    buy_token: &Token,
-    max_hops: usize,
-) -> Result<Option<DecompositionGraph>, AlgorithmError> {
-    let bounds =
-        SearchBounds { max_hops, max_paths: REFERENCE_MAX_PATHS, deadline: params.deadline };
-    let paths = graph.paths_between(&sell_token.address, &buy_token.address, &bounds);
-    // The reference is the floor other candidates must clear, so it has none of its own.
-    let subgraph_params = SubgraphParams { max_routes: params.max_routes, minimum_price: 0.0 };
-    let subgraph = build_decomposition_graph(market, depths, &subgraph_params, &paths)?;
-    if subgraph.is_none() {
-        debug!(from = %sell_token.address, to = %buy_token.address, "reference leg unavailable");
-    }
-    Ok(subgraph)
-}
-
-/// Wraps a structural failure from the solution types as an algorithm error.
-fn cast_error(error: DecompositionError) -> AlgorithmError {
-    AlgorithmError::Other(format!("decomposition reference route failed: {error}"))
 }
 
 #[cfg(test)]

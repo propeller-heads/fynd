@@ -188,6 +188,13 @@ rstest = "0.18"
 proptest = "1.11"
 tempfile = "3"
 
+# Dependencies are optimised even in debug builds. Test time is dominated by pool math inside
+# `tycho-simulation`, which runs 16x slower unoptimised: the decomposition route snapshot takes 82s
+# at opt-level 0 against 5s optimised. Workspace crates stay unoptimised and debuggable, since
+# `profile.test` inherits this.
+[profile.dev.package."*"]
+opt-level = 3
+
 # Release code with the symbols a profiler needs. Used by the benchmark
 [profile.profiling]
 inherits = "release"

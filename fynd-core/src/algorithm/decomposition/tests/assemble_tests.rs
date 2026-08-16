@@ -222,9 +222,9 @@ fn test_route_result_spends_the_whole_order_despite_split_rounding() {
         .expect("the solver sells");
 
     let gas_price_wei = BigUint::from(1u8);
-    let gas_prices = GasPrices::new(gas_price_wei.clone(), None);
-    let result = cast_into_route(&solution, &market, &order, &gas_prices, &gas_price_wei)
-        .expect("the solution assembles");
+    let gas_prices = TokenPriceData::new(gas_price_wei.clone(), None);
+    let result =
+        cast_into_route(&solution, &market, &order, &gas_prices).expect("the solution assembles");
 
     // The solver routed 99 of the 100 and bought 990; the route routes all 100 and buys 1000.
     assert_eq!(solver_bought, BigUint::from(990u32));
@@ -249,10 +249,11 @@ fn test_route_result_charges_gas_in_buy_token_units() {
     let gas_price_wei = BigUint::from(2u8);
     let mut token_prices: TokenGasPrices = FxHashMap::default();
     token_prices.insert(token_b().address, Price::new(BigUint::from(3u8), BigUint::from(1u8)));
-    let gas_prices = GasPrices::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone())));
+    let gas_prices =
+        TokenPriceData::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone())));
 
-    let result = cast_into_route(&solution, &market, &order, &gas_prices, &gas_price_wei)
-        .expect("the solution assembles");
+    let result =
+        cast_into_route(&solution, &market, &order, &gas_prices).expect("the solution assembles");
 
     // `FixedRateSim` reports one gas unit: 1 gas * 2 wei/gas * 3 token-per-wei = 6.
     assert_eq!(produced_output(&result, &order), BigUint::from(1_000u32));
@@ -282,8 +283,8 @@ fn test_shortfall_solution_is_stretched_and_requoted_at_the_full_amount() {
     );
 
     let gas_price_wei = BigUint::from(1u8);
-    let gas_prices = GasPrices::new(gas_price_wei.clone(), None);
-    let result = cast_into_route(&solution, &market, &order, &gas_prices, &gas_price_wei)
+    let gas_prices = TokenPriceData::new(gas_price_wei.clone(), None);
+    let result = cast_into_route(&solution, &market, &order, &gas_prices)
         .expect("a shortfall solution assembles at the full order amount");
 
     // The whole order goes through `p1` — the only branch carrying flow — at its tenfold rate,
@@ -324,8 +325,8 @@ fn test_one_unservable_pool_discards_the_whole_stretched_solution() {
     );
 
     let gas_price_wei = BigUint::from(1u8);
-    let gas_prices = GasPrices::new(gas_price_wei.clone(), None);
-    let error = cast_into_route(&solution, &market, &order, &gas_prices, &gas_price_wei)
+    let gas_prices = TokenPriceData::new(gas_price_wei.clone(), None);
+    let error = cast_into_route(&solution, &market, &order, &gas_prices)
         .expect_err("the brittle pool cannot serve its stretched share");
 
     // The whole solution is lost, including the healthy branch that would have served 5_000 fine.
@@ -358,8 +359,8 @@ fn test_the_healthy_branch_alone_assembles_at_the_full_order() {
     );
 
     let gas_price_wei = BigUint::from(1u8);
-    let gas_prices = GasPrices::new(gas_price_wei.clone(), None);
-    let result = cast_into_route(&solution, &market, &order, &gas_prices, &gas_price_wei)
+    let gas_prices = TokenPriceData::new(gas_price_wei.clone(), None);
+    let result = cast_into_route(&solution, &market, &order, &gas_prices)
         .expect("the healthy pool serves the whole order");
 
     assert_eq!(produced_output(&result, &order), BigUint::from(100_000u32));
@@ -378,8 +379,8 @@ fn test_solution_activating_nothing_is_insufficient_liquidity() {
     );
 
     let gas_price_wei = BigUint::from(1u8);
-    let gas_prices = GasPrices::new(gas_price_wei.clone(), None);
-    let error = cast_into_route(&solution, &market, &order, &gas_prices, &gas_price_wei)
+    let gas_prices = TokenPriceData::new(gas_price_wei.clone(), None);
+    let error = cast_into_route(&solution, &market, &order, &gas_prices)
         .expect_err("a solution routing nothing has no route");
 
     assert!(matches!(error, AlgorithmError::InsufficientLiquidity), "got {error:?}");

@@ -57,7 +57,7 @@ use crate::{
     algorithm::{
         decomposition::{
             components::{Branch, BranchSide, DecompositionGraph, Hop},
-            optimizers::GasPrices,
+            models::TokenPriceData,
         },
         split_primitives::{build_split_route, HopDescriptor, PathAllocation, SimulatedHop},
     },
@@ -116,7 +116,7 @@ pub(crate) fn cast_into_route(
     graph: &DecompositionGraph,
     market: &MarketState,
     order: &Order,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Result<RouteResult, AlgorithmError> {
     let allocations = solution_allocations(graph);
     if allocations.is_empty() {
@@ -160,7 +160,7 @@ pub(crate) fn cast_into_route(
         "decomposition assembled route; quote re-derived from the assembled swaps"
     );
 
-    Ok(RouteResult::new(route, net, gas_prices.gas_price_wei))
+    Ok(RouteResult::new(route, net, gas_prices.gas_price_wei.clone()))
 }
 
 /// Expands every branch of the graph into the linear paths the encoder consumes.

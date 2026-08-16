@@ -12,19 +12,11 @@ use tracing::debug;
 use tycho_simulation::tycho_core::models::Address;
 
 use crate::{
-    algorithm::most_liquid::DepthAndPrice, derived::types::TokenGasPrices,
-    graph::petgraph::StableDiGraph, types::ComponentId,
+    algorithm::{decomposition::models::DirectPath, most_liquid::DepthAndPrice},
+    derived::types::TokenGasPrices,
+    graph::petgraph::StableDiGraph,
+    types::ComponentId,
 };
-
-/// A token path through the routing graph together with the pool used at each leg.
-///
-/// Owns its ids so nothing downstream carries the graph's lifetime.
-pub(crate) struct DirectPath {
-    /// Token addresses visited; one longer than [`DirectPath::components`].
-    pub(crate) tokens: Vec<Address>,
-    /// Component traded at each leg.
-    pub(crate) components: Vec<ComponentId>,
-}
 
 /// Which tokens a search may route through.
 ///
@@ -81,7 +73,13 @@ pub(crate) struct SearchBounds {
     /// The solve clock: the caller passes `start + timeout` so the search cannot eat the budget
     /// the solve and the assembly still need.
     pub(crate) deadline: Option<Instant>,
-    pub(crate) connector_tokens: Vec<Address>,
+    /// Tokens a path may pass *through*, or `None` to allow every token.
+    ///
+    /// The order's own endpoints are always allowed, so `Some(vec![])` still admits the direct
+    /// pools — and nothing longer. `None` rather than an empty list means "unrestricted", matching
+    /// [`AllowedTokens::connector_tokens`]: an allowlist that came out empty on a thin graph would
+    /// otherwise silently delete every multi-hop route.
+    pub(crate) connector_tokens: Option<Vec<Address>>,
 }
 
 /// The routing graph for the length of one solve.
@@ -174,6 +172,10 @@ impl<'a> TokenGraph<'a> {
         let mut search = PathSearch {
             graph: self.graph,
             allowed: &self.allowed,
+            connectors: bounds
+                .connector_tokens
+                .as_ref()
+                .map(|allowed| allowed.iter().collect()),
             target,
             bounds,
             since_clock_check: 0,
@@ -202,25 +204,28 @@ impl<'a> TokenGraph<'a> {
         found
     }
 
-    /// The token with the most pools that `accept` allows.
+    /// The `limit` tokens with the most pools that `accept` allows, deepest first.
     ///
-    /// Ties break on the address, so the same graph always answers the same way.
+    /// Degree is counted in pools, not in trading partners, which is the signal
+    /// `fynd derive-connector-tokens` ranks by. Ties break on the address, so the same graph always
+    /// answers the same way.
     pub(crate) fn highest_degree_tokens(
         &self,
+        limit: usize,
         accept: impl Fn(&Address) -> bool,
     ) -> Vec<&'a Address> {
-        let mut best: Vec<(usize, &Address)> = Vec::new();
+        let mut by_degree: Vec<(usize, &Address)> = Vec::new();
         for node in self.graph.node_indices() {
             let token = &self.graph[node];
             if !accept(token) {
                 continue;
             }
-            let degree = self.graph.edges(node).count();
-            if best.is_none_or(|(current, address)| (degree, token) > (current, address)) {
-                best.push((degree, token));
-            }
+            by_degree.push((self.graph.edges(node).count(), token));
         }
-        best.iter()
+        by_degree.sort_by(|left, right| right.cmp(left));
+        by_degree.truncate(limit);
+        by_degree
+            .into_iter()
             .map(|(_, address)| address)
             .collect()
     }
@@ -230,6 +235,9 @@ impl<'a> TokenGraph<'a> {
 struct PathSearch<'a, 'b> {
     graph: &'a StableDiGraph<DepthAndPrice>,
     allowed: &'a [bool],
+    /// Tokens a path may pass *through*, from [`SearchBounds::connector_tokens`]. Its own
+    /// endpoints are exempt. An empty set therefore admits one-hop paths and nothing longer.
+    connectors: Option<FxHashSet<&'b Address>>,
     target: NodeIndex,
     bounds: &'b SearchBounds,
     /// Edges expanded since the clock was last read, so the deadline costs one `Instant::now` per
@@ -304,6 +312,15 @@ impl PathSearch<'_, '_> {
             {
                 continue;
             }
+            // The destination closes a path rather than being routed through, so the connector
+            // list only governs the tokens in between.
+            if next != self.target &&
+                self.connectors
+                    .as_ref()
+                    .is_some_and(|allowed| !allowed.contains(&graph[next]))
+            {
+                continue;
+            }
 
             self.tokens.push(&graph[next]);
             self.components
@@ -336,7 +353,7 @@ impl PathSearch<'_, '_> {
 }
 
 /// Component ids of every path, for snapshotting the market before the solve.
-pub(crate) fn path_component_ids(paths: &[DirectPath]) -> FxHashSet<ComponentId> {
+pub(crate) fn path_to_component_ids(paths: &[DirectPath]) -> FxHashSet<ComponentId> {
     // Deduplicate on the borrowed ids first: a three-hop enumeration carries tens of thousands of
     // legs over a few hundred distinct pools.
     let unique: FxHashSet<&ComponentId> = paths

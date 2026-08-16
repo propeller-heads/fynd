@@ -78,18 +78,23 @@ pub use optimizers::equal_start_v2::RankingMetric;
 #[path = "tests/test_fixtures.rs"]
 pub(crate) mod test_fixtures;
 
+/// Route snapshots over the recorded market. Needs the fixture and `Solver::from_recording`, both
+/// of which are `test-utils` only.
+#[cfg(all(test, feature = "test-utils"))]
+#[path = "tests/snapshot_tests.rs"]
+mod snapshot_tests;
+
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use num_bigint::BigUint;
+use models::{DirectPath, TokenPriceData};
 use num_traits::Zero;
 use optimizers::SplitOptimizerConfig;
 use rustc_hash::FxHashSet;
-use thiserror::Error;
 use tracing::{debug, instrument, warn};
-use tycho_simulation::tycho_core::models::{token::Token, Address};
+use tycho_simulation::tycho_core::models::Address;
 
 use super::{most_liquid::DepthAndPrice, Algorithm, AlgorithmConfig};
 use crate::{
@@ -97,26 +102,17 @@ use crate::{
         assemble::cast_into_route,
         components::{DecompositionError, DecompositionGraph},
         graph_build::{build_decomposition_graph, SubgraphParams},
-        optimizers::{
-            equal_start_v2::split_equal_start_v2, frank_wolfe::split_by_frank_wolfe,
-            pair_comparison::split_by_pair_comparison, GasPrices, Sellable, SplitOptimizerT,
-            SplitSolution,
-        },
         reference::solve_reference_solution,
         solve::{
             choose_solution, net_of_gas, solve_solution_graph, solve_without_splits, SolutionChoice,
         },
-        token_graph::{path_component_ids, AllowedTokens, DirectPath, SearchBounds, TokenGraph},
+        token_graph::{path_to_component_ids, AllowedTokens, SearchBounds, TokenGraph},
     },
-    derived::{
-        computation::ComputationRequirements,
-        types::{ComponentDepths, TokenGasPrices},
-        SharedDerivedDataRef,
-    },
+    derived::{computation::ComputationRequirements, types::ComponentDepths, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, RouteResult},
-    AlgorithmError, NoPathReason,
+    AlgorithmError,
 };
 
 /// Default cap on parallel alternatives kept, per solution graph and per hop.
@@ -141,6 +137,14 @@ const DEFAULT_MAX_PARALLEL_ROUTES: usize = 50;
 /// constraint on a two-hop search over a normal market, and only bites on a dense three-hop one,
 /// where the deadline would otherwise be doing the work alone.
 const DEFAULT_MAX_ENUMERATED_PATHS: usize = 20_000;
+
+/// Tokens a candidate path may pass through, taken as the deepest hubs of the routing graph.
+///
+/// Not a defibot quantity: defibot names one intermediate token for the reference leg
+/// (`order_solver.py:344`) and bounds the candidate search with a topology filter this port does
+/// not have. The count is what bounds a multi-hop search here, since enumeration is exponential in
+/// the branching factor at each intermediate.
+const CONNECTOR_TOKEN_COUNT: usize = 20;
 
 /// Tuning parameters specific to the decomposition loop.
 ///
@@ -206,7 +210,6 @@ impl Default for DecompositionConfig {
 
 /// Splits an order by decomposing it into sub-orders routed in parallel.
 pub struct DecompositionAlgorithm {
-    min_hops: usize,
     max_hops: usize,
     timeout: Duration,
     connector_tokens: Option<FxHashSet<Address>>,
@@ -240,7 +243,6 @@ impl DecompositionAlgorithm {
             });
         }
         Ok(Self {
-            min_hops: config.min_hops(),
             max_hops: config.max_hops(),
             timeout: config.timeout(),
             connector_tokens: config.connector_tokens().cloned(),
@@ -251,7 +253,7 @@ impl DecompositionAlgorithm {
     async fn solve_order(
         &self,
         order: &Order,
-        graph: &Self::GraphType,
+        graph: &StableDiGraph<DepthAndPrice>,
         market: MarketData,
         label: Option<StateLabel>,
         derived: Option<SharedDerivedDataRef>,
@@ -260,7 +262,7 @@ impl DecompositionAlgorithm {
         let deadline = start + self.timeout;
 
         let input = self
-            .validate_input(graph, derived, order, deadline)
+            .validate_input(graph, derived.as_ref(), order)
             .await?;
 
         // ---list all paths and clone pools from market data---
@@ -271,7 +273,7 @@ impl DecompositionAlgorithm {
             Some(l) => market
                 .read_labeled(l)
                 .await
-                .map_err(|e| AlgorithmError::Other(e.to_string()))?,
+                .map_err(|error| DecompositionError::MarketRead { reason: error.to_string() })?,
             None => market.read().await,
         };
         let market_state = market.extract_subset_with_overlay(&components_to_snapshot);
@@ -285,19 +287,19 @@ impl DecompositionAlgorithm {
                 .token_prices_shared(),
             None => None,
         };
-        let gas_prices = GasPrices::new(
-            market_state
-                .gas_price()
-                .unwrap()
-                .clone()
-                .effective_gas_price(),
-            token_prices.clone(),
-        );
+        let gas_price = market_state
+            .gas_price()
+            .ok_or_else(|| DecompositionError::MarketRead {
+                reason: "the market has no gas price".to_string(),
+            })?
+            .clone()
+            .effective_gas_price();
+        let price_data = TokenPriceData::new(gas_price, token_prices.clone());
 
         // SOLVE REFERENCE
 
         let reference_solution =
-            self.solve_reference_solution(&input, reference_paths, &market_state, &gas_prices);
+            self.solve_reference_solution(&input, reference_paths, &market_state, &price_data);
 
         // CZ: defibot uses price after swap here (new marginal price) but I think this call is
         // expensive. we should be able to use executed price although the cut will be less strict
@@ -321,7 +323,7 @@ impl DecompositionAlgorithm {
                 &input,
                 all_paths,
                 &market_state,
-                &gas_prices,
+                &price_data,
                 reference_price,
             ) {
                 Ok(solution) => Some(solution),
@@ -338,7 +340,7 @@ impl DecompositionAlgorithm {
         // COMPARE BOTH
         // CZ: Lets just refactor this to PICK one, instead of giving a vec... so dumb
 
-        let ranked = rank_solutions(main_solution, reference_solution, &gas_prices);
+        let ranked = rank_solutions(main_solution, reference_solution, &price_data);
         if ranked.is_empty() {
             return Err(DecompositionError::SolveError);
         }
@@ -349,7 +351,7 @@ impl DecompositionAlgorithm {
         // assemble falls through to the runner-up rather than failing the order.
         let mut last_error = None;
         for (choice, solution) in &ranked {
-            match cast_into_route(solution, &market_state, &input.order, &gas_prices) {
+            match cast_into_route(solution, &market_state, &input.order, &price_data) {
                 Ok(result) => {
                     debug!(
                         ?choice,
@@ -360,27 +362,31 @@ impl DecompositionAlgorithm {
                 }
                 Err(error) => {
                     warn!(?choice, %error, "decomposition solution did not assemble; trying the next");
-                    last_error = DecompositionError::RouteBuildFailure { error };
+                    last_error = Some(DecompositionError::RouteBuildFailure { error });
                 }
             }
         }
-        Err(last_error)
+        // `ranked` is non-empty by the check above, so the loop always sets this; the fallback is
+        // for the compiler, not for a reachable state.
+        Err(last_error.unwrap_or(DecompositionError::SolveError))
     }
 
-    fn search_graph(&self, deadline: Instant, input: &SolveInput) -> GraphSearchResult {
-        let connector_tokens = self
-            .get_connector_tokens(&input)
-            .cloned();
+    fn search_graph(&self, deadline: Instant, input: &SolveRequest) -> GraphSearchResult {
+        let connector_tokens: Vec<Address> = self
+            .get_connector_tokens(input)
+            .into_iter()
+            .cloned()
+            .collect();
 
         // -- CANDIDATE PATH LISTING --
         let full_search_bounds = SearchBounds {
             max_hops: self.max_hops,
             max_paths: self.config.max_enumerated_paths,
             deadline: Some(deadline),
-            connector_tokens,
+            connector_tokens: Some(connector_tokens.clone()),
         };
         let all_paths = input.search_graph(&full_search_bounds);
-        let mut component_ids = path_component_ids(&all_paths);
+        let mut component_ids = path_to_component_ids(&all_paths);
 
         // -- REFERENCE PATH LISTING --
         // Reference solution uses only direct 1hop pools or go through connector tokens
@@ -388,14 +394,14 @@ impl DecompositionAlgorithm {
             max_hops: 1,
             max_paths: self.config.max_enumerated_paths,
             deadline: Some(deadline),
-            connector_tokens: Vec::new(),
+            connector_tokens: Some(Vec::new()),
         };
         let direct_paths = input.search_graph(&direct_search);
         let connector_search = SearchBounds {
             max_hops: 2,
             max_paths: self.config.max_enumerated_paths,
             deadline: Some(deadline),
-            connector_tokens,
+            connector_tokens: Some(connector_tokens),
         };
         let connector_paths = input.search_graph(&connector_search);
         let reference_paths = direct_paths
@@ -403,7 +409,7 @@ impl DecompositionAlgorithm {
             .chain(connector_paths.into_iter())
             .collect::<Vec<_>>();
 
-        component_ids.extend(path_component_ids(&reference_paths));
+        component_ids.extend(path_to_component_ids(&reference_paths));
         (all_paths, reference_paths, component_ids)
     }
 
@@ -412,10 +418,9 @@ impl DecompositionAlgorithm {
     async fn validate_input<'a>(
         &self,
         graph: &'a StableDiGraph<DepthAndPrice>,
-        derived: Option<SharedDerivedDataRef>,
-        order: &Order,
-        deadline: Instant,
-    ) -> Result<SolveInput<'a>, DecompositionError> {
+        derived: Option<&SharedDerivedDataRef>,
+        order: &'a Order,
+    ) -> Result<SolveRequest<'a>, DecompositionError> {
         let (token_prices, depths) = match derived {
             Some(derived) => {
                 let store = derived.read().await;
@@ -442,35 +447,35 @@ impl DecompositionAlgorithm {
         // A token the routing graph has never seen has no route of any kind, reference included,
         // so this is reported before anything is searched or snapshotted.
         if !token_graph.contains_token(order.token_in()) {
-            return Err(DecompositionError::InvalidInput);
+            return Err(DecompositionError::InvalidInput {
+                reason: format!("sell token {} is not in the routing graph", order.token_in()),
+            });
         }
 
         if !token_graph.contains_token(order.token_out()) {
-            return Err(DecompositionError::InvalidInput);
+            return Err(DecompositionError::InvalidInput {
+                reason: format!("buy token {} is not in the routing graph", order.token_out()),
+            });
         }
 
-        Ok(SolveInput::new(
-            order,
-            token_graph,
-            token_prices,
-            depths,
-            deadline,
-            self.config.optimizers,
-        ))
+        Ok(SolveRequest::new(order, token_graph, depths, self.config.optimizers))
     }
 
-    /// Token the reference route's two-hop leg goes through for this solve.
-    fn get_connector_tokens<'a>(&self, input: &SolveInput<'a>) -> Vec<&'a Address> {
-        let addresses = input
+    /// Tokens the reference route's two-hop leg may go through for this solve.
+    ///
+    /// The deepest hubs the operator's allowlist admits, by pool count. defibot hard-codes the
+    /// wrapped native token (`order_solver.py:344`); Fynd runs on chains where that is neither the
+    /// same address nor the deepest hub, and the reference's whole job is to almost always exist.
+    fn get_connector_tokens<'a>(&self, input: &SolveRequest<'a>) -> Vec<&'a Address> {
+        input
             .token_graph
-            .highest_degree_tokens(|token| {
+            .highest_degree_tokens(CONNECTOR_TOKEN_COUNT, |token| {
                 token != input.order.token_in() &&
                     token != input.order.token_out() &&
                     self.connector_tokens
                         .as_ref()
                         .is_none_or(|allowed| allowed.contains(token))
-            });
-        addresses
+            })
     }
 
     /// Builds and solves the reference route, or `None` when there is no safe route to build.
@@ -479,15 +484,18 @@ impl DecompositionAlgorithm {
     /// letting it fail the order would make the fallback the thing that breaks the solve.
     fn solve_reference_solution(
         &self,
-        input: &SolveInput,
+        input: &SolveRequest,
         reference_paths: Vec<DirectPath>,
         market_state: &MarketState,
-        gas_prices: &GasPrices,
+        price_data: &TokenPriceData,
     ) -> Option<DecompositionGraph> {
-        // The reference is one or two branches, so only the outer choice is meaningful here.
-        // Matched rather than boxed: `SplitOptimizer::optimize` is generic over the alternative it
-        // splits, so the trait is not object-safe.
-        let solution = solve_reference_solution(&input, reference_paths, market_state, gas_prices);
+        let solution = solve_reference_solution(
+            input,
+            reference_paths,
+            self.config.max_parallel_routes,
+            market_state,
+            price_data,
+        );
         match solution {
             Ok(reference) => reference,
             Err(error) => {
@@ -503,22 +511,19 @@ impl DecompositionAlgorithm {
     /// clear (`order_solver.py:240-242`).
     fn solve_full_graph(
         &self,
-        input: &SolveInput,
+        input: &SolveRequest,
         paths: Vec<DirectPath>,
         market_state: &MarketState,
-        gas_prices: &GasPrices,
+        gas_prices: &TokenPriceData,
         minimum_price: f64,
     ) -> Result<DecompositionGraph, DecompositionError> {
-        let params = SubgraphParams { max_routes: self.effective_max_routes(), minimum_price };
-        let Some(mut candidate) =
-            build_decomposition_graph(market_state, input.depths.as_ref(), &params, paths)?
-        else {
-            return Err(DecompositionError::GraphBuildFailure);
-        };
+        let params = SubgraphParams { max_routes: self.config.max_parallel_routes, minimum_price };
+        let mut candidate =
+            build_decomposition_graph(market_state, input.depths.as_ref(), &params, paths)?;
         // Sell limits are denominated through the derived mid-prices from here on; see
         // `types::convert_through_numeraire`. Without them every cast falls back to chained spot
         // prices.
-        if let Some(prices) = gas_prices.token_prices() {
+        if let Some(prices) = gas_prices.token_prices.as_ref() {
             candidate.set_prices(Arc::clone(prices));
         }
 
@@ -526,9 +531,8 @@ impl DecompositionAlgorithm {
             &mut candidate,
             input.order.amount(),
             input.split_optimizers,
-            &gas_prices,
-        )
-        .map_err(|error| AlgorithmError::Other(format!("decomposition solve failed: {error}")))?;
+            gas_prices,
+        )?;
 
         // `order_solver.py:137-141`: when the ordinary solve buys nothing the market is too thin to
         // split, so hand the order out greedily over whatever the branches can individually absorb.
@@ -536,11 +540,7 @@ impl DecompositionAlgorithm {
             debug!(
                 "decomposition candidate bought nothing; falling back to solving without splits"
             );
-            solve_without_splits(&mut candidate, input.order.amount(), gas_prices).map_err(
-                |error| {
-                    AlgorithmError::Other(format!("decomposition fallback solve failed: {error}"))
-                },
-            )?;
+            solve_without_splits(&mut candidate, input.order.amount(), gas_prices)?;
         }
 
         Ok(candidate)
@@ -550,11 +550,6 @@ impl DecompositionAlgorithm {
     fn connector_tokens(&self) -> Option<&FxHashSet<Address>> {
         self.connector_tokens.as_ref()
     }
-    #[cfg(test)]
-    pub(crate) fn min_hops(&self) -> usize {
-        self.min_hops
-    }
-
     #[cfg(test)]
     pub(crate) fn max_hops(&self) -> usize {
         self.max_hops
@@ -631,27 +626,22 @@ impl Algorithm for DecompositionAlgorithm {
 }
 
 /// Everything one solve works against, prepared under a single market read lock.
-struct SolveInput<'a> {
+pub(crate) struct SolveRequest<'a> {
     /// Snapshot of the components every candidate path and reference leg can reach.
     order: &'a Order,
     token_graph: TokenGraph<'a>,
     depths: Option<ComponentDepths>,
-    /// Instant the whole solve stops at.
-    deadline: Instant,
-    token_prices: Option<Arc<TokenGasPrices>>,
     split_optimizers: SplitOptimizerConfig,
 }
 
-impl<'a> SolveInput<'a> {
+impl<'a> SolveRequest<'a> {
     fn new(
         order: &'a Order,
         token_graph: TokenGraph<'a>,
-        token_prices: Option<Arc<TokenGasPrices>>,
         depths: Option<ComponentDepths>,
-        deadline: Instant,
         split_optimizers: SplitOptimizerConfig,
     ) -> Self {
-        Self { order, token_graph, depths, deadline, token_prices, split_optimizers }
+        Self { order, token_graph, depths, split_optimizers }
     }
 
     fn search_graph(&self, search_bounds: &SearchBounds) -> Vec<DirectPath> {
@@ -663,7 +653,7 @@ impl<'a> SolveInput<'a> {
 fn rank_solutions(
     candidate: Option<DecompositionGraph>,
     reference: Option<DecompositionGraph>,
-    gas_prices: &GasPrices,
+    gas_prices: &TokenPriceData,
 ) -> Vec<(SolutionChoice, DecompositionGraph)> {
     match (candidate, reference) {
         (Some(candidate), Some(reference)) => {
@@ -700,6 +690,7 @@ fn rank_solutions(
     }
 }
 
+mod models;
 #[cfg(test)]
 #[path = "tests/algorithm_tests.rs"]
 mod tests;
