@@ -17,7 +17,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    decode::TraderFlow,
+    netting::TraderFlow,
     registry::Registry,
     transfer_ledger::{NetSwap, Transfer, TransferLedger, RESIDUE_GROSS_RATIO},
 };
