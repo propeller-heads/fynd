@@ -1230,7 +1230,7 @@ mod tests {
             ],
             failed_solvers: vec![("c".to_string(), SolveError::QueueFull)],
         };
-        let scopes = HashMap::from([
+        let scopes = FxHashMap::from_iter([
             ("public".to_string(), LiquidityScope::PublicOnly),
             ("excl".to_string(), LiquidityScope::IncludeExclusive),
         ]);
