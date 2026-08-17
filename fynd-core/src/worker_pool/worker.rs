@@ -45,14 +45,41 @@ fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth
 }
 
 /// Records per-pool solve latency: one algorithm's own working time for one order, excluding
-/// queue wait. Unlike `worker_router_solve_duration_seconds`, which times the router racing every
-/// pool and so belongs to no single pool, this is attributable per pool.
+/// queue wait and readiness wait. Unlike `worker_router_solve_duration_seconds`, which times the
+/// router racing every pool and so belongs to no single pool, this is attributable per pool.
 ///
-/// Successful solves only — a pool that exhausts its timeout returns before this point and is
-/// counted in `worker_router_solver_failures_total{error_type="timeout"}` instead.
-fn record_solve_duration(pool_name: &str, solve_time: Duration) {
-    metrics::histogram!("worker_pool_solve_duration_seconds", "pool" => pool_name.to_string())
-        .record(solve_time.as_secs_f64());
+/// Recorded for every outcome, labelled by `outcome`. A histogram of successes alone hides the
+/// cost of the failures the request still waited for, which is how a pool can show a healthy p95
+/// while setting the request's.
+fn record_solve_duration(pool_name: &str, outcome: &'static str, solve_time: Duration) {
+    metrics::histogram!(
+        "worker_pool_solve_duration_seconds",
+        "pool" => pool_name.to_string(),
+        "outcome" => outcome,
+    )
+    .record(solve_time.as_secs_f64());
+}
+
+/// Records how long a task waited for its algorithm's required derived data before solving.
+///
+/// This sits between task pickup and the solve itself, so it is in neither
+/// `worker_pool_queue_wait_seconds` nor `worker_pool_solve_duration_seconds`, yet the request
+/// waits through all of it.
+fn record_readiness_wait(pool_name: &str, wait: Duration) {
+    metrics::histogram!("worker_pool_readiness_wait_seconds", "pool" => pool_name.to_string())
+        .record(wait.as_secs_f64());
+}
+
+/// Classifies a solve outcome for the `outcome` label on `worker_pool_solve_duration_seconds`.
+fn solve_outcome(result: &Result<OrderQuote, SolveError>) -> &'static str {
+    match result {
+        Ok(_) => "success",
+        Err(SolveError::NotReady(_)) => "not_ready",
+        Err(SolveError::Timeout { .. }) => "timeout",
+        Err(SolveError::NoRouteFound { .. }) => "no_route",
+        Err(SolveError::InsufficientLiquidity { .. }) => "insufficient_liquidity",
+        Err(_) => "error",
+    }
 }
 
 /// A solver worker instance that maintains a market graph and processes solve requests.
@@ -177,13 +204,27 @@ where
     }
 
     /// Returns a quote for an order, optionally solved against a named state overlay.
+    ///
+    /// Times every outcome, not just the successful ones, so a pool that fails slowly is as
+    /// visible as one that succeeds slowly.
     pub async fn quote(
         &mut self,
         order: &Order,
         params: SolveParams,
     ) -> Result<SingleOrderQuote, SolveError> {
         let start_time = Instant::now();
+        let result = self.solve(order, params).await;
+        let solve_time = start_time.elapsed();
+        record_solve_duration(&self.pool_name, solve_outcome(&result), solve_time);
+        result.map(|quote| SingleOrderQuote::new(quote, solve_time.as_millis() as u64))
+    }
 
+    /// Solves one order, leaving timing and metrics to [`SolverWorker::quote`].
+    async fn solve(
+        &mut self,
+        order: &Order,
+        params: SolveParams,
+    ) -> Result<OrderQuote, SolveError> {
         // Log order details once at entry
         debug!(
             order_id = %order.id(),
@@ -352,10 +393,7 @@ where
             }
         };
 
-        let solve_time = start_time.elapsed();
-        record_solve_duration(&self.pool_name, solve_time);
-
-        Ok(SingleOrderQuote::new(order_quote, solve_time.as_millis() as u64))
+        Ok(order_quote)
     }
 
     /// Waits for required derived data to become ready, or until timeout.
@@ -551,7 +589,10 @@ where
 
                             // Wait for derived data readiness before solving
                             // Use algorithm timeout as the max wait time
-                            if let Err(e) = self.wait_until_ready(self.algorithm.timeout()).await {
+                            let ready_start = Instant::now();
+                            let readiness = self.wait_until_ready(self.algorithm.timeout()).await;
+                            record_readiness_wait(&self.pool_name, ready_start.elapsed());
+                            if let Err(e) = readiness {
                                 warn!(
                                     self.worker_id,
                                     task_id = %task_id,
@@ -1254,7 +1295,7 @@ mod tests {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         metrics::with_local_recorder(&recorder, || {
-            record_solve_duration("test_pool", std::time::Duration::from_millis(120));
+            record_solve_duration("test_pool", "success", std::time::Duration::from_millis(120));
         });
 
         let mut solve_seen = false;

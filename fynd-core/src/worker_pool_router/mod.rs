@@ -249,6 +249,21 @@ struct ResponsesView<'a> {
     failed_solvers: &'a [(String, SolveError)],
 }
 
+/// Records how long a worker pool took to answer, as observed by the router.
+///
+/// Unlike `worker_pool_solve_duration_seconds`, which a worker reports for its own successful
+/// solves, this covers everything the request actually waits for — queue wait, readiness wait,
+/// and the solve — and is recorded for failures too (`outcome`). The gap between the two is
+/// what a request pays for a worker pool beyond its algorithm's own working time.
+fn record_pool_response(worker_pool_name: &str, outcome: &'static str, elapsed: Duration) {
+    histogram!(
+        "worker_router_pool_response_seconds",
+        "pool" => worker_pool_name.to_string(),
+        "outcome" => outcome,
+    )
+    .record(elapsed.as_secs_f64());
+}
+
 /// Orchestrates multiple solver pools to find the best quote.
 pub struct WorkerPoolRouter {
     /// All registered solver pools.
@@ -523,8 +538,7 @@ impl WorkerPoolRouter {
                 // Timeout reached
                 _ = tokio::time::sleep_until(deadline_instant) => {
                     // Mark all remaining worker pools as timed out
-                    let elapsed_ms = deadline.saturating_duration_since(Instant::now())
-                        .as_millis() as u64;
+                    let elapsed_ms = start_time.elapsed().as_millis() as u64;
                     for worker_pool_name in remaining_worker_pools.drain() {
                         failed_solvers.push((
                             worker_pool_name,
@@ -540,6 +554,11 @@ impl WorkerPoolRouter {
                         Some((worker_pool_name, Ok(single_quote))) => {
                             // Remove from remaining
                             remaining_worker_pools.remove(&worker_pool_name);
+                            record_pool_response(
+                                &worker_pool_name,
+                                "ok",
+                                start_time.elapsed(),
+                            );
 
                             if allocation.is_exclusive(&worker_pool_name) {
                                 has_exclusive_access_response = true;
@@ -579,6 +598,11 @@ impl WorkerPoolRouter {
                         }
                         Some((worker_pool_name, Err(e))) => {
                             remaining_worker_pools.remove(&worker_pool_name);
+                            record_pool_response(
+                                &worker_pool_name,
+                                "error",
+                                start_time.elapsed(),
+                            );
                             // A failed exclusive-access worker pool still counts as "responded"
                             // for gating — we know it won't produce a surplus quote, so the
                             // public worker pools can early-return without waiting for a result
