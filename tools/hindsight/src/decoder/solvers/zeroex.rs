@@ -13,7 +13,7 @@
 //! A bare Settler entry (no `AllowanceHolder` wrapper) never occurred in the sample, and — unlike
 //! `AllowedSlippage`, which is read the same way either way — has no calldata field that reliably
 //! carries `token_in`/`amount_in`: Settler's `actions` array is heterogeneous per liquidity source,
-//! so scanning it for an input-token address would be a guess, not a decode. `swap_intent` for a
+//! so scanning it for an input-token address would be a guess, not a decode. `declared_swap` for a
 //! bare entry is declined rather than guessed, per the "no dead code, no guessing" rule; if bare
 //! entries turn out to matter, the `token_in` question needs its own investigation, not a shortcut
 //! here.
@@ -24,7 +24,7 @@ use alloy::{
     sol_types::SolCall,
 };
 
-use crate::decoder::solvers::{SolverKnowledge, SwapIntent};
+use crate::decoder::solvers::{SolverDecoder, SwapIntent};
 
 sol! {
     /// `IAllowanceHolder.exec` — Relay's 0x flow always enters through this wrapper before
@@ -100,7 +100,7 @@ fn decode_execute(input: &[u8]) -> Option<SettlerTerms> {
 
 pub(crate) struct ZeroEx;
 
-impl SolverKnowledge for ZeroEx {
+impl SolverDecoder for ZeroEx {
     /// The trader's swap terms from `AllowanceHolder.exec`'s own parameters (`token`/`amount`,
     /// the input side) and the wrapped `execute` call's `AllowedSlippage` (`buyToken`/
     /// `minAmountOut`, the output side). `minAmountOut` is passed through as-is, including a
@@ -109,7 +109,7 @@ impl SolverKnowledge for ZeroEx {
     /// treats a zero floor sanely (trivially fillable, no margin to compute). `amount_in_hint` is
     /// unused: `AllowanceHolder`'s own parameter is the real amount, not a value to locate a field
     /// by.
-    fn swap_intent(&self, input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
+    fn declared_swap(&self, input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
         let call = execCall::abi_decode(input).ok()?;
         if call.amount.is_zero() {
             return None;
@@ -129,7 +129,7 @@ impl SolverKnowledge for ZeroEx {
 
     /// Settler's `AllowedSlippage.recipient` — the address whose receipt `RelayCalldata` anchors
     /// the settled amount on, same as Fly/KyberSwap. Tried both wrapped (`AllowanceHolder.exec`)
-    /// and bare (`execute` called directly): unlike `swap_intent`, the recipient needs nothing
+    /// and bare (`execute` called directly): unlike `declared_swap`, the recipient needs nothing
     /// `AllowanceHolder` adds, so a bare entry still resolves even though its `token_in` cannot.
     fn output_recipient(&self, input: &[u8]) -> Option<Address> {
         if let Ok(call) = execCall::abi_decode(input) {
@@ -167,9 +167,9 @@ mod tests {
     const RELAY_ROUTER: Address = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
 
     #[test]
-    fn test_real_settled_swap_intent() {
+    fn test_real_settled_declared_swap() {
         let intent = ZeroEx
-            .swap_intent(&settled_input(), None)
+            .declared_swap(&settled_input(), None)
             .unwrap();
         assert_eq!(intent.token_in, Address::ZERO); // 0x's native-ETH sentinel, normalized
         assert_eq!(intent.token_out, USDC);
@@ -184,11 +184,11 @@ mod tests {
     }
 
     #[test]
-    fn test_real_reverted_swap_intent() {
+    fn test_real_reverted_declared_swap() {
         // The reverted trade's terms decode the same way a settled one's do — a revert emits no
         // logs, so calldata is the only source, and it is read no differently here.
         let intent = ZeroEx
-            .swap_intent(&reverted_input(), None)
+            .declared_swap(&reverted_input(), None)
             .unwrap();
         assert_eq!(intent.token_in, Address::ZERO);
         assert_eq!(intent.token_out, USDC);
@@ -210,8 +210,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bare_settler_entry_has_no_swap_intent_but_resolves_recipient() {
-        // A direct `execute` call (no `AllowanceHolder` wrapper): swap_intent has nowhere to read
+    fn test_bare_settler_entry_has_no_declared_swap_but_resolves_recipient() {
+        // A direct `execute` call (no `AllowanceHolder` wrapper): declared_swap has nowhere to read
         // token_in/amount_in from, so it declines; output_recipient does not need them.
         let call = executeCall {
             slippage: AllowedSlippage {
@@ -224,7 +224,7 @@ mod tests {
         };
         let input = executeCall::abi_encode(&call);
         assert!(ZeroEx
-            .swap_intent(&input, None)
+            .declared_swap(&input, None)
             .is_none());
         assert_eq!(ZeroEx.output_recipient(&input), Some(RELAY_ROUTER));
     }
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn test_garbage_input_declines() {
         assert!(ZeroEx
-            .swap_intent(&[0xde, 0xad, 0xbe, 0xef], None)
+            .declared_swap(&[0xde, 0xad, 0xbe, 0xef], None)
             .is_none());
         assert!(ZeroEx
             .output_recipient(&[0xde, 0xad, 0xbe, 0xef])
@@ -251,7 +251,7 @@ mod tests {
         };
         let input = execCall::abi_encode(&call);
         assert!(ZeroEx
-            .swap_intent(&input, None)
+            .declared_swap(&input, None)
             .is_none());
     }
 
@@ -277,7 +277,7 @@ mod tests {
         };
         let input = execCall::abi_encode(&call);
         let intent = ZeroEx
-            .swap_intent(&input, None)
+            .declared_swap(&input, None)
             .unwrap();
         assert_eq!(intent.min_amount_out, U256::ZERO);
     }

@@ -15,7 +15,7 @@ use alloy::{
     sol_types::SolCall,
 };
 
-use crate::decoder::solvers::{SolverKnowledge, SwapIntent};
+use crate::decoder::solvers::{SolverDecoder, SwapIntent};
 
 /// `KyberSwap` represents native ETH with this sentinel address rather than the zero address —
 /// hindsight's convention — so it is normalized on the way out.
@@ -100,7 +100,7 @@ fn declared_quote(input: &[u8]) -> Option<(U256, Option<u64>)> {
 /// The `KyberSwap` solver.
 pub(crate) struct Kyberswap;
 
-impl SolverKnowledge for Kyberswap {
+impl SolverDecoder for Kyberswap {
     /// Extract the trader's swap terms from a `swap` call's `SwapDescriptionV2`:
     /// `srcToken`/`dstToken` (native ETH normalized to `Address::ZERO`), `amount`, and the
     /// enforced floor `minReturnAmount` (the revert reads "Return amount is not enough" below
@@ -108,7 +108,7 @@ impl SolverKnowledge for Kyberswap {
     /// word-aligned data. The hint is unused: `KyberSwap`'s fields are decoded by ABI position, not
     /// located by value. When the calldata also carries a `clientData` quote, it is attached; a
     /// missing or malformed one does not fail the intent.
-    fn swap_intent(&self, input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
+    fn declared_swap(&self, input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
         let call = swapCall::abi_decode(input).ok()?;
         let desc = call.execution.desc;
         if desc.amount.is_zero() || desc.minReturnAmount.is_zero() {
@@ -278,11 +278,11 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_intent_round_trip() {
+    fn test_declared_swap_round_trip() {
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
         let intent = Kyberswap
-            .swap_intent(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, ""), None)
+            .declared_swap(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, ""), None)
             .unwrap();
         assert_eq!(intent.token_in, src);
         assert_eq!(intent.token_out, dst);
@@ -311,11 +311,11 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_intent_with_declared_quote() {
+    fn test_declared_swap_with_declared_quote() {
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
         let intent = Kyberswap
-            .swap_intent(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, BLOB), None)
+            .declared_swap(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, BLOB), None)
             .unwrap();
         assert_eq!(intent.min_amount_out, U256::from(990_000u64));
         assert_eq!(intent.quoted_amount_out(), U256::from(70_400_409_935u64));
@@ -323,13 +323,13 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_intent_malformed_quote_does_not_fail_the_intent() {
+    fn test_declared_swap_malformed_quote_does_not_fail_the_intent() {
         // clientData present but missing AmountOut: the ABI-decoded terms are still recovered,
         // the quote is just absent.
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
         let intent = Kyberswap
-            .swap_intent(
+            .declared_swap(
                 &swap_calldata_with_terms(src, dst, 1_000_000, 990_000, "{\"Source\":\"relay\"}"),
                 None,
             )
@@ -339,16 +339,10 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_intent_normalizes_native_eth() {
+    fn test_declared_swap_normalizes_native_eth() {
         let intent = Kyberswap
-            .swap_intent(
-                &swap_calldata_with_terms(
-                    KYBERSWAP_NATIVE,
-                    Address::repeat_byte(0x22),
-                    1_000,
-                    900,
-                    "",
-                ),
+            .declared_swap(
+                &swap_calldata_with_terms(KYBERSWAP_NATIVE, Address::repeat_byte(0x22), 1_000, 900, ""),
                 None,
             )
             .unwrap();
@@ -357,29 +351,29 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_intent_zero_amounts_rejected() {
+    fn test_declared_swap_zero_amounts_rejected() {
         let a = Address::repeat_byte(0x11);
         let b = Address::repeat_byte(0x22);
         assert!(Kyberswap
-            .swap_intent(&swap_calldata_with_terms(a, b, 0, 900, ""), None)
+            .declared_swap(&swap_calldata_with_terms(a, b, 0, 900, ""), None)
             .is_none());
         assert!(Kyberswap
-            .swap_intent(&swap_calldata_with_terms(a, b, 1_000, 0, ""), None)
+            .declared_swap(&swap_calldata_with_terms(a, b, 1_000, 0, ""), None)
             .is_none());
     }
 
     #[test]
-    fn test_swap_intent_garbage_input() {
+    fn test_declared_swap_garbage_input() {
         assert!(Kyberswap
-            .swap_intent(&[], None)
+            .declared_swap(&[], None)
             .is_none());
         assert!(Kyberswap
-            .swap_intent(&[0xde, 0xad, 0xbe, 0xef], None)
+            .declared_swap(&[0xde, 0xad, 0xbe, 0xef], None)
             .is_none());
         // A well-formed but unrelated call (KyberSwap's own clientData blob calldata) must not
         // decode as a `swap` execution.
         assert!(Kyberswap
-            .swap_intent(&calldata_with(BLOB), None)
+            .declared_swap(&calldata_with(BLOB), None)
             .is_none());
     }
 }

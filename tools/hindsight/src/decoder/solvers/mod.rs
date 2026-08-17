@@ -1,10 +1,12 @@
-//! Solver-specific knowledge: the routers Fynd competes with.
+//! Solver-specific decoders: the routers Fynd competes with.
 //!
 //! Solver addresses live in the address book's `[solvers]` section, and for most solvers that
-//! line is all that is needed: matching, attribution, and gas isolation work from the address
-//! alone. A solver whose transactions carry more information than that gets a module here with a
-//! `SolverKnowledge` impl registered in `IMPLEMENTATIONS`: a swap intent recovered from calldata,
-//! or a matching veto for order shapes that are not same-chain swaps.
+//! line is all that is needed: matching, attribution, and metric labels work from the address
+//! alone. A solver whose calldata or logs carry more than that gets a module here with a
+//! `SolverDecoder` impl registered in `IMPLEMENTATIONS`: a swap intent recovered from calldata,
+//! or a matching veto for order shapes that are not same-chain swaps. The impl is joined onto
+//! the registry's solver entry once, at address-book load (see `decoder_for`); at trade time
+//! every lookup is by address through `Registry::solver`.
 
 pub(crate) mod attribution;
 pub(crate) mod fly;
@@ -108,44 +110,41 @@ impl SwapIntent {
     }
 }
 
-/// Solver-specific knowledge beyond the address-book entry.
+/// One solver's decoder: everything the solver's own calldata and logs can say about a trade.
 ///
-/// Every method has a default meaning "this solver has nothing to add", so a solver only
-/// implements the capabilities it has; most solvers need no code at all.
-pub(crate) trait SolverKnowledge: Send + Sync {
+/// Every method has a default meaning "this solver's data does not carry that", so a solver only
+/// implements what its transactions expose; most solvers need no code at all.
+pub(crate) trait SolverDecoder: Send + Sync {
     /// The swap terms encoded in the solver frame's own calldata, when this solver's calldata
-    /// carries them plainly enough to recover without netting a settled amount. Dispatched with
-    /// the solver frame's input (found via `trace::find_solver_frame`/the reverted-tolerant
-    /// variant), not the root transaction's — a packed calldata layout (Fly) uses offsets valid
-    /// only in its own frame.
+    /// carries them plainly enough to recover without netting a settled amount. Called with
+    /// the solver frame's input (found via `trace::find_solver_frame`), not the root
+    /// transaction's — a packed calldata layout (Fly) uses offsets valid only in its own frame.
     ///
-    /// `amount_in_hint` is the decoded flow's input amount, when one is known — absent for a
-    /// reverted trade, which has no netted flow to draw it from. Some extractors (`ParaSwap`) need
-    /// it to locate fields by value rather than by ABI offset.
-    fn swap_intent(&self, _input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
+    /// `amount_in_hint` is a netted input amount, when one is known. Some extractors (`ParaSwap`)
+    /// need it to locate fields by value rather than by ABI offset.
+    fn declared_swap(&self, _input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
         None
     }
 
     /// The address this solver's calldata declares as the output recipient, when it carries one
-    /// plainly enough to recover — how a calldata-primary decode learns whose receipt to read the
-    /// settled amount from, since calldata alone never carries a settled amount. Dispatched with
-    /// the same solver-frame input as `swap_intent`. `None` when the calldata carries no such
-    /// field (most solvers deliver to the caller implicitly) or it did not parse.
+    /// plainly enough to recover — whose receipt the settled amount is read from, since calldata
+    /// alone never carries a settled amount. Called with the same solver-frame input as
+    /// `declared_swap`. `None` when the calldata carries no such field (most solvers deliver to
+    /// the caller implicitly) or it did not parse.
     fn output_recipient(&self, _input: &[u8]) -> Option<Address> {
         None
     }
 
     /// The veto this solver's logs place on a matched transaction that is not decodable as a
     /// swap. Checked at match time — before attribution names the solver, and before the
-    /// transaction costs a trace.
-    fn solver_veto(&self, _logs: &[Log]) -> Option<Veto> {
+    /// transaction is decoded.
+    fn veto(&self, _logs: &[Log]) -> Option<Veto> {
         None
     }
 
     /// The order-flow integrator tag this solver records in its logs, when it exposes one. A
     /// solver that fronts other apps (`LiFi`'s Diamond) carries the frontend's integrator string in
-    /// its swap event; venue attribution maps that tag to a venue (see
-    /// `crate::decoder::venue_attribution`).
+    /// its swap event; venue attribution maps that tag to a venue.
     fn integrator(&self, _logs: &[Log]) -> Option<String> {
         None
     }
@@ -157,15 +156,32 @@ pub(crate) trait SolverKnowledge: Send + Sync {
     }
 }
 
-/// The solvers with a `SolverKnowledge` implementation, by address-book name. A solver absent
-/// here needs none — its address-book entry alone is complete.
-const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
+/// The solvers with a `SolverDecoder` implementation, by address-book name. A solver absent
+/// here needs none — its address-book entry alone is complete. Consulted once, when the address
+/// book loads (see `decoder_for`); everything after that calls the trait through the registry
+/// entry.
+const IMPLEMENTATIONS: &[(&str, &'static dyn SolverDecoder)] = &[
     ("fly", &fly::Fly),
     ("kyberswap", &kyberswap::Kyberswap),
     ("lifi", &lifi::Lifi),
     ("paraswap", &paraswap::Paraswap),
     ("0x", &zeroex::ZeroEx),
 ];
+
+/// A solver with no `SolverDecoder` implementation: every method keeps its "nothing to add"
+/// default, so callers hold one handle type and never branch on whether a solver has code.
+struct NoDecoder;
+
+impl SolverDecoder for NoDecoder {}
+
+/// Resolve a solver name to its `SolverDecoder`, once, when the address book loads. A book-only
+/// solver resolves to the no-op implementation.
+pub(crate) fn decoder_for(solver: &str) -> &'static dyn SolverDecoder {
+    IMPLEMENTATIONS
+        .iter()
+        .find(|(name, _)| *name == solver)
+        .map_or(&NoDecoder, |(_, decoder)| *decoder)
+}
 
 /// The veto a solver places on a matched transaction that must be skipped instead of decoded,
 /// if any.
@@ -175,48 +191,19 @@ const IMPLEMENTATIONS: &[(&str, &'static dyn SolverKnowledge)] = &[
 /// part of the transaction — as its entry point or as a log emitter — so a veto can never
 /// affect another solver's trades.
 pub(crate) fn solver_veto(logs: &[Log], entry_point: Address, registry: &Registry) -> Option<Veto> {
-    for (name, knowledge) in IMPLEMENTATIONS {
-        let present = registry.solver_name(entry_point) == Some(name) ||
-            logs.iter()
-                .any(|log| registry.solver_name(log.address()) == Some(name));
-        if present {
-            if let Some(veto) = knowledge.solver_veto(logs) {
-                return Some(veto);
-            }
-        }
-    }
-    None
+    std::iter::once(entry_point)
+        .chain(logs.iter().map(Log::address))
+        .filter_map(|address| registry.solver(address))
+        .find_map(|solver| solver.decoder.veto(logs))
 }
 
-/// The order-flow integrator tag declared in a transaction's logs, from whichever solver records
-/// one. Only a solver that fronts other apps (`LiFi`) returns a tag; the rest default to `None`, so
-/// the first hit is the answer.
-pub(crate) fn integrator(logs: &[Log]) -> Option<String> {
-    IMPLEMENTATIONS
-        .iter()
-        .find_map(|(_, knowledge)| knowledge.integrator(logs))
-}
-
-/// The swap terms encoded in the solver frame's own calldata, dispatched on the attributed
-/// solver so a lookalike blob from another router cannot masquerade as an intent.
-pub(crate) fn swap_intent(
-    solver: &str,
-    input: &[u8],
-    amount_in_hint: Option<U256>,
-) -> Option<SwapIntent> {
-    let (_, knowledge) = IMPLEMENTATIONS
-        .iter()
-        .find(|(name, _)| *name == solver)?;
-    knowledge.swap_intent(input, amount_in_hint)
-}
-
-/// The address the solver frame's own calldata declares as the output recipient, dispatched on
-/// the attributed solver so a lookalike blob from another router cannot masquerade as one.
-pub(crate) fn output_recipient(solver: &str, input: &[u8]) -> Option<Address> {
-    let (_, knowledge) = IMPLEMENTATIONS
-        .iter()
-        .find(|(name, _)| *name == solver)?;
-    knowledge.output_recipient(input)
+/// The order-flow integrator tag declared in a transaction's logs, from whichever log-emitting
+/// solver records one. Only a solver that fronts other apps (`LiFi`) returns a tag; the rest
+/// default to `None`, so the first hit is the answer.
+pub(crate) fn integrator(logs: &[Log], registry: &Registry) -> Option<String> {
+    logs.iter()
+        .filter_map(|log| registry.solver(log.address()))
+        .find_map(|solver| solver.decoder.integrator(logs))
 }
 
 /// The output-token fee the solver's declared fee recipients were paid, when its calldata names
@@ -392,7 +379,11 @@ mod tests {
         ] {
             input.extend_from_slice(&word.to_be_bytes::<32>());
         }
-        assert!(swap_intent("paraswap", &input, Some(amount_in)).is_some());
-        assert!(swap_intent("1inch", &input, Some(amount_in)).is_none());
+        assert!(decoder_for("paraswap")
+            .declared_swap(&input, Some(amount_in))
+            .is_some());
+        assert!(decoder_for("1inch")
+            .declared_swap(&input, Some(amount_in))
+            .is_none());
     }
 }

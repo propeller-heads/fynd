@@ -11,7 +11,7 @@
 
 use alloy::primitives::{Address, U256};
 
-use crate::decoder::solvers::{SolverKnowledge, SwapIntent};
+use crate::decoder::solvers::{SolverDecoder, SwapIntent};
 
 /// Selectors sharing `LibRouter`'s packed layout (`swapWithBackendSignature`,
 /// `swapWithMagpieSignature`, `swapWithUserSignature`, `swapWithoutSignature`, `swap`).
@@ -77,14 +77,14 @@ fn parse(input: &[u8]) -> Option<SwapData> {
 /// The Fly (Magpie) `DexAggregator` solver.
 pub(crate) struct Fly;
 
-impl SolverKnowledge for Fly {
+impl SolverDecoder for Fly {
     /// The trader's enforced swap terms: `amountOutMin` is the on-chain floor
     /// (`InsufficientAmountOut()` below it); `expectedAmountOut`, when present, is Magpie's
     /// declared quote and must not be stricter than the floor it is quoted against. `input` must
     /// carry Fly's packed layout (e.g. it is `None` when `input` is the outer Relay wrapper, not
     /// Fly's own frame); the hint is unused — Fly's fields sit at fixed offsets, not located by
     /// value.
-    fn swap_intent(&self, input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
+    fn declared_swap(&self, input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
         let data = parse(input)?;
         if data.amount_in.is_zero() || data.amount_out_min.is_zero() {
             return None;
@@ -125,9 +125,9 @@ mod tests {
     }
 
     #[test]
-    fn test_real_fixture_swap_intent() {
+    fn test_real_fixture_declared_swap() {
         let intent = Fly
-            .swap_intent(&real_input(), None)
+            .declared_swap(&real_input(), None)
             .unwrap();
         assert_eq!(intent.token_in, address!("0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"));
         assert_eq!(intent.token_out, Address::ZERO);
@@ -164,7 +164,7 @@ mod tests {
     fn test_wrong_selector() {
         let mut input = real_input();
         input[0] = 0xff;
-        assert!(Fly.swap_intent(&input, None).is_none());
+        assert!(Fly.declared_swap(&input, None).is_none());
     }
 
     #[test]
@@ -172,17 +172,17 @@ mod tests {
         let full = real_input();
         // Cut before the fixed-offset fields are readable at all.
         assert!(Fly
-            .swap_intent(&full[..100], None)
+            .declared_swap(&full[..100], None)
             .is_none());
         // Cut inside the packed-header pointer's target word.
         assert!(Fly
-            .swap_intent(&full[..300], None)
+            .declared_swap(&full[..300], None)
             .is_none());
     }
 
     #[test]
     fn test_empty_input() {
-        assert!(Fly.swap_intent(&[], None).is_none());
+        assert!(Fly.declared_swap(&[], None).is_none());
     }
 
     #[test]
@@ -190,7 +190,7 @@ mod tests {
         let mut input = real_input();
         // Zero out the word the amountOutMin pointer resolves to (ptr 281 in this fixture).
         input[281..313].fill(0);
-        assert!(Fly.swap_intent(&input, None).is_none());
+        assert!(Fly.declared_swap(&input, None).is_none());
     }
 
     #[test]
@@ -203,6 +203,6 @@ mod tests {
         // fixture (ptrs 281 and 289), so filling the word instead would corrupt both readings
         // identically and leave them equal, not violate the check.
         input[AMOUNT_OUT_MIN_HEADER] = 0;
-        assert!(Fly.swap_intent(&input, None).is_none());
+        assert!(Fly.declared_swap(&input, None).is_none());
     }
 }
