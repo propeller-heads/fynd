@@ -40,14 +40,13 @@ use alloy::{
     rpc::types::trace::geth::CallFrame,
 };
 use anyhow::Context;
-use futures::stream::StreamExt;
 use tracing::{debug, warn};
 
 use crate::decoder::{
     decode::{recover, DecodeContext, TraderFlow},
     matching::MatchedSolverTrade,
     solvers::SwapIntent,
-    trace::{collect_native_transfers, fetch_trace},
+    trace::{collect_native_transfers, fetch_block_traces},
     transfer_ledger::TransferLedger,
 };
 pub(crate) use crate::decoder::{
@@ -178,11 +177,6 @@ fn intent_fields(intent: Option<&SwapIntent>) -> (Option<U256>, Option<U256>, Op
     (min_amount_out, declared_quote, quote_timestamp)
 }
 
-/// Max concurrent trace requests per block. Bounds RPC load so a block
-/// with many solver trades still completes within the block time
-/// without tripping provider rate limits.
-const TRACE_CONCURRENCY: usize = 10;
-
 /// Stateful trade decoder: owns the RPC provider, the chain's address
 /// registry, and the caches that are worth keeping across blocks.
 pub(crate) struct Decoder<P> {
@@ -250,41 +244,29 @@ impl<P: Provider> Decoder<P> {
             })
             .collect();
 
-        // Per-block batch: trace every matched tx concurrently (bounded),
-        // collected in block order for deterministic output. Wall-clock cost is
-        // one receipts call plus the slowest trace wave — not the sum of every
-        // request — so a block stays well inside its block time.
-        //
-        // Failures are collected per transaction rather than aborting the wave: one transaction the
-        // RPC cannot trace costs that trade, not the whole block. Failing the block instead drops
-        // its every trade from the aggregates, and the surviving sample is selected by which
-        // transactions the RPC happened to serve.
-        let traces = futures::stream::iter(
-            matched
-                .iter()
-                .map(|(_, m)| fetch_trace(&self.provider, m.receipt.transaction_hash)),
-        )
-        .buffered(TRACE_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
+        // Nothing matched: the block has no solver trades, so its trace is never needed.
+        if matched.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // One debug_traceBlockByNumber call covers every matched transaction. A transaction the
+        // tracer could not process is absent from the map and costs that trade, not the block.
+        let mut roots = fetch_block_traces(&self.provider, block_number).await?;
 
         let mut trades = Vec::with_capacity(matched.len());
-        for ((index, matched), trace) in matched.into_iter().zip(traces) {
+        for (index, matched) in matched {
             let tx_index = matched
                 .receipt
                 .transaction_index
                 .unwrap_or(index as u64);
-            let root = match trace {
-                Ok(root) => root,
-                Err(e) => {
-                    warn!(
-                        block = block_number,
-                        tx = %matched.receipt.transaction_hash,
-                        "skipping untraceable transaction: {e}"
-                    );
-                    crate::telemetry::record_untraced_transaction();
-                    continue;
-                }
+            let Some(root) = roots.remove(&matched.receipt.transaction_hash) else {
+                warn!(
+                    block = block_number,
+                    tx = %matched.receipt.transaction_hash,
+                    "skipping transaction absent from the block trace"
+                );
+                crate::telemetry::record_untraced_transaction();
+                continue;
             };
             if let Some(mut trade) = self
                 .decode_transaction(matched, &root, block_number, tx_index)
@@ -450,13 +432,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_untraceable_transaction_does_not_drop_the_block() {
+        use alloy::rpc::types::trace::{common::TraceResult, geth::GethTrace};
+
         let asserter = Asserter::new();
         asserter.push_success(&vec![
             swap_receipt(tx_hash(1), addr(1)),
             swap_receipt(tx_hash(2), addr(2)),
         ]);
-        asserter.push_failure_msg("debug_traceTransaction unavailable");
-        asserter.push_success(&frame("CALL", addr(2), ONEINCH, 0));
+        // The block trace answers in one call: the first transaction failed inside the tracer,
+        // the second traced fine.
+        asserter.push_success(&vec![
+            TraceResult::Error {
+                error: "tracer aborted".to_string(),
+                tx_hash: Some(tx_hash(1)),
+            },
+            TraceResult::Success {
+                result: GethTrace::CallTracer(frame("CALL", addr(2), ONEINCH, 0)),
+                tx_hash: Some(tx_hash(2)),
+            },
+        ]);
 
         let mut decoder = Decoder::new(
             ProviderBuilder::default().connect_mocked_client(asserter),

@@ -1,32 +1,55 @@
+use std::collections::HashMap;
+
 use alloy::{
+    eips::BlockNumberOrTag,
     primitives::{Address, TxHash, U256},
     providers::{ext::DebugApi, Provider},
-    rpc::types::trace::geth::{CallConfig, CallFrame, GethDebugTracingOptions, GethTrace},
+    rpc::types::trace::{
+        common::TraceResult,
+        geth::{CallConfig, CallFrame, GethDebugTracingOptions, GethTrace},
+    },
 };
 use anyhow::Context;
+use tracing::warn;
 
 use crate::decoder::registry::Registry;
 
-/// Fetch the callTracer root frame for a transaction.
+/// Fetch the callTracer root frame of every transaction in a block, keyed by transaction hash —
+/// one `debug_traceBlockByNumber` call instead of one `debug_traceTransaction` per transaction.
 ///
-/// The trace is the only place native ETH transfers and the internal
-/// solver call appear — neither emits a log.
-pub(crate) async fn fetch_trace<P: Provider>(
+/// The trace is the only place native ETH transfers and the internal solver call appear — neither
+/// emits a log. A transaction the tracer could not process is dropped from the map with a warning
+/// (its trades are lost, not the block's); a failure of the whole call is the block's error.
+pub(crate) async fn fetch_block_traces<P: Provider>(
     provider: &P,
-    tx_hash: TxHash,
-) -> anyhow::Result<CallFrame> {
+    block_number: u64,
+) -> anyhow::Result<HashMap<TxHash, CallFrame>> {
     let options = GethDebugTracingOptions::call_tracer(CallConfig::default());
-    let trace = provider
-        .debug_trace_transaction(tx_hash, options)
+    let traces = provider
+        .debug_trace_block_by_number(BlockNumberOrTag::Number(block_number), options)
         .await
         .with_context(|| {
-            format!("failed to trace {tx_hash} (does the RPC support debug_traceTransaction?)")
+            format!(
+                "failed to trace block {block_number} \
+                 (does the RPC support debug_traceBlockByNumber?)"
+            )
         })?;
 
-    let GethTrace::CallTracer(root) = trace else {
-        anyhow::bail!("expected callTracer output for {tx_hash}");
-    };
-    Ok(root)
+    let mut roots = HashMap::with_capacity(traces.len());
+    for trace in traces {
+        match trace {
+            TraceResult::Success { result: GethTrace::CallTracer(root), tx_hash: Some(hash) } => {
+                roots.insert(hash, root);
+            }
+            TraceResult::Success { result, tx_hash } => {
+                warn!(?tx_hash, ?result, "expected callTracer output in the block trace");
+            }
+            TraceResult::Error { error, tx_hash } => {
+                warn!(?tx_hash, error, "block trace failed for one transaction");
+            }
+        }
+    }
+    Ok(roots)
 }
 
 /// Walk the call frames, collecting native ETH value transfers.
