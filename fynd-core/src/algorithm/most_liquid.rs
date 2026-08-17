@@ -751,7 +751,7 @@ impl MostLiquidAlgorithm {
                 cache.swap((pair[0], pair[1]), &current_amount, pools, simulate)
             };
             let Some(hop_result) = hop_result else {
-                return Err(MostLiquidError::HopNotTradable { from: pair[0], to: pair[1] })
+                return Err(MostLiquidError::HopNotTradable { from: pair[0], to: pair[1] });
             };
 
             let chosen = pools

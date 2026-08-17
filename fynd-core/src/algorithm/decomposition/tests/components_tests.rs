@@ -4,6 +4,8 @@ use super::*;
 
 /// Unit tests for the component types.
 mod unit {
+    use std::sync::Arc;
+
     use num_traits::FromPrimitive;
 
     use super::*;
@@ -11,7 +13,24 @@ mod unit {
         token, token_with_decimals, ConstantProductSim, MockProtocolSim,
     };
 
-    fn cp_pool(id: &str, reserve_0: u64, reserve_1: u64) -> PoolRef {
+    /// Components hold `Arc<Token>`; the shared fixtures hand out `Token`.
+    fn arc_token(byte: u8, symbol: &str) -> Arc<Token> {
+        Arc::new(token(byte, symbol))
+    }
+
+    fn arc_token_with_decimals(byte: u8, symbol: &str, decimals: u32) -> Arc<Token> {
+        Arc::new(token_with_decimals(byte, symbol, decimals))
+    }
+
+    fn token_a() -> Arc<Token> {
+        arc_token(0x0A, "A")
+    }
+
+    fn token_b() -> Arc<Token> {
+        arc_token(0x0B, "B")
+    }
+
+    fn cp_pool(id: &str, reserve_0: u64, reserve_1: u64) -> Pool {
         cp_pool_with_depth(id, reserve_0, reserve_1, None)
     }
 
@@ -20,9 +39,11 @@ mod unit {
         reserve_0: u64,
         reserve_1: u64,
         depth: Option<BigUint>,
-    ) -> PoolRef {
-        PoolRef::new(
+    ) -> Pool {
+        Pool::new(
             id.to_string(),
+            token_a(),
+            token_b(),
             SellLimitKind::Enforced,
             Box::new(ConstantProductSim {
                 reserve_0: BigUint::from(reserve_0),
@@ -33,9 +54,11 @@ mod unit {
         )
     }
 
-    fn mock_pool(id: &str, spot_price: f64, fee: f64, liquidity: u128) -> PoolRef {
-        PoolRef::new(
+    fn mock_pool(id: &str, spot_price: f64, fee: f64, liquidity: u128) -> Pool {
+        Pool::new(
             id.to_string(),
+            token_a(),
+            token_b(),
             SellLimitKind::Enforced,
             Box::new(
                 MockProtocolSim::new(spot_price)
@@ -51,14 +74,40 @@ mod unit {
         Some(BigUint::from(whole) * BigUint::from(10u8).pow(18))
     }
 
-    /// One hop A -> B over the given pools, unsolved.
-    fn hop_ab(pools: Vec<PoolRef>) -> Hop {
-        Hop::new(token(0x0A, "A"), token(0x0B, "B"), pools).expect("hop has pools")
+    /// One hop `token_in -> token_out` over the given pools, unsolved.
+    ///
+    /// The pools are retargeted onto the pair: a `PoolRef` carries the direction it trades, and the
+    /// fixtures build them with a fixed pair before knowing which leg they will serve.
+    fn hop_over(
+        token_in: Arc<Token>,
+        token_out: Arc<Token>,
+        mut pools: Vec<Pool>,
+    ) -> ParallelRoute {
+        for pool in &mut pools {
+            pool.retarget(Arc::clone(&token_in), Arc::clone(&token_out));
+        }
+        ParallelRoute::new(
+            pools
+                .into_iter()
+                .map(Route::pool)
+                .collect(),
+        )
+        .expect("hop has pools")
     }
 
-    fn route_ab(hop: Hop) -> SequentialRoute {
-        SequentialRoute::new(vec![token(0x0A, "A"), token(0x0B, "B")], vec![hop])
-            .expect("route matches its token path")
+    /// One hop A -> B over the given pools, unsolved.
+    fn hop_ab(pools: Vec<Pool>) -> ParallelRoute {
+        ParallelRoute::new(
+            pools
+                .into_iter()
+                .map(Route::pool)
+                .collect(),
+        )
+        .expect("hop has pools")
+    }
+
+    fn route_ab(hop: ParallelRoute) -> SequenceRoute {
+        SequenceRoute::new(vec![hop]).expect("one hop is a chain")
     }
 
     // ---------- Fraction ----------
@@ -126,7 +175,7 @@ mod unit {
         assert!(Fraction::from_ratio(1, 0).is_none());
     }
 
-    // ---------- Hop composition ----------
+    // ---------- SplitRoute composition ----------
 
     #[test]
     fn test_hop_route_price_is_mean_when_unsolved() {
@@ -191,7 +240,7 @@ mod unit {
 
     #[test]
     fn test_hop_new_rejects_empty_pools() {
-        let result = Hop::new(token(0x0A, "A"), token(0x0B, "B"), vec![]);
+        let result = ParallelRoute::new(vec![]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
@@ -214,7 +263,7 @@ mod unit {
     fn test_pool_inertia_uses_supplied_depth() {
         let pool = cp_pool_with_depth("p1", 1_000, 2_000, depth(7));
 
-        assert!((pool.inertia(&token(0x0A, "A")) - 7.0).abs() < 1e-9);
+        assert!((pool.inertia() - 7.0).abs() < 1e-9);
     }
 
     #[test]
@@ -222,7 +271,7 @@ mod unit {
         // The pool has plenty of reserves; only the absent depth entry decides the value.
         let pool = cp_pool("p1", 1_000_000, 2_000_000);
 
-        assert_eq!(pool.inertia(&token(0x0A, "A")), MISSING_DEPTH_INERTIA);
+        assert_eq!(pool.inertia(), MISSING_DEPTH_INERTIA);
     }
 
     #[test]
@@ -304,23 +353,21 @@ mod unit {
 
     #[test]
     fn test_route_new_marginal_price_none_when_any_hop_unsold() {
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
-        let token_c = token(0x0C, "C");
+        let token_a = arc_token(0x0A, "A");
+        let token_b = arc_token(0x0B, "B");
+        let token_c = arc_token(0x0C, "C");
         let mut first =
-            Hop::new(token_a.clone(), token_b.clone(), vec![cp_pool("ab", 1_000_000, 2_000_000)])
-                .expect("hop has pools");
+            hop_over(token_a.clone(), token_b.clone(), vec![cp_pool("ab", 1_000_000, 2_000_000)]);
         first
             .set_splits(vec![Fraction::one()])
             .expect("one split per pool");
         let mut second =
-            Hop::new(token_b.clone(), token_c.clone(), vec![cp_pool("bc", 1_000_000, 2_000_000)])
-                .expect("hop has pools");
+            hop_over(token_b.clone(), token_c.clone(), vec![cp_pool("bc", 1_000_000, 2_000_000)]);
         second
             .set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        let mut route = SequentialRoute::new(vec![token_a, token_b, token_c], vec![first, second])
-            .expect("route matches its token path");
+        let mut route =
+            SequenceRoute::new(vec![first, second]).expect("route matches its token path");
 
         assert_eq!(route.new_marginal_price(), None);
 
@@ -336,7 +383,7 @@ mod unit {
         let mut hop = hop_ab(vec![cp_pool("p1", 1_000_000, 2_000_000)]);
         hop.set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        let mut graph = DecompositionGraph::from_routes(vec![route_ab(hop)], vec![Fraction::one()])
+        let mut graph = DecompositionGraph::new(vec![route_ab(hop)], vec![Fraction::one()])
             .expect("branches share endpoints");
 
         assert_eq!(graph.new_marginal_price(), None);
@@ -359,7 +406,7 @@ mod unit {
         let mut rich = hop_ab(vec![cp_pool_with_depth("p2", 1_000, 4_000, depth(3))]);
         rich.set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        DecompositionGraph::from_routes(vec![route_ab(cheap), route_ab(rich)], outer_splits)
+        DecompositionGraph::new(vec![route_ab(cheap), route_ab(rich)], outer_splits)
             .expect("branches share endpoints")
     }
 
@@ -368,9 +415,9 @@ mod unit {
         let graph = two_branch_graph(Vec::new());
 
         assert!(graph
-            .branches()
+            .sequences
             .iter()
-            .all(Branch::solved));
+            .all(SequenceRoute::solved));
         assert!(!graph.solved());
     }
 
@@ -454,10 +501,8 @@ mod unit {
         hop.set_splits(vec![Fraction::one()])
             .expect("one split per pool");
 
-        let result = DecompositionGraph::from_routes(
-            vec![route_ab(hop)],
-            vec![Fraction::one(), Fraction::one()],
-        );
+        let result =
+            DecompositionGraph::new(vec![route_ab(hop)], vec![Fraction::one(), Fraction::one()]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
@@ -473,21 +518,18 @@ mod unit {
         assert!(matches!(error, DecompositionError::Unsolved { .. }));
     }
 
-    // ---------- SequentialRoute composition ----------
+    // ---------- SequenceRoute composition ----------
 
     #[test]
     fn test_route_fee_composes_in_series() {
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
-        let token_c = token(0x0C, "C");
+        let token_a = arc_token(0x0A, "A");
+        let token_b = arc_token(0x0B, "B");
+        let token_c = arc_token(0x0C, "C");
         let first =
-            Hop::new(token_a.clone(), token_b.clone(), vec![mock_pool("ab", 2.0, 0.1, u128::MAX)])
-                .expect("hop has pools");
+            hop_over(token_a.clone(), token_b.clone(), vec![mock_pool("ab", 2.0, 0.1, u128::MAX)]);
         let second =
-            Hop::new(token_b.clone(), token_c.clone(), vec![mock_pool("bc", 2.0, 0.2, u128::MAX)])
-                .expect("hop has pools");
-        let route = SequentialRoute::new(vec![token_a, token_b, token_c], vec![first, second])
-            .expect("route matches its token path");
+            hop_over(token_b.clone(), token_c.clone(), vec![mock_pool("bc", 2.0, 0.2, u128::MAX)]);
+        let route = SequenceRoute::new(vec![first, second]).expect("route matches its token path");
 
         // 1 - (1 - 0.1)(1 - 0.2) = 0.28
         assert!((route.fee() - 0.28).abs() < 1e-9);
@@ -495,38 +537,32 @@ mod unit {
 
     #[test]
     fn test_route_inertia_is_min_over_hops() {
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
-        let token_c = token(0x0C, "C");
-        let first = Hop::new(
+        let token_a = arc_token(0x0A, "A");
+        let token_b = arc_token(0x0B, "B");
+        let token_c = arc_token(0x0C, "C");
+        let first = hop_over(
             token_a.clone(),
             token_b.clone(),
             vec![cp_pool_with_depth("ab", 4_000, 2_000, depth(4))],
-        )
-        .expect("hop has pools");
-        let second = Hop::new(
+        );
+        let second = hop_over(
             token_b.clone(),
             token_c.clone(),
             vec![cp_pool_with_depth("bc", 1_000, 2_000, depth(1))],
-        )
-        .expect("hop has pools");
-        let route = SequentialRoute::new(vec![token_a, token_b, token_c], vec![first, second])
-            .expect("route matches its token path");
+        );
+        let route = SequenceRoute::new(vec![first, second]).expect("route matches its token path");
 
         assert!((route.inertia() - 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_route_price_is_product_of_hops() {
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
-        let token_c = token(0x0C, "C");
-        let first = Hop::new(token_a.clone(), token_b.clone(), vec![cp_pool("ab", 1_000, 2_000)])
-            .expect("hop has pools");
-        let second = Hop::new(token_b.clone(), token_c.clone(), vec![cp_pool("bc", 1_000, 3_000)])
-            .expect("hop has pools");
-        let route = SequentialRoute::new(vec![token_a, token_b, token_c], vec![first, second])
-            .expect("route matches its token path");
+        let token_a = arc_token(0x0A, "A");
+        let token_b = arc_token(0x0B, "B");
+        let token_c = arc_token(0x0C, "C");
+        let first = hop_over(token_a.clone(), token_b.clone(), vec![cp_pool("ab", 1_000, 2_000)]);
+        let second = hop_over(token_b.clone(), token_c.clone(), vec![cp_pool("bc", 1_000, 3_000)]);
+        let route = SequenceRoute::new(vec![first, second]).expect("route matches its token path");
 
         assert!(
             (route
@@ -540,28 +576,30 @@ mod unit {
 
     #[test]
     fn test_route_new_rejects_disconnected_hops() {
-        let hop = hop_ab(vec![cp_pool("p1", 1_000, 2_000)]);
+        // The second hop starts at C, not at the B the first one ends on, so nothing carries the
+        // output of one into the other.
+        let first = hop_ab(vec![cp_pool("ab", 1_000, 2_000)]);
+        let second =
+            hop_over(arc_token(0x0C, "C"), arc_token(0x0D, "D"), vec![cp_pool("cd", 1_000, 2_000)]);
 
-        let result = SequentialRoute::new(vec![token(0x0A, "A"), token(0x0C, "C")], vec![hop]);
+        let result = SequenceRoute::new(vec![first, second]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
 
     #[test]
     fn test_route_solved_requires_every_hop() {
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
-        let token_c = token(0x0C, "C");
+        let token_a = arc_token(0x0A, "A");
+        let token_b = arc_token(0x0B, "B");
+        let token_c = arc_token(0x0C, "C");
         let mut first =
-            Hop::new(token_a.clone(), token_b.clone(), vec![cp_pool("ab", 1_000, 2_000)])
-                .expect("hop has pools");
+            hop_over(token_a.clone(), token_b.clone(), vec![cp_pool("ab", 1_000, 2_000)]);
         first
             .set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        let second = Hop::new(token_b.clone(), token_c.clone(), vec![cp_pool("bc", 1_000, 2_000)])
-            .expect("hop has pools");
-        let mut route = SequentialRoute::new(vec![token_a, token_b, token_c], vec![first, second])
-            .expect("route matches its token path");
+        let second = hop_over(token_b.clone(), token_c.clone(), vec![cp_pool("bc", 1_000, 2_000)]);
+        let mut route =
+            SequenceRoute::new(vec![first, second]).expect("route matches its token path");
 
         assert!(!route.solved());
 
@@ -577,13 +615,11 @@ mod unit {
     #[test]
     fn test_pool_sell_zero_clears_post_trade_state() {
         let mut pool = cp_pool("p1", 1_000_000, 2_000_000);
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
-        pool.sell(&BigUint::from(1_000u32), &token_a, &token_b)
+        pool.sell(&BigUint::from(1_000u32))
             .expect("amount is under the limit");
         assert!(pool.new_state().is_some());
 
-        pool.sell(&BigUint::zero(), &token_a, &token_b)
+        pool.sell(&BigUint::zero())
             .expect("selling zero always succeeds");
 
         assert!(pool.new_state().is_none());
@@ -594,17 +630,15 @@ mod unit {
     #[test]
     fn test_pool_sell_serves_repeats_from_cache() {
         let mut pool = cp_pool("p1", 1_000_000, 2_000_000);
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
         let amount = BigUint::from(1_000u32);
 
         let first = pool
-            .sell(&amount, &token_a, &token_b)
+            .sell(&amount)
             .expect("amount is under the limit");
         assert!(pool.has_cached_swap(&amount));
 
         let second = pool
-            .sell(&amount, &token_a, &token_b)
+            .sell(&amount)
             .expect("amount is under the limit");
 
         assert_eq!(first, second);
@@ -615,11 +649,10 @@ mod unit {
     #[test]
     fn test_pool_sell_over_limit_carries_limit() {
         let mut pool = mock_pool("p1", 1.0, 0.0, 1_000);
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
+        let token_a = arc_token(0x0A, "A");
 
         let error = pool
-            .sell(&BigUint::from(2_000u32), &token_a, &token_b)
+            .sell(&BigUint::from(2_000u32))
             .expect_err("amount is over the limit");
 
         match error {
@@ -662,23 +695,21 @@ mod unit {
 
     #[test]
     fn test_route_sell_threads_output_into_next_hop() {
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
-        let token_c = token(0x0C, "C");
+        let token_a = arc_token(0x0A, "A");
+        let token_b = arc_token(0x0B, "B");
+        let token_c = arc_token(0x0C, "C");
         let mut first =
-            Hop::new(token_a.clone(), token_b.clone(), vec![cp_pool("ab", 1_000_000, 2_000_000)])
-                .expect("hop has pools");
+            hop_over(token_a.clone(), token_b.clone(), vec![cp_pool("ab", 1_000_000, 2_000_000)]);
         first
             .set_splits(vec![Fraction::one()])
             .expect("one split per pool");
         let mut second =
-            Hop::new(token_b.clone(), token_c.clone(), vec![cp_pool("bc", 1_000_000, 2_000_000)])
-                .expect("hop has pools");
+            hop_over(token_b.clone(), token_c.clone(), vec![cp_pool("bc", 1_000_000, 2_000_000)]);
         second
             .set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        let mut route = SequentialRoute::new(vec![token_a, token_b, token_c], vec![first, second])
-            .expect("route matches its token path");
+        let mut route =
+            SequenceRoute::new(vec![first, second]).expect("route matches its token path");
 
         let (bought, _) = route
             .sell(&BigUint::from(1_000u32))
@@ -699,7 +730,7 @@ mod unit {
         second_hop
             .set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        let mut graph = DecompositionGraph::from_routes(
+        let mut graph = DecompositionGraph::new(
             vec![route_ab(first_hop), route_ab(second_hop)],
             vec![
                 Fraction::from_ratio(1, 4).expect("non-zero denominator"),
@@ -712,8 +743,8 @@ mod unit {
             .sell(&BigUint::from(1_000u32))
             .expect("amount is under the limit");
 
-        assert_eq!(graph.branches()[0].sell_amount(), &BigUint::from(250u32));
-        assert_eq!(graph.branches()[1].sell_amount(), &BigUint::from(750u32));
+        assert_eq!(graph.sequences[0].sell_amount(), &BigUint::from(250u32));
+        assert_eq!(graph.sequences[1].sell_amount(), &BigUint::from(750u32));
     }
 
     // ---------- Limits ----------
@@ -733,18 +764,16 @@ mod unit {
 
     #[test]
     fn test_route_sell_amount_limit_is_min_after_casting() {
-        // Hop 1 sells A at price 2 into B; hop 2's B limit of 1_000 is worth 500 A.
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
-        let token_c = token(0x0C, "C");
+        // SplitRoute 1 sells A at price 2 into B; hop 2's B limit of 1_000 is worth 500 A.
+        let token_a = arc_token(0x0A, "A");
+        let token_b = arc_token(0x0B, "B");
+        let token_c = arc_token(0x0C, "C");
         let first =
-            Hop::new(token_a.clone(), token_b.clone(), vec![mock_pool("ab", 2.0, 0.0, 10_000)])
-                .expect("hop has pools");
+            hop_over(token_a.clone(), token_b.clone(), vec![mock_pool("ab", 2.0, 0.0, 10_000)]);
         let second =
-            Hop::new(token_b.clone(), token_c.clone(), vec![mock_pool("bc", 1.0, 0.0, 1_000)])
-                .expect("hop has pools");
-        let mut route = SequentialRoute::new(vec![token_a, token_b, token_c], vec![first, second])
-            .expect("route matches its token path");
+            hop_over(token_b.clone(), token_c.clone(), vec![mock_pool("bc", 1.0, 0.0, 1_000)]);
+        let mut route =
+            SequenceRoute::new(vec![first, second]).expect("route matches its token path");
 
         let (limit, pools) = route
             .sell_amount_limit()
@@ -756,16 +785,14 @@ mod unit {
 
     #[test]
     fn test_route_sell_amount_limit_short_circuits_on_empty_hop() {
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
-        let token_c = token(0x0C, "C");
+        let token_a = arc_token(0x0A, "A");
+        let token_b = arc_token(0x0B, "B");
+        let token_c = arc_token(0x0C, "C");
         let first =
-            Hop::new(token_a.clone(), token_b.clone(), vec![mock_pool("ab", 2.0, 0.0, 10_000)])
-                .expect("hop has pools");
-        let second = Hop::new(token_b.clone(), token_c.clone(), vec![mock_pool("bc", 1.0, 0.0, 0)])
-            .expect("hop has pools");
-        let mut route = SequentialRoute::new(vec![token_a, token_b, token_c], vec![first, second])
-            .expect("route matches its token path");
+            hop_over(token_a.clone(), token_b.clone(), vec![mock_pool("ab", 2.0, 0.0, 10_000)]);
+        let second = hop_over(token_b.clone(), token_c.clone(), vec![mock_pool("bc", 1.0, 0.0, 0)]);
+        let mut route =
+            SequenceRoute::new(vec![first, second]).expect("route matches its token path");
 
         let (limit, _) = route
             .sell_amount_limit()
@@ -776,24 +803,21 @@ mod unit {
 
     #[test]
     fn test_route_sell_over_limit_reports_limit_in_sell_token() {
-        let token_a = token(0x0A, "A");
-        let token_b = token(0x0B, "B");
-        let token_c = token(0x0C, "C");
+        let token_a = arc_token(0x0A, "A");
+        let token_b = arc_token(0x0B, "B");
+        let token_c = arc_token(0x0C, "C");
         let mut first =
-            Hop::new(token_a.clone(), token_b.clone(), vec![mock_pool("ab", 2.0, 0.0, 10_000)])
-                .expect("hop has pools");
+            hop_over(token_a.clone(), token_b.clone(), vec![mock_pool("ab", 2.0, 0.0, 10_000)]);
         first
             .set_splits(vec![Fraction::one()])
             .expect("one split per pool");
         let mut second =
-            Hop::new(token_b.clone(), token_c.clone(), vec![mock_pool("bc", 1.0, 0.0, 1_000)])
-                .expect("hop has pools");
+            hop_over(token_b.clone(), token_c.clone(), vec![mock_pool("bc", 1.0, 0.0, 1_000)]);
         second
             .set_splits(vec![Fraction::one()])
             .expect("one split per pool");
         let mut route =
-            SequentialRoute::new(vec![token_a.clone(), token_b, token_c], vec![first, second])
-                .expect("route matches its token path");
+            SequenceRoute::new(vec![first, second]).expect("route matches its token path");
 
         let error = route
             .sell(&BigUint::from(9_000u32))
@@ -811,17 +835,14 @@ mod unit {
     #[test]
     fn test_route_cast_to_sell_token_scales_decimals() {
         // A has 18 decimals, B has 6; price is 1.0, so 10^6 B units are 10^18 A units.
-        let token_a = token_with_decimals(0x0A, "A", 18);
-        let token_b = token_with_decimals(0x0B, "B", 6);
-        let token_c = token_with_decimals(0x0C, "C", 6);
+        let token_a = arc_token_with_decimals(0x0A, "A", 18);
+        let token_b = arc_token_with_decimals(0x0B, "B", 6);
+        let token_c = arc_token_with_decimals(0x0C, "C", 6);
         let first =
-            Hop::new(token_a.clone(), token_b.clone(), vec![mock_pool("ab", 1.0, 0.0, u128::MAX)])
-                .expect("hop has pools");
+            hop_over(token_a.clone(), token_b.clone(), vec![mock_pool("ab", 1.0, 0.0, u128::MAX)]);
         let second =
-            Hop::new(token_b.clone(), token_c.clone(), vec![mock_pool("bc", 1.0, 0.0, u128::MAX)])
-                .expect("hop has pools");
-        let route = SequentialRoute::new(vec![token_a, token_b, token_c], vec![first, second])
-            .expect("route matches its token path");
+            hop_over(token_b.clone(), token_c.clone(), vec![mock_pool("bc", 1.0, 0.0, u128::MAX)]);
+        let route = SequenceRoute::new(vec![first, second]).expect("route matches its token path");
 
         let cast = route
             .cast_to_sell_token(1, &BigUint::from(1_000_000u32))
@@ -834,7 +855,7 @@ mod unit {
     fn test_graph_sell_amount_limit_sums_branches() {
         let first_hop = hop_ab(vec![mock_pool("p1", 1.0, 0.0, 1_000)]);
         let second_hop = hop_ab(vec![mock_pool("p2", 1.0, 0.0, 3_000)]);
-        let mut graph = DecompositionGraph::from_routes(
+        let mut graph = DecompositionGraph::new(
             vec![route_ab(first_hop), route_ab(second_hop)],
             vec![Fraction::one(), Fraction::one()],
         )
@@ -876,8 +897,8 @@ mod unit {
 
     #[test]
     fn test_executed_price_scales_decimals() {
-        let sell_token = token_with_decimals(0x0A, "A", 18);
-        let buy_token = token_with_decimals(0x0B, "B", 6);
+        let sell_token = arc_token_with_decimals(0x0A, "A", 18);
+        let buy_token = arc_token_with_decimals(0x0B, "B", 6);
         let sell_amount = BigUint::from(10u8).pow(18);
         let buy_amount = BigUint::from(2_000_000u32);
 
@@ -910,6 +931,8 @@ mod unit {
 /// Numbers are defibot's wherever they follow from the fixture arithmetic rather than from a
 /// recorded mainnet block.
 mod defibot_routes {
+    use std::sync::Arc;
+
     use num_bigint::{BigInt, BigUint};
     use num_rational::BigRational;
     use num_traits::{Signed, Zero};
@@ -921,9 +944,10 @@ mod defibot_routes {
     use crate::algorithm::{
         decomposition::{
             components::{
-                Branch, BranchSide, DecompositionError, DecompositionGraph, Fraction, Hop, PoolRef,
-                SellLimitKind, SequentialRoute, SPLIT_PRECISION,
+                DecompositionError, DecompositionGraph, ParallelRoute, Pool, Route, SellLimitKind,
+                SequenceRoute, SPLIT_PRECISION,
             },
+            models::Fraction,
             solve::sell_with_coupled_paths,
             test_fixtures::{
                 branch, diamond_graph, expect_sell_amount_limit, graph, hop, pool, route,
@@ -934,9 +958,14 @@ mod defibot_routes {
         test_utils::{token, ConstantProductSim, MockProtocolSim},
     };
 
+    /// Components hold `Arc<Token>`; the shared fixtures hand out `Token`.
+    fn arc_token(byte: u8, symbol: &str) -> Arc<Token> {
+        Arc::new(token(byte, symbol))
+    }
+
     /// A pool priced like defibot's `TestMarginalPrice.make_route` (`test_routes.py:443-476`): a
     /// spot price before the trade, an independent one after it, and a fee.
-    fn priced_pool(id: &str, spot_price: f64, post_trade_spot_price: f64, fee: f64) -> PoolRef {
+    fn priced_pool(id: &str, spot_price: f64, post_trade_spot_price: f64, fee: f64) -> Pool {
         pool(
             id,
             FixedRateSim::new(1)
@@ -948,7 +977,7 @@ mod defibot_routes {
 
     /// A pool with a hard cap on what it will sell, defibot's `MockRouteLimit`
     /// (`utils.py:138-148`).
-    fn limited_pool(id: &str, sell_limit: u64) -> PoolRef {
+    fn limited_pool(id: &str, sell_limit: u64) -> Pool {
         pool(id, FixedRateSim::new(10).with_sell_limit(sell_limit))
     }
 
@@ -956,9 +985,11 @@ mod defibot_routes {
     ///
     /// [`pool`] supplies no depth, so every pool built through it reports the missing-depth inertia
     /// of `1.0` and differences between the max and mean inertia rules are invisible.
-    fn pool_with_depth(id: &str, spot_price: f64, depth_tokens: u64) -> PoolRef {
-        PoolRef::new(
+    fn pool_with_depth(id: &str, spot_price: f64, depth_tokens: u64) -> Pool {
+        Pool::new(
             id.to_string(),
+            token_a(),
+            token_b(),
             SellLimitKind::Enforced,
             Box::new(FixedRateSim::new(1).with_spot_price(spot_price)),
             Some(BigUint::from(depth_tokens) * BigUint::from(10u64).pow(18)),
@@ -967,7 +998,7 @@ mod defibot_routes {
 
     #[test]
     fn test_one_hop_route_weight_is_the_best_pool_not_the_composed_formula() {
-        // defibot ranks a single-hop token sequence as a bare `ParallelRoute`
+        // defibot ranks a single-hop token sequence as a bare `SplitRoute`
         // (`order_solver.py:450-456`), whose unsolved weight is the maximum over its pools
         // (`routes/parallel.py:136-146`). Both pools here score 1.0 * 10 and 5.0 * 2, so the answer
         // is 10 — while the composed sequential formula would pair the mean price (6) with
@@ -1022,22 +1053,13 @@ mod defibot_routes {
         // `test_simple_route` (:479): spot 100 at a 1% fee is a marginal price of 99, and the
         // post-trade spot of 200 is a post-trade marginal price of 198.
         let mut pool = priced_pool("p", 100.0, 200.0, 0.01);
-        let (token_in, token_out) = (token_a(), token_b());
 
-        assert!(
-            (pool
-                .marginal_price(&token_in, &token_out)
-                .unwrap() -
-                99.0)
-                .abs() <
-                1e-9
-        );
+        assert!((pool.marginal_price().unwrap() - 99.0).abs() < 1e-9);
 
-        pool.sell(&BigUint::from(1u8), &token_in, &token_out)
-            .unwrap();
+        pool.sell(&BigUint::from(1u8)).unwrap();
 
         let new_price = pool
-            .new_marginal_price(&token_in, &token_out)
+            .new_marginal_price()
             .expect("the pool was sold on");
         assert!((new_price - 198.0).abs() < 1e-9);
     }
@@ -1046,17 +1068,9 @@ mod defibot_routes {
     fn test_pool_new_marginal_price_none_without_a_sell() {
         // `test_simple_route_no_new_state` (:521).
         let pool = priced_pool("p", 100.0, 200.0, 0.01);
-        let (token_in, token_out) = (token_a(), token_b());
 
-        assert!(
-            (pool
-                .marginal_price(&token_in, &token_out)
-                .unwrap() -
-                99.0)
-                .abs() <
-                1e-9
-        );
-        assert_eq!(pool.new_marginal_price(&token_in, &token_out), None);
+        assert!((pool.marginal_price().unwrap() - 99.0).abs() < 1e-9);
+        assert_eq!(pool.new_marginal_price(), None);
     }
 
     #[test]
@@ -1182,7 +1196,7 @@ mod defibot_routes {
     #[test]
     fn test_graph_new_marginal_price_none_when_a_split_branch_was_not_sold() {
         // The outer level of `test_parallel_route_no_new_state` (:544). The three-level structure
-        // has no equivalent of a `ParallelRoute` directly over `SimpleRoute`s, so the same
+        // has no equivalent of a `SplitRoute` directly over `SimpleRoute`s, so the same
         // rule is checked where it now lives: over branches.
         let mut graph = graph(
             vec![
@@ -1298,7 +1312,7 @@ mod defibot_routes {
 
     #[test]
     fn test_route_sell_amount_limit_is_the_tightest_hop_in_sell_token_units() {
-        // `TestSequentialRoute.test_get_sell_amount_limit` (:370, `intermediate_0=False`): hop
+        // `TestSequenceRoute.test_get_sell_amount_limit` (:370, `intermediate_0=False`): hop
         // limits 10, 10 and 5 at prices 1.0, 1.0 and 0.01 make the third hop the binding
         // one, and its limit of 5 is already in sell-token units because the hops before it
         // price at one.
@@ -1347,7 +1361,7 @@ mod defibot_routes {
 
     #[test]
     fn test_route_sell_amount_limit_is_zero_when_an_intermediate_hop_is_empty() {
-        // `TestSequentialRoute.test_get_sell_amount_limit` (:370, `intermediate_0=True`): a middle
+        // `TestSequenceRoute.test_get_sell_amount_limit` (:370, `intermediate_0=True`): a middle
         // hop that can absorb nothing takes the whole route to zero, and names itself as
         // the reason.
         let mut route = route(
@@ -1434,7 +1448,7 @@ mod defibot_routes {
             vec![single_pool_hop(token_c(), token_b(), tenfold_pool("cb"))],
         );
 
-        let result = DecompositionGraph::from_routes(vec![first, second], vec![split(1, 2); 2]);
+        let result = DecompositionGraph::new(vec![first, second], vec![split(1, 2); 2]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
@@ -1451,7 +1465,7 @@ mod defibot_routes {
             vec![single_pool_hop(token_b(), token_c(), tenfold_pool("bc"))],
         );
 
-        let result = DecompositionGraph::from_routes(vec![first, second], vec![split(1, 2); 2]);
+        let result = DecompositionGraph::new(vec![first, second], vec![split(1, 2); 2]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
@@ -1501,7 +1515,7 @@ mod defibot_routes {
 
     #[test]
     fn test_route_sell_compounds_the_hop_multiples() {
-        // `TestSequentialRoute.test_sell` (:294): the first hop's output is the second hop's input,
+        // `TestSequenceRoute.test_sell` (:294): the first hop's output is the second hop's input,
         // so two tenfold hops turn 10^9 into 10^11 and charge one gas each.
         let mut route = tenfold_route("hop", vec![token_a(), token_b(), token_c()]);
 
@@ -1517,7 +1531,7 @@ mod defibot_routes {
 
     #[test]
     fn test_route_sell_stops_at_a_hop_that_buys_nothing() {
-        // `TestSequentialRoute.test_inner_buy_0` (:346): the middle hop returns nothing, so the
+        // `TestSequenceRoute.test_inner_buy_0` (:346): the middle hop returns nothing, so the
         // last hop is sold zero and charges no gas while the two before it still do.
         let mut route = route(
             vec![token_a(), token_b(), token_c(), token_d()],
@@ -1559,7 +1573,7 @@ mod defibot_routes {
         assert_eq!(gas, BigUint::from(8u8));
         assert_eq!(graph.sell_token().address, wbtc().address);
         assert_eq!(graph.buy_token().address, usdc().address);
-        for branch in graph.branches() {
+        for branch in graph.sequences {
             assert_eq!(branch.sell_amount(), &BigUint::from(25u8));
         }
     }
@@ -1578,10 +1592,12 @@ mod defibot_routes {
             gas: 50_000,
         };
         let mut hop = solved_hop(
-            token(0x0A, "A"),
-            token(0x0B, "B"),
-            vec![PoolRef::new(
+            arc_token(0x0A, "A"),
+            arc_token(0x0B, "B"),
+            vec![Pool::new(
                 "cp".to_string(),
+                arc_token(0x0A, "A"),
+                arc_token(0x0B, "B"),
                 SellLimitKind::Enforced,
                 Box::new(untouched.clone()),
                 None,
@@ -1600,7 +1616,7 @@ mod defibot_routes {
     fn test_diamond_pool_states_are_unchanged_after_selling() {
         // The whole-solution form of `test_curve_bug` (:18): no branch writes back into any pool.
         let before: Vec<Box<dyn ProtocolSim>> = diamond_graph()
-            .branches()
+            .sequences
             .iter()
             .flat_map(|route| route.hops())
             .flat_map(|hop| hop.pools())
@@ -1613,11 +1629,11 @@ mod defibot_routes {
             .unwrap();
 
         let after: Vec<&dyn ProtocolSim> = graph
-            .branches()
+            .sequences
             .iter()
             .flat_map(|route| route.hops())
             .flat_map(|hop| hop.pools())
-            .map(PoolRef::state)
+            .map(Pool::state)
             .collect();
         assert_eq!(before.len(), after.len());
         for (original, current) in before.iter().zip(after) {
@@ -1646,8 +1662,10 @@ mod defibot_routes {
     fn test_pool_weight_multiplies_inertia_fee_and_price() {
         // `TestSimpleRoute.test_attributes` (:137): `weight == inertia * (1 - fee) * route_price`.
         let depth = BigUint::from(4u8) * BigUint::from(10u8).pow(18);
-        let pool = PoolRef::new(
+        let pool = Pool::new(
             "p".to_string(),
+            arc_token(0x0A, "A"),
+            arc_token(0x0B, "B"),
             SellLimitKind::Enforced,
             Box::new(
                 FixedRateSim::new(1)
@@ -1656,16 +1674,10 @@ mod defibot_routes {
             ),
             Some(depth),
         );
-        let (token_in, token_out) = (token_a(), token_b());
 
-        let weight = pool
-            .weight(&token_in, &token_out)
-            .unwrap();
+        let weight = pool.weight().unwrap();
 
-        let expected = pool.inertia(&token_in) *
-            (1.0 - pool.fee()) *
-            pool.route_price(&token_in, &token_out)
-                .unwrap();
+        let expected = pool.inertia() * (1.0 - pool.fee()) * pool.route_price().unwrap();
         assert!((weight - 9.0).abs() < 1e-9);
         assert!((weight - expected).abs() < 1e-9);
     }
@@ -1674,7 +1686,7 @@ mod defibot_routes {
 
     // defibot's `test_build_routes_graph_no_duplicate_pools_in_sequential_routes`
     // (`test_routes.py:631`) is a `build_routes_subgraph` test despite living in the route test
-    // module: it solves USDT -> USDC and asserts each constructed `SequentialRoute` has no
+    // module: it solves USDT -> USDC and asserts each constructed `SequenceRoute` has no
     // repeated pool. defibot enforces that during construction via the `seen_pools` guard
     // (`order_solver.py:467-474`), not in the route type, so there is nothing to assert at this
     // level. The ported coverage is
@@ -1724,10 +1736,12 @@ mod defibot_routes {
     }
 
     /// A constant-product pool with equal reserves of two 18-decimal tokens.
-    fn cp_pool(id: &str, reserves: u64) -> PoolRef {
+    fn cp_pool(id: &str, reserves: u64) -> Pool {
         let reserve = BigUint::from(reserves) * BigUint::from(10u8).pow(18);
-        PoolRef::new(
+        Pool::new(
             id.to_string(),
+            token_a(),
+            token_b(),
             SellLimitKind::Enforced,
             Box::new(ConstantProductSim {
                 reserve_0: reserve.clone(),
@@ -1764,7 +1778,7 @@ mod defibot_routes {
         let routed: BigUint = hop
             .pools()
             .iter()
-            .map(PoolRef::sell_amount)
+            .map(|pool| pool.sell_amount().clone())
             .sum();
         assert_eq!(routed, BigUint::from(99u8));
         assert_eq!(bought, BigUint::from(990u32));
@@ -1801,11 +1815,11 @@ mod defibot_routes {
 
         // 101 -> 50 per branch (one unit lost) -> 25 per pool, so 100 of the 101 reaches a pool.
         let routed: BigUint = graph
-            .branches()
+            .sequences
             .iter()
             .flat_map(|route| route.hops())
             .flat_map(|hop| hop.pools())
-            .map(PoolRef::sell_amount)
+            .map(Pool::sell_amount)
             .sum();
         assert_eq!(routed, BigUint::from(100u8));
         assert_eq!(bought, BigUint::from(1_000u32));
@@ -1879,13 +1893,81 @@ mod defibot_routes {
         );
     }
 
+    /// Wraps a chain as a one-tail branch: its first hop, then a split holding the rest.
+    ///
+    /// The successor of `Branch::from_hops`. Every composition rule collapses to the plain chain's
+    /// when there is exactly one tail, which is what the tests below pin.
+    fn branch_from_hops(mut hops: Vec<ParallelRoute>) -> Result<SequenceRoute, DecompositionError> {
+        let head = hops.remove(0);
+        if hops.is_empty() {
+            return SequenceRoute::new(vec![head]);
+        }
+        let tail = SequenceRoute::new(hops)?;
+        let solved = tail.solved();
+        let mut fed = ParallelRoute::new(vec![Route::Sequence(tail)])?;
+        if solved {
+            fed.set_splits(vec![Fraction::one()])?;
+        }
+        SequenceRoute::new(vec![head, fed])
+    }
+
+    /// The branch's shared hop: the one whose alternatives are pools.
+    fn branch_hop(branch: &SequenceRoute) -> &ParallelRoute {
+        branch
+            .hops()
+            .iter()
+            .find(|hop| !hop.pools().is_empty())
+            .expect("a branch has one hop over pools")
+    }
+
+    /// The tails a grouped branch splits over, empty for a one-hop branch.
+    fn branch_tails(branch: &SequenceRoute) -> Vec<&SequenceRoute> {
+        let mut tails = Vec::new();
+        for hop in branch.hops() {
+            for child in hop.children() {
+                if let Route::Sequence(chain) = child {
+                    tails.push(chain);
+                }
+            }
+        }
+        tails
+    }
+
+    /// [`branch_hop`], mutably.
+    fn branch_hop_mut(branch: &mut SequenceRoute) -> &mut ParallelRoute {
+        branch
+            .hops_mut()
+            .iter_mut()
+            .find(|hop| !hop.pools().is_empty())
+            .expect("a branch has one hop over pools")
+    }
+
+    /// The tail at `index` of a grouped branch, mutably.
+    fn branch_tail_mut(branch: &mut SequenceRoute, index: usize) -> &mut SequenceRoute {
+        let hop = tail_split_hop(branch).expect("a grouped branch has a tail split hop");
+        match &mut hop.children_mut()[index] {
+            Route::Sequence(chain) => chain,
+            Route::Direct(_) => panic!("a tail split hop holds chains"),
+        }
+    }
+
+    /// The hop a grouped branch splits its tails with, if it has one.
+    fn tail_split_hop(branch: &mut SequenceRoute) -> Option<&mut ParallelRoute> {
+        branch
+            .hops_mut()
+            .iter_mut()
+            .find(|hop| hop.pools().is_empty())
+    }
+
     /// A pool with an explicit depth, so `inertia` is something other than the missing-depth
     /// constant.
     ///
     /// The arithmetic fixtures' tokens all have 18 decimals, so the inertia is `whole` exactly.
-    fn deep_pool(id: &str, sim: FixedRateSim, whole: u64) -> PoolRef {
-        PoolRef::new(
+    fn deep_pool(id: &str, sim: FixedRateSim, whole: u64) -> Pool {
+        Pool::new(
             id.to_string(),
+            token_a(),
+            token_b(),
             SellLimitKind::Enforced,
             Box::new(sim),
             Some(BigUint::from(whole) * BigUint::from(10u8).pow(18)),
@@ -1896,7 +1978,7 @@ mod defibot_routes {
     ///
     /// Every quantity the collapse has to preserve differs between the legs, so an implementation
     /// that silently used one leg's value for the pair would fail rather than coincide.
-    fn asymmetric_two_hop() -> SequentialRoute {
+    fn asymmetric_two_hop() -> SequenceRoute {
         route(
             vec![token_a(), token_b(), token_c()],
             vec![
@@ -1915,7 +1997,7 @@ mod defibot_routes {
     }
 
     /// `A -> B -> C -> D`, the deepest shape the algorithm builds.
-    fn asymmetric_three_hop() -> SequentialRoute {
+    fn asymmetric_three_hop() -> SequenceRoute {
         route(
             vec![token_a(), token_b(), token_c(), token_d()],
             vec![
@@ -1942,7 +2024,7 @@ mod defibot_routes {
     ///
     /// The head is one object, so its pool can only be allocated once no matter how many tails read
     /// from it — which is the whole point of the level.
-    fn two_tail_branch(tail_splits: Vec<Fraction>) -> Branch {
+    fn two_tail_branch(tail_splits: Vec<Fraction>) -> SequenceRoute {
         branch(
             single_pool_hop(token_a(), token_b(), pool("ab", FixedRateSim::new(2))),
             vec![
@@ -1967,9 +2049,10 @@ mod defibot_routes {
     #[test]
     fn test_two_hop_branch_composes_like_the_route_it_came_from() {
         let route = asymmetric_two_hop();
-        let branch = Branch::from_route(asymmetric_two_hop()).expect("a token path is a branch");
+        let branch =
+            branch_from_hops(asymmetric_two_hop().into_hops()).expect("a token path is a branch");
 
-        assert_eq!(branch.sequences().len(), 1);
+        assert_eq!(branch_tails(&branch).len(), 1);
         assert_composes(branch.route_price().unwrap(), route.route_price().unwrap(), "route_price");
         assert_composes(
             branch.marginal_price().unwrap(),
@@ -1987,10 +2070,11 @@ mod defibot_routes {
     #[test]
     fn test_three_hop_branch_composes_like_the_route_it_came_from() {
         let route = asymmetric_three_hop();
-        let branch = Branch::from_route(asymmetric_three_hop()).expect("a token path is a branch");
+        let branch =
+            branch_from_hops(asymmetric_three_hop().into_hops()).expect("a token path is a branch");
 
         // The tail is itself two hops, so this exercises composition through both levels.
-        assert_eq!(branch.sequences()[0].hops().len(), 2);
+        assert_eq!(branch_tails(&branch)[0].hops().len(), 2);
         assert_composes(branch.route_price().unwrap(), route.route_price().unwrap(), "route_price");
         assert_composes(
             branch.marginal_price().unwrap(),
@@ -2006,7 +2090,8 @@ mod defibot_routes {
     fn test_two_hop_branch_composes_the_hop_quantities_defibot_composes() {
         // Spelled out against the fixture rather than against the route, so a matching bug in both
         // cannot hide: price 2 * 5, fee 1 - 0.9 * 0.8, inertia min(40, 9).
-        let branch = Branch::from_route(asymmetric_two_hop()).expect("a token path is a branch");
+        let branch =
+            branch_from_hops(asymmetric_two_hop().into_hops()).expect("a token path is a branch");
 
         assert!((branch.route_price().unwrap() - 10.0).abs() < 1e-9);
         assert!((branch.fee() - 0.28).abs() < 1e-9);
@@ -2029,10 +2114,9 @@ mod defibot_routes {
             ],
         );
         let expected = leg.weight().unwrap();
-        let branch = Branch::from_route(route(vec![token_a(), token_b()], vec![leg]))
-            .expect("a token path is a branch");
+        let branch = branch_from_hops(vec![leg]).expect("a token path is a branch");
 
-        assert!(branch.sequences().is_empty());
+        assert!(branch_tails(&branch).is_empty());
         assert_eq!(branch.weight().unwrap(), expected);
         // The composed formula would score above the best pool; the delegation must not.
         let composed = branch.route_price().unwrap() * (1.0 - branch.fee()) * branch.inertia();
@@ -2043,7 +2127,7 @@ mod defibot_routes {
     fn test_one_tail_branch_sells_exactly_like_the_route_it_came_from() {
         let mut route = asymmetric_two_hop();
         let mut branch =
-            Branch::from_route(asymmetric_two_hop()).expect("a token path is a branch");
+            branch_from_hops(asymmetric_two_hop().into_hops()).expect("a token path is a branch");
         let amount = BigUint::from(1_000u32);
 
         let from_route = route.sell(&amount).unwrap();
@@ -2084,7 +2168,7 @@ mod defibot_routes {
             )
         };
         let mut route = build();
-        let mut branch = Branch::from_route(build()).expect("a token path is a branch");
+        let mut branch = branch_from_hops(build().into_hops()).expect("a token path is a branch");
 
         let (route_limit, _) = route.sell_amount_limit().unwrap();
         let (branch_limit, _) = branch.sell_amount_limit().unwrap();
@@ -2097,7 +2181,8 @@ mod defibot_routes {
 
     #[test]
     fn test_one_tail_branch_is_solved_exactly_when_its_route_is() {
-        let solved = Branch::from_route(asymmetric_two_hop()).expect("a token path is a branch");
+        let solved =
+            branch_from_hops(asymmetric_two_hop().into_hops()).expect("a token path is a branch");
         assert!(asymmetric_two_hop().solved() && solved.solved());
 
         let unsolved_route = route(
@@ -2107,10 +2192,17 @@ mod defibot_routes {
                 hop(token_b(), token_c(), vec![tenfold_pool("bc1"), tenfold_pool("bc2")]),
             ],
         );
-        let unsolved = Branch::from_route(unsolved_route).expect("a token path is a branch");
+        let mut unsolved =
+            branch_from_hops(unsolved_route.into_hops()).expect("a token path is a branch");
 
         assert!(!unsolved.solved());
-        assert!(unsolved.splits().is_empty());
+        // The route's second hop was never split, so the tail is unsolved — and the branch's own
+        // split over that tail is left empty rather than claiming it routes anything.
+        assert!(!branch_tails(&unsolved)[0].solved());
+        assert!(tail_split_hop(&mut unsolved)
+            .expect("a one-tail branch has a tail split hop")
+            .splits()
+            .is_empty());
     }
 
     // ---------- A branch with several tails ----------
@@ -2122,14 +2214,15 @@ mod defibot_routes {
         // One head pool, and it appears once in the branch's hops even though two tails read from
         // it.
         let head_pools: Vec<&str> = branch
-            .hops()
-            .flat_map(|hop| hop.pools())
+            .all_hops()
+            .into_iter()
+            .flat_map(ParallelRoute::pools)
             .map(|pool| pool.component_id().as_str())
             .filter(|id| *id == "ab")
             .collect();
         assert_eq!(head_pools, ["ab"]);
-        assert_eq!(branch.hop().pools().len(), 1);
-        assert_eq!(branch.sequences().len(), 2);
+        assert_eq!(branch_hop(&branch).pools().len(), 1);
+        assert_eq!(branch_tails(&branch).len(), 2);
     }
 
     #[test]
@@ -2143,12 +2236,12 @@ mod defibot_routes {
             .unwrap();
 
         // The head pool saw the full 1000, not 250 and 750 in two independent sells.
-        assert_eq!(branch.hop().pools()[0].sell_amount(), &BigUint::from(1_000u32));
-        assert_eq!(branch.hop().buy_amount(), &BigUint::from(2_000u32));
+        assert_eq!(branch_hop(&branch).pools()[0].sell_amount(), &BigUint::from(1_000u32));
+        assert_eq!(branch_hop(&branch).buy_amount(), &BigUint::from(2_000u32));
         // A quarter of the head's 2000 output down `B -> D` at x3, three quarters down `B -> C ->
         // D` at x5 then x7: 500 * 3 + 1500 * 35.
-        assert_eq!(branch.sequences()[0].sell_amount(), &BigUint::from(500u32));
-        assert_eq!(branch.sequences()[1].sell_amount(), &BigUint::from(1_500u32));
+        assert_eq!(branch_tails(&branch)[0].sell_amount(), &BigUint::from(500u32));
+        assert_eq!(branch_tails(&branch)[1].sell_amount(), &BigUint::from(1_500u32));
         assert_eq!(bought, BigUint::from(1_500u32 + 52_500u32));
     }
 
@@ -2245,8 +2338,7 @@ mod defibot_routes {
             .unwrap();
         assert!(branch.new_marginal_price().is_some());
 
-        branch
-            .hop_mut()
+        branch_hop_mut(&mut branch)
             .sell(&BigUint::zero())
             .unwrap();
 
@@ -2277,7 +2369,7 @@ mod defibot_routes {
             .unwrap();
 
         // Selling zero on a tail clears its post-trade state while its split stays non-zero.
-        branch.sequences_mut()[1]
+        branch_tail_mut(&mut branch, 1)
             .sell(&BigUint::zero())
             .unwrap();
 
@@ -2305,7 +2397,8 @@ mod defibot_routes {
         let mut branch = two_tail_branch(Vec::new());
         assert!(!branch.solved());
 
-        branch
+        tail_split_hop(&mut branch)
+            .expect("a two-tail branch has a tail split hop")
             .set_splits(vec![split(1, 2); 2])
             .unwrap();
 
@@ -2325,21 +2418,26 @@ mod defibot_routes {
     fn test_branch_rejects_tail_splits_that_do_not_match_its_tails() {
         let mut branch = two_tail_branch(Vec::new());
 
-        let result = branch.set_splits(vec![Fraction::one()]);
+        let result = tail_split_hop(&mut branch)
+            .expect("a two-tail branch has a tail split hop")
+            .set_splits(vec![Fraction::one()]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
 
     #[test]
     fn test_branch_rejects_a_tail_that_does_not_start_where_the_head_ends() {
-        let result = Branch::head(
-            single_pool_hop(token_a(), token_b(), tenfold_pool("ab")),
-            vec![route(
-                vec![token_c(), token_d()],
-                vec![single_pool_hop(token_c(), token_d(), tenfold_pool("cd"))],
-            )],
-            Vec::new(),
+        let tail = route(
+            vec![token_c(), token_d()],
+            vec![single_pool_hop(token_c(), token_d(), tenfold_pool("cd"))],
         );
+        let fed =
+            ParallelRoute::new(vec![Route::Sequence(tail)]).expect("one tail shares its own ends");
+
+        let result = SequenceRoute::new(vec![
+            single_pool_hop(token_a(), token_b(), tenfold_pool("ab")),
+            fed,
+        ]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
@@ -2369,9 +2467,11 @@ mod defibot_routes {
     }
 
     /// A pool trading at `spot_price` with no fee.
-    fn no_fee_pool(id: &str, spot_price: f64) -> PoolRef {
-        PoolRef::new(
+    fn no_fee_pool(id: &str, spot_price: f64) -> Pool {
+        Pool::new(
             id.to_string(),
+            token_a(),
+            token_b(),
             SellLimitKind::Enforced,
             Box::new(MockProtocolSim::new(spot_price).with_fee(0.0)),
             None,
@@ -2382,88 +2482,112 @@ mod defibot_routes {
     ///
     /// Selling on a branch requires every hop below it to be solved, so the fixtures build them
     /// that way rather than having each test set the same split.
-    fn solved_leg(id: &str, token_in: &Token, token_out: &Token) -> Hop {
-        let mut hop = Hop::new(token_in.clone(), token_out.clone(), vec![no_fee_pool(id, 2.0)])
-            .expect("hop has pools");
+    fn solved_leg(id: &str, token_in: &Arc<Token>, token_out: &Arc<Token>) -> ParallelRoute {
+        let mut hop = hop(token_in.clone(), token_out.clone(), vec![no_fee_pool(id, 2.0)]);
         hop.set_splits(vec![Fraction::one()])
             .expect("one split for one pool");
         hop
     }
 
     /// A token path through `tokens`, one pool per leg, pool ids taken from `ids`.
-    fn token_path(tokens: &[Token], ids: &[&str]) -> SequentialRoute {
+    fn token_path(tokens: &[Arc<Token>], ids: &[&str]) -> SequenceRoute {
         let hops = tokens
             .windows(2)
             .zip(ids)
             .map(|(pair, id)| solved_leg(id, &pair[0], &pair[1]))
             .collect();
-        SequentialRoute::new(tokens.to_vec(), hops).expect("route matches its token path")
+        SequenceRoute::new(hops).expect("route matches its token path")
     }
 
     /// `A`, `B`, `C`, `D`, `X` — `A` sells, `X` buys.
-    fn five_tokens() -> (Token, Token, Token, Token, Token) {
-        (token(0x0A, "A"), token(0x0B, "B"), token(0x0C, "C"), token(0x0D, "D"), token(0x11, "X"))
+    fn five_tokens() -> [Arc<Token>; 5] {
+        [
+            arc_token(0x0A, "A"),
+            arc_token(0x0B, "B"),
+            arc_token(0x0C, "C"),
+            arc_token(0x0D, "D"),
+            arc_token(0x11, "X"),
+        ]
     }
 
     // ==================== the tail-grouped branch ====================
 
+    /// A tail-grouped branch: a split over the sequences feeding one shared final hop.
+    fn tail_grouped(
+        sequences: Vec<SequenceRoute>,
+        splits: Vec<Fraction>,
+        shared_hop: ParallelRoute,
+    ) -> Result<SequenceRoute, DecompositionError> {
+        let mut feeding = ParallelRoute::new(
+            sequences
+                .into_iter()
+                .map(Route::Sequence)
+                .collect(),
+        )?;
+        feeding.set_splits(splits)?;
+        SequenceRoute::new(vec![feeding, shared_hop])
+    }
+
     #[test]
     fn test_tail_grouped_branch_reports_the_outer_tokens() {
-        let (a, b, c, _d, x) = five_tokens();
-        let branch = Branch::tail(
-            solved_leg("cx", &c, &x),
-            vec![token_path(&[a.clone(), b, c], &["ab", "bc"])],
+        let [a, b, c, _d, x] = five_tokens();
+        let branch = tail_grouped(
+            vec![token_path(&[a.clone(), b, c.clone()], &["ab", "bc"])],
             Vec::new(),
+            solved_leg("cx", &c, &x),
         )
         .expect("sequences end where the hop starts");
 
-        assert_eq!(branch.side(), BranchSide::Tail);
+        // The shared hop trails, so the branch sells what the sequences sell and buys what it buys.
+        assert!(branch.hops()[0].pools().is_empty(), "the leading hop holds chains");
         assert_eq!(branch.sell_token().symbol, a.symbol);
         assert_eq!(branch.buy_token().symbol, x.symbol);
     }
 
     #[test]
     fn test_tail_grouped_branch_walks_its_hops_in_flow_order() {
-        let (a, b, c, _d, x) = five_tokens();
-        let branch = Branch::tail(
-            solved_leg("cx", &c, &x),
-            vec![token_path(&[a, b, c], &["ab", "bc"])],
+        let [a, b, c, _d, x] = five_tokens();
+        let branch = tail_grouped(
+            vec![token_path(&[a, b, c.clone()], &["ab", "bc"])],
             Vec::new(),
+            solved_leg("cx", &c, &x),
         )
         .expect("sequences end where the hop starts");
 
         // The shared hop is last, not first: flow order, so assembly and loop removal read it
-        // right.
+        // right. The hop holding the chains carries no pools and so claims no direction.
         let symbols: Vec<String> = branch
-            .hops()
-            .map(|hop| format!("{}->{}", hop.token_in().symbol, hop.token_out().symbol))
+            .all_hops()
+            .into_iter()
+            .filter(|hop| !hop.pools().is_empty())
+            .map(|hop| format!("{}->{}", hop.sell_token().symbol, hop.buy_token().symbol))
             .collect();
         assert_eq!(symbols, vec!["A->B", "B->C", "C->X"]);
     }
 
     #[test]
     fn test_tail_grouped_label_renders_the_sequences_before_the_hop() {
-        let (a, b, c, d, x) = five_tokens();
-        let branch = Branch::tail(
-            solved_leg("dx", &d, &x),
+        let [a, b, c, d, x] = five_tokens();
+        let branch = tail_grouped(
             vec![
                 token_path(&[a.clone(), b, d.clone()], &["ab", "bd"]),
-                token_path(&[a, c, d], &["ac", "cd"]),
+                token_path(&[a, c, d.clone()], &["ac", "cd"]),
             ],
             Vec::new(),
+            solved_leg("dx", &d, &x),
         )
         .expect("sequences end where the hop starts");
 
-        assert_eq!(branch.token_path_label(), "[A->B | A->C]->D->X");
+        assert_eq!(branch.token_path_label(), "A->[B->D | C->D]->X");
     }
 
     #[test]
     fn test_tail_grouped_branch_rejects_a_sequence_that_ends_elsewhere() {
-        let (a, b, c, d, x) = five_tokens();
-        let result = Branch::tail(
-            solved_leg("dx", &d, &x),
+        let [a, b, c, d, x] = five_tokens();
+        let result = tail_grouped(
             vec![token_path(&[a, b, c], &["ab", "bc"])],
             Vec::new(),
+            solved_leg("dx", &d, &x),
         );
 
         assert!(
@@ -2474,8 +2598,8 @@ mod defibot_routes {
 
     #[test]
     fn test_tail_grouped_branch_rejects_an_empty_sequence_set() {
-        let (_a, _b, _c, d, x) = five_tokens();
-        let result = Branch::tail(solved_leg("dx", &d, &x), Vec::new(), Vec::new());
+        let [_a, _b, _c, d, x] = five_tokens();
+        let result = tail_grouped(Vec::new(), Vec::new(), solved_leg("dx", &d, &x));
 
         assert!(
             matches!(result, Err(DecompositionError::InvalidStructure { .. })),
@@ -2485,14 +2609,14 @@ mod defibot_routes {
 
     #[test]
     fn test_tail_grouped_branch_sells_its_hop_once_for_the_whole_flow() {
-        let (a, b, c, d, x) = five_tokens();
-        let mut branch = Branch::tail(
-            solved_leg("dx", &d, &x),
+        let [a, b, c, d, x] = five_tokens();
+        let mut branch = tail_grouped(
             vec![
                 token_path(&[a.clone(), b, d.clone()], &["ab", "bd"]),
-                token_path(&[a, c, d], &["ac", "cd"]),
+                token_path(&[a, c, d.clone()], &["ac", "cd"]),
             ],
             vec![Fraction::one(), Fraction::zero()],
+            solved_leg("dx", &d, &x),
         )
         .expect("sequences end where the hop starts");
 
@@ -2503,12 +2627,11 @@ mod defibot_routes {
         // Both sequences feed one hop, so the hop's own sell amount is their combined output rather
         // than either sequence's share. That is what stops the two from each claiming its
         // liquidity.
-        let into_hop: BigUint = branch
-            .sequences()
+        let into_hop: BigUint = branch_tails(&branch)
             .iter()
-            .map(SequentialRoute::buy_amount)
+            .map(|tail| tail.buy_amount().clone())
             .sum();
-        assert_eq!(branch.hop().sell_amount(), &into_hop);
+        assert_eq!(branch_hop(&branch).sell_amount(), &into_hop);
         assert_eq!(branch.buy_amount(), &bought);
         assert!(!bought.is_zero());
     }

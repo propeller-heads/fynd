@@ -18,7 +18,7 @@
 //! percent settles at zero and is never revisited.
 //!
 //! Unlike `PathFrankWolfeAlgorithm`, the market is not re-priced between steps: each alternative
-//! owns private [`PoolRef`](crate::algorithm::decomposition::components::PoolRef) copies and is
+//! owns private [`PoolRef`](crate::algorithm::decomposition::components::Pool) copies and is
 //! sold against untouched state, so a split whose alternatives share a pool is overvalued and
 //! [`sell_with_coupled_paths`](crate::algorithm::decomposition::solve) corrects the totals
 //! afterwards.
@@ -31,8 +31,8 @@ use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::{
     decomposition::{
-        components::{DecompositionError, Fraction},
-        models::TokenPriceData,
+        components::DecompositionError,
+        models::{Fraction, TokenPriceData},
         optimizers::{decrease_until_sell, split_of, Sellable, SplitSolution},
     },
     split_primitives::golden_section_search,
@@ -66,7 +66,7 @@ pub(crate) fn split_by_frank_wolfe<S: Sellable>(
         });
     }
     if routes.len() == 1 {
-        let (bought, _) = decrease_until_sell(&mut routes[0], sell_amount)?;
+        let (bought, _) = decrease_until_sell(sell_amount, |amount| routes[0].sell(amount))?;
         return Ok(SplitSolution {
             sold: routes[0].sell_amount().clone(),
             bought,
@@ -193,7 +193,8 @@ fn evaluate<S: Sellable>(
             routes[index].sell(&BigUint::zero())?;
             continue;
         }
-        let (route_bought, route_gas) = decrease_until_sell(&mut routes[index], &amount)?;
+        let (route_bought, route_gas) =
+            decrease_until_sell(&amount, |amount| routes[index].sell(amount))?;
         bought += route_bought;
         gas += route_gas;
     }
@@ -215,7 +216,7 @@ fn rank<S: Sellable>(
         if !route.solved() {
             continue;
         }
-        let (bought, gas) = decrease_until_sell(route, sell_amount)?;
+        let (bought, gas) = decrease_until_sell(sell_amount, |amount| route.sell(amount))?;
         let cost = gas_prices.cost_in_token(&gas, &buy_token.address);
         let net = BigInt::from(bought) - BigInt::from(cost);
         if !net.is_positive() {

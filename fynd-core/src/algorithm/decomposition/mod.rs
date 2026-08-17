@@ -112,7 +112,7 @@ use crate::{
     feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, RouteResult},
-    AlgorithmError,
+    AlgorithmError, NoPathReason,
 };
 
 /// Default cap on parallel alternatives kept, per solution graph and per hop.
@@ -383,7 +383,7 @@ impl DecompositionAlgorithm {
             max_hops: self.max_hops,
             max_paths: self.config.max_enumerated_paths,
             deadline: Some(deadline),
-            connector_tokens: Some(connector_tokens.clone()),
+            connector_tokens: None,
         };
         let all_paths = input.search_graph(&full_search_bounds);
         let mut component_ids = path_to_component_ids(&all_paths);
@@ -592,7 +592,15 @@ impl Algorithm for DecompositionAlgorithm {
         }
         self.solve_order(order, graph, market, label, derived)
             .await
-            .map_err(|e| AlgorithmError::Other(format!("decomposition solve failed: {e}")))
+            .map_err(|error| match error {
+                // Every other algorithm reports an unroutable pair as `NoPath`, and the router and
+                // the RPC layer read that variant; flattening it to `Other` would make this
+                // algorithm the only one that does not.
+                DecompositionError::GraphBuildFailure | DecompositionError::SolveError => {
+                    no_route(order, NoPathReason::NoGraphPath)
+                }
+                error => AlgorithmError::Other(format!("decomposition solve failed: {error}")),
+            })
     }
 
     /// The solve reads two derived quantities and no others.
@@ -650,6 +658,11 @@ impl<'a> SolveRequest<'a> {
     }
 }
 
+/// Reports an order as unroutable in the shape the other algorithms use.
+fn no_route(order: &Order, reason: NoPathReason) -> AlgorithmError {
+    AlgorithmError::NoPath { from: order.token_in().clone(), to: order.token_out().clone(), reason }
+}
+
 fn rank_solutions(
     candidate: Option<DecompositionGraph>,
     reference: Option<DecompositionGraph>,
@@ -659,9 +672,9 @@ fn rank_solutions(
         (Some(candidate), Some(reference)) => {
             debug!(
                 candidate_net = %net_of_gas(&candidate, gas_prices),
-                candidate_branches = candidate.branches().len(),
+                candidate_sequences = candidate.sequences.len(),
                 reference_net = %net_of_gas(&reference, gas_prices),
-                reference_branches = reference.branches().len(),
+                reference_sequences = reference.sequences.len(),
                 "decomposition ranking candidate against reference"
             );
             match choose_solution(&candidate, Some(&reference), gas_prices) {

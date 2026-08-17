@@ -49,8 +49,8 @@ use crate::{
     PoolConfig, Solver,
 };
 
-/// Hop limit for the snapshot. Three is what the benchmark configs use, and it is deep enough that
-/// the branch grouping has something to group.
+/// SplitHop limit for the snapshot. Three is what the benchmark configs use, and it is deep enough
+/// that the branch grouping has something to group.
 const MAX_HOPS: usize = 3;
 
 /// Per-order solve budget. Generous, so the snapshot pins what the algorithm decides rather than
@@ -194,8 +194,8 @@ fn largest_orders(chain: &str) -> Vec<(String, crate::types::Order)> {
 
 /// Solves every order and records what came back.
 async fn solve_all() -> Vec<RouteSnapshot> {
-    let recording =
-        fynd_test_fixtures::read_recording(&fixture("market_recording.json.zst")).expect(
+    let recording = fynd_test_fixtures::read_recording(&fixture("market_recording.json.zst"))
+        .expect(
             "market recording fixture; it is stored in Git LFS, so `git lfs pull` if this fails",
         );
     let chain_name = recording.metadata.chain.clone();
@@ -245,9 +245,7 @@ async fn solve_all() -> Vec<RouteSnapshot> {
                     scenario,
                     status: format!("{:?}", result.status()),
                     amount_out: result.amount_out().to_string(),
-                    amount_out_net_gas: result
-                        .amount_out_net_gas()
-                        .to_string(),
+                    amount_out_net_gas: result.amount_out_net_gas().to_string(),
                     swaps,
                 }
             }
@@ -259,12 +257,11 @@ async fn solve_all() -> Vec<RouteSnapshot> {
 /// Every order returns the route it returned when the snapshot was taken.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_decomposition_routes_match_the_snapshot() {
-    let expected: Vec<RouteSnapshot> = serde_json::from_str(
-        &std::fs::read_to_string(snapshot_path()).expect(
+    let expected: Vec<RouteSnapshot> =
+        serde_json::from_str(&std::fs::read_to_string(snapshot_path()).expect(
             "route snapshot; run the ignored `regenerate_decomposition_snapshot` test to create it",
-        ),
-    )
-    .expect("route snapshot parses");
+        ))
+        .expect("route snapshot parses");
 
     let actual = solve_all().await;
 
@@ -288,8 +285,11 @@ async fn test_decomposition_routes_match_the_snapshot() {
 async fn regenerate_decomposition_snapshot() {
     let snapshots = solve_all().await;
     let path = snapshot_path();
-    std::fs::create_dir_all(path.parent().expect("snapshot has a directory"))
-        .expect("snapshot directory");
+    std::fs::create_dir_all(
+        path.parent()
+            .expect("snapshot has a directory"),
+    )
+    .expect("snapshot directory");
     std::fs::write(
         &path,
         format!("{}\n", serde_json::to_string_pretty(&snapshots).expect("snapshot serialises")),

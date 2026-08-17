@@ -20,7 +20,7 @@ use super::*;
 use crate::{
     algorithm::{
         decomposition::{
-            components::Branch,
+            components::SequenceRoute,
             models::DirectPath,
             optimizers::SplitOptimizerConfig,
             token_graph::{AllowedTokens, TokenGraph},
@@ -122,9 +122,9 @@ fn build(
 /// Token sequence of every branch, rendered as `"A->W->B"`.
 fn branch_labels(graph: &DecompositionGraph) -> Vec<String> {
     graph
-        .branches()
+        .sequences
         .iter()
-        .map(Branch::token_path_label)
+        .map(SequenceRoute::token_path_label)
         .collect()
 }
 

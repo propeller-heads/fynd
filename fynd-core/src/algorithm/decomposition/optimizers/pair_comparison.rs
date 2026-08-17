@@ -30,8 +30,8 @@ use tracing::debug;
 use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::decomposition::{
-    components::{DecompositionError, Fraction},
-    models::TokenPriceData,
+    components::DecompositionError,
+    models::{Fraction, TokenPriceData},
     optimizers::{decrease_until_sell, scale, split_of, to_human, Sellable, SplitSolution},
 };
 
@@ -64,7 +64,7 @@ pub(crate) fn split_by_pair_comparison<S: Sellable>(
     if routes.len() == 1 {
         // Note that the split stays at one even when the back-off sold less than asked, so a
         // single-alternative shortfall shows up only in `sold` (`pair_comparison.py:39-42`).
-        let (bought, _) = decrease_until_sell(&mut routes[0], sell_amount)?;
+        let (bought, _) = decrease_until_sell(sell_amount, |amount| routes[0].sell(amount))?;
         return Ok(SplitSolution {
             sold: routes[0].sell_amount().clone(),
             bought,
@@ -84,7 +84,7 @@ pub(crate) fn split_by_pair_comparison<S: Sellable>(
         let index = to_analyse[0];
         let mut splits = vec![Fraction::zero(); routes.len()];
         splits[index] = split_of(routes[index].sell_amount(), sell_amount);
-        let (bought, _) = decrease_until_sell(&mut routes[index], sell_amount)?;
+        let (bought, _) = decrease_until_sell(sell_amount, |amount| routes[index].sell(amount))?;
         return Ok(SplitSolution { sold: routes[index].sell_amount().clone(), bought, splits });
     }
 
@@ -117,7 +117,7 @@ fn sort_routes<S: Sellable>(
             ranked.push((index, BigInt::zero()));
             continue;
         }
-        let (bought, gas) = decrease_until_sell(route, sell_amount)?;
+        let (bought, gas) = decrease_until_sell(sell_amount, |amount| route.sell(amount))?;
         let cost = gas_prices.cost_in_token(&gas, &buy_token.address);
         // Floored at zero so a route that cannot pay for its own gas ranks alongside one that
         // cannot trade at all; both are dropped by the caller.
@@ -414,8 +414,12 @@ fn move_funds<S: Sellable>(
             return settle_on_sender(routes, pair, sell_amount, &best_split.0);
         }
 
-        decrease_until_sell(&mut routes[sender], &scale(sell_amount, &best_split.0))?;
-        decrease_until_sell(&mut routes[receiver], &scale(sell_amount, &best_split.1))?;
+        decrease_until_sell(&scale(sell_amount, &best_split.0), |amount| {
+            routes[sender].sell(amount)
+        })?;
+        decrease_until_sell(&scale(sell_amount, &best_split.1), |amount| {
+            routes[receiver].sell(amount)
+        })?;
         return Ok(order_by_sell_amount(routes, pair));
     }
 
@@ -427,8 +431,10 @@ fn move_funds<S: Sellable>(
         return Ok((sender, receiver));
     }
     // CASE #5.1: the receiver ended up with everything, so it becomes the sender of the next pass.
-    decrease_until_sell(&mut routes[sender], &scale(sell_amount, &best_split.0))?;
-    decrease_until_sell(&mut routes[receiver], &scale(sell_amount, &best_split.1))?;
+    decrease_until_sell(&scale(sell_amount, &best_split.0), |amount| routes[sender].sell(amount))?;
+    decrease_until_sell(&scale(sell_amount, &best_split.1), |amount| {
+        routes[receiver].sell(amount)
+    })?;
     Ok((receiver, sender))
 }
 
@@ -464,9 +470,9 @@ fn sell_with_gas<S: Sellable>(
     amount: &BigUint,
     gas_prices: &TokenPriceData,
 ) -> Result<BigInt, DecompositionError> {
-    let buy_token = route.buy_token().address.clone();
+    let buy_token = route.buy_token().clone();
     let (bought, gas) = route.sell(amount)?;
-    let cost = gas_prices.cost_in_token(&gas, &buy_token);
+    let cost = gas_prices.cost_in_token(&gas, &buy_token.address);
     Ok(BigInt::from(bought) - BigInt::from(cost))
 }
 
@@ -502,10 +508,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::{
-            decomposition::{
-                components::{Hop, PoolRef, SellLimitKind, SequentialRoute},
-                optimizers::HopPool,
-            },
+            decomposition::components::{ParallelRoute, Pool, Route, SellLimitKind, SequenceRoute},
             test_utils::{token, ConstantProductSim},
         },
         derived::types::TokenGasPrices,
@@ -520,9 +523,11 @@ mod tests {
         BigUint::from(amount) * unit()
     }
 
-    fn pool(id: &str, reserve_a: u64, reserve_b: u64) -> PoolRef {
-        PoolRef::new(
+    fn pool(id: &str, reserve_a: u64, reserve_b: u64) -> Pool {
+        Pool::new(
             id.to_string(),
+            Arc::new(token(0x0A, "A")),
+            Arc::new(token(0x0B, "B")),
             SellLimitKind::Enforced,
             Box::new(ConstantProductSim {
                 reserve_0: whole(reserve_a),
@@ -533,15 +538,23 @@ mod tests {
         )
     }
 
-    /// A one-hop A -> B route over a single pool, with the hop's split already set.
-    fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SequentialRoute {
-        let (token_a, token_b) = (token(0x0A, "A"), token(0x0B, "B"));
-        let mut hop =
-            Hop::new(token_a.clone(), token_b.clone(), vec![pool(id, reserve_a, reserve_b)])
-                .expect("hop has a pool");
+    /// A hop over `pools`, unsolved.
+    fn hop(pools: Vec<Pool>) -> ParallelRoute {
+        ParallelRoute::new(
+            pools
+                .into_iter()
+                .map(Route::pool)
+                .collect(),
+        )
+        .expect("hop has pools")
+    }
+
+    /// A one-hop A -> B chain over a single pool, with the hop's split already set.
+    fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SequenceRoute {
+        let mut hop = hop(vec![pool(id, reserve_a, reserve_b)]);
         hop.set_splits(vec![Fraction::one()])
             .expect("one split for one pool");
-        SequentialRoute::new(vec![token_a, token_b], vec![hop]).expect("route matches its path")
+        SequenceRoute::new(vec![hop]).expect("one hop is a chain")
     }
 
     /// A one-hop route over `pool_count` identical pools where every pool has been sold on but only
@@ -555,13 +568,12 @@ mod tests {
         reserve_b: u64,
         pool_count: usize,
         trial: &BigUint,
-    ) -> SequentialRoute {
-        let (token_a, token_b) = (token(0x0A, "A"), token(0x0B, "B"));
+    ) -> SequenceRoute {
         let pools = (0..pool_count)
             .map(|index| pool(&format!("p{index}"), reserve_a, reserve_b))
             .collect();
-        let mut hop = Hop::new(token_a.clone(), token_b.clone(), pools).expect("hop has pools");
-        for leg in HopPool::bind_all(&mut hop).iter_mut() {
+        let mut hop = hop(pools);
+        for leg in hop.children_mut() {
             leg.sell(trial)
                 .expect("every pool absorbs the trial amount");
         }
@@ -570,7 +582,7 @@ mod tests {
         splits[0] = Fraction::one();
         hop.set_splits(splits)
             .expect("one split per pool");
-        SequentialRoute::new(vec![token_a, token_b], vec![hop]).expect("route matches its path")
+        SequenceRoute::new(vec![hop]).expect("one hop is a chain")
     }
 
     fn free_gas(gas_price_wei: &BigUint) -> TokenPriceData {
@@ -722,7 +734,8 @@ mod tests {
         let gas_price_wei = BigUint::one();
         let gas_prices =
             TokenPriceData::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone())));
-        decrease_until_sell(&mut routes[0], &sell_amount).expect("incumbent sells");
+        decrease_until_sell(&sell_amount, |amount| routes[0].sell(amount))
+            .expect("incumbent sells");
 
         let ranked = vec![(0, BigInt::one()), (1, BigInt::one())];
         let (to_analyse, skipped) = prune(
@@ -850,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_no_routes() {
-        let mut routes: Vec<SequentialRoute> = Vec::new();
+        let mut routes: Vec<Route> = Vec::new();
         let gas_price_wei = BigUint::zero();
 
         let solution = optimize(&mut routes, &whole(1_000), &free_gas(&gas_price_wei));
@@ -893,19 +906,13 @@ mod tests {
     #[test]
     fn test_optimizer_splits_a_hop_over_its_pools() {
         // The same optimizer, one level down: the alternatives are a hop's pools, not branches.
-        let (token_a, token_b) = (token(0x0A, "A"), token(0x0B, "B"));
-        let mut hop = Hop::new(
-            token_a,
-            token_b,
-            vec![pool("a", 1_000_000, 1_000_000), pool("b", 1_000_000, 1_000_000)],
-        )
-        .expect("hop has pools");
+        let mut hop = hop(vec![pool("a", 1_000_000, 1_000_000), pool("b", 1_000_000, 1_000_000)]);
         let sell_amount = whole(1_000);
         let gas_price_wei = BigUint::zero();
 
         let solution = {
-            let mut legs = HopPool::bind_all(&mut hop);
-            optimize(&mut legs, &sell_amount, &free_gas(&gas_price_wei))
+            let legs = hop.children_mut();
+            optimize(legs, &sell_amount, &free_gas(&gas_price_wei))
         };
 
         let half = Fraction::from_ratio(1, 2).expect("non-zero denominator");

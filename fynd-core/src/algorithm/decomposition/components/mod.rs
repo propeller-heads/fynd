@@ -2,34 +2,43 @@
 //!
 //! Port of defibot's `FractalRoute` tree (`defibot/solver/order_solver/decomposition/routes/`).
 //! defibot models a solution as an arbitrarily deep recursion of `SimpleRoute` (one pool),
-//! `SequentialRoute` (hops in series) and `ParallelRoute` (alternatives in parallel). Years of
-//! production use showed that solutions always collapse to the same three levels, so the recursion
-//! is replaced here by a fixed structure:
+//! `SequentialRoute` (hops in series) and `ParallelRoute` (alternatives in parallel). The same
+//! three shapes are here, named rather than nested without limit:
 //!
-//! * [`DecompositionGraph`] — the outer `ParallelRoute` over one order.
-//! * [`Branch`] — one outer split: a shared first [`Hop`] plus the parallel tails hanging off it.
-//! * [`SequentialRoute`] — one tail: a token path with one [`Hop`] per leg.
-//! * [`Hop`] — the inner `ParallelRoute` of `SimpleRoute`s at one leg, holding [`PoolRef`]s.
+//! * [`DecompositionGraph`] — the outer parallel split over one order.
+//! * [`SequenceRoute`] — hops in series. One branch of the graph, and also one tail of a grouped
+//!   branch.
+//! * [`ParallelRoute`] — alternatives in parallel: the pools of one leg, or the tails of a grouped
+//!   branch.
+//! * [`Pool`] — one pool traded in one direction, defibot's `SimpleRoute`.
+//! * [`Route`] — which of the two a [`ParallelRoute`]'s alternatives are.
 //!
-//! A single direct pool is a one-branch graph whose branch has one pool in its head and no tails;
-//! there is no special case for it.
+//! A single direct pool is a one-branch graph whose branch is a one-hop chain over one pool; there
+//! is no special case for it.
 //!
-//! [`Branch`] is the level `_group_by_neighbour_token` (`order_solver.py:517-554`) exists to build.
-//! It is what keeps a pool shared by several token paths from being allocated once per path: the
-//! paths sharing a first hop become one branch, and that hop is sold once for all of them. See
-//! [`Branch`] for the composition rules and for why they collapse to [`SequentialRoute`]'s when a
-//! branch has a single tail.
+//! # The grouped branch
+//!
+//! `_group_by_neighbour_token` (`order_solver.py:517-554`) exists to stop a pool shared by several
+//! token paths from being allocated once per path. The paths sharing a hop become one branch, and
+//! that hop is sold once for all of them.
+//!
+//! Such a branch is a two-hop [`SequenceRoute`]: the shared hop, and a [`ParallelRoute`] whose
+//! alternatives are the tails. Which of the two comes first is the grouping's choice — leading when
+//! the paths share their first hop, trailing when they share their last. Every composition rule
+//! collapses to the plain chain's when there is exactly one tail, so grouping costs nothing on
+//! branches that share nothing.
 //!
 //! # Deviations from defibot
 //!
 //! * defibot's `EthereumToken` carries decimals and unit conversion, so a route can identify a
 //!   token by symbol alone. Fynd's [`ProtocolSim`] takes `&Token` (it needs decimals to scale spot
-//!   prices), so hops and routes hold `Token` rather than `Address`. `Token::address` is the
-//!   identity in every comparison.
+//!   prices), so components hold tokens rather than addresses — as `Arc<Token>`, which is how
+//!   `MarketState` keeps them, so passing one around is a pointer rather than a `String` symbol and
+//!   a `Vec<Option<TransferCost>>`.
 //! * defibot mixes on-chain integers with human-unit `Decimal`s. Everything here is on-chain
 //!   `BigUint`; conversion to human units happens only where a price is produced.
 //! * defibot's splits may be `None` (unsolved). Here an empty `splits` vector means unsolved and a
-//!   non-empty one must match the pool count exactly.
+//!   non-empty one must match the alternative count exactly.
 
 use std::sync::Arc;
 
@@ -127,22 +136,31 @@ fn executed_price(
     ratio.to_f64().unwrap_or(0.0)
 }
 
-mod branch;
 mod error;
 mod graph;
-mod hop;
 mod pool;
+mod route;
 mod sequence;
 mod split;
 
-pub(crate) use branch::{Branch, BranchSide};
 pub(crate) use error::DecompositionError;
 pub(crate) use graph::DecompositionGraph;
-pub(crate) use hop::Hop;
-pub(crate) use pool::{PoolRef, SellLimitKind};
-pub(crate) use sequence::SequentialRoute;
-pub(crate) use split::{splits_sum, Fraction};
+pub(crate) use pool::{Pool, SellLimitKind};
+pub(crate) use route::Route;
+pub(crate) use sequence::{sequence_weight, SequenceRoute};
+pub(crate) use split::ParallelRoute;
+
+pub(crate) use crate::algorithm::decomposition::models::Fraction;
 
 #[cfg(test)]
 #[path = "../tests/components_tests.rs"]
 mod tests;
+
+/// Sum of a split vector as an exact rational.
+pub(crate) fn splits_sum(splits: &[Fraction]) -> BigRational {
+    let mut total = BigRational::zero();
+    for split in splits {
+        total += split.as_ratio();
+    }
+    total
+}

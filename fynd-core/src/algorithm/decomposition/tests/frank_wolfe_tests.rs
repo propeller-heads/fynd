@@ -1,8 +1,10 @@
 //! Tests for the Frank-Wolfe split search.
 
+use std::sync::Arc;
+
 use super::*;
 use crate::algorithm::{
-    decomposition::components::{Hop, PoolRef, SellLimitKind, SequentialRoute},
+    decomposition::components::{ParallelRoute, Pool, Route, SellLimitKind, SequenceRoute},
     test_utils::{token, ConstantProductSim},
 };
 
@@ -15,9 +17,11 @@ fn whole(amount: u64) -> BigUint {
     BigUint::from(amount) * unit()
 }
 
-fn pool(id: &str, reserve_a: u64, reserve_b: u64) -> PoolRef {
-    PoolRef::new(
+fn pool(id: &str, reserve_a: u64, reserve_b: u64) -> Pool {
+    Pool::new(
         id.to_string(),
+        Arc::new(token(0x0A, "A")),
+        Arc::new(token(0x0B, "B")),
         SellLimitKind::Enforced,
         Box::new(ConstantProductSim {
             reserve_0: whole(reserve_a),
@@ -28,14 +32,13 @@ fn pool(id: &str, reserve_a: u64, reserve_b: u64) -> PoolRef {
     )
 }
 
-/// A one-hop A -> B route over a single pool, with the hop's split already set.
-fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SequentialRoute {
-    let (token_a, token_b) = (token(0x0A, "A"), token(0x0B, "B"));
-    let mut hop = Hop::new(token_a.clone(), token_b.clone(), vec![pool(id, reserve_a, reserve_b)])
+/// A one-hop A -> B chain over a single pool, with the hop's split already set.
+fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SequenceRoute {
+    let mut hop = ParallelRoute::new(vec![Route::pool(pool(id, reserve_a, reserve_b))])
         .expect("hop has a pool");
     hop.set_splits(vec![Fraction::one()])
         .expect("one split for one pool");
-    SequentialRoute::new(vec![token_a, token_b], vec![hop]).expect("route matches its path")
+    SequenceRoute::new(vec![hop]).expect("one hop is a chain")
 }
 
 /// Gas priced at zero, so the tests compare output alone.
@@ -127,7 +130,7 @@ fn test_one_alternative_takes_everything() {
 fn test_no_alternatives_is_an_empty_solution() {
     let (wei, _) = gas_prices();
     let prices = TokenPriceData::new(wei.clone(), None);
-    let mut routes: Vec<SequentialRoute> = Vec::new();
+    let mut routes: Vec<SequenceRoute> = Vec::new();
 
     let solution = split_by_frank_wolfe(&mut routes, &whole(100), &prices)
         .expect("an empty set is not an error");

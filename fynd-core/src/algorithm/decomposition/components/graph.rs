@@ -1,26 +1,29 @@
 //! The whole solution: parallel branches over one order.
 
 use num_bigint::BigUint;
+#[cfg(test)]
 use num_rational::BigRational;
-use num_traits::{One, Zero};
+#[cfg(test)]
+use num_traits::One;
+use num_traits::Zero;
 use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::decomposition::components::*;
 
 // ===================== SolutionGraph =====================
 
-/// A complete solution: parallel [`Branch`]es over one order.
+/// A complete solution: parallel branches over one order, each a [`SequenceRoute`].
 ///
-/// Equivalent of the top-level `ParallelRoute` in defibot. Every branch shares the same sell and
+/// Equivalent of the top-level `Route` in defibot. Every branch shares the same sell and
 /// buy token; `outer_splits` says how much of the order each branch carries, and is empty while
-/// the graph is unsolved — the same encoding [`Hop`] uses for `splits`.
+/// the graph is unsolved — the same encoding [`Route`] uses for `splits`.
 ///
 /// The outer splits are over **branches, not token paths**. Two token paths that leave the sell
 /// token through the same pool belong to one branch, so no pool the two share can be allocated
 /// twice at this level (`order_solver.py:517-554`).
 pub(crate) struct DecompositionGraph {
-    branches: Vec<Branch>,
-    branch_splits: Vec<Fraction>,
+    pub(crate) sequences: Vec<SequenceRoute>,
+    splits: Vec<Fraction>,
     sell_amount: BigUint,
     buy_amount: BigUint,
     limit_cache: Option<(BigUint, Vec<ComponentId>)>,
@@ -39,7 +42,7 @@ impl DecompositionGraph {
     /// vector does not match the branch count, or when the branches do not share both endpoints
     /// (`routes/parallel.py:289-292`).
     pub(crate) fn new(
-        branches: Vec<Branch>,
+        branches: Vec<SequenceRoute>,
         outer_splits: Vec<Fraction>,
     ) -> Result<Self, DecompositionError> {
         if branches.is_empty() {
@@ -71,47 +74,17 @@ impl DecompositionGraph {
             }
         }
         Ok(Self {
-            branches,
-            branch_splits: outer_splits,
+            sequences: branches,
+            splits: outer_splits,
             sell_amount: BigUint::zero(),
             buy_amount: BigUint::zero(),
             limit_cache: None,
         })
     }
 
-    /// Builds a graph whose branches are each one token path — the ungrouped shape, which the
-    /// arithmetic fixtures describe and the one-tail collapse is asserted against.
-    ///
-    /// # Errors
-    ///
-    /// Whatever [`Branch::from_route`] and [`DecompositionGraph::new`] raise.
-    #[cfg(test)]
-    #[cfg(test)]
-    pub(crate) fn from_routes(
-        routes: Vec<SequentialRoute>,
-        outer_splits: Vec<Fraction>,
-    ) -> Result<Self, DecompositionError> {
-        let mut branches = Vec::with_capacity(routes.len());
-        for route in routes {
-            branches.push(Branch::from_route(route)?);
-        }
-        Self::new(branches, outer_splits)
-    }
-
-    /// Parallel branches.
-    pub(crate) fn branches(&self) -> &[Branch] {
-        &self.branches
-    }
-
-    /// Mutable branches, for solvers assigning splits.
-    pub(crate) fn branches_mut(&mut self) -> &mut [Branch] {
-        &mut self.branches
-    }
-
-
     /// Share of the order each branch carries.
     pub(crate) fn outer_splits(&self) -> &[Fraction] {
-        &self.branch_splits
+        &self.splits
     }
 
     /// Assigns one split per branch, or an empty vector to mark the graph unsolved again.
@@ -123,9 +96,9 @@ impl DecompositionGraph {
     ///
     /// Supplies the derived mid-prices to every branch of the graph.
     ///
-    /// See [`SequentialRoute::set_prices`].
+    /// See [`Route::set_prices`].
     pub(crate) fn set_prices(&mut self, prices: Arc<TokenGasPrices>) {
-        for branch in &mut self.branches {
+        for branch in &mut self.sequences {
             branch.set_prices(Arc::clone(&prices));
         }
         self.limit_cache = None;
@@ -137,30 +110,31 @@ impl DecompositionGraph {
         &mut self,
         outer_splits: Vec<Fraction>,
     ) -> Result<(), DecompositionError> {
-        if !outer_splits.is_empty() && outer_splits.len() != self.branches.len() {
+        if !outer_splits.is_empty() && outer_splits.len() != self.sequences.len() {
             return Err(DecompositionError::InvalidStructure {
                 reason: format!(
                     "solution graph has {} branches but got {} splits",
-                    self.branches.len(),
+                    self.sequences.len(),
                     outer_splits.len()
                 ),
             });
         }
-        self.branch_splits = outer_splits;
+        self.splits = outer_splits;
         Ok(())
     }
 
     /// Token sold by the order.
     pub(crate) fn sell_token(&self) -> &Token {
-        self.branches[0].sell_token()
+        self.sequences[0].sell_token()
     }
 
     /// Token bought by the order.
     pub(crate) fn buy_token(&self) -> &Token {
-        self.branches[0].buy_token()
+        self.sequences[0].buy_token()
     }
 
     /// Amount of [`DecompositionGraph::sell_token`] the last sell consumed.
+    #[cfg(test)]
     pub(crate) fn sell_amount(&self) -> &BigUint {
         &self.sell_amount
     }
@@ -173,12 +147,16 @@ impl DecompositionGraph {
     /// A graph is solved once its outer splits are set and every branch is solved
     /// (`routes/parallel.py:52-57`).
     pub(crate) fn solved(&self) -> bool {
-        !self.branch_splits.is_empty() && self.branches.iter().all(Branch::solved)
+        !self.splits.is_empty() &&
+            self.sequences
+                .iter()
+                .all(SequenceRoute::solved)
     }
 
     /// Whether unsolved estimates apply (`routes/parallel.py:78`).
+    #[cfg(test)]
     fn use_estimate(&self) -> bool {
-        !self.solved() || splits_sum(&self.branch_splits) < BigRational::one()
+        !self.solved() || splits_sum(&self.splits) < BigRational::one()
     }
 
     /// Mean of the branch prices while unsolved, split-weighted sum once solved
@@ -192,12 +170,14 @@ impl DecompositionGraph {
     /// not compiled into the library.
     #[cfg(test)]
     pub(crate) fn route_price(&self) -> Result<f64, DecompositionError> {
-        self.combine(Branch::route_price)
+        self.combine(|branch| branch.route_price())
     }
 
-    /// Branch prices net of fees (`routes/parallel.py:108-118`).
+    /// Branch prices net of fees (`routes/parallel.py:108-118`). Parity-only; see
+    /// [`DecompositionGraph::route_price`].
+    #[cfg(test)]
     pub(crate) fn marginal_price(&self) -> Result<f64, DecompositionError> {
-        self.combine(Branch::marginal_price)
+        self.combine(|branch| branch.marginal_price())
     }
 
     /// Marginal price at the post-trade states (`routes/parallel.py:120-134`).
@@ -208,11 +188,7 @@ impl DecompositionGraph {
             return None;
         }
         let mut total = 0.0;
-        for (branch, split) in self
-            .branches
-            .iter()
-            .zip(&self.branch_splits)
-        {
+        for (branch, split) in self.sequences.iter().zip(&self.splits) {
             if split.is_zero() {
                 continue;
             }
@@ -227,26 +203,8 @@ impl DecompositionGraph {
     /// Gas of every branch (`routes/parallel.py:172-174`).
     pub(crate) fn gas(&self) -> BigUint {
         let mut total = BigUint::zero();
-        for branch in &self.branches {
+        for branch in &self.sequences {
             total += branch.gas();
-        }
-        total
-    }
-
-    /// Gas of only the branches the outer splits activate (`routes/parallel.py:281-286`).
-    ///
-    /// See [`Hop::minimum_gas`] for why this differs from [`DecompositionGraph::gas`].
-    pub(crate) fn minimum_gas(&self) -> BigUint {
-        let mut total = BigUint::zero();
-        for (branch, split) in self
-            .branches
-            .iter()
-            .zip(&self.branch_splits)
-        {
-            if split.is_zero() {
-                continue;
-            }
-            total += branch.minimum_gas();
         }
         total
     }
@@ -263,11 +221,11 @@ impl DecompositionGraph {
     /// would leave no branch at all — defibot assigns the empty list and produces a graph that
     /// raises on the next attribute access (`routes/parallel.py:289-292` never runs again).
     pub(crate) fn retain_branches(&mut self, keep: &[bool]) -> Result<(), DecompositionError> {
-        if keep.len() != self.branches.len() {
+        if keep.len() != self.sequences.len() {
             return Err(DecompositionError::InvalidStructure {
                 reason: format!(
                     "solution graph has {} branches but got {} keep flags",
-                    self.branches.len(),
+                    self.sequences.len(),
                     keep.len()
                 ),
             });
@@ -278,14 +236,14 @@ impl DecompositionGraph {
             });
         }
 
-        let mut kept = Vec::with_capacity(self.branches.len());
-        for (index, branch) in self.branches.drain(..).enumerate() {
+        let mut kept = Vec::with_capacity(self.sequences.len());
+        for (index, branch) in self.sequences.drain(..).enumerate() {
             if keep[index] {
                 kept.push(branch);
             }
         }
-        self.branches = kept;
-        self.branch_splits.clear();
+        self.sequences = kept;
+        self.splits.clear();
         self.limit_cache = None;
         Ok(())
     }
@@ -306,17 +264,13 @@ impl DecompositionGraph {
     pub(crate) fn inertia(&self) -> f64 {
         if !self.solved() {
             return self
-                .branches
+                .sequences
                 .iter()
-                .map(Branch::inertia)
+                .map(|branch| branch.inertia())
                 .fold(f64::NEG_INFINITY, f64::max);
         }
         let mut total = 0.0;
-        for (branch, split) in self
-            .branches
-            .iter()
-            .zip(&self.branch_splits)
-        {
+        for (branch, split) in self.sequences.iter().zip(&self.splits) {
             total += branch.inertia() * split.to_f64();
         }
         total
@@ -328,17 +282,13 @@ impl DecompositionGraph {
     pub(crate) fn weight(&self) -> Result<f64, DecompositionError> {
         if !self.solved() {
             let mut best = f64::NEG_INFINITY;
-            for branch in &self.branches {
+            for branch in &self.sequences {
                 best = best.max(branch.weight()?);
             }
             return Ok(best);
         }
         let mut total = 0.0;
-        for (branch, split) in self
-            .branches
-            .iter()
-            .zip(&self.branch_splits)
-        {
+        for (branch, split) in self.sequences.iter().zip(&self.splits) {
             total += branch.weight()? * split.to_f64();
         }
         Ok(total)
@@ -364,7 +314,7 @@ impl DecompositionGraph {
         &mut self,
         amount: &BigUint,
     ) -> Result<(BigUint, BigUint), DecompositionError> {
-        if self.branch_splits.is_empty() {
+        if self.splits.is_empty() {
             return Err(DecompositionError::Unsolved {
                 token_in: self.sell_token().address.clone(),
                 token_out: self.buy_token().address.clone(),
@@ -382,9 +332,9 @@ impl DecompositionGraph {
 
         let mut total_bought = BigUint::zero();
         let mut total_gas = BigUint::zero();
-        for index in 0..self.branches.len() {
-            let branch_amount = self.branch_splits[index].apply(amount);
-            let (bought, gas) = self.branches[index].sell(&branch_amount)?;
+        for index in 0..self.sequences.len() {
+            let branch_amount = self.splits[index].apply(amount);
+            let (bought, gas) = self.sequences[index].sell(&branch_amount)?;
             total_bought += bought;
             total_gas += gas;
         }
@@ -404,7 +354,7 @@ impl DecompositionGraph {
         }
         let mut total = BigUint::zero();
         let mut pools = Vec::new();
-        for branch in &mut self.branches {
+        for branch in &mut self.sequences {
             let (limit, branch_pools) = branch.sell_amount_limit()?;
             debug!(
                 branch = %branch.token_path_label(),
@@ -419,23 +369,20 @@ impl DecompositionGraph {
     }
 
     /// Mean over branches while unsolved, split-weighted sum once solved.
+    #[cfg(test)]
     fn combine<F>(&self, quantity: F) -> Result<f64, DecompositionError>
     where
-        F: Fn(&Branch) -> Result<f64, DecompositionError>,
+        F: Fn(&SequenceRoute) -> Result<f64, DecompositionError>,
     {
         if self.use_estimate() {
             let mut total = 0.0;
-            for branch in &self.branches {
+            for branch in &self.sequences {
                 total += quantity(branch)?;
             }
-            return Ok(total / self.branches.len() as f64);
+            return Ok(total / self.sequences.len() as f64);
         }
         let mut total = 0.0;
-        for (branch, split) in self
-            .branches
-            .iter()
-            .zip(&self.branch_splits)
-        {
+        for (branch, split) in self.sequences.iter().zip(&self.splits) {
             total += quantity(branch)? * split.to_f64();
         }
         Ok(total)

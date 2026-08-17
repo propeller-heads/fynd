@@ -7,17 +7,17 @@
 //! # Working at three levels
 //!
 //! defibot's optimizers accept `list[FractalRoute]`, so the same code splits a hop's pools, a
-//! branch's tails and a solution's parallel branches — the recursion made all three look
-//! identical. This port replaced the recursion with a fixed structure
-//! ([`SolutionGraph`](super::components::DecompositionGraph) holds [`Branch`]es, a [`Branch`] holds
-//! [`SequentialRoute`] tails, a [`Hop`] holds [`PoolRef`]s), so the polymorphism has to come from
-//! somewhere else.
+//! branch's tails and a solution's parallel branches. This port keeps the same three levels but
+//! names them: a [`DecompositionGraph`](super::components::DecompositionGraph) splits over
+//! [`SequenceRoute`] branches, each branch is a chain of
+//! [`SplitRoute`](super::components::ParallelRoute) hops, and a hop splits over [`Route`]
+//! alternatives — a pool, or another chain when the branch is grouped.
 //!
-//! [`Sellable`] is that somewhere: the smallest interface an optimizer actually uses — sell on it,
-//! read back what was sold and bought, and read the ranking quantities. [`Branch`] implements it
-//! for the outer split and [`SequentialRoute`] for a branch's inner split over its tails, while
-//! [`HopPool`] binds a [`PoolRef`] to the token pair its enclosing [`Hop`] trades so that a pool
-//! satisfies it too. Optimizers are generic over the trait and never see a route tree.
+//! [`Sellable`] is what makes one optimizer serve all three: the smallest interface an optimizer
+//! actually uses — sell on it, read back what was sold and bought, and read the ranking quantities.
+//! Two types implement it, because the same two shapes recur at every level: [`SequenceRoute`] for
+//! a split over branches or over a grouped branch's tails, and [`Route`] for a hop's split over its
+//! alternatives. Optimizers are generic over the trait and never see a route tree.
 
 pub(crate) mod equal_start_v2;
 pub(crate) mod frank_wolfe;
@@ -30,10 +30,8 @@ use tracing::debug;
 use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::decomposition::{
-    components::{
-        Branch, DecompositionError, DecompositionGraph, Fraction, Hop, PoolRef, SequentialRoute,
-    },
-    models::TokenPriceData,
+    components::{DecompositionError, Route, SequenceRoute},
+    models::{Fraction, TokenPriceData},
     optimizers::{
         equal_start_v2::split_equal_start_v2, frank_wolfe::split_by_frank_wolfe,
         pair_comparison::split_by_pair_comparison,
@@ -112,261 +110,93 @@ pub(crate) trait Sellable {
     fn sell(&mut self, amount: &BigUint) -> Result<(BigUint, BigUint), DecompositionError>;
 }
 
-impl Sellable for SequentialRoute {
+impl Sellable for Route {
     fn sell_token(&self) -> &Token {
-        SequentialRoute::sell_token(self)
+        Route::sell_token(self)
     }
 
     fn buy_token(&self) -> &Token {
-        SequentialRoute::buy_token(self)
+        Route::buy_token(self)
     }
 
     fn solved(&self) -> bool {
-        SequentialRoute::solved(self)
+        Route::solved(self)
     }
 
     fn sell_amount(&self) -> &BigUint {
-        SequentialRoute::sell_amount(self)
+        Route::sell_amount(self)
     }
 
     fn buy_amount(&self) -> &BigUint {
-        SequentialRoute::buy_amount(self)
+        Route::buy_amount(self)
     }
 
     fn minimum_gas(&self) -> BigUint {
-        SequentialRoute::minimum_gas(self)
+        Route::minimum_gas(self)
     }
 
     fn marginal_price(&self) -> Result<f64, DecompositionError> {
-        SequentialRoute::marginal_price(self)
+        Route::marginal_price(self)
     }
 
     fn new_marginal_price(&self) -> Result<Option<f64>, DecompositionError> {
-        Ok(SequentialRoute::new_marginal_price(self))
+        Ok(Route::new_marginal_price(self))
     }
 
     fn executed_price(&self) -> f64 {
-        SequentialRoute::executed_price(self)
+        Route::executed_price(self)
     }
 
     fn sell(&mut self, amount: &BigUint) -> Result<(BigUint, BigUint), DecompositionError> {
-        SequentialRoute::sell(self, amount)
+        Route::sell(self, amount)
     }
 }
 
-/// A branch is what the *outer* split is over: one shared first hop plus its parallel tails.
+/// A chain is what a split over branches or over tails is made of.
 ///
-/// Its tails are [`SequentialRoute`]s, which implement this trait themselves, so the inner split
-/// over a branch's tails runs through the same optimizers at the level below with no extra
-/// adapter.
-impl Sellable for Branch {
+/// Both the graph's outer split and a grouped branch's inner split hand their amount to chains, so
+/// this one impl serves both.
+impl Sellable for SequenceRoute {
     fn sell_token(&self) -> &Token {
-        Branch::sell_token(self)
+        SequenceRoute::sell_token(self)
     }
 
     fn buy_token(&self) -> &Token {
-        Branch::buy_token(self)
+        SequenceRoute::buy_token(self)
     }
 
     fn solved(&self) -> bool {
-        Branch::solved(self)
+        SequenceRoute::solved(self)
     }
 
     fn sell_amount(&self) -> &BigUint {
-        Branch::sell_amount(self)
+        SequenceRoute::sell_amount(self)
     }
 
     fn buy_amount(&self) -> &BigUint {
-        Branch::buy_amount(self)
+        SequenceRoute::buy_amount(self)
     }
 
     fn minimum_gas(&self) -> BigUint {
-        Branch::minimum_gas(self)
+        SequenceRoute::minimum_gas(self)
     }
 
     fn marginal_price(&self) -> Result<f64, DecompositionError> {
-        Branch::marginal_price(self)
+        SequenceRoute::marginal_price(self)
     }
 
     fn new_marginal_price(&self) -> Result<Option<f64>, DecompositionError> {
-        Ok(Branch::new_marginal_price(self))
+        Ok(SequenceRoute::new_marginal_price(self))
     }
 
     fn executed_price(&self) -> f64 {
-        Branch::executed_price(self)
+        SequenceRoute::executed_price(self)
     }
 
     fn sell(&mut self, amount: &BigUint) -> Result<(BigUint, BigUint), DecompositionError> {
-        Branch::sell(self, amount)
+        SequenceRoute::sell(self, amount)
     }
 }
-
-/// A hop is an alternative in its own right when the solver treats it as one unit — the
-/// single-pool case of `recursive_solve_splits` (`order_solver.py:661-671`) backs a hop off through
-/// [`decrease_until_sell`] exactly as it would any other route.
-impl Sellable for Hop {
-    fn sell_token(&self) -> &Token {
-        self.token_in()
-    }
-
-    fn buy_token(&self) -> &Token {
-        self.token_out()
-    }
-
-    fn solved(&self) -> bool {
-        Hop::solved(self)
-    }
-
-    fn sell_amount(&self) -> &BigUint {
-        Hop::sell_amount(self)
-    }
-
-    fn buy_amount(&self) -> &BigUint {
-        Hop::buy_amount(self)
-    }
-
-    fn minimum_gas(&self) -> BigUint {
-        Hop::minimum_gas(self)
-    }
-
-    fn marginal_price(&self) -> Result<f64, DecompositionError> {
-        Hop::marginal_price(self)
-    }
-
-    fn new_marginal_price(&self) -> Result<Option<f64>, DecompositionError> {
-        Ok(Hop::new_marginal_price(self))
-    }
-
-    fn executed_price(&self) -> f64 {
-        Hop::executed_price(self)
-    }
-
-    fn sell(&mut self, amount: &BigUint) -> Result<(BigUint, BigUint), DecompositionError> {
-        Hop::sell(self, amount)
-    }
-}
-
-/// The whole graph is an alternative in its own right in the single-branch case of
-/// `recursive_solve_splits` (`order_solver.py:661-671`), which backs the graph off as one unit.
-impl Sellable for DecompositionGraph {
-    fn sell_token(&self) -> &Token {
-        DecompositionGraph::sell_token(self)
-    }
-
-    fn buy_token(&self) -> &Token {
-        DecompositionGraph::buy_token(self)
-    }
-
-    fn solved(&self) -> bool {
-        DecompositionGraph::solved(self)
-    }
-
-    fn sell_amount(&self) -> &BigUint {
-        DecompositionGraph::sell_amount(self)
-    }
-
-    fn buy_amount(&self) -> &BigUint {
-        DecompositionGraph::buy_amount(self)
-    }
-
-    fn minimum_gas(&self) -> BigUint {
-        DecompositionGraph::minimum_gas(self)
-    }
-
-    fn marginal_price(&self) -> Result<f64, DecompositionError> {
-        DecompositionGraph::marginal_price(self)
-    }
-
-    fn new_marginal_price(&self) -> Result<Option<f64>, DecompositionError> {
-        Ok(DecompositionGraph::new_marginal_price(self))
-    }
-
-    fn executed_price(&self) -> f64 {
-        DecompositionGraph::executed_price(self)
-    }
-
-    fn sell(&mut self, amount: &BigUint) -> Result<(BigUint, BigUint), DecompositionError> {
-        DecompositionGraph::sell(self, amount)
-    }
-}
-
-/// A [`PoolRef`] bound to the token pair of the [`Hop`] that holds it.
-///
-/// A pool on its own does not know which direction it is being traded in — [`PoolRef`] takes the
-/// token pair on every call — so it cannot implement [`Sellable`] directly. Binding the pair here
-/// keeps the tokens in one place instead of storing them on every pool.
-pub(crate) struct HopPool<'a> {
-    pool: &'a mut PoolRef,
-    token_in: Token,
-    token_out: Token,
-}
-
-// CZ: sounds completely unnecessary to have this wrapper
-impl<'a> HopPool<'a> {
-    /// Binds every pool of `hop` to the hop's token pair.
-    ///
-    /// The result is what an optimizer splits when solving a single leg.
-    pub(crate) fn bind_all(hop: &'a mut Hop) -> Vec<HopPool<'a>> {
-        let token_in = hop.token_in().clone();
-        let token_out = hop.token_out().clone();
-        hop.pools_mut()
-            .iter_mut()
-            .map(|pool| HopPool { pool, token_in: token_in.clone(), token_out: token_out.clone() })
-            .collect()
-    }
-}
-
-impl Sellable for HopPool<'_> {
-    fn sell_token(&self) -> &Token {
-        &self.token_in
-    }
-
-    fn buy_token(&self) -> &Token {
-        &self.token_out
-    }
-
-    /// A single pool is always ready to trade — there is nothing below it to solve
-    /// (`routes/simple.py:46-47`).
-    fn solved(&self) -> bool {
-        true
-    }
-
-    fn sell_amount(&self) -> &BigUint {
-        self.pool.sell_amount()
-    }
-
-    fn buy_amount(&self) -> &BigUint {
-        self.pool.buy_amount()
-    }
-
-    /// A single pool has no splits below it, so it is always the pool it activates.
-    fn minimum_gas(&self) -> BigUint {
-        self.pool.gas().clone()
-    }
-
-    fn marginal_price(&self) -> Result<f64, DecompositionError> {
-        self.pool
-            .marginal_price(&self.token_in, &self.token_out)
-    }
-
-    fn new_marginal_price(&self) -> Result<Option<f64>, DecompositionError> {
-        Ok(self
-            .pool
-            .new_marginal_price(&self.token_in, &self.token_out))
-    }
-
-    fn executed_price(&self) -> f64 {
-        self.pool
-            .executed_price(&self.token_in, &self.token_out)
-    }
-
-    fn sell(&mut self, amount: &BigUint) -> Result<(BigUint, BigUint), DecompositionError> {
-        self.pool
-            .sell(amount, &self.token_in, &self.token_out)
-    }
-}
-
-// ===================== Gas pricing =====================
 
 // ===================== SplitOptimizer =====================
 
@@ -387,7 +217,6 @@ pub(crate) struct SplitSolution {
     pub(crate) splits: Vec<Fraction>,
 }
 
-/// Decides how a sell amount is divided between parallel alternatives.
 // ===================== Shared helpers =====================
 
 /// Sells `sell_amount`, shrinking the amount by 10% on every recoverable failure until it succeeds
@@ -401,22 +230,26 @@ pub(crate) struct SplitSolution {
 /// route: defibot's failed `sell` calls leave the previous sell's amounts in place, and the
 /// optimizers read those amounts back.
 ///
+/// `sell` is the only thing this needs of the level it backs off, so it takes that one operation
+/// rather than a trait: the four levels that back off are four different types, and each already
+/// has an inherent `sell`.
+///
 /// # Errors
 ///
 /// Propagates any failure that is not [`DecompositionError::is_recoverable`] — a structural problem
 /// will not go away by selling less.
-pub(crate) fn decrease_until_sell<S: Sellable + ?Sized>(
-    route: &mut S,
+pub(crate) fn decrease_until_sell(
     sell_amount: &BigUint,
+    mut sell: impl FnMut(&BigUint) -> Result<(BigUint, BigUint), DecompositionError>,
 ) -> Result<(BigUint, BigUint), DecompositionError> {
     if sell_amount.is_zero() {
-        return route.sell(&BigUint::zero());
+        return sell(&BigUint::zero());
     }
 
     let mut amount = sell_amount.clone();
     let mut rounds = 0usize;
     while !amount.is_zero() {
-        match route.sell(&amount) {
+        match sell(&amount) {
             Ok(result) => {
                 if rounds > 0 {
                     debug!(
@@ -514,15 +347,17 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::{
-            decomposition::components::{Hop, SellLimitKind},
+            decomposition::components::{Pool, SellLimitKind},
             test_utils::{token, ConstantProductSim},
         },
         derived::types::TokenGasPrices,
     };
 
-    fn pool(id: &str, reserve_0: u64, reserve_1: u64) -> PoolRef {
-        PoolRef::new(
+    fn pool(id: &str, reserve_0: u64, reserve_1: u64) -> Pool {
+        Pool::new(
             id.to_string(),
+            Arc::new(token(0x0A, "A")),
+            Arc::new(token(0x0B, "B")),
             SellLimitKind::Enforced,
             Box::new(ConstantProductSim {
                 reserve_0: BigUint::from(reserve_0),
@@ -533,31 +368,26 @@ mod tests {
         )
     }
 
-    fn hop(pools: Vec<PoolRef>) -> Hop {
-        Hop::new(token(0x0A, "A"), token(0x0B, "B"), pools).expect("hop has pools")
-    }
-
     #[test]
     fn test_decrease_until_sell_backs_off_to_the_pool_limit() {
         // ConstantProductSim caps a sell at half its input reserve.
-        let mut hop = hop(vec![pool("p", 1_000, 1_000)]);
-        let mut legs = HopPool::bind_all(&mut hop);
+        let mut pool = pool("p", 1_000, 1_000);
 
-        let (bought, _) = decrease_until_sell(&mut legs[0], &BigUint::from(900u32))
+        let (bought, _) = decrease_until_sell(&BigUint::from(900u32), |amount| pool.sell(amount))
             .expect("back-off finds a sellable amount");
 
-        assert!(legs[0].sell_amount() <= &BigUint::from(500u32));
+        assert!(pool.sell_amount() <= &BigUint::from(500u32));
         assert!(!bought.is_zero());
     }
 
     #[test]
     fn test_decrease_until_sell_reaches_zero_when_nothing_sells() {
         // A pool with a one-unit reserve caps sells at zero, so every back-off fails.
-        let mut hop = hop(vec![pool("p", 1, 1)]);
-        let mut legs = HopPool::bind_all(&mut hop);
+        let mut pool = pool("p", 1, 1);
 
-        let (bought, gas) = decrease_until_sell(&mut legs[0], &BigUint::from(1_000u32))
-            .expect("exhausting the back-off is not an error");
+        let (bought, gas) =
+            decrease_until_sell(&BigUint::from(1_000u32), |amount| pool.sell(amount))
+                .expect("exhausting the back-off is not an error");
 
         assert!(bought.is_zero());
         assert!(gas.is_zero());
@@ -565,14 +395,14 @@ mod tests {
 
     #[test]
     fn test_decrease_until_sell_zero_resets_the_route() {
-        let mut hop = hop(vec![pool("p", 1_000_000, 1_000_000)]);
-        let mut legs = HopPool::bind_all(&mut hop);
-        decrease_until_sell(&mut legs[0], &BigUint::from(1_000u32)).expect("sells");
+        let mut pool = pool("p", 1_000_000, 1_000_000);
+        decrease_until_sell(&BigUint::from(1_000u32), |amount| pool.sell(amount)).expect("sells");
 
-        decrease_until_sell(&mut legs[0], &BigUint::zero()).expect("zero always succeeds");
+        decrease_until_sell(&BigUint::zero(), |amount| pool.sell(amount))
+            .expect("zero always succeeds");
 
-        assert!(legs[0].sell_amount().is_zero());
-        assert!(legs[0].buy_amount().is_zero());
+        assert!(pool.sell_amount().is_zero());
+        assert!(pool.buy_amount().is_zero());
     }
 
     #[test]
@@ -640,6 +470,11 @@ pub enum SplitOptimizer {
 }
 
 impl SplitOptimizer {
+    /// Divides `sell_amount` between `routes`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the trial sells raise once backing off cannot recover.
     pub(crate) fn split<S: Sellable>(
         &self,
         routes: &mut [S],

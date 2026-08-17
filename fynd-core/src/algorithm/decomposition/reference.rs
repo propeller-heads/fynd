@@ -94,7 +94,7 @@ pub(crate) fn solve_reference_solution(
         warn!(
             sell_token = %solve_input.order.token_in(),
             buy_token = %solve_input.order.token_out(),
-            branches = reference.branches().len(),
+            branches = reference.sequences.len(),
             "reference route has no post-trade marginal price; solving without a reference"
         );
         return Ok(None);

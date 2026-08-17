@@ -2,7 +2,6 @@
 
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
-use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::decomposition::components::*;
 
@@ -15,7 +14,7 @@ struct CachedSwap {
     new_state: Box<dyn ProtocolSim>,
 }
 
-/// One pool inside a [`Hop`], with the amounts a sell on it produced.
+/// One pool inside a [`ParallelRoute`], with the amounts a sell on it produced.
 ///
 /// Equivalent of defibot's `SimpleRoute` (`routes/simple.py`). `state` is the pre-trade simulation
 /// state, `new_state` the post-trade state produced by the last sell — the quantity the optimizers
@@ -23,7 +22,7 @@ struct CachedSwap {
 /// What a pool's reported `get_limits` sell limit actually means.
 ///
 /// The two kinds are not interchangeable, and treating them alike is what caps a constant-product
-/// branch far below what it can trade. See [`PoolRef::sell_amount_limit`].
+/// branch far below what it can trade. See [`Pool::sell_amount_limit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SellLimitKind {
     /// The pool reverts above the reported limit, so it is a feasibility bound and must be
@@ -58,14 +57,22 @@ impl SellLimitKind {
 ///
 /// `u256::MAX`, which every on-chain token amount fits inside, so no comparison against a real
 /// amount can ever bind. Limits are only ever compared, summed, minimised and cast — never
-/// converted back to a `U256` or handed to a simulation — so the sums this produces at [`Hop`] and
-/// [`DecompositionGraph`] level are free to exceed it.
+/// converted back to a `U256` or handed to a simulation — so the sums this produces at
+/// [`ParallelRoute`] and [`DecompositionGraph`] level are free to exceed it.
 fn unbounded_sell_limit() -> BigUint {
     (BigUint::from(1u8) << 256u32) - BigUint::from(1u8)
 }
 
-pub(crate) struct PoolRef {
+pub(crate) struct Pool {
     component_id: ComponentId,
+    /// The pair this pool trades, in the direction it trades it.
+    ///
+    /// Held here rather than taken from the enclosing [`ParallelRoute`] on every call, which is
+    /// what the deleted `HopPool` wrapper existed to arrange. Shared rather than owned:
+    /// `MarketState` already keeps its tokens as `Arc<Token>`, so this is a pointer per pool
+    /// instead of a `String` symbol and a `Vec<Option<TransferCost>>` cloned per pool.
+    token_in: Arc<Token>,
+    token_out: Arc<Token>,
     limit_kind: SellLimitKind,
     state: Box<dyn ProtocolSim>,
     depth: Option<BigUint>,
@@ -78,7 +85,7 @@ pub(crate) struct PoolRef {
     limit_cache: Option<BigUint>,
 }
 
-impl PoolRef {
+impl Pool {
     /// Trial sells this pool has memoised. Test-only: the cache is an optimisation, and the only
     /// thing worth asserting about it is that invalidation empties it.
     #[cfg(test)]
@@ -102,22 +109,26 @@ impl PoolRef {
     ///
     /// `depth` is this pool's entry from
     /// [`ComponentDepths`](crate::derived::types::ComponentDepths) for the direction the enclosing
-    /// [`Hop`] trades in — the largest input before the executed price slips past the
+    /// [`ParallelRoute`] trades in — the largest input before the executed price slips past the
     /// configured threshold, in on-chain units of the hop's input token. It is defibot's
     /// *inertia* and cannot be derived from the simulation state alone, so it is supplied here
     /// rather than computed. Pass `None` when the derived store has no entry for the pool; see
-    /// [`PoolRef::inertia`].
+    /// [`Pool::inertia`].
     ///
     /// `limit_kind` says whether this pool's reported sell limit is a hard bound or a heuristic;
     /// see [`SellLimitKind`].
     pub(crate) fn new(
         component_id: ComponentId,
+        token_in: Arc<Token>,
+        token_out: Arc<Token>,
         limit_kind: SellLimitKind,
         state: Box<dyn ProtocolSim>,
         depth: Option<BigUint>,
     ) -> Self {
         Self {
             component_id,
+            token_in,
+            token_out,
             limit_kind,
             state,
             depth,
@@ -135,6 +146,28 @@ impl PoolRef {
         &self.component_id
     }
 
+    /// Token this pool consumes.
+    pub(crate) fn token_in(&self) -> &Token {
+        &self.token_in
+    }
+
+    /// Token this pool produces.
+    pub(crate) fn token_out(&self) -> &Token {
+        &self.token_out
+    }
+
+    /// [`Pool::token_in`] as a shared handle, for callers that keep it.
+    #[cfg(test)]
+    pub(crate) fn token_in_shared(&self) -> Arc<Token> {
+        Arc::clone(&self.token_in)
+    }
+
+    /// [`Pool::token_out`] as a shared handle.
+    #[cfg(test)]
+    pub(crate) fn token_out_shared(&self) -> Arc<Token> {
+        Arc::clone(&self.token_out)
+    }
+
     /// Pre-trade simulation state.
     pub(crate) fn state(&self) -> &dyn ProtocolSim {
         self.state.as_ref()
@@ -145,37 +178,33 @@ impl PoolRef {
         self.new_state.as_deref()
     }
 
-    /// Amount sold on this pool by the last [`PoolRef::sell`].
+    /// Amount sold on this pool by the last [`Pool::sell`].
     pub(crate) fn sell_amount(&self) -> &BigUint {
         &self.sell_amount
     }
 
-    /// Amount bought on this pool by the last [`PoolRef::sell`].
+    /// Amount bought on this pool by the last [`Pool::sell`].
     pub(crate) fn buy_amount(&self) -> &BigUint {
         &self.buy_amount
     }
 
-    /// Gas the last [`PoolRef::sell`] reported.
+    /// Gas the last [`Pool::sell`] reported.
     pub(crate) fn gas(&self) -> &BigUint {
         &self.gas
     }
 
-    /// Price the last [`PoolRef::sell`] achieved, in human units. Gas is not accounted for.
+    /// Price the last [`Pool::sell`] achieved, in human units. Gas is not accounted for.
     ///
-    /// The tokens are passed in because a pool does not know which direction it was traded in
-    /// (`routes/interface.py:117-127`).
-    pub(crate) fn executed_price(&self, token_in: &Token, token_out: &Token) -> f64 {
-        executed_price(&self.sell_amount, token_in, &self.buy_amount, token_out)
+    /// Zero when either token is missing from the snapshot, matching the zero-amount case: without
+    /// decimals there is no human-unit price to state (`routes/interface.py:117-127`).
+    pub(crate) fn executed_price(&self) -> f64 {
+        executed_price(&self.sell_amount, &self.token_in, &self.buy_amount, &self.token_out)
     }
 
     /// Spot price of `token_out` per `token_in` at the pre-trade state.
-    pub(crate) fn route_price(
-        &self,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<f64, DecompositionError> {
+    pub(crate) fn route_price(&self) -> Result<f64, DecompositionError> {
         self.state
-            .spot_price(token_in, token_out)
+            .spot_price(&self.token_in, &self.token_out)
             .map_err(|source| DecompositionError::Simulation {
                 component: self.component_id.clone(),
                 source,
@@ -188,20 +217,16 @@ impl PoolRef {
     }
 
     /// Spot price net of the trading fee.
-    pub(crate) fn marginal_price(
-        &self,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<f64, DecompositionError> {
-        Ok(self.route_price(token_in, token_out)? * (1.0 - self.fee()))
+    pub(crate) fn marginal_price(&self) -> Result<f64, DecompositionError> {
+        Ok(self.route_price()? * (1.0 - self.fee()))
     }
 
     /// Marginal price at the post-trade state, or `None` if this pool was not sold on.
-    pub(crate) fn new_marginal_price(&self, token_in: &Token, token_out: &Token) -> Option<f64> {
+    pub(crate) fn new_marginal_price(&self) -> Option<f64> {
         let Some(new_state) = self.new_state.as_ref() else {
             return None;
         };
-        let Ok(price) = new_state.spot_price(token_in, token_out) else {
+        let Ok(price) = new_state.spot_price(&self.token_in, &self.token_out) else {
             return None;
         };
         Some(price * (1.0 - new_state.fee()))
@@ -214,22 +239,22 @@ impl PoolRef {
     /// price down to `route_price * (1 - depth - fee)` — how much can be sold before the price
     /// slips by a configured threshold. Fynd computes exactly that in
     /// [`PoolDepthComputation`](crate::derived::computations::pool_depth::PoolDepthComputation),
-    /// so the value is taken from the depth supplied to [`PoolRef::new`]. It is deliberately *not*
+    /// so the value is taken from the depth supplied to [`Pool::new`]. It is deliberately *not*
     /// the pool-exhaustion limit from `get_limits`: the two differ by orders of magnitude and rank
     /// concentrated-liquidity pools differently, and inertia drives candidate ranking through
-    /// [`PoolRef::weight`].
+    /// [`Pool::weight`].
     ///
     /// Returns [`MISSING_DEPTH_INERTIA`] when no depth was supplied — depths can legitimately be
     /// absent for a pool. This mirrors defibot falling back to `1` (`routes/simple.py:57-68`), and
     /// is the only fallback: there is no second path that substitutes a different quantity.
-    pub(crate) fn inertia(&self, token_in: &Token) -> f64 {
+    pub(crate) fn inertia(&self) -> f64 {
         let Some(depth) = self.depth.as_ref() else {
             return MISSING_DEPTH_INERTIA;
         };
         let Some(depth) = depth.to_f64() else {
             return MISSING_DEPTH_INERTIA;
         };
-        let scaled = depth / 10f64.powi(token_in.decimals as i32);
+        let scaled = depth / 10f64.powi(self.token_in.decimals as i32);
         if scaled.is_finite() {
             scaled
         } else {
@@ -238,12 +263,8 @@ impl PoolRef {
     }
 
     /// Ranking score: `inertia * (1 - fee) * route_price` (`routes/simple.py:190-201`).
-    pub(crate) fn weight(
-        &self,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<f64, DecompositionError> {
-        Ok(self.inertia(token_in) * (1.0 - self.fee()) * self.route_price(token_in, token_out)?)
+    pub(crate) fn weight(&self) -> Result<f64, DecompositionError> {
+        Ok(self.inertia() * (1.0 - self.fee()) * self.route_price()?)
     }
 
     /// Largest amount of `token_in` this pool can absorb, in on-chain units.
@@ -252,19 +273,15 @@ impl PoolRef {
     /// [`SellLimitKind::Advisory`] one it is [`unbounded_sell_limit`]: the swap cannot revert on
     /// size, so there is nothing to bound, and the reported figure is a price-impact heuristic
     /// that has no business acting as a feasibility cap. Ranking still penalises the bad prices
-    /// such a trade earns, through [`PoolRef::weight`] and the optimizer's price comparison —
+    /// such a trade earns, through [`Pool::weight`] and the optimizer's price comparison —
     /// which is where a *quality* signal belongs.
     ///
     /// This diverges from defibot, whose constant-product limit is
     /// `spot(buy, sell) * reserves[buy]`, algebraically just `reserve_in` and so *tighter* than
     /// tycho's `2.162 * reserve_in`. Neither reaches the sizes these pools actually trade at.
     ///
-    /// Cached until [`PoolRef::invalidate`] (`routes/interface.py:303-312`).
-    pub(crate) fn sell_amount_limit(
-        &mut self,
-        token_in: &Token,
-        token_out: &Token,
-    ) -> Result<BigUint, DecompositionError> {
+    /// Cached until [`Pool::invalidate`] (`routes/interface.py:303-312`).
+    pub(crate) fn sell_amount_limit(&mut self) -> Result<BigUint, DecompositionError> {
         if let Some(limit) = self.limit_cache.as_ref() {
             return Ok(limit.clone());
         }
@@ -274,7 +291,7 @@ impl PoolRef {
             SellLimitKind::Enforced => {
                 let (sell_limit, _) = self
                     .state
-                    .get_limits(token_in.address.clone(), token_out.address.clone())
+                    .get_limits(self.token_in.address.clone(), self.token_out.address.clone())
                     .map_err(|source| DecompositionError::Simulation {
                         component: self.component_id.clone(),
                         source,
@@ -299,8 +316,6 @@ impl PoolRef {
     pub(crate) fn sell(
         &mut self,
         amount: &BigUint,
-        token_in: &Token,
-        token_out: &Token,
     ) -> Result<(BigUint, BigUint), DecompositionError> {
         if amount.is_zero() {
             self.sell_amount = BigUint::zero();
@@ -318,18 +333,18 @@ impl PoolRef {
             return Ok((self.buy_amount.clone(), self.gas.clone()));
         }
 
-        let limit = self.sell_amount_limit(token_in, token_out)?;
+        let limit = self.sell_amount_limit()?;
         if amount > &limit {
             return Err(DecompositionError::SellAmountLimit {
                 limit,
-                token: token_in.address.clone(),
+                token: self.token_in.address.clone(),
                 pools: vec![self.component_id.clone()],
             });
         }
 
         let result = self
             .state
-            .get_amount_out_guarded(amount.clone(), token_in, token_out)
+            .get_amount_out_guarded(amount.clone(), &self.token_in, &self.token_out)
             .map_err(|source| DecompositionError::Simulation {
                 component: self.component_id.clone(),
                 source,
@@ -349,6 +364,18 @@ impl PoolRef {
         );
 
         Ok((result.amount, result.gas))
+    }
+
+    /// Points this pool at a different token pair. Test-only.
+    ///
+    /// Production builds a pool with the pair its hop trades (`graph_build::build_branch`), so the
+    /// two can never disagree. The fixtures build pools before they know the hop, and this is how
+    /// [`hop`](super::super::test_fixtures::hop) reconciles them.
+    #[cfg(test)]
+    pub(crate) fn retarget(&mut self, token_in: Arc<Token>, token_out: Arc<Token>) {
+        self.token_in = token_in;
+        self.token_out = token_out;
+        self.invalidate();
     }
 
     /// Drops the swap and limit caches after the underlying pool state changed

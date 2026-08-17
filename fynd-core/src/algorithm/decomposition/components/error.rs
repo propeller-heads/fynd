@@ -36,7 +36,7 @@ pub(crate) enum DecompositionError {
         source: SimulationError,
     },
 
-    /// A hop was asked to sell before its splits were set.
+    /// A level was asked to sell before its splits were set.
     #[error("hop {token_in} -> {token_out} has no splits; solve it before selling")]
     Unsolved {
         /// Hop input token.

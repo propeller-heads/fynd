@@ -40,9 +40,9 @@
 //!   route model and deleting them afterwards (`equal_start.py:284-286`, only legal under
 //!   `Extra.allow`). Both live in local vectors here; neither is a property of a route.
 //! * An alternative that is not [`Sellable::solved`] is skipped rather than sold on. defibot would
-//!   raise from inside `ParallelRoute.sell` (`routes/parallel.py:179-180`); the solver never passes
-//!   one, so the guard costs nothing and keeps a structural error from becoming an unrecoverable
-//!   optimize failure.
+//!   raise from inside `Route.sell` (`routes/parallel.py:179-180`); the solver never passes one, so
+//!   the guard costs nothing and keeps a structural error from becoming an unrecoverable optimize
+//!   failure.
 //! * `_plot` (`equal_start.py:431-478`) and `_raise_if_no_indices` (`:243-250`) are not ported. The
 //!   latter raises `NotImplementedError` for a case its author could not construct; an empty
 //!   candidate list simply stops the search here.
@@ -62,8 +62,8 @@ use tracing::debug;
 use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::decomposition::{
-    components::{DecompositionError, Fraction},
-    models::TokenPriceData,
+    components::DecompositionError,
+    models::{Fraction, TokenPriceData},
     optimizers::{decrease_until_sell, split_of, Sellable, SplitSolution},
 };
 
@@ -323,7 +323,7 @@ fn evaluate<S: Sellable>(
         let target = splits[index]
             .apply(sell_amount)
             .min(remaining);
-        let (bought, gas) = decrease_until_sell(route, &target)?;
+        let (bought, gas) = decrease_until_sell(&target, |amount| route.sell(amount))?;
         let cost = gas_prices.cost_in_token(&gas, &buy_token.address);
         let net = BigInt::from(bought) - BigInt::from(cost);
 
@@ -367,7 +367,7 @@ fn effective_splits<S: Sellable>(
             continue;
         }
         let (route_bought, route_gas) =
-            decrease_until_sell(route, &splits[index].apply(sell_amount))?;
+            decrease_until_sell(&splits[index].apply(sell_amount), |amount| route.sell(amount))?;
         bought += route_bought;
         gas += route_gas;
         effective.push(split_of(route.sell_amount(), sell_amount));
@@ -584,10 +584,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::{
-            decomposition::{
-                components::{Hop, PoolRef, SellLimitKind, SequentialRoute},
-                optimizers::HopPool,
-            },
+            decomposition::components::{ParallelRoute, Pool, Route, SellLimitKind, SequenceRoute},
             test_utils::{token, ConstantProductSim},
         },
         derived::types::TokenGasPrices,
@@ -602,9 +599,11 @@ mod tests {
         BigUint::from(amount) * unit()
     }
 
-    fn pool(id: &str, reserve_a: u64, reserve_b: u64) -> PoolRef {
-        PoolRef::new(
+    fn pool(id: &str, reserve_a: u64, reserve_b: u64) -> Pool {
+        Pool::new(
             id.to_string(),
+            Arc::new(token(0x0A, "A")),
+            Arc::new(token(0x0B, "B")),
             SellLimitKind::Enforced,
             Box::new(ConstantProductSim {
                 reserve_0: whole(reserve_a),
@@ -615,15 +614,23 @@ mod tests {
         )
     }
 
-    /// A one-hop A -> B route over a single pool, with the hop's split already set.
-    fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SequentialRoute {
-        let (token_a, token_b) = (token(0x0A, "A"), token(0x0B, "B"));
-        let mut hop =
-            Hop::new(token_a.clone(), token_b.clone(), vec![pool(id, reserve_a, reserve_b)])
-                .expect("hop has a pool");
+    /// A hop over `pools`, unsolved.
+    fn hop(pools: Vec<Pool>) -> ParallelRoute {
+        ParallelRoute::new(
+            pools
+                .into_iter()
+                .map(Route::pool)
+                .collect(),
+        )
+        .expect("hop has pools")
+    }
+
+    /// A one-hop A -> B chain over a single pool, with the hop's split already set.
+    fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SequenceRoute {
+        let mut hop = hop(vec![pool(id, reserve_a, reserve_b)]);
         hop.set_splits(vec![Fraction::one()])
             .expect("one split for one pool");
-        SequentialRoute::new(vec![token_a, token_b], vec![hop]).expect("route matches its path")
+        SequenceRoute::new(vec![hop]).expect("one hop is a chain")
     }
 
     fn free_gas(gas_price_wei: &BigUint) -> TokenPriceData {
@@ -753,7 +760,7 @@ mod tests {
 
     #[test]
     fn test_no_routes() {
-        let mut routes: Vec<SequentialRoute> = Vec::new();
+        let mut routes: Vec<Route> = Vec::new();
         let gas_price_wei = BigUint::zero();
 
         let solution = optimize(&mut routes, &whole(1_000), &free_gas(&gas_price_wei));
@@ -781,19 +788,13 @@ mod tests {
     #[test]
     fn test_optimizer_splits_a_hop_over_its_pools() {
         // The same optimizer, one level down: the alternatives are a hop's pools, not branches.
-        let (token_a, token_b) = (token(0x0A, "A"), token(0x0B, "B"));
-        let mut hop = Hop::new(
-            token_a,
-            token_b,
-            vec![pool("a", 1_000_000, 1_000_000), pool("b", 1_000_000, 1_000_000)],
-        )
-        .expect("hop has pools");
+        let mut hop = hop(vec![pool("a", 1_000_000, 1_000_000), pool("b", 1_000_000, 1_000_000)]);
         let sell_amount = whole(1_000);
         let gas_price_wei = BigUint::zero();
 
         let solution = {
-            let mut legs = HopPool::bind_all(&mut hop);
-            optimize(&mut legs, &sell_amount, &free_gas(&gas_price_wei))
+            let legs = hop.children_mut();
+            optimize(legs, &sell_amount, &free_gas(&gas_price_wei))
         };
 
         assert_eq!(solution.splits, vec![half(), half()]);
@@ -851,7 +852,7 @@ mod tests {
     fn test_effective_splits_reset_a_zero_split_route() {
         let mut routes = vec![route("a", 1_000_000, 1_000_000), route("b", 1_000_000, 1_000_000)];
         let sell_amount = whole(1_000);
-        decrease_until_sell(&mut routes[1], &whole(100)).expect("sells");
+        decrease_until_sell(&whole(100), |amount| routes[1].sell(amount)).expect("sells");
 
         let pass =
             effective_splits(&mut routes, &sell_amount, &[Fraction::one(), Fraction::zero()])
@@ -870,7 +871,8 @@ mod tests {
         let sell_amount = whole(1_000);
         let splits = vec![half(), half()];
         for (index, route) in routes.iter_mut().enumerate() {
-            decrease_until_sell(route, &splits[index].apply(&sell_amount)).expect("sells");
+            decrease_until_sell(&splits[index].apply(&sell_amount), |amount| route.sell(amount))
+                .expect("sells");
         }
 
         let ranking = vec![Some(1.0), Some(2.0)];
@@ -908,7 +910,7 @@ mod tests {
         let splits = vec![Fraction::one(), Fraction::zero()];
         // The full route has to have absorbed its allocation, or it is ranked as a shortfall
         // before the "already full" rule is ever reached (`equal_start_v2.py:298`, `:307`).
-        decrease_until_sell(&mut routes[0], &whole(1_000)).expect("sells");
+        decrease_until_sell(&whole(1_000), |amount| routes[0].sell(amount)).expect("sells");
         let ranking = vec![Some(2.0), Some(1.0)];
 
         let ordered = best_route_indexes(

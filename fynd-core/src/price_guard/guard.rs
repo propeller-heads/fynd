@@ -141,7 +141,7 @@ impl PriceGuard {
             match result {
                 Ok(price) => {
                     if self.price_within_tolerance(quote, price, config) {
-                        return true
+                        return true;
                     }
                     price_out_of_tolerance = true;
                 }

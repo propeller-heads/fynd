@@ -2,11 +2,13 @@
 //!
 //! Port of `defibot/solver/tests/algorithms/decomposition/utils.py` and `conftest.py`. defibot's
 //! mocks subclass `SimpleRoute` itself; here the equivalent knob sits one level lower, in a
-//! [`ProtocolSim`] that [`PoolRef`] wraps, so the production composition code under test is the
+//! [`ProtocolSim`] that [`Pool`] wraps, so the production composition code under test is the
 //! real one.
 //!
 //! Later tasks of the port (optimizers, solver) build their fixtures from here rather than
 //! reinventing them.
+
+use std::sync::Arc;
 
 use num_bigint::BigUint;
 use num_traits::Zero;
@@ -22,9 +24,12 @@ use tycho_simulation::tycho_core::{
 
 use crate::{
     algorithm::{
-        decomposition::components::{
-            Branch, DecompositionError, DecompositionGraph, Fraction, Hop, PoolRef, SellLimitKind,
-            SequentialRoute,
+        decomposition::{
+            components::{
+                DecompositionError, DecompositionGraph, ParallelRoute, Pool, Route, SellLimitKind,
+                SequenceRoute,
+            },
+            models::Fraction,
         },
         test_utils::token_with_decimals,
     },
@@ -220,69 +225,85 @@ impl ProtocolSim for FixedRateSim {
 /// defibot's mocks convert on-chain and human amounts with the identity function, so its
 /// `USDC -> USDT -> DAI -> WETH` chains carry no decimal scaling. Equal decimals here reproduce
 /// that; the decimal-scaling rules have their own tests.
-pub(crate) fn token_a() -> Token {
-    token_with_decimals(0x0A, "A", 18)
+pub(crate) fn token_a() -> Arc<Token> {
+    Arc::new(token_with_decimals(0x0A, "A", 18))
 }
 
 /// First intermediate token of the arithmetic fixtures, 18 decimals.
-pub(crate) fn token_b() -> Token {
-    token_with_decimals(0x0B, "B", 18)
+pub(crate) fn token_b() -> Arc<Token> {
+    Arc::new(token_with_decimals(0x0B, "B", 18))
 }
 
 /// Second intermediate token of the arithmetic fixtures, 18 decimals.
-pub(crate) fn token_c() -> Token {
-    token_with_decimals(0x0C, "C", 18)
+pub(crate) fn token_c() -> Arc<Token> {
+    Arc::new(token_with_decimals(0x0C, "C", 18))
 }
 
 /// Buy-side token of the arithmetic fixtures, 18 decimals.
-pub(crate) fn token_d() -> Token {
-    token_with_decimals(0x0D, "D", 18)
+pub(crate) fn token_d() -> Arc<Token> {
+    Arc::new(token_with_decimals(0x0D, "D", 18))
 }
 
 /// WBTC with its mainnet decimals, for the diamond fixture.
-pub(crate) fn wbtc() -> Token {
-    token_with_decimals(0x01, "WBTC", 8)
+pub(crate) fn wbtc() -> Arc<Token> {
+    Arc::new(token_with_decimals(0x01, "WBTC", 8))
 }
 
 /// WETH with its mainnet decimals, for the diamond fixture.
-pub(crate) fn weth() -> Token {
-    token_with_decimals(0x02, "WETH", 18)
+pub(crate) fn weth() -> Arc<Token> {
+    Arc::new(token_with_decimals(0x02, "WETH", 18))
 }
 
 /// USDC with its mainnet decimals, for the diamond fixture.
-pub(crate) fn usdc() -> Token {
-    token_with_decimals(0x03, "USDC", 6)
+pub(crate) fn usdc() -> Arc<Token> {
+    Arc::new(token_with_decimals(0x03, "USDC", 6))
 }
 
 /// DAI with its mainnet decimals, for the diamond fixture.
-pub(crate) fn dai() -> Token {
-    token_with_decimals(0x04, "DAI", 18)
+pub(crate) fn dai() -> Arc<Token> {
+    Arc::new(token_with_decimals(0x04, "DAI", 18))
 }
 
 // ===================== Builders =====================
 
 /// A pool wrapping `sim` under `id`, with no depth entry.
-pub(crate) fn pool(id: &str, sim: FixedRateSim) -> PoolRef {
-    PoolRef::new(id.to_string(), SellLimitKind::Enforced, Box::new(sim), None)
+///
+/// The pair is a placeholder: [`hop`] repoints every pool it is given at the pair its hop trades,
+/// so a fixture never has to name the tokens twice.
+pub(crate) fn pool(id: &str, sim: FixedRateSim) -> Pool {
+    Pool::new(id.to_string(), token_a(), token_b(), SellLimitKind::Enforced, Box::new(sim), None)
 }
 
 /// A pool that buys ten times what it is sold, the defibot `MockRoute` default.
-pub(crate) fn tenfold_pool(id: &str) -> PoolRef {
+pub(crate) fn tenfold_pool(id: &str) -> Pool {
     pool(id, FixedRateSim::new(10))
 }
 
 /// A hop over `pools`, unsolved.
-pub(crate) fn hop(token_in: Token, token_out: Token, pools: Vec<PoolRef>) -> Hop {
-    Hop::new(token_in, token_out, pools).expect("hop has pools")
+pub(crate) fn hop(
+    token_in: Arc<Token>,
+    token_out: Arc<Token>,
+    mut pools: Vec<Pool>,
+) -> ParallelRoute {
+    for pool in &mut pools {
+        pool.retarget(Arc::clone(&token_in), Arc::clone(&token_out));
+    }
+    ParallelRoute::new(
+        pools
+            .into_iter()
+            .map(Route::pool)
+            .collect(),
+    )
+    .expect("hop has pools")
 }
 
 /// A hop over `pools` with one split each.
 pub(crate) fn solved_hop(
-    token_in: Token,
-    token_out: Token,
-    pools: Vec<PoolRef>,
+    token_in: Arc<Token>,
+    token_out: Arc<Token>,
+    pools: Vec<Pool>,
     splits: Vec<Fraction>,
-) -> Hop {
+) -> ParallelRoute {
     let mut hop = hop(token_in, token_out, pools);
     hop.set_splits(splits)
         .expect("one split per pool");
@@ -290,26 +311,61 @@ pub(crate) fn solved_hop(
 }
 
 /// A single-pool hop carrying the whole input.
-pub(crate) fn single_pool_hop(token_in: Token, token_out: Token, pool: PoolRef) -> Hop {
+pub(crate) fn single_pool_hop(
+    token_in: Arc<Token>,
+    token_out: Arc<Token>,
+    pool: Pool,
+) -> ParallelRoute {
     solved_hop(token_in, token_out, vec![pool], vec![Fraction::one()])
 }
 
-/// A route over a token path.
-pub(crate) fn route(tokens: Vec<Token>, hops: Vec<Hop>) -> SequentialRoute {
-    SequentialRoute::new(tokens, hops).expect("route matches its token path")
+/// A chain of hops, checked against the token path the fixture declares.
+///
+/// [`SequenceRoute`] derives its tokens from its pools, so the declared path is redundant to it. It
+/// is still required here: a fixture that spells out one path and then builds another is a fixture
+/// bug, and this is the only place it would show up.
+pub(crate) fn route(tokens: Vec<Arc<Token>>, hops: Vec<ParallelRoute>) -> SequenceRoute {
+    let sequence = SequenceRoute::new(hops).expect("hops chain end to end");
+    let built: Vec<Address> = sequence
+        .token_path()
+        .iter()
+        .map(|token| token.address.clone())
+        .collect();
+    let declared: Vec<Address> = tokens
+        .iter()
+        .map(|token| token.address.clone())
+        .collect();
+    assert_eq!(built, declared, "fixture route's token path does not match its hops");
+    sequence
 }
 
 /// A solution graph whose branches are one token path each — the ungrouped shape.
-pub(crate) fn graph(
-    routes: Vec<SequentialRoute>,
-    outer_splits: Vec<Fraction>,
-) -> DecompositionGraph {
-    DecompositionGraph::from_routes(routes, outer_splits).expect("branches share endpoints")
+pub(crate) fn graph(routes: Vec<SequenceRoute>, outer_splits: Vec<Fraction>) -> DecompositionGraph {
+    DecompositionGraph::new(routes, outer_splits).expect("branches share endpoints")
 }
 
-/// A branch: one shared head hop, the tails hanging off it, and the split between them.
-pub(crate) fn branch(head: Hop, tails: Vec<SequentialRoute>, tail_splits: Vec<Fraction>) -> Branch {
-    Branch::head(head, tails, tail_splits).expect("tails hang off the head")
+/// A head-grouped branch: one shared hop, then a split over the tails hanging off it.
+///
+/// The branch shape is a two-hop chain — the shared hop, then a hop whose alternatives are the
+/// tails — so `tail_splits` are the second hop's splits. An empty `tails` is a one-hop branch.
+pub(crate) fn branch(
+    head: ParallelRoute,
+    tails: Vec<SequenceRoute>,
+    tail_splits: Vec<Fraction>,
+) -> SequenceRoute {
+    if tails.is_empty() {
+        return SequenceRoute::new(vec![head]).expect("one hop is a chain");
+    }
+    let mut fed = ParallelRoute::new(
+        tails
+            .into_iter()
+            .map(Route::Sequence)
+            .collect(),
+    )
+    .expect("tails hang off the head");
+    fed.set_splits(tail_splits)
+        .expect("one split per tail");
+    SequenceRoute::new(vec![head, fed]).expect("the tails start where the hop ends")
 }
 
 /// An exact split, panicking on a zero denominator.
@@ -323,7 +379,7 @@ pub(crate) fn split_f64(value: f64) -> Fraction {
 }
 
 /// A route whose hops each hold one tenfold pool, named `{prefix}_{leg}`.
-pub(crate) fn tenfold_route(prefix: &str, tokens: Vec<Token>) -> SequentialRoute {
+pub(crate) fn tenfold_route(prefix: &str, tokens: Vec<Arc<Token>>) -> SequenceRoute {
     let mut hops = Vec::with_capacity(tokens.len() - 1);
     for (leg, pair) in tokens.windows(2).enumerate() {
         hops.push(single_pool_hop(
@@ -348,7 +404,7 @@ pub(crate) fn tenfold_route(prefix: &str, tokens: Vec<Token>) -> SequentialRoute
 /// the order.
 ///
 /// defibot's four branches share pool objects (`WBTC/DAI` and `WETH/USDC` each appear twice), so
-/// the same component id appears in more than one branch here too. Fynd's [`PoolRef`] owns its
+/// the same component id appears in more than one branch here too. Fynd's [`Pool`] owns its
 /// simulation state, so the repeated ids are *separate* states: this fixture reproduces defibot's
 /// topology, not its aliasing.
 pub(crate) fn diamond_graph() -> DecompositionGraph {

@@ -13,7 +13,7 @@ use super::*;
 use crate::{
     algorithm::{
         decomposition::{
-            components::Fraction,
+            models::Fraction,
             test_fixtures::{
                 graph, hop, route, single_pool_hop, solved_hop, split, tenfold_pool, token_a,
                 token_b, token_c, FixedRateSim,
@@ -26,10 +26,10 @@ use crate::{
 };
 
 /// A market holding one `FixedRateSim` pool per `(id, token_in, token_out)`, paying `multiple`.
-fn market(pools: &[(&str, Token, Token, u64)]) -> MarketState {
+fn market(pools: &[(&str, Arc<Token>, Arc<Token>, u64)]) -> MarketState {
     let mut market = MarketState::new();
     for (id, token_in, token_out, multiple) in pools {
-        let tokens = vec![token_in.clone(), token_out.clone()];
+        let tokens = vec![token_in.as_ref().clone(), token_out.as_ref().clone()];
         market.upsert_components(std::iter::once(component(id, &tokens)));
         market.update_states([(
             (*id).to_string(),
@@ -43,13 +43,13 @@ fn market(pools: &[(&str, Token, Token, u64)]) -> MarketState {
 /// A market where one named pool stops simulating above `threshold`, the way a concentrated
 /// liquidity pool answers `Ticks exceeded` once a swap would cross more ticks than it holds.
 fn market_with_brittle_pool(
-    pools: &[(&str, Token, Token, u64)],
+    pools: &[(&str, Arc<Token>, Arc<Token>, u64)],
     brittle: &str,
     threshold: u64,
 ) -> MarketState {
     let mut market = MarketState::new();
     for (id, token_in, token_out, multiple) in pools {
-        let tokens = vec![token_in.clone(), token_out.clone()];
+        let tokens = vec![token_in.as_ref().clone(), token_out.as_ref().clone()];
         let mut sim = FixedRateSim::new(*multiple);
         if *id == brittle {
             sim = sim.with_simulation_failure_above(threshold);
@@ -248,7 +248,8 @@ fn test_route_result_charges_gas_in_buy_token_units() {
 
     let gas_price_wei = BigUint::from(2u8);
     let mut token_prices: TokenGasPrices = FxHashMap::default();
-    token_prices.insert(token_b().address, Price::new(BigUint::from(3u8), BigUint::from(1u8)));
+    token_prices
+        .insert(token_b().address.clone(), Price::new(BigUint::from(3u8), BigUint::from(1u8)));
     let gas_prices =
         TokenPriceData::new(gas_price_wei.clone(), Some(Arc::new(token_prices.clone())));
 

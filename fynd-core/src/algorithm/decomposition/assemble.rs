@@ -56,7 +56,7 @@ use tracing::debug;
 use crate::{
     algorithm::{
         decomposition::{
-            components::{Branch, BranchSide, DecompositionGraph, Hop},
+            components::{DecompositionGraph, ParallelRoute, Route, SequenceRoute},
             models::TokenPriceData,
         },
         split_primitives::{build_split_route, HopDescriptor, PathAllocation, SimulatedHop},
@@ -98,8 +98,32 @@ const LOW_ROUTED_FLOW: f64 = 0.999;
 /// A path under construction during the cartesian expansion of one branch.
 struct PartialPath {
     hops: Vec<HopDescriptor>,
-    /// Share of the *order* that reaches this path, not the share of its branch.
-    fraction: f64,
+    /// The split of every level this path passes through, in the order they apply: the branch's
+    /// share of the order, then each hop's share of its input.
+    ///
+    /// Kept as factors rather than a running product because `f64` multiplication is not
+    /// associative, and the flow fraction has to come out bit-identical however the levels are
+    /// nested. Folded once, in order, by [`PartialPath::flow_fraction`].
+    shares: Vec<f64>,
+}
+
+impl PartialPath {
+    /// This path continued by one more level: `hop` when it is a pool, nothing when it is the split
+    /// a grouped branch puts over its tails.
+    fn extended(&self, hop: Option<HopDescriptor>, share: f64) -> Self {
+        let mut hops = self.hops.clone();
+        hops.extend(hop);
+        let mut shares = self.shares.clone();
+        shares.push(share);
+        Self { hops, shares }
+    }
+
+    /// Share of the whole order this path carries.
+    fn flow_fraction(&self) -> f64 {
+        self.shares
+            .iter()
+            .fold(1.0, |total, share| total * share)
+    }
 }
 
 /// Assembles the solved `graph` into a validated [`Route`] and the [`RouteResult`] describing it.
@@ -172,7 +196,7 @@ pub(crate) fn cast_into_route(
 fn solution_allocations(graph: &DecompositionGraph) -> Vec<PathAllocation> {
     let mut allocations = Vec::new();
     for (branch, split) in graph
-        .branches()
+        .sequences
         .iter()
         .zip(graph.outer_splits())
     {
@@ -200,138 +224,76 @@ fn solution_allocations(graph: &DecompositionGraph) -> Vec<PathAllocation> {
 
 /// Expands one branch into linear paths.
 ///
-/// The branch's own hop appears in every path this emits — at the front for
-/// [`BranchSide::Head`], at the back for [`BranchSide::Tail`] — and that repetition is exactly the
-/// shared prefix or suffix [`build_split_route`] merges back into a single on-chain swap. Emitting
-/// it once per sequence here and letting the encoder merge it is what keeps the assembled route's
-/// shape identical to the branch's: one swap per pool of that hop, however many sequences feed it.
+/// A branch's shared hop appears in every path this emits — at the front when it leads, at the back
+/// when it trails — and that repetition is exactly the shared prefix or suffix
+/// [`build_split_route`] merges back into a single on-chain swap. Emitting it once per tail here
+/// and letting the encoder merge it is what keeps the assembled route's shape identical to the
+/// branch's: one swap per pool of that hop, however many tails feed it.
 ///
 /// Returns nothing when a leg is unsolved or routes nothing — a path with a dead leg carries no
 /// flow at all, and emitting its earlier legs would strand tokens at the break.
-fn branch_allocations(branch: &Branch, branch_fraction: f64) -> Vec<PathAllocation> {
-    match branch.side() {
-        BranchSide::Head => hop_first_allocations(branch, branch_fraction),
-        BranchSide::Tail => sequences_first_allocations(branch, branch_fraction),
-    }
+fn branch_allocations(branch: &SequenceRoute, branch_fraction: f64) -> Vec<PathAllocation> {
+    let seed = PartialPath { hops: Vec::new(), shares: vec![branch_fraction] };
+    finish(expand(branch, vec![seed]))
 }
 
-/// [`BranchSide::Tail`]: every sequence's activated paths, each continued through the shared hop.
-fn sequences_first_allocations(branch: &Branch, branch_fraction: f64) -> Vec<PathAllocation> {
-    let tail_pools = activated_pools(branch.hop());
-    if tail_pools.is_empty() {
-        return Vec::new();
-    }
-
-    let mut partials = Vec::new();
-    for (sequence, split) in branch
-        .sequences()
-        .iter()
-        .zip(branch.splits())
-    {
-        if split.is_zero() {
-            continue;
-        }
-        let mut extended =
-            vec![PartialPath { hops: Vec::new(), fraction: branch_fraction * split.to_f64() }];
-
-        let mut dead_leg = false;
-        for hop in sequence.hops() {
-            let activated = activated_pools(hop);
-            if activated.is_empty() {
-                dead_leg = true;
-                break;
-            }
-            let mut next = Vec::with_capacity(extended.len() * activated.len());
-            for partial in &extended {
-                for (descriptor, pool_share) in &activated {
-                    let mut hops = partial.hops.clone();
-                    hops.push(descriptor.clone());
-                    next.push(PartialPath { hops, fraction: partial.fraction * pool_share });
-                }
-            }
-            extended = next;
-        }
-        if dead_leg {
-            continue;
-        }
-
-        // The shared hop closes every path the sequence produced.
-        for partial in &extended {
-            for (descriptor, pool_share) in &tail_pools {
-                let mut hops = partial.hops.clone();
-                hops.push(descriptor.clone());
-                partials.push(PartialPath { hops, fraction: partial.fraction * pool_share });
-            }
+/// Continues every path in `paths` through every linear route across `chain`.
+fn expand(chain: &SequenceRoute, mut paths: Vec<PartialPath>) -> Vec<PartialPath> {
+    for hop in chain.hops() {
+        paths = cross(paths, hop);
+        if paths.is_empty() {
+            return Vec::new();
         }
     }
-    finish(partials)
+    paths
 }
 
-/// [`BranchSide::Head`]: the hop's activated pools, each continued down every activated path of
-/// every sequence carrying flow.
-fn hop_first_allocations(branch: &Branch, branch_fraction: f64) -> Vec<PathAllocation> {
-    let head = activated_pools(branch.hop());
-    if head.is_empty() {
+/// Continues every path so far through every way `hop` carries flow.
+///
+/// The nesting is deliberate: chains are the outer loop and the paths so far the inner one, so all
+/// of one tail's paths are emitted before the next tail's, and within a tail the paths keep the
+/// order they already had. That is the order the two mirrored head/tail expansions produced, and it
+/// decides how tied flow fractions break in [`solution_allocations`]'s stable sort, and therefore
+/// which paths the assembly cap drops.
+fn cross(paths: Vec<PartialPath>, hop: &ParallelRoute) -> Vec<PartialPath> {
+    if hop.holds_chains() {
+        let mut next = Vec::new();
+        for (child, split) in hop.children().iter().zip(hop.splits()) {
+            let Route::Sequence(chain) = child else {
+                continue;
+            };
+            if split.is_zero() {
+                continue;
+            }
+            let entering: Vec<PartialPath> = paths
+                .iter()
+                .map(|path| path.extended(None, split.to_f64()))
+                .collect();
+            next.extend(expand(chain, entering));
+        }
+        return next;
+    }
+
+    let activated = activated_pools(hop);
+    if activated.is_empty() {
         return Vec::new();
     }
-    let heads: Vec<PartialPath> = head
-        .into_iter()
-        .map(|(descriptor, share)| PartialPath {
-            hops: vec![descriptor],
-            fraction: branch_fraction * share,
-        })
-        .collect();
-
-    if branch.sequences().is_empty() {
-        return finish(heads);
-    }
-
-    let mut partials = Vec::new();
-    for (tail, tail_split) in branch
-        .sequences()
-        .iter()
-        .zip(branch.splits())
-    {
-        if tail_split.is_zero() {
-            continue;
-        }
-        let share = tail_split.to_f64();
-        let mut extended: Vec<PartialPath> = heads
-            .iter()
-            .map(|head| PartialPath { hops: head.hops.clone(), fraction: head.fraction * share })
-            .collect();
-
-        let mut dead_leg = false;
-        for hop in tail.hops() {
-            let activated = activated_pools(hop);
-            if activated.is_empty() {
-                dead_leg = true;
-                break;
-            }
-            let mut next = Vec::with_capacity(extended.len() * activated.len());
-            for partial in &extended {
-                for (descriptor, pool_share) in &activated {
-                    let mut hops = partial.hops.clone();
-                    hops.push(descriptor.clone());
-                    next.push(PartialPath { hops, fraction: partial.fraction * pool_share });
-                }
-            }
-            extended = next;
-        }
-        if !dead_leg {
-            partials.extend(extended);
+    let mut next = Vec::with_capacity(paths.len() * activated.len());
+    for path in &paths {
+        for (descriptor, pool_share) in &activated {
+            next.push(path.extended(Some(descriptor.clone()), *pool_share));
         }
     }
-
-    finish(partials)
+    next
 }
 
 /// Turns finished partial paths into the allocations [`build_split_route`] consumes.
 fn finish(partials: Vec<PartialPath>) -> Vec<PathAllocation> {
     partials
         .into_iter()
-        .filter(|partial| partial.fraction > 0.0)
+        .filter(|partial| partial.flow_fraction() > 0.0)
         .map(|partial| PathAllocation {
+            flow_fraction: partial.flow_fraction(),
             hops: partial
                 .hops
                 .into_iter()
@@ -341,7 +303,6 @@ fn finish(partials: Vec<PartialPath>) -> Vec<PathAllocation> {
                     gas: BigUint::zero(),
                 })
                 .collect(),
-            flow_fraction: partial.fraction,
             amount_in: BigUint::zero(),
             amount_out: BigUint::zero(),
             marginal_price_product: 0.0,
@@ -350,7 +311,7 @@ fn finish(partials: Vec<PartialPath>) -> Vec<PathAllocation> {
 }
 
 /// The pools of `hop` carrying a non-zero split, with that split.
-fn activated_pools(hop: &Hop) -> Vec<(HopDescriptor, f64)> {
+fn activated_pools(hop: &ParallelRoute) -> Vec<(HopDescriptor, f64)> {
     hop.pools()
         .iter()
         .zip(hop.splits())
@@ -359,8 +320,8 @@ fn activated_pools(hop: &Hop) -> Vec<(HopDescriptor, f64)> {
             (
                 HopDescriptor::new(
                     pool.component_id().clone(),
-                    hop.token_in().clone(),
-                    hop.token_out().clone(),
+                    hop.sell_token().clone(),
+                    hop.buy_token().clone(),
                 ),
                 split.to_f64(),
             )

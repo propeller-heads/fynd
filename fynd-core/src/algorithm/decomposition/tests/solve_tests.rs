@@ -13,7 +13,7 @@ use rustc_hash::FxHashMap;
 use super::*;
 use crate::algorithm::{
     decomposition::{
-        components::{PoolRef, SellLimitKind},
+        components::{Pool, SellLimitKind},
         optimizers::{SplitOptimizer, SplitOptimizerConfig},
         test_fixtures::{
             graph as build_graph, hop as build_hop, pool, route as build_route, single_pool_hop,
@@ -42,8 +42,8 @@ fn solve(graph: &mut DecompositionGraph, sell_amount: &BigUint) {
         .expect("the fixtures solve");
 }
 
-fn solve_branch(route: &mut SequentialRoute, sell_amount: u64) {
-    solve_route(
+fn solve_branch(route: &mut SequenceRoute, sell_amount: u64) {
+    solve_sequence_route(
         route,
         &BigUint::from(sell_amount),
         SplitOptimizer::PairComparison,
@@ -63,10 +63,12 @@ fn solve_all(graph: &mut DecompositionGraph, sell_amount: &BigUint) -> (BigUint,
 }
 
 /// A constant-product pool over 18-decimal tokens.
-fn cp_pool(id: &str, reserve_0: u64, reserve_1: u64) -> PoolRef {
+fn cp_pool(id: &str, reserve_0: u64, reserve_1: u64) -> Pool {
     let unit = BigUint::from(10u8).pow(18);
-    PoolRef::new(
+    Pool::new(
         id.to_string(),
+        token_a(),
+        token_b(),
         SellLimitKind::Enforced,
         Box::new(ConstantProductSim {
             reserve_0: BigUint::from(reserve_0) * &unit,
@@ -298,11 +300,11 @@ fn test_remove_loops_drops_the_branch_that_reverses_a_claimed_direction() {
     let removed = remove_loops(&mut graph).expect("one branch survives");
 
     assert!(removed);
-    assert_eq!(graph.branches().len(), 1);
+    assert_eq!(graph.sequences.len(), 1);
     assert_eq!(
-        graph.branches()[0]
-            .hop()
-            .token_out()
+        graph.sequences[0]
+            .hop(0)
+            .buy_token()
             .address,
         token_b().address
     );
@@ -318,11 +320,11 @@ fn test_remove_loops_keeps_whichever_branch_claims_a_direction_first() {
     let removed = remove_loops(&mut graph).expect("one branch survives");
 
     assert!(removed);
-    assert_eq!(graph.branches().len(), 1);
+    assert_eq!(graph.sequences.len(), 1);
     assert_eq!(
-        graph.branches()[0]
-            .hop()
-            .token_out()
+        graph.sequences[0]
+            .hop(0)
+            .buy_token()
             .address,
         token_c().address
     );
@@ -351,7 +353,7 @@ fn test_remove_loops_ignores_hops_that_did_not_trade() {
     let mut graph = build_graph(vec![forward, backward], vec![split(1, 2); 2]);
 
     assert!(!remove_loops(&mut graph).expect("nothing to remove"));
-    assert_eq!(graph.branches().len(), 2);
+    assert_eq!(graph.sequences.len(), 2);
 }
 
 #[test]
@@ -400,7 +402,7 @@ fn test_solve_solution_graph_resolves_after_removing_a_loop() {
 
     let (bought, _) = solve_all(&mut graph, &whole(1_000));
 
-    assert_eq!(graph.branches().len(), 1);
+    assert_eq!(graph.sequences.len(), 1);
     assert_eq!(graph.outer_splits(), &[Fraction::one()]);
     assert!(!bought.is_zero());
 }
@@ -412,7 +414,7 @@ fn test_solve_solution_graph_resolves_after_removing_a_loop() {
 /// How the two share the hop depends on the size the branch is asked for, which is what makes the
 /// second pass observable: solving the branch for the whole order and solving it for the share it
 /// actually receives give different inner splits.
-fn capped_branch() -> SequentialRoute {
+fn capped_branch() -> SequenceRoute {
     build_route(
         vec![token_a(), token_b()],
         vec![build_hop(
@@ -427,7 +429,7 @@ fn capped_branch() -> SequentialRoute {
 }
 
 /// A branch over one deep pool, which is where the order goes once the capped pool is full.
-fn deep_branch() -> SequentialRoute {
+fn deep_branch() -> SequenceRoute {
     build_route(
         vec![token_a(), token_b()],
         vec![single_pool_hop(token_a(), token_b(), cp_pool("deep", 10_000_000, 10_000_000))],
@@ -442,19 +444,19 @@ fn test_second_pass_resolves_each_branch_for_the_amount_it_receives() {
     solve(&mut first_pass_only, &whole(10));
     solve_all(&mut full, &whole(10));
 
-    let optimistic = first_pass_only.branches()[0]
-        .hop_at(0)
+    let optimistic = first_pass_only.sequences[0]
+        .hop(0)
         .splits()[0]
         .clone();
-    let allocated = full.branches()[0].hop_at(0).splits()[0].clone();
+    let allocated = full.sequences[0].hop(0).splits()[0].clone();
     assert!(
         allocated > optimistic,
         "a branch solved for its share of the order should lean harder on the impact-free pool: \
          {allocated:?} vs {optimistic:?}"
     );
     // Re-solving is not cosmetic: the branch buys more for the same input than it would have.
-    assert!(full.branches()[0].buy_amount() > first_pass_only.branches()[0].buy_amount());
-    assert_eq!(full.branches()[0].sell_amount(), first_pass_only.branches()[0].sell_amount());
+    assert!(full.sequences[0].buy_amount() > first_pass_only.sequences[0].buy_amount());
+    assert_eq!(full.sequences[0].sell_amount(), first_pass_only.sequences[0].sell_amount());
 }
 
 #[test]
@@ -473,7 +475,7 @@ fn test_second_pass_leaves_zero_split_branches_alone() {
     solve_all(&mut graph, &BigUint::from(1_000u32));
 
     assert!(graph.outer_splits()[1].is_zero());
-    assert!(graph.branches()[1]
+    assert!(graph.sequences[1]
         .sell_amount()
         .is_zero());
 }
@@ -516,8 +518,8 @@ fn test_sell_with_coupled_paths_reverts_even_when_a_branch_fails() {
     // The revert lives in a `finally`. A branch whose hop was left unsolved fails on the way out
     // and the states still have to come back.
     let mut graph = coupled_graph();
-    graph.branches_mut()[1]
-        .hop_at_mut(0)
+    graph.sequences[1]
+        .hop_mut(0)
         .set_splits(Vec::new())
         .expect("clearing is always valid");
     let before: Vec<Box<dyn ProtocolSim>> = graph_pools(&graph)
@@ -542,14 +544,14 @@ fn test_sell_with_coupled_paths_updates_only_the_branches_not_yet_sold() {
 
     // Both branches sold the same amount into the same pools, but the second traded against the
     // liquidity the first had already taken.
-    assert_eq!(graph.branches()[0].sell_amount(), graph.branches()[1].sell_amount());
-    assert!(graph.branches()[1].buy_amount() < graph.branches()[0].buy_amount());
+    assert_eq!(graph.sequences[0].sell_amount(), graph.sequences[1].sell_amount());
+    assert!(graph.sequences[1].buy_amount() < graph.sequences[0].buy_amount());
 }
 
 // ===================== _solve_without_splits (order_solver.py:810-853) =====================
 
 /// A one-hop branch whose single pool pays `multiple` and stops at `sell_limit`.
-fn capacity_branch(id: &str, multiple: u64, sell_limit: u64) -> SequentialRoute {
+fn capacity_branch(id: &str, multiple: u64, sell_limit: u64) -> SequenceRoute {
     build_route(
         vec![token_a(), token_b()],
         vec![single_pool_hop(
@@ -585,9 +587,9 @@ fn test_solve_without_splits_fills_the_best_branches_first() {
 
     without_splits(&mut graph, 250);
 
-    assert_eq!(graph.branches()[1].sell_amount(), &BigUint::from(90u8));
-    assert_eq!(graph.branches()[2].sell_amount(), &BigUint::from(90u8));
-    assert_eq!(graph.branches()[0].sell_amount(), &BigUint::from(70u8));
+    assert_eq!(graph.sequences[1].sell_amount(), &BigUint::from(90u8));
+    assert_eq!(graph.sequences[2].sell_amount(), &BigUint::from(90u8));
+    assert_eq!(graph.sequences[0].sell_amount(), &BigUint::from(70u8));
     assert_eq!(graph.sell_amount(), &BigUint::from(250u32));
 }
 
@@ -600,8 +602,8 @@ fn test_solve_without_splits_skips_a_branch_reusing_an_included_pool() {
 
     without_splits(&mut graph, 250);
 
-    assert_eq!(graph.branches()[0].sell_amount(), &BigUint::from(90u8));
-    assert!(graph.branches()[1]
+    assert_eq!(graph.sequences[0].sell_amount(), &BigUint::from(90u8));
+    assert!(graph.sequences[1]
         .sell_amount()
         .is_zero());
     assert!(graph.outer_splits()[1].is_zero());
@@ -642,11 +644,11 @@ fn test_solve_without_splits_zeroes_branches_past_the_exhaustion_point() {
 
     without_splits(&mut graph, 1_000);
 
-    assert_eq!(graph.branches()[0].sell_amount(), &BigUint::from(1_000u32));
-    assert!(graph.branches()[1]
+    assert_eq!(graph.sequences[0].sell_amount(), &BigUint::from(1_000u32));
+    assert!(graph.sequences[1]
         .sell_amount()
         .is_zero());
-    assert!(graph.branches()[2]
+    assert!(graph.sequences[2]
         .sell_amount()
         .is_zero());
     let total = graph
@@ -712,7 +714,8 @@ fn test_net_of_gas_charges_the_graph_gas() {
 
     let graph = sold_graph("candidate", 10, 100);
     let mut token_prices = FxHashMap::default();
-    token_prices.insert(token_b().address, Price::new(BigUint::from(1u8), BigUint::from(1u8)));
+    token_prices
+        .insert(token_b().address.clone(), Price::new(BigUint::from(1u8), BigUint::from(1u8)));
     let wei = BigUint::from(100u8);
 
     // One unit of gas at 100 wei, priced one-for-one into the buy token, against 1000 bought.
