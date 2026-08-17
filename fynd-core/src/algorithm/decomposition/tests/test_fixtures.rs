@@ -26,8 +26,8 @@ use crate::{
     algorithm::{
         decomposition::{
             components::{
-                DecompositionError, DecompositionGraph, ParallelRoute, Pool, Route, SellLimitKind,
-                SequenceRoute,
+                DecompositionError, DecompositionGraph, ParallelRoute, Pool, SellLimitKind,
+                SequenceRoute, SplitKind,
             },
             models::Fraction,
         },
@@ -291,7 +291,7 @@ pub(crate) fn hop(
     ParallelRoute::new(
         pools
             .into_iter()
-            .map(Route::pool)
+            .map(SplitKind::pool)
             .collect(),
     )
     .expect("hop has pools")
@@ -341,7 +341,17 @@ pub(crate) fn route(tokens: Vec<Arc<Token>>, hops: Vec<ParallelRoute>) -> Sequen
 
 /// A solution graph whose branches are one token path each — the ungrouped shape.
 pub(crate) fn graph(routes: Vec<SequenceRoute>, outer_splits: Vec<Fraction>) -> DecompositionGraph {
-    DecompositionGraph::new(routes, outer_splits).expect("branches share endpoints")
+    let mut graph = DecompositionGraph::new(
+        routes
+            .into_iter()
+            .map(SplitKind::Sequence)
+            .collect(),
+    )
+    .expect("branches share endpoints");
+    graph
+        .set_splits(outer_splits)
+        .expect("one split per branch");
+    graph
 }
 
 /// A head-grouped branch: one shared hop, then a split over the tails hanging off it.
@@ -359,13 +369,39 @@ pub(crate) fn branch(
     let mut fed = ParallelRoute::new(
         tails
             .into_iter()
-            .map(Route::Sequence)
+            .map(SplitKind::Sequence)
             .collect(),
     )
     .expect("tails hang off the head");
     fed.set_splits(tail_splits)
         .expect("one split per tail");
     SequenceRoute::new(vec![head, fed]).expect("the tails start where the hop ends")
+}
+
+/// One branch of a graph as the chain it is.
+///
+/// A graph's alternatives are [`SplitKind`]s because a parallel level's are, and every branch
+/// `graph_build` produces is a chain. Tests that know that say so here rather than at each use.
+pub(crate) fn branch_of(graph: &DecompositionGraph, index: usize) -> &SequenceRoute {
+    match &graph.inner()[index] {
+        SplitKind::Sequence(chain) => chain,
+        SplitKind::Direct(_) => panic!("branch {index} is a bare pool, not a chain"),
+    }
+}
+
+/// [`branch_of`], mutably.
+pub(crate) fn branch_of_mut(graph: &mut DecompositionGraph, index: usize) -> &mut SequenceRoute {
+    match &mut graph.inner_mut()[index] {
+        SplitKind::Sequence(chain) => chain,
+        SplitKind::Direct(_) => panic!("branch {index} is a bare pool, not a chain"),
+    }
+}
+
+/// Every branch of a graph as the chains they are.
+pub(crate) fn branches_of(graph: &DecompositionGraph) -> Vec<&SequenceRoute> {
+    (0..graph.inner().len())
+        .map(|index| branch_of(graph, index))
+        .collect()
 }
 
 /// An exact split, panicking on a zero denominator.

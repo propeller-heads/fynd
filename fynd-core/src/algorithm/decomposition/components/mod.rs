@@ -11,7 +11,7 @@
 //! * [`ParallelRoute`] — alternatives in parallel: the pools of one leg, or the tails of a grouped
 //!   branch.
 //! * [`Pool`] — one pool traded in one direction, defibot's `SimpleRoute`.
-//! * [`Route`] — which of the two a [`ParallelRoute`]'s alternatives are.
+//! * [`SplitKind`] — which of the two a [`ParallelRoute`]'s alternatives are.
 //!
 //! A single direct pool is a one-branch graph whose branch is a one-hop chain over one pool; there
 //! is no special case for it.
@@ -137,18 +137,24 @@ fn executed_price(
 }
 
 mod error;
-mod graph;
 mod pool;
 mod route;
 mod sequence;
 mod split;
 
 pub(crate) use error::DecompositionError;
-pub(crate) use graph::DecompositionGraph;
 pub(crate) use pool::{Pool, SellLimitKind};
-pub(crate) use route::Route;
+pub(crate) use route::SplitKind;
 pub(crate) use sequence::{sequence_weight, SequenceRoute};
 pub(crate) use split::ParallelRoute;
+
+/// A whole solution: the outer [`ParallelRoute`] over one order.
+///
+/// An alias, not a type. The top level is a parallel split like any other — its alternatives are
+/// the branches, each a [`SequenceRoute`] — so it shares every composition rule rather than
+/// restating them. The name survives because a signature taking one means "the whole solution", not
+/// "some level of it".
+pub(crate) type DecompositionGraph = ParallelRoute;
 
 pub(crate) use crate::algorithm::decomposition::models::Fraction;
 

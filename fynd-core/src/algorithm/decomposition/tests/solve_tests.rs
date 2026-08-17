@@ -16,8 +16,9 @@ use crate::algorithm::{
         components::{Pool, SellLimitKind},
         optimizers::{SplitOptimizer, SplitOptimizerConfig},
         test_fixtures::{
-            graph as build_graph, hop as build_hop, pool, route as build_route, single_pool_hop,
-            split, tenfold_pool, token_a, token_b, token_c, token_d, FixedRateSim,
+            branch_of, branch_of_mut, graph as build_graph, hop as build_hop, pool,
+            route as build_route, single_pool_hop, split, tenfold_pool, token_a, token_b, token_c,
+            token_d, FixedRateSim,
         },
     },
     test_utils::ConstantProductSim,
@@ -38,8 +39,15 @@ fn pair_comparison() -> SplitOptimizerConfig {
 }
 
 fn solve(graph: &mut DecompositionGraph, sell_amount: &BigUint) {
-    solve_graph(graph, sell_amount, pair_comparison(), &TokenPriceData::new(free_gas(), None))
-        .expect("the fixtures solve");
+    let optimizers = pair_comparison();
+    solve_parallel_route(
+        graph,
+        sell_amount,
+        optimizers.outer,
+        optimizers.inner,
+        &TokenPriceData::new(free_gas(), None),
+    )
+    .expect("the fixtures solve");
 }
 
 fn solve_branch(route: &mut SequenceRoute, sell_amount: u64) {
@@ -53,7 +61,7 @@ fn solve_branch(route: &mut SequenceRoute, sell_amount: u64) {
 }
 
 fn solve_all(graph: &mut DecompositionGraph, sell_amount: &BigUint) -> (BigUint, BigUint) {
-    solve_solution_graph(
+    solve_decomposition_graph(
         graph,
         sell_amount,
         pair_comparison(),
@@ -300,16 +308,16 @@ fn test_remove_loops_drops_the_branch_that_reverses_a_claimed_direction() {
     let removed = remove_loops(&mut graph).expect("one branch survives");
 
     assert!(removed);
-    assert_eq!(graph.sequences.len(), 1);
+    assert_eq!(graph.inner().len(), 1);
     assert_eq!(
-        graph.sequences[0]
+        branch_of(&graph, 0)
             .hop(0)
             .buy_token()
             .address,
         token_b().address
     );
     // The graph is unsolved again, which is what forces the caller to re-solve.
-    assert!(graph.outer_splits().is_empty());
+    assert!(graph.splits().is_empty());
 }
 
 #[test]
@@ -320,9 +328,9 @@ fn test_remove_loops_keeps_whichever_branch_claims_a_direction_first() {
     let removed = remove_loops(&mut graph).expect("one branch survives");
 
     assert!(removed);
-    assert_eq!(graph.sequences.len(), 1);
+    assert_eq!(graph.inner().len(), 1);
     assert_eq!(
-        graph.sequences[0]
+        branch_of(&graph, 0)
             .hop(0)
             .buy_token()
             .address,
@@ -353,7 +361,7 @@ fn test_remove_loops_ignores_hops_that_did_not_trade() {
     let mut graph = build_graph(vec![forward, backward], vec![split(1, 2); 2]);
 
     assert!(!remove_loops(&mut graph).expect("nothing to remove"));
-    assert_eq!(graph.sequences.len(), 2);
+    assert_eq!(graph.inner().len(), 2);
 }
 
 #[test]
@@ -402,8 +410,8 @@ fn test_solve_solution_graph_resolves_after_removing_a_loop() {
 
     let (bought, _) = solve_all(&mut graph, &whole(1_000));
 
-    assert_eq!(graph.sequences.len(), 1);
-    assert_eq!(graph.outer_splits(), &[Fraction::one()]);
+    assert_eq!(graph.inner().len(), 1);
+    assert_eq!(graph.splits(), &[Fraction::one()]);
     assert!(!bought.is_zero());
 }
 
@@ -444,19 +452,19 @@ fn test_second_pass_resolves_each_branch_for_the_amount_it_receives() {
     solve(&mut first_pass_only, &whole(10));
     solve_all(&mut full, &whole(10));
 
-    let optimistic = first_pass_only.sequences[0]
+    let optimistic = branch_of(&first_pass_only, 0)
         .hop(0)
         .splits()[0]
         .clone();
-    let allocated = full.sequences[0].hop(0).splits()[0].clone();
+    let allocated = branch_of(&full, 0).hop(0).splits()[0].clone();
     assert!(
         allocated > optimistic,
         "a branch solved for its share of the order should lean harder on the impact-free pool: \
          {allocated:?} vs {optimistic:?}"
     );
     // Re-solving is not cosmetic: the branch buys more for the same input than it would have.
-    assert!(full.sequences[0].buy_amount() > first_pass_only.sequences[0].buy_amount());
-    assert_eq!(full.sequences[0].sell_amount(), first_pass_only.sequences[0].sell_amount());
+    assert!(full.inner()[0].buy_amount() > first_pass_only.inner()[0].buy_amount());
+    assert_eq!(full.inner()[0].sell_amount(), first_pass_only.inner()[0].sell_amount());
 }
 
 #[test]
@@ -474,10 +482,8 @@ fn test_second_pass_leaves_zero_split_branches_alone() {
 
     solve_all(&mut graph, &BigUint::from(1_000u32));
 
-    assert!(graph.outer_splits()[1].is_zero());
-    assert!(graph.sequences[1]
-        .sell_amount()
-        .is_zero());
+    assert!(graph.splits()[1].is_zero());
+    assert!(graph.inner()[1].sell_amount().is_zero());
 }
 
 // ===================== Coupled paths (utils.py:18-47) =====================
@@ -518,7 +524,7 @@ fn test_sell_with_coupled_paths_reverts_even_when_a_branch_fails() {
     // The revert lives in a `finally`. A branch whose hop was left unsolved fails on the way out
     // and the states still have to come back.
     let mut graph = coupled_graph();
-    graph.sequences[1]
+    branch_of_mut(&mut graph, 1)
         .hop_mut(0)
         .set_splits(Vec::new())
         .expect("clearing is always valid");
@@ -544,8 +550,8 @@ fn test_sell_with_coupled_paths_updates_only_the_branches_not_yet_sold() {
 
     // Both branches sold the same amount into the same pools, but the second traded against the
     // liquidity the first had already taken.
-    assert_eq!(graph.sequences[0].sell_amount(), graph.sequences[1].sell_amount());
-    assert!(graph.sequences[1].buy_amount() < graph.sequences[0].buy_amount());
+    assert_eq!(graph.inner()[0].sell_amount(), graph.inner()[1].sell_amount());
+    assert!(graph.inner()[1].buy_amount() < graph.inner()[0].buy_amount());
 }
 
 // ===================== _solve_without_splits (order_solver.py:810-853) =====================
@@ -587,9 +593,9 @@ fn test_solve_without_splits_fills_the_best_branches_first() {
 
     without_splits(&mut graph, 250);
 
-    assert_eq!(graph.sequences[1].sell_amount(), &BigUint::from(90u8));
-    assert_eq!(graph.sequences[2].sell_amount(), &BigUint::from(90u8));
-    assert_eq!(graph.sequences[0].sell_amount(), &BigUint::from(70u8));
+    assert_eq!(graph.inner()[1].sell_amount(), &BigUint::from(90u8));
+    assert_eq!(graph.inner()[2].sell_amount(), &BigUint::from(90u8));
+    assert_eq!(graph.inner()[0].sell_amount(), &BigUint::from(70u8));
     assert_eq!(graph.sell_amount(), &BigUint::from(250u32));
 }
 
@@ -602,11 +608,9 @@ fn test_solve_without_splits_skips_a_branch_reusing_an_included_pool() {
 
     without_splits(&mut graph, 250);
 
-    assert_eq!(graph.sequences[0].sell_amount(), &BigUint::from(90u8));
-    assert!(graph.sequences[1]
-        .sell_amount()
-        .is_zero());
-    assert!(graph.outer_splits()[1].is_zero());
+    assert_eq!(graph.inner()[0].sell_amount(), &BigUint::from(90u8));
+    assert!(graph.inner()[1].sell_amount().is_zero());
+    assert!(graph.splits()[1].is_zero());
 }
 
 #[test]
@@ -621,7 +625,7 @@ fn test_solve_without_splits_leaves_a_shortfall_when_liquidity_runs_out() {
     without_splits(&mut graph, 1_000);
 
     let total = graph
-        .outer_splits()
+        .splits()
         .iter()
         .fold(BigRational::zero(), |sum, split| sum + split.as_ratio());
     assert_eq!(total, BigRational::new(180.into(), 1_000.into()));
@@ -644,15 +648,11 @@ fn test_solve_without_splits_zeroes_branches_past_the_exhaustion_point() {
 
     without_splits(&mut graph, 1_000);
 
-    assert_eq!(graph.sequences[0].sell_amount(), &BigUint::from(1_000u32));
-    assert!(graph.sequences[1]
-        .sell_amount()
-        .is_zero());
-    assert!(graph.sequences[2]
-        .sell_amount()
-        .is_zero());
+    assert_eq!(graph.inner()[0].sell_amount(), &BigUint::from(1_000u32));
+    assert!(graph.inner()[1].sell_amount().is_zero());
+    assert!(graph.inner()[2].sell_amount().is_zero());
     let total = graph
-        .outer_splits()
+        .splits()
         .iter()
         .fold(BigRational::zero(), |sum, split| sum + split.as_ratio());
     assert_eq!(total, BigRational::one());

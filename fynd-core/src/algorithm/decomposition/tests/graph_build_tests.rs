@@ -10,7 +10,7 @@ use super::*;
 use crate::{
     algorithm::{
         decomposition::{
-            components::{ParallelRoute, Pool, Route, SellLimitKind, SequenceRoute},
+            components::{ParallelRoute, Pool, SellLimitKind, SequenceRoute, SplitKind},
             models::Fraction,
             token_graph::{AllowedTokens, SearchBounds, TokenGraph},
         },
@@ -84,13 +84,13 @@ fn open_graph<'a>(
 /// Token sequence of every branch, in ranked order, rendered as `"A->C->B"`.
 fn branch_labels(graph: &DecompositionGraph) -> Vec<String> {
     graph
-        .sequences
+        .inner()
         .iter()
-        .map(SequenceRoute::token_path_label)
+        .map(SplitKind::token_path_label)
         .collect()
 }
 
-fn pool_ids(branch: &SequenceRoute, leg: usize) -> Vec<String> {
+fn pool_ids(branch: &SplitKind, leg: usize) -> Vec<String> {
     branch.all_hops()[leg]
         .pools()
         .iter()
@@ -131,9 +131,9 @@ fn test_two_pools_on_one_pair_become_one_branch() {
         build(&open_graph(manager.graph(), &a, &b), &market, None, &a, &b, &params(), &bounds(2))
             .expect("the fixtures build a route");
 
-    assert_eq!(solution.sequences.len(), 1);
-    let route = &solution.sequences[0];
-    assert_eq!(route.hops().len(), 1);
+    assert_eq!(solution.inner().len(), 1);
+    let route = &solution.inner()[0];
+    assert_eq!(route.all_hops().len(), 1);
     // Equal depth, so ranking falls through to price: the richer pool leads.
     assert_eq!(pool_ids(route, 0), ["ab_rich", "ab_cheap"]);
 }
@@ -281,7 +281,7 @@ fn test_pool_depth_ranks_pools_within_a_hop() {
     )
     .expect("the fixtures build a route");
 
-    assert_eq!(pool_ids(&solution.sequences[0], 0), ["ab_deep", "ab_shallow"]);
+    assert_eq!(pool_ids(&solution.inner()[0], 0), ["ab_deep", "ab_shallow"]);
 }
 
 #[test]
@@ -294,8 +294,8 @@ fn test_fresh_graph_is_unsolved() {
             .expect("the fixtures build a route");
 
     assert!(!solution.solved());
-    assert!(solution.outer_splits().is_empty());
-    assert!(solution.sequences[0].hops()[0]
+    assert!(solution.splits().is_empty());
+    assert!(solution.inner()[0].all_hops()[0]
         .splits()
         .is_empty());
 }
@@ -394,7 +394,7 @@ fn test_elapsed_deadline_truncates_the_enumeration() {
         build(&open_graph(manager.graph(), &a, &b), &market, None, &a, &b, &params(), &bounds)
             .expect("the fixtures build a route");
 
-    assert_eq!(solution.sequences.len(), 1);
+    assert_eq!(solution.inner().len(), 1);
 }
 
 #[test]
@@ -414,8 +414,8 @@ fn test_max_paths_truncates_the_enumeration() {
         build(&open_graph(manager.graph(), &a, &b), &market, None, &a, &b, &params(), &bounds)
             .expect("the fixtures build a route");
 
-    assert_eq!(solution.sequences.len(), 1);
-    assert_eq!(pool_ids(&solution.sequences[0], 0).len(), 1);
+    assert_eq!(solution.inner().len(), 1);
+    assert_eq!(pool_ids(&solution.inner()[0], 0).len(), 1);
 }
 
 #[test]
@@ -468,7 +468,7 @@ fn test_token_paths_sharing_a_first_hop_become_one_branch() {
     // Six token paths — A>X, A>E>X, A>B>X, A>B>C>X, A>B>D>X and A>E... — collapse onto three
     // distinct neighbour tokens, so there are three outer splits rather than one per path.
     let mut leaves: Vec<String> = solution
-        .sequences
+        .inner()
         .iter()
         .map(|branch| {
             shared_hop(branch)
@@ -479,7 +479,7 @@ fn test_token_paths_sharing_a_first_hop_become_one_branch() {
         .collect();
     leaves.sort();
     assert_eq!(leaves, ["B", "E", "X"]);
-    assert_eq!(solution.sequences.len(), 3);
+    assert_eq!(solution.inner().len(), 3);
 }
 
 #[test]
@@ -494,7 +494,7 @@ fn test_a_grouped_branch_holds_its_shared_first_hop_once() {
             .expect("the fixtures build a route");
 
     let through_b = solution
-        .sequences
+        .inner()
         .iter()
         .find(|branch| shared_hop(branch).buy_token().symbol == "B")
         .expect("the paths through B were grouped");
@@ -523,7 +523,7 @@ fn test_a_group_on_the_buy_token_keeps_its_members_as_a_tail_less_branch() {
             .expect("the fixtures build a route");
 
     let direct = solution
-        .sequences
+        .inner()
         .iter()
         .find(|branch| shared_hop(branch).buy_token().symbol == "X")
         .expect("the direct pool is its own group");
@@ -543,11 +543,11 @@ fn test_grouping_keeps_every_token_path_as_a_tail() {
 
     // Grouping must not lose alternatives, only stop double-counting the hop they share.
     let paths: usize = solution
-        .sequences
+        .inner()
         .iter()
         .map(|branch| tails_of(branch).len().max(1))
         .sum();
-    assert_eq!(paths, 5, "{}", branch_paths(&solution.sequences));
+    assert_eq!(paths, 5, "{}", branch_paths(solution.inner()));
 }
 
 /// Which end of a branch its shared pool hop sits at.
@@ -560,19 +560,30 @@ enum SharedEnd {
     Tail,
 }
 
-fn shared_end(branch: &SequenceRoute) -> SharedEnd {
-    match branch.hops()[0].pools().is_empty() {
+/// A branch as the chain it is. Every branch `graph_build` produces is one.
+fn as_chain(branch: &SplitKind) -> &SequenceRoute {
+    match branch {
+        SplitKind::Sequence(chain) => chain,
+        SplitKind::Direct(_) => panic!("a branch is a chain, not a bare pool"),
+    }
+}
+
+fn shared_end(branch: &SplitKind) -> SharedEnd {
+    match as_chain(branch).hops()[0]
+        .pools()
+        .is_empty()
+    {
         true => SharedEnd::Tail,
         false => SharedEnd::Head,
     }
 }
 
 /// The chains a grouped branch splits over, empty for a one-hop branch.
-fn tails_of(branch: &SequenceRoute) -> Vec<&SequenceRoute> {
+fn tails_of(branch: &SplitKind) -> Vec<&SequenceRoute> {
     let mut tails = Vec::new();
-    for hop in branch.hops() {
-        for child in hop.children() {
-            if let Route::Sequence(chain) = child {
+    for hop in as_chain(branch).hops() {
+        for child in hop.inner() {
+            if let SplitKind::Sequence(chain) = child {
                 tails.push(chain);
             }
         }
@@ -581,8 +592,8 @@ fn tails_of(branch: &SequenceRoute) -> Vec<&SequenceRoute> {
 }
 
 /// The branch's shared hop: the one whose alternatives are pools.
-fn shared_hop(branch: &SequenceRoute) -> &ParallelRoute {
-    branch
+fn shared_hop(branch: &SplitKind) -> &ParallelRoute {
+    as_chain(branch)
         .hops()
         .iter()
         .find(|hop| !hop.pools().is_empty())
@@ -609,7 +620,7 @@ fn tail(token_in: &Arc<Token>, token_out: &Arc<Token>, components: &[&str]) -> V
     vec![ParallelRoute::new(
         pools
             .into_iter()
-            .map(Route::pool)
+            .map(SplitKind::pool)
             .collect(),
     )
     .expect("hop has pools")]
@@ -679,7 +690,7 @@ fn pool(id: &str, token_in: &Arc<Token>, token_out: &Arc<Token>, spot_price: f64
 /// Selling on a branch requires every hop below it to be solved, so the fixtures build them that
 /// way rather than having each test set the same split.
 fn hop(id: &str, token_in: &Arc<Token>, token_out: &Arc<Token>) -> ParallelRoute {
-    let mut hop = ParallelRoute::new(vec![Route::pool(pool(id, token_in, token_out, 2.0))])
+    let mut hop = ParallelRoute::new(vec![SplitKind::pool(pool(id, token_in, token_out, 2.0))])
         .expect("hop has pools");
     hop.set_splits(vec![Fraction::one()])
         .expect("one split for one pool");

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::algorithm::{
-    decomposition::components::{ParallelRoute, Pool, Route, SellLimitKind, SequenceRoute},
+    decomposition::components::{ParallelRoute, Pool, SellLimitKind, SplitKind},
     test_utils::{token, ConstantProductSim},
 };
 
@@ -33,12 +33,12 @@ fn pool(id: &str, reserve_a: u64, reserve_b: u64) -> Pool {
 }
 
 /// A one-hop A -> B chain over a single pool, with the hop's split already set.
-fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SequenceRoute {
-    let mut hop = ParallelRoute::new(vec![Route::pool(pool(id, reserve_a, reserve_b))])
+fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SplitKind {
+    let mut hop = ParallelRoute::new(vec![SplitKind::pool(pool(id, reserve_a, reserve_b))])
         .expect("hop has a pool");
     hop.set_splits(vec![Fraction::one()])
         .expect("one split for one pool");
-    SequenceRoute::new(vec![hop]).expect("one hop is a chain")
+    SplitKind::sequence(vec![hop]).expect("one hop is a chain")
 }
 
 /// Gas priced at zero, so the tests compare output alone.
@@ -130,7 +130,7 @@ fn test_one_alternative_takes_everything() {
 fn test_no_alternatives_is_an_empty_solution() {
     let (wei, _) = gas_prices();
     let prices = TokenPriceData::new(wei.clone(), None);
-    let mut routes: Vec<SequenceRoute> = Vec::new();
+    let mut routes: Vec<SplitKind> = Vec::new();
 
     let solution = split_by_frank_wolfe(&mut routes, &whole(100), &prices)
         .expect("an empty set is not an error");
@@ -162,7 +162,7 @@ fn test_the_splits_match_what_was_sold() {
 
     let sold: BigUint = routes
         .iter()
-        .map(Sellable::sell_amount)
+        .map(SplitKind::sell_amount)
         .fold(BigUint::zero(), |total, route| total + route);
     assert_eq!(solution.sold, sold, "the reported sold amount is what the routes hold");
     for (route, split) in routes.iter().zip(&solution.splits) {

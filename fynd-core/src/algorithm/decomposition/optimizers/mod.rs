@@ -4,20 +4,18 @@
 //! parallel alternatives, a sell amount and gas prices, and decides how much of the amount each
 //! alternative should carry.
 //!
-//! # Working at three levels
+//! # One optimizer, every level
 //!
 //! defibot's optimizers accept `list[FractalRoute]`, so the same code splits a hop's pools, a
-//! branch's tails and a solution's parallel branches. This port keeps the same three levels but
-//! names them: a [`DecompositionGraph`](super::components::DecompositionGraph) splits over
-//! [`SequenceRoute`] branches, each branch is a chain of
-//! [`SplitRoute`](super::components::ParallelRoute) hops, and a hop splits over [`Route`]
-//! alternatives — a pool, or another chain when the branch is grouped.
+//! grouped branch's tails and a solution's branches. This port needs no trait to match that,
+//! because every split in the structure hands its amount to the same type: a
+//! [`ParallelRoute`](super::components::ParallelRoute)'s alternatives are [`SplitKind`]s, and so
+//! are the whole solution's, since the solution *is* a `ParallelRoute`.
 //!
-//! [`Sellable`] is what makes one optimizer serve all three: the smallest interface an optimizer
-//! actually uses — sell on it, read back what was sold and bought, and read the ranking quantities.
-//! Two types implement it, because the same two shapes recur at every level: [`SequenceRoute`] for
-//! a split over branches or over a grouped branch's tails, and [`Route`] for a hop's split over its
-//! alternatives. Optimizers are generic over the trait and never see a route tree.
+//! So the optimizers take `&mut [Route]` and nothing else. They sell trial amounts on the
+//! alternatives and read the realised amounts back off them; that is the entire interface, and it
+//! is [`SplitKind`]'s own. Which level is being split is not something an optimizer can tell, or
+//! needs to.
 
 pub(crate) mod equal_start_v2;
 pub(crate) mod frank_wolfe;
@@ -27,10 +25,9 @@ use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
 use num_traits::{Signed, ToPrimitive, Zero};
 use tracing::debug;
-use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::decomposition::{
-    components::{DecompositionError, Route, SequenceRoute},
+    components::{DecompositionError, SplitKind},
     models::{Fraction, TokenPriceData},
     optimizers::{
         equal_start_v2::split_equal_start_v2, frank_wolfe::split_by_frank_wolfe,
@@ -38,166 +35,6 @@ use crate::algorithm::decomposition::{
     },
     RankingMetric,
 };
-// ===================== Sellable =====================
-
-/// Something an optimizer can sell on and rank against its peers.
-///
-/// The union of what defibot's optimizers read off a `FractalRoute`, and nothing more. Every method
-/// except [`Sellable::sell`] reports the state left behind by the last sell, which is how the
-/// optimizers communicate: they sell trial amounts and then read the realised amounts back.
-pub(crate) trait Sellable {
-    /// Token this alternative consumes.
-    fn sell_token(&self) -> &Token;
-
-    /// Token this alternative produces.
-    fn buy_token(&self) -> &Token;
-
-    /// Whether the alternative is ready to be sold on. An unsolved alternative is ranked last and
-    /// never sold (`optimizers/pair_comparison.py:120-122`).
-    fn solved(&self) -> bool;
-
-    /// Amount of [`Sellable::sell_token`] the last sell consumed.
-    fn sell_amount(&self) -> &BigUint;
-
-    /// Amount of [`Sellable::buy_token`] the last sell produced.
-    fn buy_amount(&self) -> &BigUint;
-
-    /// Gas of only the components the alternative's splits activate.
-    ///
-    /// defibot's `minimum_gas` (`routes/parallel.py:281-286`, `routes/sequential.py:93-94`), and
-    /// the quantity the pruning bound must charge. defibot's sibling `gas` sums every component
-    /// regardless of split, so a component left holding gas from an earlier sell but ending on a
-    /// zero split — exactly what a split search leaves behind — is counted by that one and not
-    /// here. It is deliberately **not** part of this trait: the only quantity an optimizer may
-    /// charge is this one, and offering the other would make the unsound choice reachable.
-    ///
-    /// **Charging too much gas here is unsound, charging too little is merely slow.** The pruning
-    /// bound subtracts this from a zero-impact `marginal_price` to get the best price an
-    /// alternative could conceivably reach, and drops it only when even that loses. Over-charging
-    /// pushes that bound below the truth, so it stops being an upper bound and a genuinely useful
-    /// alternative gets dropped before it is ever searched. Under-charging only leaves a hopeless
-    /// alternative in the search, which costs time and nothing else.
-    ///
-    /// Fynd's `ProtocolSim` has no equivalent of defibot's static `minimum_swap_gas`
-    /// (`routes/simple.py:256-257`), so this reports the *realised* gas of the activated
-    /// components. Realised gas is at least the static floor, so the result is an upper bound by a
-    /// little — safe in the direction that matters only because the filter above removes the large
-    /// half of the discrepancy. Do not widen it back to a sum over every component.
-    fn minimum_gas(&self) -> BigUint;
-
-    /// Price net of fees at the current (zero-impact) state, in human units.
-    fn marginal_price(&self) -> Result<f64, DecompositionError>;
-
-    /// Price net of fees at the state the last sell left behind, in human units.
-    ///
-    /// `None` when the alternative has not been sold on, so there is no post-trade state to price.
-    /// This is the quantity [`EqualStartV2`](equal_start_v2::EqualStartV2) equalises across
-    /// alternatives: two alternatives whose *next* unit prices the same cannot be improved by
-    /// moving flow between them.
-    fn new_marginal_price(&self) -> Result<Option<f64>, DecompositionError>;
-
-    /// Price the last sell actually achieved, in human units. Gas is not accounted for.
-    fn executed_price(&self) -> f64;
-
-    /// Sells `amount`, returning the bought amount and the gas used.
-    ///
-    /// Selling zero resets the alternative.
-    ///
-    /// # Errors
-    ///
-    /// Whatever the underlying structure raises; optimizers retry on
-    /// [`DecompositionError::is_recoverable`] failures and propagate the rest.
-    fn sell(&mut self, amount: &BigUint) -> Result<(BigUint, BigUint), DecompositionError>;
-}
-
-impl Sellable for Route {
-    fn sell_token(&self) -> &Token {
-        Route::sell_token(self)
-    }
-
-    fn buy_token(&self) -> &Token {
-        Route::buy_token(self)
-    }
-
-    fn solved(&self) -> bool {
-        Route::solved(self)
-    }
-
-    fn sell_amount(&self) -> &BigUint {
-        Route::sell_amount(self)
-    }
-
-    fn buy_amount(&self) -> &BigUint {
-        Route::buy_amount(self)
-    }
-
-    fn minimum_gas(&self) -> BigUint {
-        Route::minimum_gas(self)
-    }
-
-    fn marginal_price(&self) -> Result<f64, DecompositionError> {
-        Route::marginal_price(self)
-    }
-
-    fn new_marginal_price(&self) -> Result<Option<f64>, DecompositionError> {
-        Ok(Route::new_marginal_price(self))
-    }
-
-    fn executed_price(&self) -> f64 {
-        Route::executed_price(self)
-    }
-
-    fn sell(&mut self, amount: &BigUint) -> Result<(BigUint, BigUint), DecompositionError> {
-        Route::sell(self, amount)
-    }
-}
-
-/// A chain is what a split over branches or over tails is made of.
-///
-/// Both the graph's outer split and a grouped branch's inner split hand their amount to chains, so
-/// this one impl serves both.
-impl Sellable for SequenceRoute {
-    fn sell_token(&self) -> &Token {
-        SequenceRoute::sell_token(self)
-    }
-
-    fn buy_token(&self) -> &Token {
-        SequenceRoute::buy_token(self)
-    }
-
-    fn solved(&self) -> bool {
-        SequenceRoute::solved(self)
-    }
-
-    fn sell_amount(&self) -> &BigUint {
-        SequenceRoute::sell_amount(self)
-    }
-
-    fn buy_amount(&self) -> &BigUint {
-        SequenceRoute::buy_amount(self)
-    }
-
-    fn minimum_gas(&self) -> BigUint {
-        SequenceRoute::minimum_gas(self)
-    }
-
-    fn marginal_price(&self) -> Result<f64, DecompositionError> {
-        SequenceRoute::marginal_price(self)
-    }
-
-    fn new_marginal_price(&self) -> Result<Option<f64>, DecompositionError> {
-        Ok(SequenceRoute::new_marginal_price(self))
-    }
-
-    fn executed_price(&self) -> f64 {
-        SequenceRoute::executed_price(self)
-    }
-
-    fn sell(&mut self, amount: &BigUint) -> Result<(BigUint, BigUint), DecompositionError> {
-        SequenceRoute::sell(self, amount)
-    }
-}
-
 // ===================== SplitOptimizer =====================
 
 /// The result of splitting one sell amount over a set of alternatives.
@@ -475,9 +312,9 @@ impl SplitOptimizer {
     /// # Errors
     ///
     /// Whatever the trial sells raise once backing off cannot recover.
-    pub(crate) fn split<S: Sellable>(
+    pub(crate) fn split(
         &self,
-        routes: &mut [S],
+        routes: &mut [SplitKind],
         sell_amount: &BigUint,
         gas_prices: &TokenPriceData,
     ) -> Result<SplitSolution, DecompositionError> {

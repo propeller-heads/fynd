@@ -31,9 +31,9 @@ use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::{
     decomposition::{
-        components::DecompositionError,
+        components::{DecompositionError, SplitKind},
         models::{Fraction, TokenPriceData},
-        optimizers::{decrease_until_sell, split_of, Sellable, SplitSolution},
+        optimizers::{decrease_until_sell, split_of, SplitSolution},
     },
     split_primitives::golden_section_search,
 };
@@ -48,8 +48,8 @@ const LINE_SEARCH_EVALS: usize = 12;
 ///
 /// [`DecompositionError::InvalidStructure`] when `sell_amount` is zero — every share in the search
 /// is a fraction of it. Any non-recoverable failure raised while selling is propagated.
-pub(crate) fn split_by_frank_wolfe<S: Sellable>(
-    routes: &mut [S],
+pub(crate) fn split_by_frank_wolfe(
+    routes: &mut [SplitKind],
     sell_amount: &BigUint,
     gas_prices: &TokenPriceData,
 ) -> Result<SplitSolution, DecompositionError> {
@@ -116,7 +116,7 @@ pub(crate) fn split_by_frank_wolfe<S: Sellable>(
     evaluate(routes, &shares, sell_amount, gas_prices, &buy_token)?;
     let sold = routes
         .iter()
-        .map(Sellable::sell_amount)
+        .map(SplitKind::sell_amount)
         .fold(BigUint::zero(), |total, amount| total + amount);
     let splits = routes
         .iter()
@@ -124,14 +124,14 @@ pub(crate) fn split_by_frank_wolfe<S: Sellable>(
         .collect();
     let bought = routes
         .iter()
-        .map(Sellable::buy_amount)
+        .map(SplitKind::buy_amount)
         .fold(BigUint::zero(), |total, amount| total + amount);
     Ok(SplitSolution { sold, bought, splits })
 }
 
 /// Line-searches the share to move into `candidate`, or zero when no step helps.
-fn search_step<S: Sellable>(
-    routes: &mut [S],
+fn search_step(
+    routes: &mut [SplitKind],
     shares: &[f64],
     candidate: usize,
     sell_amount: &BigUint,
@@ -178,8 +178,8 @@ fn with_step(shares: &[f64], candidate: usize, step: f64) -> Vec<f64> {
 ///
 /// Alternatives on a zero share are sold zero, which resets them — the search revisits shares
 /// repeatedly and a stale sell would be counted by the caller as flow that is no longer there.
-fn evaluate<S: Sellable>(
-    routes: &mut [S],
+fn evaluate(
+    routes: &mut [SplitKind],
     shares: &[f64],
     sell_amount: &BigUint,
     gas_prices: &TokenPriceData,
@@ -205,8 +205,8 @@ fn evaluate<S: Sellable>(
 /// Ranks the alternatives on what they buy net of gas at the whole amount, best first.
 ///
 /// Unsolved alternatives and ones that cannot cover their own gas are dropped.
-fn rank<S: Sellable>(
-    routes: &mut [S],
+fn rank(
+    routes: &mut [SplitKind],
     sell_amount: &BigUint,
     gas_prices: &TokenPriceData,
     buy_token: &Token,

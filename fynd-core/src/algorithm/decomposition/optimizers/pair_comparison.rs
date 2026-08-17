@@ -20,7 +20,7 @@
 //! * The pruning bound charges `minimum_gas` as defibot does, but computes it as the *realised* gas
 //!   of the pools a route's splits activate. defibot's per-pool `minimum_swap_gas`
 //!   (`routes/simple.py:256-257`) has no equivalent in Fynd's `ProtocolSim`. See
-//!   [`Sellable::minimum_gas`] for why the activated-pools filter is the half that matters and why
+//!   [`SplitKind::minimum_gas`] for why the activated-pools filter is the half that matters and why
 //!   the remaining discrepancy is safe in the direction it errs.
 
 use num_bigint::{BigInt, BigUint};
@@ -30,9 +30,9 @@ use tracing::debug;
 use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::decomposition::{
-    components::DecompositionError,
+    components::{DecompositionError, SplitKind},
     models::{Fraction, TokenPriceData},
-    optimizers::{decrease_until_sell, scale, split_of, to_human, Sellable, SplitSolution},
+    optimizers::{decrease_until_sell, scale, split_of, to_human, SplitSolution},
 };
 
 /// Fractions of the sell amount the line search moves per iteration, coarsest first.
@@ -44,8 +44,8 @@ const STEPS: [(i64, i64); 5] = [(1, 2), (1, 5), (1, 10), (1, 50), (1, 500)];
 /// [`DecompositionError::InvalidStructure`] when `sell_amount` is zero — every split in the search
 /// is a ratio over it, and defibot raises `ZeroDivisionError` on the same input. Any
 /// non-recoverable failure raised while selling is propagated.
-pub(crate) fn split_by_pair_comparison<S: Sellable>(
-    routes: &mut [S],
+pub(crate) fn split_by_pair_comparison(
+    routes: &mut [SplitKind],
     sell_amount: &BigUint,
     gas_prices: &TokenPriceData,
 ) -> Result<SplitSolution, DecompositionError> {
@@ -105,8 +105,8 @@ pub(crate) fn split_by_pair_comparison<S: Sellable>(
 ///
 /// Returns `(index, score)` pairs, best first. The sort is stable, so equally scored alternatives
 /// keep the caller's ordering.
-fn sort_routes<S: Sellable>(
-    routes: &mut [S],
+fn sort_routes(
+    routes: &mut [SplitKind],
     sell_amount: &BigUint,
     gas_prices: &TokenPriceData,
     buy_token: &Token,
@@ -144,10 +144,10 @@ fn sort_routes<S: Sellable>(
 ///
 /// # Invariant
 ///
-/// Every term on the candidate side must stay optimistic. See [`Sellable::minimum_gas`] for why the
-/// gas charge in particular is not free to adjust.
-fn prune<S: Sellable>(
-    routes: &mut [S],
+/// Every term on the candidate side must stay optimistic. See [`SplitKind::minimum_gas`] for why
+/// the gas charge in particular is not free to adjust.
+fn prune(
+    routes: &mut [SplitKind],
     ranked: &[(usize, BigInt)],
     sell_amount: &BigUint,
     gas_prices: &TokenPriceData,
@@ -158,9 +158,9 @@ fn prune<S: Sellable>(
     let human_sell_amount = to_human(sell_amount, sell_token.decimals);
     // `minimum_gas`, not a sum over every pool: charging a candidate for pools its splits do not
     // activate pushes its optimistic price below the truth, and a bound that is not an upper bound
-    // drops routes that would have improved the solution — see `Sellable::minimum_gas`. defibot
+    // drops routes that would have improved the solution — see `Route::minimum_gas`. defibot
     // charges the same quantity at `pair_comparison.py:54` and `:72`.
-    let gas_per_unit_sold = |route: &S| -> f64 {
+    let gas_per_unit_sold = |route: &SplitKind| -> f64 {
         if human_sell_amount == 0.0 {
             return 0.0;
         }
@@ -215,8 +215,8 @@ fn prune<S: Sellable>(
 /// (`pair_comparison.py:135-187`).
 ///
 /// Returns the total sold, the total bought, and one split per entry of `members`.
-fn loop_through_pairs<S: Sellable>(
-    routes: &mut [S],
+fn loop_through_pairs(
+    routes: &mut [SplitKind],
     members: &[usize],
     sell_amount: &BigUint,
     gas_prices: &TokenPriceData,
@@ -312,8 +312,8 @@ fn step_schedule() -> impl Iterator<Item = BigRational> {
 /// holds — the larger one has already been priced against it. When at most one traded, the pair as
 /// a whole is under-filled, so the first one is carried forward with the full amount to see whether
 /// the newcomer can take what neither could.
-fn next_route_to_solve<S: Sellable>(
-    routes: &[S],
+fn next_route_to_solve(
+    routes: &[SplitKind],
     pair: (usize, usize),
     sell_amount: &BigUint,
 ) -> (usize, BigUint) {
@@ -340,8 +340,8 @@ fn next_route_to_solve<S: Sellable>(
 ///
 /// Returns the pair with the larger seller first.
 #[allow(clippy::too_many_arguments, reason = "one-to-one with the ported signature")]
-fn move_funds<S: Sellable>(
-    routes: &mut [S],
+fn move_funds(
+    routes: &mut [SplitKind],
     pair: (usize, usize),
     sell_amount: &BigUint,
     gas_prices: &TokenPriceData,
@@ -439,8 +439,8 @@ fn move_funds<S: Sellable>(
 }
 
 /// Gives the sender `split` of the amount and zeroes the receiver (`pair_comparison.py:348-351`).
-fn settle_on_sender<S: Sellable>(
-    routes: &mut [S],
+fn settle_on_sender(
+    routes: &mut [SplitKind],
     pair: (usize, usize),
     sell_amount: &BigUint,
     split: &BigRational,
@@ -453,7 +453,7 @@ fn settle_on_sender<S: Sellable>(
 
 /// Orders a pair by descending sell amount, keeping the given order on a tie
 /// (`pair_comparison.py:362-366`).
-fn order_by_sell_amount<S: Sellable>(routes: &[S], pair: (usize, usize)) -> (usize, usize) {
+fn order_by_sell_amount(routes: &[SplitKind], pair: (usize, usize)) -> (usize, usize) {
     let (first, second) = pair;
     if routes[first].sell_amount() >= routes[second].sell_amount() {
         (first, second)
@@ -465,8 +465,8 @@ fn order_by_sell_amount<S: Sellable>(routes: &[S], pair: (usize, usize)) -> (usi
 /// Sells and reports the buy amount net of gas (`routes/interface.py:82-85`).
 ///
 /// Signed, because a route can cost more gas than it buys.
-fn sell_with_gas<S: Sellable>(
-    route: &mut S,
+fn sell_with_gas(
+    route: &mut SplitKind,
     amount: &BigUint,
     gas_prices: &TokenPriceData,
 ) -> Result<BigInt, DecompositionError> {
@@ -481,7 +481,7 @@ fn sell_with_gas<S: Sellable>(
 /// Funds always flow from the worse executed price to the better one. A zero executed price means
 /// the alternative has not been tried at this size, which makes it the receiver — the search wants
 /// to find out what it would do with some volume.
-fn choose_sender_receiver<S: Sellable>(routes: &[S], pair: (usize, usize)) -> (usize, usize) {
+fn choose_sender_receiver(routes: &[SplitKind], pair: (usize, usize)) -> (usize, usize) {
     let (first, second) = pair;
     let (first_price, second_price) =
         (routes[first].executed_price(), routes[second].executed_price());
@@ -508,7 +508,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::{
-            decomposition::components::{ParallelRoute, Pool, Route, SellLimitKind, SequenceRoute},
+            decomposition::components::{ParallelRoute, Pool, SellLimitKind, SplitKind},
             test_utils::{token, ConstantProductSim},
         },
         derived::types::TokenGasPrices,
@@ -543,18 +543,18 @@ mod tests {
         ParallelRoute::new(
             pools
                 .into_iter()
-                .map(Route::pool)
+                .map(SplitKind::pool)
                 .collect(),
         )
         .expect("hop has pools")
     }
 
     /// A one-hop A -> B chain over a single pool, with the hop's split already set.
-    fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SequenceRoute {
+    fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SplitKind {
         let mut hop = hop(vec![pool(id, reserve_a, reserve_b)]);
         hop.set_splits(vec![Fraction::one()])
             .expect("one split for one pool");
-        SequenceRoute::new(vec![hop]).expect("one hop is a chain")
+        SplitKind::sequence(vec![hop]).expect("one hop is a chain")
     }
 
     /// A one-hop route over `pool_count` identical pools where every pool has been sold on but only
@@ -568,12 +568,12 @@ mod tests {
         reserve_b: u64,
         pool_count: usize,
         trial: &BigUint,
-    ) -> SequenceRoute {
+    ) -> SplitKind {
         let pools = (0..pool_count)
             .map(|index| pool(&format!("p{index}"), reserve_a, reserve_b))
             .collect();
         let mut hop = hop(pools);
-        for leg in hop.children_mut() {
+        for leg in hop.inner_mut() {
             leg.sell(trial)
                 .expect("every pool absorbs the trial amount");
         }
@@ -582,15 +582,15 @@ mod tests {
         splits[0] = Fraction::one();
         hop.set_splits(splits)
             .expect("one split per pool");
-        SequenceRoute::new(vec![hop]).expect("one hop is a chain")
+        SplitKind::sequence(vec![hop]).expect("one hop is a chain")
     }
 
     fn free_gas(gas_price_wei: &BigUint) -> TokenPriceData {
         TokenPriceData::new(gas_price_wei.clone(), None)
     }
 
-    fn optimize<S: Sellable>(
-        routes: &mut [S],
+    fn optimize(
+        routes: &mut [SplitKind],
         sell_amount: &BigUint,
         gas_prices: &TokenPriceData,
     ) -> SplitSolution {
@@ -666,8 +666,8 @@ mod tests {
     /// Runs the ranking and pruning steps the way `split_by_pair_comparison` does, and reports the
     /// partition. The end-to-end split is a poor probe for pruning — the line search often lands on
     /// the same answer by a different route — so the partition is asserted directly.
-    fn partition<S: Sellable>(
-        routes: &mut [S],
+    fn partition(
+        routes: &mut [SplitKind],
         sell_amount: &BigUint,
         gas_prices: &TokenPriceData,
     ) -> (Vec<usize>, Vec<usize>) {
@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_no_routes() {
-        let mut routes: Vec<Route> = Vec::new();
+        let mut routes: Vec<SplitKind> = Vec::new();
         let gas_price_wei = BigUint::zero();
 
         let solution = optimize(&mut routes, &whole(1_000), &free_gas(&gas_price_wei));
@@ -911,7 +911,7 @@ mod tests {
         let gas_price_wei = BigUint::zero();
 
         let solution = {
-            let legs = hop.children_mut();
+            let legs = hop.inner_mut();
             optimize(legs, &sell_amount, &free_gas(&gas_price_wei))
         };
 

@@ -44,8 +44,8 @@ fn hops_inertia(hops: &[ParallelRoute]) -> f64 {
 /// through the chains it holds.
 fn hop_label(hop: &ParallelRoute) -> String {
     let mut chains = Vec::new();
-    for child in hop.children() {
-        if let Route::Sequence(chain) = child {
+    for child in hop.inner() {
+        if let SplitKind::Sequence(chain) = child {
             chains.push(chain.continuation_label());
         }
     }
@@ -98,8 +98,8 @@ pub(crate) struct SequenceRoute {
     /// Derived mid-prices for denominating limits, or `None` to fall back to chained spot prices.
     ///
     /// Context rather than state, carried here because the cast happens inside
-    /// [`SequenceRoute::sell`], which `Sellable` gives no place to pass anything through. It
-    /// belongs in a solve context; it moves when the caches do.
+    /// [`SequenceRoute::sell`], which takes an amount and nothing else. It belongs in a solve
+    /// context; it moves when the swap caches do — see the pure-quoting item in `TODO.md`.
     prices: Option<Arc<TokenGasPrices>>,
 }
 
@@ -146,15 +146,16 @@ impl SequenceRoute {
         &mut self.hops
     }
 
-    /// Every hop of this chain and of every chain below it, in flow order.
+    /// Adds every hop of this chain and of every chain below it, in flow order.
     ///
-    /// A hop whose alternatives are chains is yielded *before* their hops, so this is the flow
-    /// order of a grouped branch: the shared hop first when it leads, last when it trails.
+    /// A hop whose alternatives are chains is added *before* their hops, so this is the flow order
+    /// of a grouped branch: the shared hop first when it leads, last when it trails.
     ///
     /// **The order is load-bearing for [`remove_loops`](super::super::solve::remove_loops)**, which
     /// registers token directions as it walks and lets the first claimer win. A hop holding chains
     /// claims nothing itself — [`ParallelRoute::pools`] keeps only pool alternatives, so such a hop
     /// reports none — and only its position among the others matters.
+    #[cfg(test)]
     pub(crate) fn all_hops(&self) -> Vec<&ParallelRoute> {
         let mut found = Vec::new();
         self.collect_hops(&mut found);
@@ -164,16 +165,16 @@ impl SequenceRoute {
     pub(super) fn collect_hops<'a>(&'a self, found: &mut Vec<&'a ParallelRoute>) {
         for hop in &self.hops {
             found.push(hop);
-            for child in hop.children() {
+            for child in hop.inner() {
                 child.collect_hops(found);
             }
         }
     }
 
-    /// Runs `visit` on every pool below this chain. See [`Route::for_each_pool_mut`].
+    /// Runs `visit` on every pool below this chain. See [`SplitKind::for_each_pool_mut`].
     pub(crate) fn for_each_pool_mut(&mut self, visit: &mut impl FnMut(&mut Pool)) {
         for hop in &mut self.hops {
-            for child in hop.children_mut() {
+            for child in hop.inner_mut() {
                 child.for_each_pool_mut(visit);
             }
         }
@@ -185,8 +186,8 @@ impl SequenceRoute {
     /// re-solved at a different one.
     pub(crate) fn reset_splits(&mut self) {
         for hop in &mut self.hops {
-            for child in hop.children_mut() {
-                if let Route::Sequence(chain) = child {
+            for child in hop.inner_mut() {
+                if let SplitKind::Sequence(chain) = child {
                     chain.reset_splits();
                 }
             }
@@ -499,7 +500,7 @@ impl SequenceRoute {
         self.prices = Some(Arc::clone(&prices));
         self.limit_cache = None;
         for hop in &mut self.hops {
-            for child in hop.children_mut() {
+            for child in hop.inner_mut() {
                 child.set_prices(Arc::clone(&prices));
             }
         }

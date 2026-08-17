@@ -68,7 +68,6 @@ pub(crate) mod assemble;
 pub(crate) mod components;
 pub(crate) mod graph_build;
 pub(crate) mod optimizers;
-pub(crate) mod reference;
 pub(crate) mod solve;
 pub(crate) mod token_graph;
 
@@ -102,9 +101,9 @@ use crate::{
         assemble::cast_into_route,
         components::{DecompositionError, DecompositionGraph},
         graph_build::{build_decomposition_graph, SubgraphParams},
-        reference::solve_reference_solution,
         solve::{
-            choose_solution, net_of_gas, solve_solution_graph, solve_without_splits, SolutionChoice,
+            choose_solution, net_of_gas, solve_decomposition_graph, solve_parallel_route,
+            solve_without_splits, SolutionChoice,
         },
         token_graph::{path_to_component_ids, AllowedTokens, SearchBounds, TokenGraph},
     },
@@ -480,8 +479,36 @@ impl DecompositionAlgorithm {
 
     /// Builds and solves the reference route, or `None` when there is no safe route to build.
     ///
-    /// A failure to build the reference is logged and swallowed: the reference is the fallback, and
-    /// letting it fail the order would make the fallback the thing that breaks the solve.
+    /// Port of `_build_reference_solution` (`order_solver.py:326-385`). The reference is the direct
+    /// pools plus the paths through a well-connected intermediate token, solved the ordinary way.
+    /// It does three jobs:
+    ///
+    /// 1. Its price is the floor candidate paths must clear (`:240-242`).
+    /// 2. It is the answer if the full candidate subgraph cannot be built at all (`:244-248`).
+    /// 3. It is the baseline the candidate must beat on output net of gas (`:304-308`), which
+    ///    [`choose_solution`] applies.
+    ///
+    /// The paths themselves are not searched here. [`DecompositionAlgorithm::search_graph`]
+    /// enumerates them alongside the candidate paths, under one pass over the graph.
+    ///
+    /// `None` is not an error at any step: an order between two thinly connected tokens
+    /// legitimately has neither a direct pool nor a path through an intermediate token, and a
+    /// reference that cannot state a price can neither filter nor be compared against, which is
+    /// why defibot drops it too (`:228-235`). Every other failure is logged and swallowed as
+    /// well — the reference is the fallback, and letting it fail the order would make the
+    /// fallback the thing that breaks the solve.
+    ///
+    /// # Deviations from defibot
+    ///
+    /// * defibot hard-codes WETH as the intermediate token (`constants.WRAPPED_TOKEN`, `:344`).
+    ///   Fynd runs on chains whose wrapped native token differs and whose deepest connector is not
+    ///   always the wrapped native token at all, so the intermediates are the graph's own
+    ///   highest-degree tokens.
+    /// * defibot prints the route scheme to stdout from inside the warning path (`:234`). A solver
+    ///   worker has no stdout worth writing to; the warning carries the same information through
+    ///   `tracing`.
+    ///
+    /// CZ: use most liquid to find single best path at 2 hops and maybe also at 3 hops
     fn solve_reference_solution(
         &self,
         input: &SolveRequest,
@@ -489,20 +516,56 @@ impl DecompositionAlgorithm {
         market_state: &MarketState,
         price_data: &TokenPriceData,
     ) -> Option<DecompositionGraph> {
-        let solution = solve_reference_solution(
-            input,
-            reference_paths,
-            self.config.max_parallel_routes,
+        // The reference is the floor other candidates must clear, so it has none of its own.
+        let params =
+            SubgraphParams { max_routes: self.config.max_parallel_routes, minimum_price: 0.0 };
+        let built = build_decomposition_graph(
             market_state,
-            price_data,
+            input.depths.as_ref(),
+            &params,
+            reference_paths,
         );
-        match solution {
+        let mut reference = match built {
             Ok(reference) => reference,
-            Err(error) => {
-                warn!(%error, "decomposition reference route failed; solving without one");
-                None
+            Err(DecompositionError::GraphBuildFailure) => {
+                debug!(
+                    sell_token = %input.order.token_in(),
+                    buy_token = %input.order.token_out(),
+                    "no reference route between these tokens"
+                );
+                return None;
             }
+            Err(error) => {
+                warn!(%error, "decomposition reference route failed to build; solving without one");
+                return None;
+            }
+        };
+
+        // One pass of the split search, and no more: `_build_reference_solution` (`:381-383`) ends
+        // at `recursive_solve_splits`, without the loop removal, re-allocation and
+        // coupled-path passes that `solve_decomposition_graph` adds for the candidate.
+        if let Err(error) = solve_parallel_route(
+            &mut reference,
+            input.order.amount(),
+            input.split_optimizers.outer,
+            input.split_optimizers.inner,
+            price_data,
+        ) {
+            warn!(%error, "decomposition reference route failed to solve; solving without one");
+            return None;
         }
+
+        if reference.new_marginal_price().is_none() {
+            warn!(
+                sell_token = %input.order.token_in(),
+                buy_token = %input.order.token_out(),
+                branches = reference.inner().len(),
+                "reference route has no post-trade marginal price; solving without a reference"
+            );
+            return None;
+        }
+
+        Some(reference)
     }
 
     /// Builds and solves the full candidate subgraph.
@@ -527,7 +590,7 @@ impl DecompositionAlgorithm {
             candidate.set_prices(Arc::clone(prices));
         }
 
-        solve_solution_graph(
+        solve_decomposition_graph(
             &mut candidate,
             input.order.amount(),
             input.split_optimizers,
@@ -672,9 +735,9 @@ fn rank_solutions(
         (Some(candidate), Some(reference)) => {
             debug!(
                 candidate_net = %net_of_gas(&candidate, gas_prices),
-                candidate_sequences = candidate.sequences.len(),
+                candidate_sequences = candidate.inner().len(),
                 reference_net = %net_of_gas(&reference, gas_prices),
-                reference_sequences = reference.sequences.len(),
+                reference_sequences = reference.inner().len(),
                 "decomposition ranking candidate against reference"
             );
             match choose_solution(&candidate, Some(&reference), gas_prices) {
@@ -707,3 +770,7 @@ mod models;
 #[cfg(test)]
 #[path = "tests/algorithm_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/reference_tests.rs"]
+mod reference_tests;

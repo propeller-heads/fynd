@@ -81,8 +81,8 @@ use tycho_simulation::tycho_common::models::{token::Token, Address};
 use crate::{
     algorithm::decomposition::{
         components::{
-            sequence_weight, DecompositionError, DecompositionGraph, ParallelRoute, Pool, Route,
-            SellLimitKind, SequenceRoute,
+            sequence_weight, DecompositionError, DecompositionGraph, ParallelRoute, Pool,
+            SellLimitKind, SplitKind,
         },
         models::DirectPath,
     },
@@ -187,7 +187,7 @@ pub(crate) fn build_decomposition_graph(
     } else {
         debug!("decomposition kept every branch; paths: {}", branch_paths(&branches));
     }
-    DecompositionGraph::new(branches, Vec::new())
+    DecompositionGraph::new(branches)
 }
 
 // ===================== Grouping by neighbour token =====================
@@ -243,7 +243,7 @@ pub(crate) fn build_decomposition_graph(
 fn group_into_branches(
     token_sequences: Vec<Vec<ParallelRoute>>,
     max_branches: usize,
-) -> Result<Vec<SequenceRoute>, DecompositionError> {
+) -> Result<Vec<SplitKind>, DecompositionError> {
     let head_groups = distinct_neighbours(&token_sequences, NeighbourEnd::Head);
     let tail_groups = distinct_neighbours(&token_sequences, NeighbourEnd::Tail);
     debug!(
@@ -306,7 +306,7 @@ fn neighbour_token(hops: &[ParallelRoute], end: NeighbourEnd) -> &Address {
 fn group_by_tail_token(
     token_sequences: Vec<Vec<ParallelRoute>>,
     max_routes: usize,
-) -> Result<Vec<SequenceRoute>, DecompositionError> {
+) -> Result<Vec<SplitKind>, DecompositionError> {
     let mut branches = Vec::new();
     for group in group_by_neighbour(token_sequences, NeighbourEnd::Tail) {
         branches.push(build_tail_branch(group, max_routes)?);
@@ -317,7 +317,7 @@ fn group_by_tail_token(
 fn group_by_head_token(
     token_sequences: Vec<Vec<ParallelRoute>>,
     max_routes: usize,
-) -> Result<Vec<SequenceRoute>, DecompositionError> {
+) -> Result<Vec<SplitKind>, DecompositionError> {
     let mut branches = Vec::new();
     for group in group_by_neighbour(token_sequences, NeighbourEnd::Head) {
         branches.push(build_head_branch(group, max_routes)?);
@@ -357,7 +357,7 @@ fn group_by_neighbour(
 fn build_tail_branch(
     group: Vec<Vec<ParallelRoute>>,
     max_routes: usize,
-) -> Result<SequenceRoute, DecompositionError> {
+) -> Result<SplitKind, DecompositionError> {
     let mut shared_hop = None;
     let mut leading = Vec::with_capacity(group.len());
     for mut hops in group {
@@ -382,10 +382,10 @@ fn build_tail_branch(
 
     if leading.is_empty() {
         // Every member was the shared hop alone: a one-hop branch, where both sides agree.
-        return SequenceRoute::new(vec![shared_hop]);
+        return SplitKind::sequence(vec![shared_hop]);
     }
     let feeding = ParallelRoute::new(rank_cap_and_deduplicate(leading, max_routes)?)?;
-    SequenceRoute::new(vec![feeding, shared_hop])
+    SplitKind::sequence(vec![feeding, shared_hop])
 }
 
 /// Turns one head-neighbour group into a branch: the group's shared first hop, then a split over
@@ -393,7 +393,7 @@ fn build_tail_branch(
 fn build_head_branch(
     group: Vec<Vec<ParallelRoute>>,
     max_routes: usize,
-) -> Result<SequenceRoute, DecompositionError> {
+) -> Result<SplitKind, DecompositionError> {
     let mut head = None;
     let mut trailing = Vec::with_capacity(group.len());
     for mut hops in group {
@@ -419,10 +419,10 @@ fn build_head_branch(
     };
     if trailing.is_empty() {
         // Every member ended at the neighbour token, so the shared hop is the whole branch.
-        return SequenceRoute::new(vec![head]);
+        return SplitKind::sequence(vec![head]);
     }
     let fed = ParallelRoute::new(rank_cap_and_deduplicate(trailing, max_routes)?)?;
-    SequenceRoute::new(vec![head, fed])
+    SplitKind::sequence(vec![head, fed])
 }
 
 /// Ranks a group's sequences, caps them at `max_routes` (`order_solver.py:549-550`), drops pools
@@ -437,14 +437,14 @@ fn build_head_branch(
 fn rank_cap_and_deduplicate(
     sequences: Vec<Vec<ParallelRoute>>,
     max_routes: usize,
-) -> Result<Vec<Route>, DecompositionError> {
+) -> Result<Vec<SplitKind>, DecompositionError> {
     let mut sequences = rank_subgraph(sequences, |hops| sequence_weight(hops))?;
     sequences.truncate(max_routes);
     remove_duplicated_routes(&mut sequences);
 
     let mut built = Vec::with_capacity(sequences.len());
     for hops in sequences {
-        built.push(Route::sequence(hops)?);
+        built.push(SplitKind::sequence(hops)?);
     }
     Ok(built)
 }
@@ -520,7 +520,7 @@ fn tail_components(tail: &[ParallelRoute]) -> Vec<ComponentId> {
 ///
 /// Diagnostic only: it answers "was this token path considered, did it survive the cap, and which
 /// branch did it end up sharing a first hop with" without reasoning backwards from the route.
-fn branch_paths(branches: &[SequenceRoute]) -> String {
+fn branch_paths(branches: &[SplitKind]) -> String {
     branches
         .iter()
         .map(|branch| {
@@ -699,7 +699,7 @@ fn build_token_sequence(
         hops.push(ParallelRoute::new(
             pools
                 .into_iter()
-                .map(Route::pool)
+                .map(SplitKind::pool)
                 .collect(),
         )?);
     }

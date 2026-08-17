@@ -74,6 +74,21 @@ mod unit {
         Some(BigUint::from(whole) * BigUint::from(10u8).pow(18))
     }
 
+    /// A graph over branches, each a chain, with the outer splits already set.
+    fn graph_of(routes: Vec<SequenceRoute>, splits: Vec<Fraction>) -> DecompositionGraph {
+        let mut graph = DecompositionGraph::new(
+            routes
+                .into_iter()
+                .map(SplitKind::Sequence)
+                .collect(),
+        )
+        .expect("branches share endpoints");
+        graph
+            .set_splits(splits)
+            .expect("one split per branch");
+        graph
+    }
+
     /// One hop `token_in -> token_out` over the given pools, unsolved.
     ///
     /// The pools are retargeted onto the pair: a `PoolRef` carries the direction it trades, and the
@@ -89,7 +104,7 @@ mod unit {
         ParallelRoute::new(
             pools
                 .into_iter()
-                .map(Route::pool)
+                .map(SplitKind::pool)
                 .collect(),
         )
         .expect("hop has pools")
@@ -100,7 +115,7 @@ mod unit {
         ParallelRoute::new(
             pools
                 .into_iter()
-                .map(Route::pool)
+                .map(SplitKind::pool)
                 .collect(),
         )
         .expect("hop has pools")
@@ -383,8 +398,7 @@ mod unit {
         let mut hop = hop_ab(vec![cp_pool("p1", 1_000_000, 2_000_000)]);
         hop.set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        let mut graph = DecompositionGraph::new(vec![route_ab(hop)], vec![Fraction::one()])
-            .expect("branches share endpoints");
+        let mut graph = graph_of(vec![route_ab(hop)], vec![Fraction::one()]);
 
         assert_eq!(graph.new_marginal_price(), None);
 
@@ -406,8 +420,7 @@ mod unit {
         let mut rich = hop_ab(vec![cp_pool_with_depth("p2", 1_000, 4_000, depth(3))]);
         rich.set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        DecompositionGraph::new(vec![route_ab(cheap), route_ab(rich)], outer_splits)
-            .expect("branches share endpoints")
+        graph_of(vec![route_ab(cheap), route_ab(rich)], outer_splits)
     }
 
     #[test]
@@ -415,9 +428,9 @@ mod unit {
         let graph = two_branch_graph(Vec::new());
 
         assert!(graph
-            .sequences
+            .inner()
             .iter()
-            .all(SequenceRoute::solved));
+            .all(SplitKind::solved));
         assert!(!graph.solved());
     }
 
@@ -480,7 +493,7 @@ mod unit {
         assert!(graph.solved());
 
         graph
-            .set_outer_splits(Vec::new())
+            .set_splits(Vec::new())
             .expect("clearing splits is allowed");
 
         assert!(!graph.solved());
@@ -490,19 +503,19 @@ mod unit {
     fn test_graph_set_outer_splits_rejects_wrong_count() {
         let mut graph = two_branch_graph(Vec::new());
 
-        let result = graph.set_outer_splits(vec![Fraction::one()]);
+        let result = graph.set_splits(vec![Fraction::one()]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
 
     #[test]
-    fn test_graph_new_rejects_wrong_split_count() {
+    fn test_graph_rejects_wrong_split_count() {
         let mut hop = hop_ab(vec![cp_pool("p1", 1_000, 2_000)]);
         hop.set_splits(vec![Fraction::one()])
             .expect("one split per pool");
+        let mut graph = graph_of(vec![route_ab(hop)], Vec::new());
 
-        let result =
-            DecompositionGraph::new(vec![route_ab(hop)], vec![Fraction::one(), Fraction::one()]);
+        let result = graph.set_splits(vec![Fraction::one(), Fraction::one()]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
@@ -730,21 +743,20 @@ mod unit {
         second_hop
             .set_splits(vec![Fraction::one()])
             .expect("one split per pool");
-        let mut graph = DecompositionGraph::new(
+        let mut graph = graph_of(
             vec![route_ab(first_hop), route_ab(second_hop)],
             vec![
                 Fraction::from_ratio(1, 4).expect("non-zero denominator"),
                 Fraction::from_ratio(3, 4).expect("non-zero denominator"),
             ],
-        )
-        .expect("branches share endpoints");
+        );
 
         graph
             .sell(&BigUint::from(1_000u32))
             .expect("amount is under the limit");
 
-        assert_eq!(graph.sequences[0].sell_amount(), &BigUint::from(250u32));
-        assert_eq!(graph.sequences[1].sell_amount(), &BigUint::from(750u32));
+        assert_eq!(graph.inner()[0].sell_amount(), &BigUint::from(250u32));
+        assert_eq!(graph.inner()[1].sell_amount(), &BigUint::from(750u32));
     }
 
     // ---------- Limits ----------
@@ -855,11 +867,10 @@ mod unit {
     fn test_graph_sell_amount_limit_sums_branches() {
         let first_hop = hop_ab(vec![mock_pool("p1", 1.0, 0.0, 1_000)]);
         let second_hop = hop_ab(vec![mock_pool("p2", 1.0, 0.0, 3_000)]);
-        let mut graph = DecompositionGraph::new(
+        let mut graph = graph_of(
             vec![route_ab(first_hop), route_ab(second_hop)],
             vec![Fraction::one(), Fraction::one()],
-        )
-        .expect("branches share endpoints");
+        );
 
         let (limit, pools) = graph
             .sell_amount_limit()
@@ -944,14 +955,14 @@ mod defibot_routes {
     use crate::algorithm::{
         decomposition::{
             components::{
-                DecompositionError, DecompositionGraph, ParallelRoute, Pool, Route, SellLimitKind,
-                SequenceRoute, SPLIT_PRECISION,
+                DecompositionError, DecompositionGraph, ParallelRoute, Pool, SellLimitKind,
+                SequenceRoute, SplitKind, SPLIT_PRECISION,
             },
             models::Fraction,
             solve::sell_with_coupled_paths,
             test_fixtures::{
-                branch, diamond_graph, expect_sell_amount_limit, graph, hop, pool, route,
-                single_pool_hop, solved_hop, split, split_f64, tenfold_pool, tenfold_route,
+                branch, branches_of, diamond_graph, expect_sell_amount_limit, graph, hop, pool,
+                route, single_pool_hop, solved_hop, split, split_f64, tenfold_pool, tenfold_route,
                 token_a, token_b, token_c, token_d, usdc, wbtc, FixedRateSim,
             },
         },
@@ -1224,7 +1235,7 @@ mod defibot_routes {
             .unwrap();
 
         graph
-            .set_outer_splits(vec![split_f64(0.4), split_f64(0.6)])
+            .set_splits(vec![split_f64(0.4), split_f64(0.6)])
             .unwrap();
 
         assert!((graph.marginal_price().unwrap() - 42.0).abs() < 1e-9);
@@ -1268,7 +1279,7 @@ mod defibot_routes {
             .unwrap();
 
         graph
-            .set_outer_splits(vec![split_f64(0.4), Fraction::zero(), split_f64(0.6)])
+            .set_splits(vec![split_f64(0.4), Fraction::zero(), split_f64(0.6)])
             .unwrap();
 
         assert!((graph.marginal_price().unwrap() - 42.0).abs() < 1e-9);
@@ -1448,7 +1459,8 @@ mod defibot_routes {
             vec![single_pool_hop(token_c(), token_b(), tenfold_pool("cb"))],
         );
 
-        let result = DecompositionGraph::new(vec![first, second], vec![split(1, 2); 2]);
+        let result =
+            DecompositionGraph::new(vec![SplitKind::Sequence(first), SplitKind::Sequence(second)]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
@@ -1465,7 +1477,8 @@ mod defibot_routes {
             vec![single_pool_hop(token_b(), token_c(), tenfold_pool("bc"))],
         );
 
-        let result = DecompositionGraph::new(vec![first, second], vec![split(1, 2); 2]);
+        let result =
+            DecompositionGraph::new(vec![SplitKind::Sequence(first), SplitKind::Sequence(second)]);
 
         assert!(matches!(result, Err(DecompositionError::InvalidStructure { .. })));
     }
@@ -1573,7 +1586,7 @@ mod defibot_routes {
         assert_eq!(gas, BigUint::from(8u8));
         assert_eq!(graph.sell_token().address, wbtc().address);
         assert_eq!(graph.buy_token().address, usdc().address);
-        for branch in graph.sequences {
+        for branch in branches_of(&graph) {
             assert_eq!(branch.sell_amount(), &BigUint::from(25u8));
         }
     }
@@ -1616,9 +1629,9 @@ mod defibot_routes {
     fn test_diamond_pool_states_are_unchanged_after_selling() {
         // The whole-solution form of `test_curve_bug` (:18): no branch writes back into any pool.
         let before: Vec<Box<dyn ProtocolSim>> = diamond_graph()
-            .sequences
+            .inner()
             .iter()
-            .flat_map(|route| route.hops())
+            .flat_map(SplitKind::all_hops)
             .flat_map(|hop| hop.pools())
             .map(|pool| pool.state().clone_box())
             .collect();
@@ -1629,9 +1642,9 @@ mod defibot_routes {
             .unwrap();
 
         let after: Vec<&dyn ProtocolSim> = graph
-            .sequences
+            .inner()
             .iter()
-            .flat_map(|route| route.hops())
+            .flat_map(SplitKind::all_hops)
             .flat_map(|hop| hop.pools())
             .map(Pool::state)
             .collect();
@@ -1806,7 +1819,7 @@ mod defibot_routes {
         };
         let mut graph = graph(vec![branch("left"), branch("right")], vec![split(1, 3); 3 - 1]);
         graph
-            .set_outer_splits(vec![split(1, 2); 2])
+            .set_splits(vec![split(1, 2); 2])
             .unwrap();
 
         let (bought, _) = graph
@@ -1815,9 +1828,9 @@ mod defibot_routes {
 
         // 101 -> 50 per branch (one unit lost) -> 25 per pool, so 100 of the 101 reaches a pool.
         let routed: BigUint = graph
-            .sequences
+            .inner()
             .iter()
-            .flat_map(|route| route.hops())
+            .flat_map(SplitKind::all_hops)
             .flat_map(|hop| hop.pools())
             .map(Pool::sell_amount)
             .sum();
@@ -1904,7 +1917,7 @@ mod defibot_routes {
         }
         let tail = SequenceRoute::new(hops)?;
         let solved = tail.solved();
-        let mut fed = ParallelRoute::new(vec![Route::Sequence(tail)])?;
+        let mut fed = ParallelRoute::new(vec![SplitKind::Sequence(tail)])?;
         if solved {
             fed.set_splits(vec![Fraction::one()])?;
         }
@@ -1924,8 +1937,8 @@ mod defibot_routes {
     fn branch_tails(branch: &SequenceRoute) -> Vec<&SequenceRoute> {
         let mut tails = Vec::new();
         for hop in branch.hops() {
-            for child in hop.children() {
-                if let Route::Sequence(chain) = child {
+            for child in hop.inner() {
+                if let SplitKind::Sequence(chain) = child {
                     tails.push(chain);
                 }
             }
@@ -1945,9 +1958,9 @@ mod defibot_routes {
     /// The tail at `index` of a grouped branch, mutably.
     fn branch_tail_mut(branch: &mut SequenceRoute, index: usize) -> &mut SequenceRoute {
         let hop = tail_split_hop(branch).expect("a grouped branch has a tail split hop");
-        match &mut hop.children_mut()[index] {
-            Route::Sequence(chain) => chain,
-            Route::Direct(_) => panic!("a tail split hop holds chains"),
+        match &mut hop.inner_mut()[index] {
+            SplitKind::Sequence(chain) => chain,
+            SplitKind::Direct(_) => panic!("a tail split hop holds chains"),
         }
     }
 
@@ -2431,8 +2444,8 @@ mod defibot_routes {
             vec![token_c(), token_d()],
             vec![single_pool_hop(token_c(), token_d(), tenfold_pool("cd"))],
         );
-        let fed =
-            ParallelRoute::new(vec![Route::Sequence(tail)]).expect("one tail shares its own ends");
+        let fed = ParallelRoute::new(vec![SplitKind::Sequence(tail)])
+            .expect("one tail shares its own ends");
 
         let result = SequenceRoute::new(vec![
             single_pool_hop(token_a(), token_b(), tenfold_pool("ab")),
@@ -2521,7 +2534,7 @@ mod defibot_routes {
         let mut feeding = ParallelRoute::new(
             sequences
                 .into_iter()
-                .map(Route::Sequence)
+                .map(SplitKind::Sequence)
                 .collect(),
         )?;
         feeding.set_splits(splits)?;

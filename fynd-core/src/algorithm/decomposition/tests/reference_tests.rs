@@ -9,6 +9,8 @@
 //! that graph solves, and whether it can state a post-trade price. Which paths reach it is decided
 //! in `mod.rs` and covered by `algorithm_tests`.
 
+use std::time::Duration;
+
 use num_bigint::BigUint;
 use num_traits::Zero;
 use tycho_simulation::tycho_core::{
@@ -20,7 +22,7 @@ use super::*;
 use crate::{
     algorithm::{
         decomposition::{
-            components::SequenceRoute,
+            components::Route,
             models::DirectPath,
             optimizers::SplitOptimizerConfig,
             token_graph::{AllowedTokens, TokenGraph},
@@ -109,22 +111,28 @@ fn build(
         },
     );
     let input = SolveRequest::new(order, token_graph, None, SplitOptimizerConfig::default());
-    solve_reference_solution(
+    reference_algorithm().solve_reference_solution(
         &input,
         paths,
-        30,
         view.base_market_state(),
         &TokenPriceData::new(BigUint::zero(), None),
     )
-    .expect("the fixtures build")
+}
+
+/// An algorithm whose only relevant setting is the parallel-alternative cap the reference inherits.
+fn reference_algorithm() -> DecompositionAlgorithm {
+    let config = AlgorithmConfig::new(1, 3, Duration::from_millis(100), None)
+        .expect("valid algorithm config");
+    let decomposition = DecompositionConfig { max_parallel_routes: 30, ..Default::default() };
+    DecompositionAlgorithm::new(config, decomposition).expect("valid decomposition config")
 }
 
 /// Token sequence of every branch, rendered as `"A->W->B"`.
 fn branch_labels(graph: &DecompositionGraph) -> Vec<String> {
     graph
-        .sequences
+        .inner()
         .iter()
-        .map(SequenceRoute::token_path_label)
+        .map(Route::token_path_label)
         .collect()
 }
 

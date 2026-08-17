@@ -39,7 +39,7 @@
 //! * defibot marks a route "exhausted"/"saturated" by setting ad-hoc attributes on the pydantic
 //!   route model and deleting them afterwards (`equal_start.py:284-286`, only legal under
 //!   `Extra.allow`). Both live in local vectors here; neither is a property of a route.
-//! * An alternative that is not [`Sellable::solved`] is skipped rather than sold on. defibot would
+//! * An alternative that is not [`SplitKind::solved`] is skipped rather than sold on. defibot would
 //!   raise from inside `Route.sell` (`routes/parallel.py:179-180`); the solver never passes one, so
 //!   the guard costs nothing and keeps a structural error from becoming an unrecoverable optimize
 //!   failure.
@@ -62,9 +62,9 @@ use tracing::debug;
 use tycho_simulation::tycho_core::models::token::Token;
 
 use crate::algorithm::decomposition::{
-    components::DecompositionError,
+    components::{DecompositionError, SplitKind},
     models::{Fraction, TokenPriceData},
-    optimizers::{decrease_until_sell, split_of, Sellable, SplitSolution},
+    optimizers::{decrease_until_sell, split_of, SplitSolution},
 };
 
 /// Fractions of the order moved per iteration, coarsest first (`equal_start_v2.py:66-74`).
@@ -99,9 +99,9 @@ pub enum RankingMetric {
 /// [`DecompositionError::InvalidStructure`] when `sell_amount` is zero — every split is a ratio
 /// over it, and defibot raises `ZeroDivisionError` on the same input (`:255`). Any non-recoverable
 /// failure raised while selling is propagated.
-pub(crate) fn split_equal_start_v2<S: Sellable>(
+pub(crate) fn split_equal_start_v2(
     ranking_metric: RankingMetric,
-    routes: &mut [S],
+    routes: &mut [SplitKind],
     sell_amount: &BigUint,
     gas_prices: &TokenPriceData,
 ) -> Result<SplitSolution, DecompositionError> {
@@ -226,9 +226,9 @@ struct Evaluation {
 /// `step` of flow from the worst alternative to the best. A move that loses is reverted and its
 /// receiver marked saturated (`:164-167`), so the second-best receives next. The search stops when
 /// no unvisited split vector is reachable, or when the iteration budget runs out.
-fn find_best_splits<S: Sellable>(
+fn find_best_splits(
     ranking_metric: RankingMetric,
-    routes: &mut [S],
+    routes: &mut [SplitKind],
     sell_amount: &BigUint,
     start_splits: &[Fraction],
     gas_prices: &TokenPriceData,
@@ -297,8 +297,8 @@ fn find_best_splits<S: Sellable>(
 ///
 /// The per-alternative amount is clamped to what is left of the order, so rounding can never push
 /// the total above the order however the splits landed (`:134-136`).
-fn evaluate<S: Sellable>(
-    routes: &mut [S],
+fn evaluate(
+    routes: &mut [SplitKind],
     sell_amount: &BigUint,
     splits: &[Fraction],
     gas_prices: &TokenPriceData,
@@ -335,7 +335,7 @@ fn evaluate<S: Sellable>(
             &sell_token,
             &buy_token,
         ));
-        marginal_prices.push(route.new_marginal_price()?);
+        marginal_prices.push(route.new_marginal_price());
         usable.push(true);
     }
 
@@ -347,8 +347,8 @@ fn evaluate<S: Sellable>(
 /// An alternative promised 0.3 that could only absorb 0.2 ends on 0.2, so **the result need not sum
 /// to one**: the shortfall is how the optimizer reports that the alternatives could not take the
 /// whole order (`optimizers/interface.py:26-31`).
-fn effective_splits<S: Sellable>(
-    routes: &mut [S],
+fn effective_splits(
+    routes: &mut [SplitKind],
     sell_amount: &BigUint,
     splits: &[Fraction],
 ) -> Result<Pass, DecompositionError> {
@@ -383,8 +383,8 @@ fn effective_splits<S: Sellable>(
 /// below any price and so sorts it to the very worst (`:269-276`) — the search wants that flow
 /// somewhere it can be used. An alternative already at zero has nothing to give and is excluded
 /// (`:277-281`).
-fn worst_route_indexes<S: Sellable>(
-    routes: &[S],
+fn worst_route_indexes(
+    routes: &[SplitKind],
     splits: &[Fraction],
     sell_amount: &BigUint,
     ranking: &[Option<f64>],
@@ -414,10 +414,10 @@ fn worst_route_indexes<S: Sellable>(
 /// An alternative already holding the whole order cannot receive (`:307-311`). One that could not
 /// sell its allocation is ranked by the price it achieved against the amount it was *asked* for, so
 /// it scores below one that filled (`:298-306`). One that has not been sold on has no post-trade
-/// price, so its pre-trade [`Sellable::marginal_price`] stands in — the search is trying to find
+/// price, so its pre-trade [`SplitKind::marginal_price`] stands in — the search is trying to find
 /// out what it would do with some flow (`:312-319`).
-fn best_route_indexes<S: Sellable>(
-    routes: &[S],
+fn best_route_indexes(
+    routes: &[SplitKind],
     splits: &[Fraction],
     sell_amount: &BigUint,
     ranking: &[Option<f64>],
@@ -584,7 +584,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::{
-            decomposition::components::{ParallelRoute, Pool, Route, SellLimitKind, SequenceRoute},
+            decomposition::components::{ParallelRoute, Pool, SellLimitKind, SplitKind},
             test_utils::{token, ConstantProductSim},
         },
         derived::types::TokenGasPrices,
@@ -619,26 +619,26 @@ mod tests {
         ParallelRoute::new(
             pools
                 .into_iter()
-                .map(Route::pool)
+                .map(SplitKind::pool)
                 .collect(),
         )
         .expect("hop has pools")
     }
 
     /// A one-hop A -> B chain over a single pool, with the hop's split already set.
-    fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SequenceRoute {
+    fn route(id: &str, reserve_a: u64, reserve_b: u64) -> SplitKind {
         let mut hop = hop(vec![pool(id, reserve_a, reserve_b)]);
         hop.set_splits(vec![Fraction::one()])
             .expect("one split for one pool");
-        SequenceRoute::new(vec![hop]).expect("one hop is a chain")
+        SplitKind::sequence(vec![hop]).expect("one hop is a chain")
     }
 
     fn free_gas(gas_price_wei: &BigUint) -> TokenPriceData {
         TokenPriceData::new(gas_price_wei.clone(), None)
     }
 
-    fn optimize<S: Sellable>(
-        routes: &mut [S],
+    fn optimize(
+        routes: &mut [SplitKind],
         sell_amount: &BigUint,
         gas_prices: &TokenPriceData,
     ) -> SplitSolution {
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn test_no_routes() {
-        let mut routes: Vec<Route> = Vec::new();
+        let mut routes: Vec<SplitKind> = Vec::new();
         let gas_price_wei = BigUint::zero();
 
         let solution = optimize(&mut routes, &whole(1_000), &free_gas(&gas_price_wei));
@@ -793,7 +793,7 @@ mod tests {
         let gas_price_wei = BigUint::zero();
 
         let solution = {
-            let legs = hop.children_mut();
+            let legs = hop.inner_mut();
             optimize(legs, &sell_amount, &free_gas(&gas_price_wei))
         };
 

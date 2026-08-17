@@ -10,15 +10,20 @@
 //! defibot's `recursive_solve_splits` walks a `FractalRoute` tree and dispatches on the node type.
 //! Here the shape is named, so the walk is two functions that call each other:
 //! [`solve_sequence_route`] threads a chain hop by hop, and [`solve_parallel_route`] divides one
-//! hop between its alternatives — recursing back into [`solve_sequence_route`] when those
-//! alternatives are themselves chains. [`solve_graph`] is the same split one level up, over the
-//! graph's branches.
+//! level between its alternatives — recursing back into [`solve_sequence_route`] when those
+//! alternatives are themselves chains.
 //!
-//! The semantics are defibot's, including the part that looks like a mistake: [`solve_graph`]
-//! solves every branch as if it were going to receive the *whole* order
-//! (`order_solver.py:673-677`). That is what makes the branches comparable to the split optimizer,
-//! and [`solve_solution_graph`]'s second pass (`order_solver.py:285-296`) re-solves each branch for
-//! the amount it actually gets.
+//! There is no third function for the graph. The whole solution *is* a parallel level over its
+//! branches, so [`solve_parallel_route`] solves it too, with the outer optimizer for its own split
+//! and the inner one for everything below. It used to be a separate `solve_graph`, and the copy had
+//! already drifted: it checked for a zero amount before the single-alternative case, where defibot
+//! checks it after, so a zero-amount single-branch graph ended up with a split of zero where
+//! defibot leaves one.
+//!
+//! The semantics are defibot's, including the part that looks like a mistake: every alternative is
+//! solved as if it were going to receive the *whole* amount (`order_solver.py:673-677`). That is
+//! what makes them comparable to the split optimizer, and [`solve_decomposition_graph`]'s second
+//! pass (`order_solver.py:285-296`) re-solves each branch for the amount it actually gets.
 //!
 //! # Sharing within a branch and sharing across branches are different problems
 //!
@@ -41,7 +46,9 @@ use tycho_simulation::tycho_core::{models::Address, simulation::protocol_sim::Pr
 
 use crate::{
     algorithm::decomposition::{
-        components::{DecompositionError, DecompositionGraph, ParallelRoute, Route, SequenceRoute},
+        components::{
+            DecompositionError, DecompositionGraph, ParallelRoute, SequenceRoute, SplitKind,
+        },
         models::{Fraction, TokenPriceData},
         optimizers::{decrease_until_sell, split_of, SplitOptimizer, SplitOptimizerConfig},
     },
@@ -65,83 +72,6 @@ const SELL_LIMIT_UTILISATION: (u8, u8) = (4, 5);
 const MAX_SOLVE_RESTARTS: usize = 64;
 
 // ===================== recursive_solve_splits =====================
-
-/// Solves the outer splits of a graph and everything below them (`order_solver.py:651-699`).
-///
-/// Every branch is first solved for the *whole* `sell_amount` so the optimizer can compare them on
-/// equal terms; see the module docs for why that is not corrected here.
-///
-/// # Errors
-///
-/// Whatever the optimizer or the underlying sells raise. A recoverable failure is retried at a
-/// smaller size rather than propagated.
-pub(crate) fn solve_graph(
-    graph: &mut DecompositionGraph,
-    sell_amount: &BigUint,
-    optimizers: SplitOptimizerConfig,
-    gas_prices: &TokenPriceData,
-) -> Result<(), DecompositionError> {
-    let (limit, _) = graph.sell_amount_limit()?;
-    let amount = clamp_to_limit(sell_amount, &limit);
-    debug!(
-        order = %sell_amount,
-        graph_limit = %limit,
-        searched_at = %amount,
-        clamped = amount < *sell_amount,
-        "graph solve size after the sell-limit clamp"
-    );
-
-    if amount.is_zero() {
-        let zeros = vec![Fraction::zero(); graph.sequences.len()];
-        graph.set_outer_splits(zeros)?;
-        graph.sell(&BigUint::zero())?;
-        return Ok(());
-    }
-
-    // A single branch carries everything, so there is no split to search (`:661-671`).
-    if graph.sequences.len() == 1 {
-        graph.set_outer_splits(vec![Fraction::one()])?;
-        solve_sequence_route(&mut graph.sequences[0], &amount, optimizers.inner, gas_prices)?;
-        decrease_until_sell(&amount, |amount| graph.sell(amount))?;
-        return Ok(());
-    }
-
-    // If internal sequences are not solved, we need to solve them first.
-    if !graph
-        .sequences
-        .iter()
-        .all(SequenceRoute::solved)
-    {
-        for branch in &mut graph.sequences {
-            solve_sequence_route(branch, &amount, optimizers.inner, gas_prices)?;
-        }
-    }
-
-    let solution = optimizers
-        .outer
-        .split(&mut graph.sequences, &amount, gas_prices)?;
-    for (index, split) in solution.splits.iter().enumerate() {
-        let sequence = &graph.sequences[index];
-        debug!(
-            branch = %sequence.token_path_label(),
-            split = split.to_f64(),
-            settled = %sequence.sell_amount(),
-            bought = %sequence.buy_amount(),
-            asked = %amount,
-            "outer split assigned to a branch"
-        );
-    }
-    graph.set_outer_splits(solution.splits)?;
-
-    // A branch the search settled on at zero keeps the amounts of its last trial sell, which would
-    // otherwise be read back as part of the solution (`:694-696`).
-    for index in zero_split_positions(graph.outer_splits()) {
-        graph.sequences[index].sell(&BigUint::zero())?;
-    }
-
-    graph.sell(&amount)?;
-    Ok(())
-}
 
 /// Solves one branch, threading each hop's output into the next (`order_solver.py:599-649`).
 ///
@@ -169,9 +99,12 @@ pub(crate) fn solve_sequence_route(
         let mut hop_amount = amount.clone();
         let mut restart = None;
         for hop_ix in 0..route.hops().len() {
+            // Below the top level the two optimizers are the same: only the graph's own split
+            // gets the outer one.
             solve_parallel_route(
                 &mut route.hops_mut()[hop_ix],
                 &hop_amount,
+                optimizer,
                 optimizer,
                 gas_prices,
             )?;
@@ -219,60 +152,83 @@ pub(crate) fn solve_sequence_route(
 
 /// Divides one level's amount between its alternatives (`order_solver.py:648-699`).
 ///
-/// The `ParallelRoute` branch of `recursive_solve_splits`. Like defibot's, it does not care whether
-/// the alternatives are pools or chains — the pools of one leg and the tails of a grouped branch
-/// take the same path. An alternative that is itself a chain has to be solved before the search can
-/// rank it, and every one is solved for the *whole* amount for the same reason [`solve_graph`]
-/// solves every branch for the whole order: the optimizer can only compare alternatives sized on
-/// equal terms.
+/// The `ParallelRoute` branch of `recursive_solve_splits`, and the only one — the whole solution is
+/// a `ParallelRoute` over its branches, so this solves the graph as well as a hop. Like defibot's,
+/// it does not care whether the alternatives are pools or chains. An alternative that is itself a
+/// chain has to be solved before the search can rank it, and every one is solved for the *whole*
+/// amount: the optimizer can only compare alternatives sized on equal terms.
+///
+/// `optimizer` splits *this* level; `inner` splits everything below it. The two differ only at the
+/// top, where [`SplitOptimizerConfig`] lets the split over branches use a different search from the
+/// splits inside them. defibot has one optimizer throughout, so the pair is a fynd addition.
 ///
 /// # Errors
 ///
 /// Whatever the optimizer or the underlying sells raise.
 pub(crate) fn solve_parallel_route(
-    split_route: &mut ParallelRoute,
+    parallel_route: &mut ParallelRoute,
     sell_amount: &BigUint,
     optimizer: SplitOptimizer,
+    inner: SplitOptimizer,
     gas_prices: &TokenPriceData,
 ) -> Result<(), DecompositionError> {
-    let (limit, _) = split_route.sell_amount_limit()?;
+    let (limit, _) = parallel_route.sell_amount_limit()?;
     let amount = clamp_to_limit(sell_amount, &limit);
+    debug!(
+        asked = %sell_amount,
+        limit = %limit,
+        searched_at = %amount,
+        clamped = amount < *sell_amount,
+        alternatives = parallel_route.inner().len(),
+        "parallel level solve size after the sell-limit clamp"
+    );
 
     // A single alternative carries everything, so there is no split to search (`:661-671`).
-    if split_route.children().len() == 1 {
-        split_route.set_splits(vec![Fraction::one()])?;
-        solve_alternative(&mut split_route.children_mut()[0], &amount, optimizer, gas_prices)?;
-        decrease_until_sell(&amount, |amount| split_route.sell(amount))?;
+    if parallel_route.inner().len() == 1 {
+        parallel_route.set_splits(vec![Fraction::one()])?;
+        solve_one_alternative(&mut parallel_route.inner_mut()[0], &amount, inner, gas_prices)?;
+        decrease_until_sell(&amount, |amount| parallel_route.sell(amount))?;
         return Ok(());
     }
 
-    if !split_route
-        .children()
+    if !parallel_route
+        .inner()
         .iter()
-        .all(Route::solved)
+        .all(SplitKind::solved)
     {
-        for child in split_route.children_mut() {
-            solve_alternative(child, &amount, optimizer, gas_prices)?;
+        for child in parallel_route.inner_mut() {
+            solve_one_alternative(child, &amount, inner, gas_prices)?;
         }
     }
 
     if amount.is_zero() {
-        let zeros = vec![Fraction::zero(); split_route.children().len()];
-        split_route.set_splits(zeros)?;
-        split_route.sell(&BigUint::zero())?;
+        let zeros = vec![Fraction::zero(); parallel_route.inner().len()];
+        parallel_route.set_splits(zeros)?;
+        parallel_route.sell(&BigUint::zero())?;
         return Ok(());
     }
 
-    let solution = optimizer.split(split_route.children_mut(), &amount, gas_prices)?;
-    split_route.set_splits(solution.splits)?;
+    let solution = optimizer.split(parallel_route.inner_mut(), &amount, gas_prices)?;
+    for (index, split) in solution.splits.iter().enumerate() {
+        let alternative = &parallel_route.inner()[index];
+        debug!(
+            alternative = %alternative.token_path_label(),
+            split = split.to_f64(),
+            settled = %alternative.sell_amount(),
+            bought = %alternative.buy_amount(),
+            asked = %amount,
+            "split assigned to one alternative"
+        );
+    }
+    parallel_route.set_splits(solution.splits)?;
 
     // An alternative the search settled on at zero keeps the amounts of its last trial sell
     // (`:694-696`).
-    for index in zero_split_positions(split_route.splits()) {
-        split_route.children_mut()[index].sell(&BigUint::zero())?;
+    for index in zero_split_positions(parallel_route.splits()) {
+        parallel_route.inner_mut()[index].sell(&BigUint::zero())?;
     }
 
-    split_route.sell(&amount)?;
+    parallel_route.sell(&amount)?;
     Ok(())
 }
 
@@ -280,15 +236,15 @@ pub(crate) fn solve_parallel_route(
 ///
 /// A chain has splits below it. A pool is defibot's `SimpleRoute`, which returns immediately
 /// because there is nothing under it to solve.
-fn solve_alternative(
-    child: &mut Route,
+fn solve_one_alternative(
+    child: &mut SplitKind,
     amount: &BigUint,
     optimizer: SplitOptimizer,
     gas_prices: &TokenPriceData,
 ) -> Result<(), DecompositionError> {
     match child {
-        Route::Direct(_) => Ok(()),
-        Route::Sequence(chain) => solve_sequence_route(chain, amount, optimizer, gas_prices),
+        SplitKind::Direct(_) => Ok(()),
+        SplitKind::Sequence(chain) => solve_sequence_route(chain, amount, optimizer, gas_prices),
     }
 }
 
@@ -346,29 +302,29 @@ fn limit_restart_amount(
 ///
 /// Whatever the optimizer or the underlying sells raise, and
 /// [`DecompositionError::InvalidStructure`] when every branch turns out to contain a loop.
-pub(crate) fn solve_solution_graph(
+pub(crate) fn solve_decomposition_graph(
     graph: &mut DecompositionGraph,
     sell_amount: &BigUint,
     optimizers: SplitOptimizerConfig,
     gas_prices: &TokenPriceData,
 ) -> Result<(BigUint, BigUint), DecompositionError> {
-    solve_graph(graph, sell_amount, optimizers, gas_prices)?;
+    solve_parallel_route(graph, sell_amount, optimizers.outer, optimizers.inner, gas_prices)?;
 
     if remove_loops(graph)? {
-        solve_graph(graph, sell_amount, optimizers, gas_prices)?;
+        solve_parallel_route(graph, sell_amount, optimizers.outer, optimizers.inner, gas_prices)?;
     }
 
     // Every branch was solved as if it would receive the whole order. Now that the outer splits say
     // otherwise, each one is solved again for what it actually gets (`:285-296`).
-    for index in 0..graph.sequences.len() {
-        let split = graph.outer_splits()[index].clone();
+    for index in 0..graph.inner().len() {
+        let split = graph.splits()[index].clone();
         if split.is_zero() {
             continue;
         }
         let allocated = split.apply(sell_amount);
-        graph.sequences[index].reset_splits();
-        solve_sequence_route(
-            &mut graph.sequences[index],
+        graph.inner_mut()[index].reset_splits();
+        solve_one_alternative(
+            &mut graph.inner_mut()[index],
             &allocated,
             optimizers.inner,
             gas_prices,
@@ -396,10 +352,10 @@ pub(crate) fn solve_solution_graph(
 /// fall back to the reference route instead.
 pub(crate) fn remove_loops(graph: &mut DecompositionGraph) -> Result<bool, DecompositionError> {
     let mut registered: FxHashSet<(Address, Address)> = FxHashSet::default();
-    let mut keep = vec![true; graph.sequences.len()];
+    let mut keep = vec![true; graph.inner().len()];
     let mut removed = false;
 
-    for (index, branch) in graph.sequences.iter().enumerate() {
+    for (index, branch) in graph.inner().iter().enumerate() {
         for hop in branch.all_hops() {
             // defibot reads directions off the executed swaps (`utils.py:168-190`), which exist
             // only where something was actually sold. A hop that carried nothing therefore neither
@@ -430,7 +386,7 @@ pub(crate) fn remove_loops(graph: &mut DecompositionGraph) -> Result<bool, Decom
     // This is not optimal: a whole top-level split is dropped because one pool in it forms a loop
     // with another branch. We are sacrificing the optimal solution for a simpler one to keep this
     // logic robust.
-    graph.retain_branches(&keep)?;
+    graph.retain(&keep)?;
     Ok(true)
 }
 
@@ -468,7 +424,7 @@ fn sell_branches_in_sequence(
     graph: &mut DecompositionGraph,
     sell_amount: &BigUint,
 ) -> Result<(BigUint, BigUint), DecompositionError> {
-    if graph.outer_splits().is_empty() {
+    if graph.splits().is_empty() {
         return Err(DecompositionError::Unsolved {
             token_in: graph.sell_token().address.clone(),
             token_out: graph.buy_token().address.clone(),
@@ -477,14 +433,14 @@ fn sell_branches_in_sequence(
 
     let mut bought = BigUint::zero();
     let mut gas = BigUint::zero();
-    for index in 0..graph.sequences.len() {
-        let split = graph.outer_splits()[index].clone();
+    for index in 0..graph.inner().len() {
+        let split = graph.splits()[index].clone();
         // Logged for the zero case too: a branch the search dropped is as informative as one it
         // kept when the question is how the order was divided.
         debug!(
-            branch = %graph.sequences[index].token_path_label(),
+            branch = %graph.inner()[index].token_path_label(),
             split = split.to_f64(),
-            hop_splits = ?graph.sequences[index]
+            hop_splits = ?graph.inner()[index]
                 .all_hops()
                 .iter()
                 .map(|hop| hop.splits().iter().map(Fraction::to_f64).collect::<Vec<_>>())
@@ -497,11 +453,11 @@ fn sell_branches_in_sequence(
 
         let amount = round_to_nearest(split.as_ratio(), sell_amount);
         let (branch_bought, branch_gas) =
-            decrease_until_sell(&amount, |amount| graph.sequences[index].sell(amount))?;
+            decrease_until_sell(&amount, |amount| graph.inner_mut()[index].sell(amount))?;
         debug!(
-            branch = %graph.sequences[index].token_path_label(),
+            branch = %graph.inner()[index].token_path_label(),
             requested = %amount,
-            settled = %graph.sequences[index].sell_amount(),
+            settled = %graph.inner()[index].sell_amount(),
             bought = %branch_bought,
             "branch sold against the liquidity earlier branches left"
         );
@@ -512,7 +468,7 @@ fn sell_branches_in_sequence(
     }
 
     let sold = graph
-        .sequences
+        .inner()
         .iter()
         .fold(BigUint::zero(), |total, branch| total + branch.sell_amount());
     graph.record_sell(sold, bought.clone());
@@ -538,9 +494,9 @@ fn snapshot_pool_states(
 /// Component id and pre-trade state of every pool in the graph, in branch order.
 fn graph_pools(graph: &DecompositionGraph) -> Vec<(&ComponentId, &dyn ProtocolSim)> {
     graph
-        .sequences
+        .inner()
         .iter()
-        .flat_map(SequenceRoute::all_hops)
+        .flat_map(SplitKind::all_hops)
         .flat_map(ParallelRoute::pools)
         .map(|pool| (pool.component_id(), pool.state()))
         .collect()
@@ -549,7 +505,7 @@ fn graph_pools(graph: &DecompositionGraph) -> Vec<(&ComponentId, &dyn ProtocolSi
 /// Writes `branch`'s post-trade pool states into that branch and every branch after it
 /// (`utils.py:42`, `:50-60`).
 fn propagate_pool_states(graph: &mut DecompositionGraph, branch: usize) {
-    let updates: Vec<(ComponentId, Box<dyn ProtocolSim>)> = graph.sequences[branch]
+    let updates: Vec<(ComponentId, Box<dyn ProtocolSim>)> = graph.inner()[branch]
         .all_hops()
         .into_iter()
         .flat_map(ParallelRoute::pools)
@@ -564,7 +520,7 @@ fn propagate_pool_states(graph: &mut DecompositionGraph, branch: usize) {
 
     // defibot updates from `inner_routes[i:]`, the sold branch included: a branch using the same
     // pool at two hops must see its own first hop's effect at the second.
-    for branch in &mut graph.sequences[branch..] {
+    for branch in &mut graph.inner_mut()[branch..] {
         let mut changed = false;
         branch.for_each_pool_mut(&mut |pool| {
             let Some((_, saved)) = updates
@@ -589,7 +545,7 @@ fn restore_pool_states(
     graph: &mut DecompositionGraph,
     snapshot: &FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
 ) {
-    for branch in &mut graph.sequences {
+    for branch in graph.inner_mut() {
         branch.for_each_pool_mut(&mut |pool| {
             let Some(state) = snapshot.get(pool.component_id()) else {
                 return;
@@ -662,12 +618,12 @@ pub(crate) fn solve_without_splits(
     sell_amount: &BigUint,
     gas_prices: &TokenPriceData,
 ) -> Result<(), DecompositionError> {
-    for branch in &mut graph.sequences {
+    for branch in graph.inner_mut() {
         decrease_until_sell(sell_amount, |amount| branch.sell(amount))?;
     }
 
     let mut ranked: Vec<(usize, BigInt)> = graph
-        .sequences
+        .inner()
         .iter()
         .enumerate()
         .map(|(index, branch)| {
@@ -680,32 +636,32 @@ pub(crate) fn solve_without_splits(
     let mut remaining = sell_amount.clone();
     let mut included: FxHashSet<ComponentId> = FxHashSet::default();
     for (index, _) in ranked {
-        let used = traded_components(&graph.sequences[index]);
+        let used = traded_components(&graph.inner()[index]);
         let reuses_pool = used
             .iter()
             .any(|component| included.contains(component));
 
         if remaining.is_zero() || reuses_pool {
-            graph.sequences[index].sell(&BigUint::zero())?;
+            graph.inner_mut()[index].sell(&BigUint::zero())?;
             continue;
         }
 
         included.extend(used);
         let allocated = remaining.clone().min(
-            graph.sequences[index]
+            graph.inner()[index]
                 .sell_amount()
                 .clone(),
         );
-        graph.sequences[index].sell(&allocated)?;
+        graph.inner_mut()[index].sell(&allocated)?;
         remaining -= allocated;
     }
 
     let splits = graph
-        .sequences
+        .inner()
         .iter()
         .map(|branch| split_of(branch.sell_amount(), sell_amount))
         .collect();
-    graph.set_outer_splits(splits)?;
+    graph.set_splits(splits)?;
 
     // defibot closes with `route.sell(order.sell_amount)` (`:852`), which re-runs every branch at
     // `floor(amount * split)` and first checks the amount against the graph's own limit. That check
@@ -714,7 +670,7 @@ pub(crate) fn solve_without_splits(
     // branches already hold the sizes they proved they can fill, so the totals are recorded rather
     // than recomputed.
     let bought = graph
-        .sequences
+        .inner()
         .iter()
         .fold(BigUint::zero(), |total, branch| total + branch.buy_amount());
     graph.record_sell(sell_amount.clone(), bought);
@@ -722,7 +678,7 @@ pub(crate) fn solve_without_splits(
 }
 
 /// Components a branch actually traded on (`order_solver.py:836`).
-fn traded_components(branch: &SequenceRoute) -> Vec<ComponentId> {
+fn traded_components(branch: &SplitKind) -> Vec<ComponentId> {
     branch
         .all_hops()
         .into_iter()

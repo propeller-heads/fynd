@@ -1,4 +1,4 @@
-//! Turning a solved [`DecompositionGraph`] into an encodable Fynd [`Route`].
+//! Turning a solved [`DecompositionGraph`] into an encodable Fynd [`SplitKind`].
 //!
 //! The decomposition's three-level structure and the encoder's flat swap list describe the same
 //! trade in different shapes, and they do not agree on amounts by construction. This module owns
@@ -26,7 +26,7 @@
 //! * The solver's `buy_amount` is used only to *rank* the candidate against the reference
 //!   ([`choose_solution`](super::solve::choose_solution)) — a comparison between two numbers
 //!   produced the same way, where the shared bias cancels.
-//! * The [`RouteResult`] returned to the worker is re-derived from the assembled [`Route`] by
+//! * The [`RouteResult`] returned to the worker is re-derived from the assembled [`SplitKind`] by
 //!   summing the swaps `execute_split_plan` actually simulated. Those swaps are the ones that get
 //!   encoded, so the quote and the transaction are the same object by construction, not by
 //!   agreement to within a tolerance.
@@ -56,7 +56,7 @@ use tracing::debug;
 use crate::{
     algorithm::{
         decomposition::{
-            components::{DecompositionGraph, ParallelRoute, Route, SequenceRoute},
+            components::{DecompositionGraph, ParallelRoute, SequenceRoute, SplitKind},
             models::TokenPriceData,
         },
         split_primitives::{build_split_route, HopDescriptor, PathAllocation, SimulatedHop},
@@ -81,8 +81,8 @@ const MAX_ASSEMBLED_PATHS: usize = 256;
 /// A [`SplitSolution`](super::optimizers::SplitSolution)'s splits deliberately need not sum to one:
 /// a shortfall is how the solver says the market could not absorb the whole order
 /// (`optimizers/interface.py:26-31`, and every path through
-/// [`solve_without_splits`](super::solve::solve_without_splits)). Fynd's [`Route`] has no way to
-/// say that — an exact-in route spends `order.amount()` and nothing less, and
+/// [`solve_without_splits`](super::solve::solve_without_splits)). Fynd's [`SplitKind`] has no way
+/// to say that — an exact-in route spends `order.amount()` and nothing less, and
 /// [`build_split_route`] renormalises the fractions it is given to make that true.
 ///
 /// Stretching is safe for the *quote*: [`build_split_route`] re-simulates every swap at the
@@ -126,7 +126,8 @@ impl PartialPath {
     }
 }
 
-/// Assembles the solved `graph` into a validated [`Route`] and the [`RouteResult`] describing it.
+/// Assembles the solved `graph` into a validated [`SplitKind`] and the [`RouteResult`] describing
+/// it.
 ///
 /// The returned result's amounts come from re-simulating the assembled route, never from the
 /// solver's own totals — see the module docs.
@@ -195,11 +196,7 @@ pub(crate) fn cast_into_route(
 /// them against the merged, topologically ordered plan.
 fn solution_allocations(graph: &DecompositionGraph) -> Vec<PathAllocation> {
     let mut allocations = Vec::new();
-    for (branch, split) in graph
-        .sequences
-        .iter()
-        .zip(graph.outer_splits())
-    {
+    for (branch, split) in graph.inner().iter().zip(graph.splits()) {
         if split.is_zero() {
             continue;
         }
@@ -232,9 +229,20 @@ fn solution_allocations(graph: &DecompositionGraph) -> Vec<PathAllocation> {
 ///
 /// Returns nothing when a leg is unsolved or routes nothing — a path with a dead leg carries no
 /// flow at all, and emitting its earlier legs would strand tokens at the break.
-fn branch_allocations(branch: &SequenceRoute, branch_fraction: f64) -> Vec<PathAllocation> {
+fn branch_allocations(branch: &SplitKind, branch_fraction: f64) -> Vec<PathAllocation> {
     let seed = PartialPath { hops: Vec::new(), shares: vec![branch_fraction] };
-    finish(expand(branch, vec![seed]))
+    match branch {
+        // A direct pool is its own branch: one path, one swap.
+        SplitKind::Direct(pool) => finish(vec![seed.extended(
+            Some(HopDescriptor::new(
+                pool.component_id().clone(),
+                pool.token_in().clone(),
+                pool.token_out().clone(),
+            )),
+            1.0,
+        )]),
+        SplitKind::Sequence(chain) => finish(expand(chain, vec![seed])),
+    }
 }
 
 /// Continues every path in `paths` through every linear route across `chain`.
@@ -258,8 +266,8 @@ fn expand(chain: &SequenceRoute, mut paths: Vec<PartialPath>) -> Vec<PartialPath
 fn cross(paths: Vec<PartialPath>, hop: &ParallelRoute) -> Vec<PartialPath> {
     if hop.holds_chains() {
         let mut next = Vec::new();
-        for (child, split) in hop.children().iter().zip(hop.splits()) {
-            let Route::Sequence(chain) = child else {
+        for (child, split) in hop.inner().iter().zip(hop.splits()) {
+            let SplitKind::Sequence(chain) = child else {
                 continue;
             };
             if split.is_zero() {
