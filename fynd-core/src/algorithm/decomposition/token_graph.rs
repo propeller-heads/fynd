@@ -3,18 +3,29 @@
 //! The worker owns the graph; a solve borrows it through [`TokenGraph`] and never writes to it.
 //! Nothing here reads the market, so a solve can work out the pools it will touch before taking
 //! the market lock.
+//!
+//! # Two steps, not one walk
+//!
+//! The graph is a [`TopologyGraph`]: one edge per directed token *pair*, holding that pair's pools.
+//! So a search is `paths_between_ix` for the token sequences, then
+//! [`TopologyGraph::expand_path`] for one path per pool combination along each — which is what the
+//! rest of the decomposition still consumes.
+//!
+//! Splitting it that way is the point. Enumeration used to walk one edge per pool, so a sequence's
+//! cost was the product of its legs' pool counts *inside the walk*; now the walk is over pairs and
+//! only the expansion pays that product. The expansion is also the only place a caller can be given
+//! token sequences instead, which is where the ranking work is headed.
 
 use std::time::Instant;
 
-use petgraph::{graph::NodeIndex, visit::EdgeRef};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use tracing::debug;
 use tycho_simulation::tycho_core::models::Address;
 
 use crate::{
     algorithm::{decomposition::models::DirectPath, most_liquid::DepthAndPrice},
     derived::types::TokenGasPrices,
-    graph::petgraph::StableDiGraph,
+    graph::{GraphQueryFilter, TopologyGraph},
     types::ComponentId,
 };
 
@@ -72,6 +83,10 @@ pub(crate) struct SearchBounds {
     ///
     /// The solve clock: the caller passes `start + timeout` so the search cannot eat the budget
     /// the solve and the assembly still need.
+    ///
+    /// Checked between token sequences during expansion rather than inside the walk.
+    /// [`TopologyGraph::paths_between_ix`] takes no deadline, and expansion is where the cost is —
+    /// one sequence stands for the product of its legs' pool counts.
     pub(crate) deadline: Option<Instant>,
     /// Tokens a path may pass *through*, or `None` to allow every token.
     ///
@@ -84,17 +99,20 @@ pub(crate) struct SearchBounds {
 
 /// The routing graph for the length of one solve.
 pub(crate) struct TokenGraph<'a> {
-    graph: &'a StableDiGraph<DepthAndPrice>,
-    address_to_ix: FxHashMap<&'a Address, NodeIndex>,
-    /// Whether each node may be routed through, by node index. Read once per edge expanded, which
-    /// is why it is an index rather than a lookup by address.
-    allowed: Vec<bool>,
+    graph: &'a TopologyGraph<DepthAndPrice>,
+    /// Tokens a search may route through, or `None` for every token.
+    ///
+    /// Resolved once per solve because [`AllowedTokens`] combines two filters that both need a
+    /// pass over the graph's tokens, while [`GraphQueryFilter`] wants the answer as one set.
+    /// Endpoints are absent from it deliberately — the filter admits a route's own endpoints
+    /// whatever it holds.
+    allowed: Option<FxHashSet<Address>>,
 }
 
 impl<'a> TokenGraph<'a> {
-    /// Indexes `graph` by token address and records which tokens a search may route through.
+    /// Records which tokens a search may route through.
     pub(crate) fn new(
-        graph: &'a StableDiGraph<DepthAndPrice>,
+        graph: &'a TopologyGraph<DepthAndPrice>,
         allowed_tokens: &AllowedTokens<'_>,
     ) -> Self {
         // The price filter needs both endpoints priced; on a thin market it would otherwise drop
@@ -105,37 +123,25 @@ impl<'a> TokenGraph<'a> {
             AllowedTokens { prices: None, ..*allowed_tokens }
         };
 
-        let mut address_to_ix = FxHashMap::default();
-        address_to_ix.reserve(graph.node_count());
-        let mut allowed = vec![
-            false;
-            graph.node_count().max(
-                graph
-                    .node_indices()
-                    .map(|node| node.index() + 1)
-                    .max()
-                    .unwrap_or(0)
-            )
-        ];
-        for node in graph.node_indices() {
-            let token = &graph[node];
-            address_to_ix.insert(token, node);
-            allowed[node.index()] = filter.allows(token);
+        // Both filters absent is the common case and needs no set at all.
+        if filter.connector_tokens.is_none() && filter.prices.is_none() {
+            return Self { graph, allowed: None };
         }
-        Self { graph, address_to_ix, allowed }
-    }
 
-    /// Whether a search may route through this node.
-    fn allows(&self, node: NodeIndex) -> bool {
-        self.allowed
-            .get(node.index())
-            .copied()
-            .unwrap_or(false)
+        let allowed = graph
+            .node_indices()
+            .map(|node| &graph[node])
+            .filter(|token| filter.allows(token))
+            .cloned()
+            .collect();
+        Self { graph, allowed: Some(allowed) }
     }
 
     /// Whether the graph holds this token at all.
     pub(crate) fn contains_token(&self, address: &Address) -> bool {
-        self.address_to_ix.contains_key(address)
+        self.graph
+            .get_token_ix(address)
+            .is_some()
     }
 
     /// Simple paths from `sell` to `buy` within `bounds`.
@@ -144,64 +150,108 @@ impl<'a> TokenGraph<'a> {
     /// `sell` and `buy` are the same token — closing a cycle would revisit the start node, and the
     /// decomposition has no use for round trips.
     ///
-    /// One path per *pool* combination, not per token sequence: the graph carries one edge per
-    /// component, so two pools on the same pair yield two paths. defibot's `all_simple_edge_paths`
-    /// over a networkx multigraph does the same (`defibot/swaps/graph.py:103`).
+    /// One path per *pool* combination, not per token sequence: the pair edge carries every pool
+    /// that trades it, and [`TopologyGraph::expand_path`] writes one path per combination along a
+    /// sequence. defibot's `all_simple_edge_paths` over a networkx multigraph does the same
+    /// (`defibot/swaps/graph.py:103`).
+    ///
+    /// Pools come out in the order the pair edge holds them, which is the order components were
+    /// added to the graph, and the expansion advances the rightmost leg first. That is a different
+    /// order from the depth-first walk this replaced, so which paths a `max_paths` cut keeps moves
+    /// — the set of paths does not.
     pub(crate) fn paths_between(
         &self,
         sell: &Address,
         buy: &Address,
         bounds: &SearchBounds,
     ) -> Vec<DirectPath> {
-        let (Some(&sell_node), Some(&buy_node)) =
-            (self.address_to_ix.get(sell), self.address_to_ix.get(buy))
-        else {
-            return Vec::new();
-        };
-        // The walk only checks the nodes it steps onto, so the start token is checked here.
-        if !self.allows(sell_node) || !self.allows(buy_node) {
+        if sell == buy {
             return Vec::new();
         }
 
-        // Walk from the less connected end: both directions enumerate the same paths, but the
-        // branching factor at the first level is the start node's degree. Ties keep the sell side.
-        let backwards = self.graph.edges(buy_node).count() < self.graph.edges(sell_node).count();
-        let (source, target) =
-            if backwards { (buy_node, sell_node) } else { (sell_node, buy_node) };
-
-        let mut search = PathSearch {
-            graph: self.graph,
-            allowed: &self.allowed,
-            connectors: bounds
-                .connector_tokens
-                .as_ref()
-                .map(|allowed| allowed.iter().collect()),
-            target,
-            bounds,
-            since_clock_check: 0,
-            truncated: false,
-            tokens: vec![&self.graph[source]],
-            components: Vec::new(),
-            visited: FxHashSet::from_iter([source]),
-            found: Vec::new(),
+        let filter = GraphQueryFilter {
+            min_hops: 1,
+            max_hops: bounds.max_hops,
+            connector_tokens: self.connectors_for(bounds),
         };
-        search.extend(source);
-        if search.truncated {
+        let Ok(sequences) = self
+            .graph
+            .paths_between(sell, buy, &filter)
+        else {
+            // Either endpoint absent from the graph. The caller checks that too and reports it;
+            // here it is simply no route.
+            return Vec::new();
+        };
+
+        let mut found: Vec<DirectPath> = Vec::new();
+        let mut truncated = false;
+        for sequence in &sequences {
+            if found.len() >= bounds.max_paths {
+                truncated = true;
+                break;
+            }
+            // Never before the first sequence has been expanded. The walk this replaced read the
+            // clock once per `DEADLINE_CHECK_INTERVAL` edges, so an already-elapsed deadline still
+            // returned whatever it had found on the way to that first read — which is what lets a
+            // zero timeout still produce a reference route.
+            if !found.is_empty() &&
+                bounds
+                    .deadline
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                truncated = true;
+                break;
+            }
+
+            let room = bounds.max_paths - found.len();
+            let expanded = self
+                .graph
+                .expand_path(sequence, Some(room));
+            truncated |= expanded.len() == room;
+            for path in expanded {
+                found.push(DirectPath {
+                    tokens: path
+                        .tokens
+                        .iter()
+                        .map(|token| (*token).clone())
+                        .collect(),
+                    components: path
+                        .edge_data
+                        .iter()
+                        .map(|edge| edge.component_id.clone())
+                        .collect(),
+                });
+            }
+        }
+
+        if truncated {
             debug!(
-                paths = search.found.len(),
+                paths = found.len(),
+                sequences = sequences.len(),
                 "decomposition path enumeration hit its bound; solving over the paths found so far"
             );
         }
-
-        let mut found = search.found;
-        if backwards {
-            // Everything downstream reads a path as sell token first.
-            for path in &mut found {
-                path.tokens.reverse();
-                path.components.reverse();
-            }
-        }
         found
+    }
+
+    /// The tokens this query may route through: the solve's allowlist narrowed by the query's own.
+    ///
+    /// `None` on either side means unrestricted, so the intersection of `None` with a set is that
+    /// set. A query passing `Some(vec![])` still admits the direct pools — the filter always allows
+    /// a route's endpoints — and nothing longer.
+    fn connectors_for(&self, bounds: &SearchBounds) -> Option<FxHashSet<Address>> {
+        match (self.allowed.as_ref(), bounds.connector_tokens.as_ref()) {
+            (None, None) => None,
+            (Some(allowed), None) => Some(allowed.clone()),
+            (None, Some(wanted)) => Some(wanted.iter().cloned().collect()),
+            (Some(allowed), Some(wanted)) => Some(
+                wanted
+                    .iter()
+                    .filter(|token| allowed.contains(*token))
+                    .cloned()
+                    .collect(),
+            ),
+        }
     }
 
     /// The `limit` tokens with the most pools that `accept` allows, deepest first.
@@ -220,7 +270,14 @@ impl<'a> TokenGraph<'a> {
             if !accept(token) {
                 continue;
             }
-            by_degree.push((self.graph.edges(node).count(), token));
+            // Pools, not pairs. On this graph an edge is a token pair holding several pools, so
+            // counting edges would rank a token on five thin pairs above one on three deep ones.
+            let pools: usize = self
+                .graph
+                .edges(node)
+                .map(|edge| edge.weight().pools().len())
+                .sum();
+            by_degree.push((pools, token));
         }
         by_degree.sort_by(|left, right| right.cmp(left));
         by_degree.truncate(limit);
@@ -228,127 +285,6 @@ impl<'a> TokenGraph<'a> {
             .into_iter()
             .map(|(_, address)| address)
             .collect()
-    }
-}
-
-/// Depth-first enumeration of simple paths between two graph nodes.
-struct PathSearch<'a, 'b> {
-    graph: &'a StableDiGraph<DepthAndPrice>,
-    allowed: &'a [bool],
-    /// Tokens a path may pass *through*, from [`SearchBounds::connector_tokens`]. Its own
-    /// endpoints are exempt. An empty set therefore admits one-hop paths and nothing longer.
-    connectors: Option<FxHashSet<&'b Address>>,
-    target: NodeIndex,
-    bounds: &'b SearchBounds,
-    /// Edges expanded since the clock was last read, so the deadline costs one `Instant::now` per
-    /// [`DEADLINE_CHECK_INTERVAL`] edges rather than one per edge.
-    since_clock_check: usize,
-    /// Set once either bound stopped the search, so the caller can report the truncation.
-    truncated: bool,
-    tokens: Vec<&'a Address>,
-    components: Vec<&'a ComponentId>,
-    /// Nodes on the current partial path. Read once per edge expanded, which makes it the hottest
-    /// container in the search, and it is keyed by graph node indices we generate ourselves — so
-    /// the default hasher's collision resistance buys nothing here.
-    visited: FxHashSet<NodeIndex>,
-    found: Vec<DirectPath>,
-}
-
-/// Edges expanded between two reads of the wall clock.
-///
-/// Checking every edge would cost more than the check saves; the overshoot past the deadline is
-/// bounded by the time to expand this many edges.
-const DEADLINE_CHECK_INTERVAL: usize = 1024;
-
-impl PathSearch<'_, '_> {
-    /// Whether either bound has stopped the search.
-    ///
-    /// Latches `truncated` so a run cut short is distinguishable from one that simply ran out of
-    /// graph.
-    fn exhausted(&mut self) -> bool {
-        if self.truncated {
-            return true;
-        }
-        if self.found.len() >= self.bounds.max_paths {
-            self.truncated = true;
-            return true;
-        }
-        self.since_clock_check += 1;
-        if self.since_clock_check >= DEADLINE_CHECK_INTERVAL {
-            self.since_clock_check = 0;
-            if self
-                .bounds
-                .deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                self.truncated = true;
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Extends the current partial path by every outgoing edge of `current`.
-    fn extend(&mut self, current: NodeIndex) {
-        if self.components.len() >= self.bounds.max_hops {
-            return;
-        }
-        // Copying the shared reference out first keeps the graph borrow independent of the
-        // mutable borrows of `self` taken inside the loop.
-        let graph = self.graph;
-        for edge in graph.edges(current) {
-            if self.exhausted() {
-                return;
-            }
-            let next = edge.target();
-            if self.visited.contains(&next) {
-                continue;
-            }
-            if !self
-                .allowed
-                .get(next.index())
-                .copied()
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            // The destination closes a path rather than being routed through, so the connector
-            // list only governs the tokens in between.
-            if next != self.target &&
-                self.connectors
-                    .as_ref()
-                    .is_some_and(|allowed| !allowed.contains(&graph[next]))
-            {
-                continue;
-            }
-
-            self.tokens.push(&graph[next]);
-            self.components
-                .push(&edge.weight().component_id);
-
-            if next == self.target {
-                // The target closes the path; a simple path never leaves and re-enters it.
-                self.found.push(DirectPath {
-                    tokens: self
-                        .tokens
-                        .iter()
-                        .map(|token| (*token).clone())
-                        .collect(),
-                    components: self
-                        .components
-                        .iter()
-                        .map(|component| (*component).clone())
-                        .collect(),
-                });
-            } else {
-                self.visited.insert(next);
-                self.extend(next);
-                self.visited.remove(&next);
-            }
-
-            self.tokens.pop();
-            self.components.pop();
-        }
     }
 }
 

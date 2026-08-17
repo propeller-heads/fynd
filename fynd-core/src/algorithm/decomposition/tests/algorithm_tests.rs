@@ -8,9 +8,7 @@ use super::*;
 use crate::{
     algorithm::{
         decomposition::optimizers::SplitOptimizer,
-        test_utils::{
-            market_read, order, setup_market_weighted_petgraph, token, ConstantProductSim,
-        },
+        test_utils::{market_read, order, setup_market_weighted_boxed, token, ConstantProductSim},
     },
     graph::GraphManager,
     replay::replay_route,
@@ -96,7 +94,7 @@ fn produced_output(result: &RouteResult, order: &Order) -> BigUint {
 async fn test_splits_an_order_across_parallel_pools() {
     let (a, b, _, _) = tokens();
     // Two identical pools, and an order large enough that price impact makes splitting pay.
-    let (market, manager) = setup_market_weighted_petgraph(vec![
+    let (market, manager) = setup_market_weighted_boxed(vec![
         ("p1", &a, &b, pool(1_000_000, 1_000_000)),
         ("p2", &a, &b, pool(1_000_000, 1_000_000)),
     ]);
@@ -123,7 +121,7 @@ async fn test_equal_start_v2_splits_an_order_across_parallel_pools() {
     // The same market as `test_splits_an_order_across_parallel_pools`, solved by the other
     // optimizer. Two identical pools have an exactly even optimum, so both must find it.
     let (a, b, _, _) = tokens();
-    let (market, manager) = setup_market_weighted_petgraph(vec![
+    let (market, manager) = setup_market_weighted_boxed(vec![
         ("p1", &a, &b, pool(1_000_000, 1_000_000)),
         ("p2", &a, &b, pool(1_000_000, 1_000_000)),
     ]);
@@ -152,7 +150,7 @@ async fn test_candidate_beats_the_reference_on_a_path_the_reference_cannot_see()
     let (a, b, c, d) = tokens();
     // The reference is direct pools plus the leg through the connector `C`. The deep route runs
     // through `D`, which only the full candidate subgraph enumerates.
-    let (market, manager) = setup_market_weighted_petgraph(vec![
+    let (market, manager) = setup_market_weighted_boxed(vec![
         ("ab", &a, &b, pool(100_000, 100_000)),
         ("ac", &a, &c, pool(100_000, 100_000)),
         ("cb", &c, &b, pool(100_000, 100_000)),
@@ -182,7 +180,7 @@ async fn test_reference_wins_when_the_candidate_ranks_a_worse_branch_first() {
     // `max_routes = 1` the candidate keeps only the two-hop path — better priced at zero size, and
     // shallow enough that at this order size it realises less. The reference keeps the deep direct
     // pool as well and wins on output net of gas.
-    let (market, manager) = setup_market_weighted_petgraph(vec![
+    let (market, manager) = setup_market_weighted_boxed(vec![
         // A < B, so reserve_0 is A: spot(A->B) = 13_000_000 / 10_000_000 = 1.3.
         ("ab", &a, &b, pool(10_000_000, 13_000_000)),
         // A < C, so reserve_0 is A: spot(A->C) = 120_000 / 100_000 = 1.2.
@@ -210,7 +208,7 @@ async fn test_reference_wins_when_the_candidate_ranks_a_worse_branch_first() {
 async fn test_order_with_no_connecting_path_is_rejected() {
     let (a, b, c, d) = tokens();
     // A/B and C/D are two disconnected components of the graph.
-    let (market, manager) = setup_market_weighted_petgraph(vec![
+    let (market, manager) = setup_market_weighted_boxed(vec![
         ("ab", &a, &b, pool(1_000_000, 1_000_000)),
         ("cd", &c, &d, pool(1_000_000, 1_000_000)),
     ]);
@@ -230,7 +228,7 @@ async fn test_order_with_no_connecting_path_is_rejected() {
 #[tokio::test]
 async fn test_timeout_still_returns_a_complete_reference_route() {
     let (a, b, c, d) = tokens();
-    let (market, manager) = setup_market_weighted_petgraph(vec![
+    let (market, manager) = setup_market_weighted_boxed(vec![
         ("ab", &a, &b, pool(1_000_000, 1_000_000)),
         ("ac", &a, &c, pool(1_000_000, 1_000_000)),
         ("cb", &c, &b, pool(1_000_000, 1_000_000)),
@@ -272,7 +270,7 @@ async fn test_quoted_amounts_match_the_route_that_would_be_encoded() {
     let (a, b, c, d) = tokens();
     // Deliberately awkward reserves: parallel pools at the first leg and prime-ish sizes, so the
     // solver's per-pool flooring leaves a remainder the encoder has to absorb.
-    let (market, manager) = setup_market_weighted_petgraph(vec![
+    let (market, manager) = setup_market_weighted_boxed(vec![
         ("ab1", &a, &b, pool(1_000_001, 999_997)),
         ("ab2", &a, &b, pool(1_000_003, 999_991)),
         ("ac", &a, &c, pool(2_000_003, 1_999_997)),
@@ -310,10 +308,10 @@ async fn test_quoted_amounts_match_the_route_that_would_be_encoded() {
 /// ```
 /// There is deliberately no direct A/B pool: a reference route can only exist by going through one
 /// of the two connectors, so which one was chosen is visible in the returned swaps.
-fn two_connector_market() -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+fn two_connector_market() -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
     let (a, b, c, d) = tokens();
     let e = token(0x0E, "E");
-    setup_market_weighted_petgraph(vec![
+    setup_market_weighted_boxed(vec![
         ("ac", &a, &c, pool(1_000_000, 1_000_000)),
         ("cb", &c, &b, pool(1_000_000, 1_000_000)),
         ("ad", &a, &d, pool(1_000_000, 1_000_000)),
@@ -326,7 +324,7 @@ fn two_connector_market() -> (MarketData, PetgraphStableDiGraphManager<DepthAndP
 /// only if a reference route was built, and its swaps say which connector it went through.
 async fn reference_only_route(
     market: MarketData,
-    manager: &PetgraphStableDiGraphManager<DepthAndPrice>,
+    manager: &TopologyGraphManager<DepthAndPrice>,
     algorithm_config: AlgorithmConfig,
     decomposition: DecompositionConfig,
     order: &Order,

@@ -109,7 +109,7 @@ use crate::{
     },
     derived::{computation::ComputationRequirements, types::ComponentDepths, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketState, StateLabel},
-    graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
+    graph::{TopologyGraph, TopologyGraphManager},
     types::{ComponentId, Order, RouteResult},
     AlgorithmError, NoPathReason,
 };
@@ -252,7 +252,7 @@ impl DecompositionAlgorithm {
     async fn solve_order(
         &self,
         order: &Order,
-        graph: &StableDiGraph<DepthAndPrice>,
+        graph: &TopologyGraph<DepthAndPrice>,
         market: MarketData,
         label: Option<StateLabel>,
         derived: Option<SharedDerivedDataRef>,
@@ -389,17 +389,22 @@ impl DecompositionAlgorithm {
 
         // -- REFERENCE PATH LISTING --
         // Reference solution uses only direct 1hop pools or go through connector tokens
+        // No deadline on the reference legs. They are one- and two-hop queries between two fixed
+        // tokens, so they cost almost nothing — and the reference is the fallback that makes a
+        // timeout return a complete route rather than none. Truncating it by the clock made which
+        // connector survived depend on enumeration order, which `paths_between_ix` does not define
+        // within a path length.
         let direct_search = SearchBounds {
             max_hops: 1,
             max_paths: self.config.max_enumerated_paths,
-            deadline: Some(deadline),
+            deadline: None,
             connector_tokens: Some(Vec::new()),
         };
         let direct_paths = input.search_graph(&direct_search);
         let connector_search = SearchBounds {
             max_hops: 2,
             max_paths: self.config.max_enumerated_paths,
-            deadline: Some(deadline),
+            deadline: None,
             connector_tokens: Some(connector_tokens),
         };
         let connector_paths = input.search_graph(&connector_search);
@@ -416,7 +421,7 @@ impl DecompositionAlgorithm {
     /// snapshot of the components its paths reach.
     async fn validate_input<'a>(
         &self,
-        graph: &'a StableDiGraph<DepthAndPrice>,
+        graph: &'a TopologyGraph<DepthAndPrice>,
         derived: Option<&SharedDerivedDataRef>,
         order: &'a Order,
     ) -> Result<SolveRequest<'a>, DecompositionError> {
@@ -624,18 +629,18 @@ impl DecompositionAlgorithm {
 }
 
 impl Algorithm for DecompositionAlgorithm {
-    // Candidate ranking is `weight = inertia * (1 - fee) * price`, where `inertia` is the pool's
-    // derived depth. That is the same pair of quantities `DepthAndPrice` carries, so the algorithm
-    // shares the graph type — and therefore the graph manager and its update work — with
-    // `bellman_ford` and `path_frank_wolfe` rather than adding another graph to maintain. It is one
-    // edge per component, not the pair-keyed `TopologyGraph` that `most_liquid` and `water_fill`
-    // moved to, because path enumeration here yields one path per *pool* combination and reads the
-    // component off each edge directly. The weights on the edges are not read here: `weight` needs
-    // the *directional* depth
-    // of a specific hop, which the solve looks up in the derived store per hop, while an edge
-    // weight is a single scalar per direction fixed at update time.
-    type GraphType = StableDiGraph<DepthAndPrice>;
-    type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+    // The pair-keyed graph `most_liquid` and `water_fill` are already on. Enumeration still yields
+    // one path per *pool* combination, but it gets there in two steps — token sequences from the
+    // walk, pool combinations from `expand_path` — instead of walking one edge per pool and then
+    // hashing the result back down by token sequence, which is what `graph_build` had to do.
+    //
+    // The edge weights are not read here. `weight` needs the *directional* depth of a specific hop,
+    // which the solve looks up in the derived store per hop, while an edge weight is a single
+    // scalar per direction fixed at update time. `DepthAndPrice` is still the parameter so the
+    // graph and its update work are shared with those two algorithms rather than maintained for
+    // this one alone.
+    type GraphType = TopologyGraph<DepthAndPrice>;
+    type GraphManager = TopologyGraphManager<DepthAndPrice>;
 
     fn name(&self) -> &str {
         "decomposition"

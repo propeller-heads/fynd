@@ -22,7 +22,7 @@ use super::*;
 use crate::{
     algorithm::{
         decomposition::{
-            components::Route,
+            components::SplitKind,
             models::DirectPath,
             optimizers::SplitOptimizerConfig,
             token_graph::{AllowedTokens, TokenGraph},
@@ -32,19 +32,14 @@ use crate::{
         test_utils::{market_read, setup_market_unweighted, token, MockProtocolSim},
     },
     feed::market_data::MarketData,
-    graph::{
-        petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
-        GraphManager,
-    },
+    graph::{GraphManager, TopologyGraph, TopologyGraphManager},
     types::{Order, OrderSide},
 };
 
 /// `(component_id, token_in, token_out, spot_price)` for a fee-free mock pool.
 type PoolSpec<'a> = (&'a str, Token, Token, f64);
 
-fn market_with(
-    pools: Vec<PoolSpec<'_>>,
-) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+fn market_with(pools: Vec<PoolSpec<'_>>) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
     let pairs: Vec<(Token, Token)> = pools
         .iter()
         .map(|(_, token_in, token_out, _)| (token_in.clone(), token_out.clone()))
@@ -61,7 +56,7 @@ fn market_with(
         .collect();
     let (market, _) = setup_market_unweighted(specs);
     // The shared helper builds an unweighted manager; a solve's graph carries edge weights.
-    let mut manager = PetgraphStableDiGraphManager::<DepthAndPrice>::default();
+    let mut manager = TopologyGraphManager::<DepthAndPrice>::default();
     manager.initialize_graph(
         &market_read(&market)
             .base_market_state()
@@ -96,7 +91,7 @@ fn order(sell_token: &Token, buy_token: &Token, amount: u32) -> Order {
 
 /// Builds and solves the reference over `paths` at zero gas cost.
 fn build(
-    graph: &StableDiGraph<DepthAndPrice>,
+    graph: &TopologyGraph<DepthAndPrice>,
     market: &MarketData,
     order: &Order,
     paths: Vec<DirectPath>,
@@ -132,7 +127,7 @@ fn branch_labels(graph: &DecompositionGraph) -> Vec<String> {
     graph
         .inner()
         .iter()
-        .map(Route::token_path_label)
+        .map(SplitKind::token_path_label)
         .collect()
 }
 

@@ -18,18 +18,13 @@ use crate::{
         test_utils::{market_read, setup_market_unweighted, token, MockProtocolSim},
     },
     feed::market_data::MarketData,
-    graph::{
-        petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
-        GraphManager,
-    },
+    graph::{GraphManager, TopologyGraph, TopologyGraphManager},
 };
 
 /// `(component_id, token_in, token_out, spot_price)` for a fee-free mock pool.
 type PoolSpec<'a> = (&'a str, Token, Token, f64);
 
-fn market_with(
-    pools: Vec<PoolSpec<'_>>,
-) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+fn market_with(pools: Vec<PoolSpec<'_>>) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
     let pairs: Vec<(Token, Token)> = pools
         .iter()
         .map(|(_, token_in, token_out, _)| (token_in.clone(), token_out.clone()))
@@ -46,7 +41,7 @@ fn market_with(
         .collect();
     let (market, _) = setup_market_unweighted(specs);
     // The shared helper builds an unweighted manager; a solve's graph carries edge weights.
-    let mut manager = PetgraphStableDiGraphManager::<DepthAndPrice>::default();
+    let mut manager = TopologyGraphManager::<DepthAndPrice>::default();
     manager.initialize_graph(
         &market_read(&market)
             .base_market_state()
@@ -67,7 +62,7 @@ fn bounds(max_hops: usize) -> SearchBounds {
 
 /// A graph every token may be routed through.
 fn open_graph<'a>(
-    graph: &'a StableDiGraph<DepthAndPrice>,
+    graph: &'a TopologyGraph<DepthAndPrice>,
     sell: &'a Token,
     buy: &'a Token,
 ) -> TokenGraph<'a> {
@@ -171,7 +166,7 @@ fn test_pool_reused_across_hops_is_skipped() {
     market.update_states([("multi".to_string(), Box::new(sim) as Box<dyn ProtocolSim>)]);
     market.upsert_tokens(vec![a.clone(), b.clone(), c.clone()]);
 
-    let mut manager = PetgraphStableDiGraphManager::<DepthAndPrice>::default();
+    let mut manager = TopologyGraphManager::<DepthAndPrice>::default();
     manager.initialize_graph(&market.component_topology());
 
     let graph = open_graph(manager.graph(), &a, &c);
@@ -439,7 +434,7 @@ fn test_max_routes_zero_is_rejected() {
 ///
 /// Three of the four token paths leave `A` through the same `ab` pool, which is the shape the
 /// grouping exists for.
-fn forked_market() -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>, Vec<Token>) {
+fn forked_market() -> (MarketData, TopologyGraphManager<DepthAndPrice>, Vec<Token>) {
     let (a, b, c) = (token(0x0A, "A"), token(0x0B, "B"), token(0x0C, "C"));
     let (d, e, x) = (token(0x0D, "D"), token(0x0E, "E"), token(0x0F, "X"));
     let (market, manager) = market_with(vec![
