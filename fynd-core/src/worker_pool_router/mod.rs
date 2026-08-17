@@ -209,27 +209,44 @@ pub(crate) struct OrderResponses {
 }
 
 impl OrderResponses {
-    /// Returns a copy keeping only candidates from public-scoped worker pools.
+    /// Borrows every candidate.
+    fn view(&self) -> ResponsesView<'_> {
+        self.view_filtered(|_| true)
+    }
+
+    /// Borrows only the candidates from public-scoped worker pools.
     ///
     /// These form the committed reference and the ranked fallback chain (ranked by `rank_quotes`,
     /// consumed by the price guard); exclusive-access candidates are overlaid separately by
     /// `combine_with_surplus`. `failed_solvers` is retained so placeholder construction is
     /// unchanged.
-    fn public_only(&self, pool_scopes: &HashMap<String, LiquidityScope>) -> OrderResponses {
-        let quotes = self
-            .quotes
-            .iter()
-            .filter(|wq| {
-                pool_scopes.get(&wq.worker_pool) != Some(&LiquidityScope::IncludeExclusive)
-            })
-            .cloned()
-            .collect();
-        OrderResponses {
-            order_id: self.order_id.clone(),
-            quotes,
-            failed_solvers: self.failed_solvers.clone(),
+    fn public_view(&self, pool_scopes: &HashMap<String, LiquidityScope>) -> ResponsesView<'_> {
+        self.view_filtered(|pool| pool_scopes.get(pool) != Some(&LiquidityScope::IncludeExclusive))
+    }
+
+    fn view_filtered(&self, keep: impl Fn(&str) -> bool) -> ResponsesView<'_> {
+        ResponsesView {
+            order_id: &self.order_id,
+            quotes: self
+                .quotes
+                .iter()
+                .filter(|worker_pool_quote| keep(&worker_pool_quote.worker_pool))
+                .collect(),
+            failed_solvers: &self.failed_solvers,
         }
     }
+}
+
+/// A borrowed, optionally scope-narrowed view over one order's responses.
+///
+/// Ranking reads candidates far more often than it keeps them, and every `OrderQuote` owns a
+/// `Route` whose legs each hold a `Box<dyn ProtocolSim>`. Narrowing by borrow rather than by
+/// clone keeps the single deep copy that `rank_quotes` makes of its winners the only one on the
+/// request path.
+struct ResponsesView<'a> {
+    order_id: &'a str,
+    quotes: Vec<&'a WorkerPoolQuote>,
+    failed_solvers: &'a [(String, SolveError)],
 }
 
 /// Orchestrates multiple solver pools to find the best quote.
@@ -363,7 +380,7 @@ impl WorkerPoolRouter {
             .map(|(responses, allocation)| {
                 if allocation.exclusive_routing_active() {
                     let public_ranked = self.rank_quotes(
-                        &responses.public_only(allocation.scopes()),
+                        &responses.public_view(allocation.scopes()),
                         request.options(),
                     );
                     combine_with_surplus(
@@ -374,7 +391,7 @@ impl WorkerPoolRouter {
                         *USER_IMPROVEMENT_SHARE_BPS,
                     )
                 } else {
-                    self.rank_quotes(responses, request.options())
+                    self.rank_quotes(&responses.view(), request.options())
                 }
             })
             .collect();
@@ -619,7 +636,11 @@ impl WorkerPoolRouter {
     /// If no valid quotes exist, returns a single-element vec with a placeholder
     /// (`NoRouteFound` or `Timeout`) so that downstream always has at least one
     /// candidate per order.
-    fn rank_quotes(&self, responses: &OrderResponses, options: &QuoteOptions) -> Vec<OrderQuote> {
+    fn rank_quotes(
+        &self,
+        responses: &ResponsesView<'_>,
+        options: &QuoteOptions,
+    ) -> Vec<OrderQuote> {
         let mut valid_quotes: Vec<_> = responses
             .quotes
             .iter()
@@ -645,7 +666,7 @@ impl WorkerPoolRouter {
             );
             return valid_quotes
                 .into_iter()
-                .map(|pq| pq.quote.clone())
+                .map(|worker_pool_quote| worker_pool_quote.quote.clone())
                 .collect();
         }
 
@@ -655,7 +676,7 @@ impl WorkerPoolRouter {
         {
             counter!("worker_router_orders_total", "status" => "no_route").increment(1);
             let mut fallback = OrderQuote::new(
-                responses.order_id.clone(),
+                responses.order_id.to_string(),
                 QuoteStatus::NoRouteFound,
                 any_q.amount_in().clone(),
                 BigUint::ZERO,
@@ -716,7 +737,7 @@ impl WorkerPoolRouter {
                 .cloned()
                 .unwrap_or_else(|| "0".to_string());
             let mut fallback = OrderQuote::new(
-                responses.order_id.clone(),
+                responses.order_id.to_string(),
                 status,
                 BigUint::ZERO,
                 BigUint::ZERO,
@@ -728,7 +749,7 @@ impl WorkerPoolRouter {
                 Bytes::default(),
                 label,
             );
-            fallback.set_no_route_cause(aggregate_no_route_cause(&responses.failed_solvers));
+            fallback.set_no_route_cause(aggregate_no_route_cause(responses.failed_solvers));
             fallback
         };
         vec![fallback]
@@ -1221,10 +1242,10 @@ mod tests {
         )
     }
 
-    /// `public_only` must carry the order identity across, or the surplus path logs and ranks
+    /// `public_view` must carry the order identity across, or the surplus path logs and ranks
     /// against a response set that has lost it.
     #[test]
-    fn test_public_only_keeps_order_id_and_failures() {
+    fn test_public_view_keeps_order_id_and_failures() {
         let responses = OrderResponses {
             order_id: "o1".to_string(),
             quotes: vec![
@@ -1237,7 +1258,7 @@ mod tests {
             ("public".to_string(), LiquidityScope::PublicOnly),
             ("excl".to_string(), LiquidityScope::IncludeExclusive),
         ]);
-        let public = responses.public_only(&scopes);
+        let public = responses.public_view(&scopes);
 
         assert_eq!(public.order_id, "o1");
         assert_eq!(public.quotes.len(), 1);
@@ -1660,7 +1681,7 @@ mod tests {
 
         let worker_router =
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &options);
+        let result = worker_router.rank_quotes(&responses.view(), &options);
 
         if should_pass {
             assert_eq!(result[0].status(), QuoteStatus::Success);
@@ -1706,7 +1727,7 @@ mod tests {
 
         let worker_router =
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
+        let result = worker_router.rank_quotes(&responses.view(), &QuoteOptions::default());
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status(), QuoteStatus::Timeout);
@@ -1725,7 +1746,7 @@ mod tests {
 
         let worker_router =
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
+        let result = worker_router.rank_quotes(&responses.view(), &QuoteOptions::default());
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
@@ -1738,7 +1759,7 @@ mod tests {
 
         let worker_router =
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
+        let result = worker_router.rank_quotes(&responses.view(), &QuoteOptions::default());
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
@@ -1766,7 +1787,7 @@ mod tests {
         };
         let worker_router =
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
+        let result = worker_router.rank_quotes(&responses.view(), &QuoteOptions::default());
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
         // Token-not-in-graph wins over no_graph_path regardless of pool order.
@@ -1786,7 +1807,7 @@ mod tests {
         };
         let worker_router =
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
+        let result = worker_router.rank_quotes(&responses.view(), &QuoteOptions::default());
         assert_eq!(result[0].no_route_reason(), Some(NoPathReason::NoGraphPath));
     }
 
@@ -1880,7 +1901,7 @@ mod tests {
         let options = QuoteOptions::default().with_max_gas(BigUint::from(1u64));
         let worker_router =
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &options);
+        let result = worker_router.rank_quotes(&responses.view(), &options);
         assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
         assert!(matches!(result[0].no_route_cause(), Some(SolveError::MaxGasExceeded)));
     }
@@ -1910,7 +1931,7 @@ mod tests {
         let options = QuoteOptions::default().with_max_gas(BigUint::from(1_000u64));
         let worker_router =
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &options);
+        let result = worker_router.rank_quotes(&responses.view(), &options);
         assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
         assert!(
             result[0].no_route_cause().is_none(),
@@ -1928,7 +1949,7 @@ mod tests {
         };
         let worker_router =
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
+        let result = worker_router.rank_quotes(&responses.view(), &QuoteOptions::default());
         assert_eq!(result[0].status(), QuoteStatus::Timeout);
         assert!(matches!(result[0].no_route_cause(), Some(SolveError::Timeout { .. })));
     }
@@ -1976,7 +1997,7 @@ mod tests {
 
         let worker_router =
             WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
-        let result = worker_router.rank_quotes(&responses, &QuoteOptions::default());
+        let result = worker_router.rank_quotes(&responses.view(), &QuoteOptions::default());
 
         assert_eq!(result.len(), 2);
         assert_eq!(*result[0].amount_out_net_gas(), BigUint::from(950u64));
