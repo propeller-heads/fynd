@@ -22,6 +22,7 @@
 //!    [`encoding::encoder::Encoder`](crate::encoding::encoder::Encoder)
 
 mod allocation;
+mod comparison_log;
 pub mod config;
 
 use std::{
@@ -31,6 +32,7 @@ use std::{
 
 pub use allocation::ExclusiveAccess;
 use allocation::{allocate, Allocation, OrderClass};
+use comparison_log::{log_quote_comparison, solver_error_label};
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, gauge, histogram};
@@ -47,8 +49,9 @@ use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
     encoding::encoder::Encoder, feed::exclusivity::is_exclusive, price_guard::guard::PriceGuard,
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote, Quote,
-    QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams, SurplusInfo,
+    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote,
+    OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
+    SurplusInfo,
 };
 
 /// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
@@ -179,13 +182,27 @@ impl SolverPoolHandle {
     }
 }
 
+/// One worker pool's answer for an order, with the time that pool took to produce it.
+///
+/// "Worker pool" throughout is the solver thread group named in `worker_pools.toml`, never a
+/// liquidity pool.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkerPoolQuote {
+    /// Name of the worker pool that produced this quote.
+    worker_pool: String,
+    /// What that worker pool solved: route, amounts and gas.
+    quote: OrderQuote,
+    /// Wall time the worker spent on this order, in milliseconds.
+    solve_time_ms: u64,
+}
+
 /// Collected responses for a single order from multiple solvers.
 #[derive(Debug)]
 pub(crate) struct OrderResponses {
     /// ID of the order these responses correspond to.
     order_id: String,
-    /// Quotes received from each worker pool (worker_pool_name, quote).
-    quotes: Vec<(String, OrderQuote)>,
+    /// Quotes received from each worker pool.
+    quotes: Vec<WorkerPoolQuote>,
     /// Worker pools that failed with their respective errors (worker_pool_name, error).
     /// This captures all error types: timeouts, no routes, algorithm errors, etc.
     failed_solvers: Vec<(String, SolveError)>,
@@ -202,7 +219,9 @@ impl OrderResponses {
         let quotes = self
             .quotes
             .iter()
-            .filter(|(pool, _)| pool_scopes.get(pool) != Some(&LiquidityScope::IncludeExclusive))
+            .filter(|wq| {
+                pool_scopes.get(&wq.worker_pool) != Some(&LiquidityScope::IncludeExclusive)
+            })
             .cloned()
             .collect();
         OrderResponses {
@@ -339,7 +358,7 @@ impl WorkerPoolRouter {
         // nothing, that ranking is the `NoRouteFound` placeholder. The exclusive candidate then
         // uses a default fee.
         let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
-            .into_iter()
+            .iter()
             .zip(&allocations)
             .map(|(responses, allocation)| {
                 if allocation.exclusive_routing_active() {
@@ -348,17 +367,26 @@ impl WorkerPoolRouter {
                         request.options(),
                     );
                     combine_with_surplus(
-                        &responses,
+                        responses,
                         allocation.scopes(),
                         request.options(),
                         public_ranked,
                         *USER_IMPROVEMENT_SHARE_BPS,
                     )
                 } else {
-                    self.rank_quotes(&responses, request.options())
+                    self.rank_quotes(responses, request.options())
                 }
             })
             .collect();
+
+        // `join_all` preserves input order, so orders and responses line up one to one
+        for (order, responses) in request
+            .orders()
+            .iter()
+            .zip(&order_responses)
+        {
+            log_quote_comparison(order, responses, request.options());
+        }
 
         // Validate against external prices when the client explicitly enables it.
         let price_guard_config = request
@@ -502,8 +530,11 @@ impl WorkerPoolRouter {
                                 has_public_response = true;
                             }
 
-                            // Extract the OrderQuote from SingleOrderQuote
-                            quotes.push((worker_pool_name.clone(), single_quote.order().clone()));
+                            quotes.push(WorkerPoolQuote {
+                                worker_pool: worker_pool_name.clone(),
+                                quote: single_quote.order().clone(),
+                                solve_time_ms: single_quote.solve_time_ms(),
+                            });
 
                             // Scope-aware early return: when the allocation routes through
                             // exclusive liquidity, only fire once we have ≥1 public AND ≥1
@@ -562,14 +593,7 @@ impl WorkerPoolRouter {
 
         // Record failures by worker pool and error type
         for (worker_pool_name, error) in &failed_solvers {
-            let error_type = match error {
-                SolveError::Timeout { .. } => "timeout",
-                SolveError::NoRouteFound { .. } => "no_route",
-                SolveError::QueueFull => "queue_full",
-                SolveError::Internal(_) => "internal",
-                SolveError::PriceCheckFailed { .. } => "price_check_failed",
-                _ => "other",
-            };
+            let error_type = solver_error_label(error);
             counter!("worker_router_solver_failures_total", "pool" => worker_pool_name.clone(), "error_type" => error_type).increment(1);
         }
 
@@ -599,40 +623,36 @@ impl WorkerPoolRouter {
         let mut valid_quotes: Vec<_> = responses
             .quotes
             .iter()
-            .filter(|(_, q)| q.status() == QuoteStatus::Success)
-            .filter(|(_, q)| {
-                options
-                    .max_gas()
-                    .map(|max| q.gas_estimate() <= max)
-                    .unwrap_or(true)
-            })
+            .filter(|wq| is_rankable(&wq.quote, options))
             .collect();
 
         // Sort descending by amount_out_net_gas
-        valid_quotes.sort_by(|(_, a), (_, b)| {
-            b.amount_out_net_gas()
-                .cmp(a.amount_out_net_gas())
+        valid_quotes.sort_by(|a, b| {
+            b.quote
+                .amount_out_net_gas()
+                .cmp(a.quote.amount_out_net_gas())
         });
 
         if !valid_quotes.is_empty() {
             counter!("worker_router_orders_total", "status" => "success").increment(1);
-            let (worker_pool_name, best) = valid_quotes[0];
-            counter!("worker_router_best_quote_pool", "pool" => worker_pool_name.clone())
+            let best = valid_quotes[0];
+            counter!("worker_router_best_quote_pool", "pool" => best.worker_pool.clone())
                 .increment(1);
             debug!(
-                order_id = %best.order_id(),
+                order_id = %best.quote.order_id(),
                 number_of_candidates = valid_quotes.len(),
                 "ranked quotes"
             );
             return valid_quotes
                 .into_iter()
-                .map(|(_, q)| q.clone())
+                .map(|pq| pq.quote.clone())
                 .collect();
         }
 
         // No valid quote found - return a NoRouteFound response
         // Try to get any response to extract block info, or create a placeholder
-        let fallback = if let Some((_, any_q)) = responses.quotes.first() {
+        let fallback = if let Some(WorkerPoolQuote { quote: any_q, .. }) = responses.quotes.first()
+        {
             counter!("worker_router_orders_total", "status" => "no_route").increment(1);
             let mut fallback = OrderQuote::new(
                 responses.order_id.clone(),
@@ -650,10 +670,10 @@ impl WorkerPoolRouter {
             // Only label the cause when a quote is actually over the request's
             // max_gas, so a future filter or non-Success status cannot silently
             // get attributed to the gas cap.
-            let over_max_gas = responses.quotes.iter().any(|(_, q)| {
+            let over_max_gas = responses.quotes.iter().any(|pq| {
                 options
                     .max_gas()
-                    .is_some_and(|max| q.gas_estimate() > max)
+                    .is_some_and(|max| pq.quote.gas_estimate() > max)
             });
             fallback.set_no_route_cause(over_max_gas.then_some(SolveError::MaxGasExceeded));
             fallback
@@ -826,6 +846,15 @@ fn combine_with_surplus(
     result
 }
 
+/// Whether a quote is eligible to be ranked against the others for this request.
+fn is_rankable(quote: &OrderQuote, options: &QuoteOptions) -> bool {
+    quote.status() == QuoteStatus::Success &&
+        options
+            .max_gas()
+            .map(|max| quote.gas_estimate() <= max)
+            .unwrap_or(true)
+}
+
 /// Returns the exclusive-access candidate with the highest output net of gas. The candidate must
 /// obey the request `max_gas` and the route shape rules of `has_valid_exclusive_route`.
 fn best_exclusive_candidate<'a>(
@@ -836,20 +865,21 @@ fn best_exclusive_candidate<'a>(
     responses
         .quotes
         .iter()
-        .filter(|(pool, _)| pool_scopes.get(pool) == Some(&LiquidityScope::IncludeExclusive))
-        .filter(|(_, q)| q.status() == QuoteStatus::Success)
-        .filter(|(_, q)| {
+        .filter(|wq| pool_scopes.get(&wq.worker_pool) == Some(&LiquidityScope::IncludeExclusive))
+        .filter(|wq| wq.quote.status() == QuoteStatus::Success)
+        .filter(|wq| {
             options
                 .max_gas()
-                .map(|max| q.gas_estimate() <= max)
+                .map(|max| wq.quote.gas_estimate() <= max)
                 .unwrap_or(true)
         })
-        .filter(|(_, q)| has_valid_exclusive_route(q))
-        .max_by(|(_, a), (_, b)| {
-            a.amount_out_net_gas()
-                .cmp(b.amount_out_net_gas())
+        .filter(|wq| has_valid_exclusive_route(&wq.quote))
+        .max_by(|a, b| {
+            a.quote
+                .amount_out_net_gas()
+                .cmp(b.quote.amount_out_net_gas())
         })
-        .map(|(_, q)| q)
+        .map(|wq| &wq.quote)
 }
 
 /// Returns the amount to commit against a successful public quote:
@@ -1078,7 +1108,7 @@ fn refine_gas_estimates(
     encoding_options: &EncodingOptions,
 ) -> Result<(), SolveError> {
     for responses in order_responses {
-        for (_, quote) in &mut responses.quotes {
+        for WorkerPoolQuote { quote, .. } in &mut responses.quotes {
             if quote.status() != QuoteStatus::Success {
                 continue;
             }
@@ -1157,7 +1187,63 @@ mod tests {
         encoder
     }
 
-    fn make_address(byte: u8) -> Address {
+    /// Builds a worker pool response with no recorded solve time, for the ranking tests that do
+    /// not exercise timing. Use [`timed_worker_quote`] where the solve time is the point.
+    fn worker_quote((worker_pool, quote): (String, OrderQuote)) -> WorkerPoolQuote {
+        timed_worker_quote(&worker_pool, quote, 0)
+    }
+
+    fn timed_worker_quote(
+        worker_pool: &str,
+        quote: OrderQuote,
+        solve_time_ms: u64,
+    ) -> WorkerPoolQuote {
+        WorkerPoolQuote { worker_pool: worker_pool.to_string(), quote, solve_time_ms }
+    }
+
+    /// A minimal successful quote for tests that only care about the net-of-gas amount.
+    fn success_quote(net: u64) -> OrderQuote {
+        OrderQuote::new(
+            "o1".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1_000u64),
+            BigUint::from(net + 10),
+            BigUint::from(10u64),
+            BigUint::from(net),
+            BlockInfo::new(42, "0xabc".to_string(), 0),
+            "algo".to_string(),
+            Bytes::default(),
+            Bytes::default(),
+            "1".to_string(),
+        )
+    }
+
+    /// `public_only` must carry the order identity across, or the surplus path logs and ranks
+    /// against a response set that has lost it.
+    #[test]
+    fn test_public_only_keeps_order_id_and_failures() {
+        let responses = OrderResponses {
+            order_id: "o1".to_string(),
+            quotes: vec![
+                timed_worker_quote("public", success_quote(1_000), 3),
+                timed_worker_quote("excl", success_quote(900), 4),
+            ],
+            failed_solvers: vec![("c".to_string(), SolveError::QueueFull)],
+        };
+        let scopes = HashMap::from([
+            ("public".to_string(), LiquidityScope::PublicOnly),
+            ("excl".to_string(), LiquidityScope::IncludeExclusive),
+        ]);
+        let public = responses.public_only(&scopes);
+
+        assert_eq!(public.order_id, "o1");
+        assert_eq!(public.quotes.len(), 1);
+        assert_eq!(public.quotes[0].worker_pool, "public");
+        assert_eq!(public.quotes[0].solve_time_ms, 3);
+        assert_eq!(public.failed_solvers.len(), 1);
+    }
+
+    fn make_address(byte: u8) -> tycho_simulation::tycho_common::models::Address {
         Address::from([byte; 20])
     }
 
@@ -1545,7 +1631,7 @@ mod tests {
     ) {
         let responses = OrderResponses {
             order_id: "test".to_string(),
-            quotes: vec![(
+            quotes: vec![worker_quote((
                 "pool".to_string(),
                 OrderQuote::new(
                     "test".to_string(),
@@ -1560,7 +1646,7 @@ mod tests {
                     Bytes::from(make_address(0xAA).as_ref()),
                     "1".to_string(),
                 ),
-            )],
+            ))],
             failed_solvers: vec![],
         };
 
@@ -1770,7 +1856,7 @@ mod tests {
     fn test_rank_quotes_max_gas_filtered_sets_max_gas_exceeded() {
         let responses = OrderResponses {
             order_id: "o1".to_string(),
-            quotes: vec![(
+            quotes: vec![worker_quote((
                 "pool".to_string(),
                 OrderQuote::new(
                     "o1".to_string(),
@@ -1785,7 +1871,7 @@ mod tests {
                     Bytes::default(),
                     "1".to_string(),
                 ),
-            )],
+            ))],
             failed_solvers: vec![],
         };
         let options = QuoteOptions::default().with_max_gas(BigUint::from(1u64));
@@ -1800,7 +1886,7 @@ mod tests {
     fn test_rank_quotes_no_cause_when_gas_within_max() {
         let responses = OrderResponses {
             order_id: "o1".to_string(),
-            quotes: vec![(
+            quotes: vec![worker_quote((
                 "pool".to_string(),
                 OrderQuote::new(
                     "o1".to_string(),
@@ -1815,7 +1901,7 @@ mod tests {
                     Bytes::default(),
                     "1".to_string(),
                 ),
-            )],
+            ))],
             failed_solvers: vec![],
         };
         let options = QuoteOptions::default().with_max_gas(BigUint::from(1_000u64));
@@ -1849,7 +1935,7 @@ mod tests {
         let responses = OrderResponses {
             order_id: "test".to_string(),
             quotes: vec![
-                (
+                worker_quote((
                     "pool_a".to_string(),
                     OrderQuote::new(
                         "test".to_string(),
@@ -1864,8 +1950,8 @@ mod tests {
                         Bytes::from(make_address(0xAA).as_ref()),
                         "1".to_string(),
                     ),
-                ),
-                (
+                )),
+                worker_quote((
                     "pool_b".to_string(),
                     OrderQuote::new(
                         "test".to_string(),
@@ -1880,7 +1966,7 @@ mod tests {
                         Bytes::from(make_address(0xAA).as_ref()),
                         "1".to_string(),
                     ),
-                ),
+                )),
             ],
             failed_solvers: vec![],
         };
@@ -2091,8 +2177,8 @@ mod tests {
         OrderResponses {
             order_id: "test-order".to_string(),
             quotes: vec![
-                ("public_pool".to_string(), public),
-                ("exclusive_access_pool".to_string(), exclusive_access),
+                worker_quote(("public_pool".to_string(), public)),
+                worker_quote(("exclusive_access_pool".to_string(), exclusive_access)),
             ],
             failed_solvers: vec![],
         }
@@ -2187,13 +2273,13 @@ mod tests {
         let responses = OrderResponses {
             order_id: "test-order".to_string(),
             quotes: vec![
-                (
+                worker_quote((
                     "public_pool".to_string(),
                     make_public_quote_zero_gas(900)
                         .order()
                         .clone(),
-                ),
-                ("exclusive_access_pool".to_string(), exclusive_quote),
+                )),
+                worker_quote(("exclusive_access_pool".to_string(), exclusive_quote)),
             ],
             failed_solvers: vec![],
         };
@@ -2235,7 +2321,7 @@ mod tests {
     fn no_public_route_responses(exclusive: OrderQuote) -> OrderResponses {
         OrderResponses {
             order_id: "test-order".to_string(),
-            quotes: vec![("exclusive_access_pool".to_string(), exclusive)],
+            quotes: vec![worker_quote(("exclusive_access_pool".to_string(), exclusive))],
             failed_solvers: vec![(
                 "public_pool".to_string(),
                 SolveError::NoRouteFound { order_id: "test-order".to_string(), reason: None },
@@ -2378,18 +2464,18 @@ mod tests {
         let responses = OrderResponses {
             order_id: "test-order".to_string(),
             quotes: vec![
-                (
+                worker_quote((
                     "public_pool".to_string(),
                     make_public_quote_zero_gas(900)
                         .order()
                         .clone(),
-                ),
-                (
+                )),
+                worker_quote((
                     "exclusive_access_pool".to_string(),
                     make_exclusive_quote_with_leg(1000, 1000, 995)
                         .order()
                         .clone(),
-                ),
+                )),
             ],
             failed_solvers: vec![],
         };
@@ -2435,18 +2521,18 @@ mod tests {
         let responses = OrderResponses {
             order_id: "test-order".to_string(),
             quotes: vec![
-                (
+                worker_quote((
                     "public_pool".to_string(),
                     make_public_quote_zero_gas(1000)
                         .order()
                         .clone(),
-                ),
-                (
+                )),
+                worker_quote((
                     "exclusive_access_pool".to_string(),
                     make_exclusive_split_quote(600, 500)
                         .order()
                         .clone(),
-                ),
+                )),
             ],
             failed_solvers: vec![],
         };
@@ -2494,18 +2580,18 @@ mod tests {
         OrderResponses {
             order_id: "test-order".to_string(),
             quotes: vec![
-                (
+                worker_quote((
                     "public_pool".to_string(),
                     make_public_quote_with_net(public_out, public_net)
                         .order()
                         .clone(),
-                ),
-                (
+                )),
+                worker_quote((
                     "exclusive_access_pool".to_string(),
                     make_exclusive_quote_with_leg(exclusive_out, exclusive_net, exclusive_out)
                         .order()
                         .clone(),
-                ),
+                )),
             ],
             failed_solvers: vec![],
         }
