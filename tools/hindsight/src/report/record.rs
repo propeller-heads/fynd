@@ -15,6 +15,12 @@ pub(crate) struct Comparison {
     pub settled_tx: String,
     pub venue: String,
     pub solver: String,
+    /// How the settled amounts were read: `"declared"` or `"netted"` (see the decoder's
+    /// `DecodedTrade`). Absent on datasets recorded before the column existed; those records were
+    /// all netted, but predate the marker, so they are kept unless `--include-netted` says
+    /// otherwise is wanted — `None` here means "no marker to filter on".
+    #[serde(default)]
+    pub decode: Option<String>,
     pub token_in: String,
     pub token_out: String,
     /// Optimistic state (N-1); the report's headline, matching the monitor's headline verdict.
