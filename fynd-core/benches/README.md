@@ -114,7 +114,7 @@ A run writes six files:
 |---|---|
 | `report.md` | The summary. Small enough to paste into a pull request |
 | `protocols.csv` | What each config routed through, one row per config and protocol |
-| `orders.csv` | One row per order per config |
+| `orders.csv` | One row per order per config. `failure` names why an unsolved order came back empty, and is blank on a solve |
 | `pairs.csv` | The same, aggregated by token pair |
 | `routes.jsonl` | The full route each config found, for the viewer |
 | `run.json` | The settings the run used, and when it finished |

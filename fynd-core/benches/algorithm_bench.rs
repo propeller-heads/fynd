@@ -47,7 +47,7 @@
 //! naming a token the recording never saw — and whatever that removes is counted in the report.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -65,7 +65,10 @@ use common::{
     ProtocolCount,
 };
 use futures::stream::StreamExt;
-use fynd_core::{types::QuoteStatus, QuoteOptions, QuoteRequest, Solver};
+use fynd_core::{
+    types::{QuoteStatus, SolveError},
+    NoPathReason, QuoteOptions, QuoteRequest, Solver,
+};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tycho_simulation::tycho_common::models::Address;
@@ -324,14 +327,81 @@ struct Measurement {
     gas: Option<BigUint>,
     /// The route, leg by leg. Empty when nothing was solved.
     edges: Vec<RouteEdge>,
+    /// Why no route came back. `None` on a solved order.
+    failure: Option<&'static str>,
     /// Microseconds, measured by the caller so queueing and dispatch are counted. A shallow solve
     /// lands well under a millisecond, and rounding those to 0 loses the distribution.
     elapsed_us: u128,
 }
 
 impl Measurement {
-    fn unsolved(elapsed_us: u128) -> Self {
-        Self { net_out: None, amount_out: None, gas: None, edges: Vec::new(), elapsed_us }
+    fn unsolved(elapsed_us: u128, failure: &'static str) -> Self {
+        Self {
+            net_out: None,
+            amount_out: None,
+            gas: None,
+            edges: Vec::new(),
+            failure: Some(failure),
+            elapsed_us,
+        }
+    }
+}
+
+/// The reason label for a quote that came back with a non-success status.
+///
+/// Every label is a fixed string because it is the grouping key for the per-config counts, the
+/// `failure` column in `orders.csv` and the filter in the viewer. Order ids, amounts and addresses
+/// stay out of it: a 50k-order run would otherwise produce 50k distinct reasons and nothing to
+/// count.
+fn status_label(status: QuoteStatus) -> &'static str {
+    match status {
+        QuoteStatus::Success => "solved",
+        QuoteStatus::NoRouteFound => "no route",
+        QuoteStatus::InsufficientLiquidity => "insufficient liquidity",
+        QuoteStatus::Timeout => "timeout",
+        QuoteStatus::NotReady => "not ready",
+        QuoteStatus::PriceCheckFailed => "price check failed",
+        // `QuoteStatus` is `#[non_exhaustive]`; a variant added upstream lands here.
+        _ => "other",
+    }
+}
+
+/// The reason label for a solve that returned an error rather than a quote.
+///
+/// `NoRouteFound` splits by its [`NoPathReason`], because "the token is not in the graph" and "the
+/// graph has no path within the hop limit" are different findings and the first is usually the
+/// dataset rather than the algorithm.
+fn error_label(error: &SolveError) -> &'static str {
+    match error {
+        SolveError::NoRouteFound { reason, .. } => match reason {
+            Some(NoPathReason::SourceTokenNotInGraph) => "no route: source token not in graph",
+            Some(NoPathReason::DestinationTokenNotInGraph) => {
+                "no route: destination token not in graph"
+            }
+            Some(NoPathReason::NoGraphPath) => "no route: no connecting path",
+            Some(NoPathReason::NoScorablePaths) => "no route: no scorable paths",
+            Some(NoPathReason::AmountTooSmall) => "no route: amount too small",
+            None => "no route",
+            // `NoPathReason` is `#[non_exhaustive]`; a variant added upstream lands here.
+            Some(_) => "no route: other",
+        },
+        SolveError::InsufficientLiquidity { .. } => "insufficient liquidity",
+        SolveError::Timeout { .. } => "timeout",
+        SolveError::AlgorithmError(_) => "algorithm error",
+        SolveError::MarketDataStale { .. } => "market data stale",
+        SolveError::QueueFull => "queue full",
+        SolveError::InvalidOrder(_) => "invalid order",
+        SolveError::Internal(_) => "internal error",
+        SolveError::NotReady(_) => "not ready",
+        SolveError::ComputationFailed(_) => "computation failed",
+        SolveError::FailedEncoding(_) => "encoding failed",
+        SolveError::EncodingUnavailable(_) => "encoding unavailable",
+        SolveError::PriceCheckFailed { .. } => "price check failed",
+        SolveError::MaxGasExceeded => "max gas exceeded",
+        SolveError::MissingData(_) => "missing data",
+        SolveError::SimulationFailed(_) => "simulation failed",
+        // `SolveError` is `#[non_exhaustive]`; a variant added upstream lands here.
+        _ => "other",
     }
 }
 
@@ -345,7 +415,7 @@ async fn measure(solver: &Solver, order: &TradeOrder) -> Measurement {
         Ok(quote) => {
             let order_quote = &quote.orders()[0];
             if order_quote.status() != QuoteStatus::Success {
-                return Measurement::unsolved(elapsed_us);
+                return Measurement::unsolved(elapsed_us, status_label(order_quote.status()));
             }
             let edges: Vec<RouteEdge> = order_quote
                 .route()
@@ -371,10 +441,11 @@ async fn measure(solver: &Solver, order: &TradeOrder) -> Measurement {
                 amount_out: Some(order_quote.amount_out().clone()),
                 gas: Some(order_quote.gas_estimate().clone()),
                 edges,
+                failure: None,
                 elapsed_us,
             }
         }
-        Err(_) => Measurement::unsolved(elapsed_us),
+        Err(error) => Measurement::unsolved(elapsed_us, error_label(&error)),
     }
 }
 
@@ -485,6 +556,8 @@ struct ConfigStats {
     solved_only: usize,
     /// Solved by the baseline where this config found nothing.
     missed: usize,
+    /// Every order this config did not solve, counted by reason. Sums to `orders - solved`.
+    failures: BTreeMap<&'static str, usize>,
     p50_us: u128,
     p95_us: u128,
     slowest_us: u128,
@@ -503,6 +576,7 @@ fn config_stats(config_run: &ConfigRun, baseline: &[Measurement]) -> ConfigStats
         tie: 0,
         solved_only: 0,
         missed: 0,
+        failures: BTreeMap::new(),
         p50_us: 0,
         p95_us: 0,
         slowest_us: 0,
@@ -519,6 +593,12 @@ fn config_stats(config_run: &ConfigRun, baseline: &[Measurement]) -> ConfigStats
         let base = baseline[index].net_out.as_ref();
         if net.is_some() {
             stats.solved += 1;
+        }
+        if let Some(failure) = measurement.failure {
+            *stats
+                .failures
+                .entry(failure)
+                .or_default() += 1;
         }
         let outcome = Outcome::of(net, base);
         match outcome {
@@ -726,6 +806,7 @@ fn routes_jsonl(outcome: &BenchOutcome<'_>) -> String {
                 config.label.clone(),
                 serde_json::json!({
                     "solved": measurement.net_out.is_some(),
+                    "failure": measurement.failure,
                     "amount_out": measurement.amount_out.as_ref().map(ToString::to_string),
                     "amount_out_net_gas": measurement.net_out.as_ref().map(ToString::to_string),
                     "usd_out": measurement
@@ -835,7 +916,7 @@ fn write_file(dir: &Path, file_name: &str, contents: &str) {
 fn orders_csv(outcome: &BenchOutcome<'_>) -> String {
     let mut csv = String::from(
         "order,token_in,token_out,amount_in,amount_usd,config,algorithm,max_hops,\
-         solved,net_out,usd_out,swaps,elapsed_us,bps_vs_baseline,outcome\n",
+         solved,failure,net_out,usd_out,swaps,elapsed_us,bps_vs_baseline,outcome\n",
     );
 
     for (index, order) in outcome.orders.iter().enumerate() {
@@ -863,7 +944,7 @@ fn orders_csv(outcome: &BenchOutcome<'_>) -> String {
                 .unwrap_or_default();
             let outcome_label = Outcome::of(measurement.net_out.as_ref(), base.as_ref()).label();
             csv.push_str(&format!(
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 order.id,
                 order.token_in,
                 order.token_out,
@@ -876,6 +957,7 @@ fn orders_csv(outcome: &BenchOutcome<'_>) -> String {
                 config.algorithm,
                 config.max_hops,
                 solved,
+                measurement.failure.unwrap_or_default(),
                 net_out,
                 value_out,
                 swaps,
@@ -1184,6 +1266,36 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
             cell(stats.tie.to_string()),
             cell(stats.solved_only.to_string()),
             cell(stats.missed.to_string()),
+        ));
+    }
+
+    out.push_str("\n## Failures\n\n");
+    out.push_str(
+        "Every order a config did not solve, by reason. An order no config solved is usually the \
+         market or the dataset; one that a single config missed is usually the algorithm. \
+         `orders.csv` has the reason per order in its `failure` column.\n\n",
+    );
+    out.push_str("| config | unsolved | reasons |\n|---|---|---|\n");
+    for (config, _) in outcome.results {
+        let stats = &outcome.stats[&config.label];
+        let mut reasons: Vec<(&str, usize)> = stats
+            .failures
+            .iter()
+            .map(|(reason, count)| (*reason, *count))
+            .collect();
+        // Commonest first: the long tail of one-off reasons is rarely what a run is about.
+        reasons.sort_by_key(|&(reason, count)| (std::cmp::Reverse(count), reason));
+        let listed = reasons
+            .iter()
+            .map(|(reason, count)| format!("{reason} {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "| `{}` | {}/{} | {} |\n",
+            config.label,
+            orders.len() - stats.solved,
+            orders.len(),
+            if listed.is_empty() { "—".to_string() } else { listed },
         ));
     }
 
