@@ -229,6 +229,9 @@ pub(crate) struct RangeComparison {
     pub solver_source: AttributionSource,
     /// Which decoder recovered the settled trade.
     pub decoder: &'static str,
+    /// How the settled amounts were read: `"declared"` (the solver's own calldata or logs) or
+    /// `"netted"` (balance netting — excluded from the report by default).
+    pub decode: &'static str,
     pub token_in: Address,
     pub token_out: Address,
     pub amount_in: U256,
@@ -308,6 +311,7 @@ pub(crate) fn build_range(
         solver: trade.solver.clone(),
         solver_source: trade.solver_source,
         decoder: trade.decoder,
+        decode: trade.decode,
         token_in: trade.token_in,
         token_out: trade.token_out,
         amount_in: trade.amount_in,
@@ -374,6 +378,7 @@ mod tests {
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
+            decode: "netted",
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),

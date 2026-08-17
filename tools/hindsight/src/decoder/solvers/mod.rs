@@ -101,13 +101,6 @@ impl SwapIntent {
     pub(crate) fn declared_quote(&self) -> Option<U256> {
         self.quoted_amount_out
     }
-
-    /// Drop the declared quote, keeping the ABI-enforced terms. Used when the settled amount
-    /// shows the quote was self-reported garbage (see [`plausible_quote`]) — the ABI fields stay
-    /// trustworthy either way.
-    pub(crate) fn clear_quote(&mut self) {
-        self.quoted_amount_out = None;
-    }
 }
 
 /// One solver's decoder: everything the solver's own calldata and logs can say about a trade.

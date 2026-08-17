@@ -70,7 +70,7 @@ mod tests {
     use super::*;
     use crate::decoder::{
         registry::Registry,
-        test_utils::{addr, frame, make_transfer_log, receipt, swap, tx_hash},
+        test_utils::{addr, make_transfer_log, receipt, swap, tx_hash},
         transfer_ledger::TransferLedger,
     };
 
@@ -95,7 +95,6 @@ mod tests {
         let mut code_cache = HashMap::new();
         let user = addr(1);
         let receipt = receipt(tx_hash(1), user, Some(entry_point), vec![]);
-        let root = frame("CALL", user, entry_point, 0);
         let mut ctx = DecodeContext {
             provider: &provider,
             registry: &registry,
@@ -104,7 +103,6 @@ mod tests {
             entry_point,
             transfer_ledger: ledger,
             input,
-            root: &root,
             venue: registry.venue("rainbow"),
         };
         RainbowCalldata.decode(&mut ctx).await

@@ -422,6 +422,7 @@ mod tests {
             solver: solver.to_string(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
+            decode: "netted",
             sender: addr(1),
             token_in,
             token_out,

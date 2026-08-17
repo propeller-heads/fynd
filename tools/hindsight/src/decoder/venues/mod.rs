@@ -39,7 +39,7 @@ use crate::decoder::decode::TradeDecoder;
 /// no decoders is rejected by the registry at load time (see `has_decoder`).
 pub(crate) fn decoders_for<P: Provider>(name: &str) -> Vec<Box<dyn TradeDecoder<P>>> {
     match name {
-        "relay" => vec![Box::new(relay::RelayCalldata), Box::new(relay::RelayNetting)],
+        "relay" => vec![Box::new(relay::RelayNetting)],
         "metamask" => vec![Box::new(metamask::MetaMaskNetting)],
         "rabby" => vec![Box::new(rabby::RabbyNetting)],
         "coinbase" => vec![Box::new(coinbase::CoinbaseNetting)],
