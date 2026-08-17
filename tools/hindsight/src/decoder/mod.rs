@@ -332,7 +332,7 @@ impl<P: Provider> Decoder<P> {
         // `venue_attribution`) overrides the entry-point label, backing any venue fee out before
         // the quote check reads the grossed output. The appData tag is read from a batch settler's
         // calldata; other transactions carry none.
-        let integrator = solvers::integrator(logs);
+        let integrator = solvers::integrator(logs, registry);
         let app_data = intents::venue_tag(registry, entry_point, &root.input);
         let venue = venue_attribution::attribute(
             registry,
@@ -364,15 +364,28 @@ impl<P: Provider> Decoder<P> {
             flow.gross_output_fee(fee);
         }
 
-        // The calldata-declared swap terms (see `solver_intent`). Only the netting amounts above
-        // stay authoritative for what actually settled; these are informational.
-        let intent = solver_intent(
-            root,
-            registry,
-            &attribution.solver,
-            flow.swap.amount_in,
-            flow.swap.amount_out,
-        );
+        // The trader's swap terms, when the settling solver frame's own calldata declares them.
+        // Dispatched with the solver frame's input, not the root transaction's — a packed
+        // calldata layout (Fly) uses offsets valid only in its own frame — and with the decoded
+        // flow's input amount as a hint for scan-based extractors (ParaSwap). Only the netting
+        // amounts above stay authoritative for what actually settled; this is informational. A
+        // declared quote that fails the unit-plausibility check against the settled amount is
+        // dropped (quotes are self-reported); the ABI-decoded terms stay either way.
+        let intent = trace::find_solver_frame(root, registry)
+            .and_then(|frame| {
+                let solver = registry.solver(frame.to?)?;
+                solver
+                    .decoder
+                    .declared_swap(&frame.input, Some(flow.swap.amount_in))
+            })
+            .map(|mut intent| {
+                if let Some(quoted) = intent.declared_quote() {
+                    if !solvers::plausible_quote(quoted, flow.swap.amount_out) {
+                        intent.clear_quote();
+                    }
+                }
+                intent
+            });
 
         warn_on_intent_disagreement(decoder, receipt.transaction_hash, intent.as_ref(), &flow);
         let (min_amount_out, declared_quote, quote_timestamp) = intent_fields(intent.as_ref());

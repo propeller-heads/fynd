@@ -124,11 +124,28 @@ impl VenueAddresses {
     }
 }
 
+/// A loaded solver entry: its display name joined with its `SolverDecoder` implementation.
+/// Built once per address-book load; at trade time `Registry::solver` hands it out by address,
+/// so no name is ever matched on a hot path.
+pub(crate) struct Solver {
+    pub(crate) name: String,
+    /// The solver's decoder — the no-op implementation for book-only solvers.
+    pub(crate) decoder: &'static dyn crate::decoder::solvers::SolverDecoder,
+}
+
+impl std::fmt::Debug for Solver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Solver")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Per-chain address book for trade decoding, loaded from TOML (see the module docs).
 #[derive(Debug)]
 pub(crate) struct Registry {
-    /// Solver routers — the venue that actually settles a swap.
-    solvers: HashMap<Address, String>,
+    /// Solver routers — the entries that actually settle a swap, each carrying its decoder.
+    solvers: HashMap<Address, Solver>,
     /// Display names of all registered solvers, for O(1) `is_solver_name` checks.
     solver_names: HashSet<String>,
     /// Every known address (solvers and venues), for name resolution.
@@ -223,6 +240,14 @@ impl Registry {
             }
         }
         let solver_names = book.solvers.values().cloned().collect();
+        let solvers = book
+            .solvers
+            .into_iter()
+            .map(|(address, name)| {
+                let decoder = crate::decoder::solvers::decoder_for(&name);
+                (address, Solver { name, decoder })
+            })
+            .collect();
         let mut usd_stablecoins: Vec<(Address, u32)> = book
             .usd_stablecoins
             .into_iter()
@@ -239,7 +264,7 @@ impl Registry {
 
         Ok(Self {
             solver_names,
-            solvers: book.solvers,
+            solvers,
             names,
             batch_settlers: book.batch_settlers,
             labels: book.labels,
@@ -267,11 +292,10 @@ impl Registry {
         self.solvers.contains_key(&address)
     }
 
-    /// The registered solver name for `address`, if any.
-    pub(crate) fn solver_name(&self, address: Address) -> Option<&str> {
-        self.solvers
-            .get(&address)
-            .map(String::as_str)
+    /// The loaded solver entry for a router address — name and decoder — if the address book has
+    /// one.
+    pub(crate) fn solver(&self, address: Address) -> Option<&Solver> {
+        self.solvers.get(&address)
     }
 
     /// Whether `name` is a registered solver's display name. Bounds the metric label
@@ -454,7 +478,7 @@ mod tests {
                 registry
                     .solvers
                     .values()
-                    .any(|name| name == "tycho"),
+                    .any(|solver| solver.name == "tycho"),
                 "{chain} has no tycho router"
             );
         }
