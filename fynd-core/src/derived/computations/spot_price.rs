@@ -65,7 +65,7 @@ impl DerivedComputation for SpotPriceComputation {
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
         // Start with existing prices (or empty for full recompute).
         let mut spot_prices = if changed.is_full_recompute {
-            SpotPrices::new()
+            SpotPrices::default()
         } else {
             let mut existing_prices = store
                 .read()

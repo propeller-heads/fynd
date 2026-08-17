@@ -17,7 +17,7 @@
 //! cargo run --package fynd-core --example custom_algorithm
 //! ```
 
-use std::{collections::HashMap, env, str::FromStr, time::Duration};
+use std::{env, str::FromStr, time::Duration};
 
 use fynd_core::{
     derived::SharedDerivedDataRef,
@@ -28,9 +28,9 @@ use fynd_core::{
     OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, Swap,
 };
 use num_bigint::{BigInt, BigUint};
+use rustc_hash::FxHashMap;
 use tracing_subscriber::EnvFilter;
 use tycho_simulation::{evm::tycho_models::Chain, tycho_core::Bytes};
-
 // =============================================================================
 // Custom algorithm implementation
 // =============================================================================
@@ -132,7 +132,7 @@ impl Algorithm for DirectComponentAlgorithm {
                 state.clone_box(),
             );
 
-            let route = Route::new(vec![swap], HashMap::new())?;
+            let route = Route::new(vec![swap], FxHashMap::default())?;
 
             // Validate every candidate route before returning it. The solver worker rejects
             // invalid routes (disconnected swaps, repeated tokens, malformed splits) and that

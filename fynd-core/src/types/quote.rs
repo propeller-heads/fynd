@@ -14,10 +14,11 @@
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{collections::VecDeque, sync::Arc};
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 pub use tycho_execution::encoding::models::UserTransferType;
@@ -1114,23 +1115,26 @@ pub struct Route {
     /// built the route. Skipped during (de)serialization — only the in-process
     /// encoding path consumes it.
     #[serde(skip, default)]
-    tokens: HashMap<Bytes, Token>,
+    tokens: FxHashMap<Bytes, Token>,
 }
 
 impl Route {
     /// Creates a new route from an ordered sequence of swaps.
+    ///
+    /// `tokens` is anything that yields address/token pairs -- a map of either hasher, or a
+    /// sequence -- so building a route does not commit the caller to ours.
     ///
     /// # Errors
     ///
     /// Returns [`RouteValidationError::EmptyRoute`] if `swaps` is empty.
     pub fn new(
         swaps: Vec<Swap>,
-        tokens: HashMap<Bytes, Token>,
+        tokens: impl IntoIterator<Item = (Bytes, Token)>,
     ) -> Result<Self, RouteValidationError> {
         if swaps.is_empty() {
             return Err(RouteValidationError::EmptyRoute);
         }
-        Ok(Self { swaps, tokens })
+        Ok(Self { swaps, tokens: tokens.into_iter().collect() })
     }
 
     /// Returns the swaps in this route.
@@ -1150,7 +1154,7 @@ impl Route {
 
     /// Returns the token map attached to this route. Empty unless populated via
     /// [`Route::with_tokens`].
-    pub(crate) fn tokens(&self) -> &HashMap<Bytes, Token> {
+    pub(crate) fn tokens(&self) -> &FxHashMap<Bytes, Token> {
         &self.tokens
     }
 
@@ -1228,7 +1232,7 @@ impl Route {
     /// Returns a human-readable path description (e.g., "WETH -> USDC -> DAI").
     ///
     /// Falls back to token address if token not found in the provided map.
-    pub fn path_description(&self, tokens: &HashMap<Address, Token>) -> String {
+    pub fn path_description(&self, tokens: &FxHashMap<Address, Arc<Token>>) -> String {
         let mut symbols = Vec::with_capacity(self.swaps.len() + 1);
 
         for (i, swap) in self.swaps.iter().enumerate() {
@@ -1323,7 +1327,7 @@ impl Route {
         let first_token = &self.swaps[0].token_in;
         let last_token = &self.swaps[self.swaps.len() - 1].token_out;
 
-        let mut seen = HashSet::new();
+        let mut seen = FxHashSet::default();
         seen.insert(first_token.clone());
         let last_idx = self.swaps.len() - 1;
         for (i, swap) in self.swaps.iter().enumerate() {
@@ -1360,7 +1364,7 @@ impl Route {
         // Collect swaps into branch collections by their input token. Each
         // branch collection represents a split (parallel branches sharing the
         // same token_in), not a sequential path.
-        let mut token_in_to_index: HashMap<Address, usize> = HashMap::new();
+        let mut token_in_to_index: FxHashMap<Address, usize> = FxHashMap::default();
         let mut swaps_by_token_in: Vec<(Address, Vec<&Swap>)> = Vec::new();
         for swap in &self.swaps {
             if let Some(&idx) = token_in_to_index.get(&swap.token_in) {
@@ -1440,10 +1444,10 @@ fn validate_split_amounts(
 /// reachable.
 fn validate_bfs_connectivity(
     swaps_by_token_in: &[(Address, Vec<&Swap>)],
-    token_in_to_index: &HashMap<Address, usize>,
+    token_in_to_index: &FxHashMap<Address, usize>,
 ) -> Result<(), RouteValidationError> {
     let first_token = &swaps_by_token_in[0].0;
-    let mut reachable: HashSet<&Address> = HashSet::new();
+    let mut reachable: FxHashSet<&Address> = FxHashSet::default();
     reachable.insert(first_token);
     let mut tokens_to_visit: VecDeque<&Address> = VecDeque::new();
     tokens_to_visit.push_back(first_token);
@@ -1477,7 +1481,7 @@ fn validate_dead_ends(
         .last()
         .ok_or(RouteValidationError::EmptyRoute)?
         .token_out;
-    let non_first_input_tokens: HashSet<&Address> = swaps_by_token_in
+    let non_first_input_tokens: FxHashSet<&Address> = swaps_by_token_in
         .iter()
         .skip(1)
         .map(|(token_in, _)| token_in)
@@ -1517,7 +1521,7 @@ fn validate_cycles(
             last: terminal_token.clone(),
         });
     }
-    let mut earlier_inputs: HashSet<&Address> = HashSet::new();
+    let mut earlier_inputs: FxHashSet<&Address> = FxHashSet::default();
     for (token_in, branch_collection) in swaps_by_token_in {
         earlier_inputs.insert(token_in);
         for swap in branch_collection {
@@ -1966,14 +1970,14 @@ mod tests {
             .into_iter()
             .map(|(a, b)| make_swap(a, b, 1000, 990))
             .collect();
-        Route::new(swaps, HashMap::new()).unwrap()
+        Route::new(swaps, FxHashMap::default()).unwrap()
     }
 
     #[test]
     fn test_route_token_symbol_resolves_from_own_map() {
         let token_in = token(0x01, "TIN");
         let token_out = token(0x02, "TOUT");
-        let tokens = HashMap::from([
+        let tokens = FxHashMap::from_iter([
             (token_in.address.clone(), token_in.clone()),
             (token_out.address.clone(), token_out.clone()),
         ]);
@@ -2038,13 +2042,13 @@ mod tests {
         let swaps: Vec<Swap> = (0..num_swaps)
             .map(|i| make_swap(i as u8, (i + 1) as u8, 1000, 990))
             .collect();
-        let route = Route { swaps, tokens: HashMap::new() };
+        let route = Route { swaps, tokens: FxHashMap::default() };
         assert_eq!(route.total_gas(), BigUint::from(expected_gas));
     }
 
     #[test]
     fn test_route_new_rejects_empty() {
-        let result = Route::new(vec![], HashMap::new());
+        let result = Route::new(vec![], FxHashMap::default());
         assert!(matches!(result, Err(RouteValidationError::EmptyRoute)));
     }
 
@@ -2117,7 +2121,7 @@ mod tests {
             make_split_swap(0x02, 0x03, 0.5),
             make_split_swap(0x02, 0x03, 0.0),
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -2131,7 +2135,7 @@ mod tests {
             make_split_swap(0x02, 0x03, 0.5),
             make_split_swap(0x02, 0x03, 0.3),
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::InvalidSplit { .. }));
     }
@@ -2147,7 +2151,7 @@ mod tests {
             make_split_swap(0x02, 0x03, 0.5),
             make_split_swap(0x02, 0x03, 0.0),
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::InvalidSplit { .. }));
     }
@@ -2163,7 +2167,7 @@ mod tests {
             make_swap(0x02, 0x04, 490, 480),
             make_swap(0x03, 0x04, 490, 480),
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -2171,7 +2175,7 @@ mod tests {
     fn test_validate_split_single_swap_nonzero_split() {
         // A ──[50%]── B   ERROR: single swap must have split=0.0
         let swaps = vec![make_split_swap(0x01, 0x02, 0.5)];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::InvalidSplit { .. }));
     }
@@ -2186,7 +2190,7 @@ mod tests {
             make_split_swap(0x01, 0x02, 0.0), // A→B (remainder)
             make_swap(0x03, 0x04, 490, 480),  // C→D (unreachable)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::DisconnectedSplitStart { .. }));
     }
@@ -2202,7 +2206,7 @@ mod tests {
             make_swap(0x02, 0x04, 490, 480),  // B→D (dead end)
             make_swap(0x03, 0x05, 490, 480),  // C→E (terminal)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::DisconnectedSplitEnd { .. }));
     }
@@ -2219,7 +2223,7 @@ mod tests {
             make_swap(0x03, 0x02, 980, 970),                 // C→B (cycle)
             make_swap(0x04, 0x02, 480, 470),                 // D→B (cycle)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::UnsupportedCycle { .. }));
     }
@@ -2236,7 +2240,7 @@ mod tests {
             make_swap(0x03, 0x04, 490, 480),  // C→D
             make_swap(0x04, 0x01, 960, 950),  // D→A (round-trip)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -2252,7 +2256,7 @@ mod tests {
             make_swap(0x03, 0x01, 960, 950),  // C→A (round-trip)
             make_swap(0x04, 0x01, 960, 950),  // D→A (round-trip)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -2265,7 +2269,7 @@ mod tests {
             make_split_swap(0x01, 0x01, 0.5), // A→A
             make_split_swap(0x01, 0x01, 0.0), // A→A (remainder)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::UnsupportedCycle { .. }));
     }
@@ -2425,11 +2429,11 @@ mod tests {
         #[case] expected: &str,
     ) {
         let route = make_route(swaps);
-        let tokens: HashMap<Address, Token> = token_data
+        let tokens: FxHashMap<Address, Arc<Token>> = token_data
             .into_iter()
             .map(|(byte, symbol)| {
                 let t = make_token(byte, symbol);
-                (t.address.clone(), t)
+                (t.address.clone(), Arc::new(t))
             })
             .collect();
 
@@ -2498,7 +2502,7 @@ mod tests {
             make_swap(0x02, 0x04, 490, 480),  // B→D
             make_swap(0x03, 0x04, 490, 480),  // C→D
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         assert!(matches!(route.validate(), Err(RouteValidationError::DisconnectedSwaps { .. })));
     }
 
@@ -2520,7 +2524,8 @@ mod tests {
             make_swap(0x02, 0x03, 594, 580).with_split(0.6), // B→C via P2, 60%
             make_swap(0x02, 0x03, 396, 385),                 // B→C via P3, remainder
         ];
-        let route_interior = Route::new(swaps_interior, HashMap::new()).expect("non-empty route");
+        let route_interior =
+            Route::new(swaps_interior, FxHashMap::default()).expect("non-empty route");
         assert!(route_interior.is_split());
 
         //   ┌──[60%]── B ──┐
@@ -2532,7 +2537,7 @@ mod tests {
             make_swap(0x01, 0x04, 400, 390),                 // A→D, remainder
             make_swap(0x04, 0x03, 390, 380),                 // D→C
         ];
-        let route_source = Route::new(swaps_source, HashMap::new()).expect("non-empty route");
+        let route_source = Route::new(swaps_source, FxHashMap::default()).expect("non-empty route");
         assert!(route_source.is_split());
     }
 

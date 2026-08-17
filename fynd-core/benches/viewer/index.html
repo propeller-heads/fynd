@@ -522,7 +522,7 @@
     selected: null, sort: "spread", query: "",
     pairSort: "orders", usdLo: null, usdHi: null, hideTies: false,
     runQuery: "", runCursor: 0, runSource: "offline",
-    algo: null, algoOutcome: "all", algoField: "all",
+    algo: null, algoOutcome: "all", algoField: "all", algoFail: "all",
     protocols: null,     // rows of protocols.csv, or null when the run predates it
     protoMetric: "legs_pct",
   };
@@ -594,6 +594,8 @@
       // `pool`; reading both keeps older bench-results loadable
       byOrder.get(key).res[r.config ?? r.variant] = {
         solved: r.solved === "true",
+        // runs written before the failure column recorded only that an order was unsolved
+        failure: r.failure || (r.solved === "true" ? null : "unrecorded"),
         net: r.net_out ? BigInt(r.net_out) : null,
         swaps: numOrNull(r.swaps),
         us: numOrNull(r.elapsed_us) ?? 0,
@@ -746,11 +748,15 @@
       // for a strong bps on the flow that matters. Orders with no usd value are left out.
       let usd = 0;
       const bpsVals = [], times = [];
+      // Unsolved orders by reason. Every non-success is in here, "no route" included: an order
+      // the config did not answer is the finding, whatever the solver called it.
+      const fails = {};
       rows.forEach(o => {
         const base = o.res[BASELINE], me = o.res[c];
         if (!me) return;
         times.push(me.us);
         if (me.solved) { solved++; if (o.usd !== null) usd += o.usd; }
+        else fails[me.failure] = (fails[me.failure] || 0) + 1;
         if (me.solved && base && !base.solved) only++;
         if (!me.solved && base && base.solved) missed++;
         if (me.outcome === "better") w++;
@@ -762,7 +768,7 @@
       });
       times.sort((a, b) => a - b);
       const raw = bpsVals.map(v => v.bps);
-      byConfig[c] = { solved, only, missed, w, l, t, usd, compared: bpsVals.length, bpsVals,
+      byConfig[c] = { solved, only, missed, w, l, t, usd, fails, compared: bpsVals.length, bpsVals,
         mean: meanOf(raw), median: medianOf(raw),
         p50: pct(times, 0.5), p95: pct(times, 0.95) };
     });
@@ -981,6 +987,13 @@
     };
   }
 
+  // The reason a config failed most often, for the scorecard. The full breakdown is the unsolved
+  // chip row underneath, which also filters the order list to it.
+  function topFailure(fails) {
+    const ranked = Object.entries(fails).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    return ranked.length ? `${ranked[0][0]} ${ranked[0][1].toLocaleString()}` : "—";
+  }
+
   function histCard(name, stat, counts, bins, kindOf, footer) {
     const peak = Math.max(1, ...counts);
     return `<article class="hist">
@@ -1003,6 +1016,8 @@
     const { byConfig } = aggregate(rows);
     const d = byConfig[config];
     const isBase = config === BASELINE;
+    // A config switch or a narrower slice can drop the reason that was being filtered on
+    if (!["all", "any"].includes(state.algoFail) && !(state.algoFail in d.fails)) state.algoFail = "all";
 
     // Two independent axes: how the config did against the baseline, and where it stands in the
     // field. Filtering on both is how "tied the baseline but another algorithm beat it" is reached.
@@ -1032,6 +1047,7 @@
       <div class="card-rows">
         <div class="card-row"><span>best / behind field</span><b>${nBest.toLocaleString()} / ${nBehind.toLocaleString()}</b></div>
         <div class="card-row"><span>solved</span><b>${d.solved.toLocaleString()} / ${rows.length}</b></div>
+        <div class="card-row"><span>commonest failure</span><b>${topFailure(d.fails)}</b></div>
         <div class="card-row"><span>volume settled</span><b>${fmtUsd(d.usd)}</b></div>
         <div class="card-row"><span>vs baseline</span><b class="${isBase ? "none" : cls(usdDiff)}">${isBase ? "\u2014" : fmtUsdDiff(usdDiff)}</b></div>
         <div class="card-row"><span>only / missed</span><b>${isBase ? "—" : `${d.only} / ${d.missed}`}</b></div>
@@ -1058,8 +1074,12 @@
 
     const matchesOutcome = o => state.algoOutcome === "all" || o.res[config].outcome === state.algoOutcome;
     const matchesField = o => state.algoField === "all" || standings.get(o.name).key === state.algoField;
+    // "any" is every unsolved order regardless of reason, which is the usual question; the named
+    // reasons split it. Solved orders match only "all".
+    const matchesFail = o => state.algoFail === "all"
+      || (state.algoFail === "any" ? !o.res[config].solved : o.res[config].failure === state.algoFail);
 
-    const picked = ran.filter(o => matchesOutcome(o) && matchesField(o));
+    const picked = ran.filter(o => matchesOutcome(o) && matchesField(o) && matchesFail(o));
     const sorted = [...picked].sort((a, b) => {
       // behind-the-field is read worst-first, like a loss against the baseline
       if (state.algoField === "behind") {
@@ -1075,7 +1095,7 @@
     const outcomeChips = `<div class="chips" role="group" aria-label="Against the baseline">
       <span class="lbl">vs baseline</span>
       ${OUTCOMES.map(([key, label]) => {
-        const n = ran.filter(o => (key === "all" || o.res[config].outcome === key) && matchesField(o)).length;
+        const n = ran.filter(o => (key === "all" || o.res[config].outcome === key) && matchesField(o) && matchesFail(o)).length;
         return `<button data-outcome="${key}" aria-pressed="${key === state.algoOutcome}">${label} ${n}</button>`;
       }).join("")}
     </div>`;
@@ -1083,15 +1103,29 @@
     const fieldChips = `<div class="chips" role="group" aria-label="Against the field">
       <span class="lbl">vs field</span>
       ${FIELD.map(([key, label]) => {
-        const n = ran.filter(o => (key === "all" || standings.get(o.name).key === key) && matchesOutcome(o)).length;
+        const n = ran.filter(o => (key === "all" || standings.get(o.name).key === key) && matchesOutcome(o) && matchesFail(o)).length;
         return `<button data-field="${key}" aria-pressed="${key === state.algoField}">${label} ${n}</button>`;
       }).join("")}
     </div>`;
+
+    // One chip per reason this config actually hit, commonest first, so the breakdown and the way
+    // to read the orders behind it are the same control.
+    const unsolved = Object.entries(d.fails).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const failChips = unsolved.length ? `<div class="chips" role="group" aria-label="Unsolved">
+      <span class="lbl">unsolved</span>
+      ${[["all", "all"], ["any", "any reason"], ...unsolved.map(([reason]) => [reason, reason])].map(([key, label]) => {
+        const n = ran.filter(o => matchesOutcome(o) && matchesField(o)
+          && (key === "all" || (key === "any" ? !o.res[config].solved : o.res[config].failure === key))).length;
+        return `<button data-fail="${key}" aria-pressed="${key === state.algoFail}">${label} ${n}</button>`;
+      }).join("")}
+    </div>` : "";
 
     const filterLabel = () => {
       const parts = [];
       if (state.algoOutcome !== "all") parts.push(`${OUTCOMES.find(([k]) => k === state.algoOutcome)[1]} against the baseline`);
       if (state.algoField !== "all") parts.push(`${state.algoField} the field`);
+      if (state.algoFail === "any") parts.push("unsolved");
+      else if (state.algoFail !== "all") parts.push(`unsolved with "${state.algoFail}"`);
       return parts.length ? parts.join(" and ") : "covered by this config";
     };
 
@@ -1104,7 +1138,7 @@
         return `<tr data-order="${o.name}">
           <td>${pairLabel(o)}</td>
           <td>${fmtUsd(o.usd)}</td>
-          <td class="bps-cell ${me.solved ? cls(me.bps) : "none"}">${me.solved ? fmtBps(me.bps) : "no route"}</td>
+          <td class="bps-cell ${me.solved ? cls(me.bps) : "none"}">${me.solved ? fmtBps(me.bps) : me.failure}</td>
           <td class="bps-cell ${f.key === "best" ? "gain" : cls(f.gap)}">${f.key === "best" ? "best" : fmtBps(f.gap)}</td>
           <td class="${f.winner ? "" : "none"}">${f.winner ?? "—"}</td>
           <td>${ms(me.us)}</td>
@@ -1142,6 +1176,7 @@
         <div style="margin-top:12px; display:flex; flex-direction:column; gap:12px">
           ${outcomeChips}
           ${fieldChips}
+          ${failChips}
           ${sorted.length ? table : `<div class="empty-route">No order in this slice is ${filterLabel()}.</div>`}
         </div>
       </div>`;
@@ -1158,6 +1193,8 @@
       b.addEventListener("click", () => { state.algoOutcome = b.dataset.outcome; renderAlgos(); }));
     document.querySelectorAll("[data-field]").forEach(b =>
       b.addEventListener("click", () => { state.algoField = b.dataset.field; renderAlgos(); }));
+    document.querySelectorAll("[data-fail]").forEach(b =>
+      b.addEventListener("click", () => { state.algoFail = b.dataset.fail; renderAlgos(); }));
     document.querySelectorAll("[data-order]").forEach(tr =>
       tr.addEventListener("click", () => {
         state.selected = tr.dataset.order;
@@ -1592,6 +1629,12 @@
     });
   }
 
+  // Why one config produced nothing for one order. routes.jsonl carries it; orders.csv is the
+  // fallback because a run can be browsed before routes.jsonl finishes loading.
+  function failureOf(order, config, route) {
+    return route.failure || order.res[config]?.failure || "no route";
+  }
+
   function renderDetail() {
     const target = document.getElementById("detail");
     if (state.routesError) {
@@ -1614,7 +1657,7 @@
         const r = R[c] || { solved: false, edges: [], elapsed_us: 0 }, v = bps(o, c);
         return `<tr>
           <td>${c}${c === BASELINE ? '<span class="baseline-tag">baseline</span>' : ""}</td>
-          <td>${r.solved ? amount(o.token_out, r.amount_out) : '<span class="pill no-route">no route</span>'}</td>
+          <td>${r.solved ? amount(o.token_out, r.amount_out) : `<span class="pill no-route">${failureOf(o, c, r)}</span>`}</td>
           <td>${r.solved ? amount(o.token_out, r.amount_out_net_gas) : "—"}</td>
           <td>${r.solved ? Number(r.gas).toLocaleString() : "—"}</td>
           <td>${r.solved ? r.edges.length : "—"}</td>
@@ -1641,7 +1684,7 @@
                  <td>${amount(e.token_in, e.amount_in)}</td>
                  <td>${amount(e.token_out, e.amount_out)}</td></tr>`).join("")}</tbody>
              </table></div></details>`
-        : `<div class="empty-route">no route found${r.elapsed_us >= (state.facts.timeout_ms || 5000) * 1000 ? ` — hit the ${state.facts.timeout_ms} ms budget` : ""}</div>`;
+        : `<div class="empty-route">unsolved — ${failureOf(o, c, r)}</div>`;
 
       return `<section class="route-card ${c === best ? "winner" : ""}">
         <div class="route-head">

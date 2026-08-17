@@ -13,6 +13,8 @@ exclude = ["tests/"]
 [dependencies]
 tycho-simulation.workspace = true
 petgraph.workspace = true
+rustc-hash.workspace = true
+smallvec.workspace = true
 tokio.workspace = true
 futures.workspace = true
 tokio-stream.workspace = true

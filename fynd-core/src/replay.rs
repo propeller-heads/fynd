@@ -143,6 +143,8 @@ pub fn replay_route(route: &Route, market: &MarketState) -> Result<RouteReplay, 
 
 #[cfg(test)]
 mod tests {
+    use rustc_hash::FxHashMap;
+
     use super::*;
     use crate::algorithm::test_utils::{component, token, ConstantProductSim, MockProtocolSim};
 
@@ -186,7 +188,7 @@ mod tests {
     }
 
     fn route(swaps: Vec<Swap>) -> Route {
-        Route::new(swaps, HashMap::new()).expect("test route must not be empty")
+        Route::new(swaps, FxHashMap::default()).expect("test route must not be empty")
     }
 
     #[test]

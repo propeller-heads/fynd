@@ -1,11 +1,12 @@
 //! Types and helpers for the GET /v1/tokens endpoint.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use fynd_core::{
     derived::{ComponentDepths, TokenGasPrices},
     types::ComponentId,
 };
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use tycho_simulation::{
     tycho_common::models::{token::Token, Address},
@@ -100,14 +101,14 @@ fn gas_units_per_token_unit(price: &Price) -> Option<f64> {
 /// token's gas price (token raw units per gas-token raw unit); tokens without a computed
 /// gas price get `None` and sort after priced ones.
 pub fn build_token_entries(
-    topology: &HashMap<ComponentId, Vec<Address>>,
-    token_registry: &HashMap<Address, Token>,
+    topology: &FxHashMap<ComponentId, Vec<Address>>,
+    token_registry: &FxHashMap<Address, Arc<Token>>,
     depths: Option<&ComponentDepths>,
     token_prices: Option<&TokenGasPrices>,
 ) -> Vec<GraphTokenEntry> {
     use num_traits::ToPrimitive;
 
-    let mut component_counts: HashMap<Address, u32> = HashMap::new();
+    let mut component_counts: FxHashMap<Address, u32> = FxHashMap::default();
     for tokens in topology.values() {
         for address in tokens {
             *component_counts
@@ -116,7 +117,7 @@ pub fn build_token_entries(
         }
     }
 
-    let mut liquidity: HashMap<Address, f64> = HashMap::new();
+    let mut liquidity: FxHashMap<Address, f64> = FxHashMap::default();
     if let (Some(depths), Some(prices)) = (depths, token_prices) {
         for ((_, token_in, _), depth) in depths {
             if !component_counts.contains_key(token_in) {
@@ -188,8 +189,8 @@ mod tests {
     }
 
     /// Topology + registry for three tokens: A and B share two components, C sits in one.
-    fn test_market() -> (HashMap<ComponentId, Vec<Address>>, HashMap<Address, Token>) {
-        let topology = HashMap::from([
+    fn test_market() -> (FxHashMap<ComponentId, Vec<Address>>, FxHashMap<Address, Arc<Token>>) {
+        let topology = FxHashMap::from_iter([
             ("c1".to_string(), vec![addr(0x0a), addr(0x0b)]),
             ("c2".to_string(), vec![addr(0x0a), addr(0x0b)]),
             ("c3".to_string(), vec![addr(0x0a), addr(0x0c)]),
@@ -197,7 +198,7 @@ mod tests {
         let registry =
             [test_token(0x0a, "AAA", 18), test_token(0x0b, "BBB", 6), test_token(0x0c, "CCC", 8)]
                 .into_iter()
-                .map(|t| (t.address.clone(), t))
+                .map(|t| (t.address.clone(), Arc::new(t)))
                 .collect();
         (topology, registry)
     }
@@ -342,6 +343,6 @@ mod tests {
     #[test]
     fn test_build_token_entries_empty_topology() {
         let (_, registry) = test_market();
-        assert!(build_token_entries(&HashMap::new(), &registry, None, None).is_empty());
+        assert!(build_token_entries(&FxHashMap::default(), &registry, None, None).is_empty());
     }
 }

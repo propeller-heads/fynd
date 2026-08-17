@@ -630,7 +630,9 @@ fn solve_error_from_algorithm_error(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Duration};
+    use std::time::Duration;
+
+    use rustc_hash::FxHashMap;
 
     use super::*;
     use crate::{
@@ -744,7 +746,7 @@ mod tests {
                 Box::new(MockProtocolSim::new(2.0)),
             );
             let route =
-                Route::new(vec![swap_ab, swap_cd], HashMap::new()).expect("non-empty route");
+                Route::new(vec![swap_ab, swap_cd], FxHashMap::default()).expect("non-empty route");
             Ok(RouteResult::new(route, num_bigint::BigInt::from(0), BigUint::from(1u64)))
         }
 

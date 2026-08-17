@@ -1,7 +1,8 @@
 //! Typed storage for derived data.
 
-use std::{any::Any, collections::HashMap, str::FromStr, sync::Arc};
+use std::{any::Any, str::FromStr, sync::Arc};
 
+use rustc_hash::FxHashMap;
 use tokio::sync::RwLock;
 use tycho_simulation::tycho_common::models::Address;
 
@@ -44,15 +45,15 @@ impl std::fmt::Debug for ComputedSlot {
 #[derive(Debug, Default)]
 pub struct DerivedData {
     /// Computation outputs keyed by [`ComputationId`], stored type-erased.
-    slots: HashMap<ComputationId, ComputedSlot>,
+    slots: FxHashMap<ComputationId, ComputedSlot>,
     /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
-    token_prices_failed: HashMap<TokenGasPriceKey, (u64, FailedItemError)>,
+    token_prices_failed: FxHashMap<TokenGasPriceKey, (u64, FailedItemError)>,
     /// Token prices with path dependency tracking for incremental computation.
     token_prices_deps: Option<ComputedValue<TokenPricesWithDeps>>,
     /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
-    component_depths_failed: HashMap<ComponentDepthKey, (u64, FailedItemError)>,
+    component_depths_failed: FxHashMap<ComponentDepthKey, (u64, FailedItemError)>,
     /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
-    spot_prices_failed: HashMap<SpotPriceKey, (u64, FailedItemError)>,
+    spot_prices_failed: FxHashMap<SpotPriceKey, (u64, FailedItemError)>,
 }
 
 /// Parses `"component_id/token_in/token_out"` into a typed `(ComponentId, Address, Address)` key.
@@ -125,6 +126,20 @@ impl DerivedData {
 
     /// Returns token prices if computed.
     pub fn token_prices(&self) -> Option<&TokenGasPrices> {
+        self.token_prices_slot()
+            .map(Arc::as_ref)
+    }
+
+    /// Returns token prices as a shared handle, if computed.
+    ///
+    /// For readers that outlive the lock on this store: cloning the handle costs a refcount
+    /// rather than a copy of every token's price, which is what a solve would otherwise pay per
+    /// order.
+    pub fn token_prices_shared(&self) -> Option<Arc<TokenGasPrices>> {
+        self.token_prices_slot().cloned()
+    }
+
+    fn token_prices_slot(&self) -> Option<&Arc<TokenGasPrices>> {
         self.output(TokenGasPriceComputation::ID)
     }
 
@@ -145,7 +160,7 @@ impl DerivedData {
         block: u64,
         is_full_recompute: bool,
     ) {
-        let new_failures: HashMap<TokenGasPriceKey, (u64, FailedItemError)> = failed_items
+        let new_failures: FxHashMap<TokenGasPriceKey, (u64, FailedItemError)> = failed_items
             .into_iter()
             .filter_map(|f| {
                 Address::from_str(&f.key)
@@ -163,7 +178,7 @@ impl DerivedData {
                 .extend(new_failures);
         }
 
-        self.set_output(TokenGasPriceComputation::ID, prices, block);
+        self.set_output(TokenGasPriceComputation::ID, Arc::new(prices), block);
     }
 
     /// Returns `(block, error)` for this token address if it failed in a past
@@ -234,7 +249,7 @@ impl DerivedData {
         block: u64,
         is_full_recompute: bool,
     ) {
-        let new_failures: HashMap<ComponentDepthKey, (u64, FailedItemError)> = failed_items
+        let new_failures: FxHashMap<ComponentDepthKey, (u64, FailedItemError)> = failed_items
             .into_iter()
             .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
             .collect();
@@ -296,7 +311,7 @@ impl DerivedData {
         block: u64,
         is_full_recompute: bool,
     ) {
-        let new_failures: HashMap<SpotPriceKey, (u64, FailedItemError)> = failed_items
+        let new_failures: FxHashMap<SpotPriceKey, (u64, FailedItemError)> = failed_items
             .into_iter()
             .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
             .collect();

@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    env, fmt,
-    time::Duration,
-};
+use std::{collections::HashMap, env, fmt, time::Duration};
 
 use tracing::{info, warn};
 use tycho_simulation::{
@@ -308,7 +304,7 @@ pub(crate) fn register_rfq(
     chain: Chain,
     min_tvl: f64,
     protocols: &[String],
-    rfq_tokens: HashSet<Bytes>,
+    rfq_tokens: std::collections::HashSet<Bytes>,
 ) -> Result<RFQStreamBuilder, DataFeedError> {
     for protocol in protocols {
         match protocol.as_str() {

@@ -21,6 +21,7 @@
 pub mod bellman_ford;
 pub mod most_liquid;
 pub mod path_frank_wolfe;
+pub(crate) mod paths;
 pub(crate) mod sim_guard;
 pub(crate) mod split_primitives;
 pub mod water_fill;
@@ -30,11 +31,12 @@ pub mod split_test_harness;
 #[cfg(test)]
 pub mod test_utils;
 
-use std::{collections::HashSet, time::Duration};
+use std::time::Duration;
 
 pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 pub use path_frank_wolfe::PathFrankWolfeAlgorithm;
+use rustc_hash::FxHashSet;
 use tycho_simulation::tycho_core::models::Address;
 pub use water_fill::WaterFillAlgorithm;
 
@@ -62,7 +64,7 @@ pub struct AlgorithmConfig {
     gas_aware: bool,
     /// Tokens allowed as intermediate hops. `None` = no restriction (all tokens reachable).
     /// `token_in` and `token_out` for a given order are always allowed regardless.
-    connector_tokens: Option<HashSet<Address>>,
+    connector_tokens: Option<FxHashSet<Address>>,
 }
 
 impl AlgorithmConfig {
@@ -141,13 +143,13 @@ impl AlgorithmConfig {
     /// When set, only these tokens may appear between `token_in` and `token_out`
     /// in a multi-hop route. The order endpoints are always allowed regardless.
     /// Pass an empty set to disallow all intermediate hops (only 1-hop routes possible).
-    pub fn with_connector_tokens(mut self, tokens: HashSet<Address>) -> Self {
-        self.connector_tokens = Some(tokens);
+    pub fn with_connector_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.connector_tokens = Some(tokens.into_iter().collect());
         self
     }
 
     /// Returns the connector token allowlist, or `None` if all tokens are permitted.
-    pub fn connector_tokens(&self) -> Option<&HashSet<Address>> {
+    pub fn connector_tokens(&self) -> Option<&FxHashSet<Address>> {
         self.connector_tokens.as_ref()
     }
 }
@@ -346,7 +348,7 @@ mod tests {
     #[test]
     fn test_with_connector_tokens_sets_field() {
         let addr = Address::from([0x01u8; 20]);
-        let tokens: HashSet<Address> = [addr.clone()].into();
+        let tokens: FxHashSet<Address> = FxHashSet::from_iter([addr.clone()]);
         let config = AlgorithmConfig::default().with_connector_tokens(tokens);
         let stored = config
             .connector_tokens()
@@ -357,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_with_connector_tokens_empty_set() {
-        let config = AlgorithmConfig::default().with_connector_tokens(HashSet::new());
+        let config = AlgorithmConfig::default().with_connector_tokens(FxHashSet::default());
         assert_eq!(
             config
                 .connector_tokens()

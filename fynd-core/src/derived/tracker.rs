@@ -4,7 +4,7 @@
 //! when `DerivedDataEvent` messages are received, and queried before solving to
 //! determine if required computations are ready.
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use super::{
     computation::{ComputationId, ComputationRequirements},
@@ -51,14 +51,14 @@ pub struct ReadinessTracker {
     /// Block number we're currently tracking readiness for (for fresh requirements).
     current_block: Option<u64>,
     /// Set of computation IDs that have completed for current block.
-    ready_for_block: HashSet<ComputationId>,
+    ready_for_block: FxHashSet<ComputationId>,
     /// Set of computation IDs that have been computed at least once (any block).
-    ever_computed: HashSet<ComputationId>,
+    ever_computed: FxHashSet<ComputationId>,
     /// `require_fresh` computations that have permanently failed for the current block.
     ///
     /// Cleared on `NewBlock`. A computation in this set will never produce a
     /// `ComputationComplete` for the current block.
-    failed_for_block: HashSet<ComputationId>,
+    failed_for_block: FxHashSet<ComputationId>,
     /// Requirements for this worker's algorithm.
     requirements: ComputationRequirements,
 }
@@ -68,9 +68,9 @@ impl ReadinessTracker {
     pub fn new(requirements: ComputationRequirements) -> Self {
         Self {
             current_block: None,
-            ready_for_block: HashSet::new(),
-            ever_computed: HashSet::new(),
-            failed_for_block: HashSet::new(),
+            ready_for_block: FxHashSet::default(),
+            ever_computed: FxHashSet::default(),
+            failed_for_block: FxHashSet::default(),
             requirements,
         }
     }
@@ -194,15 +194,15 @@ impl ReadinessTracker {
     ///
     /// For fresh requirements: not ready for current block.
     /// For stale requirements: never computed.
-    pub fn missing(&self) -> HashSet<ComputationId> {
-        let missing_fresh: HashSet<_> = self
+    pub fn missing(&self) -> FxHashSet<ComputationId> {
+        let missing_fresh: FxHashSet<_> = self
             .requirements
             .require_fresh
             .difference(&self.ready_for_block)
             .copied()
             .collect();
 
-        let missing_stale: HashSet<_> = self
+        let missing_stale: FxHashSet<_> = self
             .requirements
             .allow_stale
             .difference(&self.ever_computed)

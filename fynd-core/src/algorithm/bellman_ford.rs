@@ -24,13 +24,15 @@
 //! snapshot amounts between rounds or use a priority-based processing order.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace, warn};
 use tycho_simulation::{
     tycho_common::models::Address,
@@ -53,8 +55,15 @@ use crate::{
 };
 
 /// BFS subgraph: adjacency list, token node set, and component ID set.
-type Subgraph =
-    (HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>, HashSet<NodeIndex>, HashSet<ComponentId>);
+///
+/// The component set borrows from the graph. It exists to ask for the market subset and is done
+/// with before the solve starts, unlike the adjacency list, which outlives the graph borrow inside
+/// [`BellmanFordContext`] and so owns its ids.
+type Subgraph<'a> = (
+    FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
+    FxHashSet<NodeIndex>,
+    FxHashSet<&'a ComponentId>,
+);
 
 /// Everything needed to call `find_single_route` repeatedly without redoing setup.
 ///
@@ -65,13 +74,13 @@ type Subgraph =
 pub(crate) struct BellmanFordContext {
     pub(crate) token_in_node: NodeIndex,
     pub(crate) token_out_node: NodeIndex,
-    pub(crate) adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
-    pub(crate) token_map: HashMap<NodeIndex, Token>,
+    pub(crate) adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
+    pub(crate) token_map: FxHashMap<NodeIndex, Arc<Token>>,
     pub(crate) market_data: MarketState,
     pub(crate) gas_price_wei: Option<BigUint>,
     pub(crate) token_prices: Option<TokenGasPrices>,
     pub(crate) spot_prices: Option<SpotPrices>,
-    pub(crate) node_address: HashMap<NodeIndex, Address>,
+    pub(crate) node_address: FxHashMap<NodeIndex, Address>,
     pub(crate) max_idx: usize,
     pub(crate) scoring: RouteScoringMode,
 }
@@ -116,7 +125,7 @@ pub struct BellmanFordAlgorithm {
     max_hops: usize,
     timeout: Duration,
     gas_aware: bool,
-    connector_tokens: Option<HashSet<Address>>,
+    connector_tokens: Option<FxHashSet<Address>>,
 }
 
 impl Default for BellmanFordAlgorithm {
@@ -185,9 +194,16 @@ impl BellmanFordAlgorithm {
             });
         }
 
-        // BFS from token_in up to max_hops, building adjacency list and component set.
+        // Bounded from both ends, so the adjacency and component set cover only what could carry a
+        // route rather than everything within reach of the source.
         let (adj, token_nodes, component_ids) =
-            Self::get_subgraph(graph, token_in_node, self.max_hops, order)?;
+            Self::get_subgraph(graph, token_in_node, token_out_node, self.max_hops).ok_or_else(
+                || AlgorithmError::NoPath {
+                    from: order.token_in().clone(),
+                    to: order.token_out().clone(),
+                    reason: NoPathReason::NoGraphPath,
+                },
+            )?;
 
         let market_view = match label.as_ref() {
             Some(l) => market
@@ -196,13 +212,12 @@ impl BellmanFordAlgorithm {
                 .map_err(|e| AlgorithmError::Other(e.to_string()))?,
             None => market.read().await,
         };
-        let token_map: HashMap<NodeIndex, Token> = token_nodes
+        let token_map: FxHashMap<NodeIndex, Arc<Token>> = token_nodes
             .iter()
             .filter_map(|&node| {
                 market_view
-                    .get_token(&graph[node])
-                    .cloned()
-                    .map(|t| (node, t))
+                    .get_token_shared(&graph[node])
+                    .map(|token| (node, Arc::clone(token)))
             })
             .collect();
         let market_data = market_view.extract_subset_with_overlay(&component_ids);
@@ -211,7 +226,7 @@ impl BellmanFordAlgorithm {
             .map(|gp| gp.effective_gas_price().clone());
         drop(market_view);
 
-        let node_address: HashMap<NodeIndex, Address> = token_map
+        let node_address: FxHashMap<NodeIndex, Address> = token_map
             .iter()
             .map(|(&node, token)| (node, token.address.clone()))
             .collect();
@@ -376,7 +391,7 @@ impl BellmanFordAlgorithm {
                 break;
             }
 
-            let mut next_active: HashSet<NodeIndex> = HashSet::new();
+            let mut next_active: FxHashSet<NodeIndex> = FxHashSet::default();
 
             for &u in &active_nodes {
                 let u_idx = u.index();
@@ -528,7 +543,7 @@ impl BellmanFordAlgorithm {
         overrides: &MarketOverrides,
     ) -> Result<Route, AlgorithmError> {
         let mut swaps = Vec::with_capacity(path_edges.len());
-        let mut tokens: HashMap<Address, Token> = HashMap::new();
+        let mut tokens: FxHashMap<Address, Token> = FxHashMap::default();
 
         for (from_node, to_node, component_id) in path_edges {
             let token_in = ctx
@@ -578,10 +593,10 @@ impl BellmanFordAlgorithm {
             ));
             tokens
                 .entry(token_in.address.clone())
-                .or_insert_with(|| token_in.clone());
+                .or_insert_with(|| Token::clone(token_in));
             tokens
                 .entry(token_out.address.clone())
-                .or_insert_with(|| token_out.clone());
+                .or_insert_with(|| Token::clone(token_out));
         }
 
         Ok(Route::new(swaps, tokens)?)
@@ -703,7 +718,7 @@ impl BellmanFordAlgorithm {
     ) -> Result<Vec<(NodeIndex, NodeIndex, ComponentId)>, AlgorithmError> {
         let mut path = Vec::new();
         let mut current = token_out;
-        let mut visited = HashSet::new();
+        let mut visited = FxHashSet::default();
 
         while current != token_in {
             if !visited.insert(current) {
@@ -731,55 +746,104 @@ impl BellmanFordAlgorithm {
         Ok(path)
     }
 
-    /// Extracts the subgraph reachable from `token_in_node` within `max_hops` via BFS.
+    /// Extracts the part of the graph that can carry a route from `token_in_node` to
+    /// `token_out_node` in at most `max_hops`.
     ///
-    /// Returns `(adjacency_list, token_nodes, component_ids)` or `NoPath` if the
-    /// subgraph is empty (no outgoing edges from the source).
-    pub(crate) fn get_subgraph(
-        graph: &StableDiGraph<()>,
-        token_in_node: NodeIndex,
+    /// Returns `(adjacency_list, token_nodes, component_ids)`, or `None` when no edge qualifies.
+    /// The caller says what an empty subgraph means for it.
+    ///
+    /// Both ends bound the walk. A token reached in `d` hops is only worth keeping if the
+    /// destination is still `max_hops - d` hops away or nearer, and the same holds edge by edge.
+    /// The distances used are the shortest ones, so nothing that could appear on a route of legal
+    /// length is discarded.
+    ///
+    /// Expanding from the source alone reaches most of the market. Every component it reaches gets
+    /// copied by the caller's `extract_subset`, held for the solve, and simulated during
+    /// relaxation, so bounding the walk bounds all three.
+    pub(crate) fn get_subgraph<'a>(
+        graph: &'a StableDiGraph<()>,
+        token_in: NodeIndex,
+        token_out: NodeIndex,
         max_hops: usize,
-        order: &Order,
-    ) -> Result<Subgraph, AlgorithmError> {
-        let mut adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = HashMap::new();
-        let mut token_nodes: HashSet<NodeIndex> = HashSet::new();
-        let mut component_ids: HashSet<ComponentId> = HashSet::new();
-        let mut visited_nodes = HashSet::new();
+    ) -> Option<Subgraph<'a>> {
+        // Walked from the destination along outgoing edges, not incoming ones. Every pool in this
+        // graph is entered as a pair of opposite edges, so the two walks cover the same tokens and
+        // the outgoing one needs no reversed index.
+        let hops_to_token_out = Self::get_hops_to_reach(graph, token_out, max_hops);
+
+        let mut adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = FxHashMap::default();
+        let mut token_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
+        let mut component_ids: FxHashSet<&ComponentId> = FxHashSet::default();
+        let mut visited_nodes = FxHashSet::default();
         let mut queued_nodes = VecDeque::new();
 
-        visited_nodes.insert(token_in_node);
-        token_nodes.insert(token_in_node);
-        queued_nodes.push_back((token_in_node, 0usize));
+        visited_nodes.insert(token_in);
+        token_nodes.insert(token_in);
+        queued_nodes.push_back((token_in, 0usize));
 
-        while let Some((node, depth)) = queued_nodes.pop_front() {
-            if depth >= max_hops {
+        while let Some((node, depth_walked)) = queued_nodes.pop_front() {
+            if depth_walked >= max_hops {
                 continue;
             }
             for edge in graph.edges(node) {
-                let target = edge.target();
-                let cid = edge.weight().component_id.clone();
+                let next_token = edge.target();
 
+                // Taking this edge spends one hop; the rest have to be enough to finish the route.
+                let Some(&hops_left) = hops_to_token_out.get(&next_token) else {
+                    // token_out is not reachable from next_token within the hop budget.
+                    continue;
+                };
+
+                if depth_walked + 1 + hops_left > max_hops {
+                    // Finishing the route from next_token would take more hops than are left.
+                    continue;
+                }
+
+                let component_id = &edge.weight().component_id;
                 adj.entry(node)
                     .or_default()
-                    .push((target, cid.clone()));
-                component_ids.insert(cid);
-                token_nodes.insert(target);
+                    .push((next_token, component_id.clone()));
+                component_ids.insert(component_id);
+                token_nodes.insert(next_token);
 
-                if visited_nodes.insert(target) {
-                    queued_nodes.push_back((target, depth + 1));
+                if visited_nodes.insert(next_token) {
+                    queued_nodes.push_back((next_token, depth_walked + 1));
                 }
             }
         }
 
         if adj.is_empty() {
-            return Err(AlgorithmError::NoPath {
-                from: order.token_in().clone(),
-                to: order.token_out().clone(),
-                reason: NoPathReason::NoGraphPath,
-            });
+            return None;
         }
 
-        Ok((adj, token_nodes, component_ids))
+        Some((adj, token_nodes, component_ids))
+    }
+
+    /// Every node within `max_hops` of `from`, and how many hops each one takes to reach.
+    fn get_hops_to_reach(
+        graph: &StableDiGraph<()>,
+        from: NodeIndex,
+        max_hops: usize,
+    ) -> FxHashMap<NodeIndex, usize> {
+        let mut hops_to_reach: FxHashMap<NodeIndex, usize> = FxHashMap::default();
+        hops_to_reach.insert(from, 0);
+
+        let mut frontier = vec![from];
+        for depth in 1..=max_hops {
+            let mut next = Vec::new();
+            for node in frontier {
+                for neighbor in graph.neighbors(node) {
+                    if hops_to_reach.contains_key(&neighbor) {
+                        continue;
+                    }
+                    hops_to_reach.insert(neighbor, depth);
+                    next.push(neighbor);
+                }
+            }
+            frontier = next;
+        }
+
+        hops_to_reach
     }
 
     /// Computes net_amount_out by subtracting gas costs from the output amount.
@@ -794,7 +858,7 @@ impl BellmanFordAlgorithm {
         gas_price: &BigUint,
         token_prices: Option<&TokenGasPrices>,
         spot_product: &[f64],
-        node_address: &HashMap<NodeIndex, Address>,
+        node_address: &FxHashMap<NodeIndex, Address>,
         token_in_node: NodeIndex,
     ) -> Result<BigInt, AlgorithmError> {
         let last_swap = route.swaps().last().ok_or_else(|| {
@@ -935,7 +999,7 @@ mod tests {
     ) -> crate::derived::SharedDerivedDataRef {
         use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
-        let mut token_prices: TokenGasPrices = HashMap::new();
+        let mut token_prices: TokenGasPrices = FxHashMap::default();
         for address in token_addresses {
             token_prices.insert(
                 address.clone(),
@@ -955,6 +1019,129 @@ mod tests {
     }
 
     // ==================== Unit Tests ====================
+
+    /// The subgraph must hold everything a route could use and nothing else.
+    ///
+    /// Dropping too little is only slow, so no test would catch it; dropping too much loses routes
+    /// silently, and the route that dies first is the one using every hop it is allowed.
+    ///
+    /// ```text
+    ///   A --[ab]-- B --[bc]-- C      the only route, and it needs both hops
+    ///   A --[ad]-- D                 a dead end: D reaches nothing else
+    /// ```
+    #[test]
+    fn test_get_subgraph_keeps_full_length_routes_and_drops_dead_ends() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+
+        let (_, manager) = setup_market_bf(vec![
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ad", &token_a, &token_d, MockProtocolSim::new(5.0)),
+        ]);
+        let graph = manager.graph();
+        let node = |address: &Address| {
+            graph
+                .node_indices()
+                .find(|&n| &graph[n] == address)
+                .expect("token in graph")
+        };
+        let (adj, _, component_ids) = BellmanFordAlgorithm::get_subgraph(
+            graph,
+            node(&token_a.address),
+            node(&token_c.address),
+            2,
+        )
+        .unwrap();
+
+        let kept = |id: &str| {
+            component_ids
+                .iter()
+                .any(|component_id| *component_id == id)
+        };
+
+        // A -> B -> C spends the whole budget, so an off-by-one in the test would drop it.
+        assert!(kept("component_ab"), "the route's first hop must survive");
+        assert!(kept("component_bc"), "the route's second hop must survive");
+        // D is reachable from A but reaches nothing, so no route can pass through it. Keeping it
+        // would deep-copy its pool state and simulate it during relaxation, both for nothing.
+        assert!(!kept("component_ad"), "a dead end must not be kept");
+
+        // Nor should stepping back towards the source be kept: from B, returning to A leaves no
+        // budget to reach C.
+        let from_b = adj
+            .get(&node(&token_b.address))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        assert!(
+            from_b
+                .iter()
+                .all(|(target, _)| *target != node(&token_a.address)),
+            "B -> A cannot finish the route and must not be kept"
+        );
+    }
+
+    /// A token can sit inside the hop budget of both ends and still be on no legal route.
+    ///
+    /// D is one hop from the source and two from the destination, and the budget is two, so both
+    /// halves fit on their own while the route through D needs three. Only the sum rules it out,
+    /// which is the one case the arithmetic decides: a dead end is already gone by then, dropped
+    /// for having no distance to the destination at all.
+    ///
+    /// ```text
+    ///   A --[ab]-- B --[bc]-- C        two hops, the whole budget
+    ///   A --[ad]-- D --[de]-- E --[ec]-- C     three hops through D
+    /// ```
+    #[test]
+    fn test_get_subgraph_drops_detours_that_cannot_finish_in_budget() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+        let token_e = token(0x05, "E");
+
+        let (_, manager) = setup_market_bf(vec![
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ad", &token_a, &token_d, MockProtocolSim::new(5.0)),
+            ("component_de", &token_d, &token_e, MockProtocolSim::new(5.0)),
+            ("component_ec", &token_e, &token_c, MockProtocolSim::new(5.0)),
+        ]);
+        let graph = manager.graph();
+        let node = |address: &Address| {
+            graph
+                .node_indices()
+                .find(|&n| &graph[n] == address)
+                .expect("token in graph")
+        };
+        let (_, token_nodes, component_ids) = BellmanFordAlgorithm::get_subgraph(
+            graph,
+            node(&token_a.address),
+            node(&token_c.address),
+            2,
+        )
+        .unwrap();
+
+        let kept = |id: &str| {
+            component_ids
+                .iter()
+                .any(|component_id| *component_id == id)
+        };
+
+        assert!(kept("component_ab"), "the two-hop route's first leg must survive");
+        assert!(kept("component_bc"), "the two-hop route's second leg must survive");
+
+        // One hop spent reaching D, two more needed to leave it: three in a budget of two.
+        assert!(!kept("component_ad"), "the step into a detour must not be kept");
+        assert!(!kept("component_de"), "nor anything further along it");
+        assert!(!kept("component_ec"), "nor its last leg into the destination");
+        assert!(
+            !token_nodes.contains(&node(&token_d.address)),
+            "a token no legal route reaches must not be kept"
+        );
+    }
 
     #[tokio::test]
     async fn test_linear_path_found() {
@@ -1188,7 +1375,7 @@ mod tests {
         let algo = BellmanFordAlgorithm::with_config(
             AlgorithmConfig::new(1, 3, Duration::from_millis(1000), None)
                 .unwrap()
-                .with_connector_tokens(HashSet::new()),
+                .with_connector_tokens(FxHashSet::default()),
         );
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
@@ -1706,7 +1893,7 @@ mod tests {
     fn bf_algorithm_with_connectors(
         max_hops: usize,
         timeout_ms: u64,
-        connector_tokens: HashSet<Address>,
+        connector_tokens: FxHashSet<Address>,
     ) -> BellmanFordAlgorithm {
         BellmanFordAlgorithm::with_config(
             AlgorithmConfig::new(1, max_hops, Duration::from_millis(timeout_ms), None)
@@ -1735,7 +1922,7 @@ mod tests {
             ("component_cd", &token_c, &token_d, MockProtocolSim::new(3.0)),
         ]);
 
-        let connectors: HashSet<Address> = [token_c.address.clone()].into();
+        let connectors: FxHashSet<Address> = FxHashSet::from_iter([token_c.address.clone()]);
         let algo = bf_algorithm_with_connectors(3, 1000, connectors);
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
@@ -1760,7 +1947,7 @@ mod tests {
             setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         // Empty allowlist — no intermediate tokens allowed, but direct hop A->B should work.
-        let algo = bf_algorithm_with_connectors(1, 1000, HashSet::new());
+        let algo = bf_algorithm_with_connectors(1, 1000, FxHashSet::default());
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algo

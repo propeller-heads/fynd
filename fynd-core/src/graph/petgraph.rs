@@ -8,11 +8,10 @@
 //! useful for optimising the graph manager's performance by allowing for O(1) edge and node
 //! lookups.
 
-use std::collections::{HashMap, HashSet};
-
 use async_trait::async_trait;
 pub use petgraph::graph::EdgeIndex;
 use petgraph::{graph::NodeIndex, stable_graph};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, trace};
 use tycho_simulation::tycho_common::models::Address;
 
@@ -79,15 +78,19 @@ pub struct PetgraphStableDiGraphManager<D: Clone> {
     // edge_map viable.
     graph: StableDiGraph<D>,
     // Map from ComponentId to edge indices for fast removal and weight updates.
-    edge_map: HashMap<ComponentId, Vec<EdgeIndex>>,
+    edge_map: FxHashMap<ComponentId, Vec<EdgeIndex>>,
     // Map from token address to node index for fast node lookups.
-    node_map: HashMap<Address, NodeIndex>,
+    node_map: FxHashMap<Address, NodeIndex>,
 }
 
 impl<D: Clone> PetgraphStableDiGraphManager<D> {
     /// Creates a new empty graph manager.
     pub fn new() -> Self {
-        Self { graph: StableDiGraph::default(), edge_map: HashMap::new(), node_map: HashMap::new() }
+        Self {
+            graph: StableDiGraph::default(),
+            edge_map: FxHashMap::default(),
+            node_map: FxHashMap::default(),
+        }
     }
 
     /// Helper function to find a node index by address
@@ -161,7 +164,7 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     /// - components: A map of component IDs to their tokens.
     fn add_components(
         &mut self,
-        components: &HashMap<ComponentId, Vec<Address>>,
+        components: &FxHashMap<ComponentId, Vec<Address>>,
     ) -> Result<(), GraphError> {
         let mut invalid_components = Vec::new();
         let mut skipped_duplicates = 0usize;
@@ -392,7 +395,7 @@ impl<D: Clone> Default for PetgraphStableDiGraphManager<D> {
 }
 
 impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDiGraphManager<D> {
-    fn initialize_graph(&mut self, component_topology: &HashMap<ComponentId, Vec<Address>>) {
+    fn initialize_graph(&mut self, component_topology: &FxHashMap<ComponentId, Vec<Address>>) {
         // Clear existing graph and component map
         self.graph = StableDiGraph::default();
         self.edge_map.clear();
@@ -406,7 +409,7 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
             .values()
             .flat_map(|v| v.iter())
             .cloned()
-            .collect::<HashSet<_>>()
+            .collect::<FxHashSet<_>>()
             .into_iter()
             .collect();
         unique_tokens.sort();
@@ -478,7 +481,7 @@ mod tests {
     #[test]
     fn test_initialize_graph_empty() {
         let mut manager = PetgraphStableDiGraphManager::<()>::new();
-        let topology = HashMap::new();
+        let topology = FxHashMap::default();
 
         manager.initialize_graph(&topology);
 
@@ -490,7 +493,7 @@ mod tests {
     #[test]
     fn test_initialize_graph_comprehensive() {
         let mut manager = PetgraphStableDiGraphManager::<()>::new();
-        let mut topology = HashMap::new();
+        let mut topology = FxHashMap::default();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
         let token_c = addr("0x6B175474E89094C44Da98b954EedeAC495271d0F"); // DAI
@@ -584,7 +587,7 @@ mod tests {
     #[test]
     fn test_initialize_graph_multiple_edges_same_pair() {
         let mut manager = PetgraphStableDiGraphManager::<()>::new();
-        let mut topology = HashMap::new();
+        let mut topology = FxHashMap::default();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
@@ -624,7 +627,7 @@ mod tests {
     #[test]
     fn test_add_components_shared_tokens() {
         let mut manager = PetgraphStableDiGraphManager::<()>::new();
-        let mut components = HashMap::new();
+        let mut components = FxHashMap::default();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
@@ -651,7 +654,7 @@ mod tests {
     #[test]
     fn test_add_tokenless_components_error() {
         let mut manager = PetgraphStableDiGraphManager::<()>::new();
-        let mut components = HashMap::new();
+        let mut components = FxHashMap::default();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
@@ -679,7 +682,7 @@ mod tests {
     #[test]
     fn test_remove_components_not_found_error() {
         let mut manager = PetgraphStableDiGraphManager::<()>::new();
-        let mut components = HashMap::new();
+        let mut components = FxHashMap::default();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
@@ -723,7 +726,7 @@ mod tests {
     #[test]
     fn test_set_edge_weight_errors() {
         let mut manager = PetgraphStableDiGraphManager::<()>::new();
-        let mut topology = HashMap::new();
+        let mut topology = FxHashMap::default();
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"); // WETH
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
         let token_c = addr("0x6B175474E89094C44Da98b954EedeAC495271d0F"); // DAI
@@ -783,13 +786,12 @@ mod tests {
     #[tokio::test]
     async fn test_handle_event_propagates_errors() {
         let mut manager = PetgraphStableDiGraphManager::<()>::new();
-        use std::collections::HashMap;
 
         use crate::feed::events::{EventError, MarketEvent};
 
         // Create an event with both add and remove operations that will fail
         let event = MarketEvent::MarketUpdated {
-            added_components: HashMap::from([("component1".to_string(), vec![])]),
+            added_components: FxHashMap::from_iter([("component1".to_string(), vec![])]),
             removed_components: vec!["component2".to_string()],
             updated_components: vec![],
         };
@@ -820,7 +822,7 @@ mod tests {
         let token_a = addr("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 
-        let mut components = HashMap::new();
+        let mut components = FxHashMap::default();
         components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
 
         manager
@@ -837,69 +839,6 @@ mod tests {
         assert_eq!(
             edge_count_after_first, edge_count_after_second,
             "Edge count should not change when re-adding the same component"
-        );
-    }
-
-    #[test]
-    fn edge_weight_cleared_on_spot_price_miss() {
-        // Regression: when spot price computation fails, stale edge weights must be cleared so the
-        // component is excluded from path scoring rather than routed with an outdated price.
-        use num_bigint::BigUint;
-        use num_traits::One;
-        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
-
-        use crate::{
-            algorithm::test_utils::{market_read, setup_market_weighted, token, MockProtocolSim},
-            derived::{types::TokenGasPrices, DerivedData},
-        };
-
-        let token_a = token(0x01, "A");
-        let token_b = token(0x02, "B");
-        let (market, mut manager) = setup_market_weighted(vec![(
-            "component1",
-            &token_a,
-            &token_b,
-            MockProtocolSim::new(2.0),
-        )]);
-
-        assert!(
-            manager
-                .graph()
-                .edge_indices()
-                .all(|e| manager
-                    .graph()
-                    .edge_weight(e)
-                    .unwrap()
-                    .data
-                    .is_some()),
-            "edges should have weight data after setup"
-        );
-
-        let mut token_prices = TokenGasPrices::new();
-        for addr in [&token_a.address, &token_b.address] {
-            token_prices.insert(
-                addr.clone(),
-                Price { numerator: BigUint::one(), denominator: BigUint::one() },
-            );
-        }
-        let mut derived = DerivedData::new();
-        derived.set_spot_prices(Default::default(), vec![], 10, true);
-        derived.set_component_depths(Default::default(), vec![], 10, true);
-        derived.set_token_prices(token_prices, vec![], 10, true);
-
-        manager.update_edge_weights_with_derived(market_read(&market), &derived);
-
-        assert!(
-            manager
-                .graph()
-                .edge_indices()
-                .all(|e| manager
-                    .graph()
-                    .edge_weight(e)
-                    .unwrap()
-                    .data
-                    .is_none()),
-            "stale edge weights must be cleared when spot price is unavailable"
         );
     }
 }

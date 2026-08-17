@@ -6,7 +6,7 @@
 //! the default router fees, and all per-client overrides. Failed fetches keep the previously
 //! stored values, so the encoder always has a usable fee configuration.
 
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use alloy::{
     network::Ethereum,
@@ -179,7 +179,7 @@ impl RouterFeeFetcher {
             )
             .await?;
 
-        let mut custom_fees = HashMap::new();
+        let mut custom_fees = rustc_hash::FxHashMap::default();
         let mut start = 0usize;
         loop {
             let page = self

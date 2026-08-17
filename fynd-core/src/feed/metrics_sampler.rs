@@ -6,12 +6,10 @@
 //! the Tycho feed keeps these gauges flowing even when the feed itself is
 //! stalled — which is exactly when the sync-status metrics matter.
 
-use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
-};
+use std::time::Duration;
 
 use metrics::gauge;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::time::{interval, MissedTickBehavior};
 use tycho_simulation::tycho_client::feed::SynchronizerState;
 
@@ -57,10 +55,10 @@ impl MetricsSampler {
 /// Protocols are the union of both maps: a protocol that reported a sync
 /// status but has no components yet exports a zero component count rather than no series.
 fn emit_market_metrics(
-    component_counts: &HashMap<String, u64>,
-    sync_states: &HashMap<String, SynchronizerState>,
+    component_counts: &FxHashMap<String, u64>,
+    sync_states: &FxHashMap<String, SynchronizerState>,
 ) {
-    let protocols: HashSet<&String> = component_counts
+    let protocols: FxHashSet<&String> = component_counts
         .keys()
         .chain(sync_states.keys())
         .collect();
@@ -112,7 +110,6 @@ fn sync_state_block_number(sync_state: &SynchronizerState) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
 
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use tycho_simulation::tycho_client::feed::{BlockHeader, SynchronizerState};
@@ -160,8 +157,8 @@ mod tests {
         let snapshotter = recorder.snapshotter();
 
         let component_counts =
-            HashMap::from([("uniswap_v2".to_string(), 100u64), ("curve".to_string(), 5u64)]);
-        let sync_states = HashMap::from([
+            FxHashMap::from_iter([("uniswap_v2".to_string(), 100u64), ("curve".to_string(), 5u64)]);
+        let sync_states = FxHashMap::from_iter([
             ("uniswap_v2".to_string(), SynchronizerState::Ready(header(42))),
             ("uniswap_v3".to_string(), SynchronizerState::Stale(header(30))),
         ]);
