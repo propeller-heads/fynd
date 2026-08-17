@@ -14,6 +14,7 @@
 //! entity), `transfer_ledger` answers all value-flow questions, `veto` rejects shapes that are not
 //! comparable trades, and `registry` is the address book behind matching.
 
+mod declared;
 mod decode;
 mod intents;
 mod matching;
@@ -43,7 +44,7 @@ use anyhow::Context;
 use tracing::{debug, warn};
 
 use crate::decoder::{
-    decode::{recover, DecodeContext, TraderFlow},
+    decode::{recover, DecodeContext},
     matching::MatchedSolverTrade,
     solvers::SwapIntent,
     trace::{collect_native_transfers, fetch_block_traces},
@@ -72,6 +73,10 @@ pub(crate) struct DecodedTrade {
     /// Which decoder recovered this trade (see `decode`). Once several decoders can carry a
     /// venue's trades this measures how often each one carries a trade the others could not.
     pub decoder: &'static str,
+    /// How this record's amounts were read: `"declared"` (the settling solver's own calldata or
+    /// logs — the trusted tier) or `"netted"` (balance netting — a fallback whose amounts can be
+    /// off by an unaccounted fee; the report excludes these by default).
+    pub decode: &'static str,
     pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
@@ -110,38 +115,6 @@ pub(crate) struct DecodedTrade {
     /// `sandwich::detect`). `None` when no bracket pair was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandwich: Option<SandwichEvidence>,
-}
-
-/// Log a disagreement between the calldata-recovered intent and the netted flow, on any of the
-/// three terms they both claim. The ledger stays authoritative for what settled; two
-/// independently-derived readings landing on different terms is diagnostic signal we would
-/// otherwise lose, not a decode failure. Skipped for `relay-calldata`, whose flow already IS the
-/// intent, so there is nothing independent to disagree with.
-fn warn_on_intent_disagreement(
-    decoder: &str,
-    tx_hash: TxHash,
-    intent: Option<&SwapIntent>,
-    flow: &TraderFlow,
-) {
-    let Some(intent) = intent.filter(|_| decoder != "relay-calldata") else {
-        return;
-    };
-    if intent.token_in == flow.swap.token_in &&
-        intent.token_out == flow.swap.token_out &&
-        intent.amount_in == flow.swap.amount_in
-    {
-        return;
-    }
-    warn!(
-        tx = %tx_hash,
-        intent_token_in = %intent.token_in,
-        intent_token_out = %intent.token_out,
-        intent_amount_in = %intent.amount_in,
-        flow_token_in = %flow.swap.token_in,
-        flow_token_out = %flow.swap.token_out,
-        flow_amount_in = %flow.swap.amount_in,
-        "calldata-recovered intent disagrees with the netted flow"
-    );
 }
 
 /// Copy the calldata-declared terms off a parsed intent, or all-`None` when no intent was
@@ -298,24 +271,34 @@ impl<P: Provider> Decoder<P> {
         collect_native_transfers(root, &mut native);
         let transfer_ledger = TransferLedger::from_transaction(logs, &native);
 
-        let mut ctx = DecodeContext {
-            provider,
-            registry,
-            code_cache,
-            receipt,
-            entry_point,
-            transfer_ledger: &transfer_ledger,
-            input: &root.input,
-            root,
-            venue: None,
-        };
-        let Some((decoder, mut flow)) = recover(&mut ctx).await else {
-            warn!(
-                tx = %receipt.transaction_hash,
-                venue = %registry.label(entry_point),
-                "no decoder recovered a trade from this transaction"
-            );
-            return None;
+        // The declared decode runs first, for every matched transaction: the settling solver's
+        // own calldata is the trusted reading. Netting is the fallback, and its records are
+        // marked (`decode: "netted"`).
+        let (decoder, mut flow, intent, decode) = if let Some((flow, intent)) =
+            declared::declared_flow(root, registry, &transfer_ledger, sender, entry_point)
+        {
+            ("solver-calldata", flow, Some(intent), "declared")
+        } else {
+            let mut ctx = DecodeContext {
+                provider,
+                registry,
+                code_cache,
+                receipt,
+                entry_point,
+                transfer_ledger: &transfer_ledger,
+                input: &root.input,
+                venue: None,
+            };
+            let Some((netting_decoder, flow)) = recover(&mut ctx).await else {
+                warn!(
+                    tx = %receipt.transaction_hash,
+                    venue = %registry.label(entry_point),
+                    "no decoder recovered a trade from this transaction"
+                );
+                return None;
+            };
+            let decode = if netting_decoder.declares() { "declared" } else { "netted" };
+            (netting_decoder.name(), flow, None, decode)
         };
 
         if let Some(veto) = veto::check(&flow, &transfer_ledger, logs, registry) {
@@ -363,31 +346,6 @@ impl<P: Provider> Decoder<P> {
         ) {
             flow.gross_output_fee(fee);
         }
-
-        // The trader's swap terms, when the settling solver frame's own calldata declares them.
-        // Dispatched with the solver frame's input, not the root transaction's — a packed
-        // calldata layout (Fly) uses offsets valid only in its own frame — and with the decoded
-        // flow's input amount as a hint for scan-based extractors (ParaSwap). Only the netting
-        // amounts above stay authoritative for what actually settled; this is informational. A
-        // declared quote that fails the unit-plausibility check against the settled amount is
-        // dropped (quotes are self-reported); the ABI-decoded terms stay either way.
-        let intent = trace::find_solver_frame(root, registry)
-            .and_then(|frame| {
-                let solver = registry.solver(frame.to?)?;
-                solver
-                    .decoder
-                    .declared_swap(&frame.input, Some(flow.swap.amount_in))
-            })
-            .map(|mut intent| {
-                if let Some(quoted) = intent.declared_quote() {
-                    if !solvers::plausible_quote(quoted, flow.swap.amount_out) {
-                        intent.clear_quote();
-                    }
-                }
-                intent
-            });
-
-        warn_on_intent_disagreement(decoder, receipt.transaction_hash, intent.as_ref(), &flow);
         let (min_amount_out, declared_quote, quote_timestamp) = intent_fields(intent.as_ref());
 
         Some(DecodedTrade {
@@ -398,6 +356,7 @@ impl<P: Provider> Decoder<P> {
             solver: attribution.solver,
             solver_source: attribution.source,
             decoder,
+            decode,
             sender: flow.tracked,
             token_in: flow.swap.token_in,
             token_out: flow.swap.token_out,

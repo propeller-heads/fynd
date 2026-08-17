@@ -18,7 +18,6 @@ use alloy::{
     network::AnyTransactionReceipt,
     primitives::{Address, U256},
     providers::Provider,
-    rpc::types::trace::geth::CallFrame,
 };
 use async_trait::async_trait;
 
@@ -38,6 +37,13 @@ pub(crate) trait TradeDecoder<P: Provider>: Send + Sync {
     /// Label recorded on the trades this decoder produced, so the JSONL records say which decoder
     /// carried each trade (deliberately not a metric label).
     fn name(&self) -> &'static str;
+
+    /// Whether this decoder reads the trade from declared data (the settlement's own logs or
+    /// calldata) rather than netting balances. Declared records are the trusted tier; netted
+    /// records are marked and excluded from the report by default.
+    fn declares(&self) -> bool {
+        false
+    }
 
     async fn decode(&self, ctx: &mut DecodeContext<'_, P>) -> Option<TraderFlow>;
 }
@@ -85,10 +91,10 @@ fn decoders_for<P: Provider>(role: TraderRole<'_>) -> Vec<Box<dyn TradeDecoder<P
 }
 
 /// Decode a matched transaction: pick the decoders for its role and try them in order. Returns
-/// the winning decoder's name with the flow.
+/// the winning decoder with the flow.
 pub(crate) async fn recover<P: Provider>(
     ctx: &mut DecodeContext<'_, P>,
-) -> Option<(&'static str, TraderFlow)> {
+) -> Option<(Box<dyn TradeDecoder<P>>, TraderFlow)> {
     let role = TraderRole::classify(ctx.entry_point, ctx.registry);
     if let TraderRole::Venue(name) = role {
         let registry = ctx.registry;
@@ -101,10 +107,10 @@ pub(crate) async fn recover<P: Provider>(
 async fn try_decoders<P: Provider>(
     decoders: Vec<Box<dyn TradeDecoder<P>>>,
     ctx: &mut DecodeContext<'_, P>,
-) -> Option<(&'static str, TraderFlow)> {
+) -> Option<(Box<dyn TradeDecoder<P>>, TraderFlow)> {
     for decoder in decoders {
         if let Some(flow) = decoder.decode(ctx).await {
-            return Some((decoder.name(), flow));
+            return Some((decoder, flow));
         }
     }
     None
@@ -130,10 +136,6 @@ pub(crate) struct DecodeContext<'a, P> {
     /// The transaction's root calldata. Venues declare their solver in it; some solvers embed
     /// their quote.
     pub input: &'a [u8],
-    /// The transaction's root trace frame. A decoder that must find the settling solver's own
-    /// call (its calldata, its declared output recipient) walks this itself rather than netting
-    /// the ledger — e.g. a packed calldata layout (Fly) only decodes inside its own frame.
-    pub root: &'a CallFrame,
     /// The matched venue's address-book section (entry points, fee collectors, solver aliases),
     /// set when the transaction entered through a venue so venue decoders never look themselves
     /// up by name. `None` for direct and intent transactions.
@@ -202,7 +204,7 @@ mod tests {
     use alloy::{providers::RootProvider, rpc::client::RpcClient, transports::mock::Asserter};
 
     use super::*;
-    use crate::decoder::test_utils::{addr, frame, receipt, swap, tx_hash};
+    use crate::decoder::test_utils::{addr, receipt, swap, tx_hash};
 
     /// Always declines.
     struct Declines;
@@ -255,7 +257,6 @@ mod tests {
         let mut code_cache = HashMap::new();
         let receipt = receipt(tx_hash(1), addr(1), Some(addr(2)), vec![]);
         let transfer_ledger = TransferLedger::from_transaction(&[], &[]);
-        let root = frame("CALL", addr(1), addr(2), 0);
         let mut ctx = DecodeContext {
             provider: &provider,
             registry: &registry,
@@ -264,10 +265,11 @@ mod tests {
             entry_point: addr(2),
             transfer_ledger: &transfer_ledger,
             input: &[],
-            root: &root,
             venue: None,
         };
-        try_decoders(decoders, &mut ctx).await
+        try_decoders(decoders, &mut ctx)
+            .await
+            .map(|(decoder, flow)| (decoder.name(), flow))
     }
 
     #[tokio::test]

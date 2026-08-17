@@ -276,6 +276,7 @@ mod tests {
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
+            decode: "netted",
             sender,
             token_in: addr(59),
             token_out,

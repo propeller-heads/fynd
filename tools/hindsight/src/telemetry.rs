@@ -585,6 +585,7 @@ mod tests {
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
             decoder: "sender-netting",
+            decode: "netted",
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out,
