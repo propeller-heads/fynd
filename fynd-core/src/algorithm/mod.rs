@@ -143,8 +143,8 @@ impl AlgorithmConfig {
     /// When set, only these tokens may appear between `token_in` and `token_out`
     /// in a multi-hop route. The order endpoints are always allowed regardless.
     /// Pass an empty set to disallow all intermediate hops (only 1-hop routes possible).
-    pub fn with_connector_tokens(mut self, tokens: FxHashSet<Address>) -> Self {
-        self.connector_tokens = Some(tokens);
+    pub fn with_connector_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.connector_tokens = Some(tokens.into_iter().collect());
         self
     }
 

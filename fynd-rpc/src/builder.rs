@@ -161,9 +161,7 @@ impl FyndRPCBuilder {
 
     /// Sets the blocklist configuration for filtering components.
     pub fn blocklist(mut self, blocklist: HashSet<String>) -> Self {
-        self.fynd_builder = self
-            .fynd_builder
-            .blocklisted_components(blocklist.into_iter().collect());
+        self.fynd_builder = self.fynd_builder.blocklisted_components(blocklist);
         self
     }
 

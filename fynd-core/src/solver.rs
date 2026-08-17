@@ -522,8 +522,8 @@ impl FyndBuilder {
     }
 
     /// Sets component IDs to exclude from the Tycho stream.
-    pub fn blocklisted_components(mut self, components: FxHashSet<String>) -> Self {
-        self.blocklisted_components = components;
+    pub fn blocklisted_components(mut self, components: impl IntoIterator<Item = String>) -> Self {
+        self.blocklisted_components = components.into_iter().collect();
         self
     }
 
