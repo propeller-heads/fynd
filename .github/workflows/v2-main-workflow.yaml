@@ -9,6 +9,16 @@ jobs:
   tests-and-lints:
     uses: ./.github/workflows/ci.yaml
 
+  dev-deployment:
+    needs: tests-and-lints
+    uses: ./.github/workflows/dev-deployment.yaml
+    permissions:
+      contents: read
+      packages: write
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+
   # Opens/updates a release PR on a normal push; on merge, creates a single tag + GitHub
   # Release, which triggers release.yaml to publish crates + npm. Never commits to main.
   # Auto-detects rust -> release-plz.
