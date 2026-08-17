@@ -164,7 +164,9 @@ mod tests {
     fn test_wrong_selector() {
         let mut input = real_input();
         input[0] = 0xff;
-        assert!(Fly.declared_swap(&input, None).is_none());
+        assert!(Fly
+            .declared_swap(&input, None)
+            .is_none());
     }
 
     #[test]
@@ -190,7 +192,9 @@ mod tests {
         let mut input = real_input();
         // Zero out the word the amountOutMin pointer resolves to (ptr 281 in this fixture).
         input[281..313].fill(0);
-        assert!(Fly.declared_swap(&input, None).is_none());
+        assert!(Fly
+            .declared_swap(&input, None)
+            .is_none());
     }
 
     #[test]
@@ -203,6 +207,8 @@ mod tests {
         // fixture (ptrs 281 and 289), so filling the word instead would corrupt both readings
         // identically and leave them equal, not violate the check.
         input[AMOUNT_OUT_MIN_HEADER] = 0;
-        assert!(Fly.declared_swap(&input, None).is_none());
+        assert!(Fly
+            .declared_swap(&input, None)
+            .is_none());
     }
 }

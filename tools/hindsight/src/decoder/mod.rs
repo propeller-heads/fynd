@@ -1,31 +1,34 @@
 //! Decode solver trades from on-chain data.
 //!
 //! Terminology — three tiers, two of which appear in every record:
-//! - **venue** (`venues/`): the contract the user entered through (`tx.to`) — Relay, `MetaMask`.
-//!   Order-flow owners; they pick a solver and may take a fee.
-//! - **solver** (`solvers/`): the router that computed and settled the route — `KyberSwap`, 1inch,
-//!   0x. These are Fynd's competitors. Datasets recorded before run6 call this tier `aggregator` in
-//!   their column names; the two words mean the same thing.
+//! - **venue**: the contract the user entered through (`tx.to`) — Relay, `MetaMask`. Order-flow
+//!   owners; they pick a solver and may take a fee.
+//! - **solver** (`solvers/`, the only tier with code): the router that computed and settled the
+//!   route — `KyberSwap`, 1inch, 0x. These are Fynd's competitors. Datasets recorded before run6
+//!   call this tier `aggregator` in their column names; the two words mean the same thing.
 //! - **liquidity venues**: the pools and makers a route executes against (Uniswap, Curve,
 //!   prop-AMMs). Not modeled here; they only appear inside traces.
 //!
-//! The pipeline is match → trace → decode → veto → record: `matching` filters a block down to
-//! solver trades, `decode` recovers each trade's swap (picking the decoders for the matched
-//! entity), `transfer_ledger` answers all value-flow questions, `veto` rejects shapes that are not
-//! comparable trades, and `registry` is the address book behind matching.
+//! The pipeline is three steps, per block:
+//!
+//! 1. **Trace the whole block** — one `eth_getBlockReceipts` call and one
+//!    `debug_traceBlockByNumber` call.
+//! 2. **Per transaction, decode the swap from the solver's side** — the declared decode reads the
+//!    settling solver frame's own calldata (`declared`), or `CoW`'s `Trade` log for batch
+//!    settlements; `netting` is the fallback, and its records are marked (`decode: "netted"`). A
+//!    transaction with no known solver frame, venue entry, batch settler, or solver log is skipped.
+//!    `veto` rejects shapes that are not comparable trades.
+//! 3. **Attribute** — `attribution` names the solver and the venue on the record; `registry` is the
+//!    address book behind every lookup.
 
+mod attribution;
 mod declared;
-mod decode;
-mod intents;
-mod matching;
-mod netting_decoders;
+mod netting;
 mod registry;
 mod sandwich;
 mod solvers;
 mod trace;
 mod transfer_ledger;
-mod venue_attribution;
-pub(crate) mod venues;
 mod veto;
 
 #[cfg(test)]
@@ -35,7 +38,7 @@ use std::collections::HashMap;
 
 use alloy::{
     eips::BlockId,
-    network::AnyTransactionReceipt,
+    network::{AnyTransactionReceipt, ReceiptResponse},
     primitives::{Address, TxHash, U256},
     providers::Provider,
     rpc::types::trace::geth::CallFrame,
@@ -43,15 +46,13 @@ use alloy::{
 use anyhow::Context;
 use tracing::{debug, warn};
 
+pub(crate) use crate::decoder::{
+    attribution::AttributionSource, registry::Registry, sandwich::SandwichEvidence,
+};
 use crate::decoder::{
-    decode::{recover, DecodeContext},
-    matching::MatchedSolverTrade,
     solvers::SwapIntent,
     trace::{collect_native_transfers, fetch_block_traces},
     transfer_ledger::TransferLedger,
-};
-pub(crate) use crate::decoder::{
-    registry::Registry, sandwich::SandwichEvidence, solvers::attribution::AttributionSource,
 };
 
 /// A decoded solver trade: what token went in, what came out.
@@ -66,7 +67,7 @@ pub(crate) struct DecodedTrade {
     pub tx_index: u64,
     pub venue: String,
     pub solver: String,
-    /// The evidence tier the solver label came from (see `solvers::attribution`). Downstream
+    /// The evidence tier the solver label came from (see `attribution`). Downstream
     /// analysis weighs low-trust tiers (`largest_call`, fallback) differently — e.g. when judging
     /// an embedded quote.
     pub solver_source: AttributionSource,
@@ -97,9 +98,10 @@ pub(crate) struct DecodedTrade {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub venue_fee_out: Option<U256>,
     /// The on-chain enforced floor declared in the settling solver frame's own calldata (see
-    /// `solvers::swap_intent` for the solvers that declare one). A settled trade cleared this by
-    /// construction; it is recorded so avoidance analysis has the same field on both settled and
-    /// reverted trades. `None` when no solver frame was found or its calldata did not parse.
+    /// `SolverDecoder::declared_swap` for the solvers that declare one). A settled trade cleared
+    /// this by construction; it is recorded so avoidance analysis has the same field on both
+    /// settled and reverted trades. `None` when no solver frame was found or its calldata did
+    /// not parse.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_amount_out: Option<U256>,
     /// The solver's own off-chain quote, when its calldata declares one (unit-checked against
@@ -180,13 +182,11 @@ impl<P: Provider> Decoder<P> {
 
     /// Decode solver trades from a block.
     ///
-    /// Fetches all receipts in one `eth_getBlockReceipts` call, then matches a
-    /// transaction two ways: its entry point (`tx.to`) is a known venue or
-    /// solver, or one of its logs was emitted by a known solver. The
-    /// second case catches filler-initiated intent fills (`UniswapX`, 1inch
-    /// limit orders) where `tx.to` is a rotating filler. Matched transactions are
-    /// traced concurrently; the trace recovers native ETH flows and attributes
-    /// the settling solver.
+    /// Fetches all receipts in one `eth_getBlockReceipts` call and all traces in one
+    /// `debug_traceBlockByNumber` call, then matches a transaction three ways: a known solver's
+    /// frame appears in its trace, its entry point (`tx.to`) is a known venue, solver, or batch
+    /// settler, or one of its logs was emitted by a known solver (filler-initiated intent fills,
+    /// where `tx.to` is a rotating filler). Everything else is skipped, never decoded.
     pub(crate) async fn decode_block(
         &mut self,
         block_number: u64,
@@ -206,43 +206,62 @@ impl<P: Provider> Decoder<P> {
             .with_context(|| format!("failed to fetch receipts for block {block_number}"))?
             .ok_or_else(|| anyhow::anyhow!("block {block_number} not found"))?;
 
-        // Paired with each receipt's position in the slice, since that position — not the
-        // transaction_index field, which the RPC may omit — is what "neighbor" means for the
-        // sandwich scan below: receipts are already in block order.
-        let matched: Vec<(usize, MatchedSolverTrade)> = receipts
-            .iter()
-            .enumerate()
-            .filter_map(|(index, receipt)| {
-                matching::select(receipt, &self.registry).map(|matched| (index, matched))
-            })
-            .collect();
-
-        // Nothing matched: the block has no solver trades, so its trace is never needed.
-        if matched.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // One debug_traceBlockByNumber call covers every matched transaction. A transaction the
-        // tracer could not process is absent from the map and costs that trade, not the block.
+        // One debug_traceBlockByNumber call covers the block. A transaction the tracer could not
+        // process is absent from the map and costs that trade, not the block.
         let mut roots = fetch_block_traces(&self.provider, block_number).await?;
 
-        let mut trades = Vec::with_capacity(matched.len());
-        for (index, matched) in matched {
-            let tx_index = matched
-                .receipt
-                .transaction_index
-                .unwrap_or(index as u64);
-            let Some(root) = roots.remove(&matched.receipt.transaction_hash) else {
-                warn!(
-                    block = block_number,
-                    tx = %matched.receipt.transaction_hash,
-                    "skipping transaction absent from the block trace"
-                );
-                crate::telemetry::record_untraced_transaction();
+        let mut trades = Vec::new();
+        // The receipt's position in the slice — not the transaction_index field, which the RPC
+        // may omit — is what "neighbor" means for the sandwich scan below: receipts are already
+        // in block order.
+        for (index, receipt) in receipts.iter().enumerate() {
+            if !receipt.status() {
+                continue;
+            }
+            let Some(entry_point) = receipt.to else { continue };
+            let known_entry = self.registry.is_known(entry_point) ||
+                self.registry
+                    .is_batch_settler(entry_point);
+            let solver_logged = receipt
+                .logs()
+                .iter()
+                .any(|log| self.registry.is_solver(log.address()));
+
+            let Some(root) = roots.remove(&receipt.transaction_hash) else {
+                if known_entry || solver_logged {
+                    warn!(
+                        block = block_number,
+                        tx = %receipt.transaction_hash,
+                        "skipping transaction absent from the block trace"
+                    );
+                    crate::telemetry::record_untraced_transaction();
+                }
                 continue;
             };
+            // Matching: a known solver frame in the trace, a known entry point, or a known
+            // solver's log. Everything else is skipped, never decoded.
+            if !known_entry &&
+                !solver_logged &&
+                trace::find_solver_frame(&root, &self.registry).is_none()
+            {
+                continue;
+            }
+            // Match-time vetoes read logs alone (a solver marking a non-swap order shape).
+            if let Some(veto) = solvers::solver_veto(receipt.logs(), entry_point, &self.registry) {
+                debug!(
+                    tx = %receipt.transaction_hash,
+                    venue = %self.registry.label(entry_point),
+                    ?veto,
+                    "matched transaction is not a same-chain swap; skipping"
+                );
+                continue;
+            }
+
+            let tx_index = receipt
+                .transaction_index
+                .unwrap_or(index as u64);
             if let Some(mut trade) = self
-                .decode_transaction(matched, &root, block_number, tx_index)
+                .decode_transaction(receipt, entry_point, &root, block_number, tx_index)
                 .await
             {
                 let evidence = sandwich::detect(&receipts, index, &trade, &self.registry);
@@ -253,17 +272,17 @@ impl<P: Provider> Decoder<P> {
         Ok(trades)
     }
 
-    /// Decode one matched transaction from its trace: build the transfer ledger, run the decoders
-    /// for its entity, veto non-trades, attribute the solver, and account gas and quote.
+    /// Decode one matched transaction from its trace: build the transfer ledger, decode the swap
+    /// (declared first, netting fallback), veto non-trades, and attribute the solver and venue.
     async fn decode_transaction(
         &mut self,
-        matched: MatchedSolverTrade<'_>,
+        receipt: &AnyTransactionReceipt,
+        entry_point: Address,
         root: &CallFrame,
         block_number: u64,
         tx_index: u64,
     ) -> Option<DecodedTrade> {
         let Self { provider, registry, code_cache } = self;
-        let MatchedSolverTrade { receipt, entry_point } = matched;
         let logs = receipt.logs();
         let sender = receipt.from;
 
@@ -271,35 +290,43 @@ impl<P: Provider> Decoder<P> {
         collect_native_transfers(root, &mut native);
         let transfer_ledger = TransferLedger::from_transaction(logs, &native);
 
-        // The declared decode runs first, for every matched transaction: the settling solver's
-        // own calldata is the trusted reading. Netting is the fallback, and its records are
-        // marked (`decode: "netted"`).
-        let (decoder, mut flow, intent, decode) = if let Some((flow, intent)) =
-            declared::declared_flow(root, registry, &transfer_ledger, sender, entry_point)
-        {
-            ("solver-calldata", flow, Some(intent), "declared")
-        } else {
-            let mut ctx = DecodeContext {
-                provider,
-                registry,
-                code_cache,
-                receipt,
-                entry_point,
-                transfer_ledger: &transfer_ledger,
-                input: &root.input,
-                venue: None,
+        // The declared decode runs first: the settlement's own data is the trusted reading.
+        // A batch settler's Trade log wins over the calldata path wherever it appears — the
+        // settlement can be entered through another contract, and a batch's inner router frames
+        // are order plumbing, not the trade (which is also why the calldata path never runs on a
+        // batch-settler entry). Netting is the fallback, and its records are marked.
+        let declared = solvers::cow::settlement_trade(logs, registry)
+            .map(|flow| ("cow-trade", flow, None::<SwapIntent>))
+            .or_else(|| {
+                if registry.is_batch_settler(entry_point) {
+                    return None;
+                }
+                declared::declared_flow(root, registry, &transfer_ledger, sender, entry_point)
+                    .map(|(flow, intent)| ("solver-calldata", flow, Some(intent)))
+            });
+        let (decoder, mut flow, intent, amounts_declared) =
+            if let Some((decoder, flow, intent)) = declared {
+                (decoder, flow, intent, true)
+            } else {
+                let netted = netting::fallback_flow(
+                    provider,
+                    code_cache,
+                    registry,
+                    &transfer_ledger,
+                    sender,
+                    entry_point,
+                )
+                .await;
+                let Some((decoder, flow)) = netted else {
+                    warn!(
+                        tx = %receipt.transaction_hash,
+                        venue = %registry.label(entry_point),
+                        "no decoder recovered a trade from this transaction"
+                    );
+                    return None;
+                };
+                (decoder, flow, None, false)
             };
-            let Some((netting_decoder, flow)) = recover(&mut ctx).await else {
-                warn!(
-                    tx = %receipt.transaction_hash,
-                    venue = %registry.label(entry_point),
-                    "no decoder recovered a trade from this transaction"
-                );
-                return None;
-            };
-            let decode = if netting_decoder.declares() { "declared" } else { "netted" };
-            (netting_decoder.name(), flow, None, decode)
-        };
 
         if let Some(veto) = veto::check(&flow, &transfer_ledger, logs, registry) {
             debug!(
@@ -311,28 +338,24 @@ impl<P: Provider> Decoder<P> {
             return None;
         }
 
-        // A venue fingerprint (owning trader, CoW appData tag, fee wallet, or integrator tag — see
-        // `venue_attribution`) overrides the entry-point label, backing any venue fee out before
-        // the quote check reads the grossed output. The appData tag is read from a batch settler's
-        // calldata; other transactions carry none.
+        // A venue fingerprint (owning trader, CoW appData tag, fee wallet, or integrator tag —
+        // see `attribution`) overrides the entry-point label. The appData tag is read from a
+        // batch settler's calldata; other transactions carry none.
         let integrator = solvers::integrator(logs, registry);
-        let app_data = intents::venue_tag(registry, entry_point, &root.input);
-        let venue = venue_attribution::attribute(
+        let app_data = solvers::cow::venue_tag(registry, entry_point, &root.input);
+        let venue = attribution::venue(
             registry,
             &mut flow,
             &transfer_ledger,
             integrator.as_deref(),
             app_data,
+            amounts_declared,
         )
         .unwrap_or_else(|| registry.label(entry_point));
 
-        let attribution = solvers::attribution::attribute(
-            flow.solver_override.take(),
-            root,
-            entry_point,
-            sender,
-            registry,
-        );
+        let declared_solver =
+            attribution::venue_declared_solver(registry, entry_point, &root.input);
+        let attribution = attribution::solver(declared_solver, root, entry_point, sender, registry);
 
         // A frontend routing through the solver can take a cut of the output without owning a
         // venue section, declaring its fee recipients in the solver's own calldata. Backed out
@@ -347,6 +370,7 @@ impl<P: Provider> Decoder<P> {
             flow.gross_output_fee(fee);
         }
         let (min_amount_out, declared_quote, quote_timestamp) = intent_fields(intent.as_ref());
+        let decode = if amounts_declared { "declared" } else { "netted" };
 
         Some(DecodedTrade {
             tx_hash: receipt.transaction_hash,
@@ -414,10 +438,7 @@ mod tests {
         // The block trace answers in one call: the first transaction failed inside the tracer,
         // the second traced fine.
         asserter.push_success(&vec![
-            TraceResult::Error {
-                error: "tracer aborted".to_string(),
-                tx_hash: Some(tx_hash(1)),
-            },
+            TraceResult::Error { error: "tracer aborted".to_string(), tx_hash: Some(tx_hash(1)) },
             TraceResult::Success {
                 result: GethTrace::CallTracer(frame("CALL", addr(2), ONEINCH, 0)),
                 tx_hash: Some(tx_hash(2)),

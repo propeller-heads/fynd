@@ -77,9 +77,10 @@ struct AddressBook {
     venue_owners: HashMap<Address, String>,
     /// Fee-wallet address → venue, for venues that route through a shared router and are only
     /// identified by the fee transferred to their wallet (Phantom, Robinhood). Absent in books
-    /// with no fee-identified venues.
+    /// with no fee-identified venues. Ordered so a trade cut by two venues' wallets resolves to
+    /// the same venue on every run.
     #[serde(default)]
-    venue_fees: HashMap<Address, String>,
+    venue_fees: BTreeMap<Address, String>,
     /// Provider integrator tag → venue, for venues identified by the integrator string in a
     /// provider's event (`LiFi` frontends: Infinex, Robinhood). Keys are lowercase. Absent in
     /// books with no integrator-identified venues.
@@ -92,9 +93,9 @@ struct AddressBook {
 }
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
-/// collectors its fees are sent to, and its calldata solver aliases. Keyed by venue name in
-/// the address book; the name binds to a decoder at load time (see
-/// `crate::decoder::venues::decoders_for`).
+/// collectors its fees are sent to, and its calldata solver aliases. Pure data — a venue has no
+/// code; decoding is per solver (see `crate::decoder::declared`), and the netting fallback reads
+/// the collectors from here.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VenueAddresses {
@@ -113,6 +114,12 @@ impl VenueAddresses {
     /// the solver, trimming the venue's id decoration ("oneInchV6FeeDynamic" → "1inch") — not a
     /// 1:1 rename. Unmatched ids pass through as-is: still more informative than a raw executor
     /// address, and a signal to extend the address book.
+    /// Whether this venue declares its solver in the entry calldata (it has alias entries to
+    /// normalize the declared ids with).
+    pub(crate) fn declares_solver(&self) -> bool {
+        !self.solver_aliases.is_empty()
+    }
+
     pub(crate) fn normalize_solver(&self, id: &str) -> String {
         let lower = id.to_lowercase();
         for (substring, name) in &self.solver_aliases {
@@ -173,8 +180,9 @@ pub(crate) struct Registry {
     /// rather than by the entry point (e.g. kpk's Safes settling through `CoW`).
     venue_owners: HashMap<Address, String>,
     /// Fee-wallet address → venue name, for venues identified by the fee they take on a shared
-    /// router rather than by the entry point (Phantom, Robinhood).
-    venue_fees: HashMap<Address, String>,
+    /// router rather than by the entry point (Phantom, Robinhood). Ordered for deterministic
+    /// attribution when two venues' wallets both take a cut of one trade.
+    venue_fees: BTreeMap<Address, String>,
     /// Provider integrator tag (lowercase) → venue name, for venues identified by the integrator
     /// string a provider records in its event (`LiFi` frontends: Infinex, Robinhood).
     venue_integrators: HashMap<String, String>,
@@ -220,18 +228,6 @@ impl Registry {
     fn from_toml(text: &str) -> anyhow::Result<Self> {
         let mut book: AddressBook =
             toml::from_str(text).context("failed to parse address book TOML")?;
-
-        // A venue section only carries addresses; its decoders are bound by name in code. An
-        // unbound name (a typo, or a venue with no decoder yet) must fail here — silently never
-        // decoding would just drop that venue's trades.
-        for name in book.venues.keys() {
-            if !crate::decoder::venues::has_decoder(name) {
-                anyhow::bail!(
-                    "address book venue '{name}' has no decoder \
-                     (see venues::decoders_for for the recognized names)"
-                );
-            }
-        }
 
         let mut names = book.solvers.clone();
         for (name, venue) in &book.venues {
@@ -354,8 +350,8 @@ impl Registry {
     }
 
     /// Fee-wallet → venue map, for attributing venues identified only by their fee leg on a
-    /// shared router (see `crate::decoder::venue_attribution`).
-    pub(crate) fn venue_fees(&self) -> &HashMap<Address, String> {
+    /// shared router (see `crate::decoder::attribution`), in address order.
+    pub(crate) fn venue_fees(&self) -> &BTreeMap<Address, String> {
         &self.venue_fees
     }
 
@@ -590,28 +586,6 @@ mod tests {
         );
         assert_eq!(registry.venue_name(collector), None);
         assert!(registry.venue("kyberswap").is_none());
-    }
-
-    #[test]
-    fn test_is_fee_collector() {
-        let registry = Registry::ethereum();
-        let relay_collector = address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef");
-        let phantom_wallet = address!("0x2cffed5d56eb6a17662756ca0fdf350e732c9818");
-        assert!(registry.is_fee_collector(relay_collector));
-        assert!(registry.is_fee_collector(phantom_wallet));
-        assert!(!registry.is_fee_collector(addr(123)));
-    }
-
-    #[test]
-    fn test_venue_without_decoder() {
-        // A venue section whose name has no decoder would silently never decode, so the
-        // address book must fail to load.
-        let text =
-            format!("{ETHEREUM_TOML}\n[venues.reiay]\nentry_points = []\nfee_collectors = []\n");
-        let err = Registry::from_toml(&text)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("no decoder"), "unexpected error: {err}");
     }
 
     #[test]

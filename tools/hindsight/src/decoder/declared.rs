@@ -17,7 +17,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    decode::TraderFlow,
+    netting::TraderFlow,
     registry::Registry,
     solvers::{self, SwapIntent},
     trace,
@@ -62,8 +62,7 @@ pub(crate) fn declared_flow(
         }
     }
 
-    let (venue_fee_in, venue_fee_out) =
-        venue_fees(registry, entry_point, transfer_ledger, &intent);
+    let (venue_fee_in, venue_fee_out) = venue_fees(registry, entry_point, transfer_ledger, &intent);
     let flow = TraderFlow {
         tracked: sender,
         swap: NetSwap {
@@ -74,7 +73,6 @@ pub(crate) fn declared_flow(
         },
         venue_fee_in,
         venue_fee_out,
-        solver_override: None,
     };
     Some((flow, intent))
 }

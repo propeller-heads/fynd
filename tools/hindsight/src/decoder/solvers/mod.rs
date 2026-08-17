@@ -8,7 +8,7 @@
 //! the registry's solver entry once, at address-book load (see `decoder_for`); at trade time
 //! every lookup is by address through `Registry::solver`.
 
-pub(crate) mod attribution;
+pub(crate) mod cow;
 pub(crate) mod fly;
 pub(crate) mod kyberswap;
 pub(crate) mod lifi;
