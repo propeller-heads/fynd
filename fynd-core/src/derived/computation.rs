@@ -1,8 +1,7 @@
 //! Core computation trait and types.
 
-use std::collections::HashSet;
-
 use async_trait::async_trait;
+use rustc_hash::FxHashSet;
 
 use super::{
     error::ComputationError,
@@ -54,22 +53,22 @@ impl RequirementConflict {
 #[derive(Debug, Clone, Default)]
 pub struct ComputationRequirements {
     /// Computations that must be from the current block.
-    pub(crate) require_fresh: HashSet<ComputationId>,
+    pub(crate) require_fresh: FxHashSet<ComputationId>,
     /// Computations that can use data from any past block.
     ///
     /// TODO: Stale data can be dangerous if stale for too long. In the future, associate staleness
     /// to a block limit might be implemented.
-    pub(crate) allow_stale: HashSet<ComputationId>,
+    pub(crate) allow_stale: FxHashSet<ComputationId>,
 }
 
 impl ComputationRequirements {
     /// Returns the set of computations that require fresh data.
-    pub fn fresh_requirements(&self) -> &HashSet<ComputationId> {
+    pub fn fresh_requirements(&self) -> &FxHashSet<ComputationId> {
         &self.require_fresh
     }
 
     /// Returns the set of computations that allow stale data.
-    pub fn stale_requirements(&self) -> &HashSet<ComputationId> {
+    pub fn stale_requirements(&self) -> &FxHashSet<ComputationId> {
         &self.allow_stale
     }
 
@@ -80,12 +79,12 @@ impl ComputationRequirements {
 
     /// Creates requirements that need the given computations from the current block.
     pub fn fresh<I: IntoIterator<Item = ComputationId>>(ids: I) -> Self {
-        Self { require_fresh: ids.into_iter().collect(), allow_stale: HashSet::new() }
+        Self { require_fresh: ids.into_iter().collect(), allow_stale: FxHashSet::default() }
     }
 
     /// Creates requirements that accept the given computations from any past block.
     pub fn stale<I: IntoIterator<Item = ComputationId>>(ids: I) -> Self {
-        Self { require_fresh: HashSet::new(), allow_stale: ids.into_iter().collect() }
+        Self { require_fresh: FxHashSet::default(), allow_stale: ids.into_iter().collect() }
     }
 
     /// Builder method to add a computation that requires fresh data (current block).

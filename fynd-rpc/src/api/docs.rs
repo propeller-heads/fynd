@@ -10,19 +10,14 @@
 
 use actix_web::web;
 use serde_json::json;
-use utoipa::{
-    openapi::{
-        path::{Operation, Parameter, ParameterBuilder, ParameterIn},
-        security::{ApiKey, ApiKeyValue, SecurityScheme},
-        Components, ObjectBuilder, OpenApi, PathItem, Required, SecurityRequirement, Server, Type,
-    },
-    OpenApi as _,
+use utoipa::openapi::{
+    path::{Operation, Parameter, ParameterBuilder, ParameterIn},
+    security::{ApiKey, ApiKeyValue, SecurityScheme},
+    Components, ObjectBuilder, OpenApi, PathItem, Required, SecurityRequirement, Server, Type,
 };
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::api::ApiDoc;
-#[cfg(feature = "experimental")]
-use crate::api::ExperimentalApiDoc;
+use crate::api::openapi_spec;
 
 /// Name of the API key security scheme declared by the hosted spec.
 const API_KEY_SCHEME_NAME: &str = "ApiKeyAuth";
@@ -46,11 +41,7 @@ pub(crate) fn configure_docs(cfg: &mut web::ServiceConfig, hosted_url: Option<&s
 
 /// Builds the spec describing the endpoints this process routes.
 fn self_hosted_spec() -> OpenApi {
-    #[allow(unused_mut)]
-    let mut openapi = ApiDoc::openapi();
-    #[cfg(feature = "experimental")]
-    openapi.merge(ExperimentalApiDoc::openapi());
-    openapi
+    openapi_spec()
 }
 
 /// Builds the spec describing the endpoints as exposed by the hosted gateway.

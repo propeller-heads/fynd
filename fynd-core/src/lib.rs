@@ -61,6 +61,10 @@ pub use price_guard::{
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
 pub use replay::{replay_route, ReplayError, RouteReplay};
+// `GraphManager`, `Route` and the market data readers take `FxHashMap`/`FxHashSet`.
+// Re-exported so an external implementor names the same types without matching our
+// `rustc-hash` version itself.
+pub use rustc_hash;
 pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
 /// Processes ephemeral pending bundles against live Tycho market state. Obtained by calling
 /// [`FyndBuilder::build_with_pending`](solver::FyndBuilder::build_with_pending).
@@ -89,5 +93,6 @@ pub use worker_pool::{
     TaskQueueHandle,
 };
 pub use worker_pool_router::{
-    config::WorkerPoolRouterConfig, LiquidityScope, SolverPoolHandle, WorkerPoolRouter,
+    config::WorkerPoolRouterConfig, ExclusiveAccess, LiquidityScope, SolverPoolHandle,
+    WorkerPoolRouter,
 };

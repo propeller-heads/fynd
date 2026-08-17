@@ -1,9 +1,10 @@
 //! Test helpers for split-routing algorithm split_scenarios.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
+use rustc_hash::FxHashMap;
 use tokio::sync::RwLock;
 use tycho_simulation::{
     tycho_core::{
@@ -21,7 +22,7 @@ use crate::{
     },
     derived::{DerivedData, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketState},
-    graph::{petgraph::PetgraphStableDiGraphManager, GraphManager},
+    graph::{petgraph::PetgraphStableDiGraphManager, GraphManager, TopologyGraphManager},
     types::{
         quote::{Order, OrderSide, Route},
         BlockInfo, RouteResult,
@@ -60,7 +61,7 @@ pub(crate) fn optimal_two_component_output(
 /// [`optimal_two_component_output`]. One `MarketState` backs the whole market.
 pub(crate) struct WeightedSplitMarket {
     pub market: MarketData,
-    pub weighted: PetgraphStableDiGraphManager<DepthAndPrice>,
+    pub weighted: TopologyGraphManager<DepthAndPrice>,
     pub derived: SharedDerivedDataRef,
     pub weth: Address,
     pub usdc: Address,
@@ -108,11 +109,11 @@ pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
         edge_weights.push((component_id, weight_to, weight_from));
     }
 
-    let mut weighted = PetgraphStableDiGraphManager::<DepthAndPrice>::default();
+    let mut weighted = TopologyGraphManager::<DepthAndPrice>::default();
     weighted.initialize_graph(&market.component_topology());
     for (component_id, weight_to, weight_from) in edge_weights {
         weighted
-            .set_edge_weight(
+            .set_pool_weight(
                 &component_id.to_string(),
                 &weth.address,
                 &usdc.address,
@@ -121,7 +122,7 @@ pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
             )
             .unwrap();
         weighted
-            .set_edge_weight(
+            .set_pool_weight(
                 &component_id.to_string(),
                 &usdc.address,
                 &weth.address,
@@ -132,7 +133,7 @@ pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
     }
 
     let unit_price = Price::new(BigUint::from(1u64), BigUint::from(1u64));
-    let mut token_prices = HashMap::new();
+    let mut token_prices = FxHashMap::default();
     token_prices.insert(weth.address.clone(), unit_price.clone());
     token_prices.insert(usdc.address.clone(), unit_price);
     let mut derived = DerivedData::new();
@@ -213,7 +214,7 @@ impl TestScenario {
     /// [`build_market`](Self::build_market) (100 wei/gas).
     pub(crate) fn build_market_weighted(
         &self,
-    ) -> (MarketData, PetgraphStableDiGraphManager<DepthAndPrice>) {
+    ) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
         let mut market = MarketState::new();
         market.update_gas_price(BlockGasPrice {
             block_number: 1,
@@ -250,14 +251,14 @@ impl TestScenario {
             ));
         }
 
-        let mut weighted = PetgraphStableDiGraphManager::<DepthAndPrice>::default();
+        let mut weighted = TopologyGraphManager::<DepthAndPrice>::default();
         weighted.initialize_graph(&market.component_topology());
         for (component_id, addr_1, addr_2, weight_to, weight_from) in edge_weights {
             weighted
-                .set_edge_weight(&component_id.to_string(), &addr_1, &addr_2, weight_to, false)
+                .set_pool_weight(&component_id.to_string(), &addr_1, &addr_2, weight_to, false)
                 .unwrap();
             weighted
-                .set_edge_weight(&component_id.to_string(), &addr_2, &addr_1, weight_from, false)
+                .set_pool_weight(&component_id.to_string(), &addr_2, &addr_1, weight_from, false)
                 .unwrap();
         }
 
@@ -269,7 +270,7 @@ impl TestScenario {
     /// BF's `compute_net_amount_out` deduct gas costs.
     pub(crate) fn build_derived_data(&self) -> SharedDerivedDataRef {
         let unit_price = Price::new(BigUint::from(1u64), BigUint::from(1u64));
-        let mut token_prices = HashMap::new();
+        let mut token_prices = FxHashMap::default();
 
         token_prices.insert(self.token_in.address.clone(), unit_price.clone());
         token_prices.insert(self.token_out.address.clone(), unit_price.clone());

@@ -14,11 +14,9 @@
 //! `MarketState` lock. This decouples overlay writes from base-state reads: a TychoFeed block
 //! update no longer stalls overlay registrations and vice versa.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::sync::Arc;
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
 use tycho_simulation::{
     tycho_client::feed::SynchronizerState,
@@ -38,7 +36,7 @@ use crate::types::{BlockInfo, ComponentId};
 pub type StateLabel = String;
 
 /// An immutable snapshot of per-component simulation states for one overlay layer.
-pub type OverlayStates = Arc<HashMap<ComponentId, Box<dyn ProtocolSim>>>;
+pub type OverlayStates = Arc<FxHashMap<ComponentId, Box<dyn ProtocolSim>>>;
 
 /// A named simulation-state overlay with a block-number expiry.
 pub struct OverlayEntry {
@@ -50,7 +48,7 @@ pub struct OverlayEntry {
 }
 
 /// The shared overlay registry: maps each label to its snapshot.
-type OverlayRegistry = Arc<RwLock<HashMap<StateLabel, OverlayEntry>>>;
+type OverlayRegistry = Arc<RwLock<FxHashMap<StateLabel, OverlayEntry>>>;
 
 /// Error returned by [`MarketData::read_labeled`] when the requested label cannot be resolved.
 #[derive(Debug, thiserror::Error)]
@@ -75,7 +73,7 @@ pub struct MarketData {
 impl MarketData {
     /// Creates a new handle wrapping the given data store.
     pub fn new(data: Arc<RwLock<MarketState>>) -> Self {
-        Self { data, overlays: Arc::new(RwLock::new(HashMap::new())) }
+        Self { data, overlays: Arc::new(RwLock::new(FxHashMap::default())) }
     }
 
     /// Creates a new empty market data store wrapped in a `MarketData`.
@@ -149,7 +147,7 @@ impl MarketData {
     pub async fn register_labeled_state(
         &self,
         label: StateLabel,
-        states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
+        states: FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
         valid_until: u64,
     ) {
         self.overlays
@@ -234,7 +232,10 @@ impl<'a> MarketDataView<'a> {
     /// on top by replacing any simulation states found in both the subset and the overlay.
     ///
     /// If no overlay is active, this is equivalent to `self.extract_subset(component_ids)`.
-    pub fn extract_subset_with_overlay(&self, component_ids: &HashSet<ComponentId>) -> MarketState {
+    pub fn extract_subset_with_overlay(
+        &self,
+        component_ids: &FxHashSet<&ComponentId>,
+    ) -> MarketState {
         let mut subset = self.guard.extract_subset(component_ids);
         if let Some((ref label, ref states)) = self.overlay {
             for (id, state) in states.iter() {
@@ -253,17 +254,17 @@ impl<'a> MarketDataView<'a> {
     }
 
     /// Returns the component topology from the base data.
-    pub fn component_topology(&self) -> HashMap<ComponentId, Vec<Address>> {
+    pub fn component_topology(&self) -> FxHashMap<ComponentId, Vec<Address>> {
         self.guard.component_topology()
     }
 
     /// Extracts a base-data subset for the given component IDs (no overlay applied).
-    pub fn extract_subset(&self, component_ids: &HashSet<ComponentId>) -> MarketState {
+    pub fn extract_subset(&self, component_ids: &FxHashSet<&ComponentId>) -> MarketState {
         self.guard.extract_subset(component_ids)
     }
 
     /// Returns a reference to the token registry from the base data.
-    pub fn token_registry_ref(&self) -> &HashMap<Address, Token> {
+    pub fn token_registry_ref(&self) -> &FxHashMap<Address, Arc<Token>> {
         self.guard.token_registry_ref()
     }
 
@@ -280,6 +281,11 @@ impl<'a> MarketDataView<'a> {
     /// Returns a token by address from the base data.
     pub fn get_token(&self, address: &Address) -> Option<&Token> {
         self.guard.get_token(address)
+    }
+
+    /// Returns a token by address from the base data, to be held rather than copied.
+    pub fn get_token_shared(&self, address: &Address) -> Option<&Arc<Token>> {
+        self.guard.get_token_shared(address)
     }
 
     /// Returns a component by ID from the base data.
@@ -306,21 +312,21 @@ pub struct MarketState {
     /// is applied.
     label: StateLabel,
     /// All components indexed by their ID.
-    components: HashMap<ComponentId, ProtocolComponent>,
+    components: FxHashMap<ComponentId, Arc<ProtocolComponent>>,
     /// All states indexed by their component ID.
-    simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
-    /// All tokens indexed by their address.
-    tokens: HashMap<Address, Token>,
+    simulation_states: FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
+    /// All tokens indexed by their address. Shared for the same reason as `components`.
+    tokens: FxHashMap<Address, Arc<Token>>,
     /// Current gas price. None if not fetched yet.
     gas_price: Option<BlockGasPrice>,
     /// Protocol sync status indexed by their protocol system name.
-    protocol_sync_status: HashMap<String, SynchronizerState>,
+    protocol_sync_status: FxHashMap<String, SynchronizerState>,
     /// Block info for the last update (only updated when protocols reported "Ready" status).
     /// None if no block has been processed yet.
     last_updated: Option<BlockInfo>,
     /// Number of components per protocol system, maintained incrementally on
     /// upsert/remove so readers never scan the full component map.
-    component_counts: HashMap<String, u64>,
+    component_counts: FxHashMap<String, u64>,
 }
 
 impl MarketState {
@@ -328,13 +334,13 @@ impl MarketState {
     pub fn new() -> Self {
         Self {
             label: String::new(),
-            components: HashMap::new(),
-            simulation_states: HashMap::new(),
-            tokens: HashMap::new(),
+            components: FxHashMap::default(),
+            simulation_states: FxHashMap::default(),
+            tokens: FxHashMap::default(),
             gas_price: None,
-            protocol_sync_status: HashMap::new(),
+            protocol_sync_status: FxHashMap::default(),
             last_updated: None,
-            component_counts: HashMap::new(),
+            component_counts: FxHashMap::default(),
         }
     }
 
@@ -362,12 +368,12 @@ impl MarketState {
     ///
     /// Entries stay present at zero after all of a protocol's components are
     /// removed so exported gauges reset instead of freezing at the last value.
-    pub fn component_counts_by_protocol(&self) -> &HashMap<String, u64> {
+    pub fn component_counts_by_protocol(&self) -> &FxHashMap<String, u64> {
         &self.component_counts
     }
 
     /// Returns the sync status of every protocol system.
-    pub fn protocol_sync_states(&self) -> &HashMap<String, SynchronizerState> {
+    pub fn protocol_sync_states(&self) -> &FxHashMap<String, SynchronizerState> {
         &self.protocol_sync_status
     }
 
@@ -379,7 +385,7 @@ impl MarketState {
 
     /// Returns the component topology.
     /// This is a simple mapping from component ID to their token addresses.
-    pub fn component_topology(&self) -> HashMap<ComponentId, Vec<Address>> {
+    pub fn component_topology(&self) -> FxHashMap<ComponentId, Vec<Address>> {
         self.components
             .iter()
             .map(|(id, component)| (id.clone(), component.tokens.clone()))
@@ -388,6 +394,11 @@ impl MarketState {
 
     /// Gets a component by ID.
     pub fn get_component(&self, id: &str) -> Option<&ProtocolComponent> {
+        self.components.get(id).map(Arc::as_ref)
+    }
+
+    /// Gets a component by ID as a shared handle, for callers that need to keep it.
+    pub fn get_component_shared(&self, id: &str) -> Option<&Arc<ProtocolComponent>> {
         self.components.get(id)
     }
 
@@ -400,6 +411,13 @@ impl MarketState {
 
     /// Gets a token by address.
     pub fn get_token(&self, address: &Address) -> Option<&Token> {
+        self.tokens
+            .get(address)
+            .map(Arc::as_ref)
+    }
+
+    /// Gets a token as a shared handle, for callers that need to keep it.
+    pub fn get_token_shared(&self, address: &Address) -> Option<&Arc<Token>> {
         self.tokens.get(address)
     }
 
@@ -409,7 +427,7 @@ impl MarketState {
     }
 
     /// Returns a reference to the token registry.
-    pub fn token_registry_ref(&self) -> &HashMap<Address, Token> {
+    pub fn token_registry_ref(&self) -> &FxHashMap<Address, Arc<Token>> {
         &self.tokens
     }
 
@@ -419,7 +437,7 @@ impl MarketState {
             let protocol_system = component.protocol_system.clone();
             let previous = self
                 .components
-                .insert(component.id.clone(), component);
+                .insert(component.id.clone(), Arc::new(component));
             if previous.is_none() {
                 *self
                     .component_counts
@@ -433,7 +451,7 @@ impl MarketState {
     pub fn upsert_tokens(&mut self, tokens: impl IntoIterator<Item = Token>) {
         for token in tokens {
             self.tokens
-                .insert(token.address.clone(), token);
+                .insert(token.address.clone(), Arc::new(token));
         }
     }
 
@@ -491,36 +509,35 @@ impl MarketState {
     /// - Simulation states for those components (cloned via `clone_box`)
     /// - Tokens referenced by those components
     /// - Gas price and block info
-    pub fn extract_subset(&self, component_ids: &HashSet<ComponentId>) -> MarketState {
-        // Filter components
-        let components: HashMap<ComponentId, ProtocolComponent> = self
-            .components
-            .iter()
-            .filter(|(id, _)| component_ids.contains(*id))
-            .map(|(id, component)| (id.clone(), component.clone()))
-            .collect();
+    pub fn extract_subset(&self, component_ids: &FxHashSet<&ComponentId>) -> MarketState {
+        let mut components =
+            FxHashMap::with_capacity_and_hasher(component_ids.len(), rustc_hash::FxBuildHasher);
+        let mut simulation_states =
+            FxHashMap::with_capacity_and_hasher(component_ids.len(), rustc_hash::FxBuildHasher);
+        // Tokens are shared between components, so this collects addresses first and resolves
+        // them once each rather than per component that mentions them.
+        let mut token_addresses: FxHashSet<&Address> =
+            FxHashSet::with_capacity_and_hasher(component_ids.len() * 2, rustc_hash::FxBuildHasher);
 
-        // Collect all token addresses from the filtered components
-        let token_addresses: HashSet<&Address> = components
-            .values()
-            .flat_map(|c| &c.tokens)
-            .collect();
+        for &id in component_ids {
+            if let Some(component) = self.components.get(id) {
+                token_addresses.extend(&component.tokens);
+                components.insert(id.clone(), component.clone());
+            }
+            // A component without a simulation state is legitimate: the recording skips `vm:*`
+            // states, and a component can be announced a block before its first state arrives.
+            if let Some(state) = self.simulation_states.get(id) {
+                simulation_states.insert(id.clone(), state.clone_box());
+            }
+        }
 
-        // Filter tokens
-        let tokens: HashMap<Address, Token> = self
-            .tokens
-            .iter()
-            .filter(|(addr, _)| token_addresses.contains(addr))
-            .map(|(addr, token)| (addr.clone(), token.clone()))
-            .collect();
-
-        // Clone simulation states using clone_box
-        let simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>> = self
-            .simulation_states
-            .iter()
-            .filter(|(id, _)| component_ids.contains(*id))
-            .map(|(id, state)| (id.clone(), state.clone_box()))
-            .collect();
+        let mut tokens =
+            FxHashMap::with_capacity_and_hasher(token_addresses.len(), rustc_hash::FxBuildHasher);
+        for address in token_addresses {
+            if let Some(token) = self.tokens.get(address) {
+                tokens.insert(address.clone(), token.clone());
+            }
+        }
 
         MarketState {
             label: self.label.clone(),
@@ -528,9 +545,9 @@ impl MarketState {
             simulation_states,
             tokens,
             gas_price: self.gas_price.clone(),
-            protocol_sync_status: HashMap::new(), // Not needed for simulation
+            protocol_sync_status: FxHashMap::default(), // Not needed for simulation
             last_updated: self.last_updated.clone(),
-            component_counts: HashMap::new(), // Not needed for simulation
+            component_counts: FxHashMap::default(), // Not needed for simulation
         }
     }
 }
@@ -624,9 +641,8 @@ mod tests {
         market.update_last_updated(BlockInfo::new(12345, "0xabc".to_string(), 0));
 
         // Extract only component_ab
-        let ids: HashSet<_> = ["component_ab".to_string()]
-            .into_iter()
-            .collect();
+        let component_ab = "component_ab".to_string();
+        let ids: FxHashSet<&ComponentId> = [&component_ab].into_iter().collect();
         let subset = market.extract_subset(&ids);
 
         // Components: only component_ab
@@ -658,7 +674,7 @@ mod tests {
         assert!(subset.last_updated.is_some());
 
         // Empty IDs returns empty subset
-        let empty_subset = market.extract_subset(&HashSet::new());
+        let empty_subset = market.extract_subset(&FxHashSet::default());
         assert!(empty_subset.components.is_empty());
         assert!(empty_subset.tokens.is_empty());
         assert!(empty_subset
@@ -673,7 +689,7 @@ mod tests {
         let market_ref = MarketData::new_shared();
 
         let label = "test_label".to_string();
-        let mut states: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut states: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
         states.insert(
             "component_ab".to_string(),
             Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
@@ -699,7 +715,7 @@ mod tests {
         market_ref
             .register_labeled_state(
                 "my_label".to_string(),
-                HashMap::from([(
+                FxHashMap::from_iter([(
                     "component1".to_string(),
                     Box::new(MockProtocolSim::new(5.0)) as Box<dyn ProtocolSim>,
                 )]),
@@ -722,7 +738,7 @@ mod tests {
         market_ref
             .register_labeled_state(
                 label.clone(),
-                HashMap::from([(
+                FxHashMap::from_iter([(
                     "component".to_string(),
                     Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
                 )]),
@@ -746,7 +762,7 @@ mod tests {
             market_ref
                 .register_labeled_state(
                     format!("label_{i}"),
-                    HashMap::from([(
+                    FxHashMap::from_iter([(
                         format!("component_{i}"),
                         Box::new(MockProtocolSim::new(f64::from(i))) as Box<dyn ProtocolSim>,
                     )]),
@@ -772,7 +788,7 @@ mod tests {
 
         base.register_labeled_state(
             "shared".to_string(),
-            HashMap::from([(
+            FxHashMap::from_iter([(
                 "component_x".to_string(),
                 Box::new(MockProtocolSim::new(7.0)) as Box<dyn ProtocolSim>,
             )]),
@@ -822,7 +838,7 @@ mod tests {
         market_ref
             .register_labeled_state(
                 label.clone(),
-                HashMap::from([(
+                FxHashMap::from_iter([(
                     "component_ab".to_string(),
                     Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
                 )]),
@@ -834,9 +850,8 @@ mod tests {
             .read_labeled(&label)
             .await
             .expect("label was just registered");
-        let ids: HashSet<ComponentId> = ["component_ab".to_string()]
-            .into_iter()
-            .collect();
+        let component_ab = "component_ab".to_string();
+        let ids: FxHashSet<&ComponentId> = [&component_ab].into_iter().collect();
         let subset = guard.extract_subset_with_overlay(&ids);
 
         let sim = subset
@@ -857,7 +872,7 @@ mod tests {
         market_ref
             .register_labeled_state(
                 "stale".to_string(),
-                HashMap::from([(
+                FxHashMap::from_iter([(
                     "component_stale".to_string(),
                     Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
                 )]),
@@ -867,7 +882,7 @@ mod tests {
         market_ref
             .register_labeled_state(
                 "fresh".to_string(),
-                HashMap::from([(
+                FxHashMap::from_iter([(
                     "component_fresh".to_string(),
                     Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
                 )]),

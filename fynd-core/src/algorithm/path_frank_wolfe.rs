@@ -771,7 +771,7 @@ mod tests {
     /// amounts. With `setup_market_unweighted` (gas_price=100 wei) and component
     /// gas=50,000, each hop costs ~5 output tokens.
     fn derived_with_token_prices(tokens: &[&Token]) -> SharedDerivedDataRef {
-        let mut prices = TokenGasPrices::new();
+        let mut prices = TokenGasPrices::default();
         // 1 token = 1,000,000 wei of gas token.
         // gas_cost_tokens = (gas × gas_price) / 1,000,000
         //                 = (50,000 × 100) / 1,000,000 = 5 tokens per hop

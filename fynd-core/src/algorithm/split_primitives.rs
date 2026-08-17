@@ -1,7 +1,8 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tycho_simulation::tycho_common::{
     dto::ProtocolStateDelta,
     models::token::Token,
@@ -73,7 +74,7 @@ impl PathAllocation {
             return Err(AlgorithmError::Other("path has no hops".to_string()));
         }
         let first_token = &self.hops[0].descriptor.token_in.address;
-        let mut seen = HashSet::new();
+        let mut seen = FxHashSet::default();
         seen.insert(first_token.clone());
         let last_idx = self.hops.len() - 1;
         for (i, hop) in self.hops.iter().enumerate() {
@@ -105,7 +106,7 @@ pub(crate) struct SimResult {
 
 /// Component state overrides for passing degraded states to `find_single_route`.
 #[derive(Default)]
-pub(crate) struct MarketOverrides(HashMap<ComponentId, Box<dyn ProtocolSim>>);
+pub(crate) struct MarketOverrides(FxHashMap<ComponentId, Box<dyn ProtocolSim>>);
 
 impl MarketOverrides {
     pub(crate) fn empty() -> Self {
@@ -147,7 +148,7 @@ impl MarketOverrides {
                     zero_gas_pairs: pairs,
                 }) as Box<dyn ProtocolSim>
             } else {
-                let mut pairs = HashSet::new();
+                let mut pairs = FxHashSet::default();
                 pairs.insert((token_in, token_out));
                 Box::new(SelectiveZeroGasSim { inner: sim, zero_gas_pairs: pairs })
             };
@@ -167,7 +168,7 @@ impl MarketOverrides {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct SelectiveZeroGasSim {
     inner: Box<dyn ProtocolSim>,
-    zero_gas_pairs: HashSet<(Bytes, Bytes)>,
+    zero_gas_pairs: FxHashSet<(Bytes, Bytes)>,
 }
 
 #[typetag::serde]
@@ -214,7 +215,7 @@ impl ProtocolSim for SelectiveZeroGasSim {
     fn delta_transition(
         &mut self,
         delta: ProtocolStateDelta,
-        tokens: &HashMap<Bytes, Token>,
+        tokens: &std::collections::HashMap<Bytes, Token>,
         balances: &Balances,
     ) -> Result<(), TransitionError> {
         self.inner
@@ -250,7 +251,7 @@ impl ProtocolSim for SelectiveZeroGasSim {
 /// Assumes `f` is roughly unimodal (has one maximum). `max_evals` controls the
 /// number of function evaluations (higher = more precise but slower).
 pub(crate) fn golden_section_search(
-    f: impl Fn(f64) -> f64,
+    mut f: impl FnMut(f64) -> f64,
     mut lo: f64,
     mut hi: f64,
     max_evals: usize,
@@ -510,7 +511,7 @@ struct SimulatedSplitSwap {
 /// The outcome of simulating a whole split route.
 struct SplitExecution {
     swaps: Vec<SimulatedSplitSwap>,
-    available: HashMap<Bytes, BigUint>,
+    available: FxHashMap<Bytes, BigUint>,
     post_swap: MarketOverrides,
     total_gas: u64,
 }
@@ -520,9 +521,9 @@ struct SplitExecution {
 /// branch collection).
 fn merge_shared_hops(
     paths: &[PathAllocation],
-) -> Result<HashMap<Bytes, Vec<SplitSwap>>, AlgorithmError> {
+) -> Result<FxHashMap<Bytes, Vec<SplitSwap>>, AlgorithmError> {
     type HopKey = (ComponentId, Bytes, Bytes);
-    let mut hops: HashMap<HopKey, SplitSwap> = HashMap::new();
+    let mut hops: FxHashMap<HopKey, SplitSwap> = FxHashMap::default();
 
     for path in paths {
         for hop in &path.hops {
@@ -549,7 +550,7 @@ fn merge_shared_hops(
         }
     }
 
-    let mut branch_collections: HashMap<Bytes, Vec<SplitSwap>> = HashMap::new();
+    let mut branch_collections: FxHashMap<Bytes, Vec<SplitSwap>> = FxHashMap::default();
     for (_, swap) in hops {
         branch_collections
             .entry(swap.hop.token_in.address.clone())
@@ -609,8 +610,8 @@ fn assign_splits_and_amounts(
 
 /// Counts, per token, how many swaps produce it, so the traversal only swaps a
 /// token once all its inflows have arrived.
-fn build_in_degree(hops_by_token: &HashMap<Bytes, Vec<SplitSwap>>) -> HashMap<Bytes, usize> {
-    let mut in_degree: HashMap<Bytes, usize> = HashMap::new();
+fn build_in_degree(hops_by_token: &FxHashMap<Bytes, Vec<SplitSwap>>) -> FxHashMap<Bytes, usize> {
+    let mut in_degree: FxHashMap<Bytes, usize> = FxHashMap::default();
     for (token_in_addr, branch_collection) in hops_by_token {
         in_degree
             .entry(token_in_addr.clone())
@@ -651,7 +652,7 @@ fn execute_split_plan(
     let mut ready = VecDeque::new();
     ready.push_back(start_token.clone());
 
-    let mut available: HashMap<Bytes, BigUint> = HashMap::new();
+    let mut available: FxHashMap<Bytes, BigUint> = FxHashMap::default();
     available.insert(start_token.clone(), start_amount.clone());
 
     let mut swaps = Vec::new();
@@ -792,7 +793,7 @@ pub(crate) fn evaluate_total_output(
         .first()
         .and_then(|path| path.first())
         .ok_or_else(|| AlgorithmError::Other("paths must not be empty".to_string()))?;
-    let terminal_tokens: HashSet<Bytes> = paths
+    let terminal_tokens: FxHashSet<Bytes> = paths
         .iter()
         .map(|path| {
             path.last()
@@ -883,7 +884,7 @@ pub(crate) fn build_split_route(
         &MarketOverrides::empty(),
     )?;
     let mut swaps = Vec::new();
-    let mut route_tokens: HashMap<Bytes, Token> = HashMap::new();
+    let mut route_tokens: FxHashMap<Bytes, Token> = FxHashMap::default();
 
     for executed in execution.swaps {
         let component = market

@@ -68,8 +68,7 @@ fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Openapi => {
-            use utoipa::OpenApi as _;
-            let spec = fynd_rpc::api::ApiDoc::openapi();
+            let spec = fynd_rpc::api::openapi_spec();
             // Safety: OpenAPI spec serialization only fails on non-string map keys,
             // which utoipa never produces.
             let json = serde_json::to_string_pretty(&spec).expect("spec serialization cannot fail");

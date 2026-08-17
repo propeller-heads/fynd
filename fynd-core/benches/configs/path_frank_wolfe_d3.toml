@@ -1,0 +1,2 @@
+algorithm = "path_frank_wolfe"
+max_hops = 3

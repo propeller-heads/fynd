@@ -30,28 +30,27 @@
 
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument};
-use tycho_simulation::{
-    tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::Address,
-};
+use tycho_simulation::tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim};
 
 use super::{
     most_liquid::DepthAndPrice,
+    paths,
     sim_guard::GuardedProtocolSim,
     split_primitives::{build_split_route, HopDescriptor, PathAllocation, SimulatedHop},
-    Algorithm, AlgorithmConfig, MostLiquidAlgorithm, NoPathReason,
+    Algorithm, AlgorithmConfig, NoPathReason,
 };
 use crate::{
     derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketDataView, MarketState, StateLabel},
-    graph::{petgraph::StableDiGraph, EdgeData, Path, PetgraphStableDiGraphManager},
+    graph::{EdgeData, GraphQueryFilter, Path, TopologyGraph, TopologyGraphManager},
     types::{ComponentId, Order, Route, RouteResult},
     AlgorithmError,
 };
@@ -119,12 +118,11 @@ impl SplitCandidate {
 /// Splits an order across component-disjoint (and, via fill-and-spill, component-sharing) paths to
 /// reduce price impact, returning the best net of the single path and several split allocations.
 pub struct WaterFillAlgorithm {
-    min_hops: usize,
-    max_hops: usize,
+    /// The hop bounds and connector tokens every route search runs under.
+    query: GraphQueryFilter,
     timeout: Duration,
     max_candidates: usize,
     max_paths: usize,
-    connector_tokens: Option<HashSet<Address>>,
 }
 
 /// A candidate reallocation in the exchange-refinement pass: shift one `delta` of input from the
@@ -173,15 +171,17 @@ impl WaterFillAlgorithm {
     /// Creates a `WaterFillAlgorithm` from an `AlgorithmConfig`.
     pub(crate) fn with_config(config: AlgorithmConfig) -> Result<Self, AlgorithmError> {
         Ok(Self {
-            min_hops: config.min_hops(),
-            max_hops: config.max_hops(),
+            query: GraphQueryFilter {
+                min_hops: config.min_hops(),
+                max_hops: config.max_hops(),
+                connector_tokens: config.connector_tokens().cloned(),
+            },
             timeout: config.timeout(),
             max_candidates: config
                 .max_routes()
                 .unwrap_or(DEFAULT_MAX_CANDIDATES)
                 .max(DEFAULT_MAX_PATHS),
             max_paths: DEFAULT_MAX_PATHS,
-            connector_tokens: config.connector_tokens().cloned(),
         })
     }
 
@@ -191,7 +191,7 @@ impl WaterFillAlgorithm {
     fn simulate_step(
         path: &Path<DepthAndPrice>,
         market: &MarketState,
-        overlay: &HashMap<ComponentId, Box<dyn ProtocolSim>>,
+        overlay: &FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
         amount: BigUint,
     ) -> Option<StepResult> {
         let mut current = amount;
@@ -201,13 +201,15 @@ impl WaterFillAlgorithm {
         // per-hop state clone when the path actually repeats a component; the common case
         // skips the clone entirely.
         let path_reuses_component = {
-            let mut seen: HashSet<&ComponentId> = HashSet::with_capacity(path.len());
+            let mut seen: FxHashSet<&ComponentId> =
+                FxHashSet::with_capacity_and_hasher(path.len(), Default::default());
             !path
                 .edge_iter()
                 .iter()
                 .all(|e| seen.insert(&e.component_id))
         };
-        let mut intra_path_states: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut intra_path_states: FxHashMap<ComponentId, Box<dyn ProtocolSim>> =
+            FxHashMap::default();
         let mut new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)> =
             Vec::with_capacity(path.len());
 
@@ -267,7 +269,7 @@ impl WaterFillAlgorithm {
     /// Walks `ranked` best first and keeps a path only if none of its components are already used
     /// by a kept path, skipping it otherwise. Returns the kept paths' indices into `ranked`.
     fn select_disjoint(ranked: &[Path<DepthAndPrice>], max_paths: usize) -> Vec<usize> {
-        let mut visited_components: HashSet<&ComponentId> = HashSet::new();
+        let mut visited_components: FxHashSet<&ComponentId> = FxHashSet::default();
         let mut selected = Vec::new();
         for (idx, path) in ranked.iter().enumerate() {
             let path_components: Vec<&ComponentId> = path
@@ -297,7 +299,7 @@ impl WaterFillAlgorithm {
     #[instrument(level = "debug", skip_all)]
     async fn setup<'a>(
         &self,
-        graph: &'a StableDiGraph<DepthAndPrice>,
+        graph: &'a TopologyGraph<DepthAndPrice>,
         market: MarketData,
         label: Option<StateLabel>,
         derived: Option<SharedDerivedDataRef>,
@@ -314,14 +316,8 @@ impl WaterFillAlgorithm {
             None
         };
 
-        let all_paths = MostLiquidAlgorithm::find_paths(
-            graph,
-            order.token_in(),
-            order.token_out(),
-            self.min_hops,
-            self.max_hops,
-            self.connector_tokens.as_ref(),
-        )?;
+        let all_paths =
+            paths::find_paths(graph, order.token_in(), order.token_out(), &self.query, None)?;
         if all_paths.is_empty() {
             return Err(AlgorithmError::NoPath {
                 from: order.token_in().clone(),
@@ -333,7 +329,7 @@ impl WaterFillAlgorithm {
         let mut scored: Vec<(Path<DepthAndPrice>, f64)> = all_paths
             .into_iter()
             .map(|p| {
-                let s = MostLiquidAlgorithm::try_score_path(&p).unwrap_or(f64::MIN);
+                let s = paths::try_score_path(&p).unwrap_or(f64::MIN);
                 (p, s)
             })
             .collect();
@@ -369,10 +365,8 @@ impl WaterFillAlgorithm {
                 &view,
                 order,
                 CandidateSearchConfig {
-                    min_hops: self.min_hops,
-                    max_hops: self.max_hops,
+                    query: &self.query,
                     max_candidates: BOUNDED_DISCOVERY_CANDIDATES,
-                    connector_tokens: self.connector_tokens.as_ref(),
                     anchor_tokens: &anchor_tokens,
                     source_token: order.token_in(),
                     start: &start,
@@ -381,7 +375,8 @@ impl WaterFillAlgorithm {
             );
             match bounded {
                 Ok((bounded_paths, _)) => {
-                    let mut keys: HashSet<Vec<ComponentId>> = paths.iter().map(path_key).collect();
+                    let mut keys: FxHashSet<Vec<ComponentId>> =
+                        paths.iter().map(path_key).collect();
                     let mut union = Vec::with_capacity(bounded_paths.len() + paths.len());
                     for path in bounded_paths {
                         if keys.insert(path_key(&path)) {
@@ -398,12 +393,12 @@ impl WaterFillAlgorithm {
                     debug!(error = %e, "water-fill bounded discovery failed; using exhaustive candidates only")
                 }
             }
-            let component_ids: HashSet<ComponentId> = paths
+            let component_ids: FxHashSet<&ComponentId> = paths
                 .iter()
                 .flat_map(|p| {
                     p.edge_iter()
                         .iter()
-                        .map(|e| e.component_id.clone())
+                        .map(|e| &e.component_id)
                 })
                 .collect();
             let subset = view.extract_subset_with_overlay(&component_ids);
@@ -424,12 +419,8 @@ impl WaterFillAlgorithm {
             if start.elapsed().as_millis() as u64 > timeout_ms {
                 break;
             }
-            match MostLiquidAlgorithm::simulate_path(
-                path,
-                &market,
-                token_prices.as_ref(),
-                amount_in.clone(),
-            ) {
+            match paths::simulate_pool_path(path, &market, token_prices.as_ref(), amount_in.clone())
+            {
                 Ok(result) => {
                     let gross = result
                         .route()
@@ -473,8 +464,8 @@ impl WaterFillAlgorithm {
 }
 
 impl Algorithm for WaterFillAlgorithm {
-    type GraphType = StableDiGraph<DepthAndPrice>;
-    type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+    type GraphType = TopologyGraph<DepthAndPrice>;
+    type GraphManager = TopologyGraphManager<DepthAndPrice>;
 
     fn name(&self) -> &str {
         "water_fill"
@@ -626,7 +617,7 @@ impl WaterFillAlgorithm {
         if amount.is_zero() {
             return Some(BigInt::zero());
         }
-        let empty: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let empty: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
         let step = Self::simulate_step(path, ctx.market, &empty, amount.clone())?;
         let activation = Self::activation_cost(ctx, &step.gas);
         Some(BigInt::from(step.amount_out) - activation)
@@ -742,7 +733,7 @@ impl WaterFillAlgorithm {
     fn allocation_commit(
         path: &Path<DepthAndPrice>,
         market: &MarketState,
-        overrides: &mut HashMap<ComponentId, Box<dyn ProtocolSim>>,
+        overrides: &mut FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
         amount: BigUint,
         flow_fraction: f64,
     ) -> Option<PathAllocation> {
@@ -821,7 +812,7 @@ impl WaterFillAlgorithm {
             }
             // Fresh overrides per leg: legs are component-disjoint, but a component reused within
             // one path must still see its own first swap.
-            let mut overrides: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+            let mut overrides: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
             let allocation = Self::allocation_commit(
                 &ctx.ordered[path_idx],
                 ctx.market,
@@ -857,8 +848,8 @@ impl WaterFillAlgorithm {
         let timeout_ms = self.timeout.as_millis() as u64;
         let path_count = subset.len();
 
-        let mut committed: Vec<HashMap<ComponentId, Box<dyn ProtocolSim>>> = (0..path_count)
-            .map(|_| HashMap::new())
+        let mut committed: Vec<FxHashMap<ComponentId, Box<dyn ProtocolSim>>> = (0..path_count)
+            .map(|_| FxHashMap::default())
             .collect();
         let mut cum_in: Vec<BigUint> = vec![BigUint::zero(); path_count];
         let mut activated: Vec<bool> = vec![!gate; path_count];
@@ -898,6 +889,7 @@ impl WaterFillAlgorithm {
             let Some((best_i, _, step)) = best else {
                 break;
             };
+
             for (id, state) in step.new_states {
                 committed[best_i].insert(id, state);
             }
@@ -917,7 +909,7 @@ impl WaterFillAlgorithm {
             return candidates;
         }
         let timeout_ms = self.timeout.as_millis() as u64;
-        let empty: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let empty: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
         let mut marginal: Vec<(usize, BigInt)> = Vec::new();
         for (idx, path) in ctx
             .ordered
@@ -1001,7 +993,7 @@ impl WaterFillAlgorithm {
         let remainder = &amount_in - &base_chunk * num_chunks;
         let timeout_ms = self.timeout.as_millis() as u64;
 
-        let mut overlay: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut overlay: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
         let mut activated: Vec<bool> = vec![!gate; subset.len()];
         let mut active_count = if gate { 0 } else { subset.len() };
         let mut counts: Vec<usize> = vec![0; subset.len()];
@@ -1080,7 +1072,7 @@ impl WaterFillAlgorithm {
         }
         execution_order.sort_by(|&a, &b| cand_in[b].cmp(&cand_in[a]));
 
-        let mut overrides: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut overrides: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
         let mut allocations = Vec::new();
         for i in execution_order {
             let allocation = Self::allocation_commit(
@@ -1146,11 +1138,10 @@ struct ScoredEdge<'a, W> {
 /// Parameters for one bounded candidate-discovery run.
 #[derive(Clone, Copy)]
 struct CandidateSearchConfig<'a> {
-    min_hops: usize,
-    max_hops: usize,
+    /// The same hop bounds and connector set every other route search runs under.
+    query: &'a GraphQueryFilter,
     max_candidates: usize,
-    connector_tokens: Option<&'a HashSet<Address>>,
-    anchor_tokens: &'a HashSet<Address>,
+    anchor_tokens: &'a FxHashSet<Address>,
     source_token: &'a Address,
     start: &'a Instant,
     timeout_ms: u64,
@@ -1163,7 +1154,7 @@ fn timed_out(start: &Instant, timeout_ms: u64) -> bool {
 /// Runs the bounded discovery and returns the candidate paths plus their `(index, full-amount
 /// gross output)` ranking, best first.
 fn find_candidate_paths<'a, W>(
-    graph: &'a StableDiGraph<W>,
+    graph: &'a TopologyGraph<W>,
     market: &MarketDataView<'_>,
     order: &Order,
     cfg: CandidateSearchConfig<'_>,
@@ -1171,11 +1162,11 @@ fn find_candidate_paths<'a, W>(
 where
     W: Clone,
 {
-    if cfg.min_hops == 0 || cfg.min_hops > cfg.max_hops {
+    if cfg.query.min_hops == 0 || cfg.query.min_hops > cfg.query.max_hops {
         return Err(AlgorithmError::InvalidConfiguration {
             reason: format!(
                 "invalid hop configuration: min_hops={} max_hops={}",
-                cfg.min_hops, cfg.max_hops,
+                cfg.query.min_hops, cfg.query.max_hops,
             ),
         });
     }
@@ -1191,11 +1182,12 @@ where
         amount_out: order.amount().clone(),
     }];
 
-    for _depth in 0..cfg.max_hops {
+    for _depth in 0..cfg.query.max_hops {
         if timed_out(cfg.start, cfg.timeout_ms) || frontier.is_empty() {
             break;
         }
-        let mut next_by_node: HashMap<NodeIndex, Vec<CandidatePathState<'a, W>>> = HashMap::new();
+        let mut next_by_node: FxHashMap<NodeIndex, Vec<CandidatePathState<'a, W>>> =
+            FxHashMap::default();
         for state in frontier {
             if state.node == to_idx && from_idx != to_idx {
                 continue;
@@ -1217,14 +1209,13 @@ where
 }
 
 fn find_token_node<W>(
-    graph: &StableDiGraph<W>,
+    graph: &TopologyGraph<W>,
     token: &Address,
     reason: NoPathReason,
     order: &Order,
 ) -> Result<NodeIndex, AlgorithmError> {
     graph
-        .node_indices()
-        .find(|&node| &graph[node] == token)
+        .get_token_ix(token)
         .ok_or(AlgorithmError::NoPath {
             from: order.token_in().clone(),
             to: order.token_out().clone(),
@@ -1233,13 +1224,13 @@ fn find_token_node<W>(
 }
 
 fn expand_candidate_state<'a, W>(
-    graph: &'a StableDiGraph<W>,
+    graph: &'a TopologyGraph<W>,
     market: &MarketDataView<'_>,
     cfg: &CandidateSearchConfig<'_>,
     target: NodeIndex,
     state: CandidatePathState<'a, W>,
     found: &mut Vec<(Path<'a, W>, BigUint)>,
-    next_by_node: &mut HashMap<NodeIndex, Vec<CandidatePathState<'a, W>>>,
+    next_by_node: &mut FxHashMap<NodeIndex, Vec<CandidatePathState<'a, W>>>,
 ) where
     W: Clone,
 {
@@ -1255,10 +1246,10 @@ fn expand_candidate_state<'a, W>(
             path: path.clone(),
             amount_out: candidate.amount_out,
         };
-        if candidate.target == target && path.len() >= cfg.min_hops {
+        if candidate.target == target && path.len() >= cfg.query.min_hops {
             found.push((path.clone(), path_state.amount_out.clone()));
         }
-        if path.len() < cfg.max_hops {
+        if path.len() < cfg.query.max_hops {
             next_by_node
                 .entry(candidate.target)
                 .or_default()
@@ -1268,7 +1259,7 @@ fn expand_candidate_state<'a, W>(
 }
 
 fn candidate_edges_for_state<'a, W>(
-    graph: &'a StableDiGraph<W>,
+    graph: &'a TopologyGraph<W>,
     market: &MarketDataView<'_>,
     cfg: &CandidateSearchConfig<'_>,
     target: NodeIndex,
@@ -1282,7 +1273,7 @@ fn candidate_edges_for_state<'a, W>(
 }
 
 fn score_candidate_edges<'a, W>(
-    graph: &'a StableDiGraph<W>,
+    graph: &'a TopologyGraph<W>,
     market: &MarketDataView<'_>,
     cfg: &CandidateSearchConfig<'_>,
     target: NodeIndex,
@@ -1292,41 +1283,54 @@ fn score_candidate_edges<'a, W>(
     let mut scored = Vec::new();
     for edge in graph.edges(state.node) {
         let next_node = edge.target();
-        if !can_extend_path(graph, state, next_node, target, edge.weight(), cfg) {
-            continue;
-        }
+        // Priority is a property of the token reached, so it is settled before looking at the pools
+        // that reach it.
         let priority = match candidate_priority(graph, next_node, target, cfg) {
             Some(priority) => priority,
             None if preferred_only => continue,
             None => 3,
         };
-        let Some(amount_out) = simulate_edge(
-            market,
-            &state.amount_out,
-            &graph[state.node],
-            edge.weight(),
-            &graph[next_node],
-        ) else {
-            continue;
-        };
-        scored.push(ScoredEdge { target: next_node, edge: edge.weight(), amount_out, priority });
+        for pool in edge.weight().pools() {
+            if !can_extend_path(graph, state, next_node, target, pool, cfg) {
+                continue;
+            }
+            let Some(amount_out) = simulate_edge(
+                market,
+                &state.amount_out,
+                &graph[state.node],
+                pool,
+                &graph[next_node],
+            ) else {
+                continue;
+            };
+            scored.push(ScoredEdge { target: next_node, edge: pool, amount_out, priority });
+        }
     }
     scored
 }
 
 /// Derives bounded discovery's soft anchor set from the live graph: the `DERIVED_ANCHOR_COUNT`
-/// most-connected tokens (highest component-edge degree) plus the native-ETH sentinel. Degree is
+/// most-connected tokens (most pools trading them) plus the native-ETH sentinel. Degree is
 /// the same connectivity signal `derive-connector-tokens` ranks by, so anchoring stays correct on
 /// any chain without a hardcoded per-chain list. The native-ETH zero address carries near-zero
 /// degree but is load-bearing for `WETH → ETH → token` routes where Tycho models native ETH as
 /// `0x0`, so it is anchored explicitly.
-fn derive_anchor_tokens<W>(graph: &StableDiGraph<W>) -> HashSet<Address> {
-    let mut by_degree: Vec<(NodeIndex, usize)> = graph
+///
+/// Pools, not trading partners: this graph holds one edge per token pair with the pools inside it,
+/// so counting edges would rank a token on five thin pairs above one on three deep ones.
+fn derive_anchor_tokens<W>(graph: &TopologyGraph<W>) -> FxHashSet<Address> {
+    let mut by_pool_count: Vec<(NodeIndex, usize)> = graph
         .node_indices()
-        .map(|node| (node, graph.edges(node).count()))
+        .map(|node| {
+            let pools = graph
+                .edges(node)
+                .map(|edge| edge.weight().pools().len())
+                .sum();
+            (node, pools)
+        })
         .collect();
-    by_degree.sort_unstable_by_key(|(_, degree)| Reverse(*degree));
-    let mut anchors: HashSet<Address> = by_degree
+    by_pool_count.sort_unstable_by_key(|(_, pools)| Reverse(*pools));
+    let mut anchors: FxHashSet<Address> = by_pool_count
         .into_iter()
         .take(DERIVED_ANCHOR_COUNT)
         .map(|(node, _)| graph[node].clone())
@@ -1336,7 +1340,7 @@ fn derive_anchor_tokens<W>(graph: &StableDiGraph<W>) -> HashSet<Address> {
 }
 
 fn candidate_priority<W>(
-    graph: &StableDiGraph<W>,
+    graph: &TopologyGraph<W>,
     node: NodeIndex,
     target: NodeIndex,
     cfg: &CandidateSearchConfig<'_>,
@@ -1345,7 +1349,7 @@ fn candidate_priority<W>(
         return Some(0);
     }
     let token = &graph[node];
-    match cfg.connector_tokens {
+    match cfg.query.connector_tokens.as_ref() {
         Some(tokens) => tokens.contains(token).then_some(1),
         None => cfg
             .anchor_tokens
@@ -1355,7 +1359,7 @@ fn candidate_priority<W>(
 }
 
 fn can_extend_path<W>(
-    graph: &StableDiGraph<W>,
+    graph: &TopologyGraph<W>,
     state: &CandidatePathState<'_, W>,
     next_node: NodeIndex,
     target: NodeIndex,
@@ -1380,7 +1384,9 @@ fn can_extend_path<W>(
     if next_node == target {
         return true;
     }
-    cfg.connector_tokens
+    cfg.query
+        .connector_tokens
+        .as_ref()
         .map(|tokens| tokens.contains(next_addr))
         .unwrap_or(true)
 }
@@ -1407,7 +1413,7 @@ fn select_candidate_edges<W>(
 ) -> Vec<ScoredEdge<'_, W>> {
     scored.sort_by(compare_scored_edges);
     let mut selected = Vec::new();
-    let mut per_target: HashMap<NodeIndex, usize> = HashMap::new();
+    let mut per_target: FxHashMap<NodeIndex, usize> = FxHashMap::default();
     for edge in scored {
         let limit = if edge.priority == 0 {
             CANDIDATE_DIRECT_EDGES_PER_TOKEN
@@ -1436,7 +1442,7 @@ fn compare_scored_edges<W>(a: &ScoredEdge<'_, W>, b: &ScoredEdge<'_, W>) -> Orde
 }
 
 fn prune_candidate_frontier<W>(
-    by_node: HashMap<NodeIndex, Vec<CandidatePathState<'_, W>>>,
+    by_node: FxHashMap<NodeIndex, Vec<CandidatePathState<'_, W>>>,
 ) -> Vec<CandidatePathState<'_, W>> {
     by_node
         .into_values()
@@ -1454,7 +1460,7 @@ fn rank_found_candidate_paths<'a, W>(
     order: &Order,
 ) -> Result<CandidatePathSet<'a, W>, AlgorithmError> {
     found.sort_by(|(_, a), (_, b)| b.cmp(a));
-    let mut keys = HashSet::new();
+    let mut keys = FxHashSet::default();
     let mut paths = Vec::new();
     let mut scores = Vec::new();
 
@@ -1489,7 +1495,7 @@ mod tests {
     use num_traits::ToPrimitive;
     use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
 
-    use super::*;
+    use super::{super::MostLiquidAlgorithm, *};
     use crate::{
         algorithm::{
             split_test_harness::{
@@ -1497,8 +1503,8 @@ mod tests {
                 two_equal_weth_usdc, TWO_EQUAL_USDC_RESERVE, TWO_EQUAL_WETH_RESERVE,
             },
             test_utils::{
-                addr, setup_market_unweighted, setup_market_weighted_boxed, token_with_decimals,
-                ConstantProductSim, DivByZeroSim,
+                addr, setup_market_unweighted_topology, setup_market_weighted_boxed,
+                token_with_decimals, ConstantProductSim, DivByZeroSim,
             },
         },
         graph::GraphManager,
@@ -1761,7 +1767,7 @@ mod tests {
     async fn test_discovery_finds_and_ranks_parallel_components() {
         let link = token_with_decimals(0x01, "LINK", 18);
         let weth = token_with_decimals(0x02, "WETH", 18);
-        let (market, graph_manager) = setup_market_unweighted(vec![
+        let (market, graph_manager) = setup_market_unweighted_topology(vec![
             (
                 "a_weak_link_weth",
                 &link,
@@ -1790,11 +1796,9 @@ mod tests {
             &view,
             &order,
             CandidateSearchConfig {
-                min_hops: 1,
-                max_hops: 3,
+                query: &GraphQueryFilter { min_hops: 1, max_hops: 3, connector_tokens: None },
                 max_candidates: 128,
-                connector_tokens: None,
-                anchor_tokens: &HashSet::new(),
+                anchor_tokens: &FxHashSet::default(),
                 source_token: order.token_in(),
                 start: &start,
                 timeout_ms: 2000,
@@ -1817,7 +1821,7 @@ mod tests {
     async fn test_discovery_rejects_invalid_hop_configuration() {
         let link = token_with_decimals(0x01, "LINK", 18);
         let weth = token_with_decimals(0x02, "WETH", 18);
-        let (market, graph_manager) = setup_market_unweighted(vec![(
+        let (market, graph_manager) = setup_market_unweighted_topology(vec![(
             "link_weth",
             &link,
             &weth,
@@ -1838,11 +1842,9 @@ mod tests {
             &view,
             &order,
             CandidateSearchConfig {
-                min_hops: 0,
-                max_hops: 3,
+                query: &GraphQueryFilter { min_hops: 0, max_hops: 3, connector_tokens: None },
                 max_candidates: 128,
-                connector_tokens: None,
-                anchor_tokens: &HashSet::new(),
+                anchor_tokens: &FxHashSet::default(),
                 source_token: order.token_in(),
                 start: &start,
                 timeout_ms: 2000,
@@ -1862,7 +1864,7 @@ mod tests {
         let a = token_with_decimals(0x02, "A", 18);
         let b = token_with_decimals(0x03, "B", 18);
         let c = token_with_decimals(0x04, "C", 18);
-        let (_market, graph_manager) = setup_market_unweighted(vec![
+        let (_market, graph_manager) = setup_market_unweighted_topology(vec![
             ("hub_a", &hub, &a, Box::new(v2_component(1, 1)) as Box<dyn ProtocolSim>),
             ("hub_b", &hub, &b, Box::new(v2_component(1, 1)) as Box<dyn ProtocolSim>),
             ("hub_c", &hub, &c, Box::new(v2_component(1, 1)) as Box<dyn ProtocolSim>),

@@ -670,11 +670,10 @@ fn has_exclusive_leg(quote: &OrderQuote) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use alloy::primitives::{Address as EvmAddress, Bytes as EvmBytes};
     use num_bigint::BigUint;
     use rstest::rstest;
+    use rustc_hash::FxHashMap;
     use tycho_execution::encoding::{
         errors::EncodingError,
         models::{EncodedSolution, Solution},
@@ -725,7 +724,7 @@ mod tests {
     /// Builds a `Route` with both swaps and the token map populated, mirroring
     /// what the algorithms do in production.
     fn make_route_with_tokens(pairs: &[(Address, Address)]) -> crate::types::Route {
-        let mut tokens = HashMap::new();
+        let mut tokens = rustc_hash::FxHashMap::default();
         let swaps = pairs
             .iter()
             .map(|(tin, tout)| {
@@ -778,7 +777,12 @@ mod tests {
 
     fn mock_encoder(chain: Chain) -> Encoder {
         let router_fees = SharedRouterFees::default();
-        router_fees.set(RouterFees::new(FEE_SCALE, 100_000, 20_000_000, HashMap::new()));
+        router_fees.set(RouterFees::new(
+            FEE_SCALE,
+            100_000,
+            20_000_000,
+            rustc_hash::FxHashMap::default(),
+        ));
         Encoder {
             tycho_encoder: Some(Box::new(MockTychoEncoder)),
             chain,
@@ -900,7 +904,7 @@ mod tests {
     }
 
     fn single_swap_route(swap: crate::types::Swap) -> crate::types::Route {
-        let tokens = HashMap::from([
+        let tokens = FxHashMap::from_iter([
             (swap.token_in().clone(), make_token(swap.token_in().clone())),
             (swap.token_out().clone(), make_token(swap.token_out().clone())),
         ]);
@@ -991,7 +995,7 @@ mod tests {
         // Load fees so encode() can run; in production the fetcher supplies on-chain values.
         encoder
             .router_fees()
-            .set(RouterFees::new(FEE_SCALE, 100_000, 20_000_000, HashMap::new()));
+            .set(RouterFees::new(FEE_SCALE, 100_000, 20_000_000, rustc_hash::FxHashMap::default()));
         encoder
     }
 
@@ -1236,7 +1240,8 @@ mod tests {
     async fn test_encode_uses_custom_fees_for_client_fee_receiver() {
         let encoder = real_encoder();
         // Default 1% router fee on output; receiver 0xBB pays no router fees at all.
-        let custom = HashMap::from([(Bytes::from(make_address(0xBB).as_ref()), (0u32, 0u32))]);
+        let custom =
+            FxHashMap::from_iter([(Bytes::from(make_address(0xBB).as_ref()), (0u32, 0u32))]);
         encoder
             .router_fees()
             .set(RouterFees::new(FEE_SCALE, 1_000_000, 20_000_000, custom));
@@ -1260,8 +1265,10 @@ mod tests {
         let encoder = real_encoder();
         // The order sender (0xAA) has a custom zero router fee on output; client-fee share
         // inherits the 20% default.
-        let custom =
-            HashMap::from([(Bytes::from(make_address(0xAA).as_ref()), (0u32, 20_000_000u32))]);
+        let custom = FxHashMap::from_iter([(
+            Bytes::from(make_address(0xAA).as_ref()),
+            (0u32, 20_000_000u32),
+        )]);
         encoder
             .router_fees()
             .set(RouterFees::new(FEE_SCALE, 1_000_000, 20_000_000, custom));
@@ -1282,7 +1289,12 @@ mod tests {
         let encoder = real_encoder();
         encoder
             .router_fees()
-            .set(RouterFees::new(FEE_SCALE, 1_000_000, 20_000_000, HashMap::new()));
+            .set(RouterFees::new(
+                FEE_SCALE,
+                1_000_000,
+                20_000_000,
+                rustc_hash::FxHashMap::default(),
+            ));
         let quote = make_order_quote(1_000_000_000)
             .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
 

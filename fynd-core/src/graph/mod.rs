@@ -5,34 +5,56 @@
 //! based on market events.
 
 pub mod petgraph;
-
-use std::collections::HashMap;
+pub mod token_graph;
 
 pub use petgraph::{EdgeData, PetgraphStableDiGraphManager, StableDiGraph};
+use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use thiserror::Error;
+pub use token_graph::{PairEdge, TokenGraph, TokenPath, TopologyGraph, TopologyGraphManager};
 use tycho_simulation::{
     tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim},
     tycho_core::models::token::Token,
 };
 
-use crate::types::ComponentId;
+use crate::{derived::DerivedData, feed::market_data::MarketDataView, types::ComponentId};
 
-/// A path through the graph as a sequence of edge indices.
+/// Tokens held without allocating. A path of `h` hops names `h + 1` tokens, so this covers every
+/// `max_hops` up to 4. A deeper path still works: `SmallVec` moves to the heap and behaves as a
+/// `Vec` from there.
+pub(crate) const INLINE_TOKENS: usize = 5;
+
+/// Edges held without allocating. A path's edges are its tokens less one, and an edge is a leg of
+/// a route, so this sizes per-leg buffers too.
+pub(crate) const INLINE_EDGES: usize = INLINE_TOKENS - 1;
+
+/// A route with a pool chosen for every leg.
 ///
-/// Each edge index points to an edge in the graph containing the component ID and weight.
-/// This representation allows O(1) access to edge data during scoring and simulation.
-#[derive(Clone, Default)]
+/// Borrows from the graph rather than copying it, so scoring and simulation read a leg's component
+/// id and weight without a lookup.
+#[derive(Default)]
 pub struct Path<'a, D> {
-    /// Sequence of token addresses in the path.
-    pub tokens: Vec<&'a Address>,
-    /// Sequence of edge indices representing the path. Length is tokens.len() - 1.
-    pub edge_data: Vec<&'a EdgeData<D>>,
+    /// The tokens the route passes through, in order.
+    pub tokens: SmallVec<[&'a Address; INLINE_TOKENS]>,
+    /// The pool taken on each leg. One shorter than `tokens`.
+    pub edge_data: SmallVec<[&'a EdgeData<D>; INLINE_EDGES]>,
+}
+
+/// Written out rather than derived so the copy is a `memcpy`: `SmallVec` takes that path only
+/// through `from_slice`, which the derived `Clone` cannot call.
+impl<D> Clone for Path<'_, D> {
+    fn clone(&self) -> Self {
+        Self {
+            tokens: SmallVec::from_slice(&self.tokens),
+            edge_data: SmallVec::from_slice(&self.edge_data),
+        }
+    }
 }
 
 impl<'a, D> Path<'a, D> {
     /// Creates a new empty Path.
     pub fn new() -> Self {
-        Self { tokens: Vec::new(), edge_data: Vec::new() }
+        Self { tokens: SmallVec::new(), edge_data: SmallVec::new() }
     }
 
     /// Adds a hop to the path.
@@ -114,13 +136,24 @@ where
     ///
     /// Arguments:
     /// - components: A map of component IDs to their tokens addresses.
-    fn initialize_graph(&mut self, components: &HashMap<ComponentId, Vec<Address>>);
+    fn initialize_graph(&mut self, components: &FxHashMap<ComponentId, Vec<Address>>);
 
     /// Returns a reference to the managed graph.
     fn graph(&self) -> &G;
 }
 
-use crate::{derived::DerivedData, feed::market_data::MarketDataView};
+/// What a caller will accept from a route search.
+///
+/// Bundles the bounds every path query carries so they travel as one argument instead of three.
+pub struct GraphQueryFilter {
+    /// Shortest route to return, in hops. A query with `0` matches nothing.
+    pub min_hops: usize,
+    /// Longest route to return, in hops.
+    pub max_hops: usize,
+    /// Tokens a route may pass *through*. Its own endpoints are always allowed, whatever this
+    /// holds. `None` allows every token.
+    pub connector_tokens: Option<FxHashSet<Address>>,
+}
 
 /// Trait for edge weight types that can be computed from a ProtocolSim and DerivedData.
 ///

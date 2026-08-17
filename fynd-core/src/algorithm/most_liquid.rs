@@ -1,43 +1,270 @@
 //! Most Liquid algorithm implementation.
 //!
 //! This algorithm finds routes by:
-//! 1. Finding all edge paths up to max_hops using BFS (shorter paths first, all parallel edges)
-//! 2. Scoring and sorting paths by spot price, fees, and liquidity depth
-//! 3. Simulating paths with actual ProtocolSim to get accurate output (best paths first)
-//! 4. Ranking by net output (output - gas cost in output token terms)
-//! 5. Returning the best route with stats recorded to the tracing span
+//! 1. Finding every route between the two tokens as a sequence of tokens, no pools chosen yet
+//! 2. Ranking those sequences by spot price and liquidity depth, deepest first
+//! 3. Solving each sequence hop by hop, taking the pool that pays most at the amount that reaches
+//!    it — one simulation per pool per hop rather than per pool combination, and never the same
+//!    pool on two hops
+//! 4. Ranking the solved sequences by net output (output less gas, in the output token)
+//! 5. Building swaps for the winner alone, with stats recorded to the tracing span
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use metrics::{counter, histogram};
 use num_bigint::{BigInt, BigUint};
 use num_traits::ToPrimitive;
-use petgraph::prelude::EdgeRef;
+use petgraph::stable_graph::NodeIndex;
+use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use tracing::{debug, instrument, trace};
 use tycho_simulation::{
-    tycho_common::simulation::protocol_sim::ProtocolSim,
+    tycho_common::simulation::protocol_sim::{GetAmountOutResult, Price, ProtocolSim},
     tycho_core::models::{token::Token, Address},
 };
 
 use super::{Algorithm, AlgorithmConfig, NoPathReason};
 use crate::{
-    algorithm::sim_guard::GuardedProtocolSim,
+    algorithm::{paths, sim_guard::GuardedProtocolSim},
     derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketState, StateLabel},
-    graph::{petgraph::StableDiGraph, Path, PetgraphStableDiGraphManager},
+    graph::{
+        EdgeData, GraphQueryFilter, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES,
+    },
     types::{ComponentId, Order, Route, RouteResult, Swap},
     AlgorithmError,
 };
+
+/// What can go wrong settling one token sequence.
+///
+/// Never leaves most-liquid: the caller counts it and tries the next sequence. Variants carry node
+/// indices rather than addresses, so a sequence that fails costs nothing to report.
+#[derive(Debug, thiserror::Error)]
+enum MostLiquidError {
+    /// No pool trading this pair could take the amount that reached it.
+    #[error("no pool between {from:?} and {to:?} could trade the amount")]
+    HopNotTradable { from: NodeIndex, to: NodeIndex },
+    /// A token on the sequence is not in the market subset this solve was given.
+    #[error("token {0:?} not in the market subset")]
+    TokenMissing(NodeIndex),
+}
+
+/// What every candidate on one order is solved against.
+///
+/// Fixed for the whole solve, so it travels as one argument rather than as five that would have to
+/// stay in step.
+#[derive(Clone, Copy)]
+struct SolveContext<'a> {
+    graph: &'a TopologyGraph<DepthAndPrice>,
+    market: &'a MarketState,
+    token_prices: Option<&'a TokenGasPrices>,
+    amount_in: &'a BigUint,
+    /// What a unit of gas costs, read once off the market snapshot.
+    gas_price: &'a BigUint,
+    /// When the solve started, against which every candidate checks the timeout.
+    start: Instant,
+}
+
+/// A token sequence with every hop solved, before any swap is built.
+struct SolvedRoute {
+    hops: SmallVec<[HopResult; INLINE_EDGES]>,
+    /// The route's output less the gas it costs, in the output token's own units. Falls back to
+    /// the gross amount when that token has no price, which is what happens before derived data
+    /// has been computed.
+    net_amount_out: BigInt,
+}
+
+/// One half of a token's gas price as an `f64`, for normalising depth.
+///
+/// `None` when it is zero or too large for an `f64`, either of which makes the edge unusable.
+/// `part` names which half, for the log.
+fn price_part(
+    value: &BigUint,
+    part: &'static str,
+    component_id: &ComponentId,
+    token_in: &Token,
+) -> Option<f64> {
+    match value.to_f64() {
+        Some(v) if v > 0.0 => Some(v),
+        Some(_) => {
+            trace!(
+                component_id = %component_id,
+                token_in = %token_in.address,
+                part,
+                "token price part is zero, skipping edge"
+            );
+            None
+        }
+        None => {
+            trace!(
+                component_id = %component_id,
+                token_in = %token_in.address,
+                part,
+                "token price part overflows f64, skipping edge"
+            );
+            None
+        }
+    }
+}
+
+/// How one solve went: what it looked at, what it dropped, and why.
+///
+/// Filled in as the solve runs, then handed to [`SolveReport::record`] once, which owns every
+/// metric and every log line the solve emits.
+#[derive(Default)]
+struct SolveReport {
+    /// Token sequences the graph search returned.
+    paths_candidates: usize,
+    /// Of those, the ones left after ranking and the `max_routes` cut.
+    paths_to_simulate: usize,
+    /// Of those, the ones reached before the timeout stopped the solve.
+    paths_simulated: usize,
+    /// Sequences the ranking could not place at all, so they were never simulated.
+    scoring_failures: usize,
+    /// Sequences with a hop no pool would trade.
+    simulation_failures: usize,
+    /// Winners whose swaps did not form a route the executor can take.
+    validation_failures: usize,
+}
+
+impl SolveReport {
+    /// How much of what was worth simulating actually got simulated, as a percentage.
+    fn coverage_pct(&self) -> f64 {
+        (self.paths_simulated as f64 / self.paths_to_simulate as f64) * 100.0
+    }
+
+    /// Records the counters and writes the line that says how the solve went.
+    fn record(
+        &self,
+        best: Option<&RouteResult>,
+        market: &MarketState,
+        amount_in: &BigUint,
+        solve_time_ms: u64,
+        components_considered: usize,
+    ) {
+        counter!("algorithm.scoring_failures").increment(self.scoring_failures as u64);
+        counter!("algorithm.simulation_failures").increment(self.simulation_failures as u64);
+        counter!("algorithm.validation_failures").increment(self.validation_failures as u64);
+        histogram!("algorithm.simulation_coverage_pct").record(self.coverage_pct());
+
+        let block_number = market
+            .last_updated()
+            .map(|b| b.number());
+        let tokens_considered = market.token_registry_ref().len();
+        let Some(result) = best else {
+            debug!(
+                solve_time_ms,
+                block_number,
+                paths_candidates = self.paths_candidates,
+                paths_to_simulate = self.paths_to_simulate,
+                paths_simulated = self.paths_simulated,
+                simulation_failures = self.simulation_failures,
+                validation_failures = self.validation_failures,
+                simulation_coverage_pct = self.coverage_pct(),
+                components_considered,
+                tokens_considered,
+                "no viable route"
+            );
+            return;
+        };
+
+        let path_desc = result
+            .route()
+            .path_description(market.token_registry_ref());
+        let protocols = result
+            .route()
+            .swaps()
+            .iter()
+            .map(|s| s.protocol())
+            .collect::<Vec<_>>();
+        let price = amount_in
+            .to_f64()
+            .filter(|&v| v > 0.0)
+            .and_then(|amt_in| {
+                result
+                    .net_amount_out()
+                    .to_f64()
+                    .map(|amt_out| amt_out / amt_in)
+            })
+            .unwrap_or(f64::NAN);
+
+        debug!(
+            solve_time_ms,
+            block_number,
+            paths_candidates = self.paths_candidates,
+            paths_to_simulate = self.paths_to_simulate,
+            paths_simulated = self.paths_simulated,
+            simulation_failures = self.simulation_failures,
+            validation_failures = self.validation_failures,
+            simulation_coverage_pct = self.coverage_pct(),
+            components_considered,
+            tokens_considered,
+            path = %path_desc,
+            amount_in = %amount_in,
+            net_amount_out = %result.net_amount_out(),
+            price_out_per_in = price,
+            hop_count = result.route().swaps().len(),
+            protocols = ?protocols,
+            "route found"
+        );
+    }
+}
+
+/// A built route's output less what its gas costs, in the output token.
+///
+/// Read off the swaps rather than off the solve because [`MostLiquidAlgorithm::build_route`]
+/// re-simulates with state overrides, so its numbers — not the solve's — are the ones the caller
+/// is handed. Falls back to the gross amount when the output token has no price, which is what
+/// happens before derived data has been computed.
+fn swap_on_route(
+    route: &Route,
+    token_prices: Option<&TokenGasPrices>,
+    gas_price: &BigUint,
+) -> BigInt {
+    let Some(last) = route.swaps().last() else {
+        return BigInt::ZERO;
+    };
+    let amount_out = BigInt::from(last.amount_out().clone());
+
+    let Some(price) = token_prices.and_then(|prices| prices.get(last.token_out())) else {
+        return amount_out;
+    };
+    let mut gas = BigUint::ZERO;
+    for swap in route.swaps() {
+        gas += swap.gas_estimate();
+    }
+
+    amount_out - BigInt::from(gas * gas_price * &price.numerator / &price.denominator)
+}
+
+/// What one pool paid for one input amount, on one token pair.
+///
+/// Holds no pool state and no component: a candidate route is solved to compare it, and only the
+/// winner is built into swaps.
+#[derive(Clone)]
+struct HopResult {
+    /// Where the pool these numbers came from sits in the pair's pool list.
+    pool_ix: usize,
+    /// What that pool paid out, before gas.
+    amount_out: BigUint,
+    /// What that swap costs in gas, in wei.
+    gas: BigUint,
+}
+
+impl HopResult {
+    fn new(pool_ix: usize, result: GetAmountOutResult) -> Self {
+        HopResult { pool_ix, amount_out: result.amount, gas: result.gas }
+    }
+}
+
 /// Algorithm that selects routes based on expected output after gas.
 pub struct MostLiquidAlgorithm {
-    min_hops: usize,
-    max_hops: usize,
+    /// The hop bounds and connector tokens every route search runs under. Owned, so a solve hands
+    /// it straight to the graph instead of assembling one per order.
+    query: GraphQueryFilter,
     timeout: Duration,
     max_routes: Option<usize>,
-    connector_tokens: Option<HashSet<Address>>,
+    cache_pair_swaps: bool,
 }
 
 /// Algorithm-specific edge data for liquidity-based routing.
@@ -130,44 +357,8 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
             .and_then(|p| p.get(&token_in.address))
         {
             Some(price) => {
-                let num = match price.numerator.to_f64() {
-                    Some(v) if v > 0.0 => v,
-                    Some(_) => {
-                        trace!(
-                            component_id = %component_id,
-                            token_in = %token_in.address,
-                            "token price numerator is zero, skipping edge"
-                        );
-                        return None;
-                    }
-                    None => {
-                        trace!(
-                            component_id = %component_id,
-                            token_in = %token_in.address,
-                            "token price numerator overflows f64, skipping edge"
-                        );
-                        return None;
-                    }
-                };
-                let den = match price.denominator.to_f64() {
-                    Some(v) if v > 0.0 => v,
-                    Some(_) => {
-                        trace!(
-                            component_id = %component_id,
-                            token_in = %token_in.address,
-                            "token price denominator is zero, skipping edge"
-                        );
-                        return None;
-                    }
-                    None => {
-                        trace!(
-                            component_id = %component_id,
-                            token_in = %token_in.address,
-                            "token price denominator overflows f64, skipping edge"
-                        );
-                        return None;
-                    }
-                };
+                let num = price_part(&price.numerator, "numerator", component_id, token_in)?;
+                let den = price_part(&price.denominator, "denominator", component_id, token_in)?;
                 raw_depth * den / num
             }
             None => {
@@ -188,219 +379,145 @@ impl MostLiquidAlgorithm {
     /// Creates a new MostLiquidAlgorithm with default settings.
     pub fn new() -> Self {
         Self {
-            min_hops: 1,
-            max_hops: 3,
+            query: GraphQueryFilter { min_hops: 1, max_hops: 3, connector_tokens: None },
             timeout: Duration::from_millis(500),
             max_routes: None,
-            connector_tokens: None,
+            cache_pair_swaps: true,
         }
     }
 
     /// Creates a new MostLiquidAlgorithm with custom settings.
     pub fn with_config(config: AlgorithmConfig) -> Result<Self, AlgorithmError> {
-        Ok(Self {
-            min_hops: config.min_hops(),
-            max_hops: config.max_hops(),
-            timeout: config.timeout(),
-            max_routes: config.max_routes(),
-            connector_tokens: config.connector_tokens().cloned(),
-        })
-    }
-
-    /// Finds all paths between two tokens using BFS directly on the graph.
-    ///
-    /// This is a helper method that operates on the graph without needing the graph manager.
-    /// It performs BFS traversal to find all paths within the hop budget.
-    ///
-    /// # Errors
-    ///
-    /// Returns `AlgorithmError` if:
-    /// - Source token is not in the graph
-    /// - Destination token is not in the graph
-    #[instrument(level = "debug", skip(graph, connector_tokens))]
-    pub(crate) fn find_paths<'a>(
-        graph: &'a StableDiGraph<DepthAndPrice>,
-        from: &Address,
-        to: &Address,
-        min_hops: usize,
-        max_hops: usize,
-        connector_tokens: Option<&HashSet<Address>>,
-    ) -> Result<Vec<Path<'a, DepthAndPrice>>, AlgorithmError> {
-        if min_hops == 0 || min_hops > max_hops {
+        if config.min_hops() == 0 || config.min_hops() > config.max_hops() {
             return Err(AlgorithmError::InvalidConfiguration {
                 reason: format!(
-                    "invalid hop configuration: min_hops={min_hops} max_hops={max_hops}",
+                    "invalid hop configuration: min_hops={} max_hops={}",
+                    config.min_hops(),
+                    config.max_hops()
                 ),
             });
         }
 
-        // Find source and destination nodes by address
-        // TODO: this could be optimized by using a node index map in the graph manager
-        let from_idx = graph
-            .node_indices()
-            .find(|&n| &graph[n] == from)
-            .ok_or(AlgorithmError::NoPath {
-                from: from.clone(),
-                to: to.clone(),
-                reason: NoPathReason::SourceTokenNotInGraph,
-            })?;
-        let to_idx = graph
-            .node_indices()
-            .find(|&n| &graph[n] == to)
-            .ok_or(AlgorithmError::NoPath {
-                from: from.clone(),
-                to: to.clone(),
-                reason: NoPathReason::DestinationTokenNotInGraph,
-            })?;
-
-        let mut paths = Vec::new();
-        let mut queue = VecDeque::new();
-        queue.push_back((from_idx, Path::new()));
-
-        while let Some((current_node, current_path)) = queue.pop_front() {
-            if current_path.len() >= max_hops {
-                continue;
-            }
-
-            for edge in graph.edges(current_node) {
-                let next_node = edge.target();
-                let next_addr = &graph[next_node];
-
-                // Skip paths that revisit a token already in the path.
-                // Exception: when source == destination, the destination may appear at the end
-                // (forming a first == last cycle, e.g. USDC → WETH → USDC). All other intermediate
-                // cycles (e.g. USDC → WETH → WBTC → WETH) are not supported by Tycho execution.
-                let already_visited = current_path.tokens.contains(&next_addr);
-                let is_closing_circular_route = from_idx == to_idx && next_node == to_idx;
-                if already_visited && !is_closing_circular_route {
-                    continue;
-                }
-
-                // Skip disallowed connector tokens. Endpoints (from / to) are always permitted.
-                let is_destination = next_node == to_idx;
-                if !is_destination {
-                    if let Some(tokens) = connector_tokens {
-                        if !tokens.contains(next_addr) {
-                            continue;
-                        }
-                    }
-                }
-
-                let mut new_path = current_path.clone();
-                new_path.add_hop(&graph[current_node], edge.weight(), next_addr);
-
-                if next_node == to_idx && new_path.len() >= min_hops {
-                    paths.push(new_path.clone());
-                }
-
-                queue.push_back((next_node, new_path));
-            }
-        }
-
-        Ok(paths)
+        Ok(Self {
+            query: GraphQueryFilter {
+                min_hops: config.min_hops(),
+                max_hops: config.max_hops(),
+                connector_tokens: config.connector_tokens().cloned(),
+            },
+            timeout: config.timeout(),
+            max_routes: config.max_routes(),
+            cache_pair_swaps: true,
+        })
     }
 
-    /// Attempts to score a path based on spot prices and minimum liquidity depth.
+    /// Ranks a token sequence without simulating it, by the best its hops could do.
     ///
-    /// Formula: `score = (product of all spot_price) × min(depths)`
+    /// Every pool on a hop is read as the market holds it, with nothing carried between hops. That
+    /// is exact here because [`MostLiquidAlgorithm::solve_token_path`] never takes the same pool
+    /// twice, so no hop is scored against a pool an earlier hop would have moved.
     ///
-    /// This accounts for:
-    /// - Spot price: the theoretical exchange rate along the path not accounting for slippage
-    /// - Fees: included in spot_price already
-    /// - Depth (inertia): minimum depth acts as a liquidity bottleneck indicator
+    /// The same shape as [`MostLiquidAlgorithm::try_score_path`] — spot prices multiplied, thinnest
+    /// depth as the bottleneck — but a hop here stands for several pools, so it is scored on its
+    /// best. That makes the figure an upper bound on any route through the sequence, which is what
+    /// a ranking wants: no sequence is pushed down the queue below one that cannot beat it.
     ///
-    /// Returns `None` if the path cannot be scored (empty path or missing edge weights).
-    /// Paths that return `None` are filtered out of simulation.
+    /// A hop whose pools all lack derived data scores as unmeasured, which sinks the sequence to
+    /// the bottom of the queue without removing it. Depth is what the ranking is made of, so a
+    /// sequence missing it cannot be placed -- but it can still be simulated, and simulation is
+    /// what decides.
     ///
-    /// Higher score = better path candidate. Paths through deeper components rank higher.
-    pub(crate) fn try_score_path(path: &Path<DepthAndPrice>) -> Option<f64> {
-        if path.is_empty() {
-            trace!("cannot score empty path");
+    /// Returns `None` only when the sequence names a pair the graph has no pool for, which would be
+    /// the two indexes disagreeing rather than a routing outcome.
+    fn score_token_path(
+        graph: &TopologyGraph<DepthAndPrice>,
+        token_path: &[NodeIndex],
+    ) -> Option<f64> {
+        if token_path.len() < 2 {
             return None;
         }
 
         let mut price = 1.0;
         let mut min_depth = f64::MAX;
 
-        for edge in path.edge_iter() {
-            let Some(data) = edge.data.as_ref() else {
-                debug!(component_id = %edge.component_id, "edge missing weight data, path cannot be scored");
+        for pair in token_path.windows(2) {
+            let pools = graph.pools_between(pair[0], pair[1]);
+            if pools.is_empty() {
                 return None;
-            };
+            }
 
-            price *= data.spot_price;
-            min_depth = min_depth.min(data.depth);
+            let mut best_price = f64::MIN;
+            let mut best_depth = f64::MIN;
+            for pool in pools {
+                if let Some(data) = pool.data.as_ref() {
+                    best_price = best_price.max(data.spot_price);
+                    best_depth = best_depth.max(data.depth);
+                }
+            }
+
+            if best_price == f64::MIN {
+                // Nothing measured on this hop. Neutral on price, thinnest possible on depth, so
+                // the sequence sinks to the bottom of the queue rather than out of it.
+                min_depth = 0.0;
+            } else {
+                price *= best_price;
+                min_depth = min_depth.min(best_depth);
+            }
         }
 
         Some(price * min_depth)
     }
 
-    /// Simulates swaps along a path using each component's `ProtocolSim::get_amount_out`.
-    /// Tracks intermediate state changes to handle routes that revisit the same component.
+    /// Builds the route the caller chose, once, from the pools it picked.
     ///
-    /// Calculates `net_amount_out` by subtracting gas cost from the output amount.
-    /// The result can be negative if gas cost exceeds output (e.g., inaccurate gas estimation).
-    ///
-    /// # Arguments
-    /// * `path` - The edge path to simulate
-    /// * `graph` - The graph containing edge and node data
-    /// * `market` - Market data for token/component lookups and gas price
-    /// * `token_prices` - Optional token prices for gas cost conversion
-    /// * `amount_in` - The input amount to simulate
-    #[instrument(level = "trace", skip(path, market, token_prices), fields(hop_count = path.len()))]
-    pub(crate) fn simulate_path<D>(
-        path: &Path<D>,
-        market: &MarketState,
-        token_prices: Option<&TokenGasPrices>,
-        amount_in: BigUint,
-    ) -> Result<RouteResult, AlgorithmError> {
+    /// Each hop is simulated again rather than carrying its result through the comparison: the
+    /// numbers come out the same, and a swap needs the pool's state as it was before it, which
+    /// nothing else has to hold on to. The state overrides are a backstop only -- the solve hands
+    /// over a route whose hops name distinct pools -- and they cover protocols whose components
+    /// share state behind the scenes.
+    fn build_route(
+        ctx: &SolveContext<'_>,
+        token_path: &[NodeIndex],
+        solved: &SolvedRoute,
+    ) -> Result<Route, AlgorithmError> {
+        let SolveContext { graph, market, amount_in, .. } = *ctx;
         let mut current_amount = amount_in.clone();
-        let mut swaps = Vec::with_capacity(path.len());
+        let mut swaps = Vec::with_capacity(solved.hops.len());
+        let mut tokens: FxHashMap<Address, Token> = FxHashMap::default();
+        let mut state_overrides: FxHashMap<ComponentId, Box<dyn ProtocolSim>> =
+            FxHashMap::default();
 
-        // Track state overrides for components we've already swapped through.
-        let mut state_overrides: HashMap<&ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
-        let mut tokens: HashMap<Address, Token> = HashMap::new();
+        for (pair, hop) in token_path.windows(2).zip(&solved.hops) {
+            let address_in = &graph[pair[0]];
+            let address_out = &graph[pair[1]];
+            let token_in = paths::get_token(market, address_in)?;
+            let token_out = paths::get_token(market, address_out)?;
 
-        for (address_in, edge_data, address_out) in path.iter() {
-            // Get token and component data for the simulation call
-            let token_in = market
-                .get_token(address_in)
+            let component_id = graph
+                .pools_between(pair[0], pair[1])
+                .get(hop.pool_ix)
+                .map(|edge| &edge.component_id)
                 .ok_or_else(|| AlgorithmError::DataNotFound {
-                    kind: "token",
-                    id: Some(format!("{:?}", address_in)),
+                    kind: "pool",
+                    id: Some(format!("{address_in:?} -> {address_out:?}")),
                 })?;
-            let token_out = market
-                .get_token(address_out)
-                .ok_or_else(|| AlgorithmError::DataNotFound {
-                    kind: "token",
-                    id: Some(format!("{:?}", address_out)),
-                })?;
-
-            let component_id = &edge_data.component_id;
             let component = market
                 .get_component(component_id)
                 .ok_or_else(|| AlgorithmError::DataNotFound {
                     kind: "component",
                     id: Some(component_id.clone()),
                 })?;
-            let component_state = market
-                .get_simulation_state(component_id)
+            let state = state_overrides
+                .get(component_id)
+                .map(Box::as_ref)
+                .or_else(|| market.get_simulation_state(component_id))
                 .ok_or_else(|| AlgorithmError::DataNotFound {
                     kind: "simulation state",
                     id: Some(component_id.clone()),
                 })?;
-
-            let state = state_overrides
-                .get(component_id)
-                .map(Box::as_ref)
-                .unwrap_or(component_state);
-
-            // Simulate the swap
             let result = state
                 .get_amount_out_guarded(current_amount.clone(), token_in, token_out)
-                .map_err(|e| AlgorithmError::Other(format!("simulation error: {:?}", e)))?;
+                .map_err(|e| AlgorithmError::Other(format!("simulation error: {e:?}")))?;
 
-            // Record the swap
             swaps.push(Swap::new(
                 component_id.clone(),
                 component.protocol_system.clone(),
@@ -419,50 +536,263 @@ impl MostLiquidAlgorithm {
                 .entry(token_out.address.clone())
                 .or_insert_with(|| token_out.clone());
 
-            state_overrides.insert(component_id, result.new_state);
+            state_overrides.insert(component_id.clone(), result.new_state);
             current_amount = result.amount;
         }
 
-        // Calculate net amount out (output - gas cost in output token terms)
-        let route = Route::new(swaps, tokens)?;
-        let output_amount = route
-            .swaps()
-            .last()
-            .map(|s| s.amount_out().clone())
-            .unwrap_or_else(|| BigUint::ZERO);
+        Ok(Route::new(swaps, tokens)?)
+    }
 
-        let gas_price = market
-            .gas_price()
-            .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
-            .effective_gas_price()
-            .clone();
+    /// Ranks token sequences by [`MostLiquidAlgorithm::score_token_path`], best first.
+    ///
+    /// A sequence whose pools carry no derived data still scores — as zero depth — and is still
+    /// simulated. Only a sequence with a pair no pool trades at all drops out here.
+    fn score_paths(
+        graph: &TopologyGraph<DepthAndPrice>,
+        all_paths: Vec<TokenPath>,
+    ) -> Vec<(TokenPath, f64)> {
+        let mut scored_paths: Vec<(TokenPath, f64)> = all_paths
+            .into_iter()
+            .filter_map(|path| {
+                let score = Self::score_token_path(graph, &path)?;
+                Some((path, score))
+            })
+            .collect();
 
-        let net_amount_out = if let Some(last_swap) = route.swaps().last() {
-            let total_gas = route.total_gas();
-            let gas_cost_wei = &total_gas * &gas_price;
+        scored_paths.sort_by(|(_, a_score), (_, b_score)| {
+            // Flip the comparison to get descending order
+            b_score
+                .partial_cmp(a_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-            // Convert gas cost to output token terms using token prices
-            let gas_cost_in_output_token: Option<BigUint> = token_prices
-                .and_then(|prices| prices.get(last_swap.token_out()))
-                .map(|price| {
-                    // gas_cost_in_token = gas_cost_wei * numerator / denominator
-                    // where numerator = tokens per ETH, denominator = 10^18 + path_gas
-                    &gas_cost_wei * &price.numerator / &price.denominator
-                });
+        scored_paths
+    }
 
-            match gas_cost_in_output_token {
-                Some(gas_cost) => BigInt::from(output_amount) - BigInt::from(gas_cost),
-                None => {
-                    // No token price available - use output amount as-is
-                    // This happens if derived data hasn't been computed yet
-                    BigInt::from(output_amount)
+    async fn snapshot_market_state(
+        graph: &TopologyGraph<DepthAndPrice>,
+        market: MarketData,
+        label: Option<StateLabel>,
+        scored_paths: &[(TokenPath, f64)],
+    ) -> Result<MarketState, AlgorithmError> {
+        let mut pairs: FxHashSet<(NodeIndex, NodeIndex)> = FxHashSet::default();
+        for (token_path, _) in scored_paths {
+            for pair in token_path.windows(2) {
+                pairs.insert((pair[0], pair[1]));
+            }
+        }
+        let mut component_ids: FxHashSet<&ComponentId> = FxHashSet::default();
+        for &(from, to) in &pairs {
+            for pool in graph.pools_between(from, to) {
+                component_ids.insert(&pool.component_id);
+            }
+        }
+
+        let market = match label.as_ref() {
+            Some(l) => market
+                .read_labeled(l)
+                .await
+                .map_err(|e| AlgorithmError::Other(e.to_string()))?,
+            None => market.read().await,
+        };
+        let market_subset = market.extract_subset_with_overlay(&component_ids);
+        drop(market);
+        Ok(market_subset)
+    }
+
+    fn solve_for_best_path(
+        &self,
+        scored_paths: &[(TokenPath, f64)],
+        report: &mut SolveReport,
+        ctx: &SolveContext,
+    ) -> Result<RouteResult, AlgorithmError> {
+        let mut best_route: Option<(&TokenPath, SolvedRoute)> = None;
+        let mut cache = PoolSwapsCache::new(self.cache_pair_swaps);
+        let timeout_ms = self.timeout.as_millis() as u64;
+
+        for (token_path, _) in scored_paths {
+            // Check timeout
+            let elapsed_ms = ctx.start.elapsed().as_millis() as u64;
+            if elapsed_ms > timeout_ms {
+                break;
+            }
+
+            let solved = match Self::solve_token_path(ctx, token_path, &mut cache) {
+                Ok(solved) => solved,
+                Err(e) => {
+                    trace!(error = %e, "could not solve path");
+                    report.simulation_failures += 1;
+                    continue;
+                }
+            };
+
+            // Check if this is the best result so far
+            if best_route
+                .as_ref()
+                .is_none_or(|(_, previous): &(&TokenPath, SolvedRoute)| {
+                    solved.net_amount_out > previous.net_amount_out
+                })
+            {
+                best_route = Some((token_path, solved));
+            }
+
+            report.paths_simulated += 1;
+        }
+
+        // Only the winner is built into swaps: that is what copies a component and a pool state per
+        // hop, and every other candidate would have thrown them away.
+        let best = match best_route {
+            Some((token_path, solved)) => {
+                let route = Self::build_route(ctx, token_path, &solved)?;
+                if let Err(e) = route.validate() {
+                    trace!(error = %e, "best route failed validation");
+                    report.validation_failures += 1;
+                    None
+                } else {
+                    let amount_out = swap_on_route(&route, ctx.token_prices, ctx.gas_price);
+                    Some(RouteResult::new(route, amount_out, ctx.gas_price.clone()))
                 }
             }
-        } else {
-            BigInt::from(output_amount)
+            None => None,
         };
 
-        Ok(RouteResult::new(route, net_amount_out, gas_price))
+        let solve_time_ms = ctx.start.elapsed().as_millis() as u64;
+        report.record(
+            best.as_ref(),
+            ctx.market,
+            ctx.amount_in,
+            solve_time_ms,
+            ctx.market.component_count(),
+        );
+
+        match best {
+            Some(best_route) => Ok(best_route),
+            None => {
+                if solve_time_ms > timeout_ms {
+                    Err(AlgorithmError::Timeout { elapsed_ms: solve_time_ms })
+                } else {
+                    Err(AlgorithmError::InsufficientLiquidity)
+                }
+            }
+        }
+    }
+
+    /// Solves a fixed token sequence, choosing the pool to swap through on each hop.
+    ///
+    /// Walks the hops in order and, at each, simulates every pool serving that pair at the amount
+    /// actually arriving and keeps whichever nets most after its own gas. Enumerating the
+    /// combinations instead costs the product of the pools per hop; this costs their sum.
+    ///
+    /// Choosing hop by hop is not a shortcut that gives up accuracy. More into a pool is more out
+    /// of it, so the largest amount at each hop carries through to the largest amount at the
+    /// end. Gas does not disturb that: the gas already spent is common to every candidate at a
+    /// hop and drops out of the comparison, and a hop's own gas priced in the token it pays out
+    /// ranks the candidates the same way as comparing whole routes would. What it does improve
+    /// on is the ranking heuristic, which never sees the order size — here every choice is made
+    /// at the amount really flowing.
+    ///
+    /// Falls back to comparing gross output when a token has no price, which is exact for gross.
+    ///
+    /// A pool an earlier hop swapped through is not offered to a later one. Each hop is simulated
+    /// against the pool's state as the market holds it, so a pool taken twice would be quoted the
+    /// second time as if the first swap had not moved it. Two hops of one sequence never name the
+    /// same token pair, but one component can serve two pairs -- a pool holding A, B and C is on
+    /// both hops of A -> B -> C -- and a circular sequence crosses the same pair in both
+    /// directions. Sequences whose hops all run out of pools this way are dropped, the same as any
+    /// other sequence that cannot be settled.
+    fn solve_token_path(
+        ctx: &SolveContext<'_>,
+        token_path: &[NodeIndex],
+        cache: &mut PoolSwapsCache,
+    ) -> Result<SolvedRoute, MostLiquidError> {
+        let mut current_amount = ctx.amount_in.clone();
+        let mut hops: SmallVec<[HopResult; INLINE_EDGES]> = SmallVec::new();
+        let mut used_components: SmallVec<[&ComponentId; INLINE_EDGES]> = SmallVec::new();
+        let mut gas = BigUint::ZERO;
+        // What a unit of gas costs in the token the route pays out, which is the last hop's own
+        // output token. `None` when that token has no price.
+        let mut route_gas_price = None;
+
+        for pair in token_path.windows(2) {
+            let (token_in, token_out, token_out_gas_price) = Self::get_pair_data(ctx, pair)?;
+
+            let simulate = |component_id: &ComponentId| {
+                let state = ctx
+                    .market
+                    .get_simulation_state(component_id)?;
+                let result = state
+                    .get_amount_out_guarded(current_amount.clone(), token_in, token_out)
+                    .ok()?;
+                let net = match token_out_gas_price {
+                    Some(price) => {
+                        let cost =
+                            &result.gas * ctx.gas_price * &price.numerator / &price.denominator;
+                        BigInt::from(result.amount.clone()) - BigInt::from(cost)
+                    }
+                    None => BigInt::from(result.amount.clone()),
+                };
+                Some((result, net))
+            };
+
+            let pools = ctx
+                .graph
+                .pools_between(pair[0], pair[1]);
+
+            // A pool this route already crossed cannot be offered again. Where that bites, the
+            // pool is picked here and the cache is left alone in both directions: what it holds
+            // was chosen over every pool, and the best of a narrowed field is not the answer the
+            // next route to ask this pair at this amount should be handed.
+            let restricted = pools
+                .iter()
+                .any(|edge| used_components.contains(&&edge.component_id));
+            let hop_result = if restricted {
+                best_paying_pool(pools, |id| !used_components.contains(&id), simulate)
+            } else {
+                cache.swap((pair[0], pair[1]), &current_amount, pools, simulate)
+            };
+            let Some(hop_result) = hop_result else {
+                return Err(MostLiquidError::HopNotTradable { from: pair[0], to: pair[1] })
+            };
+
+            let chosen = pools
+                .get(hop_result.pool_ix)
+                .expect("Pool used not present in the pools available");
+
+            used_components.push(&chosen.component_id);
+
+            gas += &hop_result.gas;
+            current_amount = hop_result.amount_out.clone();
+            route_gas_price = token_out_gas_price;
+            hops.push(hop_result);
+        }
+
+        let net_amount_out = match route_gas_price {
+            Some(price) => {
+                let cost = gas * ctx.gas_price * &price.numerator / &price.denominator;
+                BigInt::from(current_amount) - BigInt::from(cost)
+            }
+            None => BigInt::from(current_amount),
+        };
+
+        Ok(SolvedRoute { hops, net_amount_out })
+    }
+
+    fn get_pair_data<'a>(
+        ctx: &SolveContext<'a>,
+        pair: &[NodeIndex],
+    ) -> Result<(&'a Token, &'a Token, Option<&'a Price>), MostLiquidError> {
+        let token_in = ctx
+            .market
+            .get_token(&ctx.graph[pair[0]])
+            .ok_or(MostLiquidError::TokenMissing(pair[0]))?;
+        let token_out = ctx
+            .market
+            .get_token(&ctx.graph[pair[1]])
+            .ok_or(MostLiquidError::TokenMissing(pair[1]))?;
+        let token_out_gas_price = ctx
+            .token_prices
+            .and_then(|prices| prices.get(&token_out.address));
+        Ok((token_in, token_out, token_out_gas_price))
     }
 }
 
@@ -473,8 +803,8 @@ impl Default for MostLiquidAlgorithm {
 }
 
 impl Algorithm for MostLiquidAlgorithm {
-    type GraphType = StableDiGraph<DepthAndPrice>;
-    type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+    type GraphType = TopologyGraph<DepthAndPrice>;
+    type GraphManager = TopologyGraphManager<DepthAndPrice>;
 
     fn name(&self) -> &str {
         "most_liquid"
@@ -497,228 +827,69 @@ impl Algorithm for MostLiquidAlgorithm {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
 
-        // Extract token prices from derived data (if available)
-        let token_prices = if let Some(ref derived) = derived {
-            derived
+        // Shared rather than copied: a solve only reads these, and the map covers every token in
+        // the market.
+        let token_prices = match derived.as_ref() {
+            Some(derived) => derived
                 .read()
                 .await
-                .token_prices()
-                .cloned()
-        } else {
-            None
+                .token_prices_shared(),
+            None => None,
         };
 
         let amount_in = order.amount().clone();
 
-        // Step 1: Find all edge paths using BFS (shorter paths first)
-        let all_paths = Self::find_paths(
-            graph,
-            order.token_in(),
-            order.token_out(),
-            self.min_hops,
-            self.max_hops,
-            self.connector_tokens.as_ref(),
-        )?;
-
-        let paths_candidates = all_paths.len();
-        if paths_candidates == 0 {
-            return Err(AlgorithmError::NoPath {
-                from: order.token_in().clone(),
-                to: order.token_out().clone(),
-                reason: NoPathReason::NoGraphPath,
-            });
+        // Step 1: Find every route as a sequence of tokens. Pools are chosen per hop during
+        // simulation.
+        let all_paths =
+            paths::find_token_paths(graph, order.token_in(), order.token_out(), &self.query)?;
+        let n_paths = all_paths.len();
+        let no_path = |reason| AlgorithmError::NoPath {
+            from: order.token_in().clone(),
+            to: order.token_out().clone(),
+            reason,
+        };
+        if all_paths.is_empty() {
+            return Err(no_path(NoPathReason::NoGraphPath));
         }
 
         // Step 2: Score and sort all paths by estimated output (higher score = better)
         // No lock needed — scoring uses only local graph data.
-        let mut scored_paths: Vec<(Path<DepthAndPrice>, f64)> = all_paths
-            .into_iter()
-            .filter_map(|path| {
-                let score = Self::try_score_path(&path)?;
-                Some((path, score))
-            })
-            .collect();
+        let mut scored_paths = Self::score_paths(graph, all_paths);
+        if scored_paths.is_empty() {
+            return Err(no_path(NoPathReason::NoScorablePaths));
+        }
 
-        scored_paths.sort_by(|(_, a_score), (_, b_score)| {
-            // Flip the comparison to get descending order
-            b_score
-                .partial_cmp(a_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let mut report = SolveReport {
+            paths_candidates: n_paths,
+            scoring_failures: n_paths - scored_paths.len(),
+            ..SolveReport::default()
+        };
 
         if let Some(max_routes) = self.max_routes {
             scored_paths.truncate(max_routes);
         }
+        report.paths_to_simulate = scored_paths.len();
 
-        let paths_to_simulate = scored_paths.len();
-        let scoring_failures = paths_candidates - paths_to_simulate;
-        if paths_to_simulate == 0 {
-            return Err(AlgorithmError::NoPath {
-                from: order.token_in().clone(),
-                to: order.token_out().clone(),
-                reason: NoPathReason::NoScorablePaths,
-            });
-        }
+        // Step 3: Fetch all pools in scored_paths.
+        let market = Self::snapshot_market_state(graph, market, label, &scored_paths).await?;
+        let gas_price = market
+            .gas_price()
+            .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
+            .effective_gas_price()
+            .clone();
 
-        // Step 3: Extract component IDs from all paths we'll simulate
-        let component_ids: HashSet<ComponentId> = scored_paths
-            .iter()
-            .flat_map(|(path, _)| {
-                path.edge_iter()
-                    .iter()
-                    .map(|e| e.component_id.clone())
-            })
-            .collect();
-
-        // Step 4: Brief lock — check gas price + extract market subset for simulation
-        let market = {
-            let market = match label.as_ref() {
-                Some(l) => market
-                    .read_labeled(l)
-                    .await
-                    .map_err(|e| AlgorithmError::Other(e.to_string()))?,
-                None => market.read().await,
-            };
-            if market.gas_price().is_none() {
-                return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
-            }
-            let market_subset = market.extract_subset_with_overlay(&component_ids);
-            drop(market);
-            market_subset
+        // Step 4: Solve all paths in score order and return the best one
+        let ctx = SolveContext {
+            graph,
+            market: &market,
+            token_prices: token_prices.as_deref(),
+            amount_in: &amount_in,
+            gas_price: &gas_price,
+            start,
         };
 
-        let mut paths_simulated = 0usize;
-        let mut simulation_failures = 0usize;
-        let mut validation_failures = 0usize;
-
-        // Step 5: Simulate all paths in score order using the local market subset
-        let mut best: Option<RouteResult> = None;
-        let timeout_ms = self.timeout.as_millis() as u64;
-
-        for (edge_path, _) in scored_paths {
-            // Check timeout
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-            if elapsed_ms > timeout_ms {
-                break;
-            }
-
-            let result = match Self::simulate_path(
-                &edge_path,
-                &market,
-                token_prices.as_ref(),
-                amount_in.clone(),
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    trace!(error = %e, "simulation failed for path");
-                    simulation_failures += 1;
-                    continue;
-                }
-            };
-
-            // Skip routes that fail validation so the next-best candidate can win.
-            if let Err(e) = result.route().validate() {
-                trace!(error = %e, "skipping invalid route");
-                validation_failures += 1;
-                continue;
-            }
-
-            // Check if this is the best result so far
-            if best
-                .as_ref()
-                .map(|best| result.net_amount_out() > best.net_amount_out())
-                .unwrap_or(true)
-            {
-                best = Some(result);
-            }
-
-            paths_simulated += 1;
-        }
-
-        // Log solve result
-        let solve_time_ms = start.elapsed().as_millis() as u64;
-        let block_number = market
-            .last_updated()
-            .map(|b| b.number());
-        // The proportion of paths simulated to total paths that we filtered to simulate
-        let coverage_pct = if paths_to_simulate == 0 {
-            100.0
-        } else {
-            (paths_simulated as f64 / paths_to_simulate as f64) * 100.0
-        };
-
-        // Record metrics
-        counter!("algorithm.scoring_failures").increment(scoring_failures as u64);
-        counter!("algorithm.simulation_failures").increment(simulation_failures as u64);
-        counter!("algorithm.validation_failures").increment(validation_failures as u64);
-        histogram!("algorithm.simulation_coverage_pct").record(coverage_pct);
-
-        match &best {
-            Some(result) => {
-                let tokens = market.token_registry_ref();
-                let path_desc = result.route().path_description(tokens);
-                let protocols = result
-                    .route()
-                    .swaps()
-                    .iter()
-                    .map(|s| s.protocol())
-                    .collect::<Vec<_>>();
-
-                let price = amount_in
-                    .to_f64()
-                    .filter(|&v| v > 0.0)
-                    .and_then(|amt_in| {
-                        result
-                            .net_amount_out()
-                            .to_f64()
-                            .map(|amt_out| amt_out / amt_in)
-                    })
-                    .unwrap_or(f64::NAN);
-
-                debug!(
-                    solve_time_ms,
-                    block_number,
-                    paths_candidates,
-                    paths_to_simulate,
-                    paths_simulated,
-                    simulation_failures,
-                    validation_failures,
-                    simulation_coverage_pct = coverage_pct,
-                    components_considered = component_ids.len(),
-                    tokens_considered = market.token_registry_ref().len(),
-                    path = %path_desc,
-                    amount_in = %amount_in,
-                    net_amount_out = %result.net_amount_out(),
-                    price_out_per_in = price,
-                    hop_count = result.route().swaps().len(),
-                    protocols = ?protocols,
-                    "route found"
-                );
-            }
-            None => {
-                debug!(
-                    solve_time_ms,
-                    block_number,
-                    paths_candidates,
-                    paths_to_simulate,
-                    paths_simulated,
-                    simulation_failures,
-                    validation_failures,
-                    simulation_coverage_pct = coverage_pct,
-                    components_considered = component_ids.len(),
-                    tokens_considered = market.token_registry_ref().len(),
-                    "no viable route"
-                );
-            }
-        }
-
-        best.ok_or({
-            if solve_time_ms > timeout_ms {
-                AlgorithmError::Timeout { elapsed_ms: solve_time_ms }
-            } else {
-                AlgorithmError::InsufficientLiquidity
-            }
-        })
+        self.solve_for_best_path(&scored_paths, &mut report, &ctx)
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {
@@ -739,11 +910,126 @@ impl Algorithm for MostLiquidAlgorithm {
     }
 }
 
+/// The pool on a pair paying the most net of gas, among those `usable` admits.
+///
+/// `pool_ix` indexes `pools`, so a caller that skipped some still gets back the index the built
+/// route needs.
+fn best_paying_pool<D>(
+    pools: &[EdgeData<D>],
+    mut usable: impl FnMut(&ComponentId) -> bool,
+    mut simulate: impl FnMut(&ComponentId) -> Option<(GetAmountOutResult, BigInt)>,
+) -> Option<HopResult> {
+    let mut best: Option<(usize, GetAmountOutResult, BigInt)> = None;
+
+    for (pool_ix, edge) in pools.iter().enumerate() {
+        if !usable(&edge.component_id) {
+            continue;
+        }
+        let Some((result, net)) = simulate(&edge.component_id) else {
+            trace!(component_id = edge.component_id, "simulation failed, skipping pool");
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(_, _, best_net)| net > *best_net)
+        {
+            best = Some((pool_ix, result, net));
+        }
+    }
+
+    let (pool_ix, result, _) = best?;
+    Some(HopResult::new(pool_ix, result))
+}
+
+/// What each token pair paid, created for every order and not persisted after it.
+///
+/// Routes share pairs: every route through WBTC -> WETH asks the same pools the same question. This
+/// answers it once. Which pool pays most is remembered for the pair; what it paid is remembered per
+/// input amount, so routes arriving with the same amount get the same numbers.
+///
+/// Remembering nothing is a valid state: [`PoolSwapsCache::new`] takes a flag, and with it off
+/// every hop asks every pool, which is the answer the cache is an approximation of.
+struct PoolSwapsCache {
+    pairs: FxHashMap<(NodeIndex, NodeIndex), PairCacheEntry>,
+    enabled: bool,
+}
+
+/// The pool that won a pair, and what it paid at each amount seen so far.
+struct PairCacheEntry {
+    /// Where the pool that last won this pair sits in its pool list.
+    pool_ix: usize,
+    /// Keyed by the amount that went in. Each outcome names the pool it came from, which is not
+    /// always `pool_ix`: a later amount can be won by a different pool, and the outcomes already
+    /// recorded still belong to whichever pool produced them.
+    outcomes_by_amount: FxHashMap<BigUint, HopResult>,
+}
+
+impl PoolSwapsCache {
+    fn new(enabled: bool) -> Self {
+        Self { pairs: FxHashMap::default(), enabled }
+    }
+
+    /// Swaps one pair: which pool to go through, and what it pays.
+    ///
+    /// Tries in order: the amount already recorded for this pair, then the pool that won it, then
+    /// every pool. `simulate` runs one pool and reports what it pays and what that is worth after
+    /// its own gas.
+    ///
+    /// Returns `None` when no pool on the pair can trade the amount.
+    fn swap<D>(
+        &mut self,
+        pair: (NodeIndex, NodeIndex),
+        amount_in: &BigUint,
+        pools: &[EdgeData<D>],
+        mut simulate: impl FnMut(&ComponentId) -> Option<(GetAmountOutResult, BigInt)>,
+    ) -> Option<HopResult> {
+        if let Some(choice) = self.pairs.get(&pair) {
+            if let Some(outcome) = choice.outcomes_by_amount.get(amount_in) {
+                return Some(outcome.clone());
+            }
+
+            // The pool was simulated but not at this amount. We assume that amounts dont move
+            // so much so we assume the same winner wins again at a slightly different amount.
+            if let Some((result, _)) = pools
+                .get(choice.pool_ix)
+                .and_then(|edge| simulate(&edge.component_id))
+            {
+                let hop_result = HopResult::new(choice.pool_ix, result);
+                self.record(pair, amount_in, &hop_result);
+                return Some(hop_result);
+            }
+        }
+
+        let hop_result = best_paying_pool(pools, |_| true, simulate)?;
+        self.record(pair, amount_in, &hop_result);
+        Some(hop_result)
+    }
+
+    /// Remembers what a pool paid for one amount on one pair, unless the cache is off.
+    ///
+    /// This is the only place anything is written, so an off cache stays empty and every lookup in
+    /// [`PoolSwapsCache::swap`] misses.
+    fn record(&mut self, pair: (NodeIndex, NodeIndex), amount_in: &BigUint, result: &HopResult) {
+        if !self.enabled {
+            return;
+        }
+
+        let choice = self
+            .pairs
+            .entry(pair)
+            .or_insert_with(|| PairCacheEntry {
+                pool_ix: result.pool_ix,
+                outcomes_by_amount: FxHashMap::default(),
+            });
+        choice.pool_ix = result.pool_ix;
+        choice
+            .outcomes_by_amount
+            .insert(amount_in.clone(), result.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
-    use rstest::rstest;
     use tycho_simulation::{
         tycho_core::simulation::protocol_sim::Price,
         tycho_ethereum::gas::{BlockGasPrice, GasPrice},
@@ -753,8 +1039,8 @@ mod tests {
     use crate::{
         algorithm::test_utils::{
             addr, component,
-            fixtures::{addrs, diamond_graph, linear_graph, parallel_graph},
-            market_read, order, setup_market_weighted, token, MockProtocolSim, ONE_ETH,
+            fixtures::{addrs, linear_graph},
+            order, setup_market_weighted, token, MockProtocolSim, ONE_ETH,
         },
         derived::{
             computation::{FailedItem, FailedItemError},
@@ -774,7 +1060,7 @@ mod tests {
     /// The price is set to numerator=1, denominator=1, which means:
     /// gas_cost_in_token = gas_cost_wei * 1 / 1 = gas_cost_wei
     fn setup_derived_with_token_prices(token_addresses: &[Address]) -> SharedDerivedDataRef {
-        let mut token_prices: TokenGasPrices = HashMap::new();
+        let mut token_prices: TokenGasPrices = FxHashMap::default();
         for addr in token_addresses {
             // Price where 1 wei of gas = 1 unit of token
             token_prices.insert(
@@ -786,76 +1072,6 @@ mod tests {
         let mut derived_data = DerivedData::new();
         derived_data.set_token_prices(token_prices, vec![], 1, true);
         std::sync::Arc::new(tokio::sync::RwLock::new(derived_data))
-    }
-    // ==================== try_score_path Tests ====================
-
-    #[test]
-    fn test_try_score_path_calculates_correctly() {
-        let (a, b, c, _) = addrs();
-        let mut m = linear_graph();
-
-        // A->B: spot=2.0, depth=1000, fee=0.3%; B->C: spot=0.5, depth=500, fee=0.1%
-        m.set_edge_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0), false)
-            .unwrap();
-        m.set_edge_weight(&"bc".to_string(), &b, &c, DepthAndPrice::new(0.5, 500.0), false)
-            .unwrap();
-
-        // Use find_paths to get the 2-hop path A->B->C
-        let graph = m.graph();
-        let paths = MostLiquidAlgorithm::find_paths(graph, &a, &c, 2, 2, None).unwrap();
-        assert_eq!(paths.len(), 1);
-        let path = &paths[0];
-
-        // price = 2.0 * 0.997 * 0.5 * 0.999, min_depth = 500.0
-        let expected = 2.0 * 0.5 * 500.0;
-        let score = MostLiquidAlgorithm::try_score_path(path).unwrap();
-        assert_eq!(score, expected, "expected {expected}, got {score}");
-    }
-
-    #[test]
-    fn test_try_score_path_empty_returns_none() {
-        let path: Path<DepthAndPrice> = Path::new();
-        assert_eq!(MostLiquidAlgorithm::try_score_path(&path), None);
-    }
-
-    #[test]
-    fn test_try_score_path_missing_weight_returns_none() {
-        let (a, b, _, _) = addrs();
-        let m = linear_graph();
-        let graph = m.graph();
-        let paths = MostLiquidAlgorithm::find_paths(graph, &a, &b, 1, 1, None).unwrap();
-        assert_eq!(paths.len(), 1);
-        assert!(MostLiquidAlgorithm::try_score_path(&paths[0]).is_none());
-    }
-
-    #[test]
-    fn test_try_score_path_circular_route() {
-        // Test scoring a circular path A -> B -> A
-        let (a, b, _, _) = addrs();
-        let mut m = linear_graph();
-
-        // Set weights for both directions of the ab component
-        // A->B: spot=2.0, depth=1000, fee=0.3%
-        // B->A: spot=0.6, depth=800, fee=0.3%
-        m.set_edge_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0), false)
-            .unwrap();
-        m.set_edge_weight(&"ab".to_string(), &b, &a, DepthAndPrice::new(0.6, 800.0), false)
-            .unwrap();
-
-        let graph = m.graph();
-        // Find A->B->A paths (circular, 2 hops)
-        let paths = MostLiquidAlgorithm::find_paths(graph, &a, &a, 2, 2, None).unwrap();
-
-        // Should find at least one path
-        assert_eq!(paths.len(), 1);
-
-        // Score should be: price * min_depth
-        // price = 2.0 * 0.997 * 0.6 * 0.997 = 1.1928...
-        // min_depth = min(1000, 800) = 800
-        // score = 1.1928 * 800 ≈ 954.3
-        let score = MostLiquidAlgorithm::try_score_path(&paths[0]).unwrap();
-        let expected = 2.0 * 0.6 * 800.0;
-        assert_eq!(score, expected, "expected {expected}, got {score}");
     }
 
     fn make_mock_sim() -> MockProtocolSim {
@@ -871,7 +1087,7 @@ mod tests {
     }
 
     fn make_token_prices(addresses: &[Address]) -> TokenGasPrices {
-        let mut prices = TokenGasPrices::new();
+        let mut prices = TokenGasPrices::default();
         for addr in addresses {
             // 1:1 price (1 token unit = 1 gas token unit)
             prices.insert(
@@ -1047,7 +1263,7 @@ mod tests {
 
         // Token price: 2000 token_in per 1 ETH (numerator=2000, denominator=1)
         // So 2_000_000 raw units / 2000 = 1000 ETH
-        let mut token_prices = TokenGasPrices::new();
+        let mut token_prices = TokenGasPrices::default();
         token_prices.insert(
             tok_in.address.clone(),
             Price { numerator: BigUint::from(2000u64), denominator: BigUint::from(1u64) },
@@ -1089,7 +1305,7 @@ mod tests {
 
         // Token price: numerator=3, denominator=2 -> 1.5 tokens per ETH
         // depth_in_eth = 500 * 2 / 3 = 333.333...
-        let mut token_prices = TokenGasPrices::new();
+        let mut token_prices = TokenGasPrices::default();
         token_prices.insert(
             tok_in.address.clone(),
             Price { numerator: BigUint::from(3u64), denominator: BigUint::from(2u64) },
@@ -1109,439 +1325,6 @@ mod tests {
             "depth should be {expected_depth}, got {}",
             data.depth
         );
-    }
-
-    // ==================== find_paths Tests ====================
-
-    fn all_ids(paths: Vec<Path<'_, DepthAndPrice>>) -> HashSet<Vec<&str>> {
-        paths
-            .iter()
-            .map(|p| {
-                p.iter()
-                    .map(|(_, e, _)| e.component_id.as_str())
-                    .collect()
-            })
-            .collect()
-    }
-
-    #[test]
-    fn test_find_paths_linear_forward_and_reverse() {
-        let (a, b, c, d) = addrs();
-        let m = linear_graph();
-        let g = m.graph();
-
-        // Forward: A->B (1 hop), A->C (2 hops), A->D (3 hops)
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 1, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab"]]));
-
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &c, 1, 2, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab", "bc"]]));
-
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 3, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab", "bc", "cd"]]));
-
-        // Reverse: D->A (bidirectional components)
-        let p = MostLiquidAlgorithm::find_paths(g, &d, &a, 1, 3, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["cd", "bc", "ab"]]));
-    }
-
-    #[test]
-    fn test_find_paths_respects_hop_bounds() {
-        let (a, _, c, d) = addrs();
-        let m = linear_graph();
-        let g = m.graph();
-
-        // A->D needs 3 hops, max_hops=2 finds nothing
-        assert!(MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 2, None)
-            .unwrap()
-            .is_empty());
-
-        // A->C is 2 hops, min_hops=3 finds nothing
-        assert!(MostLiquidAlgorithm::find_paths(g, &a, &c, 3, 3, None)
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn test_find_paths_parallel_components() {
-        let (a, b, c, _) = addrs();
-        let m = parallel_graph();
-        let g = m.graph();
-
-        // A->B: 3 parallel components = 3 paths
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 1, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab1"], vec!["ab2"], vec!["ab3"]]));
-
-        // A->C: 3 A->B components × 2 B->C components = 6 paths
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &c, 1, 2, None).unwrap();
-        assert_eq!(
-            all_ids(p),
-            HashSet::from([
-                vec!["ab1", "bc1"],
-                vec!["ab1", "bc2"],
-                vec!["ab2", "bc1"],
-                vec!["ab2", "bc2"],
-                vec!["ab3", "bc1"],
-                vec!["ab3", "bc2"],
-            ])
-        );
-    }
-
-    #[test]
-    fn test_find_paths_diamond_multiple_routes() {
-        let (a, _, _, d) = addrs();
-        let m = diamond_graph();
-        let g = m.graph();
-
-        // A->D: two 2-hop paths
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 2, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab", "bd"], vec!["ac", "cd"]]));
-    }
-
-    #[test]
-    fn test_find_paths_no_intermediate_cycles() {
-        let (a, b, _, _) = addrs();
-        let m = linear_graph();
-        let g = m.graph();
-
-        // A->B with max_hops=3: only the direct 1-hop path is valid.
-        // Revisit paths like A->B->C->B or A->B->B->B are pruned because
-        // they create intermediate cycles unsupported by Tycho execution
-        // (only first == last cycles are allowed, i.e. from == to).
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 3, None).unwrap();
-        assert_eq!(all_ids(p), HashSet::from([vec!["ab"]]));
-    }
-
-    #[test]
-    fn test_find_paths_cyclic_same_source_dest() {
-        let (a, _, _, _) = addrs();
-        // Use parallel_graph with 3 A<->B components to verify all combinations
-        let m = parallel_graph();
-        let g = m.graph();
-
-        // A->A (cyclic path) with 2 hops: should find all 9 combinations (3 components × 3
-        // components) Note: min_hops=2 because cyclic paths require at least 2 hops
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &a, 2, 2, None).unwrap();
-        assert_eq!(
-            all_ids(p),
-            HashSet::from([
-                vec!["ab1", "ab1"],
-                vec!["ab1", "ab2"],
-                vec!["ab1", "ab3"],
-                vec!["ab2", "ab1"],
-                vec!["ab2", "ab2"],
-                vec!["ab2", "ab3"],
-                vec!["ab3", "ab1"],
-                vec!["ab3", "ab2"],
-                vec!["ab3", "ab3"],
-            ])
-        );
-    }
-
-    #[rstest]
-    #[case::source_not_in_graph(false, true)]
-    #[case::dest_not_in_graph(true, false)]
-    fn test_find_paths_token_not_in_graph(#[case] from_exists: bool, #[case] to_exists: bool) {
-        // Graph contains tokens A (0x0A) and B (0x0B) from linear_graph fixture
-        let (a, b, _, _) = addrs();
-        let non_existent = addr(0x99);
-        let m = linear_graph();
-        let g = m.graph();
-
-        let from = if from_exists { a } else { non_existent.clone() };
-        let to = if to_exists { b } else { non_existent };
-
-        let result = MostLiquidAlgorithm::find_paths(g, &from, &to, 1, 3, None);
-
-        assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
-    }
-
-    #[rstest]
-    #[case::min_greater_than_max(3, 1)]
-    #[case::min_hops_zero(0, 1)]
-    fn test_find_paths_invalid_configuration(#[case] min_hops: usize, #[case] max_hops: usize) {
-        let (a, b, _, _) = addrs();
-        let m = linear_graph();
-        let g = m.graph();
-
-        assert!(matches!(
-            MostLiquidAlgorithm::find_paths(g, &a, &b, min_hops, max_hops, None)
-                .err()
-                .unwrap(),
-            AlgorithmError::InvalidConfiguration { reason: _ }
-        ));
-    }
-
-    #[test]
-    fn test_find_paths_bfs_ordering() {
-        // Build a graph with 1-hop, 2-hop, and 3-hop paths to E:
-        //   A --[ae]--> E                          (1-hop)
-        //   A --[ab]--> B --[be]--> E              (2-hop)
-        //   A --[ac]--> C --[cd]--> D --[de]--> E  (3-hop)
-        let (a, b, c, d) = addrs();
-        let e = addr(0x0E);
-        let mut m = PetgraphStableDiGraphManager::<DepthAndPrice>::new();
-        let mut t = HashMap::new();
-        t.insert("ae".into(), vec![a.clone(), e.clone()]);
-        t.insert("ab".into(), vec![a.clone(), b.clone()]);
-        t.insert("be".into(), vec![b, e.clone()]);
-        t.insert("ac".into(), vec![a.clone(), c.clone()]);
-        t.insert("cd".into(), vec![c, d.clone()]);
-        t.insert("de".into(), vec![d, e.clone()]);
-        m.initialize_graph(&t);
-        let g = m.graph();
-
-        let p = MostLiquidAlgorithm::find_paths(g, &a, &e, 1, 3, None).unwrap();
-
-        // BFS guarantees paths are ordered by hop count
-        assert_eq!(p.len(), 3, "Expected 3 paths total");
-        assert_eq!(p[0].len(), 1, "First path should be 1-hop");
-        assert_eq!(p[1].len(), 2, "Second path should be 2-hop");
-        assert_eq!(p[2].len(), 3, "Third path should be 3-hop");
-    }
-
-    // ==================== simulate_path Tests ====================
-    //
-    // Note: These tests use MockProtocolSim which is detected as a "native" component.
-    // Ideally we should also test VM component state override behavior (vm_state_override),
-    // which shares state across all VM components. This would require a mock that
-    // downcasts to EVMPoolState<PreCachedDB>, or integration tests with real VM components.
-
-    #[test]
-    fn test_simulate_path_single_hop() {
-        let token_a = token(0x01, "A");
-        let token_b = token(0x02, "B");
-
-        let (market, manager) = setup_market_weighted(vec![(
-            "component1",
-            &token_a,
-            &token_b,
-            MockProtocolSim::new(2.0),
-        )]);
-
-        let paths = MostLiquidAlgorithm::find_paths(
-            manager.graph(),
-            &token_a.address,
-            &token_b.address,
-            1,
-            1,
-            None,
-        )
-        .unwrap();
-        let path = paths.into_iter().next().unwrap();
-
-        let result = MostLiquidAlgorithm::simulate_path(
-            &path,
-            market_read(&market).base_market_state(),
-            None,
-            BigUint::from(100u64),
-        )
-        .unwrap();
-
-        assert_eq!(result.route().swaps().len(), 1);
-        assert_eq!(*result.route().swaps()[0].amount_in(), BigUint::from(100u64));
-        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(200u64)); // 100 * 2
-        assert_eq!(result.route().swaps()[0].component_id(), "component1");
-    }
-
-    #[test]
-    fn test_simulate_path_multi_hop_chains_amounts() {
-        let token_a = token(0x01, "A");
-        let token_b = token(0x02, "B");
-        let token_c = token(0x03, "C");
-
-        let (market, manager) = setup_market_weighted(vec![
-            ("component1", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("component2", &token_b, &token_c, MockProtocolSim::new(3.0)),
-        ]);
-
-        let paths = MostLiquidAlgorithm::find_paths(
-            manager.graph(),
-            &token_a.address,
-            &token_c.address,
-            2,
-            2,
-            None,
-        )
-        .unwrap();
-        let path = paths.into_iter().next().unwrap();
-
-        let result = MostLiquidAlgorithm::simulate_path(
-            &path,
-            market_read(&market).base_market_state(),
-            None,
-            BigUint::from(10u64),
-        )
-        .unwrap();
-
-        assert_eq!(result.route().swaps().len(), 2);
-        // First hop: 10 * 2 = 20
-        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(20u64));
-        // Second hop: 20 * 3 = 60
-        assert_eq!(*result.route().swaps()[1].amount_in(), BigUint::from(20u64));
-        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(60u64));
-    }
-
-    #[test]
-    fn test_simulate_path_same_component_twice_uses_updated_state() {
-        // Route: A -> B -> A through the same component
-        // First swap uses multiplier=2, second should use multiplier=3 (updated state)
-        let token_a = token(0x01, "A");
-        let token_b = token(0x02, "B");
-
-        let (market, manager) = setup_market_weighted(vec![(
-            "component1",
-            &token_a,
-            &token_b,
-            MockProtocolSim::new(2.0),
-        )]);
-
-        // A->B->A path requires min_hops=2, max_hops=2
-        // Since the graph is bidirectional, we should get A->B->A path
-        let paths = MostLiquidAlgorithm::find_paths(
-            manager.graph(),
-            &token_a.address,
-            &token_a.address,
-            2,
-            2,
-            None,
-        )
-        .unwrap();
-
-        // Should only contain the A->B->A path
-        assert_eq!(paths.len(), 1);
-        let path = paths[0].clone();
-
-        let result = MostLiquidAlgorithm::simulate_path(
-            &path,
-            market_read(&market).base_market_state(),
-            None,
-            BigUint::from(10u64),
-        )
-        .unwrap();
-
-        assert_eq!(result.route().swaps().len(), 2);
-        // First: 10 * 2 = 20
-        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(20u64));
-        // Second: 20 / 3 = 6 (state updated, multiplier incremented)
-        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(6u64));
-    }
-
-    #[test]
-    fn test_simulate_path_missing_token_returns_data_not_found() {
-        let token_a = token(0x01, "A");
-        let token_b = token(0x02, "B");
-        let token_c = token(0x03, "C");
-
-        let (market, _) = setup_market_weighted(vec![(
-            "component1",
-            &token_a,
-            &token_b,
-            MockProtocolSim::new(2.0),
-        )]);
-        let market = market_read(&market);
-
-        // Add token C to graph but not to market (A->B->C)
-        let mut topology = market.component_topology();
-        topology.insert(
-            "component2".to_string(),
-            vec![token_b.address.clone(), token_c.address.clone()],
-        );
-        let mut manager = PetgraphStableDiGraphManager::default();
-        manager.initialize_graph(&topology);
-
-        let graph = manager.graph();
-        let paths =
-            MostLiquidAlgorithm::find_paths(graph, &token_a.address, &token_c.address, 2, 2, None)
-                .unwrap();
-        let path = paths.into_iter().next().unwrap();
-
-        let result = MostLiquidAlgorithm::simulate_path(
-            &path,
-            market.base_market_state(),
-            None,
-            BigUint::from(100u64),
-        );
-        assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "token", .. })));
-    }
-
-    #[test]
-    fn test_simulate_path_missing_component_returns_data_not_found() {
-        let token_a = token(0x01, "A");
-        let token_b = token(0x02, "B");
-        let (market, manager) = setup_market_weighted(vec![(
-            "component1",
-            &token_a,
-            &token_b,
-            MockProtocolSim::new(2.0),
-        )]);
-
-        // Remove the component but keep tokens and graph
-        let mut market_write = market.try_write().unwrap();
-        market_write.remove_components([&"component1".to_string()]);
-        drop(market_write);
-
-        let graph = manager.graph();
-        let paths =
-            MostLiquidAlgorithm::find_paths(graph, &token_a.address, &token_b.address, 1, 1, None)
-                .unwrap();
-        let path = paths.into_iter().next().unwrap();
-
-        let result = MostLiquidAlgorithm::simulate_path(
-            &path,
-            market_read(&market).base_market_state(),
-            None,
-            BigUint::from(100u64),
-        );
-        assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "component", .. })));
-    }
-
-    // ==================== connector_tokens Tests ====================
-
-    #[test]
-    fn test_connector_tokens_blocks_disallowed_intermediate() {
-        // Diamond: A->B->D, A->C->D. Only C in allowlist → only A->C->D survives.
-        let (a, b, c, d) = addrs();
-        let m = diamond_graph();
-        let g = m.graph();
-        let allowed: HashSet<Address> = [c.clone()].into();
-        let paths = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 2, Some(&allowed)).unwrap();
-        let intermediates: HashSet<&Address> = paths
-            .iter()
-            .flat_map(|p| p.iter().map(|(node, _, _)| node))
-            .filter(|addr| *addr != &a && *addr != &d)
-            .collect();
-        // B must not appear; C must appear
-        assert!(!intermediates.contains(&b), "B should be blocked");
-        assert!(intermediates.contains(&c), "C should be allowed");
-    }
-
-    #[test]
-    fn test_connector_tokens_allows_endpoints_even_if_not_listed() {
-        // Allowlist contains neither token_in nor token_out, but a 1-hop route should still work.
-        let (a, b, _, _) = addrs();
-        let m = linear_graph();
-        let g = m.graph();
-        let allowed: HashSet<Address> = HashSet::new(); // empty — no intermediates
-                                                        // 1-hop A->B: destination is reached directly, no intermediate check
-        let paths = MostLiquidAlgorithm::find_paths(g, &a, &b, 1, 1, Some(&allowed)).unwrap();
-        assert!(!paths.is_empty(), "1-hop direct route should survive empty allowlist");
-    }
-
-    #[test]
-    fn test_connector_tokens_none_is_unrestricted() {
-        // None allowlist → both paths in diamond graph returned
-        let (a, b, c, d) = addrs();
-        let m = diamond_graph();
-        let g = m.graph();
-        let paths = MostLiquidAlgorithm::find_paths(g, &a, &d, 1, 2, None).unwrap();
-        let intermediates: HashSet<&Address> = paths
-            .iter()
-            .flat_map(|p| p.iter().map(|(node, _, _)| node))
-            .filter(|addr| *addr != &a && *addr != &d)
-            .collect();
-        assert!(intermediates.contains(&b), "B should appear with no restriction");
-        assert!(intermediates.contains(&c), "C should appear with no restriction");
     }
 
     // ==================== find_best_route Tests ====================
@@ -1667,9 +1450,122 @@ mod tests {
         assert_eq!(result.route().swaps()[1].component_id(), "component2".to_string());
     }
 
+    /// Builds a market and graph from components that may hold more than two tokens.
+    ///
+    /// [`setup_market_weighted`] takes one pair per component, which cannot express the pool that
+    /// serves two hops of the same sequence. Sets no edge weights: an unranked sequence is still
+    /// simulated, and these cases are about which pool a hop picks.
+    fn setup_market_multi_token(
+        components: Vec<(&str, Vec<Token>, MockProtocolSim)>,
+        tokens: &[Token],
+    ) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
+        let mut market = MarketState::new();
+        market.update_gas_price(BlockGasPrice {
+            block_number: 1,
+            block_hash: Default::default(),
+            block_timestamp: 0,
+            pricing: GasPrice::Legacy { gas_price: BigUint::from(1u64) },
+        });
+        market.upsert_tokens(tokens.to_vec());
+        let protocol_components: Vec<_> = components
+            .iter()
+            .map(|(id, tokens, _)| component(id, tokens))
+            .collect();
+        market.upsert_components(protocol_components);
+        let states: Vec<_> = components
+            .into_iter()
+            .map(|(id, _, sim)| (id.to_string(), Box::new(sim) as Box<dyn ProtocolSim>))
+            .collect();
+        market.update_states(states);
+
+        let mut manager = TopologyGraphManager::default();
+        manager.initialize_graph(&market.component_topology());
+        (wrap_market(market), manager)
+    }
+
+    /// A pool serving two hops of one sequence is taken by the first of them only.
+    ///
+    /// `multi` holds all three tokens, so it trades both A -> B and B -> C, and it pays more than
+    /// `bc` on the second hop. Taking it twice would price the second swap against a pool the
+    /// first swap had already moved, so the second hop falls to `bc`.
     #[tokio::test]
-    async fn test_find_best_route_skips_paths_without_edge_weights() {
-        // Component1 has edge weights (scoreable), Component2 doesn't (filtered out during scoring)
+    async fn test_find_best_route_never_takes_one_pool_twice() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market_multi_token(
+            vec![
+                (
+                    "multi",
+                    vec![token_a.clone(), token_b.clone(), token_c.clone()],
+                    MockProtocolSim::new(3.0),
+                ),
+                ("bc", vec![token_b.clone(), token_c.clone()], MockProtocolSim::new(2.0)),
+            ],
+            &[token_a.clone(), token_b.clone(), token_c.clone()],
+        );
+
+        // Two hops exactly, so the direct A -> C pool `multi` also offers is not the answer.
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(2, 2, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
+
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, None, &order)
+            .await
+            .unwrap();
+
+        assert_eq!(result.route().swaps().len(), 2);
+        assert_eq!(result.route().swaps()[0].component_id(), "multi");
+        assert_eq!(result.route().swaps()[1].component_id(), "bc");
+        // A -> B through multi: 1000 * 3. B -> C through bc: 3000 * 2.
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(3000u64));
+        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(6000u64));
+    }
+
+    /// A sequence whose second hop has no pool left is dropped rather than solved.
+    ///
+    /// `multi` is the only pool on either hop of A -> B -> C, and the first hop takes it.
+    #[tokio::test]
+    async fn test_find_best_route_drops_sequence_with_no_pool_left() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market_multi_token(
+            vec![(
+                "multi",
+                vec![token_a.clone(), token_b.clone(), token_c.clone()],
+                MockProtocolSim::new(3.0),
+            )],
+            &[token_a.clone(), token_b.clone(), token_c.clone()],
+        );
+
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(2, 2, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
+
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, None, &order)
+            .await;
+
+        assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
+    }
+
+    /// A pool with no derived data is still a pool that trades.
+    ///
+    /// Depth is measured by binary search over simulations and gives up for a range of reasons --
+    /// missing token metadata, a spot price too small to work with, a protocol that answers
+    /// `get_limits` poorly. None of those say the pool would execute badly, only that it could not
+    /// be measured, so it is ranked last and simulated rather than dropped.
+    #[tokio::test]
+    async fn test_find_best_route_uses_pools_without_edge_weights() {
+        // Component1 has edge weights (scoreable), Component2 doesn't
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -1702,14 +1598,14 @@ mod tests {
         market.upsert_tokens(vec![token_a.clone(), token_b.clone()]);
 
         // Initialize graph with both components
-        let mut manager = PetgraphStableDiGraphManager::default();
+        let mut manager = TopologyGraphManager::default();
         manager.initialize_graph(&market.component_topology());
 
         // Only set edge weights for component1, NOT component2
         let weight =
             DepthAndPrice::from_protocol_sim(&component1_state, &token_a, &token_b).unwrap();
         manager
-            .set_edge_weight(
+            .set_pool_weight(
                 &"component1".to_string(),
                 &token_a.address,
                 &token_b.address,
@@ -1730,15 +1626,20 @@ mod tests {
             .await
             .unwrap();
 
-        // Should use component1 (only scoreable path), despite component2 having better multiplier
+        // component2 has no weight, so it never gets ranked -- but it pays 3x against component1's
+        // 2x, and simulating both is what settles the hop.
         assert_eq!(result.route().swaps().len(), 1);
-        assert_eq!(result.route().swaps()[0].component_id(), "component1");
-        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(ONE_ETH * 2));
+        assert_eq!(result.route().swaps()[0].component_id(), "component2");
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(ONE_ETH * 3));
     }
 
+    /// A market whose derived data has not been computed at all still routes.
+    ///
+    /// Ranking only decides what order routes are simulated in, so with nothing to rank by every
+    /// route is still simulated.
     #[tokio::test]
-    async fn test_find_best_route_no_scorable_paths() {
-        // All paths exist but none have edge weights (can't be scored)
+    async fn test_find_best_route_without_any_derived_data() {
+        // All paths exist but none have edge weights
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -1765,7 +1666,7 @@ mod tests {
         market.upsert_tokens(vec![token_a.clone(), token_b.clone()]);
 
         // Initialize graph but DO NOT set any edge weights
-        let mut manager = PetgraphStableDiGraphManager::default();
+        let mut manager = TopologyGraphManager::default();
         manager.initialize_graph(&market.component_topology());
 
         let algorithm = MostLiquidAlgorithm::new();
@@ -1774,11 +1675,12 @@ mod tests {
 
         let result = algorithm
             .find_best_route(manager.graph(), market, None, None, &order)
-            .await;
-        assert!(matches!(
-            result,
-            Err(AlgorithmError::NoPath { reason: NoPathReason::NoScorablePaths, .. })
-        ));
+            .await
+            .expect("an unranked route is still a route");
+
+        assert_eq!(result.route().swaps().len(), 1);
+        assert_eq!(result.route().swaps()[0].component_id(), "component1");
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(ONE_ETH * 2));
     }
 
     #[tokio::test]
@@ -1869,12 +1771,12 @@ mod tests {
         market.upsert_tokens(vec![token_a.clone(), token_b.clone()]);
 
         // Initialize graph and set edge weights
-        let mut manager = PetgraphStableDiGraphManager::default();
+        let mut manager = TopologyGraphManager::default();
         manager.initialize_graph(&market.component_topology());
         let weight =
             DepthAndPrice::from_protocol_sim(&component_state, &token_a, &token_b).unwrap();
         manager
-            .set_edge_weight(
+            .set_pool_weight(
                 &"component1".to_string(),
                 &token_a.address,
                 &token_b.address,
@@ -1895,19 +1797,18 @@ mod tests {
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "gas price", .. })));
     }
 
+    /// A circle crosses the pair in both directions, so it needs a pool for each direction.
     #[tokio::test]
     async fn test_find_best_route_circular_arbitrage() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        // MockProtocolSim::get_amount_out multiplies by spot_price when token_in < token_out.
-        // After the first swap, spot_price increments to 3.
-        let (market, manager) = setup_market_weighted(vec![(
-            "component1",
-            &token_a,
-            &token_b,
-            MockProtocolSim::new(2.0),
-        )]);
+        // MockProtocolSim::get_amount_out multiplies by spot_price when token_in < token_out and
+        // divides by it otherwise.
+        let (market, manager) = setup_market_weighted(vec![
+            ("component1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component2", &token_a, &token_b, MockProtocolSim::new(3.0)),
+        ]);
 
         // Use min_hops=2 to require at least 2 hops (circular)
         let algorithm = MostLiquidAlgorithm::with_config(
@@ -1926,18 +1827,47 @@ mod tests {
         // Should have 2 swaps forming a circle
         assert_eq!(result.route().swaps().len(), 2, "Should have 2 swaps for circular route");
 
-        // First swap: A -> B (100 * 2 = 200)
+        // First swap: A -> B through component2, which pays most (100 * 3 = 300)
         assert_eq!(*result.route().swaps()[0].token_in(), token_a.address);
         assert_eq!(*result.route().swaps()[0].token_out(), token_b.address);
-        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(200u64));
+        assert_eq!(result.route().swaps()[0].component_id(), "component2");
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(300u64));
 
-        // Second swap: B -> A (200 / 3 = 66, spot_price incremented to 3)
+        // Second swap: B -> A. component2 is spent, so the hop falls to component1 (300 / 2 = 150)
         assert_eq!(*result.route().swaps()[1].token_in(), token_b.address);
         assert_eq!(*result.route().swaps()[1].token_out(), token_a.address);
-        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(66u64));
+        assert_eq!(result.route().swaps()[1].component_id(), "component1");
+        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(150u64));
 
         // Verify the route starts and ends with the same token
         assert_eq!(result.route().swaps()[0].token_in(), result.route().swaps()[1].token_out());
+    }
+
+    /// One pool is not a circle: the return hop would have to cross the pool the outbound hop
+    /// already moved, which is the reuse the solve refuses.
+    #[tokio::test]
+    async fn test_find_best_route_circular_needs_two_pools() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0),
+        )]);
+
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(2, 2, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_a, 100, OrderSide::Sell);
+
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, None, &order)
+            .await;
+
+        assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
     }
 
     #[tokio::test]
@@ -1981,7 +1911,7 @@ mod tests {
     #[tokio::test]
     async fn test_find_best_route_respects_max_hops() {
         // Setup: Only path is A->B->C (2 hops)
-        // With max_hops=1, should return NoPath error
+        // With max_hops=1, no sequence reaches C, so nothing can be scored
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -2002,8 +1932,8 @@ mod tests {
             .find_best_route(manager.graph(), market, None, None, &order)
             .await;
         assert!(
-            matches!(result, Err(AlgorithmError::NoPath { .. })),
-            "Should return NoPath when max_hops is insufficient"
+            matches!(result, Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })),
+            "Should fail when max_hops is insufficient"
         );
     }
 
@@ -2072,7 +2002,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(algorithm.max_hops, max_hops);
+        assert_eq!(algorithm.query.max_hops, max_hops);
         assert_eq!(algorithm.timeout, Duration::from_millis(timeout_ms));
         assert_eq!(algorithm.name(), "most_liquid");
     }
@@ -2083,15 +2013,65 @@ mod tests {
 
         let algorithm = MostLiquidAlgorithm::new();
 
-        assert_eq!(algorithm.max_hops, 3);
+        assert_eq!(algorithm.query.max_hops, 3);
         assert_eq!(algorithm.timeout, Duration::from_millis(500));
         assert_eq!(algorithm.name(), "most_liquid");
     }
 
-    // ==================== Configuration Validation Tests ====================
+    // ==================== Hop solving Tests ====================
 
+    /// Each hop is solved on its own, at the amount that actually reaches it.
+    ///
+    /// The pool paying most is deliberately not the first on either hop, and it is not the one the
+    /// score ranking favours either — `spot_price * min_depth` prefers the deep, cheap pools here.
+    /// Only simulating at the order's size finds them, and picking per hop is what makes that
+    /// affordable: four simulations rather than the four two-hop routes they combine into.
     #[tokio::test]
-    async fn test_find_best_route_respects_max_routes_cap() {
+    async fn test_each_leg_takes_its_best_paying_pool() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        // Ids sort ascending, so the weak pool of each pair is reached first.
+        let (market, manager) = setup_market_weighted(vec![
+            ("ab1", &token_a, &token_b, MockProtocolSim::new(1.0).with_liquidity(9_000_000)),
+            ("ab2", &token_a, &token_b, MockProtocolSim::new(3.0).with_liquidity(1_000_000)),
+            ("bc1", &token_b, &token_c, MockProtocolSim::new(1.0).with_liquidity(9_000_000)),
+            ("bc2", &token_b, &token_c, MockProtocolSim::new(5.0).with_liquidity(1_000_000)),
+        ]);
+
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(2, 2, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
+        let result = algorithm
+            .find_best_route(manager.graph(), market, None, None, &order)
+            .await
+            .unwrap();
+
+        let chosen: Vec<&str> = result
+            .route()
+            .swaps()
+            .iter()
+            .map(|swap| swap.component_id())
+            .collect();
+        assert_eq!(chosen, vec!["ab2", "bc2"], "each hop must take its best-paying pool");
+
+        // 1000 -> 3000 over the first hop, and the second hop has to be settled on that 3000
+        // rather than on the order amount.
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(3000u64));
+        assert_eq!(*result.route().swaps()[1].amount_in(), BigUint::from(3000u64));
+        assert_eq!(*result.route().swaps()[1].amount_out(), BigUint::from(15000u64));
+    }
+
+    /// `max_routes` bounds token sequences, not the pools on a pair.
+    ///
+    /// Every pool on a pair is compared at the amount actually flowing, whatever the cap, so the
+    /// pool paying four times the input is found even at `max_routes = 2` -- where the score
+    /// ranking, which never sees the order size, puts it last.
+    #[tokio::test]
+    async fn test_max_routes_caps_token_sequences_not_pools_on_a_pair() {
         // 4 parallel components. Score = spot_price * min_depth.
         // In tests, depth comes from get_limits().0 (sell_limit), which is
         // liquidity / (spot_price * (1 - fee)). With fee=0: depth = liquidity / spot_price.
@@ -2100,10 +2080,6 @@ mod tests {
         //   component3 (score = 2.0 * 3M/2.0 = 3M)
         //   component2 (score = 3.0 * 2M/3.0 = 2M)
         //   component1 (score = 4.0 * 1M/4.0 = 1M)
-        //
-        // With max_routes=2, only component4 and component3 are simulated.
-        // component1 has the best simulation output (4x) but the lowest score,
-        // so it's excluded by the cap.
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
@@ -2114,7 +2090,6 @@ mod tests {
             ("component4", &token_a, &token_b, MockProtocolSim::new(1.0).with_liquidity(4_000_000)),
         ]);
 
-        // Cap at 2: only the two highest-scored paths are simulated
         let algorithm = MostLiquidAlgorithm::with_config(
             AlgorithmConfig::new(1, 1, Duration::from_millis(100), Some(2)).unwrap(),
         )
@@ -2125,12 +2100,11 @@ mod tests {
             .await
             .unwrap();
 
-        // component1 has the best simulation output (4x) but lowest score, so it's
-        // excluded by the cap. Among the top-2 scored (component4=4M, component3=3M),
-        // component3 gives the best simulation output (2x vs 1x).
+        // A -> B is one sequence however many pools serve it, so the cap has nothing to remove and
+        // every pool is compared at the order's own size. component1 pays the most.
         assert_eq!(result.route().swaps().len(), 1);
-        assert_eq!(result.route().swaps()[0].component_id(), "component3");
-        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(2000u64));
+        assert_eq!(result.route().swaps()[0].component_id(), "component1");
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(4000u64));
     }
 
     #[tokio::test]
@@ -2162,6 +2136,8 @@ mod tests {
         assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(4000u64));
     }
 
+    // ==================== Configuration Validation Tests ====================
+
     #[test]
     fn test_algorithm_config_rejects_zero_max_routes() {
         let result = AlgorithmConfig::new(1, 3, Duration::from_millis(100), Some(0));
@@ -2187,5 +2163,181 @@ mod tests {
             result,
             Err(AlgorithmError::InvalidConfiguration { reason }) if reason.contains("cannot exceed")
         ));
+    }
+
+    // ==================== score_token_path Tests ====================
+
+    /// A hop with no measured pool cannot be placed, so the sequence sinks to the bottom of the
+    /// queue rather than out of it: it still scores, and the score is the lowest there is.
+    #[test]
+    fn test_score_token_path_sinks_a_sequence_with_an_unmeasured_hop() {
+        let (a, b, c, _) = addrs();
+        let mut manager = linear_graph();
+        // A->B measured, B->C left without derived data.
+        manager
+            .set_pool_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0), false)
+            .unwrap();
+        let graph = manager.graph();
+        let node = |address: &Address| graph.get_token_ix(address).unwrap();
+
+        let unmeasured =
+            MostLiquidAlgorithm::score_token_path(graph, &[node(&a), node(&b), node(&c)]);
+
+        assert_eq!(unmeasured, Some(0.0), "an unmeasured hop scores zero, not None");
+        assert!(
+            MostLiquidAlgorithm::score_token_path(graph, &[node(&a), node(&b)])
+                .is_some_and(|measured| measured > 0.0),
+            "a fully measured sequence still outranks it"
+        );
+    }
+
+    /// A sequence naming a pair the graph has no pool for is the two indexes disagreeing, not a
+    /// routing outcome, so it is dropped rather than ranked.
+    #[test]
+    fn test_score_token_path_drops_a_sequence_with_an_unconnected_pair() {
+        let (a, _, c, _) = addrs();
+        let manager = linear_graph();
+        let graph = manager.graph();
+        let node = |address: &Address| graph.get_token_ix(address).unwrap();
+
+        assert_eq!(MostLiquidAlgorithm::score_token_path(graph, &[node(&a), node(&c)]), None);
+        assert_eq!(MostLiquidAlgorithm::score_token_path(graph, &[node(&a)]), None);
+    }
+
+    // ==================== PoolSwapsCache Tests ====================
+
+    /// `count` pools on one pair, named `pool0`, `pool1`, ... for [`simulator`] to answer as.
+    fn pools(count: usize) -> Vec<EdgeData<()>> {
+        (0..count)
+            .map(|i| EdgeData::new(format!("pool{i}")))
+            .collect()
+    }
+
+    /// Answers as pool `i` would: out is `amount_in * multipliers[i]`, gas is flat.
+    fn simulator(
+        multipliers: [u64; 2],
+        amount_in: u64,
+    ) -> impl FnMut(&ComponentId) -> Option<(GetAmountOutResult, BigInt)> {
+        move |component_id: &ComponentId| {
+            let index: usize = component_id
+                .trim_start_matches("pool")
+                .parse()
+                .ok()?;
+            let amount = BigUint::from(amount_in * multipliers[index]);
+            let result = GetAmountOutResult::new(
+                amount.clone(),
+                BigUint::from(10u64),
+                Box::new(MockProtocolSim::new(1.0)),
+            );
+            Some((result, BigInt::from(amount)))
+        }
+    }
+
+    /// The one token pair every cache case works on.
+    fn pair() -> (NodeIndex, NodeIndex) {
+        (NodeIndex::new(0), NodeIndex::new(1))
+    }
+
+    #[test]
+    fn test_cache_takes_the_pool_that_pays_most() {
+        let mut cache = PoolSwapsCache::new(true);
+        let multipliers = [2u64, 5u64];
+        let pools = pools(multipliers.len());
+
+        let outcome = cache
+            .swap(pair(), &BigUint::from(100u64), &pools, simulator(multipliers, 100))
+            .unwrap();
+
+        assert_eq!(outcome.pool_ix, 1, "pool1 pays 500 against pool0's 200");
+        assert_eq!(outcome.amount_out, BigUint::from(500u64));
+    }
+
+    /// The second ask at the same amount must not simulate anything.
+    #[test]
+    fn test_cache_answers_a_repeated_amount_without_simulating() {
+        let mut cache = PoolSwapsCache::new(true);
+        let multipliers = [2u64, 5u64];
+        let pools = pools(multipliers.len());
+        let amount = BigUint::from(100u64);
+        cache
+            .swap(pair(), &amount, &pools, simulator(multipliers, 100))
+            .unwrap();
+
+        let outcome = cache
+            .swap(pair(), &amount, &pools, |_| panic!("must not simulate on a hit"))
+            .unwrap();
+
+        assert_eq!(outcome.pool_ix, 1);
+        assert_eq!(outcome.amount_out, BigUint::from(500u64));
+    }
+
+    /// A remembered outcome carries the pool that produced it. A later amount won by a different
+    /// pool must not rewrite what an earlier one was told.
+    #[test]
+    fn test_cache_keeps_each_amount_with_the_pool_that_paid_it() {
+        let mut cache = PoolSwapsCache::new(true);
+        let pools = pools(2);
+
+        // At 100, pool1 wins. At 50 the simulator is rigged so only pool0 answers, which makes it
+        // the pair's remembered winner.
+        cache
+            .swap(pair(), &BigUint::from(100u64), &pools, simulator([2, 5], 100))
+            .unwrap();
+        cache
+            .swap(pair(), &BigUint::from(50u64), &pools, |component_id: &ComponentId| {
+                (component_id == "pool0").then(|| {
+                    let amount = BigUint::from(50u64);
+                    (
+                        GetAmountOutResult::new(
+                            amount.clone(),
+                            BigUint::from(10u64),
+                            Box::new(MockProtocolSim::new(1.0)),
+                        ),
+                        BigInt::from(amount),
+                    )
+                })
+            })
+            .unwrap();
+
+        let replay = cache
+            .swap(pair(), &BigUint::from(100u64), &pools, |_| panic!("must not simulate on a hit"))
+            .unwrap();
+
+        assert_eq!(replay.pool_ix, 1, "the 100 outcome still belongs to pool1");
+        assert_eq!(replay.amount_out, BigUint::from(500u64));
+    }
+
+    /// Off, the cache stays empty, so every ask simulates again.
+    #[test]
+    fn test_cache_disabled_remembers_nothing() {
+        let mut cache = PoolSwapsCache::new(false);
+        let multipliers = [2u64, 5u64];
+        let pools = pools(multipliers.len());
+        let amount = BigUint::from(100u64);
+
+        let first = cache
+            .swap(pair(), &amount, &pools, simulator(multipliers, 100))
+            .unwrap();
+        let mut asked = 0usize;
+        let second = cache
+            .swap(pair(), &amount, &pools, |component_id| {
+                asked += 1;
+                simulator(multipliers, 100)(component_id)
+            })
+            .unwrap();
+
+        assert_eq!(asked, 2, "both pools are asked again, so nothing was remembered");
+        assert_eq!(first.amount_out, second.amount_out);
+    }
+
+    /// No pool on the pair can trade the amount.
+    #[test]
+    fn test_cache_returns_none_when_no_pool_trades() {
+        let mut cache = PoolSwapsCache::new(true);
+        let pools = pools(2);
+
+        let outcome = cache.swap(pair(), &BigUint::from(100u64), &pools, |_| None);
+
+        assert!(outcome.is_none());
     }
 }

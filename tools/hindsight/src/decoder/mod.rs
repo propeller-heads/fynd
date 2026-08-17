@@ -269,7 +269,7 @@ impl<P: Provider> Decoder<P> {
             return None;
         };
 
-        if let Some(veto) = veto::check(&flow, logs, registry) {
+        if let Some(veto) = veto::check(&flow, &transfer_ledger, logs, registry) {
             debug!(
                 tx = %receipt.transaction_hash,
                 venue = %registry.label(entry_point),

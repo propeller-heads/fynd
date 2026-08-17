@@ -20,13 +20,15 @@
 //!
 //! # Assumptions
 //!
-//! - **The tracked address both pays and receives.** A swap whose output is delivered to a
-//!   different receiver nets as output-less and is declined (a coverage miss, never a wrong
-//!   record).
+//! - **The tracked address both pays and receives.** A swap whose output goes to a different
+//!   receiver nets as output-less and is declined — unless a dust payout in the output token poses
+//!   as the output; the dust-output check in `TransferLedger::net_swap` declines that too.
 //! - **One swap per address per transaction.** Two swaps by the same address net into one combined
 //!   flow; if they share sides they merge, otherwise they decline as multi-token.
 //! - **Rebasing/fee-on-transfer tokens** can leave residue that fails the one-in/one-out rule; such
-//!   trades decline rather than record skewed amounts.
+//!   trades decline rather than record skewed amounts. An input-side transfer fee nets cleanly (the
+//!   fee is part of the trader's outflow), so it is caught after decoding instead — see
+//!   `veto::Veto::FeeOnTransfer`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -129,6 +131,13 @@ impl TransferLedger {
     /// was repaid in *both* tokens it went out and came back — an arbitrage or liquidity probe —
     /// and the two leftovers are what the round trip cost, not a conversion of one into the other.
     /// Those are declined; see `is_round_trip`.
+    ///
+    /// # Dust outputs
+    ///
+    /// A dust payout can pose as the output when the real output went to a different receiver:
+    /// tx `0xd01666df…` on Arbitrum fills 6,164 DAI → 3.2313 WETH to the order's receiver and
+    /// pays the tracked trader 0.00009 WETH; the pair decoded as a $6k win. The output leg must
+    /// therefore itself pass the residue proof — see `is_dust_output`.
     pub(crate) fn net_swap(&self, tracked: Address) -> Option<NetSwap> {
         let mut amounts_by_token: HashMap<Address, TokenAmounts> = HashMap::new();
         for &(token, from, to, value) in &self.transfers {
@@ -207,6 +216,31 @@ impl TransferLedger {
             .into_iter()
             .filter(|(_, total)| !total.is_zero())
             .map(|((recipient, token), total)| (recipient, token, total))
+            .collect()
+    }
+
+    /// Totals of `token` paid to pure sinks — addresses that received value in the transaction
+    /// but never sent any — by senders that never received the token themselves: a trader
+    /// spending it or a pool paying out a swap, never a router forwarding what it was paid.
+    /// Returned as `(recipient, total)`.
+    pub(crate) fn sink_payments(&self, token: Address) -> Vec<(Address, U256)> {
+        let mut senders: HashSet<Address> = HashSet::new();
+        let mut token_receivers: HashSet<Address> = HashSet::new();
+        for &(transferred, from, to, _) in &self.transfers {
+            senders.insert(from);
+            if transferred == token {
+                token_receivers.insert(to);
+            }
+        }
+        let mut totals: HashMap<Address, U256> = HashMap::new();
+        for &(transferred, from, to, value) in &self.transfers {
+            if transferred == token && !token_receivers.contains(&from) && !senders.contains(&to) {
+                *totals.entry(to).or_default() += value;
+            }
+        }
+        totals
+            .into_iter()
+            .filter(|(_, total)| !total.is_zero())
             .collect()
     }
 
@@ -295,7 +329,32 @@ fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwa
         debug!(?token_in, ?token_out, "declining round-trip flow");
         return None;
     }
+    if is_dust_output(amounts_by_token, token_out, amount_out) {
+        debug!(
+            ?token_in,
+            ?token_out,
+            "declining dust output: real output went to a different receiver"
+        );
+        return None;
+    }
     Some(NetSwap { token_in, amount_in, token_out, amount_out })
+}
+
+/// Whether the lone output leg is dust rather than the trade's output: one-directional,
+/// routed third-party, and under 1% of the token's gross flow. A real output is a far larger
+/// share, so the real output went to a different receiver. The input leg is not tested — a
+/// batch member's real payment can be a tiny share of its token's gross flow.
+fn is_dust_output(
+    amounts_by_token: &HashMap<Address, TokenAmounts>,
+    token_out: Address,
+    amount_out: U256,
+) -> bool {
+    let Some(amounts) = amounts_by_token.get(&token_out) else {
+        return false;
+    };
+    amounts.sent.is_zero() &&
+        amounts.routed_third_party &&
+        amount_out.saturating_mul(U256::from(RESIDUE_GROSS_RATIO)) < amounts.gross
 }
 
 /// Whether the tracked address's flow in both swap tokens is bidirectional, which makes the net a
@@ -557,6 +616,48 @@ mod tests {
     }
 
     #[test]
+    fn test_dust_output_different_receiver() {
+        // The shape of tx 0xd01666df… on Arbitrum: the trader pays DAI, the fill's WETH goes to
+        // the order's receiver, and the venue pays the trader a dust WETH distribution. Netting
+        // the trader pairs the DAI with the dust — a fake mega-win — so the trade must decline.
+        let trader = addr(1);
+        let receiver = addr(2);
+        let venue = addr(3);
+        let pool = addr(50);
+        let dai = addr(10);
+        let weth = addr(11);
+
+        let logs = vec![
+            make_transfer_log(dai, trader, pool, U256::from(6_164_000_000u64)),
+            make_transfer_log(weth, pool, receiver, U256::from(3_231_301u64)),
+            make_transfer_log(weth, venue, trader, U256::from(90u64)),
+        ];
+
+        assert!(net_swap(&logs, &[], trader).is_none());
+    }
+
+    #[test]
+    fn test_output_via_router_still_decodes() {
+        // The output token routing third-party is normal — pool pays the router, the router pays
+        // the trader. The trader's share of the token's gross flow is half, far above residue,
+        // so the orphaned-output rejection must not fire.
+        let trader = addr(1);
+        let router = addr(2);
+        let pool = addr(50);
+        let token_in = addr(10);
+        let token_out = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_in, trader, pool, U256::from(1000)),
+            make_transfer_log(token_out, pool, router, U256::from(2000)),
+            make_transfer_log(token_out, router, trader, U256::from(2000)),
+        ];
+
+        let result = net_swap(&logs, &[], trader).unwrap();
+        assert_eq!(result, swap(token_in, 1000, token_out, 2000));
+    }
+
+    #[test]
     fn test_no_sender_flow() {
         let sender = addr(1);
         let logs = vec![make_transfer_log(addr(10), addr(50), addr(51), U256::from(1000))];
@@ -646,6 +747,34 @@ mod tests {
             transfer_ledger.group_net_received(&group),
             HashMap::from([(addr(11), U256::from(200))])
         );
+    }
+
+    #[test]
+    fn test_sink_payments() {
+        // The trader pays token_a to the pool (a sender, so never a sink) and, split by the
+        // token contract, to a wallet that only accumulates. On the token_b side the pool is
+        // the source of the fee wallet's leg, while the router only forwards what it received.
+        let trader = addr(1);
+        let pool = addr(50);
+        let router = addr(2);
+        let in_fee_wallet = addr(60);
+        let out_fee_wallet = addr(61);
+        let token_a = addr(10);
+        let token_b = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_a, trader, pool, U256::from(950)),
+            make_transfer_log(token_a, trader, in_fee_wallet, U256::from(30)),
+            make_transfer_log(token_a, trader, in_fee_wallet, U256::from(20)),
+            make_transfer_log(token_b, pool, trader, U256::from(1900)),
+            make_transfer_log(token_b, pool, out_fee_wallet, U256::from(100)),
+            make_transfer_log(token_b, pool, router, U256::from(500)),
+            make_transfer_log(token_b, router, out_fee_wallet, U256::from(500)),
+        ];
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+
+        assert_eq!(transfer_ledger.sink_payments(token_a), vec![(in_fee_wallet, U256::from(50))]);
+        assert_eq!(transfer_ledger.sink_payments(token_b), vec![(out_fee_wallet, U256::from(100))]);
     }
 
     #[test]

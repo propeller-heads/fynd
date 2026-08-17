@@ -786,6 +786,7 @@ mod tests {
     use std::{collections::HashMap, env};
 
     use num_bigint::BigUint;
+    use rustc_hash::FxHashMap;
     use tycho_simulation::{
         protocol::models::{ProtocolComponent, Update},
         tycho_common::{
@@ -936,7 +937,7 @@ mod tests {
 
         sender
             .send(MarketEvent::MarketUpdated {
-                added_components: HashMap::new(),
+                added_components: FxHashMap::default(),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
             })
@@ -948,7 +949,7 @@ mod tests {
         assert_eq!(
             event_1,
             MarketEvent::MarketUpdated {
-                added_components: HashMap::new(),
+                added_components: FxHashMap::default(),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
             }
@@ -1010,7 +1011,7 @@ mod tests {
         assert_eq!(
             event,
             MarketEvent::MarketUpdated {
-                added_components: HashMap::from([(
+                added_components: FxHashMap::from_iter([(
                     component_id.to_string(),
                     vec![token1.address, token2.address]
                 )]),
@@ -1118,7 +1119,7 @@ mod tests {
         assert_eq!(
             event_1,
             MarketEvent::MarketUpdated {
-                added_components: HashMap::from([(
+                added_components: FxHashMap::from_iter([(
                     component_id.to_string(),
                     vec![token1.address, token2.address]
                 )]),
@@ -1129,7 +1130,7 @@ mod tests {
         assert_eq!(
             event_2,
             MarketEvent::MarketUpdated {
-                added_components: HashMap::new(),
+                added_components: FxHashMap::default(),
                 removed_components: vec![component_id.to_string()],
                 updated_components: Vec::new(),
             }
@@ -1232,7 +1233,7 @@ mod tests {
         assert_eq!(
             event_1,
             MarketEvent::MarketUpdated {
-                added_components: HashMap::from([(
+                added_components: FxHashMap::from_iter([(
                     component_id.to_string(),
                     vec![token1.address, token2.address]
                 )]),
@@ -1243,7 +1244,7 @@ mod tests {
         assert_eq!(
             event_2,
             MarketEvent::MarketUpdated {
-                added_components: HashMap::new(),
+                added_components: FxHashMap::default(),
                 removed_components: Vec::new(),
                 updated_components: vec![component_id.to_string()],
             }
@@ -1332,7 +1333,7 @@ mod tests {
         assert_eq!(
             event_1,
             MarketEvent::MarketUpdated {
-                added_components: HashMap::from([(
+                added_components: FxHashMap::from_iter([(
                     old_component_id.to_string(),
                     vec![old_token1.address.clone(), old_token2.address.clone()]
                 )]),
@@ -1345,7 +1346,7 @@ mod tests {
         assert_eq!(
             event_2,
             MarketEvent::MarketUpdated {
-                added_components: HashMap::from([(
+                added_components: FxHashMap::from_iter([(
                     new_component_id.to_string(),
                     vec![new_token1.address, new_token2.address]
                 )]),

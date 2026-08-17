@@ -26,10 +26,12 @@ COPY tools/fynd-gas-audit/Cargo.toml tools/fynd-gas-audit/
 COPY tools/record-market/Cargo.toml tools/record-market/
 COPY tools/hindsight/Cargo.toml tools/hindsight/
 COPY test-fixtures/Cargo.toml test-fixtures/
-RUN mkdir -p src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
+RUN mkdir -p src fynd-core/src fynd-core/benches fynd-rpc/src fynd-rpc-types/src \
         clients/rust/src tools/benchmark/src tools/common/src tools/fynd-swap-cli/src \
         tools/erc20-overrides/src tools/fynd-gas-audit/src \
         tools/record-market/src tools/hindsight/src test-fixtures/src && \
+    echo "fn main() {}" > fynd-core/benches/algorithm_bench.rs && \
+    echo "fn main() {}" > fynd-core/benches/profile.rs && \
     echo "fn main() {}" > src/main.rs && \
     echo "" > src/lib.rs && \
     echo "" > fynd-core/src/lib.rs && \
@@ -44,7 +46,7 @@ RUN mkdir -p src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
     echo "fn main() {}" > tools/record-market/src/main.rs && \
     echo "fn main() {}" > tools/hindsight/src/main.rs && \
     echo "" > test-fixtures/src/lib.rs && \
-    cargo build --release --package fynd --package fynd-swap-cli --package hindsight && \
+    cargo build --release --package fynd --features fynd-rpc/experimental --package fynd-swap-cli --package hindsight && \
     rm -rf src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
         clients/rust/src tools/benchmark/src tools/common/src tools/fynd-swap-cli/src \
         tools/erc20-overrides/src tools/fynd-gas-audit/src \
@@ -61,7 +63,9 @@ COPY tools/erc20-overrides/src/ tools/erc20-overrides/src/
 COPY tools/common/src/ tools/common/src/
 COPY tools/hindsight/src/ tools/hindsight/src/
 RUN mkdir -p tools/benchmark/src tools/fynd-gas-audit/src \
-        tools/record-market/src test-fixtures/src && \
+        tools/record-market/src test-fixtures/src fynd-core/benches && \
+    echo "fn main() {}" > fynd-core/benches/algorithm_bench.rs && \
+    echo "fn main() {}" > fynd-core/benches/profile.rs && \
     echo "fn main() {}" > tools/benchmark/src/main.rs && \
     echo "fn main() {}" > tools/fynd-gas-audit/src/main.rs && \
     echo "fn main() {}" > tools/record-market/src/main.rs && \
@@ -70,7 +74,7 @@ RUN mkdir -p tools/benchmark/src tools/fynd-gas-audit/src \
         fynd-rpc-types/src/lib.rs clients/rust/src/lib.rs \
         tools/fynd-swap-cli/src/main.rs tools/erc20-overrides/src/lib.rs \
         tools/common/src/lib.rs tools/hindsight/src/main.rs && \
-    cargo build --release --package fynd --package fynd-swap-cli --package hindsight
+    cargo build --release --package fynd --features fynd-rpc/experimental --package fynd-swap-cli --package hindsight
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim

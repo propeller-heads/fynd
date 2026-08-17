@@ -1,5 +1,6 @@
-use std::{collections::HashSet, time::Duration};
+use std::time::Duration;
 
+use rustc_hash::FxHashSet;
 use tycho_simulation::tycho_common::models::Chain;
 
 /// Market events broadcast by the Tycho feed on every block update.
@@ -47,7 +48,7 @@ pub(crate) struct TychoFeedConfig {
     /// Only include tokens traded within this many days.
     pub(crate) traded_n_days_ago: Option<u64>,
     /// Component IDs to exclude from the Tycho stream.
-    pub(crate) blocklisted_components: HashSet<String>,
+    pub(crate) blocklisted_components: FxHashSet<String>,
     /// Enable partial block (flashblock) updates from the Tycho stream.
     /// When enabled, component state updates are delivered mid-block rather than only at
     /// finalization, reducing effective latency at the cost of processing more frequent,
@@ -75,7 +76,7 @@ impl TychoFeedConfig {
             traded_n_days_ago: None,
             tvl_buffer_ratio: 1.1,
             reconnect_delay: Duration::from_secs(5),
-            blocklisted_components: HashSet::new(),
+            blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
         }
     }
@@ -100,7 +101,7 @@ impl TychoFeedConfig {
         self
     }
 
-    pub(crate) fn blocklisted_components(mut self, components: HashSet<String>) -> Self {
+    pub(crate) fn blocklisted_components(mut self, components: FxHashSet<String>) -> Self {
         self.blocklisted_components = components;
         self
     }
