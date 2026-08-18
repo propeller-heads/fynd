@@ -74,8 +74,10 @@ pub enum FullAmountOutcome {
 /// The two orderings the full-amount pass produces, both holding indices into the path list it
 /// ranked.
 pub struct FullAmountRanking {
-    /// Every path simulated, best output first. One that could not take the whole order ranks last
-    /// at zero: it may still be worth a fraction in a split.
+    /// Every path simulated, best output net of gas first — the same measure the baseline and the
+    /// finished split are judged on, so a long route does not rank above a short one on an output
+    /// its extra swaps hand straight back. One that could not take the whole order ranks last: it
+    /// may still be worth a fraction in a split.
     pub by_output: Vec<usize>,
     /// The paths that filled the order, best output net of gas first. The single-path baseline is
     /// the first of these that builds into a route.

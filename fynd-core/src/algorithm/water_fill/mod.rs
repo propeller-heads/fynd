@@ -1277,14 +1277,16 @@ fn rank_outcomes(
     token_prices: Option<&TokenGasPrices>,
     token_out: &Address,
 ) -> FullAmountRanking {
-    let mut by_output: Vec<(usize, BigUint)> = Vec::with_capacity(outcomes_by_path.len());
+    // A path that took the whole order carries what it pays net of gas; one that could not takes
+    // no place among them, whatever its gas would have been.
+    let mut by_output: Vec<(usize, Option<BigInt>)> = Vec::with_capacity(outcomes_by_path.len());
     let mut by_output_net_gas: Vec<(usize, BigInt)> = Vec::new();
 
     for (path_ix, outcome) in outcomes_by_path.into_iter().enumerate() {
         let Some(outcome) = outcome else {
             continue;
         };
-        let output = match outcome {
+        let net_output = match outcome {
             FullAmountOutcome::Filled(paid) => {
                 let gas_cost = WaterFillAlgorithm::gas_cost_in_token(
                     &paid.gas,
@@ -1294,14 +1296,17 @@ fn rank_outcomes(
                 );
                 let net_output = BigInt::from(paid.amount_out.clone()) -
                     gas_cost.map_or_else(BigInt::zero, BigInt::from);
-                by_output_net_gas.push((path_ix, net_output));
-                paid.amount_out
+                by_output_net_gas.push((path_ix, net_output.clone()));
+                Some(net_output)
             }
-            FullAmountOutcome::Unfilled => BigUint::zero(),
+            FullAmountOutcome::Unfilled => None,
         };
-        by_output.push((path_ix, output));
+        by_output.push((path_ix, net_output));
     }
 
+    // A path that could not take the whole order ranks below every path that did, however little
+    // that one is left with: net output can be negative once gas costs more than the path pays,
+    // and a path that filled for a loss still tells the split passes more than one that failed.
     by_output.sort_by(|(_, a), (_, b)| b.cmp(a));
     by_output_net_gas.sort_by(|(_, a), (_, b)| b.cmp(a));
     FullAmountRanking {
@@ -2045,8 +2050,9 @@ mod tests {
         assert_eq!(ranking.by_output_net_gas, vec![3, 0], "unfilled cannot be the baseline");
     }
 
-    /// Gas is taken off before the net-of-gas ordering, so a path paying more gross can rank below
-    /// a cheaper one — which is the whole reason for keeping a second ordering.
+    /// Both orderings take gas off, so a path paying more gross ranks below a cheaper one in each.
+    /// The candidate set the split passes are built from is sliced off `by_output`, and ranking
+    /// that gross put a long route above a short one on an output its extra swaps hand back.
     #[test]
     fn test_rank_outcomes_orders_by_output_net_of_gas() {
         let token_out = addr(0x02);
@@ -2066,8 +2072,35 @@ mod tests {
         let ranking =
             rank_outcomes(outcomes, &BigUint::from(1u64), Some(&token_prices), &token_out);
 
-        assert_eq!(ranking.by_output, vec![0, 1], "gross output still puts the larger first");
-        assert_eq!(ranking.by_output_net_gas, vec![1, 0], "net of gas reverses them");
+        assert_eq!(ranking.by_output, vec![1, 0], "the cheaper path ranks first");
+        assert_eq!(ranking.by_output_net_gas, vec![1, 0], "and the baseline ordering agrees");
+    }
+
+    /// A path that filled but paid less than its gas ranks below every profitable path and above
+    /// every path that could not fill: net output goes negative, and an unfilled path has no net
+    /// at all rather than a zero that would float it over the loss-making ones.
+    #[test]
+    fn test_rank_outcomes_places_a_loss_making_path_above_an_unfilled_one() {
+        let token_out = addr(0x02);
+        let mut token_prices = TokenGasPrices::default();
+        token_prices.insert(
+            token_out.clone(),
+            tycho_simulation::tycho_common::simulation::protocol_sim::Price::new(
+                BigUint::from(1u64),
+                BigUint::from(1u64),
+            ),
+        );
+        let outcomes = vec![
+            Some(FullAmountOutcome::Unfilled),
+            // Gas costs more than it pays: net output is -400.
+            Some(FullAmountOutcome::Filled(hop(100, 500))),
+            Some(FullAmountOutcome::Filled(hop(900, 10))),
+        ];
+
+        let ranking =
+            rank_outcomes(outcomes, &BigUint::from(1u64), Some(&token_prices), &token_out);
+
+        assert_eq!(ranking.by_output, vec![2, 1, 0], "unfilled ranks below a loss-making path");
     }
 
     /// With no price for the output token gas cannot be converted, so it is not taken off and the
