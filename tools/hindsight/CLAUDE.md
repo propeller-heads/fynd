@@ -16,7 +16,7 @@ and takes neither.
 Built-in address books: `ethereum`, `base`, `unichain`, `arbitrum`, `bsc`, `polygon`, `robinhood`.
 Any other name needs `--registry`.
 
-- **`decode`** — Fetch block receipts, match solver transactions, trace each one, and emit decoded
+- **`decode`** — Fetch a block's receipts and traces (two calls), match, and emit decoded
   trades (token in/out, amounts, venue, solver, sandwich evidence). Accepts `--block N`,
   `--range START-END` (max 1000 blocks), or defaults to the latest block. Use `--json` for
   machine-readable output.
@@ -45,7 +45,7 @@ Any other name needs `--registry`.
 
 | Variable | Purpose |
 |---|---|
-| `RPC_URL` | Chain JSON-RPC endpoint (must support `debug_traceTransaction`) |
+| `RPC_URL` | Chain JSON-RPC endpoint (must support `debug_traceBlockByNumber`) |
 | `ALLIUM_API_KEY` | Allium API key (`verify` only) |
 | `ALLIUM_QUERY_ID` | Saved Allium query ID (`verify` only) |
 | `HINDSIGHT_REGISTRY` | Override path for the decoder address-book TOML |
@@ -54,42 +54,49 @@ Any other name needs `--registry`.
 
 ### Decode pipeline (`src/decoder/`)
 
-Match → trace → decode → veto → record.
+Three steps per block: trace the whole block → decode each transaction from the solver's side →
+attribute. [README.md](README.md) holds the full pipeline diagram and the two-tier decode model.
 
 | File/dir | Purpose |
 |---|---|
-| `matching.rs` | Receipt-only filter: is this transaction a solver trade at all, plus match-time vetoes |
-| `decode.rs` | The `TradeDecoder` trait, the matched entity → decoders mapping, `DecodeContext`, `TraderFlow` |
-| `netting_decoders.rs` | Netting toolkit (`sender_flow`, `venue_flow`) plus the `SenderNetting` decoder |
+| `mod.rs` | The orchestrator: fetch receipts + block trace, match, decode (declared first, netting fallback), veto, attribute |
+| `declared.rs` | The declared decode: the settling solver frame's own calldata, anchored by the recipient's ledger receipt |
+| `netting.rs` | The netting fallback (marked `decode: "netted"`): the engine plus the venue/sender/intent arms picked by the entry point |
+| `attribution.rs` | Solver attribution tiers and venue fingerprints (owner, appData, fee wallet in address order, integrator tag) |
 | `transfer_ledger.rs` | Builds a transfer ledger from logs and native ETH flows |
 | `veto.rs` | The shared `Veto` type, plus post-decode vetoes of non-comparable shapes (NFT purchases, mis-paired wrap trades, fee-on-transfer skims) |
-| `registry.rs` | Per-chain address book, loaded from TOML (see below) |
+| `registry.rs` | Per-chain address book, loaded from TOML; joins each solver to its `SolverDecoder` at load |
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |
-| `venues/` | Per-venue `TradeDecoder` impls (Relay, MetaMask, Rabby), listed in `venues::decoders_for`. Relay has two, tried in order: `RelayCalldata` (calldata-primary, see below) then `RelayNetting` (the fallback) |
-| `solvers/` | Per-solver knowledge: embedded quotes, match-time vetoes, attribution, and swap intents (`fly.rs`'s packed-calldata parser, `kyberswap.rs`'s ABI-decoded `swap` params, `zeroex.rs`'s ABI-decoded `AllowanceHolder.exec`/`Settler.execute`) recovered from a solver frame's own calldata, plus the declared output recipient (`output_recipient`) that lets `RelayCalldata` anchor the settled amount |
-| `intents/` | Intent-role decoders (solver-sent, trader-not-sender): `cow.rs` reads CoW's `Trade` event, `netting.rs` is the generic net-flow finder, `decoders_for` lists them |
-| `trace.rs` | Transaction trace fetching and processing |
+| `solvers/` | One `SolverDecoder` per solver with code: declared swaps (`fly.rs` packed calldata, `kyberswap.rs` ABI `swap` params, `zeroex.rs` `AllowanceHolder.exec`/`Settler.execute`), vetoes and integrator tags (`lifi.rs`), and `cow.rs`'s `Trade`-log read for batch settlements |
+| `trace.rs` | Whole-block trace fetching (`debug_traceBlockByNumber`) and frame walks |
 
 `src/verify/` contains the Allium integration:
 - `allium.rs` — Allium API client for the `verify` subcommand
 - `mod.rs` — Diff logic between decoded trades and Allium ground truth
 
-Three address tiers: **venue** (order-flow owner, `tx.to`), **solver** (router that settled the
-trade), **liquidity venues** (pools inside traces — not modeled here).
+Three address tiers: **venue** (order-flow owner, `tx.to` — pure data), **solver** (router that
+settled the trade — the only tier with code), **liquidity venues** (pools inside traces — not
+modeled here).
+
+### The two decode tiers
+
+Every record carries `decode: "declared" | "netted"`. Declared records (solver calldata or a
+batch settler's `Trade` log) are the trusted tier and the report's default scope. Netted records
+(balance netting) can hide an unaccounted fee inside the amounts; the report excludes them unless
+`--include-netted`.
 
 ### The address book (`registry/<chain>.toml`)
 
 All chain- and protocol-specific data lives in a per-chain TOML, embedded for the seven chains
 listed above (`registry::BUILTIN_CHAINS`) and loadable via `--registry`. A book carries only the
-tiers its chain has — Unichain has no batch settlers because CoW does not settle there, and no LiFi
-or integrator tier because the Diamond is not deployed; each book's header says what was checked.
-An address also moves per chain: Robinhood Chain's LiFi Diamond, 0x Settler, OKX router and
-MetaMask router all sit at chain-specific addresses, re-derived rather than copied.
-Sections: `wrapped_native`, `infrastructure` (Permit2 etc. —
-addresses attribution and sandwich detection skip), `usd_stablecoins` (USD anchors for
-reporting), `batch_settlers`, `[solvers]` (router address → name), `[labels]` (display-only
-names), and `[venues.<name>]` (entry points, fee collectors, and — for venues that declare
-their solver in calldata — `solver_aliases`).
+tiers its chain has; each book's header says what was checked. An address also moves per chain:
+Robinhood Chain's LiFi Diamond, 0x Settler, OKX router and MetaMask router all sit at
+chain-specific addresses, re-derived rather than copied. Sections: `wrapped_native`,
+`infrastructure` (Permit2 etc.), `usd_stablecoins` (USD anchors for reporting), `batch_settlers`,
+`[solvers]` (router address → name; the name joins to a `SolverDecoder` at load), `[labels]`
+(display-only names), `[venues.<name>]` (entry points, fee collectors, and — for venues that
+declare their solver in calldata — `solver_aliases`), and the venue fingerprints
+(`[venue_owners]`, `[venue_fees]`, `[venue_integrators]`, `[venue_appdata]`).
 
 ### Re-solve engine (`src/resolve/`)
 
@@ -132,21 +139,20 @@ positive-only USD histogram (`hindsight_positive_slippage_usd`) whose sum is the
 hypothetical revenue. Absent when the top was unsolved or the re-execution failed (e.g. a pool
 vanished at N).
 
-### Calldata-first Relay decoding
+### The declared decode
 
-`RelayCalldata` reads `token_in`/`token_out`/`amount_in` from the settling solver frame's own
+`declared_flow` reads `token_in`/`token_out`/`amount_in` from the settling solver frame's own
 `SwapIntent` and recovers the settled `amount_out` as the gross amount of `token_out` received by
-the output recipient the same calldata declares — the one field calldata can never carry. Two
-guards protect the recipient-receipt query: the recovered output must clear the intent's
-`min_amount_out` floor, and any declared quote must sit within `plausible_quote`'s band of it;
-either failure falls through to `RelayNetting`. The solver frame's `amount_in` needs no fee
-adjustment — Relay pays its input-side fee to the collector *before* forwarding into the solver
-call, so it is already the post-fee figure `amount_in` is defined to be — and the recipient's
-receipt is the gross output before any output-side fee, so neither amount needs adjusting; both
-fees are still recorded via `venue_fee_in`/`venue_fee_out` for transparency. See
-`.claude/plans/calldata-first-decoding.md` for the empirics: on a 315-transaction Base sample,
-coverage rises from 60.0% (netting alone) to 91.4% (calldata-first union), with zero divergences
-across the 165 trades both paths could decode.
+the output recipient the same calldata declares (falling back to the transaction sender) — the
+one field calldata can never carry. Two guards protect the recipient-receipt query: the recovered
+output must clear the intent's `min_amount_out` floor, and any declared quote must sit within
+`plausible_quote`'s band of it; either failure falls through to the netting fallback. The
+declared amounts are already on the solver-task basis — a venue's input-side fee left before the
+solver frame, and the recipient's receipt is the gross output — so venue fees are recorded via
+`venue_fee_in`/`venue_fee_out` for transparency without adjusting the amounts. See
+`.claude/plans/calldata-first-decoding.md` for the empirics behind calldata-first ordering: on a
+315-transaction Base sample, coverage rises from 60.0% (netting alone) to 91.4% (calldata-first
+union), with zero divergences across the 165 trades both paths could decode.
 
 ### Key types
 
@@ -199,27 +205,20 @@ It surfaces three ways:
 - **JSONL**: flat `algorithm` and `route` per state, next to the nested per-hop route (which keeps
   the pools and amounts the string leaves out).
 
-## Adding a venue / solver / decoder / chain
+## Adding a solver / venue / chain
 
-- **Solver** (a router Fynd competes with): one line in the address book's `[solvers]` section is
-  enough for matching, attribution, and metric labels. Optional code: a
-  `SolverKnowledge` impl in `solvers/` (registered in `solvers::IMPLEMENTATIONS`) with a
-  `solver_veto` method if some of its orders are not same-chain swaps, or a `swap_intent` method
-  if a trade's terms (tokens, amounts, on-chain floor, and — when the calldata declares one —
-  the solver's off-chain quote) can be recovered from the settling solver frame's own calldata.
-- **Venue** (a platform users enter through): a `[venues.<name>]` address-book section plus a
-  `TradeDecoder` in `venues/`, registered in the one `venues::decoders_for` arm (its `mod`
-  declaration is the only other line). Most venues are sender netting + fee back-out — call
-  `netting_decoders::venue_flow` and add only what is specific to the venue. The registry fails to load if
-  an address-book venue has no decoder.
-- **Decoder** (a new way to read a swap — calldata decoding, log parsing): a `TradeDecoder`, with
-  its extraction toolkit in `netting_decoders`/`calldata`, listed in the mapping for the entities that use
-  it. Netting is one shared engine; calldata is per-router, so a calldata decoder is a standalone
-  parser.
-- **Chain**: a new `registry/<chain>.toml` plus its entry in `registry::BUILTIN_CHAINS`, or passed
-  via `--registry`. Verify each venue's fee collector on that chain before adding it — a missing
-  collector leaves the fee inside the amounts, which is a wrong record rather than a miss. Check
-  the monitor's pacing flags (`--max-lag-blocks`) against the chain's block time. The `verify`
+- **Solver** (a router Fynd competes with): one line in the address book's `[solvers]` section
+  covers matching, attribution, and metric labels. To make its trades declared (trusted) instead
+  of netted: a `SolverDecoder` impl in `solvers/` with a `declared_swap` method — plus
+  `output_recipient` when the calldata names the receiver — registered as one row in
+  `solvers::IMPLEMENTATIONS`. Add a `veto` method if some of its orders are not same-chain swaps.
+- **Venue** (a platform users enter through): a `[venues.<name>]` address-book section — entry
+  points, fee collectors, and (for venues that declare their solver in calldata)
+  `solver_aliases`. No code. Verify each fee collector on-chain before adding it: a missing
+  collector leaves the fee inside the netted amounts (declared amounts are immune).
+- **Chain**: a new `registry/<chain>.toml` plus its entry in `registry::BUILTIN_CHAINS`, or
+  passed via `--registry`. Re-verify each venue's fee collectors on that chain. Check the
+  monitor's pacing flags (`--max-lag-blocks`) against the chain's block time. The `verify`
   subcommand's saved Allium query is per-chain.
 
 ## Running
