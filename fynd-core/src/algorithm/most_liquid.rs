@@ -19,13 +19,17 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use tracing::{debug, instrument, trace};
 use tycho_simulation::{
-    tycho_common::simulation::protocol_sim::{GetAmountOutResult, Price, ProtocolSim},
+    tycho_common::simulation::protocol_sim::{Price, ProtocolSim},
     tycho_core::models::{token::Token, Address},
 };
 
 use super::{Algorithm, AlgorithmConfig, NoPathReason};
 use crate::{
-    algorithm::{paths, sim_guard::GuardedProtocolSim},
+    algorithm::{
+        paths,
+        sim_guard::GuardedProtocolSim,
+        swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
+    },
     derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{
@@ -34,6 +38,10 @@ use crate::{
     types::{ComponentId, Order, Route, RouteResult, Swap},
     AlgorithmError,
 };
+
+/// What the simulation report calls the pass that picks a route. Most-liquid has one: every swap
+/// it makes is ranking candidates, and the winner is re-simulated by `build_route` afterwards.
+const SELECTION: &str = "selection";
 
 /// What can go wrong settling one token sequence.
 ///
@@ -249,12 +257,6 @@ struct HopResult {
     amount_out: BigUint,
     /// What that swap costs in gas, in wei.
     gas: BigUint,
-}
-
-impl HopResult {
-    fn new(pool_ix: usize, result: GetAmountOutResult) -> Self {
-        HopResult { pool_ix, amount_out: result.amount, gas: result.gas }
-    }
 }
 
 /// Algorithm that selects routes based on expected output after gas.
@@ -601,7 +603,8 @@ impl MostLiquidAlgorithm {
         ctx: &SolveContext,
     ) -> Result<RouteResult, AlgorithmError> {
         let mut best_route: Option<(&TokenPath, SolvedRoute)> = None;
-        let mut cache = PoolSwapsCache::new(self.cache_pair_swaps);
+        let mut winners = PairWinners::new(self.cache_pair_swaps);
+        let mut swaps = SwapCache::new();
         let timeout_ms = self.timeout.as_millis() as u64;
 
         for (token_path, _) in scored_paths {
@@ -611,7 +614,7 @@ impl MostLiquidAlgorithm {
                 break;
             }
 
-            let solved = match Self::solve_token_path(ctx, token_path, &mut cache) {
+            let solved = match Self::solve_token_path(ctx, token_path, &mut winners, &mut swaps) {
                 Ok(solved) => solved,
                 Err(e) => {
                     trace!(error = %e, "could not solve path");
@@ -694,11 +697,13 @@ impl MostLiquidAlgorithm {
     /// both hops of A -> B -> C -- and a circular sequence crosses the same pair in both
     /// directions. Sequences whose hops all run out of pools this way are dropped, the same as any
     /// other sequence that cannot be settled.
-    fn solve_token_path(
-        ctx: &SolveContext<'_>,
+    fn solve_token_path<'g>(
+        ctx: &SolveContext<'g>,
         token_path: &[NodeIndex],
-        cache: &mut PoolSwapsCache,
+        winners: &mut PairWinners,
+        swaps: &mut SwapCache<'g>,
     ) -> Result<SolvedRoute, MostLiquidError> {
+        let (graph, market, gas_price) = (ctx.graph, ctx.market, ctx.gas_price);
         let mut current_amount = ctx.amount_in.clone();
         let mut hops: SmallVec<[HopResult; INLINE_EDGES]> = SmallVec::new();
         let mut used_components: SmallVec<[&ComponentId; INLINE_EDGES]> = SmallVec::new();
@@ -710,27 +715,37 @@ impl MostLiquidAlgorithm {
         for pair in token_path.windows(2) {
             let (token_in, token_out, token_out_gas_price) = Self::get_pair_data(ctx, pair)?;
 
-            let simulate = |component_id: &ComponentId| {
-                let state = ctx
-                    .market
-                    .get_simulation_state(component_id)?;
-                let result = state
-                    .get_amount_out_guarded(current_amount.clone(), token_in, token_out)
-                    .ok()?;
+            let simulate = |component_id: &'g ComponentId| {
+                let paid = swaps.swap(
+                    PoolDirection {
+                        component_id,
+                        address_in: &token_in.address,
+                        address_out: &token_out.address,
+                    },
+                    &current_amount,
+                    SELECTION,
+                    || {
+                        let Some(state) = market.get_simulation_state(component_id) else {
+                            return Err(Refusal::Failed);
+                        };
+                        state
+                            .get_amount_out_guarded(current_amount.clone(), token_in, token_out)
+                            .map(|result| SwapResult { amount_out: result.amount, gas: result.gas })
+                            .map_err(|error| Refusal::of(&error))
+                    },
+                    true,
+                )?;
                 let net = match token_out_gas_price {
                     Some(price) => {
-                        let cost =
-                            &result.gas * ctx.gas_price * &price.numerator / &price.denominator;
-                        BigInt::from(result.amount.clone()) - BigInt::from(cost)
+                        let cost = &paid.gas * gas_price * &price.numerator / &price.denominator;
+                        BigInt::from(paid.amount_out.clone()) - BigInt::from(cost)
                     }
-                    None => BigInt::from(result.amount.clone()),
+                    None => BigInt::from(paid.amount_out.clone()),
                 };
-                Some((result, net))
+                Some((paid, net))
             };
 
-            let pools = ctx
-                .graph
-                .pools_between(pair[0], pair[1]);
+            let pools = graph.pools_between(pair[0], pair[1]);
 
             // A pool this route already crossed cannot be offered again. Where that bites, the
             // pool is picked here and the cache is left alone in both directions: what it holds
@@ -742,7 +757,7 @@ impl MostLiquidAlgorithm {
             let hop_result = if restricted {
                 best_paying_pool(pools, |id| !used_components.contains(&id), simulate)
             } else {
-                cache.swap((pair[0], pair[1]), &current_amount, pools, simulate)
+                winners.hop((pair[0], pair[1]), pools, simulate)
             };
             let Some(hop_result) = hop_result else {
                 return Err(MostLiquidError::HopNotTradable { from: pair[0], to: pair[1] })
@@ -904,12 +919,12 @@ impl Algorithm for MostLiquidAlgorithm {
 ///
 /// `pool_ix` indexes `pools`, so a caller that skipped some still gets back the index the built
 /// route needs.
-fn best_paying_pool<D>(
-    pools: &[EdgeData<D>],
+fn best_paying_pool<'g, D>(
+    pools: &'g [EdgeData<D>],
     mut usable: impl FnMut(&ComponentId) -> bool,
-    mut simulate: impl FnMut(&ComponentId) -> Option<(GetAmountOutResult, BigInt)>,
+    mut simulate: impl FnMut(&'g ComponentId) -> Option<(SwapResult, BigInt)>,
 ) -> Option<HopResult> {
-    let mut best: Option<(usize, GetAmountOutResult, BigInt)> = None;
+    let mut best: Option<(usize, SwapResult, BigInt)> = None;
 
     for (pool_ix, edge) in pools.iter().enumerate() {
         if !usable(&edge.component_id) {
@@ -927,94 +942,63 @@ fn best_paying_pool<D>(
         }
     }
 
-    let (pool_ix, result, _) = best?;
-    Some(HopResult::new(pool_ix, result))
+    let (pool_ix, paid, _) = best?;
+    Some(HopResult { pool_ix, amount_out: paid.amount_out, gas: paid.gas })
 }
 
-/// What each token pair paid, created for every order and not persisted after it.
+/// Which pool won each token pair, for this order only.
 ///
-/// Routes share pairs: every route through WBTC -> WETH asks the same pools the same question. This
-/// answers it once. Which pool pays most is remembered for the pair; what it paid is remembered per
-/// input amount, so routes arriving with the same amount get the same numbers.
+/// Routes share pairs: every route through WBTC -> WETH asks the same pools the same question.
+/// What each pool *paid* is not kept here -- that lives in the shared [`SwapCache`], keyed by pool
+/// so two nearby amounts on one pool's curve can be read across. Keeping amounts per pair could
+/// not do that: a later amount can be won by a different pool, and a line drawn between two
+/// amounts won by two pools joins two unrelated curves.
 ///
-/// Remembering nothing is a valid state: [`PoolSwapsCache::new`] takes a flag, and with it off
-/// every hop asks every pool, which is the answer the cache is an approximation of.
-struct PoolSwapsCache {
-    pairs: FxHashMap<(NodeIndex, NodeIndex), PairCacheEntry>,
+/// What is left is the choice, which is the part worth reusing: try the pool that won this pair
+/// last before asking every pool on it again.
+///
+/// Remembering nothing is a valid state: [`PairWinners::new`] takes a flag, and with it off every
+/// hop asks every pool, which is the answer this is an approximation of.
+struct PairWinners {
+    winner_by_pair: FxHashMap<(NodeIndex, NodeIndex), usize>,
     enabled: bool,
 }
 
-/// The pool that won a pair, and what it paid at each amount seen so far.
-struct PairCacheEntry {
-    /// Where the pool that last won this pair sits in its pool list.
-    pool_ix: usize,
-    /// Keyed by the amount that went in. Each outcome names the pool it came from, which is not
-    /// always `pool_ix`: a later amount can be won by a different pool, and the outcomes already
-    /// recorded still belong to whichever pool produced them.
-    outcomes_by_amount: FxHashMap<BigUint, HopResult>,
-}
-
-impl PoolSwapsCache {
+impl PairWinners {
     fn new(enabled: bool) -> Self {
-        Self { pairs: FxHashMap::default(), enabled }
+        Self { winner_by_pair: FxHashMap::default(), enabled }
     }
 
     /// Swaps one pair: which pool to go through, and what it pays.
     ///
-    /// Tries in order: the amount already recorded for this pair, then the pool that won it, then
-    /// every pool. `simulate` runs one pool and reports what it pays and what that is worth after
-    /// its own gas.
+    /// Tries the pool that won this pair before falling back to every pool. `simulate` reports
+    /// what one pool pays and what that is worth after its own gas; whether it reaches the pool or
+    /// is answered from amounts already asked is the swap cache's business, not this one's.
     ///
     /// Returns `None` when no pool on the pair can trade the amount.
-    fn swap<D>(
+    fn hop<'g, D>(
         &mut self,
         pair: (NodeIndex, NodeIndex),
-        amount_in: &BigUint,
-        pools: &[EdgeData<D>],
-        mut simulate: impl FnMut(&ComponentId) -> Option<(GetAmountOutResult, BigInt)>,
+        pools: &'g [EdgeData<D>],
+        mut simulate: impl FnMut(&'g ComponentId) -> Option<(SwapResult, BigInt)>,
     ) -> Option<HopResult> {
-        if let Some(choice) = self.pairs.get(&pair) {
-            if let Some(outcome) = choice.outcomes_by_amount.get(amount_in) {
-                return Some(outcome.clone());
-            }
-
-            // The pool was simulated but not at this amount. We assume that amounts dont move
-            // so much so we assume the same winner wins again at a slightly different amount.
-            if let Some((result, _)) = pools
-                .get(choice.pool_ix)
+        // The winner is assumed to hold at a nearby amount. Where it does not, it still pays what
+        // it pays, and the next full scan of this pair moves the choice on.
+        if let Some(&pool_ix) = self.winner_by_pair.get(&pair) {
+            if let Some((paid, _)) = pools
+                .get(pool_ix)
                 .and_then(|edge| simulate(&edge.component_id))
             {
-                let hop_result = HopResult::new(choice.pool_ix, result);
-                self.record(pair, amount_in, &hop_result);
-                return Some(hop_result);
+                return Some(HopResult { pool_ix, amount_out: paid.amount_out, gas: paid.gas });
             }
         }
 
         let hop_result = best_paying_pool(pools, |_| true, simulate)?;
-        self.record(pair, amount_in, &hop_result);
-        Some(hop_result)
-    }
-
-    /// Remembers what a pool paid for one amount on one pair, unless the cache is off.
-    ///
-    /// This is the only place anything is written, so an off cache stays empty and every lookup in
-    /// [`PoolSwapsCache::swap`] misses.
-    fn record(&mut self, pair: (NodeIndex, NodeIndex), amount_in: &BigUint, result: &HopResult) {
-        if !self.enabled {
-            return;
+        if self.enabled {
+            self.winner_by_pair
+                .insert(pair, hop_result.pool_ix);
         }
-
-        let choice = self
-            .pairs
-            .entry(pair)
-            .or_insert_with(|| PairCacheEntry {
-                pool_ix: result.pool_ix,
-                outcomes_by_amount: FxHashMap::default(),
-            });
-        choice.pool_ix = result.pool_ix;
-        choice
-            .outcomes_by_amount
-            .insert(amount_in.clone(), result.clone());
+        Some(hop_result)
     }
 }
 
@@ -2194,7 +2178,7 @@ mod tests {
         assert_eq!(MostLiquidAlgorithm::score_token_path(graph, &[node(&a)]), None);
     }
 
-    // ==================== PoolSwapsCache Tests ====================
+    // ==================== PairWinners Tests ====================
 
     /// `count` pools on one pair, named `pool0`, `pool1`, ... for [`simulator`] to answer as.
     fn pools(count: usize) -> Vec<EdgeData<()>> {
@@ -2207,126 +2191,115 @@ mod tests {
     fn simulator(
         multipliers: [u64; 2],
         amount_in: u64,
-    ) -> impl FnMut(&ComponentId) -> Option<(GetAmountOutResult, BigInt)> {
+    ) -> impl FnMut(&ComponentId) -> Option<(SwapResult, BigInt)> {
         move |component_id: &ComponentId| {
             let index: usize = component_id
                 .trim_start_matches("pool")
                 .parse()
                 .ok()?;
             let amount = BigUint::from(amount_in * multipliers[index]);
-            let result = GetAmountOutResult::new(
-                amount.clone(),
-                BigUint::from(10u64),
-                Box::new(MockProtocolSim::new(1.0)),
-            );
-            Some((result, BigInt::from(amount)))
+            let paid = SwapResult { amount_out: amount.clone(), gas: BigUint::from(10u64) };
+            Some((paid, BigInt::from(amount)))
         }
     }
 
-    /// The one token pair every cache case works on.
+    /// The one token pair every case works on.
     fn pair() -> (NodeIndex, NodeIndex) {
         (NodeIndex::new(0), NodeIndex::new(1))
     }
 
     #[test]
-    fn test_cache_takes_the_pool_that_pays_most() {
-        let mut cache = PoolSwapsCache::new(true);
+    fn test_winners_takes_the_pool_that_pays_most() {
+        let mut winners = PairWinners::new(true);
         let multipliers = [2u64, 5u64];
         let pools = pools(multipliers.len());
 
-        let outcome = cache
-            .swap(pair(), &BigUint::from(100u64), &pools, simulator(multipliers, 100))
+        let outcome = winners
+            .hop(pair(), &pools, simulator(multipliers, 100))
             .unwrap();
 
         assert_eq!(outcome.pool_ix, 1, "pool1 pays 500 against pool0's 200");
         assert_eq!(outcome.amount_out, BigUint::from(500u64));
     }
 
-    /// The second ask at the same amount must not simulate anything.
+    /// Once a pair has a winner, only that pool is asked. Whether the ask reaches the pool or is
+    /// answered from an amount already asked is the swap cache's business, not this one's.
     #[test]
-    fn test_cache_answers_a_repeated_amount_without_simulating() {
-        let mut cache = PoolSwapsCache::new(true);
+    fn test_winners_asks_only_the_remembered_winner() {
+        let mut winners = PairWinners::new(true);
         let multipliers = [2u64, 5u64];
         let pools = pools(multipliers.len());
-        let amount = BigUint::from(100u64);
-        cache
-            .swap(pair(), &amount, &pools, simulator(multipliers, 100))
+        winners
+            .hop(pair(), &pools, simulator(multipliers, 100))
             .unwrap();
 
-        let outcome = cache
-            .swap(pair(), &amount, &pools, |_| panic!("must not simulate on a hit"))
+        let mut asked = Vec::new();
+        let outcome = winners
+            .hop(pair(), &pools, |component_id: &ComponentId| {
+                asked.push(component_id.clone());
+                simulator(multipliers, 100)(component_id)
+            })
             .unwrap();
 
+        assert_eq!(asked, vec!["pool1".to_string()], "only the winner should be asked");
         assert_eq!(outcome.pool_ix, 1);
-        assert_eq!(outcome.amount_out, BigUint::from(500u64));
     }
 
-    /// A remembered outcome carries the pool that produced it. A later amount won by a different
-    /// pool must not rewrite what an earlier one was told.
+    /// A winner that cannot trade the amount does not end the hop: every pool is asked, and the
+    /// one that answers becomes the pair's winner.
     #[test]
-    fn test_cache_keeps_each_amount_with_the_pool_that_paid_it() {
-        let mut cache = PoolSwapsCache::new(true);
+    fn test_winners_falls_back_to_every_pool_when_the_winner_cannot_trade() {
+        let mut winners = PairWinners::new(true);
         let pools = pools(2);
-
-        // At 100, pool1 wins. At 50 the simulator is rigged so only pool0 answers, which makes it
-        // the pair's remembered winner.
-        cache
-            .swap(pair(), &BigUint::from(100u64), &pools, simulator([2, 5], 100))
+        winners
+            .hop(pair(), &pools, simulator([2, 5], 100))
             .unwrap();
-        cache
-            .swap(pair(), &BigUint::from(50u64), &pools, |component_id: &ComponentId| {
+
+        let outcome = winners
+            .hop(pair(), &pools, |component_id: &ComponentId| {
                 (component_id == "pool0").then(|| {
                     let amount = BigUint::from(50u64);
                     (
-                        GetAmountOutResult::new(
-                            amount.clone(),
-                            BigUint::from(10u64),
-                            Box::new(MockProtocolSim::new(1.0)),
-                        ),
+                        SwapResult { amount_out: amount.clone(), gas: BigUint::from(10u64) },
                         BigInt::from(amount),
                     )
                 })
             })
             .unwrap();
 
-        let replay = cache
-            .swap(pair(), &BigUint::from(100u64), &pools, |_| panic!("must not simulate on a hit"))
-            .unwrap();
-
-        assert_eq!(replay.pool_ix, 1, "the 100 outcome still belongs to pool1");
-        assert_eq!(replay.amount_out, BigUint::from(500u64));
+        assert_eq!(outcome.pool_ix, 0, "pool1 refused, so pool0 takes the pair");
+        assert_eq!(outcome.amount_out, BigUint::from(50u64));
     }
 
-    /// Off, the cache stays empty, so every ask simulates again.
+    /// Off, no winner is remembered, so every pool is asked every time.
     #[test]
-    fn test_cache_disabled_remembers_nothing() {
-        let mut cache = PoolSwapsCache::new(false);
+    fn test_winners_disabled_scans_every_pool_each_time() {
+        let mut winners = PairWinners::new(false);
         let multipliers = [2u64, 5u64];
         let pools = pools(multipliers.len());
-        let amount = BigUint::from(100u64);
 
-        let first = cache
-            .swap(pair(), &amount, &pools, simulator(multipliers, 100))
+        let first = winners
+            .hop(pair(), &pools, simulator(multipliers, 100))
             .unwrap();
         let mut asked = 0usize;
-        let second = cache
-            .swap(pair(), &amount, &pools, |component_id| {
+        let second = winners
+            .hop(pair(), &pools, |component_id: &ComponentId| {
                 asked += 1;
                 simulator(multipliers, 100)(component_id)
             })
             .unwrap();
 
-        assert_eq!(asked, 2, "both pools are asked again, so nothing was remembered");
+        assert_eq!(asked, 2, "both pools are asked again, so no winner was remembered");
         assert_eq!(first.amount_out, second.amount_out);
     }
 
     /// No pool on the pair can trade the amount.
     #[test]
-    fn test_cache_returns_none_when_no_pool_trades() {
-        let mut cache = PoolSwapsCache::new(true);
+    fn test_winners_returns_none_when_no_pool_trades() {
+        let mut winners = PairWinners::new(true);
         let pools = pools(2);
 
-        let outcome = cache.swap(pair(), &BigUint::from(100u64), &pools, |_| None);
+        let outcome = winners.hop(pair(), &pools, |_| None);
 
         assert!(outcome.is_none());
     }
