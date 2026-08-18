@@ -57,9 +57,9 @@ See [`tools/hindsight/CLAUDE.md`](hindsight/CLAUDE.md) for the full module overv
 
 Four subcommands via `cargo run -p hindsight --release --`:
 
-- **`decode`** — Fetch block receipts, match and trace solver transactions, emit decoded trades
-  (token in/out, amounts, client, solver, settled gas). Accepts `--block N`, `--range START-END`
-  (max 1000 blocks), or defaults to the latest block.
+- **`decode`** — Fetch a block's receipts and traces, match solver transactions, emit decoded
+  trades (token in/out, amounts, venue, solver, decode tier). Accepts `--block N`,
+  `--range START-END` (max 1000 blocks), or defaults to the latest block.
 - **`verify`** — Diff decoded trades against Allium's `aggregator_trades` ground truth. Requires 
   `ALLIUM_API_KEY` and `ALLIUM_QUERY_ID`.
 - **`monitor`** — Live mode: drives an in-process `fynd-core` solver block-by-block, solving
