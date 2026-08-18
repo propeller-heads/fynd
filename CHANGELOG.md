@@ -1,4 +1,30 @@
 
+## [0.99.7](https://github.com/propeller-heads/fynd/compare/0.99.6...0.99.7) (2026-08-17)
+
+### Features
+
+* Replace path data types with SmallVec ([4a7424b](https://github.com/propeller-heads/fynd/commit/4a7424b851084f9e6404e8d7df44d4012e1ecbdb))
+* Use FxHash at all hashed fields ([75ea368](https://github.com/propeller-heads/fynd/commit/75ea368b4ab6085136f7d9c0109fbf94571be160))
+* Add error tracking on benchmark ([3fd39fe](https://github.com/propeller-heads/fynd/commit/3fd39fef0e3187fe118ecdacda154c62c9399bbb))
+* Keep public API backwards compatible ([fada11d](https://github.com/propeller-heads/fynd/commit/fada11d6ba92c0016fcab62681c2e579e20e254a))
+* **most_liquid:** Never send a route through one pool twice ([d1fc9be](https://github.com/propeller-heads/fynd/commit/d1fc9be73197e2dbe61deb98aeb034f82df53465))
+* Allow querying market data with reference IDs ([8bed02b](https://github.com/propeller-heads/fynd/commit/8bed02b8deb5aa7dc0d083591e2f47acbc8b0fda))
+* Implement target node filtering on bellman ford ([cfb138f](https://github.com/propeller-heads/fynd/commit/cfb138f17067b4f14655123559d1b1b7375779d7))
+* Implement MostLiquid V2, designed with token sequences ([06f4a74](https://github.com/propeller-heads/fynd/commit/06f4a7492f3d8d68a6dec9f0eb78e09f4829888b))
+* Implement topology graph search methods ([b23372c](https://github.com/propeller-heads/fynd/commit/b23372c23ae50715dab87c0fa568972528c48fc5))
+* Use shared pointer (ARC) for component and token data ([20b67e8](https://github.com/propeller-heads/fynd/commit/20b67e8016553c76c04a01741b99b61abcad54e5))
+* Implement TopologyGraph - single edge between tokens ([9463fa1](https://github.com/propeller-heads/fynd/commit/9463fa1f40ca3c31bf4e85d565feba420c02bc17))
+
+### Bug Fixes
+
+* Update callsite after merging main ([d606fb8](https://github.com/propeller-heads/fynd/commit/d606fb8c949fd57e1aea5781deb6bc11a6eff8a4))
+* Give the integration tests their own worker pool config ([0648090](https://github.com/propeller-heads/fynd/commit/06480908da73dfbec9a2a1dcc0f74db58d2056d1))
+
+### Performance Improvements
+
+* Extract subset loops optimized ([7b2624a](https://github.com/propeller-heads/fynd/commit/7b2624a88525e35379d678e9d54675e80456c116))
+
+
 ## [0.99.6](https://github.com/propeller-heads/fynd/compare/0.99.5...0.99.6) (2026-08-14)
 
 ### Features
