@@ -104,7 +104,19 @@ alloy = { version = "1", features = [
     "rpc-types-eth",
 ] }
 # HTTP
-actix-web = "4"
+# Default features minus "http2": that feature is the only thing pulling h2 ^0.3, which has no
+# patch for RUSTSEC-2026-0258. The server binds plain TCP with no TLS, so HTTP/2 was only ever
+# reachable via h2c prior knowledge. Re-enable once actix-http moves to h2 0.4.
+actix-web = { version = "4", default-features = false, features = [
+    "macros",
+    "compress-brotli",
+    "compress-gzip",
+    "compress-zstd",
+    "cookies",
+    "unicode",
+    "compat",
+    "ws",
+] }
 reqwest = { version = "0.12", features = ["json"] }
 
 # Async
