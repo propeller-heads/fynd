@@ -43,7 +43,7 @@ jobs:
                 repo: context.repo.repo,
                 username: actor,
               });
-              if (!['maintain', 'admin'].includes(permission)) {
+              if (!['maintain', 'admin', 'write'].includes(permission)) {
                 throw new Error(`Manual Dev deployment requires maintain or admin permission; ${actor} has ${permission}.`);
               }
             }
