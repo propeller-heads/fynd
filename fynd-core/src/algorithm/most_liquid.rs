@@ -588,13 +588,7 @@ impl MostLiquidAlgorithm {
             }
         }
 
-        let market = match label.as_ref() {
-            Some(l) => market
-                .read_labeled(l)
-                .await
-                .map_err(|e| AlgorithmError::Other(e.to_string()))?,
-            None => market.read().await,
-        };
+        let market = paths::read_market(&market, label).await?;
         let market_subset = market.extract_subset_with_overlay(&component_ids);
         drop(market);
         Ok(market_subset)
@@ -873,11 +867,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 3: Fetch all pools in scored_paths.
         let market = Self::snapshot_market_state(graph, market, label, &scored_paths).await?;
-        let gas_price = market
-            .gas_price()
-            .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
-            .effective_gas_price()
-            .clone();
+        let gas_price = paths::fetch_gas_price(&market)?;
 
         // Step 4: Solve all paths in score order and return the best one
         let ctx = SolveContext {

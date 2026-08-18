@@ -43,7 +43,7 @@ use super::{
     split_primitives::MarketOverrides, Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason,
 };
 use crate::{
-    algorithm::sim_guard::GuardedProtocolSim,
+    algorithm::{paths, sim_guard::GuardedProtocolSim},
     derived::{
         computation::ComputationRequirements,
         types::{SpotPrices, TokenGasPrices},
@@ -205,13 +205,7 @@ impl BellmanFordAlgorithm {
                 },
             )?;
 
-        let market_view = match label.as_ref() {
-            Some(l) => market
-                .read_labeled(l)
-                .await
-                .map_err(|e| AlgorithmError::Other(e.to_string()))?,
-            None => market.read().await,
-        };
+        let market_view = paths::read_market(&market, label).await?;
         let token_map: FxHashMap<NodeIndex, Arc<Token>> = token_nodes
             .iter()
             .filter_map(|&node| {

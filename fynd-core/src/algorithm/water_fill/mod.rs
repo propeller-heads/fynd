@@ -28,92 +28,54 @@
 //! (including the native-ETH sentinel) survive the spot × depth cutoff. Every returned route is
 //! assembled through the shared split primitives and can be encoded on-chain.
 
+mod config;
+mod models;
+
 use std::{
     cmp::{Ordering, Reverse},
     time::{Duration, Instant},
 };
 
+use models::{
+    CandidatePathSet, CandidatePathState, CandidateSearchConfig, Deadline, Discovery, ExchangeMove,
+    FullAmountOutcome, FullAmountRanking, ScoredEdge, SetupResult, SolveInput, SolveStage,
+    SplitCandidate, StepResult,
+};
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
 use petgraph::{graph::NodeIndex, prelude::EdgeRef};
 use rustc_hash::{FxHashMap, FxHashSet};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, trace};
 use tycho_simulation::tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim};
 
 use super::{
     most_liquid::DepthAndPrice,
     paths,
-    sim_guard::GuardedProtocolSim,
-    split_primitives::{build_split_route, HopDescriptor, PathAllocation, SimulatedHop},
+    sim_meter::{self, MeteredProtocolSim},
+    split_primitives::{
+        build_split_route, HopDescriptor, MarketOverrides, PathAllocation, SimulatedHop,
+    },
     Algorithm, AlgorithmConfig, NoPathReason,
 };
 use crate::{
+    algorithm::{
+        paths::read_market,
+        swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
+        water_fill::config::{
+            BASELINE_CANDIDATES, CANDIDATE_CONNECTOR_EDGES_PER_TOKEN,
+            CANDIDATE_DIRECT_EDGES_PER_TOKEN, CANDIDATE_EDGES_PER_STATE, CANDIDATE_STATES_PER_NODE,
+            COARSE_CHUNKS, DEFAULT_MAX_CANDIDATES, DEFAULT_MAX_PATHS, DERIVED_ANCHOR_COUNT,
+            EXCHANGE_DELTA_FLOOR, EXCHANGE_MAX_SIMS, FINE_CHUNKS, MAX_DISCOVERY_CANDIDATES,
+            SHARED_FULL_PATHS, SHARED_MARGIN_PATHS, SHARED_MARGIN_PROBE_PATHS,
+            SHARED_MAX_CANDIDATES,
+        },
+    },
     derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketDataView, MarketState, StateLabel},
     graph::{EdgeData, GraphQueryFilter, Path, TopologyGraph, TopologyGraphManager},
-    types::{ComponentId, Order, Route, RouteResult},
+    types::{ComponentId, Order, RouteResult},
     AlgorithmError,
 };
-
-/// Maximum candidate paths simulated per order after heuristic ranking.
-const DEFAULT_MAX_CANDIDATES: usize = 5000;
-/// Cap on candidates from the bounded amount-aware discovery added to the candidate set
-/// (matches the bounded discovery's own cap; see the discovery section below).
-const BOUNDED_DISCOVERY_CANDIDATES: usize = 128;
-/// Maximum number of parallel paths in a split.
-const DEFAULT_MAX_PATHS: usize = 4;
-/// Chunk grid for the coarse set-selection pass.
-const COARSE_CHUNKS: usize = 20;
-/// Chunk grid for the fine allocation pass over the fixed active set.
-const FINE_CHUNKS: usize = 256;
-/// Number of top full-amount paths always considered for shared-component fill-and-spill.
-const SHARED_FULL_PATHS: usize = 8;
-/// Number of full-amount-ranked paths probed with the first chunk for fill-and-spill.
-const SHARED_MARGIN_PROBE_PATHS: usize = 32;
-/// Number of marginal-probe winners added to the fill-and-spill candidate set.
-const SHARED_MARGIN_PATHS: usize = 8;
-/// Upper bound on fill-and-spill candidate paths.
-const SHARED_MAX_CANDIDATES: usize = 12;
-/// Candidate states retained per intermediate token during bounded discovery expansion.
-const CANDIDATE_STATES_PER_NODE: usize = 4;
-/// Candidate edge expansions from one path state during discovery.
-const CANDIDATE_EDGES_PER_STATE: usize = 16;
-/// Parallel components kept for a discovery edge directly into the target token.
-const CANDIDATE_DIRECT_EDGES_PER_TOKEN: usize = 4;
-/// Parallel components kept for a discovery edge into an anchor or configured connector token.
-const CANDIDATE_CONNECTOR_EDGES_PER_TOKEN: usize = 2;
-/// Number of highest-connectivity tokens taken as bounded-discovery anchors, derived per solve
-/// from the graph (see `derive_anchor_tokens`).
-const DERIVED_ANCHOR_COUNT: usize = 16;
-/// Exchange-refinement step floor: the pass stops once `delta` falls below one fine chunk divided
-/// by this factor, i.e. `amount_in / (fine_chunks * EXCHANGE_DELTA_FLOOR)`.
-const EXCHANGE_DELTA_FLOOR: usize = 64;
-/// Safety bound on trial simulations across the whole exchange-refinement pass.
-const EXCHANGE_MAX_SIMS: usize = 400;
-
-/// A fully-built split candidate: the assembled route plus its summed gross output and gas.
-struct SplitCandidate {
-    route: Route,
-    gross: BigUint,
-    gas: BigUint,
-}
-
-impl SplitCandidate {
-    /// Net output in output-token terms (gross minus gas cost).
-    fn net(
-        &self,
-        gas_price: &BigUint,
-        token_prices: Option<&TokenGasPrices>,
-        token_out: &Address,
-    ) -> BigInt {
-        let cost =
-            WaterFillAlgorithm::gas_cost_in_token(&self.gas, gas_price, token_prices, token_out);
-        match cost {
-            Some(c) => BigInt::from(self.gross.clone()) - BigInt::from(c),
-            None => BigInt::from(self.gross.clone()),
-        }
-    }
-}
 
 /// Splits an order across component-disjoint (and, via fill-and-spill, component-sharing) paths to
 /// reduce price impact, returning the best net of the single path and several split allocations.
@@ -123,48 +85,6 @@ pub struct WaterFillAlgorithm {
     timeout: Duration,
     max_candidates: usize,
     max_paths: usize,
-}
-
-/// A candidate reallocation in the exchange-refinement pass: shift one `delta` of input from the
-/// over-allocated `donor` to the under-allocated `recipient`, carrying the two paths' recomputed
-/// net outputs and the resulting gain in summed net output.
-struct ExchangeMove {
-    donor: usize,
-    recipient: usize,
-    donor_net: BigInt,
-    recip_net: BigInt,
-    gain: BigInt,
-}
-
-/// One simulated traversal of a path, with the resulting per-component states so they can be
-/// committed.
-struct StepResult {
-    amount_out: BigUint,
-    gas: BigUint,
-    new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
-}
-
-/// Shared inputs threaded through every split-allocation pass: the ranked candidate paths, the
-/// market snapshot, gas pricing, and the order under a single solve clock. Bundled so the
-/// allocation methods take one context instead of the same six references each.
-struct SplitContext<'a, 'g> {
-    ordered: &'a [Path<'g, DepthAndPrice>],
-    market: &'a MarketState,
-    gas_price: &'a BigUint,
-    token_prices: Option<&'a TokenGasPrices>,
-    order: &'a Order,
-    start: Instant,
-}
-
-/// Output of the shared setup pass: candidate paths ranked by full-amount output, the market
-/// subset they touch, the effective gas price, the best single path (if one fills the order), and
-/// token gas prices for gas-aware ranking.
-struct SetupResult<'a> {
-    ordered: Vec<Path<'a, DepthAndPrice>>,
-    market: MarketState,
-    gas_price: BigUint,
-    best_single: Option<RouteResult>,
-    token_prices: Option<TokenGasPrices>,
 }
 
 impl WaterFillAlgorithm {
@@ -188,10 +108,10 @@ impl WaterFillAlgorithm {
     /// Simulates `amount` through `path`, reading each component from `overlay` if present else the
     /// base state. Returns the output, summed gas, and the resulting per-component states so
     /// the caller can commit them into an overlay.
-    fn simulate_step(
-        path: &Path<DepthAndPrice>,
+    fn simulate_step<'g>(
+        path: &Path<'g, DepthAndPrice>,
         market: &MarketState,
-        overlay: &FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
+        overlay: &MarketOverrides,
         amount: BigUint,
     ) -> Option<StepResult> {
         let mut current = amount;
@@ -200,14 +120,7 @@ impl WaterFillAlgorithm {
         // intra-path overlay carried across hops. That reuse is rare, so only pay the
         // per-hop state clone when the path actually repeats a component; the common case
         // skips the clone entirely.
-        let path_reuses_component = {
-            let mut seen: FxHashSet<&ComponentId> =
-                FxHashSet::with_capacity_and_hasher(path.len(), Default::default());
-            !path
-                .edge_iter()
-                .iter()
-                .all(|e| seen.insert(&e.component_id))
-        };
+        let path_reuses_component = path_reuses_component(path);
         let mut intra_path_states: FxHashMap<ComponentId, Box<dyn ProtocolSim>> =
             FxHashMap::default();
         let mut new_states: Vec<(ComponentId, Box<dyn ProtocolSim>)> =
@@ -217,17 +130,15 @@ impl WaterFillAlgorithm {
             let token_in = market.get_token(address_in)?;
             let token_out = market.get_token(address_out)?;
             let component_id = &edge.component_id;
-            let state = intra_path_states
-                .get(component_id)
-                .map(Box::as_ref)
-                .or_else(|| {
-                    overlay
-                        .get(component_id)
-                        .map(Box::as_ref)
-                })
-                .or_else(|| market.get_simulation_state(component_id))?;
+            let state = hop_state(market, component_id, Some(&intra_path_states), Some(overlay))?;
             let result = state
-                .get_amount_out_guarded(current.clone(), token_in, token_out)
+                .get_amount_out_metered(
+                    component_id,
+                    SolveStage::Chunking.label(),
+                    current.clone(),
+                    token_in,
+                    token_out,
+                )
                 .ok()?;
             total_gas += &result.gas;
             if path_reuses_component {
@@ -256,10 +167,15 @@ impl WaterFillAlgorithm {
     /// A path's gas converted to output-token terms as a signed amount, or zero when no gas price
     /// is available. Subtracted from gross output to get net, so gas-blind solves fall back to
     /// gross ranking rather than erroring.
-    fn activation_cost(ctx: &SplitContext, gas: &BigUint) -> BigInt {
-        Self::gas_cost_in_token(gas, ctx.gas_price, ctx.token_prices, ctx.order.token_out())
-            .map(BigInt::from)
-            .unwrap_or_else(BigInt::zero)
+    fn activation_cost(input: &SolveInput, gas: &BigUint) -> BigInt {
+        Self::gas_cost_in_token(
+            gas,
+            &input.gas_price,
+            input.token_prices.as_ref(),
+            input.order.token_out(),
+        )
+        .map(BigInt::from)
+        .unwrap_or_else(BigInt::zero)
     }
 
     /// Picks up to `max_paths` paths that share no component, so their outputs can be summed
@@ -297,15 +213,15 @@ impl WaterFillAlgorithm {
     /// Shared setup: enumerate + rank candidates, simulate at full amount, pick the best single
     /// path if any (a path that fails at the full amount is kept as a split-only candidate).
     #[instrument(level = "debug", skip_all)]
-    async fn setup<'a>(
+    async fn setup<'o, 'g>(
         &self,
-        graph: &'a TopologyGraph<DepthAndPrice>,
+        graph: &'g TopologyGraph<DepthAndPrice>,
         market: MarketData,
         label: Option<StateLabel>,
         derived: Option<SharedDerivedDataRef>,
-        order: &Order,
-        start: Instant,
-    ) -> Result<SetupResult<'a>, AlgorithmError> {
+        order: &'o Order,
+        deadline: Deadline,
+    ) -> Result<SetupResult<'o, 'g>, AlgorithmError> {
         let token_prices = if let Some(ref derived) = derived {
             derived
                 .read()
@@ -316,6 +232,182 @@ impl WaterFillAlgorithm {
             None
         };
 
+        let mut scored_paths = self.top_scored_paths(graph, order)?;
+        let mut joined_paths = Vec::new();
+
+        let market_view = read_market(&market, label).await?;
+
+        // Bounded amount-aware discovery (see the discovery section below): union its
+        // candidates ahead of the pre-ranked set, so connector/anchor routes (incl. the
+        // native-ETH sentinel) survive the spot×depth truncation. Discovery failure is not
+        // fatal — the pre-ranked set already guarantees a route.
+        let anchor_tokens = derive_anchor_tokens(graph);
+
+        // Discovery and ranking both swap against untouched state, so they share one cache: every
+        // frontier edge discovery simulates is an answer ranking would otherwise pay for again.
+        // It outlives setup because the allocation passes that read untouched state reuse it too.
+        let mut cache = SwapCache::new();
+        sim_meter::start_solve();
+
+        let (discovered_paths, _) = discover_paths(
+                graph,
+                &market_view,
+                order,
+                &mut cache,
+                CandidateSearchConfig {
+                    query: &self.query,
+                    max_candidates: MAX_DISCOVERY_CANDIDATES,
+                    anchor_tokens: &anchor_tokens,
+                    source_token: order.token_in(),
+                    deadline,
+                },
+            )
+            .inspect_err(|e| {
+                debug!(error = %e, "water-fill bounded discovery failed; using exhaustive candidates only")
+            })
+            .unwrap_or_default();
+
+        let mut keys: FxHashSet<Vec<ComponentId>> = scored_paths
+            .iter()
+            .map(path_key)
+            .collect();
+        for path in discovered_paths {
+            if keys.insert(path_key(&path)) {
+                joined_paths.push(path);
+            }
+        }
+        joined_paths.append(&mut scored_paths);
+
+        let component_ids: FxHashSet<&ComponentId> = joined_paths
+            .iter()
+            .flat_map(|p| {
+                p.edge_iter()
+                    .iter()
+                    .map(|e| &e.component_id)
+            })
+            .collect();
+        let market_state = market_view.extract_subset_with_overlay(&component_ids);
+        let gas_price = paths::fetch_gas_price(&market_state)?;
+        drop(market_view);
+
+        let amount_in = order.amount().clone();
+        // Holds the candidates in enumeration order to start with; ranking reorders them below.
+        let mut input = SolveInput {
+            ordered: joined_paths,
+            market: market_state,
+            gas_price,
+            token_prices,
+            order,
+            deadline,
+        };
+        let ranking = self.rank_at_full_amount(&input, &mut cache);
+
+        // The baseline is the bar every split has to beat, so it is settled on exact figures.
+        // Ranking may have read a path's amounts across two nearby ones, which understates and can
+        // demote a path that deserved the top place; taking the best of the top few as simulated
+        // costs a handful of builds and keeps the bar at the best single path really on offer.
+        // Building is what copies a component and a pool state per leg, which is why it is a few
+        // and not all of them.
+        let build_baseline = |path_ix: usize| {
+            paths::simulate_pool_path(
+                &input.ordered[path_ix],
+                &input.market,
+                input.token_prices.as_ref(),
+                amount_in.clone(),
+            )
+            .ok()
+        };
+        let best_single = ranking
+            .by_output_net_gas
+            .iter()
+            .take(BASELINE_CANDIDATES)
+            .filter_map(|&path_ix| build_baseline(path_ix))
+            .max_by(|a, b| {
+                a.net_amount_out()
+                    .cmp(b.net_amount_out())
+            })
+            .or_else(|| {
+                // None of the top few assembled; fall down the list for any route at all.
+                ranking
+                    .by_output_net_gas
+                    .iter()
+                    .skip(BASELINE_CANDIDATES)
+                    .find_map(|&path_ix| build_baseline(path_ix))
+            });
+
+        // No early exit on a missing single path: a split across thin components can fill an order
+        // that no single path can, so the caller decides — it only errors when neither a
+        // single path nor a split candidate fills the order.
+        input.ordered = ranking
+            .by_output
+            .iter()
+            .map(|&path_ix| input.ordered[path_ix].clone())
+            .collect();
+
+        debug!(
+            candidate_paths = input.ordered.len(),
+            elapsed_ms = deadline.elapsed().as_millis(),
+            "water-fill discovery + full-amount ranking"
+        );
+        Ok(SetupResult { input, best_single, cache })
+    }
+
+    /// Simulates every path at the full order amount and ranks them by what they pay.
+    ///
+    /// The paths overlap heavily — thousands open with the same pool, all carrying the whole order
+    /// into it — so every hop goes through `cache` and each distinct swap costs one simulation no
+    /// matter how many paths make it.
+    ///
+    /// A path that crosses one pool twice is dropped instead of ranked: its second crossing would
+    /// have to see its own earlier swap, and every swap here reads untouched state.
+    ///
+    /// Nothing here builds a route. Only the baseline `setup` picks out of the ranking is worth
+    /// copying a component and a pool state per leg.
+    fn rank_at_full_amount<'g>(
+        &self,
+        input: &SolveInput<'_, 'g>,
+        cache: &mut SwapCache<'g>,
+    ) -> FullAmountRanking {
+        let paths = &input.ordered;
+        let order_amount = input.order.amount();
+        let mut outcomes_by_path: Vec<Option<FullAmountOutcome>> = vec![None; paths.len()];
+
+        for (path_ix, path) in paths.iter().enumerate() {
+            if input.deadline.expired() {
+                break;
+            }
+            if path_reuses_component(path) {
+                continue;
+            }
+            outcomes_by_path[path_ix] = Some(
+                match simulate_path(
+                    path,
+                    &input.market,
+                    cache,
+                    order_amount.clone(),
+                    SolveStage::Ranking,
+                ) {
+                    Some(paid) => FullAmountOutcome::Filled(paid),
+                    None => FullAmountOutcome::Unfilled,
+                },
+            );
+        }
+
+        rank_outcomes(
+            outcomes_by_path,
+            &input.gas_price,
+            input.token_prices.as_ref(),
+            input.order.token_out(),
+        )
+    }
+
+    /// Every path the graph holds between the order's tokens, best spot-price-times-depth score
+    /// first, cut to `max_candidates`. A path no edge weight covers sorts behind every scored one.
+    fn top_scored_paths<'a>(
+        &self,
+        graph: &'a TopologyGraph<DepthAndPrice>,
+        order: &Order,
+    ) -> Result<Vec<Path<'a, DepthAndPrice>>, AlgorithmError> {
         let all_paths =
             paths::find_paths(graph, order.token_in(), order.token_out(), &self.query, None)?;
         if all_paths.is_empty() {
@@ -326,140 +418,38 @@ impl WaterFillAlgorithm {
             });
         }
 
+        let path_count = all_paths.len();
+        let mut scored_count = 0usize;
+
+        // A path no edge weight covers sorts behind every scored one rather than level with a
+        // path scored at zero: the score is a spot price times a depth, so zero is a real score
+        // that a weightless path has not earned.
         let mut scored: Vec<(Path<DepthAndPrice>, f64)> = all_paths
             .into_iter()
-            .map(|p| {
-                let s = paths::try_score_path(&p).unwrap_or(f64::MIN);
-                (p, s)
+            .map(|path| {
+                let score = match paths::try_score_path(&path) {
+                    Some(score) => {
+                        scored_count += 1;
+                        score
+                    }
+                    None => f64::MIN,
+                };
+                (path, score)
             })
             .collect();
         scored.sort_by(|(_, a), (_, b)| {
             b.partial_cmp(a)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+
+        trace!(path_count, scored_count, limit = self.max_candidates, "water-fill path scoring");
+
         scored.truncate(self.max_candidates);
-        let mut paths: Vec<Path<DepthAndPrice>> = scored
+
+        Ok(scored
             .into_iter()
             .map(|(p, _)| p)
-            .collect();
-
-        let timeout_ms = self.timeout.as_millis() as u64;
-        let market = {
-            let view = match label.as_ref() {
-                Some(l) => market
-                    .read_labeled(l)
-                    .await
-                    .map_err(|e| AlgorithmError::Other(e.to_string()))?,
-                None => market.read().await,
-            };
-            if view.gas_price().is_none() {
-                return Err(AlgorithmError::DataNotFound { kind: "gas price", id: None });
-            }
-            // Bounded amount-aware discovery (see the discovery section below): union its
-            // candidates ahead of the pre-ranked set, so connector/anchor routes (incl. the
-            // native-ETH sentinel) survive the spot×depth truncation. Discovery failure is not
-            // fatal — the pre-ranked set already guarantees a route.
-            let anchor_tokens = derive_anchor_tokens(graph);
-            let bounded = find_candidate_paths(
-                graph,
-                &view,
-                order,
-                CandidateSearchConfig {
-                    query: &self.query,
-                    max_candidates: BOUNDED_DISCOVERY_CANDIDATES,
-                    anchor_tokens: &anchor_tokens,
-                    source_token: order.token_in(),
-                    start: &start,
-                    timeout_ms,
-                },
-            );
-            match bounded {
-                Ok((bounded_paths, _)) => {
-                    let mut keys: FxHashSet<Vec<ComponentId>> =
-                        paths.iter().map(path_key).collect();
-                    let mut union = Vec::with_capacity(bounded_paths.len() + paths.len());
-                    for path in bounded_paths {
-                        if keys.insert(path_key(&path)) {
-                            union.push(path);
-                        }
-                    }
-                    union.append(&mut paths);
-                    paths = union;
-                }
-                // Not fatal — the pre-ranked exhaustive set already guarantees a route — but log it
-                // so a misconfiguration or systematic discovery failure is visible rather than
-                // silently narrowing the candidate set.
-                Err(e) => {
-                    debug!(error = %e, "water-fill bounded discovery failed; using exhaustive candidates only")
-                }
-            }
-            let component_ids: FxHashSet<&ComponentId> = paths
-                .iter()
-                .flat_map(|p| {
-                    p.edge_iter()
-                        .iter()
-                        .map(|e| &e.component_id)
-                })
-                .collect();
-            let subset = view.extract_subset_with_overlay(&component_ids);
-            drop(view);
-            subset
-        };
-        let gas_price = market
-            .gas_price()
-            .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
-            .effective_gas_price()
-            .clone();
-
-        let amount_in = order.amount().clone();
-        let mut best_single: Option<RouteResult> = None;
-        let mut full_outputs: Vec<(usize, BigUint)> = Vec::new();
-
-        for (idx, path) in paths.iter().enumerate() {
-            if start.elapsed().as_millis() as u64 > timeout_ms {
-                break;
-            }
-            match paths::simulate_pool_path(path, &market, token_prices.as_ref(), amount_in.clone())
-            {
-                Ok(result) => {
-                    let gross = result
-                        .route()
-                        .swaps()
-                        .last()
-                        .map(|s| s.amount_out().clone())
-                        .unwrap_or_else(BigUint::zero);
-                    full_outputs.push((idx, gross));
-                    if best_single
-                        .as_ref()
-                        .map(|b| result.net_amount_out() > b.net_amount_out())
-                        .unwrap_or(true)
-                    {
-                        best_single = Some(result);
-                    }
-                }
-                // A path that can't take the whole order (e.g. concentrated liquidity exhausted at
-                // the full amount) may still be worth a fraction in a split, so keep it as a
-                // split-only candidate ranked last (gross 0). It never becomes the single-path
-                // baseline, and the allocation passes skip it at any chunk it still fails.
-                Err(_) => full_outputs.push((idx, BigUint::zero())),
-            }
-        }
-
-        // No early exit on a missing single path: a split across thin components can fill an order
-        // that no single path can, so the caller decides — it only errors when neither a
-        // single path nor a split candidate fills the order.
-        full_outputs.sort_by(|(_, a), (_, b)| b.cmp(a));
-        let ordered: Vec<Path<DepthAndPrice>> = full_outputs
-            .into_iter()
-            .map(|(idx, _)| paths[idx].clone())
-            .collect();
-
-        debug!(
-            candidate_paths = ordered.len(),
-            elapsed_ms = start.elapsed().as_millis(),
-            "water-fill discovery + full-amount ranking"
-        );
-        Ok(SetupResult { ordered, market, gas_price, best_single, token_prices })
+            .collect())
     }
 }
 
@@ -480,23 +470,14 @@ impl Algorithm for WaterFillAlgorithm {
         derived: Option<SharedDerivedDataRef>,
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError> {
-        let start = Instant::now();
+        let deadline = Deadline::new(Instant::now(), self.timeout);
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
 
-        let SetupResult { ordered, market, gas_price, best_single, token_prices } = self
-            .setup(graph, market, label, derived, order, start)
+        let SetupResult { input, best_single, mut cache } = self
+            .setup(graph, market, label, derived, order, deadline)
             .await?;
-        let token_out = order.token_out();
-        let ctx = SplitContext {
-            ordered: &ordered,
-            market: &market,
-            gas_price: &gas_price,
-            token_prices: token_prices.as_ref(),
-            order,
-            start,
-        };
 
         // Build the split candidates; the best net of them competes with the single path.
         let mut candidates: Vec<SplitCandidate> = Vec::new();
@@ -504,24 +485,26 @@ impl Algorithm for WaterFillAlgorithm {
         // split and the refined split, so run it once. It is cheap and always finishes, so
         // a tight timeout cannot cut it off while leaving the single path — a winning split
         // is never lost to the clock.
-        let disjoint = Self::select_disjoint(ctx.ordered, self.max_paths);
+        let disjoint = Self::select_disjoint(&input.ordered, self.max_paths);
         let coarse = (disjoint.len() >= 2)
-            .then(|| self.disjoint_waterfill(&ctx, &disjoint, COARSE_CHUNKS, true))
+            .then(|| self.disjoint_waterfill(&input, &disjoint, COARSE_CHUNKS, true))
             .flatten();
         if let Some(coarse) = coarse.as_deref() {
             // The 20-chunk floor split: exactly the coarse allocation.
-            if let Some(c) = self.build_disjoint_legs(&ctx, &disjoint, coarse) {
+            if let Some(c) = self.build_disjoint_legs(&input, &disjoint, coarse) {
                 candidates.push(c);
             }
             // Finer allocation over the same active set (a bonus; a timeout may cut it off, and
             // then the floor stands).
-            if let Some(c) = self.disjoint_refine(&ctx, &disjoint, coarse, FINE_CHUNKS) {
+            if let Some(c) =
+                self.disjoint_refine(&input, &disjoint, coarse, FINE_CHUNKS, &mut cache)
+            {
                 candidates.push(c);
             }
         }
         // Fill-and-spill: a split that lets paths share a component and branch at an intermediate
         // token (a tree route), which the component-disjoint splits cannot express.
-        if let Some(c) = self.fillspill_alloc(&ctx, FINE_CHUNKS) {
+        if let Some(c) = self.fillspill_alloc(&input, FINE_CHUNKS, &mut cache) {
             candidates.push(c);
         }
 
@@ -533,7 +516,7 @@ impl Algorithm for WaterFillAlgorithm {
             .map(|b| b.net_amount_out().clone());
         let mut best: Option<(BigInt, SplitCandidate)> = None;
         for cand in candidates {
-            let net = cand.net(&gas_price, token_prices.as_ref(), token_out);
+            let net = cand.net(&input);
             let beats = match (&best, &baseline_net) {
                 (Some((current, _)), _) => net > *current,
                 (None, Some(base)) => net > *base,
@@ -544,15 +527,16 @@ impl Algorithm for WaterFillAlgorithm {
             }
         }
         let split_won = best.is_some();
+        sim_meter::report(&input.market, || deadline.elapsed().as_millis() as u64);
         debug!(
             candidate_count,
             split_won,
-            elapsed_ms = start.elapsed().as_millis(),
+            elapsed_ms = deadline.elapsed().as_millis(),
             "water-fill selected {}",
             if split_won { "split candidate" } else { "single path" }
         );
         match best {
-            Some((net, cand)) => Ok(RouteResult::new(cand.route, net, gas_price)),
+            Some((net, cand)) => Ok(RouteResult::new(cand.route, net, input.gas_price.clone())),
             // No split won: return the single path if there is one, else nothing fills the order.
             None => best_single.ok_or(AlgorithmError::InsufficientLiquidity),
         }
@@ -575,12 +559,13 @@ impl WaterFillAlgorithm {
     /// amount), re-allocates over that set on a fine grid with the gate off (gas already
     /// justified), then runs the exchange-refinement pass. If a tight timeout cuts off either pass
     /// this returns `None` and the caller falls back to the 20-chunk floor candidate.
-    fn disjoint_refine(
+    fn disjoint_refine<'g>(
         &self,
-        ctx: &SplitContext,
+        input: &SolveInput<'_, 'g>,
         disjoint: &[usize],
         coarse: &[BigUint],
         fine_chunks: usize,
+        cache: &mut SwapCache<'g>,
     ) -> Option<SplitCandidate> {
         // The active set is the coarse-gated paths that were allocated a nonzero amount.
         let active: Vec<usize> = disjoint
@@ -595,13 +580,13 @@ impl WaterFillAlgorithm {
         }
 
         // Fine water-fill over the fixed active set, no gate (gas already justified).
-        let fine = self.disjoint_waterfill(ctx, &active, fine_chunks, false)?;
+        let fine = self.disjoint_waterfill(input, &active, fine_chunks, false)?;
 
         // Exchange refinement. The fine water-fill quantizes each path to a whole chunk, so it can
         // sit up to one chunk off the equal-marginal optimum. Nudge flow between paths at sub-chunk
         // resolution, accepting only strictly-improving moves (never-lose).
-        let refined = self.disjoint_exchange(ctx, &active, fine_chunks, fine);
-        self.build_disjoint_legs(ctx, &active, &refined)
+        let refined = self.disjoint_exchange(input, &active, fine_chunks, fine, cache);
+        self.build_disjoint_legs(input, &active, &refined)
     }
 
     /// Net output (gross output minus gas cost in output-token terms) of `path` simulated in
@@ -609,18 +594,19 @@ impl WaterFillAlgorithm {
     /// re-simulation is exact. A zero amount means the path is dropped from the route: it
     /// yields no output and, since it is no longer swapped, no gas — so dropping a donor
     /// credits its saved gas automatically.
-    fn path_net(
-        ctx: &SplitContext,
-        path: &Path<DepthAndPrice>,
+    fn path_net<'g>(
+        input: &SolveInput<'_, 'g>,
+        path: &Path<'g, DepthAndPrice>,
         amount: &BigUint,
+        cache: &mut SwapCache<'g>,
     ) -> Option<BigInt> {
         if amount.is_zero() {
             return Some(BigInt::zero());
         }
-        let empty: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
-        let step = Self::simulate_step(path, ctx.market, &empty, amount.clone())?;
-        let activation = Self::activation_cost(ctx, &step.gas);
-        Some(BigInt::from(step.amount_out) - activation)
+        let result =
+            simulate_path(path, &input.market, cache, amount.clone(), SolveStage::Exchange)?;
+        let activation = Self::activation_cost(input, &result.gas);
+        Some(BigInt::from(result.amount_out) - activation)
     }
 
     /// Exchange-refinement pass over the fixed active set, starting from the fine water-fill split.
@@ -631,41 +617,43 @@ impl WaterFillAlgorithm {
     /// component-disjoint, so a trial re-simulates only the two paths it touches (unchanged
     /// paths keep their cached net). Only strictly-improving moves are accepted, so the result
     /// never scores below the split it started from.
-    fn disjoint_exchange(
+    fn disjoint_exchange<'g>(
         &self,
-        ctx: &SplitContext,
+        input: &SolveInput<'_, 'g>,
         active: &[usize],
         fine_chunks: usize,
         alloc: Vec<BigUint>,
+        cache: &mut SwapCache<'g>,
     ) -> Vec<BigUint> {
         let path_count = active.len();
         if path_count < 2 {
             return alloc;
         }
-        let amount_in = ctx.order.amount().clone();
+        let amount_in = input.order.amount().clone();
         let fine_chunks = fine_chunks.max(1);
         let mut delta = &amount_in / fine_chunks;
         let min_delta = &amount_in / (fine_chunks * EXCHANGE_DELTA_FLOOR);
         if delta.is_zero() {
             return alloc;
         }
-        let timeout_ms = self.timeout.as_millis() as u64;
 
-        let mut cum = alloc;
-        // Cache each active path's net at its current cumulative amount so a pair trial only
-        // re-simulates the two paths it moves flow between, not the whole active set.
+        let mut cumulative_amount_in = alloc;
+        // Cache each active path's net at its current cumulative_amount_in amount so a pair trial
+        // only re-simulates the two paths it moves flow between, not the whole active set.
         let mut net_cache: Vec<BigInt> = Vec::with_capacity(path_count);
         for (i, &path_idx) in active.iter().enumerate() {
-            let Some(net) = Self::path_net(ctx, &ctx.ordered[path_idx], &cum[i]) else {
+            let Some(net) =
+                Self::path_net(input, &input.ordered[path_idx], &cumulative_amount_in[i], cache)
+            else {
                 // The starting split does not simulate cleanly; refining it is unsafe, so keep it.
-                return cum;
+                return cumulative_amount_in;
             };
             net_cache.push(net);
         }
 
         let mut sims = 0usize;
         while delta >= min_delta && !delta.is_zero() {
-            if ctx.start.elapsed().as_millis() as u64 > timeout_ms || sims >= EXCHANGE_MAX_SIMS {
+            if input.deadline.expired() || sims >= EXCHANGE_MAX_SIMS {
                 break;
             }
 
@@ -674,22 +662,26 @@ impl WaterFillAlgorithm {
                 if sims >= EXCHANGE_MAX_SIMS {
                     break;
                 }
-                if cum[donor] < delta {
+                if cumulative_amount_in[donor] < delta {
                     continue;
                 }
-                let donor_amt = &cum[donor] - &delta;
-                let Some(donor_net) = Self::path_net(ctx, &ctx.ordered[active[donor]], &donor_amt)
+                let donor_amt = &cumulative_amount_in[donor] - &delta;
+                let Some(donor_net) =
+                    Self::path_net(input, &input.ordered[active[donor]], &donor_amt, cache)
                 else {
                     continue;
                 };
                 sims += 1;
                 for recipient in 0..path_count {
-                    if recipient == donor || sims >= EXCHANGE_MAX_SIMS {
+                    if sims >= EXCHANGE_MAX_SIMS {
+                        break;
+                    }
+                    if recipient == donor {
                         continue;
                     }
-                    let recip_amt = &cum[recipient] + &delta;
+                    let recip_amt = &cumulative_amount_in[recipient] + &delta;
                     let Some(recip_net) =
-                        Self::path_net(ctx, &ctx.ordered[active[recipient]], &recip_amt)
+                        Self::path_net(input, &input.ordered[active[recipient]], &recip_amt, cache)
                     else {
                         continue;
                     };
@@ -720,20 +712,20 @@ impl WaterFillAlgorithm {
                 delta = &delta / 2usize;
                 continue;
             };
-            cum[mv.donor] = &cum[mv.donor] - &delta;
-            cum[mv.recipient] = &cum[mv.recipient] + &delta;
+            cumulative_amount_in[mv.donor] = &cumulative_amount_in[mv.donor] - &delta;
+            cumulative_amount_in[mv.recipient] = &cumulative_amount_in[mv.recipient] + &delta;
             net_cache[mv.donor] = mv.donor_net;
             net_cache[mv.recipient] = mv.recip_net;
         }
-        cum
+        cumulative_amount_in
     }
 
     /// Simulates `amount` through `path`, reading and committing component states via `overrides`,
     /// and returns the allocation the route assembly consumes.
-    fn allocation_commit(
-        path: &Path<DepthAndPrice>,
+    fn allocation_commit<'g>(
+        path: &Path<'g, DepthAndPrice>,
         market: &MarketState,
-        overrides: &mut FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
+        overrides: &mut MarketOverrides,
         amount: BigUint,
         flow_fraction: f64,
     ) -> Option<PathAllocation> {
@@ -745,12 +737,15 @@ impl WaterFillAlgorithm {
             let token_in = market.get_token(address_in)?;
             let token_out = market.get_token(address_out)?;
             let component_id = &edge.component_id;
-            let state = overrides
-                .get(component_id)
-                .map(Box::as_ref)
-                .or_else(|| market.get_simulation_state(component_id))?;
+            let state = hop_state(market, component_id, None, Some(overrides))?;
             let result = state
-                .get_amount_out_guarded(current.clone(), token_in, token_out)
+                .get_amount_out_metered(
+                    component_id,
+                    SolveStage::Assembly.label(),
+                    current.clone(),
+                    token_in,
+                    token_out,
+                )
                 .ok()?;
             hops.push(SimulatedHop {
                 descriptor: HopDescriptor::new(
@@ -778,11 +773,11 @@ impl WaterFillAlgorithm {
     /// order, tycho-execution remainder-split convention, route token map) and derives the
     /// candidate's gross output and gas from the assembled route.
     fn candidate_from_allocations(
-        ctx: &SplitContext,
+        input: &SolveInput,
         allocations: &[PathAllocation],
     ) -> Option<SplitCandidate> {
-        let route = build_split_route(allocations, ctx.market, ctx.order).ok()?;
-        let token_out = ctx.order.token_out();
+        let route = build_split_route(allocations, &input.market, input.order).ok()?;
+        let token_out = input.order.token_out();
         let gross = route
             .swaps()
             .iter()
@@ -798,13 +793,13 @@ impl WaterFillAlgorithm {
     /// Builds one independent leg per path at its allocated amount. `subset` and `alloc` are
     /// aligned by index; component-disjoint paths never interfere, so each leg is a real
     /// independent simulation.
-    fn build_disjoint_legs(
+    fn build_disjoint_legs<'g>(
         &self,
-        ctx: &SplitContext,
+        input: &SolveInput<'_, 'g>,
         subset: &[usize],
         alloc: &[BigUint],
     ) -> Option<SplitCandidate> {
-        let amount_in = ctx.order.amount().clone();
+        let amount_in = input.order.amount().clone();
         let mut allocations = Vec::new();
         for (i, &path_idx) in subset.iter().enumerate() {
             if alloc[i].is_zero() {
@@ -812,10 +807,10 @@ impl WaterFillAlgorithm {
             }
             // Fresh overrides per leg: legs are component-disjoint, but a component reused within
             // one path must still see its own first swap.
-            let mut overrides: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
+            let mut overrides = MarketOverrides::empty();
             let allocation = Self::allocation_commit(
-                &ctx.ordered[path_idx],
-                ctx.market,
+                &input.ordered[path_idx],
+                &input.market,
                 &mut overrides,
                 alloc[i].clone(),
                 ratio(&alloc[i], &amount_in),
@@ -825,107 +820,142 @@ impl WaterFillAlgorithm {
         if allocations.is_empty() {
             return None;
         }
-        Self::candidate_from_allocations(ctx, &allocations)
+        Self::candidate_from_allocations(input, &allocations)
     }
 
     /// Incremental water-fill over a set of component-disjoint paths. Returns the amount allocated
     /// to each path in `subset` order. With `gate`, a path only activates when its first chunk
     /// covers its gas; without it, every path is eligible (used once the active set is fixed).
-    fn disjoint_waterfill(
+    fn disjoint_waterfill<'g>(
         &self,
-        ctx: &SplitContext,
+        input: &SolveInput<'_, 'g>,
         subset: &[usize],
         num_chunks: usize,
         gate: bool,
     ) -> Option<Vec<BigUint>> {
-        let amount_in = ctx.order.amount().clone();
+        let amount_in = input.order.amount().clone();
         let num_chunks = num_chunks.max(1);
         let base_chunk = &amount_in / num_chunks;
         if base_chunk.is_zero() {
             return None;
         }
         let remainder = &amount_in - &base_chunk * num_chunks;
-        let timeout_ms = self.timeout.as_millis() as u64;
         let path_count = subset.len();
 
-        let mut committed: Vec<FxHashMap<ComponentId, Box<dyn ProtocolSim>>> = (0..path_count)
-            .map(|_| FxHashMap::default())
+        let mut committed: Vec<MarketOverrides> = (0..path_count)
+            .map(|_| MarketOverrides::empty())
             .collect();
-        let mut cum_in: Vec<BigUint> = vec![BigUint::zero(); path_count];
+        let mut cumulative_amount_in: Vec<BigUint> = vec![BigUint::zero(); path_count];
         let mut activated: Vec<bool> = vec![!gate; path_count];
 
+        // What each path last paid for a chunk. Only the path that wins a chunk commits anything,
+        // and these paths share no component, so every other path is asked the same question of the
+        // same untouched pools next chunk and pays the same. Its marginal is kept rather than
+        // simulated again.
+        let mut marginals: Vec<Option<StepResult>> = (0..path_count).map(|_| None).collect();
+        // The chunk every remembered marginal was priced at. The first one carries the remainder,
+        // so what the paths are asked changes once and nothing remembered still answers it.
+        let mut marginals_chunk: Option<BigUint> = None;
+
         for chunk_idx in 0..num_chunks {
-            if ctx.start.elapsed().as_millis() as u64 > timeout_ms {
+            if input.deadline.expired() {
                 break;
             }
             let chunk = if chunk_idx == 0 { &base_chunk + &remainder } else { base_chunk.clone() };
+            if marginals_chunk.as_ref() != Some(&chunk) {
+                marginals
+                    .iter_mut()
+                    .for_each(|m| *m = None);
+                marginals_chunk = Some(chunk.clone());
+            }
 
-            let mut best: Option<(usize, BigInt, StepResult)> = None;
+            let mut best: Option<(usize, BigInt)> = None;
             for (i, &path_idx) in subset.iter().enumerate() {
-                let Some(step) = Self::simulate_step(
-                    &ctx.ordered[path_idx],
-                    ctx.market,
-                    &committed[i],
-                    chunk.clone(),
-                ) else {
+                if marginals[i].is_none() {
+                    marginals[i] = Self::simulate_step(
+                        &input.ordered[path_idx],
+                        &input.market,
+                        &committed[i],
+                        chunk.clone(),
+                    );
+                }
+                let Some(step) = marginals[i].as_ref() else {
                     continue;
                 };
                 let gross_marginal = BigInt::from(step.amount_out.clone());
                 let net_marginal = if activated[i] {
                     gross_marginal
                 } else {
-                    let activation = Self::activation_cost(ctx, &step.gas);
+                    let activation = Self::activation_cost(input, &step.gas);
                     gross_marginal - activation
                 };
                 if best
                     .as_ref()
-                    .map(|(_, m, _)| &net_marginal > m)
+                    .map(|(_, m)| &net_marginal > m)
                     .unwrap_or(true)
                 {
-                    best = Some((i, net_marginal, step));
+                    best = Some((i, net_marginal));
                 }
             }
 
-            let Some((best_i, _, step)) = best else {
+            let Some((best_i, _)) = best else {
+                break;
+            };
+            // Take the winner's marginal rather than read it: its pools are about to move, so
+            // what it just paid no longer answers, and taking it is how that is forgotten.
+            let Some(step) = marginals[best_i].take() else {
                 break;
             };
 
             for (id, state) in step.new_states {
                 committed[best_i].insert(id, state);
             }
-            cum_in[best_i] += &chunk;
+            cumulative_amount_in[best_i] += &chunk;
             activated[best_i] = true;
         }
-        Some(cum_in)
+        Some(cumulative_amount_in)
     }
 
     /// Selects fill-and-spill candidates: the top full-amount paths plus the best first-chunk
     /// marginal probes. The probe is what makes intermediate-token splits (tree routes) reachable:
     /// the extra path often ranks poorly at full size but wins on the margin.
-    fn select_shared_candidates(&self, ctx: &SplitContext) -> Vec<usize> {
-        let mut candidates: Vec<usize> = (0..ctx.ordered.len().min(SHARED_FULL_PATHS)).collect();
-        let first_chunk = ctx.order.amount() / COARSE_CHUNKS;
+    fn select_shared_candidates<'g>(
+        &self,
+        input: &SolveInput<'_, 'g>,
+        cache: &mut SwapCache<'g>,
+    ) -> Vec<usize> {
+        let mut candidates: Vec<usize> = (0..input
+            .ordered
+            .len()
+            .min(SHARED_FULL_PATHS))
+            .collect();
+        let first_chunk = input.order.amount() / COARSE_CHUNKS;
         if first_chunk.is_zero() {
             return candidates;
         }
-        let timeout_ms = self.timeout.as_millis() as u64;
-        let empty: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
         let mut marginal: Vec<(usize, BigInt)> = Vec::new();
-        for (idx, path) in ctx
+        for (idx, path) in input
             .ordered
             .iter()
             .enumerate()
             .take(SHARED_MARGIN_PROBE_PATHS)
         {
-            if ctx.start.elapsed().as_millis() as u64 > timeout_ms {
+            if input.deadline.expired() {
                 break;
             }
-            let Some(step) = Self::simulate_step(path, ctx.market, &empty, first_chunk.clone())
-            else {
+            // Nothing is committed yet, so these probes read untouched state and go through the
+            // cache like every other swap that does.
+            let Some(probe) = simulate_path(
+                path,
+                &input.market,
+                cache,
+                first_chunk.clone(),
+                SolveStage::SetSelection,
+            ) else {
                 continue;
             };
-            let activation = Self::activation_cost(ctx, &step.gas);
-            marginal.push((idx, BigInt::from(step.amount_out) - activation));
+            let activation = Self::activation_cost(input, &probe.gas);
+            marginal.push((idx, BigInt::from(probe.amount_out) - activation));
         }
         marginal.sort_by(|(_, a), (_, b)| b.cmp(a));
         for (idx, net) in marginal
@@ -946,97 +976,146 @@ impl WaterFillAlgorithm {
     }
 
     /// Coarse set-selection then fine allocation with shared-component fill-and-spill.
-    fn fillspill_alloc(&self, ctx: &SplitContext, fine_chunks: usize) -> Option<SplitCandidate> {
-        let candidates = self.select_shared_candidates(ctx);
+    ///
+    /// Only the probes that pick the candidate set can use `cache`: the two water-fill passes below
+    /// commit each chunk into an overlay and must see the pools they have already drained.
+    fn fillspill_alloc<'g>(
+        &self,
+        input: &SolveInput<'_, 'g>,
+        fine_chunks: usize,
+        cache: &mut SwapCache<'g>,
+    ) -> Option<SplitCandidate> {
+        let candidates = self.select_shared_candidates(input, cache);
         if candidates.len() < 2 {
             return None;
         }
 
-        // Phase 1: coarse gated pass to choose the active candidate set.
-        let (coarse_counts, _) = self.fillspill_waterfill(ctx, &candidates, COARSE_CHUNKS, true)?;
+        // Phase 1: coarse gated pass to choose the active candidate set — the candidates that
+        // took at least one chunk.
+        let coarse = self.fillspill_waterfill(input, &candidates, COARSE_CHUNKS, true)?;
+        let took_a_chunk: FxHashSet<usize> = coarse.iter().map(|(i, _)| *i).collect();
         let active: Vec<usize> = candidates
             .iter()
             .copied()
-            .zip(coarse_counts.iter())
-            .filter(|(_, count)| **count > 0)
-            .map(|(idx, _)| idx)
+            .enumerate()
+            .filter(|(i, _)| took_a_chunk.contains(i))
+            .map(|(_, idx)| idx)
             .collect();
         if active.len() < 2 {
             return None;
         }
 
         // Phase 2: fine ungated pass over the active set, with the commit schedule for replay.
-        let (_, schedule) = self.fillspill_waterfill(ctx, &active, fine_chunks, false)?;
+        let schedule = self.fillspill_waterfill(input, &active, fine_chunks, false)?;
         if schedule.is_empty() {
             return None;
         }
 
-        self.build_fillspill_route(ctx, &active, &schedule)
+        self.build_fillspill_route(input, &active, &schedule)
     }
 
-    /// Incremental fill-and-spill water-fill over a single shared overlay. Returns the chunk count
-    /// each candidate received and the ordered commit schedule of `(active_index, chunk_amount)`.
-    #[allow(clippy::type_complexity)]
-    fn fillspill_waterfill(
+    /// Incremental fill-and-spill water-fill over a single shared overlay. Returns the ordered
+    /// commit schedule of `(subset_index, chunk_amount)`; which candidates took a chunk at all is
+    /// read off it.
+    fn fillspill_waterfill<'g>(
         &self,
-        ctx: &SplitContext,
+        input: &SolveInput<'_, 'g>,
         subset: &[usize],
         num_chunks: usize,
         gate: bool,
-    ) -> Option<(Vec<usize>, Vec<(usize, BigUint)>)> {
-        let amount_in = ctx.order.amount().clone();
+    ) -> Option<Vec<(usize, BigUint)>> {
+        let amount_in = input.order.amount().clone();
         let num_chunks = num_chunks.max(1);
         let base_chunk = &amount_in / num_chunks;
         if base_chunk.is_zero() {
             return None;
         }
         let remainder = &amount_in - &base_chunk * num_chunks;
-        let timeout_ms = self.timeout.as_millis() as u64;
 
-        let mut overlay: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
+        let mut overlay = MarketOverrides::empty();
         let mut activated: Vec<bool> = vec![!gate; subset.len()];
         let mut active_count = if gate { 0 } else { subset.len() };
-        let mut counts: Vec<usize> = vec![0; subset.len()];
         let mut schedule: Vec<(usize, BigUint)> = Vec::with_capacity(num_chunks);
+        // What each candidate last paid for a chunk, kept so a candidate the winning chunk did not
+        // touch is not asked the same question again. Candidates here may share pools — that is the
+        // point of fill-and-spill — so committing a chunk forgets every candidate crossing one of
+        // the pools it moved, not only the winner.
+        let mut marginals: Vec<Option<StepResult>> = (0..subset.len())
+            .map(|_| None)
+            .collect();
+        // The chunk every remembered marginal was priced at. The first one carries the remainder,
+        // so what the candidates are asked changes once and nothing remembered still answers it.
+        let mut marginals_chunk: Option<BigUint> = None;
 
         for chunk_idx in 0..num_chunks {
-            if ctx.start.elapsed().as_millis() as u64 > timeout_ms {
+            if input.deadline.expired() {
                 break;
             }
             let chunk = if chunk_idx == 0 { &base_chunk + &remainder } else { base_chunk.clone() };
+            if marginals_chunk.as_ref() != Some(&chunk) {
+                marginals
+                    .iter_mut()
+                    .for_each(|m| *m = None);
+                marginals_chunk = Some(chunk.clone());
+            }
 
-            let mut best: Option<(usize, BigInt, StepResult)> = None;
+            let mut best: Option<(usize, BigInt)> = None;
             for (i, &path_idx) in subset.iter().enumerate() {
                 if !activated[i] && active_count >= self.max_paths {
                     continue;
                 }
-                let Some(step) = Self::simulate_step(
-                    &ctx.ordered[path_idx],
-                    ctx.market,
-                    &overlay,
-                    chunk.clone(),
-                ) else {
+                if marginals[i].is_none() {
+                    marginals[i] = Self::simulate_step(
+                        &input.ordered[path_idx],
+                        &input.market,
+                        &overlay,
+                        chunk.clone(),
+                    );
+                }
+                let Some(step) = marginals[i].as_ref() else {
                     continue;
                 };
                 let gross_marginal = BigInt::from(step.amount_out.clone());
                 let net_marginal = if activated[i] {
                     gross_marginal
                 } else {
-                    let activation = Self::activation_cost(ctx, &step.gas);
+                    let activation = Self::activation_cost(input, &step.gas);
                     gross_marginal - activation
                 };
                 if best
                     .as_ref()
-                    .map(|(_, m, _)| &net_marginal > m)
+                    .map(|(_, m)| &net_marginal > m)
                     .unwrap_or(true)
                 {
-                    best = Some((i, net_marginal, step));
+                    best = Some((i, net_marginal));
                 }
             }
 
-            let Some((best_i, _, step)) = best else {
+            let Some((best_i, _)) = best else {
                 break;
             };
+            // Take the winner's marginal rather than read it: taking is how it is forgotten.
+            // `best` is only set while that entry holds a marginal, so the `else` cannot be
+            // reached; it stands in for an unwrap the crate's lints forbid.
+            let Some(step) = marginals[best_i].take() else {
+                break;
+            };
+
+            let pools_moved: FxHashSet<&ComponentId> = step
+                .new_states
+                .iter()
+                .map(|(id, _)| id)
+                .collect();
+            for (i, &path_idx) in subset.iter().enumerate() {
+                if input.ordered[path_idx]
+                    .edge_iter()
+                    .iter()
+                    .any(|e| pools_moved.contains(&e.component_id))
+                {
+                    marginals[i] = None;
+                }
+            }
+
             for (id, state) in step.new_states {
                 overlay.insert(id, state);
             }
@@ -1044,22 +1123,22 @@ impl WaterFillAlgorithm {
                 activated[best_i] = true;
                 active_count += 1;
             }
-            counts[best_i] += 1;
             schedule.push((best_i, chunk));
         }
-        Some((counts, schedule))
+
+        Some(schedule)
     }
 
     /// Rebuilds the fill-and-spill result as one leg per active path at its total allocated
     /// amount, committed sequentially (largest allocation first) against a shared overlay — the
     /// same execution model the router applies on-chain.
-    fn build_fillspill_route(
+    fn build_fillspill_route<'g>(
         &self,
-        ctx: &SplitContext,
+        input: &SolveInput<'_, 'g>,
         active: &[usize],
         schedule: &[(usize, BigUint)],
     ) -> Option<SplitCandidate> {
-        let amount_in = ctx.order.amount().clone();
+        let amount_in = input.order.amount().clone();
         let mut cand_in: Vec<BigUint> = vec![BigUint::zero(); active.len()];
         for (i, chunk) in schedule {
             cand_in[*i] += chunk;
@@ -1072,19 +1151,168 @@ impl WaterFillAlgorithm {
         }
         execution_order.sort_by(|&a, &b| cand_in[b].cmp(&cand_in[a]));
 
-        let mut overrides: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
+        let mut overrides = MarketOverrides::empty();
         let mut allocations = Vec::new();
         for i in execution_order {
             let allocation = Self::allocation_commit(
-                &ctx.ordered[active[i]],
-                ctx.market,
+                &input.ordered[active[i]],
+                &input.market,
                 &mut overrides,
                 cand_in[i].clone(),
                 ratio(&cand_in[i], &amount_in),
             )?;
             allocations.push(allocation);
         }
-        Self::candidate_from_allocations(ctx, &allocations)
+        Self::candidate_from_allocations(input, &allocations)
+    }
+}
+
+/// Whether `path` crosses the same component more than once. Such a path has to see its own
+/// earlier swap, so it cannot be simulated against untouched component state.
+fn path_reuses_component<W>(path: &Path<'_, W>) -> bool {
+    let mut seen: FxHashSet<&ComponentId> =
+        FxHashSet::with_capacity_and_hasher(path.len(), Default::default());
+    !path
+        .edge_iter()
+        .iter()
+        .all(|e| seen.insert(&e.component_id))
+}
+
+/// Swaps `amount_in` through one hop against the market's untouched state. `None` when the market
+/// holds no token or state for the hop, or the pool refuses the swap.
+fn simulate_hop(
+    market: &MarketState,
+    component_id: &ComponentId,
+    address_in: &Address,
+    address_out: &Address,
+    amount_in: &BigUint,
+    pass: SolveStage,
+) -> Result<SwapResult, Refusal> {
+    let (Some(token_in), Some(token_out), Some(state)) = (
+        market.get_token(address_in),
+        market.get_token(address_out),
+        market.get_simulation_state(component_id),
+    ) else {
+        return Err(Refusal::Failed);
+    };
+    state
+        .get_amount_out_metered(component_id, pass.label(), amount_in.clone(), token_in, token_out)
+        .map(|result| SwapResult { amount_out: result.amount, gas: result.gas })
+        .map_err(|error| Refusal::of(&error))
+}
+
+/// The state a hop swaps against: what this path has already moved, then what the pass has
+/// committed, then the market as it stands.
+///
+/// The precedence lives here rather than in each pass's own loop, so two passes cannot quietly
+/// disagree about which state a hop sees. `intra_path` is `None` for a pass whose paths never
+/// cross a pool twice, and `committed` is `None` for one that reads untouched state.
+fn hop_state<'s>(
+    market: &'s MarketState,
+    component_id: &ComponentId,
+    intra_path: Option<&'s FxHashMap<ComponentId, Box<dyn ProtocolSim>>>,
+    committed: Option<&'s MarketOverrides>,
+) -> Option<&'s dyn ProtocolSim> {
+    intra_path
+        .and_then(|states| {
+            states
+                .get(component_id)
+                .map(Box::as_ref)
+        })
+        .or_else(|| committed.and_then(|overrides| overrides.get(component_id)))
+        .or_else(|| market.get_simulation_state(component_id))
+}
+
+/// Swaps `amount_in` along `path` against untouched component state, going through `cache` so a
+/// hop some other path already made is not made again. Returns what the path pays and its summed
+/// gas, or `None` as soon as one hop refuses.
+///
+/// The pass must not hand this a path that crosses one pool twice: the second crossing would
+/// have to see the first one's swap, and every hop here reads untouched state. Both path sets this
+/// runs on are already free of them — `rank_at_full_amount` drops them, and discovery never builds
+/// one because `can_extend_path` refuses to repeat a component.
+fn simulate_path<'a>(
+    path: &Path<'a, DepthAndPrice>,
+    market: &MarketState,
+    cache: &mut SwapCache<'a>,
+    amount_in: BigUint,
+    stage: SolveStage,
+) -> Option<SwapResult> {
+    // What the next hop swaps; once the last one is done, what the path pays out.
+    let mut hop_amount_in = amount_in;
+    let mut path_gas = BigUint::zero();
+
+    for (address_in, edge, address_out) in path.iter() {
+        let direction = PoolDirection { component_id: &edge.component_id, address_in, address_out };
+        let hop = cache.swap(
+            direction,
+            &hop_amount_in,
+            stage.label(),
+            || {
+                simulate_hop(
+                    market,
+                    &edge.component_id,
+                    address_in,
+                    address_out,
+                    &hop_amount_in,
+                    stage,
+                )
+            },
+            stage.may_interpolate(),
+        )?;
+        hop_amount_in = hop.amount_out;
+        path_gas += hop.gas;
+    }
+
+    Some(SwapResult { amount_out: hop_amount_in, gas: path_gas })
+}
+
+/// Turns the full-amount pass's per-path outcomes into the two orderings `setup` consumes. Both
+/// are built in path order and sorted stably, so paths paying the same amount keep the order they
+/// were enumerated in. A path with no outcome never ran — ranking timed out before reaching it,
+/// or it crossed a pool twice — and appears in neither ordering.
+fn rank_outcomes(
+    outcomes_by_path: Vec<Option<FullAmountOutcome>>,
+    gas_price: &BigUint,
+    token_prices: Option<&TokenGasPrices>,
+    token_out: &Address,
+) -> FullAmountRanking {
+    let mut by_output: Vec<(usize, BigUint)> = Vec::with_capacity(outcomes_by_path.len());
+    let mut by_output_net_gas: Vec<(usize, BigInt)> = Vec::new();
+
+    for (path_ix, outcome) in outcomes_by_path.into_iter().enumerate() {
+        let Some(outcome) = outcome else {
+            continue;
+        };
+        let output = match outcome {
+            FullAmountOutcome::Filled(paid) => {
+                let gas_cost = WaterFillAlgorithm::gas_cost_in_token(
+                    &paid.gas,
+                    gas_price,
+                    token_prices,
+                    token_out,
+                );
+                let net_output = BigInt::from(paid.amount_out.clone()) -
+                    gas_cost.map_or_else(BigInt::zero, BigInt::from);
+                by_output_net_gas.push((path_ix, net_output));
+                paid.amount_out
+            }
+            FullAmountOutcome::Unfilled => BigUint::zero(),
+        };
+        by_output.push((path_ix, output));
+    }
+
+    by_output.sort_by(|(_, a), (_, b)| b.cmp(a));
+    by_output_net_gas.sort_by(|(_, a), (_, b)| b.cmp(a));
+    FullAmountRanking {
+        by_output: by_output
+            .into_iter()
+            .map(|(path_ix, _)| path_ix)
+            .collect(),
+        by_output_net_gas: by_output_net_gas
+            .into_iter()
+            .map(|(path_ix, _)| path_ix)
+            .collect(),
     }
 }
 
@@ -1118,62 +1346,19 @@ fn ratio(numerator: &BigUint, denominator: &BigUint) -> f64 {
 // (discovery only reads `component_id`s) so it runs on the production `DepthAndPrice` graph while
 // tests exercise it on a bare topology graph.
 
-type RankedPathScores = Vec<(usize, BigInt)>;
-type CandidatePathSet<'a, W = ()> = (Vec<Path<'a, W>>, RankedPathScores);
-
-#[derive(Clone)]
-struct CandidatePathState<'a, W> {
-    node: NodeIndex,
-    path: Path<'a, W>,
-    amount_out: BigUint,
-}
-
-struct ScoredEdge<'a, W> {
-    target: NodeIndex,
-    edge: &'a EdgeData<W>,
-    amount_out: BigUint,
-    priority: u8,
-}
-
-/// Parameters for one bounded candidate-discovery run.
-#[derive(Clone, Copy)]
-struct CandidateSearchConfig<'a> {
-    /// The same hop bounds and connector set every other route search runs under.
-    query: &'a GraphQueryFilter,
-    max_candidates: usize,
-    anchor_tokens: &'a FxHashSet<Address>,
-    source_token: &'a Address,
-    start: &'a Instant,
-    timeout_ms: u64,
-}
-
-fn timed_out(start: &Instant, timeout_ms: u64) -> bool {
-    start.elapsed().as_millis() as u64 > timeout_ms
-}
-
 /// Runs the bounded discovery and returns the candidate paths plus their `(index, full-amount
 /// gross output)` ranking, best first.
-fn find_candidate_paths<'a, W>(
+fn discover_paths<'a, W>(
     graph: &'a TopologyGraph<W>,
     market: &MarketDataView<'_>,
     order: &Order,
+    cache: &mut SwapCache<'a>,
     cfg: CandidateSearchConfig<'_>,
 ) -> Result<CandidatePathSet<'a, W>, AlgorithmError>
 where
     W: Clone,
 {
-    if cfg.query.min_hops == 0 || cfg.query.min_hops > cfg.query.max_hops {
-        return Err(AlgorithmError::InvalidConfiguration {
-            reason: format!(
-                "invalid hop configuration: min_hops={} max_hops={}",
-                cfg.query.min_hops, cfg.query.max_hops,
-            ),
-        });
-    }
-    let from_idx =
-        find_token_node(graph, order.token_in(), NoPathReason::SourceTokenNotInGraph, order)?;
-    let to_idx =
-        find_token_node(graph, order.token_out(), NoPathReason::DestinationTokenNotInGraph, order)?;
+    let (from_idx, to_idx) = get_token_ixs(graph, order)?;
 
     let mut found = Vec::new();
     let mut frontier = vec![CandidatePathState {
@@ -1183,7 +1368,7 @@ where
     }];
 
     for _depth in 0..cfg.query.max_hops {
-        if timed_out(cfg.start, cfg.timeout_ms) || frontier.is_empty() {
+        if cfg.deadline.expired() || frontier.is_empty() {
             break;
         }
         let mut next_by_node: FxHashMap<NodeIndex, Vec<CandidatePathState<'a, W>>> =
@@ -1192,15 +1377,9 @@ where
             if state.node == to_idx && from_idx != to_idx {
                 continue;
             }
-            expand_candidate_state(
-                graph,
-                market,
-                &cfg,
-                to_idx,
-                state,
-                &mut found,
-                &mut next_by_node,
-            );
+
+            let mut discovery = Discovery { graph, market, cfg: &cfg, cache };
+            expand_candidate_state(&mut discovery, to_idx, state, &mut found, &mut next_by_node);
         }
         frontier = prune_candidate_frontier(next_by_node);
     }
@@ -1208,25 +1387,31 @@ where
     rank_found_candidate_paths(found, cfg.max_candidates, order)
 }
 
-fn find_token_node<W>(
+/// The graph nodes holding the order's sell and buy tokens.
+///
+/// # Errors
+///
+/// [`AlgorithmError::NoPath`] naming whichever of the two the graph does not hold.
+fn get_token_ixs<W>(
     graph: &TopologyGraph<W>,
-    token: &Address,
-    reason: NoPathReason,
     order: &Order,
-) -> Result<NodeIndex, AlgorithmError> {
-    graph
-        .get_token_ix(token)
-        .ok_or(AlgorithmError::NoPath {
-            from: order.token_in().clone(),
-            to: order.token_out().clone(),
-            reason,
-        })
+) -> Result<(NodeIndex, NodeIndex), AlgorithmError> {
+    let missing = |reason| AlgorithmError::NoPath {
+        from: order.token_in().clone(),
+        to: order.token_out().clone(),
+        reason,
+    };
+    let from_idx = graph
+        .get_token_ix(order.token_in())
+        .ok_or_else(|| missing(NoPathReason::SourceTokenNotInGraph))?;
+    let to_idx = graph
+        .get_token_ix(order.token_out())
+        .ok_or_else(|| missing(NoPathReason::DestinationTokenNotInGraph))?;
+    Ok((from_idx, to_idx))
 }
 
 fn expand_candidate_state<'a, W>(
-    graph: &'a TopologyGraph<W>,
-    market: &MarketDataView<'_>,
-    cfg: &CandidateSearchConfig<'_>,
+    discovery: &mut Discovery<'a, '_, W>,
     target: NodeIndex,
     state: CandidatePathState<'a, W>,
     found: &mut Vec<(Path<'a, W>, BigUint)>,
@@ -1234,9 +1419,11 @@ fn expand_candidate_state<'a, W>(
 ) where
     W: Clone,
 {
-    let edges = candidate_edges_for_state(graph, market, cfg, target, &state);
+    let cfg = discovery.cfg;
+    let graph = discovery.graph;
+    let edges = candidate_edges_for_state(discovery, target, &state);
     for candidate in edges {
-        if timed_out(cfg.start, cfg.timeout_ms) {
+        if cfg.deadline.expired() {
             break;
         }
         let mut path = state.path.clone();
@@ -1259,27 +1446,27 @@ fn expand_candidate_state<'a, W>(
 }
 
 fn candidate_edges_for_state<'a, W>(
-    graph: &'a TopologyGraph<W>,
-    market: &MarketDataView<'_>,
-    cfg: &CandidateSearchConfig<'_>,
+    discovery: &mut Discovery<'a, '_, W>,
     target: NodeIndex,
     state: &CandidatePathState<'a, W>,
 ) -> Vec<ScoredEdge<'a, W>> {
-    let mut preferred = score_candidate_edges(graph, market, cfg, target, state, true);
+    let mut preferred = score_candidate_edges(discovery, target, state, true);
     if preferred.is_empty() {
-        preferred = score_candidate_edges(graph, market, cfg, target, state, false);
+        preferred = score_candidate_edges(discovery, target, state, false);
     }
     select_candidate_edges(preferred, CANDIDATE_EDGES_PER_STATE)
 }
 
 fn score_candidate_edges<'a, W>(
-    graph: &'a TopologyGraph<W>,
-    market: &MarketDataView<'_>,
-    cfg: &CandidateSearchConfig<'_>,
+    discovery: &mut Discovery<'a, '_, W>,
     target: NodeIndex,
     state: &CandidatePathState<'a, W>,
     preferred_only: bool,
 ) -> Vec<ScoredEdge<'a, W>> {
+    let Discovery { graph, market, cfg, cache } = discovery;
+    let graph = *graph;
+    let market = *market;
+    let cfg = *cfg;
     let mut scored = Vec::new();
     for edge in graph.edges(state.node) {
         let next_node = edge.target();
@@ -1294,16 +1481,25 @@ fn score_candidate_edges<'a, W>(
             if !can_extend_path(graph, state, next_node, target, pool, cfg) {
                 continue;
             }
-            let Some(amount_out) = simulate_edge(
-                market,
+            let address_in = &graph[state.node];
+            let address_out = &graph[next_node];
+            let direction =
+                PoolDirection { component_id: &pool.component_id, address_in, address_out };
+            let Some(hop) = cache.swap(
+                direction,
                 &state.amount_out,
-                &graph[state.node],
-                pool,
-                &graph[next_node],
+                SolveStage::Discovery.label(),
+                || simulate_edge(market, &state.amount_out, address_in, pool, address_out),
+                SolveStage::Discovery.may_interpolate(),
             ) else {
                 continue;
             };
-            scored.push(ScoredEdge { target: next_node, edge: pool, amount_out, priority });
+            scored.push(ScoredEdge {
+                target: next_node,
+                edge: pool,
+                amount_out: hop.amount_out,
+                priority,
+            });
         }
     }
     scored
@@ -1397,14 +1593,24 @@ fn simulate_edge<W>(
     token_in_addr: &Address,
     edge: &EdgeData<W>,
     token_out_addr: &Address,
-) -> Option<BigUint> {
-    let token_in = market.get_token(token_in_addr)?;
-    let token_out = market.get_token(token_out_addr)?;
-    let state = market.get_simulation_state(&edge.component_id)?;
+) -> Result<SwapResult, Refusal> {
+    let (Some(token_in), Some(token_out), Some(state)) = (
+        market.get_token(token_in_addr),
+        market.get_token(token_out_addr),
+        market.get_simulation_state(&edge.component_id),
+    ) else {
+        return Err(Refusal::Failed);
+    };
     state
-        .get_amount_out_guarded(amount.clone(), token_in, token_out)
-        .ok()
-        .map(|result| result.amount)
+        .get_amount_out_metered(
+            &edge.component_id,
+            SolveStage::Discovery.label(),
+            amount.clone(),
+            token_in,
+            token_out,
+        )
+        .map(|result| SwapResult { amount_out: result.amount, gas: result.gas })
+        .map_err(|error| Refusal::of(&error))
 }
 
 fn select_candidate_edges<W>(
@@ -1791,17 +1997,17 @@ mod tests {
 
         let start = Instant::now();
         let view = market.read().await;
-        let (paths, scores) = find_candidate_paths(
+        let (paths, scores) = discover_paths(
             graph_manager.graph(),
             &view,
             &order,
+            &mut SwapCache::new(),
             CandidateSearchConfig {
                 query: &GraphQueryFilter { min_hops: 1, max_hops: 3, connector_tokens: None },
                 max_candidates: 128,
                 anchor_tokens: &FxHashSet::default(),
                 source_token: order.token_in(),
-                start: &start,
-                timeout_ms: 2000,
+                deadline: Deadline::new(start, Duration::from_millis(2000)),
             },
         )
         .expect("discovery finds candidates");
@@ -1816,44 +2022,66 @@ mod tests {
         );
     }
 
-    /// An invalid hop configuration is rejected before any graph work.
-    #[tokio::test]
-    async fn test_discovery_rejects_invalid_hop_configuration() {
-        let link = token_with_decimals(0x01, "LINK", 18);
-        let weth = token_with_decimals(0x02, "WETH", 18);
-        let (market, graph_manager) = setup_market_unweighted_topology(vec![(
-            "link_weth",
-            &link,
-            &weth,
-            Box::new(v2_component(2_000_000, 5_700)) as Box<dyn ProtocolSim>,
-        )]);
-        let order = Order::new(
-            link.address.clone(),
-            weth.address.clone(),
-            BigUint::from(1_000u64) * BigUint::from(10u64).pow(18),
-            OrderSide::Sell,
-            addr(0xFF),
-        );
+    // ==================== Ranking the full-amount outcomes ====================
 
-        let start = Instant::now();
-        let view = market.read().await;
-        let result = find_candidate_paths(
-            graph_manager.graph(),
-            &view,
-            &order,
-            CandidateSearchConfig {
-                query: &GraphQueryFilter { min_hops: 0, max_hops: 3, connector_tokens: None },
-                max_candidates: 128,
-                anchor_tokens: &FxHashSet::default(),
-                source_token: order.token_in(),
-                start: &start,
-                timeout_ms: 2000,
-            },
+    fn hop(amount_out: u64, gas: u64) -> SwapResult {
+        SwapResult { amount_out: BigUint::from(amount_out), gas: BigUint::from(gas) }
+    }
+
+    /// `Unfilled` paths rank last by output and are kept out of the net-of-gas ordering entirely,
+    /// so one can never become the single-path baseline. A path with no outcome is in neither.
+    #[test]
+    fn test_rank_outcomes_places_unfilled_and_missing_paths() {
+        let outcomes = vec![
+            Some(FullAmountOutcome::Filled(hop(1000, 0))),
+            Some(FullAmountOutcome::Unfilled),
+            None,
+            Some(FullAmountOutcome::Filled(hop(3000, 0))),
+        ];
+
+        let ranking = rank_outcomes(outcomes, &BigUint::from(1u64), None, &addr(0x02));
+
+        assert_eq!(ranking.by_output, vec![3, 0, 1], "unfilled ranks last, missing is absent");
+        assert_eq!(ranking.by_output_net_gas, vec![3, 0], "unfilled cannot be the baseline");
+    }
+
+    /// Gas is taken off before the net-of-gas ordering, so a path paying more gross can rank below
+    /// a cheaper one — which is the whole reason for keeping a second ordering.
+    #[test]
+    fn test_rank_outcomes_orders_by_output_net_of_gas() {
+        let token_out = addr(0x02);
+        let mut token_prices = TokenGasPrices::default();
+        token_prices.insert(
+            token_out.clone(),
+            tycho_simulation::tycho_common::simulation::protocol_sim::Price::new(
+                BigUint::from(1u64),
+                BigUint::from(1u64),
+            ),
         );
-        assert!(
-            matches!(result, Err(AlgorithmError::InvalidConfiguration { .. })),
-            "min_hops of 0 should be rejected",
-        );
+        let outcomes = vec![
+            Some(FullAmountOutcome::Filled(hop(1000, 500))),
+            Some(FullAmountOutcome::Filled(hop(900, 10))),
+        ];
+
+        let ranking =
+            rank_outcomes(outcomes, &BigUint::from(1u64), Some(&token_prices), &token_out);
+
+        assert_eq!(ranking.by_output, vec![0, 1], "gross output still puts the larger first");
+        assert_eq!(ranking.by_output_net_gas, vec![1, 0], "net of gas reverses them");
+    }
+
+    /// With no price for the output token gas cannot be converted, so it is not taken off and the
+    /// two orderings agree.
+    #[test]
+    fn test_rank_outcomes_ignores_gas_it_cannot_price() {
+        let outcomes = vec![
+            Some(FullAmountOutcome::Filled(hop(1000, 500))),
+            Some(FullAmountOutcome::Filled(hop(900, 10))),
+        ];
+
+        let ranking = rank_outcomes(outcomes, &BigUint::from(1u64), None, &addr(0x02));
+
+        assert_eq!(ranking.by_output_net_gas, vec![0, 1]);
     }
 
     /// Anchors are the most-connected tokens (highest component-edge degree) plus the native-ETH
