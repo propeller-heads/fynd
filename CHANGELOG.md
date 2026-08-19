@@ -1,4 +1,11 @@
 
+## [0.99.10](https://github.com/propeller-heads/fynd/compare/0.99.9...0.99.10) (2026-08-19)
+
+### Features
+
+* accept exclusive legs that wrap into the output token ([320204e](https://github.com/propeller-heads/fynd/commit/320204ebf664facb0341a3cca3b730908babbc52))
+
+
 
 
 ## [0.99.7](https://github.com/propeller-heads/fynd/compare/0.99.6...0.99.7) (2026-08-17)
