@@ -424,6 +424,7 @@ pub struct FyndBuilder {
     reconnect_delay: Duration,
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
+    stream_timeout_secs: Option<u64>,
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
@@ -457,6 +458,7 @@ impl FyndBuilder {
             reconnect_delay: defaults::RECONNECT_DELAY,
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
+            stream_timeout_secs: None,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
@@ -534,6 +536,16 @@ impl FyndBuilder {
     /// unaffected.
     pub fn partial_blocks(mut self, enabled: bool) -> Self {
         self.partial_blocks = enabled;
+        self
+    }
+
+    /// Overrides the Tycho stream timeout in seconds (default: derived from the chain's block
+    /// time by tycho-client).
+    ///
+    /// Useful when the upstream indexer can pause longer than the derived timeout, e.g. during
+    /// catch-up bursts, which would otherwise end the stream with a missed-block error.
+    pub fn stream_timeout_secs(mut self, timeout_secs: Option<u64>) -> Self {
+        self.stream_timeout_secs = timeout_secs;
         self
     }
 
@@ -715,7 +727,8 @@ impl FyndBuilder {
         .min_token_quality(self.min_token_quality)
         .traded_n_days_ago(self.traded_n_days_ago)
         .blocklisted_components(self.blocklisted_components)
-        .partial_blocks(self.partial_blocks);
+        .partial_blocks(self.partial_blocks)
+        .stream_timeout_secs(self.stream_timeout_secs);
 
         let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
             .map_err(|e| SolverBuildError::RpcClient(e.to_string()))?;
