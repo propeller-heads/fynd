@@ -141,6 +141,14 @@ beats the committed amount and records the difference as `SurplusInfo`
 (`OrderQuote::surplus_amount()`, `committed_amount_out()`, `Swap::committed_amount_out()`). All are
 `#[serde(skip)]` — internal, not on the wire.
 
+A route can carry a commitment when it has exactly one exclusive leg and replays against the states
+its swaps were quoted at. Where the leg sits does not matter.
+`worker_pool_router/exclusive_capture.rs` solves how much the leg withholds: for a leg that ends the
+route the answer is the surplus itself, and for a leg with swaps after it the answer is what those
+swaps turn into the surplus, found by bisecting replays of the route. The router reads token
+decimals for those replays from `MarketData` (`WorkerPoolRouter::with_market_data`); without it no
+commitment is made and orders answer from public liquidity.
+
 Enable by setting the scope per pool via `PoolConfig::with_liquidity_scope()` or
 `liquidity_scope = "include_exclusive"` in `worker_pools.toml`. A deployment where every pool sets it
 fails the build (`SolverBuildError::NoPublicPool`) — there would be no pool left to establish the

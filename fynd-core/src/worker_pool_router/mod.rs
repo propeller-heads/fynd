@@ -24,6 +24,7 @@
 mod allocation;
 mod comparison_log;
 pub mod config;
+mod exclusive_capture;
 
 use std::{
     sync::LazyLock,
@@ -34,6 +35,7 @@ pub use allocation::ExclusiveAccess;
 use allocation::{allocate, Allocation, OrderClass};
 use comparison_log::{log_quote_comparison, solver_error_label};
 use config::WorkerPoolRouterConfig;
+use exclusive_capture::{solve_withheld_amount, TokenLookup};
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
@@ -45,13 +47,15 @@ use tycho_execution::encoding::{
     evm::gas_estimator::estimate_gas_usage,
     models::{Solution, Strategy},
 };
-use tycho_simulation::tycho_common::{models::Chain, Bytes};
+use tycho_simulation::tycho_common::{models::Address, Bytes};
 
 use crate::{
-    encoding::encoder::Encoder, feed::exclusivity::is_exclusive, price_guard::guard::PriceGuard,
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote,
-    OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
-    SurplusInfo, Swap,
+    encoding::encoder::Encoder,
+    feed::{exclusivity::is_exclusive, market_data::MarketData},
+    price_guard::guard::PriceGuard,
+    worker_pool::task_queue::TaskQueueHandle,
+    BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
+    QuoteStatus, SolveError, SolveParams, SurplusInfo,
 };
 
 /// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
@@ -243,6 +247,10 @@ pub struct WorkerPoolRouter {
     /// Validates solution outputs against external price sources.
     /// Present when the server has price guard enabled; `None` when disabled.
     price_guard: Option<PriceGuard>,
+    /// Source of the token decimals that replaying an exclusive candidate needs. `None` leaves
+    /// exclusive candidates unsolvable, so no commitment is made and orders answer from public
+    /// liquidity.
+    market_data: Option<MarketData>,
 }
 
 impl WorkerPoolRouter {
@@ -252,7 +260,45 @@ impl WorkerPoolRouter {
         config: WorkerPoolRouterConfig,
         encoder: Encoder,
     ) -> Self {
-        Self { solver_pools, config, encoder, price_guard: None }
+        Self { solver_pools, config, encoder, price_guard: None, market_data: None }
+    }
+
+    /// Gives the router the market it reads token decimals from.
+    ///
+    /// Only exclusive routing needs this: replaying a candidate to solve its withheld amount calls
+    /// the pool simulations, which take full tokens rather than addresses.
+    pub fn with_market_data(mut self, market_data: MarketData) -> Self {
+        self.market_data = Some(market_data);
+        self
+    }
+
+    /// Collects the tokens every candidate route touches, in one read of the market.
+    ///
+    /// Solving runs inside a synchronous ranking pass, so the tokens are gathered up front rather
+    /// than looked up per swap.
+    async fn route_tokens(&self, responses: &[OrderResponses]) -> TokenLookup {
+        let Some(market_data) = self.market_data.as_ref() else {
+            return TokenLookup::default();
+        };
+        let addresses: FxHashSet<Address> = responses
+            .iter()
+            .flat_map(|response| response.quotes.iter())
+            .filter_map(|wq| wq.quote.route())
+            .flat_map(|route| route.swaps())
+            .flat_map(|swap| [swap.token_in().clone(), swap.token_out().clone()])
+            .collect();
+        if addresses.is_empty() {
+            return TokenLookup::default();
+        }
+
+        let market = market_data.read().await;
+        addresses
+            .into_iter()
+            .filter_map(|address| {
+                let token = market.get_token(&address)?.clone();
+                Some((address, token))
+            })
+            .collect()
     }
 
     /// Makes price guard validation available for this router.
@@ -350,6 +396,16 @@ impl WorkerPoolRouter {
             refine_gas_estimates(&mut order_responses, encoding_options)?;
         }
 
+        let exclusive_tokens = if allocations
+            .iter()
+            .any(Allocation::exclusive_routing_active)
+        {
+            self.route_tokens(&order_responses)
+                .await
+        } else {
+            TokenLookup::default()
+        };
+
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
         // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
         // fallback chain. When the allocation holds an exclusive-scope worker pool, the winning
@@ -372,7 +428,7 @@ impl WorkerPoolRouter {
                         request.options(),
                         public_ranked,
                         *USER_IMPROVEMENT_SHARE_BPS,
-                        self.encoder.chain(),
+                        &exclusive_tokens,
                     )
                 } else {
                     self.rank_quotes(responses, request.options())
@@ -813,10 +869,10 @@ fn combine_with_surplus(
     options: &QuoteOptions,
     public_ranked: Vec<OrderQuote>,
     user_share_bps: u32,
-    chain: Chain,
+    tokens: &TokenLookup,
 ) -> Vec<OrderQuote> {
     let Some(exclusive_candidate) =
-        best_exclusive_candidate(responses, pool_scopes, options, chain)
+        best_exclusive_candidate(responses, pool_scopes, options, tokens)
     else {
         return public_ranked;
     };
@@ -843,8 +899,12 @@ fn combine_with_surplus(
         gauge!("exclusive_user_savings_amount").increment(user_savings.to_f64().unwrap_or(0.0));
     }
 
+    let Some(pinned) = pin_commitment(exclusive_candidate, committed_amount_out, tokens) else {
+        return public_ranked;
+    };
+
     let mut result = Vec::with_capacity(public_ranked.len() + 1);
-    result.push(pin_commitment(exclusive_candidate, committed_amount_out));
+    result.push(pinned);
     result.extend(public_ranked);
     result
 }
@@ -859,12 +919,12 @@ fn is_rankable(quote: &OrderQuote, options: &QuoteOptions) -> bool {
 }
 
 /// Returns the exclusive-access candidate with the highest output net of gas. The candidate must
-/// obey the request `max_gas` and the route shape rules of `has_valid_exclusive_route`.
+/// obey the request `max_gas` and the rules of `has_valid_exclusive_route`.
 fn best_exclusive_candidate<'a>(
     responses: &'a OrderResponses,
     pool_scopes: &FxHashMap<String, LiquidityScope>,
     options: &QuoteOptions,
-    chain: Chain,
+    tokens: &TokenLookup,
 ) -> Option<&'a OrderQuote> {
     responses
         .quotes
@@ -877,7 +937,7 @@ fn best_exclusive_candidate<'a>(
                 .map(|max| wq.quote.gas_estimate() <= max)
                 .unwrap_or(true)
         })
-        .filter(|wq| has_valid_exclusive_route(&wq.quote, chain))
+        .filter(|wq| has_valid_exclusive_route(&wq.quote, tokens))
         .max_by(|a, b| {
             a.quote
                 .amount_out_net_gas()
@@ -948,11 +1008,22 @@ fn default_fee_commitment(exclusive_candidate: &OrderQuote) -> Option<BigUint> {
     Some(committed_amount_out)
 }
 
-/// Sets `exclusive_candidate` to `committed_amount_out`. This sets the committed amount on each
-/// leg, sets `amount_out` and `amount_out_net_gas`, and attaches the `SurplusInfo`.
+/// Sets `exclusive_candidate` to `committed_amount_out`. This sets the committed amount on the
+/// exclusive leg, sets `amount_out` and `amount_out_net_gas`, and attaches the `SurplusInfo`.
 ///
-/// The exclusive components capture all output above the commitment.
-fn pin_commitment(exclusive_candidate: &OrderQuote, committed_amount_out: BigUint) -> OrderQuote {
+/// The exclusive component captures all output above the commitment. How much the leg withholds to
+/// do that is solved by [`solve_withheld_amount`], which replays the route against the states its
+/// swaps were quoted at. A leg that ends its path withholds the surplus itself; a leg with swaps
+/// after it withholds whatever those swaps turn into the surplus.
+///
+/// Returns `None` when the route cannot be replayed, since the withheld amount is then unknown.
+/// `best_exclusive_candidate` has already replayed the candidate, so this is not reachable for a
+/// candidate it returned.
+fn pin_commitment(
+    exclusive_candidate: &OrderQuote,
+    committed_amount_out: BigUint,
+    tokens: &TokenLookup,
+) -> Option<OrderQuote> {
     let exclusive_route_amount_out = exclusive_candidate.amount_out();
     let exclusive_gas_cost = exclusive_route_amount_out - exclusive_candidate.amount_out_net_gas();
     let surplus_amount = exclusive_route_amount_out - &committed_amount_out;
@@ -960,58 +1031,12 @@ fn pin_commitment(exclusive_candidate: &OrderQuote, committed_amount_out: BigUin
     gauge!("exclusive_fee_amount").increment(surplus_amount.to_f64().unwrap_or(0.0));
 
     let mut surplus_quote = exclusive_candidate.clone();
-
-    // Final output of each swap's path, walked backwards (a path's terminal output propagates
-    // to its chained predecessors). Converting captured surplus into a leg's token needs the
-    // realized downstream price `path_final_out / leg_out`; for terminal legs the ratio is 1.
-    let path_final_outs: Vec<BigUint> = surplus_quote
-        .route()
-        .map(|route| {
-            let swaps = route.swaps();
-            let mut finals = vec![BigUint::ZERO; swaps.len()];
-            let mut current_final = BigUint::ZERO;
-            for i in (0..swaps.len()).rev() {
-                let is_terminal =
-                    i == swaps.len() - 1 || swaps[i + 1].token_in() != swaps[i].token_out();
-                if is_terminal {
-                    current_final = swaps[i].amount_out().clone();
-                }
-                finals[i] = current_final.clone();
-            }
-            finals
-        })
-        .unwrap_or_default();
+    let withheld = withheld_leg_amount(&surplus_quote, &surplus_amount, tokens)?;
 
     if let Some(route) = surplus_quote.route_mut() {
-        // Capture the route's surplus at the exclusive legs.
-        // Each leg absorbs up to its path's capacity; any remainder is left with the user.
-        let mut surplus = exclusive_route_amount_out - &committed_amount_out;
-        for (i, swap) in route.swaps_mut().iter_mut().enumerate() {
+        for swap in route.swaps_mut().iter_mut() {
             if is_exclusive(swap.protocol_component()) {
-                let Some(path_final_out) = path_final_outs.get(i) else {
-                    continue;
-                };
-                let captured = surplus
-                    .clone()
-                    .min(path_final_out.clone());
-                // Convert into the leg's own token, rounding down so any error is taken
-                // from the protocol, not the user. Today the leg is always the last hop of
-                // its path (validator), so path_final_out equals the leg's output and this
-                // divides by itself — a plain subtraction. Once mid-path legs are allowed,
-                // the "user gets at least the committed amount" guarantee also requires the
-                // components after the leg to have diminishing returns.
-                let captured_leg = if *path_final_out == BigUint::ZERO {
-                    BigUint::ZERO
-                } else {
-                    &captured * swap.amount_out() / path_final_out
-                };
-                debug_assert!(
-                    captured_leg <= *swap.amount_out(),
-                    "captured amount ({captured_leg}) must not exceed the leg's output ({})",
-                    swap.amount_out(),
-                );
-                let committed_leg = swap.amount_out() - &captured_leg;
-                surplus -= captured;
+                let committed_leg = swap.amount_out() - &withheld;
                 swap.set_committed_amount_out(committed_leg);
             }
         }
@@ -1025,79 +1050,73 @@ fn pin_commitment(exclusive_candidate: &OrderQuote, committed_amount_out: BigUin
     surplus_quote.set_amount_out_net_gas(&committed_amount_out - &exclusive_gas_cost);
 
     let surplus_info = SurplusInfo::new(surplus_amount, committed_amount_out);
-    surplus_quote.with_surplus(surplus_info)
+    Some(surplus_quote.with_surplus(surplus_info))
 }
 
-/// Returns `true` only for routes carrying exactly one exclusive leg that produces the route's
-/// output token, either itself or through a single native wrap leg.
+/// Returns how much the route's exclusive leg withholds so the route delivers `surplus` less.
+///
+/// Returns `None` if the route is missing, has no exclusive leg, or cannot be replayed.
+fn withheld_leg_amount(
+    quote: &OrderQuote,
+    surplus: &BigUint,
+    tokens: &TokenLookup,
+) -> Option<BigUint> {
+    let route = quote.route()?;
+    let (input_token, output_token) = (route.input_token()?, route.output_token()?);
+    let swaps = route.swaps();
+    let leg_index = swaps
+        .iter()
+        .position(|swap| is_exclusive(swap.protocol_component()))?;
+
+    match solve_withheld_amount(swaps, &input_token, &output_token, leg_index, surplus, tokens) {
+        Ok(withheld) => Some(withheld),
+        Err(error) => {
+            warn!(?error, "exclusive candidate could not be replayed; dropping the commitment");
+            counter!("exclusive_capture_failures_total").increment(1);
+            None
+        }
+    }
+}
+
+/// Returns `true` for routes carrying exactly one exclusive leg whose withheld amount can be
+/// solved.
 ///
 /// Returns `false` for routes with no exclusive leg, more than one exclusive leg, an empty route,
-/// no route at all, or an exclusive leg whose output reaches the route's output token any other
-/// way.
+/// no route at all, or a route that cannot be replayed against the states its swaps carry.
 ///
-/// The single-leg constraint is a v1 restriction that keeps per-leg surplus attribution
-/// unambiguous: multiple exclusive legs make the per-component attribution non-unique.
+/// The single-leg constraint stays: with two exclusive legs the split of the surplus between them
+/// is not determined by the route, so there is no one answer to solve for.
 ///
-/// A trailing wrap leg is allowed because it converts 1:1, so it needs no inverse simulation.
-/// `pin_commitment` converts captured surplus into a leg's token with the ratio
-/// `path_final_out / leg_out`, which a wrap leaves at exactly 1 — the same arithmetic a terminal
-/// leg gets. Without this a pool quoting the native token could never serve a request for the
-/// wrapped token, even though tycho streams the wrap as an ordinary component.
-fn has_valid_exclusive_route(quote: &OrderQuote, chain: Chain) -> bool {
+/// Where the leg sits in the route no longer matters. A leg that ends its path withholds the
+/// surplus itself; a leg with swaps after it withholds the amount those swaps turn into the
+/// surplus, which [`solve_withheld_amount`] finds by replaying the route. Replaying it here as
+/// well as in `pin_commitment` costs one extra pass and keeps an unsolvable candidate from being
+/// ranked as if it could carry a commitment.
+fn has_valid_exclusive_route(quote: &OrderQuote, tokens: &TokenLookup) -> bool {
     let Some(route) = quote.route() else {
         return false;
     };
-
     let swaps = route.swaps();
-    if swaps.is_empty() {
-        return false;
-    }
-
-    let Some(output_token) = route.output_token() else {
-        return false;
-    };
-
-    let mut exclusive_count = 0;
-
-    for (index, swap) in swaps.iter().enumerate() {
-        if !is_exclusive(swap.protocol_component()) {
-            continue;
-        }
-
-        // Only the immediately following leg is considered: a wrap run that ends at the output
-        // token is always a single leg, and requiring adjacency keeps this validator in step with
-        // the chaining rule `pin_commitment` uses to find a path's final output.
-        let reaches_output = *swap.token_out() == output_token ||
-            swaps
-                .get(index + 1)
-                .is_some_and(|next| {
-                    next.token_in() == swap.token_out() &&
-                        next.token_out() == &output_token &&
-                        is_native_wrap(next, chain)
-                });
-        if !reaches_output {
-            return false;
-        }
-        exclusive_count += 1;
-    }
-
-    exclusive_count == 1
-}
-
-/// Returns `true` when the leg converts between the native token and its wrapped form, which tycho
-/// streams as a 1:1 component.
-///
-/// An unregistered custom chain resolves no wrap pair, so no leg qualifies and the exclusive leg
-/// must be terminal.
-fn is_native_wrap(swap: &Swap, chain: Chain) -> bool {
-    let (Ok(native), Ok(wrapped)) = (chain.try_native_token(), chain.try_wrapped_native_token())
+    let (Some(input_token), Some(output_token)) = (route.input_token(), route.output_token())
     else {
         return false;
     };
 
-    let (token_in, token_out) = (swap.token_in(), swap.token_out());
-    (*token_in == native.address && *token_out == wrapped.address) ||
-        (*token_in == wrapped.address && *token_out == native.address)
+    let mut exclusive_legs = swaps
+        .iter()
+        .enumerate()
+        .filter(|(_, swap)| is_exclusive(swap.protocol_component()));
+    let Some((leg_index, _)) = exclusive_legs.next() else {
+        return false;
+    };
+    if exclusive_legs.next().is_some() {
+        return false;
+    }
+
+    // A zero surplus solves trivially, so probe with the leg's whole output: that is the largest
+    // surplus any commitment can ask for, and it exercises the same replay path.
+    let probe = swaps[leg_index].amount_out().clone();
+    solve_withheld_amount(swaps, &input_token, &output_token, leg_index, &probe, tokens).is_ok()
 }
 
 /// Shared-graph facts beat path-specific reasons (most specific first:
@@ -1573,7 +1592,8 @@ mod tests {
             .with_timeout(Duration::from_millis(2000))
             .with_min_responses(min_responses);
         let worker_router =
-            WorkerPoolRouter::new(vec![public_pool, exclusive_pool], config, default_encoder());
+            WorkerPoolRouter::new(vec![public_pool, exclusive_pool], config, default_encoder())
+                .with_market_data(exclusive_fixture_market().await);
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let start = Instant::now();
@@ -1617,7 +1637,8 @@ mod tests {
             vec![public_pool, exclusive_pool],
             WorkerPoolRouterConfig::default().with_timeout(Duration::from_millis(2000)),
             default_encoder(),
-        );
+        )
+        .with_market_data(exclusive_fixture_market().await);
         let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
 
         let result = worker_router
@@ -2015,6 +2036,48 @@ mod tests {
         assert_eq!(*result[1].amount_out_net_gas(), BigUint::from(800u64));
     }
 
+    /// Every token a quote's route touches, at 18 decimals — the lookup the router builds from
+    /// the market before solving an exclusive candidate.
+    fn tokens_of(quote: &OrderQuote) -> TokenLookup {
+        quote
+            .route()
+            .map(|route| {
+                route
+                    .swaps()
+                    .iter()
+                    .flat_map(|swap| [swap.token_in().clone(), swap.token_out().clone()])
+                    .map(|address| {
+                        let token = Token {
+                            address: address.clone(),
+                            symbol: "T".to_string(),
+                            decimals: 18,
+                            tax: Default::default(),
+                            gas: vec![],
+                            chain: SimChain::Ethereum,
+                            quality: 100,
+                        };
+                        (address, token)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The lookup for the fixtures below, whose routes only ever touch tokens 0x01 and 0x02.
+    fn exclusive_fixture_tokens() -> TokenLookup {
+        tokens_of(make_exclusive_quote(1_000).order())
+    }
+
+    /// A market holding those same tokens, for the router tests that quote end to end.
+    async fn exclusive_fixture_market() -> MarketData {
+        let market_data = MarketData::new_shared();
+        market_data
+            .write()
+            .await
+            .upsert_tokens(exclusive_fixture_tokens().into_values());
+        market_data
+    }
+
     /// Like `make_single_quote` but the swap uses an exclusive protocol component. The swap's own
     /// output is `leg_amount_out`, letting tests exercise per-leg attribution where the leg
     /// differs from the route total
@@ -2106,7 +2169,10 @@ mod tests {
                 &[tin_token.clone(), tout_token.clone()],
             ),
             Box::new(MockProtocolSim::default()),
-        );
+        )
+        // Half the input each. Without the fraction the branches are not replayable: the first
+        // swap of a token's group takes everything the split-0.0 rule leaves it.
+        .with_split(0.5);
         let mut exclusive_comp = component(
             "0x0000000000000000000000000000000000000002",
             &[tin_token.clone(), tout_token.clone()],
@@ -2273,7 +2339,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             user_share_bps,
-            SimChain::Ethereum,
+            &exclusive_fixture_tokens(),
         );
 
         let expected_surplus = expected_surplus.map(BigUint::from);
@@ -2328,7 +2394,7 @@ mod tests {
             &options,
             public_ranked,
             1_000,
-            SimChain::Ethereum,
+            &exclusive_fixture_tokens(),
         );
 
         assert_eq!(combined.len(), 1);
@@ -2381,7 +2447,7 @@ mod tests {
             &QuoteOptions::default(),
             vec![no_route_quote()],
             1_000,
-            SimChain::Ethereum,
+            &exclusive_fixture_tokens(),
         );
 
         assert_eq!(combined.len(), 2);
@@ -2422,7 +2488,7 @@ mod tests {
             &QuoteOptions::default(),
             vec![no_route_quote()],
             1_000,
-            SimChain::Ethereum,
+            &exclusive_fixture_tokens(),
         );
 
         assert_eq!(*combined[0].amount_out(), BigUint::from(1_099_750u64));
@@ -2461,7 +2527,7 @@ mod tests {
             &QuoteOptions::default(),
             vec![no_route_quote()],
             1_000,
-            SimChain::Ethereum,
+            &exclusive_fixture_tokens(),
         );
 
         assert_eq!(combined.len(), 1);
@@ -2480,7 +2546,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             1_000,
-            SimChain::Ethereum,
+            &exclusive_fixture_tokens(),
         );
 
         let surplus_quote = &combined[0];
@@ -2529,7 +2595,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             1_000,
-            SimChain::Ethereum,
+            &exclusive_fixture_tokens(),
         );
 
         let route = combined[0]
@@ -2587,7 +2653,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             1_000,
-            SimChain::Ethereum,
+            &exclusive_fixture_tokens(),
         );
 
         assert_eq!(*combined[0].amount_out(), BigUint::from(1010u64));
@@ -2706,26 +2772,25 @@ mod tests {
         .with_route(Route::new(swaps, tokens).expect("non-empty route"))
     }
 
-    /// Route-shape validation: exactly one exclusive leg, terminal in its path.
+    /// Route validation: exactly one exclusive leg, wherever in the route it sits.
     #[rstest]
     #[case::terminal_exclusive_leg(
         &[("uniswap_v2", 0x01, 0x02), ("vm:exclusive", 0x02, 0x03)], true)]
+    // The leg the old shape rule turned away. Its output now reaches the route's output token
+    // through the swap after it, and `solve_withheld_amount` prices that hop.
     #[case::mid_route_exclusive_leg(
-        &[("vm:exclusive", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)], false)]
-    // Split route in sequential representation: path 1 is a single exclusive hop 0x01→0x02;
-    // path 2 is 0x01→0x03→0x02. The exclusive leg is terminal for its path because the next
-    // swap starts over from 0x01.
+        &[("vm:exclusive", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)], true)]
     #[case::exclusive_leg_ending_its_path(
         &[("vm:exclusive", 0x01, 0x02), ("uniswap_v2", 0x01, 0x03), ("uniswap_v2", 0x03, 0x02)],
         true)]
     #[case::no_exclusive_leg(
         &[("uniswap_v2", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)], false)]
-    // Two exclusive legs: out of scope for v1 (ambiguous per-component attribution).
+    // Two exclusive legs: still out of scope. The route does not say how the surplus divides
+    // between them, so there is no single withheld amount to solve for.
     #[case::two_exclusive_legs(
         &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x01, 0x02)], false)]
     // Diamond split: 0x01 splits into 0x01->0x02 (exclusive) and 0x01->0x03, both merging into
-    // 0x02->0x04 and 0x03->0x04. The exclusive leg feeds the merge point, not the route's output
-    // (0x04), so it's mid-path even though the next serialized swap starts a sibling branch.
+    // 0x02->0x04 and 0x03->0x04. The exclusive leg feeds the merge point rather than the output.
     #[case::exclusive_leg_feeding_diamond_merge(
         &[
             ("vm:exclusive", 0x01, 0x02),
@@ -2733,21 +2798,7 @@ mod tests {
             ("uniswap_v2", 0x02, 0x04),
             ("uniswap_v2", 0x03, 0x04),
         ],
-        false)]
-    // Same diamond shape, reordered so the exclusive leg's real continuation is adjacent to it —
-    // regression case for a prior bug where terminal-ness was inferred from adjacency alone.
-    #[case::exclusive_leg_feeding_diamond_merge_reordered(
-        &[
-            ("vm:exclusive", 0x01, 0x02),
-            ("uniswap_v2", 0x02, 0x04),
-            ("uniswap_v2", 0x01, 0x03),
-            ("uniswap_v2", 0x03, 0x04),
-        ],
-        false)]
-    // Sibling branches sharing a prefix: 0x01->0x02->0x03->0x04 alongside
-    // 0x01->0x02->0x05->0x04(exclusive). The exclusive leg is the terminal hop of its own branch
-    // and produces the route's output token, so it's valid despite sharing 0x01->0x02 with the
-    // other branch.
+        true)]
     #[case::exclusive_leg_on_sibling_branch(
         &[
             ("uniswap_v2", 0x01, 0x02),
@@ -2759,76 +2810,32 @@ mod tests {
         true)]
     fn test_exclusive_route_validation(#[case] legs: &[(&str, u8, u8)], #[case] expected: bool) {
         let quote = make_route_quote(legs);
-        assert_eq!(has_valid_exclusive_route(&quote, SimChain::Ethereum), expected);
+        let tokens = tokens_of(&quote);
+        assert_eq!(has_valid_exclusive_route(&quote, &tokens), expected);
     }
 
-    /// Native token, its wrapped form, and an unrelated token. Read from the same chain config the
-    /// validator uses, so the pair cannot drift from tycho's.
-    fn wrap_tokens() -> (Address, Address, Address) {
-        (
-            SimChain::Ethereum
-                .native_token()
-                .address,
-            SimChain::Ethereum
-                .wrapped_native_token()
-                .address,
-            make_address(0x07),
-        )
+    #[test]
+    fn test_route_missing_a_token_is_rejected() {
+        let quote = make_route_quote(&[("vm:exclusive", 0x01, 0x02)]);
+        assert!(!has_valid_exclusive_route(&quote, &TokenLookup::default()));
     }
 
+    /// A leg that wraps into the output token needs no special case any more: the wrap is an
+    /// ordinary downstream swap, and the replay prices it like any other.
     #[test]
     fn test_exclusive_leg_wrapped_into_output() {
-        let (native, wrapped, other) = wrap_tokens();
+        let native = SimChain::Ethereum
+            .native_token()
+            .address;
+        let wrapped = SimChain::Ethereum
+            .wrapped_native_token()
+            .address;
         let quote = make_route_quote_for_tokens(&[
-            ("vm:exclusive", other, native.clone()),
+            ("vm:exclusive", make_address(0x07), native.clone()),
             ("uniswap_v2", native, wrapped),
         ]);
+        let tokens = tokens_of(&quote);
 
-        assert!(has_valid_exclusive_route(&quote, SimChain::Ethereum));
-    }
-
-    #[test]
-    fn test_exclusive_leg_unwrapped_into_output() {
-        let (native, wrapped, other) = wrap_tokens();
-        let quote = make_route_quote_for_tokens(&[
-            ("vm:exclusive", other, wrapped.clone()),
-            ("uniswap_v2", wrapped, native),
-        ]);
-
-        assert!(has_valid_exclusive_route(&quote, SimChain::Ethereum));
-    }
-
-    #[test]
-    fn test_exclusive_leg_followed_by_non_wrap() {
-        let (native, _, other) = wrap_tokens();
-        let quote = make_route_quote_for_tokens(&[
-            ("vm:exclusive", other, native.clone()),
-            ("uniswap_v2", native, make_address(0x08)),
-        ]);
-
-        assert!(!has_valid_exclusive_route(&quote, SimChain::Ethereum));
-    }
-
-    #[test]
-    fn test_exclusive_leg_wrap_not_producing_output() {
-        let (native, wrapped, other) = wrap_tokens();
-        let quote = make_route_quote_for_tokens(&[
-            ("vm:exclusive", other, native.clone()),
-            ("uniswap_v2", native, wrapped.clone()),
-            ("uniswap_v2", wrapped, make_address(0x08)),
-        ]);
-
-        assert!(!has_valid_exclusive_route(&quote, SimChain::Ethereum));
-    }
-
-    #[test]
-    fn test_exclusive_leg_wrap_of_another_path() {
-        let (native, wrapped, other) = wrap_tokens();
-        let quote = make_route_quote_for_tokens(&[
-            ("vm:exclusive", other, make_address(0x08)),
-            ("uniswap_v2", native, wrapped),
-        ]);
-
-        assert!(!has_valid_exclusive_route(&quote, SimChain::Ethereum));
+        assert!(has_valid_exclusive_route(&quote, &tokens));
     }
 }

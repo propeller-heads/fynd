@@ -862,7 +862,8 @@ impl FyndBuilder {
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses);
-        let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
+        let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder)
+            .with_market_data(market_data.clone());
 
         if self.price_guard_enabled {
             let mut registry = PriceProviderRegistry::new();
@@ -1328,7 +1329,8 @@ impl Solver {
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(Duration::from_millis(max_timeout_ms.max(5000)))
             .with_min_responses(defaults::ROUTER_MIN_RESPONSES);
-        let router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
+        let router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder)
+            .with_market_data(market_data.clone());
 
         // Trigger derived data computation
         let market_read = market_data.read().await;
