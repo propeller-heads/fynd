@@ -95,8 +95,8 @@ chain-specific addresses, re-derived rather than copied. Sections: `wrapped_nati
 `infrastructure` (Permit2 etc.), `usd_stablecoins` (USD anchors for reporting), `batch_settlers`,
 `bridge_order_events` (topic0s marking a transaction as not a same-chain swap),
 `[solvers]` (router address → name; the name joins to a `SolverDecoder` at load), `[labels]`
-(display-only names), `[venues.<name>]` (entry points, fee collectors, and — for venues that
-declare their solver in calldata — `solver_aliases`), and the venue fingerprints
+(display-only names), `[venues.<name>]` (entry points and fee collectors), and the venue
+fingerprints
 (`[venue_owners]`, `[venue_fees]`, `[venue_integrators]`, `[venue_appdata]`).
 
 ### Re-solve engine (`src/resolve/`)
@@ -215,8 +215,7 @@ It surfaces three ways:
   recipient when the calldata declares one. If some of its orders are not same-chain swaps, add
   the marking event's topic0 to the address book's `bridge_order_events` — no code.
 - **Venue** (a platform users enter through): a `[venues.<name>]` address-book section — entry
-  points, fee collectors, and (for venues that declare their solver in calldata)
-  `solver_aliases`. No code. Verify each fee collector on-chain before adding it: a missing
+  points and fee collectors. No code. Verify each fee collector on-chain before adding it: a missing
   collector leaves the fee inside the netted amounts (declared amounts are immune).
 - **Chain**: a new `registry/<chain>.toml` plus its entry in `registry::BUILTIN_CHAINS`, or
   passed via `--registry`. Re-verify each venue's fee collectors on that chain. Check the

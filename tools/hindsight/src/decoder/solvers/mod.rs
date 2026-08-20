@@ -165,6 +165,37 @@ const IMPLEMENTATIONS: &[(&str, &'static dyn SolverDecoder)] = &[
     ("0x", &zeroex::ZeroEx),
 ];
 
+/// Substrings of the solver ids venues declare in their calldata, mapped to the address book's
+/// solver names. A venue decorates the id it was routed through ("oneInchV6FeeDynamic",
+/// "uniswapPermit2FeeDynamic"), and the decoration is the venue's, not the chain's — the same
+/// vocabulary on every chain — so it lives here rather than in each chain's address book.
+const DECLARED_NAME_ALIASES: &[(&str, &str)] = &[
+    ("airswap", "airswap"),
+    ("hashflow", "hashflow"),
+    ("kyber", "kyberswap"),
+    ("okx", "okx"),
+    ("oneinch", "1inch"),
+    ("openocean", "openocean"),
+    ("paraswap", "paraswap"),
+    ("uniswap", "uniswap"),
+    ("zeroex", "0x"),
+];
+
+/// Normalize a solver id a venue declared in its calldata to the address book's solver names:
+/// the first alias substring contained in the lowercased id names the solver, trimming the
+/// venue's decoration. No alias is a substring of another, so the answer does not depend on the
+/// order above. An unmatched id passes through as-is — still more informative than a raw
+/// executor address, and a signal to extend the list.
+pub(crate) fn normalize_declared_name(id: &str) -> String {
+    let lower = id.to_lowercase();
+    for (substring, name) in DECLARED_NAME_ALIASES {
+        if lower.contains(substring) {
+            return (*name).to_string();
+        }
+    }
+    id.to_string()
+}
+
 /// A solver with no `SolverDecoder` implementation: every method keeps its "nothing to add"
 /// default, so callers hold one handle type and never branch on whether a solver has code.
 struct NoDecoder;

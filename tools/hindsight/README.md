@@ -147,7 +147,7 @@ four maps from the address book:
   string mapped to a venue (LiFi frontends), read by that provider's `SolverDecoder::integrator`.
 
 The solver label comes from its own evidence tiers, most- to least-trusted: the venue-declared
-calldata id (MetaMask's `aggregatorId`, normalized via that venue's `solver_aliases`), the entry
+calldata id (MetaMask's `aggregatorId`, normalized through the alias list in `solvers/`), the entry
 point itself, the solver frame in the trace, the largest external call (a guess, for unknown
 routers), and the entry-point label as the honest "don't know". The tier is recorded on the
 record (`solver_source`).
@@ -170,7 +170,7 @@ fee collectors are still re-verified on every chain a venue is added on.
 | Track a new solver | One line in the address book's `[solvers]` section. No code — its trades match and net like any other | Trades sent directly to the solver's router never match; trades a known venue routed through it decode, but the solver is recorded as "unknown" |
 | Make a solver's trades declared (trusted) instead of netted | A `SolverDecoder` impl in `solvers/` with `declared_swap`, one row in `solvers::IMPLEMENTATIONS` | The solver's trades stay netted: marked, excluded from the report by default, and missing `min_amount_out` / `declared_quote` / `quote_timestamp` |
 | Skip a solver's non-swap orders | The marking event's topic0 in the address book's `bridge_order_events` | Those orders decode as trades that never happened, with absurd rates |
-| Add a venue | A `[venues.<name>]` section in the address book — entry points, fee collectors, optional `solver_aliases`. No code | The venue's trades still decode when a known solver's frame or log is inside; the venue label falls back to the raw entry address, and netted amounts keep the venue's fee inside |
+| Add a venue | A `[venues.<name>]` section in the address book — entry points and fee collectors. No code | The venue's trades still decode when a known solver's frame or log is inside; the venue label falls back to the raw entry address, and netted amounts keep the venue's fee inside |
 | Attribute a new venue (owner / appData tag / fee wallet / integrator tag) | The matching address-book map (`[venue_owners]` / `[venue_appdata]` / `[venue_fees]` / `[venue_integrators]`) | The venue's trades are attributed to the underlying router or settler, not the venue |
 | Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |
 | Support a new chain | A `registry/<chain>.toml` address book, an entry in `registry::BUILTIN_CHAINS` | The chain has no built-in book and must be passed via `--registry` |

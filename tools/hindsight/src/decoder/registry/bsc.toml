@@ -116,16 +116,6 @@ fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 entry_points = ["0xdb9b1e94b5b69df7e401ddbede43491141047db3"]
 fee_collectors = ["0xe3478b0bb1a5084567c319096437924948be1964"]
 
-[venues.metamask.solver_aliases]
-oneinch = "1inch"
-zeroex = "0x"
-uniswap = "uniswap"
-okx = "okx"
-kyber = "kyberswap"
-paraswap = "paraswap"
-airswap = "airswap"
-openocean = "openocean"
-hashflow = "hashflow"
 
 # Rabby SwapProxy — same address as mainnet. Verified on-chain: 218 fee legs paid to 0xcd6b9800…
 # (mainnet fee wallet 1) in a 20k-block sample; the historical wallet 0x39041f… is unused on BSC.
