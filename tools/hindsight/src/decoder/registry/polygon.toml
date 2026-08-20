@@ -88,7 +88,6 @@ entry_points = [
     "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
     "0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7",
 ]
-fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 
 # MetaMask Swap Router on Polygon — the same proxy Base, Arbitrum and BSC use (0xdb9b1e94…), and
 # the busiest MetaMask deployment of the chains added here (1015 fee legs and 200 router
@@ -96,7 +95,6 @@ fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 # 0xe3478b0b… (mainnet fee wallet 1); mainnet wallet 2 took nothing.
 [venues.metamask]
 entry_points = ["0xdb9b1e94b5b69df7e401ddbede43491141047db3"]
-fee_collectors = ["0xe3478b0bb1a5084567c319096437924948be1964"]
 
 
 # Rabby SwapProxy — same address as mainnet. Verified on-chain: 69 fee legs paid to 0xcd6b9800…
@@ -105,13 +103,11 @@ fee_collectors = ["0xe3478b0bb1a5084567c319096437924948be1964"]
 # recognised by the fee leg (see rabby.rs), not by tx.to.
 [venues.rabby]
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
-fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
 
 # Rainbow's own router — same address as mainnet. Verified live by its own token transfers.
 # Input-side fee read from calldata; no fee collector (see rainbow.rs).
 [venues.rainbow]
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
-fee_collectors = []
 
 # Venues identified by the fee they take on a shared router. Verified on-chain in a 10k-block
 # sample: 194 fee legs to Robinhood's wallet and 30 to Phantom's current wallet, every one paid by

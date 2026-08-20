@@ -93,11 +93,10 @@ tiers its chain has; each book's header says what was checked. An address also m
 Robinhood Chain's LiFi Diamond, 0x Settler, OKX router and MetaMask router all sit at
 chain-specific addresses, re-derived rather than copied. Sections: `wrapped_native`,
 `infrastructure` (Permit2 etc.), `usd_stablecoins` (USD anchors for reporting), `batch_settlers`,
-`bridge_order_events` (topic0s marking a transaction as not a same-chain swap),
 `[solvers]` (router address → name; the name joins to a `SolverDecoder` at load), `[labels]`
-(display-only names), `[venues.<name>]` (entry points and fee collectors), and the venue
-fingerprints
-(`[venue_owners]`, `[venue_fees]`, `[venue_integrators]`, `[venue_appdata]`).
+(display-only names), `[venues.<name>]` (entry points), and the venue fingerprints
+(`[venue_owners]`, `[venue_fees]`, `[venue_integrators]`, `[venue_appdata]`). Venue fees are not
+modelled: a fee is charged whichever solver fills, so it cancels out of the comparison.
 
 ### Re-solve engine (`src/resolve/`)
 
@@ -148,9 +147,8 @@ the output recipient the same calldata declares (falling back to the transaction
 one field calldata can never carry. Two guards protect the recipient-receipt query: the recovered
 output must clear the intent's `min_amount_out` floor, and any declared quote must sit within
 `plausible_quote`'s band of it; either failure falls through to the netting fallback. The
-declared amounts are already on the solver-task basis — a venue's input-side fee left before the
-solver frame, and the recipient's receipt is the gross output — so venue fees are recorded via
-`venue_fee_in`/`venue_fee_out` for transparency without adjusting the amounts. See
+declared `amount_in` is already on the solver-task basis: an input-side venue fee left before the
+solver frame. Venue fees are not modelled otherwise (see the README). See
 `.claude/plans/calldata-first-decoding.md` for the empirics behind calldata-first ordering: on a
 315-transaction Base sample, coverage rises from 60.0% (netting alone) to 91.4% (calldata-first
 union), with zero divergences across the 165 trades both paths could decode.
@@ -212,14 +210,13 @@ It surfaces three ways:
   covers matching, attribution, and metric labels. To make its trades declared (trusted) instead
   of netted: a `SolverDecoder` impl in `solvers/` with a `declared_swap` method, registered as one
   row in `solvers::IMPLEMENTATIONS`. One parse fills the whole `SwapIntent`, including the output
-  recipient when the calldata declares one. If some of its orders are not same-chain swaps, add
-  the marking event's topic0 to the address book's `bridge_order_events` — no code.
-- **Venue** (a platform users enter through): a `[venues.<name>]` address-book section — entry
-  points and fee collectors. No code. Verify each fee collector on-chain before adding it: a missing
-  collector leaves the fee inside the netted amounts (declared amounts are immune).
+  recipient when the calldata declares one. Add a `veto` method if some of its orders are not
+  same-chain swaps.
+- **Venue** (a platform users enter through): a `[venues.<name>]` address-book section — its
+  entry points. No code. A venue with no entry point of its own is identified by its fee wallet
+  (`[venue_fees]`) instead.
 - **Chain**: a new `registry/<chain>.toml` plus its entry in `registry::BUILTIN_CHAINS`, or
-  passed via `--registry`. Re-verify each venue's fee collectors on that chain. Check the
-  monitor's pacing flags (`--max-lag-blocks`) against the chain's block time. The `verify`
+  passed via `--registry`. Check the monitor's pacing flags (`--max-lag-blocks`) against the chain's block time. The `verify`
   subcommand's saved Allium query is per-chain.
 
 ## Running

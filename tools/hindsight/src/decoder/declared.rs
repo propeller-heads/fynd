@@ -11,10 +11,7 @@
 //! Declines (falling through to the netting decoders) when no solver frame or intent is found,
 //! the recipient never received the token, or either guard below fails.
 
-use alloy::{
-    primitives::{Address, U256},
-    rpc::types::trace::geth::CallFrame,
-};
+use alloy::{primitives::Address, rpc::types::trace::geth::CallFrame};
 
 use crate::decoder::{
     netting::TraderFlow,
@@ -40,7 +37,6 @@ pub(crate) fn declared_flow(
     registry: &Registry,
     transfer_ledger: &TransferLedger,
     sender: Address,
-    entry_point: Address,
 ) -> Option<(TraderFlow, SwapIntent)> {
     let solver_frame = trace::find_solver_frame(root, registry)?;
     let solver = registry.solver(solver_frame.to?)?;
@@ -61,48 +57,21 @@ pub(crate) fn declared_flow(
         }
     }
 
-    let (venue_fee_in, venue_fee_out) = venue_fees(registry, entry_point, transfer_ledger, &intent);
-    let flow = TraderFlow {
-        tracked: sender,
-        swap: NetSwap {
+    let flow = TraderFlow::new(
+        sender,
+        NetSwap {
             token_in: intent.token_in,
             amount_in: intent.amount_in,
             token_out: intent.token_out,
             amount_out,
         },
-        venue_fee_in,
-        venue_fee_out,
-    };
+    );
     Some((flow, intent))
-}
-
-/// The venue fees this transaction paid, when the entry point belongs to a known venue. Recorded
-/// for transparency only — the declared amounts are already on the solver-task basis, so neither
-/// is adjusted (unlike netting's fee back-out).
-fn venue_fees(
-    registry: &Registry,
-    entry_point: Address,
-    transfer_ledger: &TransferLedger,
-    intent: &SwapIntent,
-) -> (Option<U256>, Option<U256>) {
-    let Some(venue) = registry
-        .venue_name(entry_point)
-        .and_then(|name| registry.venue(name))
-    else {
-        return (None, None);
-    };
-    let fees = transfer_ledger.received_by(&venue.fee_collectors);
-    let non_zero = |token: &Address| {
-        fees.get(token)
-            .copied()
-            .filter(|fee| !fee.is_zero())
-    };
-    (non_zero(&intent.token_in), non_zero(&intent.token_out))
 }
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::address;
+    use alloy::primitives::{address, U256};
 
     use super::*;
     use crate::decoder::test_utils::{addr, frame, make_transfer_log};
@@ -137,16 +106,6 @@ mod tests {
         root
     }
 
-    fn relay_collector(registry: &Registry) -> Address {
-        *registry
-            .venue("relay")
-            .unwrap()
-            .fee_collectors
-            .iter()
-            .next()
-            .unwrap()
-    }
-
     #[test]
     fn test_decode_recovers_output_from_recipient_receipt() {
         // The router — the declared recipient — receives native ETH above the floor; the
@@ -158,7 +117,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (flow, intent) = declared_flow(&root, &registry, &ledger, sender, ROUTER).unwrap();
+        let (flow, intent) = declared_flow(&root, &registry, &ledger, sender).unwrap();
         assert_eq!(flow.tracked, sender);
         assert_eq!(flow.swap.token_in, TOKEN_IN);
         assert_eq!(flow.swap.token_out, Address::ZERO);
@@ -177,7 +136,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT - 1))];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &ledger, sender, ROUTER).is_none());
+        assert!(declared_flow(&root, &registry, &ledger, sender).is_none());
     }
 
     #[test]
@@ -187,7 +146,7 @@ mod tests {
         let root = root_with_solver_frame(sender, ROUTER, FLY);
         let ledger = TransferLedger::from_transaction(&[], &[]);
 
-        assert!(declared_flow(&root, &registry, &ledger, sender, ROUTER).is_none());
+        assert!(declared_flow(&root, &registry, &ledger, sender).is_none());
     }
 
     #[test]
@@ -198,7 +157,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &ledger, sender, ROUTER).is_none());
+        assert!(declared_flow(&root, &registry, &ledger, sender).is_none());
     }
 
     #[test]
@@ -212,7 +171,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &ledger, sender, ROUTER).is_none());
+        assert!(declared_flow(&root, &registry, &ledger, sender).is_none());
     }
 
     #[test]
@@ -227,63 +186,60 @@ mod tests {
         let native = vec![(addr(50), ROUTER, implausible)];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &ledger, sender, ROUTER).is_none());
+        assert!(declared_flow(&root, &registry, &ledger, sender).is_none());
     }
 
     #[test]
-    fn test_decode_collector_funded_rebalance() {
-        // The fee collector, not the sender, net-sends the input token: a solver-initiated
-        // rebalance still decodes from the calldata, with the intent's own amounts.
+    fn test_decode_third_party_funded_rebalance() {
+        // Someone other than the sender net-sends the input token: a solver-initiated rebalance
+        // still decodes from the calldata, with the intent's own amounts.
         let registry = Registry::ethereum();
         let sender = addr(1);
-        let collector = relay_collector(&registry);
+        let funder = addr(99);
         let root = root_with_solver_frame(sender, ROUTER, FLY);
-        let logs = vec![make_transfer_log(TOKEN_IN, collector, ROUTER, U256::from(AMOUNT_IN))];
+        let logs = vec![make_transfer_log(TOKEN_IN, funder, ROUTER, U256::from(AMOUNT_IN))];
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (flow, _) = declared_flow(&root, &registry, &ledger, sender, ROUTER).unwrap();
+        let (flow, _) = declared_flow(&root, &registry, &ledger, sender).unwrap();
         assert_eq!(flow.tracked, sender);
         assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
     }
 
     #[test]
-    fn test_decode_records_venue_fee_without_adjusting_amounts() {
-        // An input-side fee leg to the real Relay collector: recorded for transparency, but
-        // `amount_in` stays the intent's raw figure — it is already post-fee, unlike netting's
-        // fee back-out. The collectors come from the entry point's venue section in the address
-        // book; no venue code is involved.
+    fn test_decode_ignores_an_input_side_fee_leg() {
+        // An input-side fee leg on the way to the solver: `amount_in` stays the frame's own
+        // figure, which is already what reached the solver.
         let registry = Registry::ethereum();
         let sender = addr(1);
-        let collector = relay_collector(&registry);
         let root = root_with_solver_frame(sender, ROUTER, FLY);
         let logs = vec![
             make_transfer_log(TOKEN_IN, sender, ROUTER, U256::from(AMOUNT_IN)),
-            make_transfer_log(TOKEN_IN, ROUTER, collector, U256::from(40)),
+            make_transfer_log(TOKEN_IN, ROUTER, addr(99), U256::from(40)),
         ];
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (flow, _) = declared_flow(&root, &registry, &ledger, sender, ROUTER).unwrap();
+        let (flow, _) = declared_flow(&root, &registry, &ledger, sender).unwrap();
         assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
-        assert_eq!(flow.venue_fee_in, Some(U256::from(40)));
     }
 
     #[test]
-    fn test_decode_outside_a_venue_records_no_fee() {
-        // A direct transaction (the entry point is the solver, not a venue): the root frame is
-        // the solver frame, and there is no venue section to read collectors from, so no fee is
-        // recorded.
+    fn test_decode_needs_no_venue() {
+        // A direct transaction: the root frame is itself the solver frame, and nothing about the
+        // decode consults a venue.
         let registry = Registry::ethereum();
         let sender = addr(1);
         let mut root = frame("CALL", sender, FLY, 0);
         root.input = fly_input().into();
         let logs = vec![make_transfer_log(TOKEN_IN, sender, FLY, U256::from(AMOUNT_IN))];
+        // The recipient is whatever the calldata declares — here Relay's router, even though the
+        // transaction never went near a venue.
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (flow, _) = declared_flow(&root, &registry, &ledger, sender, FLY).unwrap();
-        assert_eq!(flow.venue_fee_in, None);
-        assert_eq!(flow.venue_fee_out, None);
+        let (flow, _) = declared_flow(&root, &registry, &ledger, sender).unwrap();
+        assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
+        assert_eq!(flow.swap.amount_out, U256::from(MIN_AMOUNT_OUT + 1_000));
     }
 }

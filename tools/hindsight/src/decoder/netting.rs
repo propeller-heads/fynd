@@ -2,16 +2,17 @@
 //!
 //! The evidence is the ERC-20 `Transfer` events plus the native transfers recovered from the
 //! trace (see `transfer_ledger`) — what actually moved, not what any contract or calldata
-//! declared. It needs no knowledge of any router's format, which is also its weakness: a fee the
-//! ledger does not show (or whose collector is not in the address book) sits inside the netted
-//! amounts. Netted records are therefore the marked fallback tier (`decode: "netted"`), excluded
-//! from the report by default; the declared decode (see `super::declared`) is the trusted path.
+//! declared. It needs no knowledge of any router's format, which is also its weakness: a venue fee
+//! taken out of the trade sits inside the netted amounts, since netting reads the trader's gross
+//! spend and receipt. Netted records are therefore the marked fallback tier (`decode: "netted"`),
+//! excluded from the report by default; the declared decode (see `super::declared`) is the trusted
+//! path, and its `amount_in` is already past any input-side fee.
 //!
 //! Netting requires the trader to both pay and receive. When the swap's output is delivered to a
 //! different receiver, nothing nets against the trader's input and the transaction is declined —
 //! a coverage miss, never wrong amounts (see `transfer_ledger` for the model's assumptions).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use alloy::{primitives::Address, providers::Provider};
 use tracing::warn;
@@ -21,60 +22,25 @@ use crate::decoder::{
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
-/// The trader's side of a matched transaction: the swap, plus the venue fees that make it
-/// comparable.
+/// The trader's side of a matched transaction.
 pub(crate) struct TraderFlow {
     /// The address whose flow the swap was read from.
     pub tracked: Address,
     pub swap: NetSwap,
-    /// Venue fee taken from the input token. On a netted flow it is already backed out of
-    /// `swap.amount_in`; on a declared flow it is recorded only (the declared amount is already
-    /// post-fee).
-    pub venue_fee_in: Option<alloy::primitives::U256>,
-    /// Venue fee taken from the output token. On a netted flow it is already added back into
-    /// `swap.amount_out`; on a declared flow it is recorded only.
-    pub venue_fee_out: Option<alloy::primitives::U256>,
 }
 
 impl TraderFlow {
-    pub(crate) fn without_fees(tracked: Address, swap: NetSwap) -> Self {
-        Self { tracked, swap, venue_fee_in: None, venue_fee_out: None }
-    }
-
-    /// Record `fee` as an output-token venue fee and gross it back into `swap.amount_out`, so the
-    /// settled output stays comparable to Fynd's gross re-solve. A no-op when an output fee was
-    /// already accounted, so a second matching fee leg cannot double-count.
-    pub(crate) fn gross_output_fee(&mut self, fee: alloy::primitives::U256) {
-        if self.venue_fee_out.is_some() {
-            return;
-        }
-        self.venue_fee_out = Some(fee);
-        self.swap.amount_out = self.swap.amount_out.saturating_add(fee);
-    }
-
-    /// Record `fee` as an input-token venue fee and net it out of `swap.amount_in`, so the settled
-    /// input is what actually reached the pools rather than the user's gross spend. A no-op when an
-    /// input fee was already accounted.
-    ///
-    /// Without this, a venue skimming its fee off the input makes the settled trade look bigger
-    /// than it was, and Fynd — re-solved on that inflated size — appears to beat it.
-    pub(crate) fn net_input_fee(&mut self, fee: alloy::primitives::U256) {
-        if self.venue_fee_in.is_some() {
-            return;
-        }
-        self.venue_fee_in = Some(fee);
-        self.swap.amount_in = self.swap.amount_in.saturating_sub(fee);
+    pub(crate) fn new(tracked: Address, swap: NetSwap) -> Self {
+        Self { tracked, swap }
     }
 }
 
 /// Net the trade the declared decode could not read, picking whose balances count as the trade
 /// from the entry point:
 ///
-/// - a venue entry nets the sender and backs the venue's fee out (collectors from the address
-///   book);
+/// - a venue entry or a solver entry is a direct swap: the sender is the trader;
 /// - a batch settlement or a log-matched intent fill is sent by a solver, so the trader is found in
-///   the transfers instead;
-/// - a solver entry is a direct swap: the sender is the trader.
+///   the transfers instead.
 ///
 /// Returns the decoder label recorded on the trade with the flow.
 pub(crate) async fn fallback_flow<P: Provider>(
@@ -85,11 +51,11 @@ pub(crate) async fn fallback_flow<P: Provider>(
     sender: Address,
     entry_point: Address,
 ) -> Option<(&'static str, TraderFlow)> {
-    if let Some(venue) = registry
+    if registry
         .venue_name(entry_point)
-        .and_then(|name| registry.venue(name))
+        .is_some()
     {
-        return venue_flow(transfer_ledger, sender, entry_point, &venue.fee_collectors)
+        return sender_flow(transfer_ledger, sender, entry_point)
             .map(|flow| ("venue-netting", flow));
     }
     if registry.is_solver(entry_point) && !registry.is_batch_settler(entry_point) {
@@ -118,60 +84,12 @@ pub(crate) fn sender_flow(
 ) -> Option<TraderFlow> {
     transfer_ledger
         .net_swap(sender)
-        .map(|swap| TraderFlow::without_fees(sender, swap))
+        .map(|swap| TraderFlow::new(sender, swap))
         .or_else(|| {
             transfer_ledger
                 .net_swap(entry_point)
-                .map(|swap| TraderFlow::without_fees(entry_point, swap))
+                .map(|swap| TraderFlow::new(entry_point, swap))
         })
-}
-
-/// Net the sender's flow and back the venue's fee out of it — the shared shape of every
-/// fee-taking venue entry.
-///
-/// One exception to the fee back-out: when the tracked trader IS a fee collector, the transaction
-/// is a treasury operation — the collector's receipts are its own output, not a fee, and backing
-/// them "out" would add the output to itself and double it.
-pub(crate) fn venue_flow(
-    transfer_ledger: &TransferLedger,
-    sender: Address,
-    entry_point: Address,
-    fee_collectors: &HashSet<Address>,
-) -> Option<TraderFlow> {
-    let flow = sender_flow(transfer_ledger, sender, entry_point)?;
-    if fee_collectors.contains(&flow.tracked) {
-        return Some(flow);
-    }
-    Some(back_out_venue_fees(flow, transfer_ledger, fee_collectors))
-}
-
-/// Back a venue fee out of a decoded user flow.
-///
-/// The venue can take its fee on either side. An input-side fee is subtracted from `amount_in`
-/// (the user's gross spend included money that never entered the swap) and an output-side fee is
-/// added back into `amount_out` (the swap produced more than the user kept), so both sides are the
-/// amounts actually swapped — the like-for-like basis vs Fynd.
-fn back_out_venue_fees(
-    mut flow: TraderFlow,
-    transfer_ledger: &TransferLedger,
-    fee_collectors: &HashSet<Address>,
-) -> TraderFlow {
-    let fees = transfer_ledger.received_by(fee_collectors);
-    if let Some(fee) = fees
-        .get(&flow.swap.token_in)
-        .copied()
-        .filter(|fee| !fee.is_zero())
-    {
-        flow.net_input_fee(fee);
-    }
-    if let Some(fee) = fees
-        .get(&flow.swap.token_out)
-        .copied()
-        .filter(|fee| !fee.is_zero())
-    {
-        flow.gross_output_fee(fee);
-    }
-    flow
 }
 
 /// Find the order swapper's trade in a solver-initiated intent fill.
@@ -202,7 +120,7 @@ pub(crate) async fn find_intent_trade<P: Provider>(
 ) -> Option<TraderFlow> {
     for (candidate, trade) in intent_candidates(transfer_ledger, exclude, registry) {
         if !is_contract(provider, candidate, code_cache).await {
-            return Some(TraderFlow::without_fees(candidate, trade));
+            return Some(TraderFlow::new(candidate, trade));
         }
     }
     None
@@ -270,16 +188,6 @@ mod tests {
         RootProvider::new(RpcClient::mocked(asserter.clone()))
     }
 
-    fn relay_collector(registry: &Registry) -> Address {
-        *registry
-            .venue("relay")
-            .unwrap()
-            .fee_collectors
-            .iter()
-            .next()
-            .unwrap()
-    }
-
     fn relay_entry(registry: &Registry) -> Address {
         *registry
             .venue("relay")
@@ -301,12 +209,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fallback_venue_entry_backs_the_fee_out() {
-        // User swap through a venue entry point: sender nets token_in -> token_out, with an
-        // input-side fee to the venue's collector (from the address book). The fee is backed out
-        // of amount_in.
+    async fn test_fallback_venue_entry_nets_the_sender() {
+        // User swap through a venue entry point: the sender's own net flow is the trade. A venue
+        // fee taken from the input stays inside `amount_in` — the record is marked netted, and the
+        // marker is what carries that inaccuracy.
         let registry = Registry::ethereum();
-        let collector = relay_collector(&registry);
         let router = relay_entry(&registry);
         let user = addr(1);
         let pool = addr(50);
@@ -315,7 +222,7 @@ mod tests {
 
         let logs = vec![
             make_transfer_log(token_in, user, router, U256::from(1000)),
-            make_transfer_log(token_in, router, collector, U256::from(40)),
+            make_transfer_log(token_in, router, addr(99), U256::from(40)),
             make_transfer_log(token_in, router, pool, U256::from(960)),
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
@@ -329,33 +236,7 @@ mod tests {
                 .unwrap();
         assert_eq!(decoder, "venue-netting");
         assert_eq!(flow.tracked, user);
-        assert_eq!(flow.swap, swap(token_in, 960, token_out, 2000));
-        assert_eq!(flow.venue_fee_in, Some(U256::from(40)));
-        assert_eq!(flow.venue_fee_out, None);
-    }
-
-    #[tokio::test]
-    async fn test_fallback_collector_is_the_trader() {
-        // Treasury op: the fee collector itself unwraps WETH via the venue router. Its 1:1 native
-        // receipt must not be treated as a fee and added back — that doubled the output.
-        let registry = Registry::ethereum();
-        let collector = relay_collector(&registry);
-        let router = relay_entry(&registry);
-        let weth = addr(10);
-
-        let logs = vec![make_transfer_log(weth, collector, router, U256::from(1000))];
-        let native = vec![(router, collector, U256::from(1000))];
-        let ledger = TransferLedger::from_transaction(&logs, &native);
-        let provider = mocked_provider(&Asserter::new());
-        let mut cache = HashMap::new();
-
-        let (_, flow) = fallback_flow(&provider, &mut cache, &registry, &ledger, collector, router)
-            .await
-            .unwrap();
-        assert_eq!(flow.tracked, collector);
-        assert_eq!(flow.swap, swap(weth, 1000, Address::ZERO, 1000));
-        assert_eq!(flow.venue_fee_in, None);
-        assert_eq!(flow.venue_fee_out, None);
+        assert_eq!(flow.swap, swap(token_in, 1000, token_out, 2000));
     }
 
     #[tokio::test]
