@@ -9,9 +9,12 @@
 //! hint, there is no other way to find it — then read the floor-and-quote pair that follows it and
 //! the token pair that precedes it.
 
-use alloy::primitives::{Address, U256};
+use alloy::{
+    primitives::{Address, U256},
+    rpc::types::Log,
+};
 
-use crate::decoder::solvers::{SolverDecoder, SwapIntent};
+use crate::decoder::solvers::{Declaration, SolverDecoder, SwapIntent};
 
 /// Byte length of an ABI-encoded word.
 const WORD_LEN: usize = 32;
@@ -51,7 +54,12 @@ impl SolverDecoder for Paraswap {
     /// not a token pair) — the intent is lost along with the quote, since there is nothing left
     /// to recover the floor from. A reverted trade has no netted flow to draw a hint from, so
     /// `amount_in_hint: None` always yields `None`.
-    fn declared_swap(&self, input: &[u8], amount_in_hint: Option<U256>) -> Option<SwapIntent> {
+    fn declared(
+        &self,
+        input: &[u8],
+        _logs: &[Log],
+        amount_in_hint: Option<U256>,
+    ) -> Option<Declaration> {
         let amount_in = amount_in_hint.filter(|hint| !hint.is_zero())?;
         if input.len() < 4 {
             return None;
@@ -83,7 +91,7 @@ impl SolverDecoder for Paraswap {
                 amount_in,
                 to_amount,
             );
-            return Some(intent.with_quote(quoted, None));
+            return Some(Declaration::Terms(intent.with_quote(quoted, None)));
         }
         None
     }
@@ -91,6 +99,14 @@ impl SolverDecoder for Paraswap {
 
 #[cfg(test)]
 mod tests {
+    /// The terms this solver reads from `input`, for tests that only care about the calldata path.
+    fn terms(input: &[u8], hint: Option<U256>) -> Option<SwapIntent> {
+        match Paraswap.declared(input, &[], hint)? {
+            Declaration::Terms(intent) => Some(intent),
+            Declaration::Settled(_) => None,
+        }
+    }
+
     use super::*;
 
     /// Word-aligned Augustus-style calldata: selector, then 32-byte words.
@@ -118,9 +134,7 @@ mod tests {
             U256::from(171_602_266u64),
             U256::ZERO, // metadata
         ];
-        let intent = Paraswap
-            .declared_swap(&calldata(&words), Some(amount_in))
-            .unwrap();
+        let intent = terms(&calldata(&words), Some(amount_in)).unwrap();
         assert_eq!(intent.token_in, address_from_word(src_token));
         assert_eq!(intent.token_out, address_from_word(dst_token));
         assert_eq!(intent.amount_in, amount_in);
@@ -138,15 +152,9 @@ mod tests {
             U256::from(171_430_663u64),
             U256::from(171_602_266u64),
         ];
-        assert!(Paraswap
-            .declared_swap(&calldata(&words), Some(U256::from(999u64)))
-            .is_none());
-        assert!(Paraswap
-            .declared_swap(&[], Some(U256::from(1u64)))
-            .is_none());
-        assert!(Paraswap
-            .declared_swap(&calldata(&words), Some(U256::ZERO))
-            .is_none());
+        assert!(terms(&calldata(&words), Some(U256::from(999u64))).is_none());
+        assert!(terms(&[], Some(U256::from(1u64))).is_none());
+        assert!(terms(&calldata(&words), Some(U256::ZERO)).is_none());
     }
 
     #[test]
@@ -160,9 +168,7 @@ mod tests {
             U256::from(171_430_663u64),
             U256::from(171_602_266u64),
         ];
-        assert!(Paraswap
-            .declared_swap(&calldata(&words), None)
-            .is_none());
+        assert!(terms(&calldata(&words), None).is_none());
     }
 
     #[test]
@@ -177,9 +183,7 @@ mod tests {
             U256::from(990_000u64),
             U256::from(400_000u64),
         ];
-        assert!(Paraswap
-            .declared_swap(&calldata(&below), Some(amount_in))
-            .is_none());
+        assert!(terms(&calldata(&below), Some(amount_in)).is_none());
         let far_above = [
             U256::from(0x1111u64),
             U256::from(0x2222u64),
@@ -187,9 +191,7 @@ mod tests {
             U256::from(990_000u64),
             U256::from(10_000_000u64),
         ];
-        assert!(Paraswap
-            .declared_swap(&calldata(&far_above), Some(amount_in))
-            .is_none());
+        assert!(terms(&calldata(&far_above), Some(amount_in)).is_none());
     }
 
     #[test]
@@ -205,9 +207,7 @@ mod tests {
             U256::from(990_000u64),
             U256::from(995_000u64),
         ];
-        assert!(Paraswap
-            .declared_swap(&calldata(&words), Some(amount_in))
-            .is_none());
+        assert!(terms(&calldata(&words), Some(amount_in)).is_none());
     }
 
     #[test]
@@ -216,8 +216,6 @@ mod tests {
         // words, even though the hint matches and the floor/quote pair is plausible.
         let amount_in = U256::from(1_000_000u64);
         let words = [amount_in, U256::from(990_000u64), U256::from(995_000u64)];
-        assert!(Paraswap
-            .declared_swap(&calldata(&words), Some(amount_in))
-            .is_none());
+        assert!(terms(&calldata(&words), Some(amount_in)).is_none());
     }
 }
