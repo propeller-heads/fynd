@@ -93,6 +93,7 @@ tiers its chain has; each book's header says what was checked. An address also m
 Robinhood Chain's LiFi Diamond, 0x Settler, OKX router and MetaMask router all sit at
 chain-specific addresses, re-derived rather than copied. Sections: `wrapped_native`,
 `infrastructure` (Permit2 etc.), `usd_stablecoins` (USD anchors for reporting), `batch_settlers`,
+`bridge_order_events` (topic0s marking a transaction as not a same-chain swap),
 `[solvers]` (router address → name; the name joins to a `SolverDecoder` at load), `[labels]`
 (display-only names), `[venues.<name>]` (entry points, fee collectors, and — for venues that
 declare their solver in calldata — `solver_aliases`), and the venue fingerprints
@@ -209,9 +210,10 @@ It surfaces three ways:
 
 - **Solver** (a router Fynd competes with): one line in the address book's `[solvers]` section
   covers matching, attribution, and metric labels. To make its trades declared (trusted) instead
-  of netted: a `SolverDecoder` impl in `solvers/` with a `declared_swap` method — plus
-  `output_recipient` when the calldata names the receiver — registered as one row in
-  `solvers::IMPLEMENTATIONS`. Add a `veto` method if some of its orders are not same-chain swaps.
+  of netted: a `SolverDecoder` impl in `solvers/` with a `declared_swap` method, registered as one
+  row in `solvers::IMPLEMENTATIONS`. One parse fills the whole `SwapIntent`, including the output
+  recipient when the calldata declares one. If some of its orders are not same-chain swaps, add
+  the marking event's topic0 to the address book's `bridge_order_events` — no code.
 - **Venue** (a platform users enter through): a `[venues.<name>]` address-book section — entry
   points, fee collectors, and (for venues that declare their solver in calldata)
   `solver_aliases`. No code. Verify each fee collector on-chain before adding it: a missing

@@ -114,71 +114,20 @@ impl SolverDecoder for Kyberswap {
         if desc.amount.is_zero() || desc.minReturnAmount.is_zero() {
             return None;
         }
+        // `dstReceiver` — KyberSwap passes this straight down to the inner pool, which pays it
+        // directly; the router itself never touches the output.
         let intent = SwapIntent::new(
             normalize_native(desc.srcToken),
             normalize_native(desc.dstToken),
             desc.amount,
             desc.minReturnAmount,
-        );
+        )
+        .with_recipient(desc.dstReceiver);
         Some(match declared_quote(input) {
             Some((amount_out, timestamp)) => intent.with_quote(amount_out, timestamp),
             None => intent,
         })
     }
-
-    /// `SwapDescriptionV2.dstReceiver` — `KyberSwap` passes this straight down to the inner pool,
-    /// which pays it directly; the router itself never touches the output.
-    fn output_recipient(&self, input: &[u8]) -> Option<Address> {
-        let call = swapCall::abi_decode(input).ok()?;
-        Some(call.execution.desc.dstReceiver)
-    }
-
-    /// The integrator fee recipients Kyber's router is told to pay out of the swap.
-    ///
-    /// Read from the root call only. A wrapper that nests Kyber's calldata (Relay, `MetaMask`)
-    /// owns the flow and accounts its own fee, so a nested fee is that venue's to report.
-    fn fee_recipients(&self, input: &[u8]) -> Vec<Address> {
-        if let Ok(call) = swapCall::abi_decode(input) {
-            return call.execution.desc.feeReceivers;
-        }
-        if let Ok(call) = swapSimpleModeCall::abi_decode(input) {
-            return call.desc.feeReceivers;
-        }
-        Vec::new()
-    }
-}
-
-/// A `MetaAggregationRouterV2.swap` call paying `fee_receivers`, for tests here and in
-/// `solvers::tests`. Only the fee tier is meaningful; the rest is the minimum a decode needs.
-///
-/// The layout is the one that decoded Base tx
-/// 0x78c70ca665a6e5d15e2af5a5b497cb3c1eb1214000308f1f0e2eb8e7e8c63e69, whose declared receiver
-/// 0x41ec04c3… is the address the trace shows taking 10% of the output.
-#[cfg(test)]
-pub(crate) fn swap_calldata(fee_receivers: Vec<alloy::primitives::Address>) -> Vec<u8> {
-    use alloy::primitives::{Address, Bytes};
-    swapCall {
-        execution: SwapExecutionParams {
-            callTarget: Address::ZERO,
-            approveTarget: Address::ZERO,
-            targetData: Bytes::default(),
-            desc: SwapDescriptionV2 {
-                srcToken: Address::ZERO,
-                dstToken: Address::ZERO,
-                srcReceivers: Vec::new(),
-                srcAmounts: Vec::new(),
-                feeReceivers: fee_receivers,
-                feeAmounts: vec![U256::from(1000)],
-                dstReceiver: Address::ZERO,
-                amount: U256::ZERO,
-                minReturnAmount: U256::ZERO,
-                flags: U256::from(704),
-                permit: Bytes::default(),
-            },
-            clientData: Bytes::default(),
-        },
-    }
-    .abi_encode()
 }
 
 #[cfg(test)]
@@ -297,17 +246,10 @@ mod tests {
     fn test_output_recipient_round_trip() {
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
-        let recipient = Kyberswap
-            .output_recipient(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, ""))
+        let intent = Kyberswap
+            .declared_swap(&swap_calldata(src, dst, 1_000_000, 990_000, ""), None)
             .unwrap();
-        assert_eq!(recipient, Address::repeat_byte(0x77));
-    }
-
-    #[test]
-    fn test_output_recipient_garbage_input() {
-        assert!(Kyberswap
-            .output_recipient(&[])
-            .is_none());
+        assert_eq!(intent.output_recipient, Some(Address::repeat_byte(0x77)));
     }
 
     #[test]
