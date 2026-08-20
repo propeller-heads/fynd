@@ -282,8 +282,7 @@ impl<P: Provider> Decoder<P> {
 
         // The declared decode runs first: the settling solver's own data is the trusted reading.
         // Netting is the fallback, and its records are marked.
-        let declared =
-            declared::declared_flow(root, registry, logs, &transfer_ledger, sender, entry_point);
+        let declared = declared::declared_flow(root, registry, logs, &transfer_ledger, sender);
         let (decoder, mut flow, intent, amounts_declared) =
             if let Some((decoder, flow, intent)) = declared {
                 (decoder, flow, intent, true)

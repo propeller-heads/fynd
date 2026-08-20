@@ -12,6 +12,7 @@ pub(crate) mod cow;
 pub(crate) mod fly;
 pub(crate) mod kyberswap;
 pub(crate) mod lifi;
+pub(crate) mod okx;
 pub(crate) mod paraswap;
 pub(crate) mod zeroex;
 
@@ -179,6 +180,7 @@ const IMPLEMENTATIONS: &[(&str, &'static dyn SolverDecoder)] = &[
     ("fly", &fly::Fly),
     ("kyberswap", &kyberswap::Kyberswap),
     ("lifi", &lifi::Lifi),
+    ("okx", &okx::Okx),
     ("paraswap", &paraswap::Paraswap),
     ("0x", &zeroex::ZeroEx),
 ];
