@@ -40,6 +40,8 @@ struct SwapData {
     amount_out_min: U256,
     /// Magpie's off-chain quote. Can legitimately be absent (zero) in some calldata variants.
     expected_amount_out: U256,
+    /// The blob's `toAddress` field: the declared output recipient.
+    to_address: Address,
 }
 
 /// Read a 3-byte packed header at `header_offset`: a right-shift byte, then a 2-byte big-endian
@@ -71,7 +73,18 @@ fn parse(input: &[u8]) -> Option<SwapData> {
     let amount_in = U256::from_be_slice(input.get(AMOUNT_IN_OFFSET..AMOUNT_IN_OFFSET + WORD_LEN)?);
     let amount_out_min = read_packed(input, AMOUNT_OUT_MIN_HEADER)?;
     let expected_amount_out = read_packed(input, EXPECTED_AMOUNT_OUT_HEADER)?;
-    Some(SwapData { from_asset, to_asset, amount_in, amount_out_min, expected_amount_out })
+    // In practice Relay's own router, not the trader — Relay receives the output and forwards it
+    // — so the settled output is what this address *received*, never treated as the trader.
+    let to_address =
+        Address::from_slice(input.get(TO_ADDRESS_OFFSET..TO_ADDRESS_OFFSET + ADDRESS_LEN)?);
+    Some(SwapData {
+        from_asset,
+        to_asset,
+        amount_in,
+        amount_out_min,
+        expected_amount_out,
+        to_address,
+    })
 }
 
 /// The Fly (Magpie) `DexAggregator` solver.
@@ -93,20 +106,13 @@ impl SolverDecoder for Fly {
             return None;
         }
         let intent =
-            SwapIntent::new(data.from_asset, data.to_asset, data.amount_in, data.amount_out_min);
+            SwapIntent::new(data.from_asset, data.to_asset, data.amount_in, data.amount_out_min)
+                .with_recipient(data.to_address);
         Some(if data.expected_amount_out.is_zero() {
             intent
         } else {
             intent.with_quote(data.expected_amount_out, None)
         })
-    }
-
-    /// The packed blob's `toAddress` field. In practice this is Relay's own router, not the
-    /// trader — Relay receives the output and forwards it — so callers must read the settled
-    /// output as what this address *received*, not treat it as the trader.
-    fn output_recipient(&self, input: &[u8]) -> Option<Address> {
-        has_fly_selector(input)?;
-        Some(Address::from_slice(input.get(TO_ADDRESS_OFFSET..TO_ADDRESS_OFFSET + ADDRESS_LEN)?))
     }
 }
 
@@ -138,26 +144,14 @@ mod tests {
 
     #[test]
     fn test_real_fixture_output_recipient() {
-        // Relay's own router — the delivery address, not the trader (see the method's doc).
-        let recipient = Fly
-            .output_recipient(&real_input())
+        // Relay's own router — the delivery address, not the trader (see `parse`).
+        let intent = Fly
+            .declared_swap(&real_input(), None)
             .unwrap();
-        assert_eq!(recipient, address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"));
-    }
-
-    #[test]
-    fn test_output_recipient_wrong_selector() {
-        let mut input = real_input();
-        input[0] = 0xff;
-        assert!(Fly.output_recipient(&input).is_none());
-    }
-
-    #[test]
-    fn test_output_recipient_truncated_input() {
-        let full = real_input();
-        assert!(Fly
-            .output_recipient(&full[..80])
-            .is_none());
+        assert_eq!(
+            intent.output_recipient,
+            Some(address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"))
+        );
     }
 
     #[test]

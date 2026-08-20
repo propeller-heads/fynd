@@ -47,9 +47,8 @@ pub(crate) fn declared_flow(
     let intent = solver
         .decoder
         .declared_swap(&solver_frame.input, None)?;
-    let recipient = solver
-        .decoder
-        .output_recipient(&solver_frame.input)
+    let recipient = intent
+        .output_recipient
         .unwrap_or(sender);
 
     let amount_out = transfer_ledger.received_by_address(recipient, intent.token_out);

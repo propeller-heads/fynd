@@ -45,6 +45,11 @@ pub(crate) struct SwapIntent {
     pub amount_in: U256,
     /// The trader's on-chain enforced floor for `token_out` — the swap reverts below it.
     pub min_amount_out: U256,
+    /// The output recipient the calldata declares, when it carries one — whose receipt the
+    /// settled amount is read from, since calldata never carries a settled amount. `None` when
+    /// the solver delivers to the caller implicitly; the caller then anchors on the transaction
+    /// sender.
+    pub output_recipient: Option<Address>,
     /// The solver's declared off-chain quote, when its calldata carries one. Private: the
     /// ABI-decoded fields above are hard facts, this one is self-reported, so it is read only
     /// through the accessors, never assumed present.
@@ -68,9 +73,16 @@ impl SwapIntent {
             token_out,
             amount_in,
             min_amount_out,
+            output_recipient: None,
             quoted_amount_out: None,
             timestamp: None,
         }
+    }
+
+    /// Attach the output recipient the same calldata declares.
+    pub(crate) fn with_recipient(mut self, output_recipient: Address) -> Self {
+        self.output_recipient = Some(output_recipient);
+        self
     }
 
     /// Attach the solver's declared off-chain quote and, when known, its timestamp.
@@ -108,23 +120,15 @@ impl SwapIntent {
 /// Every method has a default meaning "this solver's data does not carry that", so a solver only
 /// implements what its transactions expose; most solvers need no code at all.
 pub(crate) trait SolverDecoder: Send + Sync {
-    /// The swap terms encoded in the solver frame's own calldata, when this solver's calldata
-    /// carries them plainly enough to recover without netting a settled amount. Called with
-    /// the solver frame's input (found via `trace::find_solver_frame`), not the root
-    /// transaction's — a packed calldata layout (Fly) uses offsets valid only in its own frame.
+    /// The swap terms encoded in the solver frame's own calldata — including the output
+    /// recipient, when the calldata declares one — for a solver whose calldata carries them
+    /// plainly enough to recover without netting a settled amount. Called with the solver frame's
+    /// input (found via `trace::find_solver_frame`), not the root transaction's: a packed calldata
+    /// layout (Fly) uses offsets valid only in its own frame.
     ///
     /// `amount_in_hint` is a netted input amount, when one is known. Some extractors (`ParaSwap`)
     /// need it to locate fields by value rather than by ABI offset.
     fn declared_swap(&self, _input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
-        None
-    }
-
-    /// The address this solver's calldata declares as the output recipient, when it carries one
-    /// plainly enough to recover — whose receipt the settled amount is read from, since calldata
-    /// alone never carries a settled amount. Called with the same solver-frame input as
-    /// `declared_swap`. `None` when the calldata carries no such field (most solvers deliver to
-    /// the caller implicitly) or it did not parse.
-    fn output_recipient(&self, _input: &[u8]) -> Option<Address> {
         None
     }
 

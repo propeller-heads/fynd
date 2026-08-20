@@ -115,27 +115,19 @@ impl SolverDecoder for ZeroEx {
             return None;
         }
         let terms = decode_execute(&call.data)?;
+        // Settler's `AllowedSlippage.recipient` — the address whose receipt anchors the settled
+        // amount, same as Fly/KyberSwap.
         let intent = SwapIntent::new(
             normalize_native(call.token),
             terms.buy_token,
             call.amount,
             terms.min_amount_out,
-        );
+        )
+        .with_recipient(terms.recipient);
         Some(match terms.declared_quote {
             Some(quote) => intent.with_quote(quote, None),
             None => intent,
         })
-    }
-
-    /// Settler's `AllowedSlippage.recipient` — the address whose receipt `RelayCalldata` anchors
-    /// the settled amount on, same as Fly/KyberSwap. Tried both wrapped (`AllowanceHolder.exec`)
-    /// and bare (`execute` called directly): unlike `declared_swap`, the recipient needs nothing
-    /// `AllowanceHolder` adds, so a bare entry still resolves even though its `token_in` cannot.
-    fn output_recipient(&self, input: &[u8]) -> Option<Address> {
-        if let Ok(call) = execCall::abi_decode(input) {
-            return decode_execute(&call.data).map(|terms| terms.recipient);
-        }
-        decode_execute(input).map(|terms| terms.recipient)
     }
 }
 
@@ -180,7 +172,10 @@ mod tests {
 
     #[test]
     fn test_real_settled_output_recipient() {
-        assert_eq!(ZeroEx.output_recipient(&settled_input()), Some(RELAY_ROUTER));
+        let intent = ZeroEx
+            .declared_swap(&settled_input(), None)
+            .unwrap();
+        assert_eq!(intent.output_recipient, Some(RELAY_ROUTER));
     }
 
     #[test]
@@ -199,7 +194,10 @@ mod tests {
 
     #[test]
     fn test_real_reverted_output_recipient() {
-        assert_eq!(ZeroEx.output_recipient(&reverted_input()), Some(RELAY_ROUTER));
+        let intent = ZeroEx
+            .declared_swap(&reverted_input(), None)
+            .unwrap();
+        assert_eq!(intent.output_recipient, Some(RELAY_ROUTER));
     }
 
     #[test]
@@ -210,9 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn test_bare_settler_entry_has_no_declared_swap_but_resolves_recipient() {
-        // A direct `execute` call (no `AllowanceHolder` wrapper): declared_swap has nowhere to read
-        // token_in/amount_in from, so it declines; output_recipient does not need them.
+    fn test_bare_settler_entry_declines() {
+        // A direct `execute` call (no `AllowanceHolder` wrapper): there is nowhere to read
+        // token_in/amount_in from, so the whole decode declines and netting carries the trade.
         let call = executeCall {
             slippage: AllowedSlippage {
                 recipient: RELAY_ROUTER,
@@ -226,16 +224,12 @@ mod tests {
         assert!(ZeroEx
             .declared_swap(&input, None)
             .is_none());
-        assert_eq!(ZeroEx.output_recipient(&input), Some(RELAY_ROUTER));
     }
 
     #[test]
     fn test_garbage_input_declines() {
         assert!(ZeroEx
             .declared_swap(&[0xde, 0xad, 0xbe, 0xef], None)
-            .is_none());
-        assert!(ZeroEx
-            .output_recipient(&[0xde, 0xad, 0xbe, 0xef])
             .is_none());
     }
 

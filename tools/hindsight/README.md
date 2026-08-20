@@ -46,7 +46,7 @@ call, so decoding starts there, and the venue is attributed afterwards as a labe
            │      match      │  trace, its entry point is a known venue / solver / batch
            └────────┬────────┘  settler, or a known solver emitted one of its logs; skip
                     │           everything else, never decoded. A solver's veto
-                    │           (SolverDecoder::veto) rejects non-swap order shapes here.
+                    │           A bridge-order event in the logs rejects it here.
                     ▼
            ┌─────────────────┐  the settling solver's own declaration:
            │ declared decode │    calldata — find the solver frame, ask its registry entry's
@@ -92,16 +92,19 @@ One trait per solver — everything the solver's own calldata and logs can say:
 
 ```rust
 trait SolverDecoder {
-    /// The swap terms in the solver call's own calldata, when parseable.
+    /// The swap terms in the solver call's own calldata — tokens, amounts, the on-chain floor,
+    /// and (when declared) the off-chain quote and the output recipient whose receipt anchors
+    /// amount_out.
     fn declared_swap(&self, input: &[u8], amount_in_hint: Option<U256>) -> Option<SwapIntent>;
-    /// The output recipient the calldata declares — whose receipt anchors amount_out.
-    fn output_recipient(&self, input: &[u8]) -> Option<Address>;
-    /// Rejects a matched transaction that is not a same-chain swap (checked at match time).
-    fn veto(&self, logs: &[Log]) -> Option<Veto>;
     /// The frontend tag this solver records in its logs (LiFi fronts other apps).
     fn integrator(&self, logs: &[Log]) -> Option<String>;
 }
 ```
+
+The calldata question is one method: a solver's parse fills the whole `SwapIntent` in one pass,
+including the recipient. `integrator` is the only log question left on the trait — it decodes a
+string out of an event, so it needs code. Rejecting a non-swap order shape needs none: the marking
+event's topic0 is address-book data (`bridge_order_events`, read by `Registry::log_veto`).
 
 Every method defaults to "this solver's data does not carry that", so most solvers need no code
 at all — one address-book line covers matching, attribution, and labels. An implementation is one
@@ -165,8 +168,8 @@ fee collectors are still re-verified on every chain a venue is added on.
 | You want to… | Touch | Without it |
 |---|---|---|
 | Track a new solver | One line in the address book's `[solvers]` section. No code — its trades match and net like any other | Trades sent directly to the solver's router never match; trades a known venue routed through it decode, but the solver is recorded as "unknown" |
-| Make a solver's trades declared (trusted) instead of netted | A `SolverDecoder` impl in `solvers/` with `declared_swap` (+ `output_recipient` when the calldata names the receiver), one row in `solvers::IMPLEMENTATIONS` | The solver's trades stay netted: marked, excluded from the report by default, and missing `min_amount_out` / `declared_quote` / `quote_timestamp` |
-| Skip a solver's non-swap orders | A `veto` method on its `SolverDecoder` impl | Those orders decode as trades that never happened, with absurd rates |
+| Make a solver's trades declared (trusted) instead of netted | A `SolverDecoder` impl in `solvers/` with `declared_swap`, one row in `solvers::IMPLEMENTATIONS` | The solver's trades stay netted: marked, excluded from the report by default, and missing `min_amount_out` / `declared_quote` / `quote_timestamp` |
+| Skip a solver's non-swap orders | The marking event's topic0 in the address book's `bridge_order_events` | Those orders decode as trades that never happened, with absurd rates |
 | Add a venue | A `[venues.<name>]` section in the address book — entry points, fee collectors, optional `solver_aliases`. No code | The venue's trades still decode when a known solver's frame or log is inside; the venue label falls back to the raw entry address, and netted amounts keep the venue's fee inside |
 | Attribute a new venue (owner / appData tag / fee wallet / integrator tag) | The matching address-book map (`[venue_owners]` / `[venue_appdata]` / `[venue_fees]` / `[venue_integrators]`) | The venue's trades are attributed to the underlying router or settler, not the venue |
 | Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |
@@ -201,7 +204,8 @@ algorithm.
 ### The address book (`src/decoder/registry/<chain>.toml`)
 
 All chain- and protocol-specific data — solver routers, venue entry points and fee collectors,
-batch settlers, infrastructure contracts, USD-anchor stablecoins, display labels — lives in a
+batch settlers, bridge-order event signatures, infrastructure contracts, USD-anchor stablecoins,
+display labels — lives in a
 per-chain TOML loaded by `Registry`. One book is embedded at compile time per chain — ethereum,
 base, unichain, arbitrum, bsc, polygon, robinhood — and `--chain <name>` picks one. Pass
 `--registry <path>` to extend or replace a book without recompiling.
