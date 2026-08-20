@@ -45,13 +45,13 @@ use tycho_execution::encoding::{
     evm::gas_estimator::estimate_gas_usage,
     models::{Solution, Strategy},
 };
-use tycho_simulation::tycho_common::Bytes;
+use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
     encoding::encoder::Encoder, feed::exclusivity::is_exclusive, price_guard::guard::PriceGuard,
     worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote,
     OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
-    SurplusInfo,
+    SurplusInfo, Swap,
 };
 
 /// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
@@ -372,6 +372,7 @@ impl WorkerPoolRouter {
                         request.options(),
                         public_ranked,
                         *USER_IMPROVEMENT_SHARE_BPS,
+                        self.encoder.chain(),
                     )
                 } else {
                     self.rank_quotes(responses, request.options())
@@ -812,8 +813,10 @@ fn combine_with_surplus(
     options: &QuoteOptions,
     public_ranked: Vec<OrderQuote>,
     user_share_bps: u32,
+    chain: Chain,
 ) -> Vec<OrderQuote> {
-    let Some(exclusive_candidate) = best_exclusive_candidate(responses, pool_scopes, options)
+    let Some(exclusive_candidate) =
+        best_exclusive_candidate(responses, pool_scopes, options, chain)
     else {
         return public_ranked;
     };
@@ -861,6 +864,7 @@ fn best_exclusive_candidate<'a>(
     responses: &'a OrderResponses,
     pool_scopes: &FxHashMap<String, LiquidityScope>,
     options: &QuoteOptions,
+    chain: Chain,
 ) -> Option<&'a OrderQuote> {
     responses
         .quotes
@@ -873,7 +877,7 @@ fn best_exclusive_candidate<'a>(
                 .map(|max| wq.quote.gas_estimate() <= max)
                 .unwrap_or(true)
         })
-        .filter(|wq| has_valid_exclusive_route(&wq.quote))
+        .filter(|wq| has_valid_exclusive_route(&wq.quote, chain))
         .max_by(|a, b| {
             a.quote
                 .amount_out_net_gas()
@@ -1024,18 +1028,22 @@ fn pin_commitment(exclusive_candidate: &OrderQuote, committed_amount_out: BigUin
     surplus_quote.with_surplus(surplus_info)
 }
 
-/// Returns `true` only for routes carrying exactly one exclusive leg that is the terminal leg of
-/// its path.
+/// Returns `true` only for routes carrying exactly one exclusive leg that produces the route's
+/// output token, either itself or through a single native wrap leg.
 ///
-/// Returns `false` for routes with no exclusive leg, more than one exclusive leg, an empty
-/// route, no route at all, or an exclusive leg that sits mid-path.
+/// Returns `false` for routes with no exclusive leg, more than one exclusive leg, an empty route,
+/// no route at all, or an exclusive leg whose output reaches the route's output token any other
+/// way.
 ///
-/// Both constraints are v1 restrictions that keep per-leg surplus attribution exact and
-/// unambiguous: a mid-route leg would need inverse simulation to convert the surplus into its
-/// token, and multiple exclusive legs make the per-component attribution non-unique. Both are
-/// deferred to a future version. Terminal is defined as producing the route's overall output
-/// token (`Route::output_token`).
-fn has_valid_exclusive_route(quote: &OrderQuote) -> bool {
+/// The single-leg constraint is a v1 restriction that keeps per-leg surplus attribution
+/// unambiguous: multiple exclusive legs make the per-component attribution non-unique.
+///
+/// A trailing wrap leg is allowed because it converts 1:1, so it needs no inverse simulation.
+/// `pin_commitment` converts captured surplus into a leg's token with the ratio
+/// `path_final_out / leg_out`, which a wrap leaves at exactly 1 — the same arithmetic a terminal
+/// leg gets. Without this a pool quoting the native token could never serve a request for the
+/// wrapped token, even though tycho streams the wrap as an ordinary component.
+fn has_valid_exclusive_route(quote: &OrderQuote, chain: Chain) -> bool {
     let Some(route) = quote.route() else {
         return false;
     };
@@ -1051,18 +1059,45 @@ fn has_valid_exclusive_route(quote: &OrderQuote) -> bool {
 
     let mut exclusive_count = 0;
 
-    for swap in swaps {
+    for (index, swap) in swaps.iter().enumerate() {
         if !is_exclusive(swap.protocol_component()) {
             continue;
         }
 
-        if *swap.token_out() != output_token {
+        // Only the immediately following leg is considered: a wrap run that ends at the output
+        // token is always a single leg, and requiring adjacency keeps this validator in step with
+        // the chaining rule `pin_commitment` uses to find a path's final output.
+        let reaches_output = *swap.token_out() == output_token ||
+            swaps
+                .get(index + 1)
+                .is_some_and(|next| {
+                    next.token_in() == swap.token_out() &&
+                        next.token_out() == &output_token &&
+                        is_native_wrap(next, chain)
+                });
+        if !reaches_output {
             return false;
         }
         exclusive_count += 1;
     }
 
     exclusive_count == 1
+}
+
+/// Returns `true` when the leg converts between the native token and its wrapped form, which tycho
+/// streams as a 1:1 component.
+///
+/// An unregistered custom chain resolves no wrap pair, so no leg qualifies and the exclusive leg
+/// must be terminal.
+fn is_native_wrap(swap: &Swap, chain: Chain) -> bool {
+    let (Ok(native), Ok(wrapped)) = (chain.try_native_token(), chain.try_wrapped_native_token())
+    else {
+        return false;
+    };
+
+    let (token_in, token_out) = (swap.token_in(), swap.token_out());
+    (*token_in == native.address && *token_out == wrapped.address) ||
+        (*token_in == wrapped.address && *token_out == native.address)
 }
 
 /// Shared-graph facts beat path-specific reasons (most specific first:
@@ -2238,6 +2273,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             user_share_bps,
+            SimChain::Ethereum,
         );
 
         let expected_surplus = expected_surplus.map(BigUint::from);
@@ -2292,6 +2328,7 @@ mod tests {
             &options,
             public_ranked,
             1_000,
+            SimChain::Ethereum,
         );
 
         assert_eq!(combined.len(), 1);
@@ -2344,6 +2381,7 @@ mod tests {
             &QuoteOptions::default(),
             vec![no_route_quote()],
             1_000,
+            SimChain::Ethereum,
         );
 
         assert_eq!(combined.len(), 2);
@@ -2384,6 +2422,7 @@ mod tests {
             &QuoteOptions::default(),
             vec![no_route_quote()],
             1_000,
+            SimChain::Ethereum,
         );
 
         assert_eq!(*combined[0].amount_out(), BigUint::from(1_099_750u64));
@@ -2422,6 +2461,7 @@ mod tests {
             &QuoteOptions::default(),
             vec![no_route_quote()],
             1_000,
+            SimChain::Ethereum,
         );
 
         assert_eq!(combined.len(), 1);
@@ -2440,6 +2480,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             1_000,
+            SimChain::Ethereum,
         );
 
         let surplus_quote = &combined[0];
@@ -2488,6 +2529,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             1_000,
+            SimChain::Ethereum,
         );
 
         let route = combined[0]
@@ -2545,6 +2587,7 @@ mod tests {
             &QuoteOptions::default(),
             public_ranked,
             1_000,
+            SimChain::Ethereum,
         );
 
         assert_eq!(*combined[0].amount_out(), BigUint::from(1010u64));
@@ -2600,6 +2643,16 @@ mod tests {
     /// Builds a Success quote whose route has one swap per `(protocol_system, token_in, token_out)`
     /// leg, for exercising `has_valid_exclusive_route` on multi-leg and multi-path route shapes.
     fn make_route_quote(legs: &[(&str, u8, u8)]) -> OrderQuote {
+        let legs: Vec<(&str, Address, Address)> = legs
+            .iter()
+            .map(|(protocol_system, token_in, token_out)| {
+                (*protocol_system, make_address(*token_in), make_address(*token_out))
+            })
+            .collect();
+        make_route_quote_for_tokens(&legs)
+    }
+
+    fn make_route_quote_for_tokens(legs: &[(&str, Address, Address)]) -> OrderQuote {
         let make_token = |addr: &Address| Token {
             address: addr.clone(),
             symbol: "T".to_string(),
@@ -2611,9 +2664,8 @@ mod tests {
         };
         let mut tokens = FxHashMap::default();
         let mut swaps = Vec::new();
-        for (protocol_system, tin_byte, tout_byte) in legs {
-            let tin = make_address(*tin_byte);
-            let tout = make_address(*tout_byte);
+        for (protocol_system, tin, tout) in legs {
+            let (tin, tout) = (tin.clone(), tout.clone());
             let tin_token = make_token(&tin);
             let tout_token = make_token(&tout);
             let mut comp = component(
@@ -2625,7 +2677,7 @@ mod tests {
                 mark_exclusive(&mut comp);
             }
             swaps.push(Swap::new(
-                format!("pool-{tin_byte}-{tout_byte}"),
+                format!("pool-{tin}-{tout}"),
                 protocol_system.to_string(),
                 tin.clone(),
                 tout.clone(),
@@ -2707,6 +2759,76 @@ mod tests {
         true)]
     fn test_exclusive_route_validation(#[case] legs: &[(&str, u8, u8)], #[case] expected: bool) {
         let quote = make_route_quote(legs);
-        assert_eq!(has_valid_exclusive_route(&quote), expected);
+        assert_eq!(has_valid_exclusive_route(&quote, SimChain::Ethereum), expected);
+    }
+
+    /// Native token, its wrapped form, and an unrelated token. Read from the same chain config the
+    /// validator uses, so the pair cannot drift from tycho's.
+    fn wrap_tokens() -> (Address, Address, Address) {
+        (
+            SimChain::Ethereum
+                .native_token()
+                .address,
+            SimChain::Ethereum
+                .wrapped_native_token()
+                .address,
+            make_address(0x07),
+        )
+    }
+
+    #[test]
+    fn test_exclusive_leg_wrapped_into_output() {
+        let (native, wrapped, other) = wrap_tokens();
+        let quote = make_route_quote_for_tokens(&[
+            ("vm:exclusive", other, native.clone()),
+            ("uniswap_v2", native, wrapped),
+        ]);
+
+        assert!(has_valid_exclusive_route(&quote, SimChain::Ethereum));
+    }
+
+    #[test]
+    fn test_exclusive_leg_unwrapped_into_output() {
+        let (native, wrapped, other) = wrap_tokens();
+        let quote = make_route_quote_for_tokens(&[
+            ("vm:exclusive", other, wrapped.clone()),
+            ("uniswap_v2", wrapped, native),
+        ]);
+
+        assert!(has_valid_exclusive_route(&quote, SimChain::Ethereum));
+    }
+
+    #[test]
+    fn test_exclusive_leg_followed_by_non_wrap() {
+        let (native, _, other) = wrap_tokens();
+        let quote = make_route_quote_for_tokens(&[
+            ("vm:exclusive", other, native.clone()),
+            ("uniswap_v2", native, make_address(0x08)),
+        ]);
+
+        assert!(!has_valid_exclusive_route(&quote, SimChain::Ethereum));
+    }
+
+    #[test]
+    fn test_exclusive_leg_wrap_not_producing_output() {
+        let (native, wrapped, other) = wrap_tokens();
+        let quote = make_route_quote_for_tokens(&[
+            ("vm:exclusive", other, native.clone()),
+            ("uniswap_v2", native, wrapped.clone()),
+            ("uniswap_v2", wrapped, make_address(0x08)),
+        ]);
+
+        assert!(!has_valid_exclusive_route(&quote, SimChain::Ethereum));
+    }
+
+    #[test]
+    fn test_exclusive_leg_wrap_of_another_path() {
+        let (native, wrapped, other) = wrap_tokens();
+        let quote = make_route_quote_for_tokens(&[
+            ("vm:exclusive", other, make_address(0x08)),
+            ("uniswap_v2", native, wrapped),
+        ]);
+
+        assert!(!has_valid_exclusive_route(&quote, SimChain::Ethereum));
     }
 }

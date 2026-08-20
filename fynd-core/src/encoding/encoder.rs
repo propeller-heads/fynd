@@ -190,6 +190,11 @@ impl Encoder {
         self.router_address.as_ref()
     }
 
+    /// Returns the chain this encoder targets.
+    pub fn chain(&self) -> Chain {
+        self.chain
+    }
+
     /// Returns the shared router fee handle this encoder reads on every encode.
     ///
     /// Pass it to a [`RouterFeeFetcher`](crate::encoding::fee_fetcher::RouterFeeFetcher)
