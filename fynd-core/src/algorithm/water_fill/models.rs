@@ -111,7 +111,6 @@ pub struct SetupResult<'o, 'g> {
 }
 
 type RankedPathScores = Vec<(usize, BigInt)>;
-pub type CandidatePathSet<'a, W = ()> = (Vec<Path<'a, W>>, RankedPathScores);
 
 #[derive(Clone)]
 pub struct CandidatePathState<'a, W> {

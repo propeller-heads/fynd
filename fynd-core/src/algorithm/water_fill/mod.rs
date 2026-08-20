@@ -37,7 +37,7 @@ use std::{
 };
 
 use models::{
-    CandidatePathSet, CandidatePathState, CandidateSearchConfig, Deadline, Discovery, ExchangeMove,
+    CandidatePathState, CandidateSearchConfig, Deadline, Discovery, ExchangeMove,
     FullAmountOutcome, FullAmountRanking, ScoredEdge, SetupResult, SolveInput, SolveStage,
     SplitCandidate, StepResult,
 };
@@ -249,7 +249,7 @@ impl WaterFillAlgorithm {
         let mut cache = SwapCache::new();
         sim_meter::start_solve();
 
-        let (discovered_paths, _) = discover_paths(
+        let discovered_paths = discover_paths(
                 graph,
                 &market_view,
                 order,
@@ -1359,7 +1359,7 @@ fn discover_paths<'a, W>(
     order: &Order,
     cache: &mut SwapCache<'a>,
     cfg: CandidateSearchConfig<'_>,
-) -> Result<CandidatePathSet<'a, W>, AlgorithmError>
+) -> Result<Vec<Path<'a, W>>, AlgorithmError>
 where
     W: Clone,
 {
@@ -1669,7 +1669,7 @@ fn rank_found_candidate_paths<'a, W>(
     mut found: Vec<(Path<'a, W>, BigUint)>,
     max_candidates: usize,
     order: &Order,
-) -> Result<CandidatePathSet<'a, W>, AlgorithmError> {
+) -> Result<Vec<Path<'a, W>>, AlgorithmError> {
     found.sort_by(|(_, a), (_, b)| b.cmp(a));
     let mut keys = FxHashSet::default();
     let mut paths = Vec::new();
@@ -1694,7 +1694,7 @@ fn rank_found_candidate_paths<'a, W>(
             reason: NoPathReason::NoGraphPath,
         });
     }
-    Ok((paths, scores))
+    Ok(paths)
 }
 
 #[cfg(test)]
@@ -2002,7 +2002,7 @@ mod tests {
 
         let start = Instant::now();
         let view = market.read().await;
-        let (paths, scores) = discover_paths(
+        let paths = discover_paths(
             graph_manager.graph(),
             &view,
             &order,
@@ -2019,7 +2019,7 @@ mod tests {
 
         assert_eq!(paths.len(), 2, "both parallel components should be discovered");
         // Scores are (path index, full-amount gross output), best first: the deeper component wins.
-        let best_path = &paths[scores[0].0];
+        let best_path = &paths[0];
         assert_eq!(
             best_path.edge_iter()[0].component_id,
             "z_strong_link_weth",
