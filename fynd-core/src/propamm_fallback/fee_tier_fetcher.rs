@@ -140,7 +140,9 @@ impl FeeTierFetcher {
     /// tiers of the others. A failed `fallbackFee` read aborts the whole refresh, because every
     /// pair without an override resolves through it.
     async fn fetch_fee_tiers(&self) -> Result<FeeTiers, FeeTierFetchError> {
-        let (default_tier, pairs) = self.fetch_default_tier_and_pairs().await?;
+        let (default_tier, pairs) = self
+            .fetch_default_tier_and_pairs()
+            .await?;
         let mut fee_tiers = FeeTiers::new(default_tier);
 
         if pairs.is_empty() {
@@ -180,10 +182,8 @@ impl FeeTierFetcher {
         let Some((fallback_fee, venue_results)) = results.split_first() else {
             return Err(self.call_error("fallbackFee", "empty multicall response".to_string()));
         };
-        let default_tier =
-            decode::<IPropAMMRouter::fallbackFeeCall>(fallback_fee).map_err(|e| {
-                self.call_error("fallbackFee", e)
-            })?;
+        let default_tier = decode::<IPropAMMRouter::fallbackFeeCall>(fallback_fee)
+            .map_err(|e| self.call_error("fallbackFee", e))?;
 
         let mut seen = FxHashSet::default();
         let mut pairs = Vec::new();
@@ -219,7 +219,9 @@ impl FeeTierFetcher {
                 )
             })
             .collect();
-        let results = self.aggregate3(calls, "getPairFee").await?;
+        let results = self
+            .aggregate3(calls, "getPairFee")
+            .await?;
         if results.len() != pairs.len() {
             return Err(self.call_error(
                 "getPairFee",
@@ -249,11 +251,7 @@ impl FeeTierFetcher {
             aggregate3Call { calls }.abi_encode(),
         )
         .await
-        .map_err(|reason| FeeTierFetchError::Call {
-            method,
-            contract: MULTICALL3_ADDRESS,
-            reason,
-        })
+        .map_err(|reason| FeeTierFetchError::Call { method, contract: MULTICALL3_ADDRESS, reason })
     }
 
     fn call_error(&self, method: &'static str, reason: String) -> FeeTierFetchError {

@@ -26,7 +26,7 @@ use crate::{
     },
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{events::MarketEvent, market_data::MarketData},
-    propamm_fallback::SharedFallbackFees,
+    propamm_fallback::SharedFeeTiers,
     types::internal::SolveTask,
     worker_pool::worker::SolverWorker,
     worker_pool_router::LiquidityScope,
@@ -64,7 +64,7 @@ pub(crate) struct SpawnWorkersParams {
     /// Liquidity scope applied to every worker in this worker pool.
     pub liquidity_scope: LiquidityScope,
     /// PropAMMRouter fee tiers, shared with the fetcher that refreshes them.
-    pub fallback_fees: SharedFallbackFees,
+    pub fallback_fee_tiers: SharedFeeTiers,
 }
 
 /// Error returned when algorithm registration fails.
@@ -171,7 +171,7 @@ where
         let pool_name = params.pool_name.clone();
         let factory = factory.clone();
         let liquidity_scope = params.liquidity_scope;
-        let fallback_fees = params.fallback_fees.clone();
+        let fallback_fee_tiers = params.fallback_fee_tiers.clone();
 
         let handle = thread::Builder::new()
             .name(format!("{}-worker-{}", algorithm_name, worker_id))
@@ -192,7 +192,7 @@ where
                         pool_name,
                     )
                     .with_liquidity_scope(liquidity_scope)
-                    .with_fallback_fees(fallback_fees);
+                    .with_fallback_fee_tiers(fallback_fee_tiers);
 
                     worker.initialize_graph().await;
                     worker
@@ -272,7 +272,7 @@ mod tests {
             derived_event_rx,
             shutdown_tx,
             liquidity_scope: LiquidityScope::default(),
-            fallback_fees: SharedFallbackFees::default(),
+            fallback_fee_tiers: SharedFeeTiers::default(),
         }
     }
 
@@ -312,7 +312,7 @@ mod tests {
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
             liquidity_scope: LiquidityScope::default(),
-            fallback_fees: SharedFallbackFees::default(),
+            fallback_fee_tiers: SharedFeeTiers::default(),
         };
 
         let workers =
@@ -355,7 +355,7 @@ mod tests {
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
                 liquidity_scope: LiquidityScope::default(),
-                fallback_fees: SharedFallbackFees::default(),
+                fallback_fee_tiers: SharedFeeTiers::default(),
             });
         assert!(registry_err.is_err());
 
@@ -384,7 +384,7 @@ mod tests {
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
                 liquidity_scope: LiquidityScope::default(),
-                fallback_fees: SharedFallbackFees::default(),
+                fallback_fee_tiers: SharedFeeTiers::default(),
             });
 
         assert!(workers.is_ok());
@@ -414,7 +414,7 @@ mod tests {
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
             liquidity_scope: LiquidityScope::default(),
-            fallback_fees: SharedFallbackFees::default(),
+            fallback_fee_tiers: SharedFeeTiers::default(),
         };
 
         let workers =
@@ -447,7 +447,7 @@ mod tests {
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
             liquidity_scope: LiquidityScope::default(),
-            fallback_fees: SharedFallbackFees::default(),
+            fallback_fee_tiers: SharedFeeTiers::default(),
         };
 
         let workers =

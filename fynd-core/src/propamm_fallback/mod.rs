@@ -9,14 +9,12 @@
 //! the user accepted, so a fallback below that floor reverts the route anyway — and lowering the
 //! floor to fit would pay the user less than they accepted. Such a route is not quoted.
 
-pub mod fee_fetcher;
+pub mod fee_tier_fetcher;
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::sync::{Arc, RwLock};
 
 use num_bigint::BigUint;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tycho_simulation::tycho_common::models::Address;
 
 use crate::{
@@ -40,14 +38,15 @@ pub fn has_pamm_leg(route: &Route) -> bool {
 ///
 /// Uses `replay_route`, so split fractions and shared-pool depletion behave exactly as they do for
 /// any other route: a substituted leg's smaller output feeds the next one, and two legs on one
-/// pool see it deplete.
+/// pool see it deplete. The replay runs against `market`'s overlay-aware states, so a labeled
+/// solve prices the fallback on the same state the route was solved on.
 ///
 /// A route without a pAMM leg substitutes nothing, so the result is its plain replayed amount out.
 /// Check `has_pamm_leg` first to skip that pointless replay.
 pub fn fallback_amount_out(
     route: &Route,
     market: &MarketDataView<'_>,
-    fees: &FallbackFees,
+    fee_tiers: &FeeTiers,
     index: &FallbackPoolIndex,
 ) -> FallbackAmountOut {
     let mut substituted = Vec::with_capacity(route.swaps().len());
@@ -60,11 +59,11 @@ pub fn fallback_amount_out(
             continue;
         }
 
-        let fee = fees.resolved_fee(swap.token_in(), swap.token_out());
-        let Some(pool) = index.pool_for(swap.token_in(), swap.token_out(), fee) else {
+        let fee_tier = fee_tiers.resolved_tier(swap.token_in(), swap.token_out());
+        let Some(pool) = index.pool_for(swap.token_in(), swap.token_out(), fee_tier) else {
             return FallbackAmountOut::NoFallbackPool {
                 component_id: swap.component_id().to_string(),
-                fee,
+                fee_tier,
             };
         };
         let (Some(component), Some(state)) =
@@ -74,7 +73,7 @@ pub fn fallback_amount_out(
             // removed between the two reads. Treat it as no fallback pool.
             return FallbackAmountOut::NoFallbackPool {
                 component_id: swap.component_id().to_string(),
-                fee,
+                fee_tier,
             };
         };
         substituted.push(
@@ -93,11 +92,23 @@ pub fn fallback_amount_out(
         );
     }
 
-    let substituted = match Route::new(substituted, HashMap::new()) {
+    // `replay_route` resolves every pool from the state passed to it, so the substituted route has
+    // to be priced against the same overlay the algorithm solved against.
+    let replayed_components: Vec<ComponentId> = substituted
+        .iter()
+        .map(|swap| swap.component_id().to_string())
+        .collect();
+    let market_state = market.extract_subset_with_overlay(
+        &replayed_components
+            .iter()
+            .collect::<FxHashSet<_>>(),
+    );
+
+    let substituted = match Route::new(substituted, FxHashMap::default()) {
         Ok(route) => route,
         Err(e) => return FallbackAmountOut::NotPriceable { reason: e.to_string() },
     };
-    match replay_route(&substituted, market.base_market_state()) {
+    match replay_route(&substituted, &market_state) {
         Ok(replay) => FallbackAmountOut::AmountOut(replay.amount_out),
         Err(e) => FallbackAmountOut::NotPriceable { reason: e.to_string() },
     }
@@ -113,7 +124,7 @@ pub enum FallbackAmountOut {
         /// The pAMM leg with no fallback pool.
         component_id: ComponentId,
         /// The fee tier the router would have used.
-        fee: u32,
+        fee_tier: u32,
     },
     /// The substituted route could not be simulated, so there is no amount to floor at. Drop the
     /// route.
@@ -123,65 +134,69 @@ pub enum FallbackAmountOut {
     },
 }
 
-/// Mirrors the router's `resolvedFee`: the per-pair override if set, else `fallbackFee`.
+/// The Uniswap V3 fee tier the PropAMMRouter falls back to, per token pair.
 ///
-/// Both are settable on chain without an upgrade, so this is refreshed rather than hardcoded.
+/// Mirrors the router's `resolvedFee`: the per-pair override if set, else `fallbackFee`. Both are
+/// settable on chain without an upgrade, so this is read from chain rather than hardcoded.
 #[derive(Debug, Clone)]
-pub struct FallbackFees {
-    default_fee: u32,
-    per_pair: HashMap<(Address, Address), u32>,
+pub struct FeeTiers {
+    default_tier: u32,
+    per_pair: FxHashMap<(Address, Address), u32>,
 }
 
-impl Default for FallbackFees {
-    fn default() -> Self {
-        Self { default_fee: DEFAULT_FALLBACK_FEE, per_pair: HashMap::new() }
+impl FeeTiers {
+    /// Creates the tiers with `default_tier` as the router's global `fallbackFee`.
+    pub fn new(default_tier: u32) -> Self {
+        Self { default_tier, per_pair: FxHashMap::default() }
     }
-}
 
-impl FallbackFees {
     /// Order-independent, like the router's `_pairKey`.
-    pub fn resolved_fee(&self, token_a: &Address, token_b: &Address) -> u32 {
+    pub fn resolved_tier(&self, token_a: &Address, token_b: &Address) -> u32 {
         self.per_pair
             .get(&sorted_pair(token_a, token_b))
             .copied()
-            .unwrap_or(self.default_fee)
+            .unwrap_or(self.default_tier)
     }
 
-    /// Replaces the global `fallbackFee`.
-    pub fn set_default_fee(&mut self, fee: u32) {
-        self.default_fee = fee;
-    }
-
-    /// A fee of 0 clears the override, matching the router's `setPairFee`.
-    pub fn set_pair_fee(&mut self, token_a: &Address, token_b: &Address, fee: u32) {
+    /// A tier of 0 clears the override, matching the router's `setPairFee`.
+    pub fn set_pair_tier(&mut self, token_a: &Address, token_b: &Address, fee_tier: u32) {
         let key = sorted_pair(token_a, token_b);
-        if fee == 0 {
+        if fee_tier == 0 {
             self.per_pair.remove(&key);
         } else {
-            self.per_pair.insert(key, fee);
+            self.per_pair.insert(key, fee_tier);
         }
+    }
+
+    /// How many pairs carry an override.
+    pub fn pair_override_count(&self) -> usize {
+        self.per_pair.len()
     }
 }
 
-/// Shared with the task that refreshes it from the router.
+/// Shared with the task that reads the tiers from the router.
+///
+/// Empty until the first successful read. A worker that finds it empty drops the pAMM route rather
+/// than guess a tier: the wrong tier prices the wrong pool, and a floor derived from the wrong
+/// pool is the revert this whole path exists to prevent.
 #[derive(Debug, Clone, Default)]
-pub struct SharedFallbackFees(Arc<RwLock<FallbackFees>>);
+pub struct SharedFeeTiers(Arc<RwLock<Option<FeeTiers>>>);
 
-impl SharedFallbackFees {
-    /// Returns a copy of the current fee tiers.
-    pub fn snapshot(&self) -> FallbackFees {
+impl SharedFeeTiers {
+    /// Returns a copy of the current fee tiers, or `None` before the first successful read.
+    pub fn snapshot(&self) -> Option<FeeTiers> {
         self.0
             .read()
-            .expect("fallback fees lock poisoned")
+            .expect("fallback fee tier lock poisoned")
             .clone()
     }
 
-    /// Replaces the fee tiers with freshly fetched on-chain values.
-    pub fn set(&self, fees: FallbackFees) {
+    /// Replaces the fee tiers with freshly read on-chain values.
+    pub fn set(&self, fee_tiers: FeeTiers) {
         *self
             .0
             .write()
-            .expect("fallback fees lock poisoned") = fees;
+            .expect("fallback fee tier lock poisoned") = Some(fee_tiers);
     }
 }
 
@@ -193,9 +208,9 @@ impl SharedFallbackFees {
 /// lookup per added component instead of a full rebuild.
 #[derive(Debug, Default, Clone)]
 pub struct FallbackPoolIndex {
-    pools: HashMap<(Address, Address, u32), ComponentId>,
+    pools: FxHashMap<(Address, Address, u32), ComponentId>,
     /// Reverse map, so a removed component can be found without scanning `pools`.
-    keys: HashMap<ComponentId, (Address, Address, u32)>,
+    keys: FxHashMap<ComponentId, (Address, Address, u32)>,
 }
 
 impl FallbackPoolIndex {
@@ -234,18 +249,18 @@ impl FallbackPoolIndex {
             return;
         }
         let [token_a, token_b] = component.tokens.as_slice() else { return };
-        let Some(fee) = component
+        let Some(fee_tier) = component
             .static_attributes
             .get(FEE_ATTRIBUTE)
-            .and_then(parse_fee)
+            .and_then(parse_fee_tier)
         else {
             return;
         };
         let (low, high) = sorted_pair(token_a, token_b);
         self.keys
-            .insert(component_id.clone(), (low.clone(), high.clone(), fee));
+            .insert(component_id.clone(), (low.clone(), high.clone(), fee_tier));
         self.pools
-            .insert((low, high, fee), component_id);
+            .insert((low, high, fee_tier), component_id);
     }
 
     /// Drops `component_id`, leaving any pool that took over its key in place.
@@ -257,9 +272,14 @@ impl FallbackPoolIndex {
     }
 
     /// The component the router would fall back to.
-    pub fn pool_for(&self, token_a: &Address, token_b: &Address, fee: u32) -> Option<&ComponentId> {
+    pub fn pool_for(
+        &self,
+        token_a: &Address,
+        token_b: &Address,
+        fee_tier: u32,
+    ) -> Option<&ComponentId> {
         let (low, high) = sorted_pair(token_a, token_b);
-        self.pools.get(&(low, high, fee))
+        self.pools.get(&(low, high, fee_tier))
     }
 }
 
@@ -276,8 +296,8 @@ pub const PROPAMM_ROUTER_ADDRESS: &str = "0x4DdF368080CD7946db5b459aD591c3501581
 ///
 /// Only whitelisted venues may use `PROPAMM_FALLBACK_PREFIX`. The router reverts `UnknownVenue` for
 /// any other address, which fires the catch arm and executes every swap on Uniswap V3 at a worse
-/// price than the pAMM gives. `FallbackFeeFetcher` reads each venue's pairs to learn which pairs
-/// need a fee tier.
+/// price than the pAMM gives. `FeeTierFetcher` reads each venue's pairs to learn which pairs need
+/// a fee tier.
 pub const PROPAMM_VENUES: &[&str] = &[
     // Fermi (FermiSwapper)
     "0x5979458912F80B96d30D4220af8E2e4925A33320",
@@ -291,9 +311,6 @@ const FALLBACK_PROTOCOL_SYSTEM: &str = "uniswap_v3";
 /// Static attribute carrying a Uniswap V3 pool's fee tier, in hundredths of a bip.
 const FEE_ATTRIBUTE: &str = "fee";
 
-/// The router's `fallbackFee` as deployed, used for pairs without a per-pair override.
-const DEFAULT_FALLBACK_FEE: u32 = 3000;
-
 /// Order-independent pair key, matching the router's `_pairKey`.
 fn sorted_pair(token_a: &Address, token_b: &Address) -> (Address, Address) {
     if token_a <= token_b {
@@ -304,7 +321,7 @@ fn sorted_pair(token_a: &Address, token_b: &Address) -> (Address, Address) {
 }
 
 /// Tycho encodes the `fee` attribute big-endian in up to 4 bytes.
-fn parse_fee(raw: &tycho_simulation::tycho_common::Bytes) -> Option<u32> {
+fn parse_fee_tier(raw: &tycho_simulation::tycho_common::Bytes) -> Option<u32> {
     let bytes = raw.as_ref();
     if bytes.is_empty() || bytes.len() > 4 {
         return None;
@@ -323,31 +340,47 @@ mod tests {
     use super::*;
     use crate::algorithm::test_utils::{self as util, addr};
 
+    /// The tier the router reports as its global `fallbackFee`, in the tests below.
+    const DEFAULT_TIER: u32 = 3000;
+
     #[test]
-    fn test_resolved_fee_defaults_and_overrides() {
-        let mut fees = FallbackFees::default();
-        assert_eq!(fees.resolved_fee(&addr(1), &addr(2)), DEFAULT_FALLBACK_FEE);
+    fn test_resolved_tier_defaults_and_overrides() {
+        let mut fee_tiers = FeeTiers::new(DEFAULT_TIER);
+        assert_eq!(fee_tiers.resolved_tier(&addr(1), &addr(2)), DEFAULT_TIER);
 
-        fees.set_pair_fee(&addr(2), &addr(1), 500);
+        fee_tiers.set_pair_tier(&addr(2), &addr(1), 500);
         // Order-independent, like the router's sorted pair key.
-        assert_eq!(fees.resolved_fee(&addr(1), &addr(2)), 500);
-        assert_eq!(fees.resolved_fee(&addr(2), &addr(1)), 500);
+        assert_eq!(fee_tiers.resolved_tier(&addr(1), &addr(2)), 500);
+        assert_eq!(fee_tiers.resolved_tier(&addr(2), &addr(1)), 500);
 
-        // A zero fee clears the override, matching `setPairFee`.
-        fees.set_pair_fee(&addr(1), &addr(2), 0);
-        assert_eq!(fees.resolved_fee(&addr(1), &addr(2)), DEFAULT_FALLBACK_FEE);
+        // A zero tier clears the override, matching `setPairFee`.
+        fee_tiers.set_pair_tier(&addr(1), &addr(2), 0);
+        assert_eq!(fee_tiers.resolved_tier(&addr(1), &addr(2)), DEFAULT_TIER);
+    }
 
-        fees.set_default_fee(100);
-        assert_eq!(fees.resolved_fee(&addr(1), &addr(2)), 100);
+    /// Nothing may price a pAMM route before the router's tiers are read.
+    #[test]
+    fn test_shared_fee_tiers_empty_until_set() {
+        let shared = SharedFeeTiers::default();
+        assert!(shared.snapshot().is_none());
+
+        shared.set(FeeTiers::new(500));
+        assert_eq!(
+            shared
+                .snapshot()
+                .expect("tiers were set")
+                .resolved_tier(&addr(1), &addr(2)),
+            500
+        );
     }
 
     #[test]
-    fn test_parse_fee() {
-        assert_eq!(parse_fee(&Bytes::from(3000_i32.to_be_bytes().to_vec())), Some(3000));
+    fn test_parse_fee_tier() {
+        assert_eq!(parse_fee_tier(&Bytes::from(3000_i32.to_be_bytes().to_vec())), Some(3000));
         // Tycho trims leading zero bytes on some attributes.
-        assert_eq!(parse_fee(&Bytes::from(vec![0x01, 0xf4])), Some(500));
-        assert_eq!(parse_fee(&Bytes::from(Vec::new())), None);
-        assert_eq!(parse_fee(&Bytes::from(vec![0u8; 5])), None);
+        assert_eq!(parse_fee_tier(&Bytes::from(vec![0x01, 0xf4])), Some(500));
+        assert_eq!(parse_fee_tier(&Bytes::from(Vec::new())), None);
+        assert_eq!(parse_fee_tier(&Bytes::from(vec![0u8; 5])), None);
     }
 
     #[test]
@@ -444,8 +477,8 @@ mod tests {
     const PAMM_COMPONENT: &str = "0xpamm";
     const PAMM_PROTOCOL: &str = "propammfallback:fermiswap";
 
-    /// Market holding one `uniswap_v3` fallback pool for the (1, 2) pair at `fee`.
-    fn market_with_fallback_pool(fee: u32) -> crate::feed::market_data::MarketData {
+    /// Market holding one `uniswap_v3` fallback pool for the (1, 2) pair at `fee_tier`.
+    fn market_with_fallback_pool(fee_tier: u32) -> crate::feed::market_data::MarketData {
         let (token_in, token_out) = (util::token(1, "WETH"), util::token(2, "USDC"));
         let mut component = util::component_with_protocol(
             FALLBACK_POOL,
@@ -454,7 +487,7 @@ mod tests {
         );
         component
             .static_attributes
-            .insert(FEE_ATTRIBUTE.to_string(), Bytes::from(fee.to_be_bytes().to_vec()));
+            .insert(FEE_ATTRIBUTE.to_string(), Bytes::from(fee_tier.to_be_bytes().to_vec()));
 
         let market = crate::feed::market_data::MarketData::new_shared();
         {
@@ -507,10 +540,11 @@ mod tests {
     /// Only a route with a `propammfallback:` leg pays for fallback pricing.
     #[test]
     fn test_has_pamm_leg() {
-        let non_pamm = Route::new(vec![uniswap_swap()], HashMap::new()).expect("non-empty route");
+        let non_pamm =
+            Route::new(vec![uniswap_swap()], FxHashMap::default()).expect("non-empty route");
         assert!(!has_pamm_leg(&non_pamm));
 
-        let pamm = Route::new(vec![pamm_swap()], HashMap::new()).expect("non-empty route");
+        let pamm = Route::new(vec![pamm_swap()], FxHashMap::default()).expect("non-empty route");
         assert!(has_pamm_leg(&pamm));
     }
 
@@ -522,12 +556,12 @@ mod tests {
             .try_read_blocking()
             .expect("uncontended");
         let index = FallbackPoolIndex::build(&view);
-        let mut fees = FallbackFees::default();
-        fees.set_pair_fee(&addr(1), &addr(2), 500);
+        let mut fee_tiers = FeeTiers::new(DEFAULT_TIER);
+        fee_tiers.set_pair_tier(&addr(1), &addr(2), 500);
 
         let swap = pamm_swap();
-        let route = Route::new(vec![swap.clone()], HashMap::new()).expect("non-empty route");
-        let amount_out = fallback_amount_out(&route, &view, &fees, &index);
+        let route = Route::new(vec![swap.clone()], FxHashMap::default()).expect("non-empty route");
+        let amount_out = fallback_amount_out(&route, &view, &fee_tiers, &index);
 
         // MockProtocolSim multiplies by spot_price for ascending token addresses: 1000 * 1.0,
         // against the pAMM leg's recorded 2000.
@@ -535,10 +569,41 @@ mod tests {
         assert_eq!(*swap.amount_out(), BigUint::from(2_000u32));
     }
 
+    /// A labeled solve prices the fallback on the overlay it was solved against, not on the base
+    /// state.
+    #[tokio::test]
+    async fn test_fallback_amount_out_uses_the_overlay_state() {
+        let market = market_with_fallback_pool(500);
+        let label = "test_overlay".to_string();
+        let mut overlay: rustc_hash::FxHashMap<ComponentId, Box<dyn ProtocolSim>> =
+            FxHashMap::default();
+        overlay.insert(
+            FALLBACK_POOL.to_string(),
+            Box::new(util::MockProtocolSim::new(FALLBACK_PRICE / 2.0)),
+        );
+        market
+            .register_labeled_state(label.clone(), overlay, u64::MAX)
+            .await;
+
+        let view = market
+            .read_labeled(&label)
+            .await
+            .expect("registered overlay");
+        let index = FallbackPoolIndex::build(&view);
+        let mut fee_tiers = FeeTiers::new(DEFAULT_TIER);
+        fee_tiers.set_pair_tier(&addr(1), &addr(2), 500);
+
+        let route = Route::new(vec![pamm_swap()], FxHashMap::default()).expect("non-empty route");
+        let amount_out = fallback_amount_out(&route, &view, &fee_tiers, &index);
+
+        // The base pool would pay 1000 * 1.0; the overlay halves the price.
+        assert_eq!(amount_out, FallbackAmountOut::AmountOut(BigUint::from(500u32)));
+    }
+
     /// No pool at the router's fee tier means the fallback reverts too, so the route is no better
     /// than the direct path and must be dropped.
     #[test]
-    fn test_fallback_amount_out_without_pool_at_resolved_fee() {
+    fn test_fallback_amount_out_without_pool_at_resolved_tier() {
         // Pool exists at 500, but the router resolves this pair to the 3000 default.
         let market = market_with_fallback_pool(500);
         let view = market
@@ -546,14 +611,14 @@ mod tests {
             .expect("uncontended");
         let index = FallbackPoolIndex::build(&view);
 
-        let route = Route::new(vec![pamm_swap()], HashMap::new()).expect("non-empty route");
-        let amount_out = fallback_amount_out(&route, &view, &FallbackFees::default(), &index);
+        let route = Route::new(vec![pamm_swap()], FxHashMap::default()).expect("non-empty route");
+        let amount_out = fallback_amount_out(&route, &view, &FeeTiers::new(DEFAULT_TIER), &index);
 
         assert_eq!(
             amount_out,
             FallbackAmountOut::NoFallbackPool {
                 component_id: PAMM_COMPONENT.to_string(),
-                fee: DEFAULT_FALLBACK_FEE,
+                fee_tier: DEFAULT_TIER,
             }
         );
     }
@@ -566,14 +631,15 @@ mod tests {
             .try_read_blocking()
             .expect("uncontended");
         let index = FallbackPoolIndex::build(&view);
-        let mut fees = FallbackFees::default();
-        fees.set_pair_fee(&addr(1), &addr(2), 500);
+        let mut fee_tiers = FeeTiers::new(DEFAULT_TIER);
+        fee_tiers.set_pair_tier(&addr(1), &addr(2), 500);
 
         // 60% through the pAMM, the remainder through the same pool. Both legs substitute to the
         // one fallback pool, which then sees the second leg deplete it.
-        let route = Route::new(vec![pamm_swap().with_split(0.6), pamm_swap()], HashMap::new())
-            .expect("non-empty route");
-        let amount_out = fallback_amount_out(&route, &view, &fees, &index);
+        let route =
+            Route::new(vec![pamm_swap().with_split(0.6), pamm_swap()], FxHashMap::default())
+                .expect("non-empty route");
+        let amount_out = fallback_amount_out(&route, &view, &fee_tiers, &index);
 
         // The whole 1000 of input is routed either way, so the split must not lose or invent
         // amount relative to the single-leg case.
