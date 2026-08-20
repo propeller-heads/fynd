@@ -35,7 +35,7 @@ pub use allocation::ExclusiveAccess;
 use allocation::{allocate, Allocation, OrderClass};
 use comparison_log::{log_quote_comparison, solver_error_label};
 use config::WorkerPoolRouterConfig;
-use exclusive_capture::{solve_withheld_amount, TokenLookup};
+use exclusive_capture::{replay_baseline, solve_withheld_amount, TokenLookup};
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
@@ -55,7 +55,7 @@ use crate::{
     price_guard::guard::PriceGuard,
     worker_pool::task_queue::TaskQueueHandle,
     BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
-    QuoteStatus, SolveError, SolveParams, SurplusInfo,
+    QuoteStatus, Route, SolveError, SolveParams, SurplusInfo,
 };
 
 /// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
@@ -284,6 +284,12 @@ impl WorkerPoolRouter {
             .iter()
             .flat_map(|response| response.quotes.iter())
             .filter_map(|wq| wq.quote.route())
+            .filter(|route| {
+                route
+                    .swaps()
+                    .iter()
+                    .any(|swap| is_exclusive(swap.protocol_component()))
+            })
             .flat_map(|route| route.swaps())
             .flat_map(|swap| [swap.token_in().clone(), swap.token_out().clone()])
             .collect();
@@ -1031,16 +1037,16 @@ fn pin_commitment(
     gauge!("exclusive_fee_amount").increment(surplus_amount.to_f64().unwrap_or(0.0));
 
     let mut surplus_quote = exclusive_candidate.clone();
-    let withheld = withheld_leg_amount(&surplus_quote, &surplus_amount, tokens)?;
+    let leg_index = exclusive_leg_index(surplus_quote.route()?)?;
+    let withheld = withheld_leg_amount(surplus_quote.route()?, leg_index, &surplus_amount, tokens)?;
 
-    if let Some(route) = surplus_quote.route_mut() {
-        for swap in route.swaps_mut().iter_mut() {
-            if is_exclusive(swap.protocol_component()) {
-                let committed_leg = swap.amount_out() - &withheld;
-                swap.set_committed_amount_out(committed_leg);
-            }
-        }
-    }
+    surplus_quote
+        .route_mut()?
+        .swaps_mut()
+        .get_mut(leg_index)?
+        .set_committed_amount_out(
+            exclusive_candidate.route()?.swaps()[leg_index].amount_out() - &withheld,
+        );
 
     surplus_quote.set_amount_out(committed_amount_out.clone());
 
@@ -1053,22 +1059,39 @@ fn pin_commitment(
     Some(surplus_quote.with_surplus(surplus_info))
 }
 
-/// Returns how much the route's exclusive leg withholds so the route delivers `surplus` less.
+/// Returns the index of the route's only exclusive leg.
 ///
-/// Returns `None` if the route is missing, has no exclusive leg, or cannot be replayed.
+/// `None` when the route has no exclusive leg, or more than one. Two exclusive legs stay out of
+/// scope: the route does not say how the surplus divides between them, so there is no single
+/// withheld amount to solve for.
+fn exclusive_leg_index(route: &Route) -> Option<usize> {
+    let mut legs = route
+        .swaps()
+        .iter()
+        .enumerate()
+        .filter(|(_, swap)| is_exclusive(swap.protocol_component()));
+    let (index, _) = legs.next()?;
+    legs.next().is_none().then_some(index)
+}
+
+/// Returns how much the leg at `leg_index` withholds so the route delivers `surplus` less.
+///
+/// `None` when the route cannot be replayed, since the withheld amount is then unknown.
 fn withheld_leg_amount(
-    quote: &OrderQuote,
+    route: &Route,
+    leg_index: usize,
     surplus: &BigUint,
     tokens: &TokenLookup,
 ) -> Option<BigUint> {
-    let route = quote.route()?;
     let (input_token, output_token) = (route.input_token()?, route.output_token()?);
-    let swaps = route.swaps();
-    let leg_index = swaps
-        .iter()
-        .position(|swap| is_exclusive(swap.protocol_component()))?;
-
-    match solve_withheld_amount(swaps, &input_token, &output_token, leg_index, surplus, tokens) {
+    match solve_withheld_amount(
+        route.swaps(),
+        &input_token,
+        &output_token,
+        leg_index,
+        surplus,
+        tokens,
+    ) {
         Ok(withheld) => Some(withheld),
         Err(error) => {
             warn!(?error, "exclusive candidate could not be replayed; dropping the commitment");
@@ -1081,42 +1104,26 @@ fn withheld_leg_amount(
 /// Returns `true` for routes carrying exactly one exclusive leg whose withheld amount can be
 /// solved.
 ///
-/// Returns `false` for routes with no exclusive leg, more than one exclusive leg, an empty route,
-/// no route at all, or a route that cannot be replayed against the states its swaps carry.
+/// Returns `false` for routes with no exclusive leg, more than one exclusive leg, no route at all,
+/// or a route that cannot be replayed against the states its swaps carry.
 ///
-/// The single-leg constraint stays: with two exclusive legs the split of the surplus between them
-/// is not determined by the route, so there is no one answer to solve for.
-///
-/// Where the leg sits in the route no longer matters. A leg that ends its path withholds the
-/// surplus itself; a leg with swaps after it withholds the amount those swaps turn into the
-/// surplus, which [`solve_withheld_amount`] finds by replaying the route. Replaying it here as
-/// well as in `pin_commitment` costs one extra pass and keeps an unsolvable candidate from being
-/// ranked as if it could carry a commitment.
+/// Where the leg sits in the route does not matter. A leg that ends its path withholds the surplus
+/// itself; a leg with swaps after it withholds the amount those swaps turn into the surplus, which
+/// [`solve_withheld_amount`] finds by replaying the route. Solvability is the whole check here, and
+/// one replay settles it — the search itself runs once, on the winner, in `pin_commitment`.
 fn has_valid_exclusive_route(quote: &OrderQuote, tokens: &TokenLookup) -> bool {
     let Some(route) = quote.route() else {
         return false;
     };
-    let swaps = route.swaps();
+    if exclusive_leg_index(route).is_none() {
+        return false;
+    }
     let (Some(input_token), Some(output_token)) = (route.input_token(), route.output_token())
     else {
         return false;
     };
 
-    let mut exclusive_legs = swaps
-        .iter()
-        .enumerate()
-        .filter(|(_, swap)| is_exclusive(swap.protocol_component()));
-    let Some((leg_index, _)) = exclusive_legs.next() else {
-        return false;
-    };
-    if exclusive_legs.next().is_some() {
-        return false;
-    }
-
-    // A zero surplus solves trivially, so probe with the leg's whole output: that is the largest
-    // surplus any commitment can ask for, and it exercises the same replay path.
-    let probe = swaps[leg_index].amount_out().clone();
-    solve_withheld_amount(swaps, &input_token, &output_token, leg_index, &probe, tokens).is_ok()
+    replay_baseline(route.swaps(), &input_token, &output_token, tokens).is_ok()
 }
 
 /// Shared-graph facts beat path-specific reasons (most specific first:

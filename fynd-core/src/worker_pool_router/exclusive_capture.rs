@@ -28,8 +28,10 @@ use crate::{algorithm::sim_guard::GuardedProtocolSim, types::quote::Swap};
 
 /// Bisection steps taken when narrowing the withheld amount.
 ///
-/// Each step is one replay of the route. 24 steps put the answer within `leg_output / 2^24` of
-/// exact — below a wei for any realistic leg — and cap the simulation work per quote.
+/// Each step is one replay of the route, so this is the simulation work one candidate costs. The
+/// search stops early once the interval closes; where it does not, it leaves up to
+/// `leg_output / 2^24` of the surplus unwithheld. That residue stays with the user, so spending
+/// fewer steps costs the protocol capture rather than correctness.
 const MAX_BISECTION_STEPS: u32 = 24;
 
 /// Decimals and address for every token a candidate route touches, taken from the market before
@@ -46,9 +48,29 @@ pub(super) enum CaptureError {
     MissingToken(Address),
     /// A pool simulation failed or panicked while replaying the route.
     Simulation(String),
-    /// Replaying the route at full leg output produced nothing for the output token, so there is
-    /// no baseline to reduce.
+    /// The route produced nothing for its output token, so there is no baseline to reduce.
     EmptyBaseline,
+}
+
+/// Returns what the route delivers when nothing is withheld.
+///
+/// This is the cheap half of the module: one replay, enough to tell whether a candidate can be
+/// solved at all. `solve_withheld_amount` does the search.
+///
+/// # Errors
+///
+/// Returns [`CaptureError`] when the route cannot be replayed against the states its swaps carry.
+pub(super) fn replay_baseline(
+    swaps: &[Swap],
+    input_token: &Address,
+    output_token: &Address,
+    tokens: &TokenLookup,
+) -> Result<BigUint, CaptureError> {
+    let baseline = simulate_with_withholding(swaps, input_token, output_token, None, tokens)?;
+    if baseline.is_zero() {
+        return Err(CaptureError::EmptyBaseline);
+    }
+    Ok(baseline)
 }
 
 /// Returns how much the leg at `leg_index` must withhold, in its own output token, for the route
@@ -57,10 +79,9 @@ pub(super) enum CaptureError {
 /// `swaps` is the route in emitted order (topological). `input_token` and `output_token` are the
 /// route's ends.
 ///
-/// The returned amount never exceeds the leg's own output, and never withholds so much that the
-/// route falls below `baseline - surplus`. When the surplus is at least the whole baseline the leg
-/// gives up its entire output; the caller's commitment gates keep that from being reachable in
-/// practice.
+/// The answer never exceeds the leg's own output, and never withholds so much that the route falls
+/// below `baseline - surplus`. A surplus at or above the baseline takes the leg's whole output; the
+/// caller's commitment gates keep that out of reach in practice.
 ///
 /// # Errors
 ///
@@ -80,29 +101,24 @@ pub(super) fn solve_withheld_amount(
         .unwrap_or_default();
 
     let replay = |withheld: &BigUint| {
-        simulate_with_withholding(swaps, input_token, output_token, leg_index, withheld, tokens)
+        simulate_with_withholding(
+            swaps,
+            input_token,
+            output_token,
+            Some((leg_index, withheld)),
+            tokens,
+        )
     };
 
-    let baseline = replay(&BigUint::ZERO)?;
-    if baseline.is_zero() {
-        return Err(CaptureError::EmptyBaseline);
-    }
+    let baseline = replay_baseline(swaps, input_token, output_token, tokens)?;
     let Some(target) = baseline.checked_sub(surplus) else {
         return Ok(leg_output);
     };
 
-    // Largest withheld amount whose replay still clears `target`. `low` is always feasible and
-    // `high` always the first amount past the answer, so an early stop returns a feasible amount.
+    // `low` is always an amount whose replay clears `target` and `high` always the first amount
+    // past it, so the answer is `low` whenever the loop stops, however early that is.
     let mut low = BigUint::ZERO;
-    let mut high = leg_output.clone() + 1u32;
-
-    // The leg's own price is a lower bound on the answer whenever the downstream pools have
-    // diminishing returns, which is the ordinary case. Seeding with it skips most of the search.
-    // It is checked rather than trusted, so a pool that does not behave that way just costs steps.
-    let seed = surplus * &leg_output / &baseline;
-    if seed > BigUint::ZERO && seed <= leg_output && replay(&seed)? >= target {
-        low = seed;
-    }
+    let mut high = leg_output + 1u32;
 
     for _ in 0..MAX_BISECTION_STEPS {
         if &high - &low <= BigUint::from(1u32) {
@@ -119,8 +135,10 @@ pub(super) fn solve_withheld_amount(
     Ok(low)
 }
 
-/// Replays `swaps` against the states they carry, with the leg at `leg_index` emitting `withheld`
-/// less than it did, and returns what reaches `output_token`.
+/// Replays `swaps` against the states they carry and returns what reaches `output_token`.
+///
+/// `withholding` names a leg and how much less than its simulated output it emits. `None` replays
+/// the route untouched.
 ///
 /// Balances are threaded exactly as [`crate::replay::replay_route`] threads them: swaps run in the
 /// route's topological order, a positive `split` takes that fraction of the balance its token had
@@ -134,8 +152,7 @@ fn simulate_with_withholding(
     swaps: &[Swap],
     input_token: &Address,
     output_token: &Address,
-    leg_index: usize,
-    withheld: &BigUint,
+    withholding: Option<(usize, &BigUint)>,
     tokens: &TokenLookup,
 ) -> Result<BigUint, CaptureError> {
     let total_in: BigUint = swaps
@@ -182,13 +199,12 @@ fn simulate_with_withholding(
             .get_amount_out_guarded(amount_in, token_in, token_out)
             .map_err(|e| CaptureError::Simulation(e.to_string()))?;
 
-        let amount_out = if index == leg_index {
-            result
+        let amount_out = match withholding {
+            Some((leg_index, withheld)) if index == leg_index => result
                 .amount
                 .checked_sub(withheld)
-                .unwrap_or_default()
-        } else {
-            result.amount.clone()
+                .unwrap_or_default(),
+            _ => result.amount.clone(),
         };
 
         *available
@@ -275,9 +291,8 @@ mod tests {
         output: &Address,
         tokens: &TokenLookup,
     ) -> BigUint {
-        let replayed =
-            simulate_with_withholding(swaps, input, output, usize::MAX, &BigUint::ZERO, tokens)
-                .expect("route must replay");
+        let replayed = simulate_with_withholding(swaps, input, output, None, tokens)
+            .expect("route must replay");
         assert_eq!(
             replayed,
             *swaps
@@ -322,15 +337,20 @@ mod tests {
             solve_withheld_amount(&swaps, &a.address, &c.address, 0, &surplus, &tokens).unwrap();
         let target = &baseline - &surplus;
 
-        let landed =
-            simulate_with_withholding(&swaps, &a.address, &c.address, 0, &withheld, &tokens)
-                .unwrap();
+        let landed = simulate_with_withholding(
+            &swaps,
+            &a.address,
+            &c.address,
+            Some((0, &withheld)),
+            &tokens,
+        )
+        .unwrap();
+        let one_more = &withheld + 1u32;
         let overshoot = simulate_with_withholding(
             &swaps,
             &a.address,
             &c.address,
-            0,
-            &(&withheld + 1u32),
+            Some((0, &one_more)),
             &tokens,
         )
         .unwrap();
