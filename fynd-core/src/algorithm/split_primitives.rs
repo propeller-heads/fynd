@@ -160,6 +160,14 @@ impl MarketOverrides {
     pub(crate) fn get(&self, id: &ComponentId) -> Option<&dyn ProtocolSim> {
         self.0.get(id).map(|b| b.as_ref())
     }
+
+    /// Commits a post-swap component state, replacing whatever was there.
+    ///
+    /// The building counterpart to [`MarketOverrides::with_override`], for the passes that fill an
+    /// overlay chunk by chunk rather than declaring one up front.
+    pub(crate) fn insert(&mut self, id: ComponentId, sim: Box<dyn ProtocolSim>) {
+        self.0.insert(id, sim);
+    }
 }
 
 /// Wrapper that delegates all [`ProtocolSim`] calls unchanged except

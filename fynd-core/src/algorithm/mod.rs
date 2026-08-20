@@ -23,11 +23,13 @@ pub mod most_liquid;
 pub mod path_frank_wolfe;
 pub(crate) mod paths;
 pub(crate) mod sim_guard;
+pub(crate) mod sim_meter;
 pub(crate) mod split_primitives;
 pub mod water_fill;
 
 #[cfg(test)]
 pub mod split_test_harness;
+mod swap_cache;
 #[cfg(test)]
 pub mod test_utils;
 
