@@ -15,7 +15,10 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 use num_cpus;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
-use tokio::{sync::broadcast, task::JoinHandle};
+use tokio::{
+    sync::broadcast,
+    task::{AbortHandle, JoinHandle},
+};
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
 #[cfg(feature = "experimental")]
 use tycho_simulation::evm::stream::BlockStepController;
@@ -1509,6 +1512,9 @@ pub struct SolverParts {
     /// Background task refreshing router fees from the on-chain FeeCalculator.
     router_fee_handle: JoinHandle<()>,
     /// Background task refreshing the PropAMMRouter's Uniswap V3 fee tiers.
+    ///
+    /// Handed out as an [`AbortHandle`] by [`SolverParts::fee_tier_abort_handle`] rather than by
+    /// [`SolverParts::into_components`], so adding it did not change that function's signature.
     fee_tier_handle: JoinHandle<()>,
     /// Background task running the computation manager.
     computation_handle: JoinHandle<()>,
@@ -1551,6 +1557,15 @@ impl SolverParts {
         &self.router_fees
     }
 
+    /// Returns a handle that stops the task refreshing the PropAMMRouter's fee tiers.
+    ///
+    /// The handle outlives [`into_components`](Self::into_components), which drops the task's
+    /// `JoinHandle` and so detaches the task. Take this before calling it, and abort it wherever
+    /// the other background tasks are aborted.
+    pub fn fee_tier_abort_handle(&self) -> AbortHandle {
+        self.fee_tier_handle.abort_handle()
+    }
+
     /// Consumes the parts and returns the router.
     pub fn into_router(self) -> WorkerPoolRouter {
         self.router
@@ -1570,7 +1585,6 @@ impl SolverParts {
         JoinHandle<()>,
         JoinHandle<()>,
         JoinHandle<()>,
-        JoinHandle<()>,
         broadcast::Sender<()>,
     ) {
         (
@@ -1582,7 +1596,6 @@ impl SolverParts {
             self.gas_price_handle,
             self.metrics_sampler_handle,
             self.router_fee_handle,
-            self.fee_tier_handle,
             self.computation_handle,
             self.computation_shutdown_tx,
         )
