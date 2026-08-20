@@ -159,6 +159,10 @@ pub enum FailedItemError {
     /// Every simulation path for this component failed.
     #[error("all simulation paths failed")]
     AllSimulationPathsFailed,
+
+    /// No route reaches this token from the gas token.
+    #[error("unreachable from the gas token")]
+    UnreachableFromGasToken,
 }
 
 /// A single item that failed during a computation.
