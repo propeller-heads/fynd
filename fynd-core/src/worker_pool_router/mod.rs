@@ -1076,6 +1076,7 @@ fn has_valid_exclusive_route(quote: &OrderQuote, chain: Chain) -> bool {
                         is_native_wrap(next, chain)
                 });
         if !reaches_output {
+            counter!("exclusive_route_invalid_shape_total").increment(1);
             return false;
         }
         exclusive_count += 1;
