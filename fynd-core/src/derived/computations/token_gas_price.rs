@@ -1,5 +1,5 @@
-//! Computes the `mid_price` of tokens relative to a gas token (e.g., ETH) by solving a route to the
-//! token and back, with the same router that answers quotes.
+//! Computes token prices relative to a gas token (e.g., ETH) with the same router that answers
+//! quotes.
 //!
 //! # Algorithm
 //!
@@ -21,6 +21,9 @@
 //! share the single pass the buy side gets — one per token does not fit in a block. So the price
 //! omits what leaving the token would cost: about a fee for an ordinary token, more for one with a
 //! transfer tax or a thin exit.
+//!
+//! These prices convert gas cost into output-token units; they do not value tokens. A buy-only
+//! rate flatters a token that is expensive to exit, so never compare these prices across tokens.
 
 use std::collections::{HashMap, HashSet};
 
@@ -65,7 +68,7 @@ fn route_output(route: &Route, token_out: &Address) -> BigUint {
         .sum()
 }
 
-/// Computes token prices relative to the gas token by solving a buy and a sell for each token.
+/// Computes token prices relative to the gas token from the buy route to each token.
 #[derive(Debug, Clone)]
 pub struct TokenGasPriceComputation {
     /// The gas token address (e.g., ETH).
@@ -102,10 +105,10 @@ impl TokenGasPriceComputation {
         Self { gas_token, ..self }
     }
 
-    /// Solves a buy and a sell for every token, or for `filter_tokens` when given.
+    /// Solves a buy for every token, or for `filter_tokens` when given.
     ///
     /// Returns the priced tokens, the block the market was read at, and one failed item per token
-    /// that could not be solved in both directions.
+    /// the router found no buy route for.
     #[allow(clippy::type_complexity)]
     async fn solve_token_prices(
         &self,
@@ -443,7 +446,7 @@ mod tests {
         )
         .await;
 
-        // 1 ETH buys 2 MID buys 6 TARGET, and the reverse returns the ETH, so the mean is 6.
+        // 1 ETH buys 2 MID buys 6 TARGET, so the price is 6.
         assert!((ratio(&prices[&target.address]) - 6.0).abs() < 1e-6);
     }
 

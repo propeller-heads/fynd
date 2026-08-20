@@ -108,8 +108,9 @@ pub struct TokenPriceEntry {
     /// Token address.
     #[schema(value_type = String, example = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
     pub token: Address,
-    /// Raw target-token units divided by raw gas-token units, serialized as a plain decimal
-    /// string with up to 17 significant digits (no scientific notation).
+    /// Buy rate: raw target-token units one raw gas-token unit buys via the best route,
+    /// serialized as a plain decimal string with up to 17 significant digits (no scientific
+    /// notation).
     ///
     /// Intended for display and analytics only. Consumers must normalize both tokens'
     /// decimals before using it, and should parse it with a decimal-aware parser
