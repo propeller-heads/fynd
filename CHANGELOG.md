@@ -1,4 +1,16 @@
 
+## [0.99.11](https://github.com/propeller-heads/fynd/compare/0.99.10...0.99.11) (2026-08-20)
+
+### Features
+
+* Reuse caching developed for WF in ML ([d5e3a91](https://github.com/propeller-heads/fynd/commit/d5e3a91c48b901c3b9d94a23bb5a1fa98fe61dd9))
+* Waterfill - Slim Shady version ([5cadfd9](https://github.com/propeller-heads/fynd/commit/5cadfd94b7c51ce0dea095c20a4c156afde791f2))
+
+### Bug Fixes
+
+* rank water-fill candidate paths net of gas ([1b75b68](https://github.com/propeller-heads/fynd/commit/1b75b6891af29785319b8f3e95e4b981a47881f0))
+
+
 ## [0.99.10](https://github.com/propeller-heads/fynd/compare/0.99.9...0.99.10) (2026-08-19)
 
 ### Features
