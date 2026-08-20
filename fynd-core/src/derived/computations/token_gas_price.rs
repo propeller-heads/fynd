@@ -155,7 +155,7 @@ impl TokenGasPriceComputation {
                 }
                 None => failed_items.push(FailedItem {
                     key: token.to_string(),
-                    error: FailedItemError::AllSimulationPathsFailed,
+                    error: FailedItemError::UnreachableFromGasToken,
                 }),
             }
         }
@@ -291,7 +291,7 @@ impl TokenGasPriceComputation {
                 new_deps.remove(token);
                 failed_items.push(FailedItem {
                     key: token.to_string(),
-                    error: FailedItemError::AllSimulationPathsFailed,
+                    error: FailedItemError::UnreachableFromGasToken,
                 });
             }
         }
