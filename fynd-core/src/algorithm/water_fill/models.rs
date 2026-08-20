@@ -110,8 +110,6 @@ pub struct SetupResult<'o, 'g> {
     pub cache: SwapCache<'g>,
 }
 
-type RankedPathScores = Vec<(usize, BigInt)>;
-
 #[derive(Clone)]
 pub struct CandidatePathState<'a, W> {
     pub node: NodeIndex,
