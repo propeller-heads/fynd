@@ -1,48 +1,90 @@
-//! The declared decode: the trade as the settling solver's own calldata states it.
+//! The declared decode: the trade as the settling solver's own data states it.
 //!
-//! This is the primary decode for every matched transaction, regardless of venue. It reads
-//! `token_in`/`token_out`/`amount_in` from the settling solver frame's `SwapIntent` and recovers
-//! the settled `amount_out` as the gross amount of `token_out` received by the output recipient —
-//! the one field calldata can never carry. The declared amounts are already on the solver-task
-//! basis: any venue fee left the input before the solver frame, and the recipient's receipt is
-//! the gross output before any output-side fee, so no venue knowledge is needed to decode. Venue
-//! fees are still recorded for transparency when the entry point belongs to a known venue.
+//! This is the primary decode for every matched transaction, regardless of venue. A solver either
+//! states its trade in its own logs — amounts included, nothing left to recover — or carries the
+//! terms in its calldata, in which case the settled `amount_out` is recovered as the gross amount
+//! the declared output recipient received. That one field is the only thing calldata never carries.
 //!
-//! Declines (falling through to the netting decoders) when no solver frame or intent is found,
-//! the recipient never received the token, or either guard below fails.
+//! `amount_in` needs no fee adjustment either way: an input-side venue fee left before the solver
+//! frame, so the frame's own figure is already the amount that entered the swap. No venue
+//! knowledge is needed to decode.
 
-use alloy::{primitives::Address, rpc::types::trace::geth::CallFrame};
+use alloy::{
+    primitives::Address,
+    rpc::types::{trace::geth::CallFrame, Log},
+};
 
 use crate::decoder::{
     netting::TraderFlow,
     registry::Registry,
-    solvers::{self, SwapIntent},
+    solvers::{self, Declaration, SwapIntent},
     trace,
     transfer_ledger::{NetSwap, TransferLedger},
 };
 
-/// Decode a transaction from the settling solver frame's own declaration, returning the flow and
-/// the parsed intent (whose declared terms land on the record).
+/// Decode a transaction from the settling solver's own declaration: the decoder label recorded on
+/// the trade, the flow, and the parsed terms when the read was a calldata one (their columns land
+/// on the record).
 ///
-/// The output recipient is the one the solver's calldata declares; a solver whose calldata
-/// carries none delivers to the caller, so the transaction sender is the fallback anchor.
-///
-/// Two guards protect against the recipient-receipt query mis-attributing a multi-order
-/// transaction's output: the recovered output must clear the intent's on-chain floor (a
-/// successful trade cleared it by construction, so a violation means the wrong legs were picked
-/// up), and, when the calldata also declares a quote, it must sit within `plausible_quote`'s
-/// band of the recovered output.
+/// A log-stated trade is tried first, across every registered solver that emitted a log here: it
+/// is complete, so nothing has to be recovered from the ledger. Otherwise the settling solver's
+/// frame is found and its calldata read.
 pub(crate) fn declared_flow(
     root: &CallFrame,
     registry: &Registry,
+    logs: &[Log],
+    transfer_ledger: &TransferLedger,
+    sender: Address,
+    entry_point: Address,
+) -> Option<(&'static str, TraderFlow, Option<SwapIntent>)> {
+    if let Some(flow) = settled_from_logs(logs, registry) {
+        return Some(("solver-logs", flow, None));
+    }
+    // A batch settlement whose log read declined (a multi-order batch) must not fall through to
+    // calldata: its inner router frames are order plumbing, not one trade.
+    if registry.is_batch_settler(entry_point) {
+        return None;
+    }
+    let (flow, intent) = terms_from_calldata(root, registry, logs, transfer_ledger, sender)?;
+    Some(("solver-calldata", flow, Some(intent)))
+}
+
+/// The trade a solver stated in its own logs, from whichever registered solver emitted one.
+fn settled_from_logs(logs: &[Log], registry: &Registry) -> Option<TraderFlow> {
+    logs.iter()
+        .filter_map(|log| registry.solver(log.address()))
+        .find_map(|solver| match solver.decoder.declared(&[], logs, None) {
+            Some(Declaration::Settled(flow)) => Some(flow),
+            Some(Declaration::Terms(_)) | None => None,
+        })
+}
+
+/// The settling solver frame's calldata terms, with `amount_out` recovered from the recipient the
+/// same calldata declares (a solver that declares none delivers to the caller, so the transaction
+/// sender is the fallback anchor).
+///
+/// Two guards protect against the recipient-receipt query picking up a multi-order transaction's
+/// output: the recovered output must clear the intent's on-chain floor (a successful trade cleared
+/// it by construction, so a violation means the wrong legs were picked up), and, when the calldata
+/// also declares a quote, it must sit within `plausible_quote`'s band of the recovered output.
+fn terms_from_calldata(
+    root: &CallFrame,
+    registry: &Registry,
+    logs: &[Log],
     transfer_ledger: &TransferLedger,
     sender: Address,
 ) -> Option<(TraderFlow, SwapIntent)> {
     let solver_frame = trace::find_solver_frame(root, registry)?;
     let solver = registry.solver(solver_frame.to?)?;
-    let intent = solver
+    let intent = match solver
         .decoder
-        .declared_swap(&solver_frame.input, None)?;
+        .declared(&solver_frame.input, logs, None)?
+    {
+        Declaration::Terms(intent) => intent,
+        // A solver that states its trade in logs already had its chance above, and its calldata
+        // is not the place to read it from.
+        Declaration::Settled(_) => return None,
+    };
     let recipient = intent
         .output_recipient
         .unwrap_or(sender);
@@ -117,7 +159,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (flow, intent) = declared_flow(&root, &registry, &ledger, sender).unwrap();
+        let (flow, intent) = terms_from_calldata(&root, &registry, &[], &ledger, sender).unwrap();
         assert_eq!(flow.tracked, sender);
         assert_eq!(flow.swap.token_in, TOKEN_IN);
         assert_eq!(flow.swap.token_out, Address::ZERO);
@@ -136,7 +178,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT - 1))];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &ledger, sender).is_none());
+        assert!(terms_from_calldata(&root, &registry, &[], &ledger, sender).is_none());
     }
 
     #[test]
@@ -146,7 +188,7 @@ mod tests {
         let root = root_with_solver_frame(sender, ROUTER, FLY);
         let ledger = TransferLedger::from_transaction(&[], &[]);
 
-        assert!(declared_flow(&root, &registry, &ledger, sender).is_none());
+        assert!(terms_from_calldata(&root, &registry, &[], &ledger, sender).is_none());
     }
 
     #[test]
@@ -157,7 +199,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &ledger, sender).is_none());
+        assert!(terms_from_calldata(&root, &registry, &[], &ledger, sender).is_none());
     }
 
     #[test]
@@ -171,7 +213,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &ledger, sender).is_none());
+        assert!(terms_from_calldata(&root, &registry, &[], &ledger, sender).is_none());
     }
 
     #[test]
@@ -186,7 +228,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, implausible)];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &ledger, sender).is_none());
+        assert!(terms_from_calldata(&root, &registry, &[], &ledger, sender).is_none());
     }
 
     #[test]
@@ -201,7 +243,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (flow, _) = declared_flow(&root, &registry, &ledger, sender).unwrap();
+        let (flow, _) = terms_from_calldata(&root, &registry, &[], &ledger, sender).unwrap();
         assert_eq!(flow.tracked, sender);
         assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
     }
@@ -220,7 +262,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (flow, _) = declared_flow(&root, &registry, &ledger, sender).unwrap();
+        let (flow, _) = terms_from_calldata(&root, &registry, &[], &ledger, sender).unwrap();
         assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
     }
 
@@ -238,7 +280,7 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (flow, _) = declared_flow(&root, &registry, &ledger, sender).unwrap();
+        let (flow, _) = terms_from_calldata(&root, &registry, &[], &ledger, sender).unwrap();
         assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
         assert_eq!(flow.swap.amount_out, U256::from(MIN_AMOUNT_OUT + 1_000));
     }

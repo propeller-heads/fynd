@@ -22,7 +22,7 @@ use alloy::{
     rpc::types::Log,
 };
 
-use crate::decoder::{registry::Registry, transfer_ledger::TransferLedger, veto::Veto};
+use crate::decoder::{netting::TraderFlow, registry::Registry, veto::Veto};
 
 /// A trader's swap terms recovered from a solver frame's own calldata: what the trade moved, the
 /// floor the trader would accept, and — when the calldata declares one — the solver's own
@@ -115,20 +115,37 @@ impl SwapIntent {
     }
 }
 
+/// What a solver's own data says about a transaction.
+pub(crate) enum Declaration {
+    /// Swap terms read from the solver's calldata. Calldata never carries a settled amount, so
+    /// the caller recovers `amount_out` from the declared recipient's receipt.
+    Terms(SwapIntent),
+    /// The executed trade, amounts included — a solver that states them in its own logs. Nothing
+    /// is left to recover.
+    Settled(TraderFlow),
+}
+
 /// One solver's decoder: everything the solver's own calldata and logs can say about a trade.
 ///
 /// Every method has a default meaning "this solver's data does not carry that", so a solver only
 /// implements what its transactions expose; most solvers need no code at all.
 pub(crate) trait SolverDecoder: Send + Sync {
-    /// The swap terms encoded in the solver frame's own calldata — including the output
-    /// recipient, when the calldata declares one — for a solver whose calldata carries them
-    /// plainly enough to recover without netting a settled amount. Called with the solver frame's
-    /// input (found via `trace::find_solver_frame`), not the root transaction's: a packed calldata
-    /// layout (Fly) uses offsets valid only in its own frame.
+    /// What this solver's own data says about the transaction, or `None` when it says nothing
+    /// this solver can read.
+    ///
+    /// `input` is the solver frame's calldata (found via `trace::find_solver_frame`), not the root
+    /// transaction's: a packed layout (Fly) uses offsets valid only in its own frame. `logs` is the
+    /// whole receipt's logs, for a solver that states its trade in an event instead. Every solver
+    /// reads one or the other; the parameter it does not use is ignored.
     ///
     /// `amount_in_hint` is a netted input amount, when one is known. Some extractors (`ParaSwap`)
     /// need it to locate fields by value rather than by ABI offset.
-    fn declared_swap(&self, _input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
+    fn declared(
+        &self,
+        _input: &[u8],
+        _logs: &[Log],
+        _amount_in_hint: Option<U256>,
+    ) -> Option<Declaration> {
         None
     }
 
@@ -158,6 +175,7 @@ pub(crate) trait SolverDecoder: Send + Sync {
 /// book loads (see `decoder_for`); everything after that calls the trait through the registry
 /// entry.
 const IMPLEMENTATIONS: &[(&str, &'static dyn SolverDecoder)] = &[
+    ("cow", &cow::Cow),
     ("fly", &fly::Fly),
     ("kyberswap", &kyberswap::Kyberswap),
     ("lifi", &lifi::Lifi),
@@ -408,10 +426,10 @@ mod tests {
             input.extend_from_slice(&word.to_be_bytes::<32>());
         }
         assert!(decoder_for("paraswap")
-            .declared_swap(&input, Some(amount_in))
+            .declared(&input, &[], Some(amount_in))
             .is_some());
         assert!(decoder_for("1inch")
-            .declared_swap(&input, Some(amount_in))
+            .declared(&input, &[], Some(amount_in))
             .is_none());
     }
 }

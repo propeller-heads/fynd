@@ -11,11 +11,12 @@
 
 use alloy::{
     primitives::{Address, U256},
+    rpc::types::Log,
     sol,
     sol_types::SolCall,
 };
 
-use crate::decoder::solvers::{SolverDecoder, SwapIntent};
+use crate::decoder::solvers::{Declaration, SolverDecoder, SwapIntent};
 
 /// `KyberSwap` represents native ETH with this sentinel address rather than the zero address —
 /// hindsight's convention — so it is normalized on the way out.
@@ -108,7 +109,12 @@ impl SolverDecoder for Kyberswap {
     /// word-aligned data. The hint is unused: `KyberSwap`'s fields are decoded by ABI position, not
     /// located by value. When the calldata also carries a `clientData` quote, it is attached; a
     /// missing or malformed one does not fail the intent.
-    fn declared_swap(&self, input: &[u8], _amount_in_hint: Option<U256>) -> Option<SwapIntent> {
+    fn declared(
+        &self,
+        input: &[u8],
+        _logs: &[Log],
+        _amount_in_hint: Option<U256>,
+    ) -> Option<Declaration> {
         let call = swapCall::abi_decode(input).ok()?;
         let desc = call.execution.desc;
         if desc.amount.is_zero() || desc.minReturnAmount.is_zero() {
@@ -123,16 +129,24 @@ impl SolverDecoder for Kyberswap {
             desc.minReturnAmount,
         )
         .with_recipient(desc.dstReceiver);
-        Some(match declared_quote(input) {
+        Some(Declaration::Terms(match declared_quote(input) {
             Some((amount_out, timestamp)) => intent.with_quote(amount_out, timestamp),
             None => intent,
-        })
+        }))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use alloy::primitives::address;
+
+    /// The terms this solver reads from `input`, for tests that only care about the calldata path.
+    fn terms(input: &[u8], hint: Option<U256>) -> Option<SwapIntent> {
+        match Kyberswap.declared(input, &[], hint)? {
+            Declaration::Terms(intent) => Some(intent),
+            Declaration::Settled(_) => None,
+        }
+    }
 
     use super::*;
 
@@ -230,9 +244,7 @@ mod tests {
     fn test_declared_swap_round_trip() {
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
-        let intent = Kyberswap
-            .declared_swap(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, ""), None)
-            .unwrap();
+        let intent = terms(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, ""), None).unwrap();
         assert_eq!(intent.token_in, src);
         assert_eq!(intent.token_out, dst);
         assert_eq!(intent.amount_in, U256::from(1_000_000u64));
@@ -246,9 +258,7 @@ mod tests {
     fn test_output_recipient_round_trip() {
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
-        let intent = Kyberswap
-            .declared_swap(&swap_calldata(src, dst, 1_000_000, 990_000, ""), None)
-            .unwrap();
+        let intent = terms(&swap_calldata(src, dst, 1_000_000, 990_000, ""), None).unwrap();
         assert_eq!(intent.output_recipient, Some(Address::repeat_byte(0x77)));
     }
 
@@ -256,9 +266,7 @@ mod tests {
     fn test_declared_swap_with_declared_quote() {
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
-        let intent = Kyberswap
-            .declared_swap(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, BLOB), None)
-            .unwrap();
+        let intent = terms(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, BLOB), None).unwrap();
         assert_eq!(intent.min_amount_out, U256::from(990_000u64));
         assert_eq!(intent.quoted_amount_out(), U256::from(70_400_409_935u64));
         assert_eq!(intent.timestamp, Some(1_783_421_726));
@@ -270,24 +278,20 @@ mod tests {
         // the quote is just absent.
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
-        let intent = Kyberswap
-            .declared_swap(
-                &swap_calldata_with_terms(src, dst, 1_000_000, 990_000, "{\"Source\":\"relay\"}"),
-                None,
-            )
-            .unwrap();
+        let intent =
+            terms(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, "{\"Source\":\"relay\"}"), None)
+                .unwrap();
         assert_eq!(intent.quoted_amount_out(), U256::from(990_000u64));
         assert_eq!(intent.timestamp, None);
     }
 
     #[test]
     fn test_declared_swap_normalizes_native_eth() {
-        let intent = Kyberswap
-            .declared_swap(
-                &swap_calldata_with_terms(KYBERSWAP_NATIVE, Address::repeat_byte(0x22), 1_000, 900, ""),
-                None,
-            )
-            .unwrap();
+        let intent = terms(
+            &swap_calldata_with_terms(KYBERSWAP_NATIVE, Address::repeat_byte(0x22), 1_000, 900, ""),
+            None,
+        )
+        .unwrap();
         assert_eq!(intent.token_in, Address::ZERO);
         assert_eq!(intent.token_out, Address::repeat_byte(0x22));
     }
@@ -296,26 +300,16 @@ mod tests {
     fn test_declared_swap_zero_amounts_rejected() {
         let a = Address::repeat_byte(0x11);
         let b = Address::repeat_byte(0x22);
-        assert!(Kyberswap
-            .declared_swap(&swap_calldata_with_terms(a, b, 0, 900, ""), None)
-            .is_none());
-        assert!(Kyberswap
-            .declared_swap(&swap_calldata_with_terms(a, b, 1_000, 0, ""), None)
-            .is_none());
+        assert!(terms(&swap_calldata_with_terms(a, b, 0, 900, ""), None).is_none());
+        assert!(terms(&swap_calldata_with_terms(a, b, 1_000, 0, ""), None).is_none());
     }
 
     #[test]
     fn test_declared_swap_garbage_input() {
-        assert!(Kyberswap
-            .declared_swap(&[], None)
-            .is_none());
-        assert!(Kyberswap
-            .declared_swap(&[0xde, 0xad, 0xbe, 0xef], None)
-            .is_none());
+        assert!(terms(&[], None).is_none());
+        assert!(terms(&[0xde, 0xad, 0xbe, 0xef], None).is_none());
         // A well-formed but unrelated call (KyberSwap's own clientData blob calldata) must not
         // decode as a `swap` execution.
-        assert!(Kyberswap
-            .declared_swap(&calldata_with(BLOB), None)
-            .is_none());
+        assert!(terms(&calldata_with(BLOB), None).is_none());
     }
 }

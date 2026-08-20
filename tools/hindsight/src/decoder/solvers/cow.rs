@@ -11,7 +11,7 @@
 //! like-for-like — modern `CoW` records a zero on-chain fee (it is priced into the order).
 
 use alloy::{
-    primitives::{address, Address, B256},
+    primitives::{address, Address, B256, U256},
     rpc::types::Log,
     sol,
     sol_types::{SolCall, SolEvent},
@@ -20,6 +20,7 @@ use alloy::{
 use crate::decoder::{
     netting::TraderFlow,
     registry::Registry,
+    solvers::{Declaration, SolverDecoder},
     transfer_ledger::{to_primitive_log, NetSwap},
 };
 
@@ -82,13 +83,29 @@ pub(crate) fn venue_tag(registry: &Registry, entry_point: Address, input: &[u8])
 /// `CoW`'s sentinel for native ETH in buy orders, mapped to the zero address like every other flow.
 const COW_NATIVE_ETH: Address = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
 
-/// The single settled order's trade, read from the `GPv2` `Trade` event. `None` when no batch
-/// settler emitted one, or the batch settles more than one order (left to the netting fallback).
-pub(crate) fn settlement_trade(logs: &[Log], registry: &Registry) -> Option<TraderFlow> {
-    let mut trades = logs.iter().filter(|log| {
-        registry.is_batch_settler(log.address()) &&
-            log.topics().first() == Some(&Trade::SIGNATURE_HASH)
-    });
+/// `CoW`'s settlement.
+pub(crate) struct Cow;
+
+impl SolverDecoder for Cow {
+    /// The settled order's trade, read from `CoW`'s own `Trade` event: the executed amounts and
+    /// the owner, stated outright. The calldata is not read — a settlement's inner router frames
+    /// are order plumbing, not the trade.
+    fn declared(
+        &self,
+        _input: &[u8],
+        logs: &[Log],
+        _amount_in_hint: Option<U256>,
+    ) -> Option<Declaration> {
+        settlement_trade(logs).map(Declaration::Settled)
+    }
+}
+
+/// The single settled order's trade, read from the `GPv2` `Trade` event. `None` when no `Trade`
+/// event is present, or the batch settles more than one order (left to the netting fallback).
+fn settlement_trade(logs: &[Log]) -> Option<TraderFlow> {
+    let mut trades = logs
+        .iter()
+        .filter(|log| log.topics().first() == Some(&Trade::SIGNATURE_HASH));
     let first = trades.next()?;
     if trades.next().is_some() {
         return None;
@@ -157,7 +174,7 @@ mod tests {
     }
 
     fn decode(logs: &[Log]) -> Option<TraderFlow> {
-        settlement_trade(logs, &Registry::ethereum())
+        settlement_trade(logs)
     }
 
     #[test]

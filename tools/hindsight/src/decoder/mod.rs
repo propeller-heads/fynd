@@ -280,20 +280,10 @@ impl<P: Provider> Decoder<P> {
         collect_native_transfers(root, &mut native);
         let transfer_ledger = TransferLedger::from_transaction(logs, &native);
 
-        // The declared decode runs first: the settlement's own data is the trusted reading.
-        // A batch settler's Trade log wins over the calldata path wherever it appears — the
-        // settlement can be entered through another contract, and a batch's inner router frames
-        // are order plumbing, not the trade (which is also why the calldata path never runs on a
-        // batch-settler entry). Netting is the fallback, and its records are marked.
-        let declared = solvers::cow::settlement_trade(logs, registry)
-            .map(|flow| ("cow-trade", flow, None::<SwapIntent>))
-            .or_else(|| {
-                if registry.is_batch_settler(entry_point) {
-                    return None;
-                }
-                declared::declared_flow(root, registry, &transfer_ledger, sender)
-                    .map(|(flow, intent)| ("solver-calldata", flow, Some(intent)))
-            });
+        // The declared decode runs first: the settling solver's own data is the trusted reading.
+        // Netting is the fallback, and its records are marked.
+        let declared =
+            declared::declared_flow(root, registry, logs, &transfer_ledger, sender, entry_point);
         let (decoder, mut flow, intent, amounts_declared) =
             if let Some((decoder, flow, intent)) = declared {
                 (decoder, flow, intent, true)
