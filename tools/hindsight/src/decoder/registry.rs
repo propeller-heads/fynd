@@ -92,14 +92,13 @@ struct AddressBook {
     venue_appdata: HashMap<B256, String>,
 }
 
-/// A venue's address-book section on one chain: the contracts users enter through and the
-/// collectors its fees are sent to. Pure addresses — a venue has no code; decoding is per solver
-/// (see `crate::decoder::declared`), and the netting fallback reads the collectors from here.
+/// A venue's address-book section on one chain: the contracts users enter through. Pure
+/// addresses — a venue has no code, and no fee handling either: an amount is either declared by
+/// the solver's own calldata (already past any venue fee) or netted and marked as such.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VenueAddresses {
     pub(crate) entry_points: HashSet<Address>,
-    pub(crate) fee_collectors: HashSet<Address>,
 }
 
 /// A loaded solver entry: its display name joined with its `SolverDecoder` implementation.
@@ -502,12 +501,7 @@ mod tests {
     fn test_venue_section_lookup_by_name_and_entry_point() {
         let registry = Registry::ethereum();
         let relay = registry.venue("relay").unwrap();
-        let collector = address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef");
         let router = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
-        assert!(relay
-            .fee_collectors
-            .contains(&collector));
-        assert!(!relay.fee_collectors.contains(&router));
         assert!(relay.entry_points.contains(&router));
 
         assert_eq!(registry.venue_name(router), Some("relay"));
@@ -515,7 +509,10 @@ mod tests {
             registry.venue_name(address!("0x881d40237659c251811cec9c364ef91dc08d300c")),
             Some("metamask")
         );
-        assert_eq!(registry.venue_name(collector), None);
+        assert_eq!(
+            registry.venue_name(address!("0xf70da97812cb96acdf810712aa562db8dfa3dbef")),
+            None
+        );
         assert!(registry.venue("kyberswap").is_none());
     }
 

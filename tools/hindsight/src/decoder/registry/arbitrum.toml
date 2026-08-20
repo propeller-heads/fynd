@@ -89,14 +89,12 @@ entry_points = [
     "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
     "0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7",
 ]
-fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 
 # MetaMask Swap Router on Arbitrum — the same proxy Base uses (0xdb9b1e94…), not the mainnet
 # router. Verified on-chain: a decoded swap through it paid its fee to 0xe3478b0b… (mainnet fee
 # wallet 1); mainnet wallet 2 took nothing in a 20k-block sample.
 [venues.metamask]
 entry_points = ["0xdb9b1e94b5b69df7e401ddbede43491141047db3"]
-fee_collectors = ["0xe3478b0bb1a5084567c319096437924948be1964"]
 
 
 # Rabby SwapProxy — same address as mainnet. Verified on-chain: fee legs paid to 0xcd6b9800…
@@ -105,13 +103,11 @@ fee_collectors = ["0xe3478b0bb1a5084567c319096437924948be1964"]
 # Rabby swaps are recognised by the fee leg (see rabby.rs), not by tx.to.
 [venues.rabby]
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
-fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
 
 # Rainbow's own router — same address as mainnet. Verified live by its own token transfers.
 # Input-side fee read from calldata; no fee collector (see rainbow.rs).
 [venues.rainbow]
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
-fee_collectors = []
 
 # Venues identified by the fee they take on a shared router. Verified on-chain: 35 fee legs to
 # Robinhood's wallet in a 20k-block sample, every one paid by the 0x Settler contract (so the

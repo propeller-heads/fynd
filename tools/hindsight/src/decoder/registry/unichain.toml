@@ -75,7 +75,6 @@ entry_points = [
     "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
     "0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7",
 ]
-fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 
 # Rabby SwapProxy — same address as mainnet. Verified on-chain: a decoded Uniswap-v4-routed swap
 # through the proxy paid its 0.25% fee to 0xcd6b9800… (mainnet fee wallet 1); the historical wallet
@@ -83,7 +82,6 @@ fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 # Rabby swaps are recognised by the fee leg (see rabby.rs), not by tx.to.
 [venues.rabby]
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
-fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
 
 # Venues identified by the fee they take on a shared router. Verified on-chain: a decoded swap
 # entered through 0x's AllowanceHolder and paid Robinhood's wallet, so the leg is a real fee and

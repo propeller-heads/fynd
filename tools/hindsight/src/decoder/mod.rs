@@ -87,16 +87,6 @@ pub(crate) struct DecodedTrade {
     /// Gross swap output — a venue fee taken from the output (see `venue_fee_out`) is added
     /// back, so the settled amount is the full swap proceeds, comparable to Fynd's gross output.
     pub amount_out: U256,
-    /// Venue fee taken from the input token before swapping (e.g. Relay's fee), in `token_in`
-    /// units. `None` when no known fee collector took a cut. Recorded for transparency; it is
-    /// already excluded from `amount_in`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub venue_fee_in: Option<U256>,
-    /// Venue fee taken from the output token after swapping, in `token_out` units. `None` when
-    /// no known fee collector took a cut. Recorded for transparency; it is already added back into
-    /// `amount_out`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub venue_fee_out: Option<U256>,
     /// The on-chain enforced floor declared in the settling solver frame's own calldata (see
     /// `SolverDecoder::declared_swap` for the solvers that declare one). A settled trade cleared
     /// this by construction; it is recorded so avoidance analysis has the same field on both
@@ -301,7 +291,7 @@ impl<P: Provider> Decoder<P> {
                 if registry.is_batch_settler(entry_point) {
                     return None;
                 }
-                declared::declared_flow(root, registry, &transfer_ledger, sender, entry_point)
+                declared::declared_flow(root, registry, &transfer_ledger, sender)
                     .map(|(flow, intent)| ("solver-calldata", flow, Some(intent)))
             });
         let (decoder, mut flow, intent, amounts_declared) =
@@ -349,7 +339,6 @@ impl<P: Provider> Decoder<P> {
             &transfer_ledger,
             integrator.as_deref(),
             app_data,
-            amounts_declared,
         )
         .unwrap_or_else(|| registry.label(entry_point));
 
@@ -386,8 +375,6 @@ impl<P: Provider> Decoder<P> {
             token_out: flow.swap.token_out,
             amount_in: flow.swap.amount_in,
             amount_out: flow.swap.amount_out,
-            venue_fee_in: flow.venue_fee_in,
-            venue_fee_out: flow.venue_fee_out,
             min_amount_out,
             declared_quote,
             quote_timestamp,

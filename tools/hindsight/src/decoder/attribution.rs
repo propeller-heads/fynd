@@ -120,19 +120,17 @@ pub(crate) fn venue_declared_solver(
 /// (`[venue_appdata]`; the hash is extracted by the caller), fee wallet (`[venue_fees]`),
 /// provider integrator tag (`[venue_integrators]`; extracted by the caller).
 ///
-/// On a fee-wallet match the fee lands on the flow. For netted amounts it is backed out —
-/// added back to the output or netted out of the input, whichever side it was taken from. For
-/// declared amounts (`amounts_are_declared`), the sides differ: an input-side fee is recorded
-/// only (the declared `amount_in` is read after the fee left), but an output-side fee is still
-/// grossed back — a fee-wallet venue's wallet is paid from the routing path directly, so the
-/// declared recipient's receipt is short of the swap's gross output by exactly the fee.
+/// A fee-wallet match also grosses an output-side fee back into `amount_out`. The wallet is paid
+/// from the routing path, so the trader's receipt — netted or declared — is short of the swap's
+/// gross output by exactly the fee, and Fynd's quote is gross. Without this the comparison hands
+/// Fynd the venue's cut as savings. An input-side fee is not corrected: the declared `amount_in`
+/// is already past it, and a netted one carries the marker that says so.
 pub(crate) fn venue(
     registry: &Registry,
     flow: &mut TraderFlow,
     ledger: &TransferLedger,
     integrator: Option<&str>,
     app_data: Option<B256>,
-    amounts_are_declared: bool,
 ) -> Option<String> {
     if let Some(venue) = registry.venue_for_owner(flow.tracked) {
         return Some(venue.to_string());
@@ -142,12 +140,11 @@ pub(crate) fn venue(
     }
     if let Some((venue, fee)) = fee_venue(registry, ledger, flow.swap.token_in, flow.swap.token_out)
     {
-        match (fee, amounts_are_declared) {
-            (VenueFee::Input(amount), false) => flow.net_input_fee(amount),
-            (VenueFee::Input(amount), true) => {
-                flow.venue_fee_in = flow.venue_fee_in.or(Some(amount));
-            }
-            (VenueFee::Output(amount), _) => flow.gross_output_fee(amount),
+        if let VenueFee::Output(amount) = fee {
+            flow.swap.amount_out = flow
+                .swap
+                .amount_out
+                .saturating_add(amount);
         }
         return Some(venue);
     }
@@ -404,16 +401,16 @@ mod tests {
         let registry = Registry::ethereum();
         let kpk_safe = address!("0x4f2083f5fbede34c2714affb3105539775f7fe64");
         let ledger = TransferLedger::from_transaction(&[], &[]);
-        let mut flow = TraderFlow::without_fees(kpk_safe, swap(addr(10), 1, addr(11), 2));
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, None, false).as_deref(), Some("kpk"));
+        let mut flow = TraderFlow::new(kpk_safe, swap(addr(10), 1, addr(11), 2));
+        assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("kpk"));
     }
 
     #[test]
     fn test_unknown_owner_is_not_a_venue() {
         let registry = Registry::ethereum();
         let ledger = TransferLedger::from_transaction(&[], &[]);
-        let mut flow = TraderFlow::without_fees(addr(9), swap(addr(10), 1, addr(11), 2));
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, None, false), None);
+        let mut flow = TraderFlow::new(addr(9), swap(addr(10), 1, addr(11), 2));
+        assert_eq!(venue(&registry, &mut flow, &ledger, None, None), None);
     }
 
     #[test]
@@ -423,12 +420,12 @@ mod tests {
         let registry = Registry::ethereum();
         let ledger = TransferLedger::from_transaction(&[], &[]);
         let defillama = b256!("0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422");
-        let mut flow = TraderFlow::without_fees(addr(1), swap(addr(10), 1, addr(11), 2));
+        let mut flow = TraderFlow::new(addr(1), swap(addr(10), 1, addr(11), 2));
         assert_eq!(
-            venue(&registry, &mut flow, &ledger, None, Some(defillama), false).as_deref(),
+            venue(&registry, &mut flow, &ledger, None, Some(defillama)).as_deref(),
             Some("llamaswap")
         );
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, Some(B256::ZERO), false), None);
+        assert_eq!(venue(&registry, &mut flow, &ledger, None, Some(B256::ZERO)), None);
     }
 
     #[test]
@@ -447,13 +444,9 @@ mod tests {
             make_transfer_log(token_out, pool, phantom, U256::from(85)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::without_fees(user, swap(token_in, 1000, token_out, 9915));
+        let mut flow = TraderFlow::new(user, swap(token_in, 1000, token_out, 9915));
 
-        assert_eq!(
-            venue(&registry, &mut flow, &ledger, None, None, false).as_deref(),
-            Some("phantom")
-        );
-        assert_eq!(flow.venue_fee_out, Some(U256::from(85)));
+        assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("phantom"));
         assert_eq!(flow.swap.amount_out, U256::from(10000));
     }
 
@@ -474,13 +467,9 @@ mod tests {
             make_transfer_log(token_out, pool, phantom, U256::from(85)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::without_fees(user, swap(token_in, 1000, token_out, 9915));
+        let mut flow = TraderFlow::new(user, swap(token_in, 1000, token_out, 9915));
 
-        assert_eq!(
-            venue(&registry, &mut flow, &ledger, None, None, true).as_deref(),
-            Some("phantom")
-        );
-        assert_eq!(flow.venue_fee_out, Some(U256::from(85)));
+        assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("phantom"));
         assert_eq!(flow.swap.amount_out, U256::from(10000));
     }
 
@@ -500,13 +489,9 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::without_fees(user, swap(token_in, 9905, token_out, 2000));
+        let mut flow = TraderFlow::new(user, swap(token_in, 9905, token_out, 2000));
 
-        assert_eq!(
-            venue(&registry, &mut flow, &ledger, None, None, true).as_deref(),
-            Some("coinbase")
-        );
-        assert_eq!(flow.venue_fee_in, Some(U256::from(95)));
+        assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("coinbase"));
         assert_eq!(flow.swap.amount_in, U256::from(9905));
     }
 
@@ -516,19 +501,19 @@ mod tests {
         // not.
         let registry = Registry::ethereum();
         let ledger = TransferLedger::from_transaction(&[], &[]);
-        let mut flow = TraderFlow::without_fees(addr(1), swap(addr(10), 1, addr(11), 2));
+        let mut flow = TraderFlow::new(addr(1), swap(addr(10), 1, addr(11), 2));
         assert_eq!(
-            venue(&registry, &mut flow, &ledger, Some("Infinex"), None, false).as_deref(),
+            venue(&registry, &mut flow, &ledger, Some("Infinex"), None).as_deref(),
             Some("infinex")
         );
-        assert_eq!(venue(&registry, &mut flow, &ledger, Some("somedapp"), None, false), None);
+        assert_eq!(venue(&registry, &mut flow, &ledger, Some("somedapp"), None), None);
     }
 
     #[test]
-    fn test_fee_wallet_input_side_fee_nets_the_input_down() {
+    fn test_fee_wallet_input_side_fee_identifies_without_adjusting() {
         // A LiFi-routed Coinbase Base App swap: the 0.95% cut is skimmed off the sell token before
-        // routing, so only the remainder reached the pools. Leaving it in makes the settled trade
-        // look bigger than it was and Fynd, re-solved on that inflated size, appear to win.
+        // routing. The wallet identifies the venue, but the amount is left as netted — a declared
+        // amount_in is already past the fee, and a netted one carries the marker that says so.
         let registry = Registry::builtin(Chain::Bsc).unwrap();
         let coinbase = address!("0x5aafc1f252d544f744d17a4e734afd6efc47ede4");
         let user = addr(1);
@@ -541,16 +526,14 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::without_fees(user, swap(token_in, 10000, token_out, 2000));
+        let mut flow = TraderFlow::new(user, swap(token_in, 10000, token_out, 2000));
 
         assert_eq!(
-            venue(&registry, &mut flow, &ledger, Some("base-app"), None, false).as_deref(),
+            venue(&registry, &mut flow, &ledger, Some("base-app"), None).as_deref(),
             Some("coinbase")
         );
-        assert_eq!(flow.venue_fee_in, Some(U256::from(95)));
-        assert_eq!(flow.swap.amount_in, U256::from(9905));
+        assert_eq!(flow.swap.amount_in, U256::from(10000));
         // The output side is untouched: this venue took nothing out of the buy token.
-        assert_eq!(flow.venue_fee_out, None);
         assert_eq!(flow.swap.amount_out, U256::from(2000));
     }
 
@@ -568,15 +551,10 @@ mod tests {
             make_transfer_log(token_out, addr(50), phantom, U256::from(85)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::without_fees(user, swap(token_in, 1000, token_out, 9915));
+        let mut flow = TraderFlow::new(user, swap(token_in, 1000, token_out, 9915));
 
-        assert_eq!(
-            venue(&registry, &mut flow, &ledger, None, None, false).as_deref(),
-            Some("phantom")
-        );
-        assert_eq!(flow.venue_fee_out, Some(U256::from(85)));
+        assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("phantom"));
         assert_eq!(flow.swap.amount_out, U256::from(10000));
-        assert_eq!(flow.venue_fee_in, None);
         assert_eq!(flow.swap.amount_in, U256::from(1000));
     }
 
@@ -593,7 +571,7 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::without_fees(user, swap(token_in, 1000, token_out, 2000));
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, None, false), None);
+        let mut flow = TraderFlow::new(user, swap(token_in, 1000, token_out, 2000));
+        assert_eq!(venue(&registry, &mut flow, &ledger, None, None), None);
     }
 }

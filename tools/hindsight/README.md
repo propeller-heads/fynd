@@ -46,7 +46,7 @@ call, so decoding starts there, and the venue is attributed afterwards as a labe
            │      match      │  trace, its entry point is a known venue / solver / batch
            └────────┬────────┘  settler, or a known solver emitted one of its logs; skip
                     │           everything else, never decoded. A solver's veto
-                    │           A bridge-order event in the logs rejects it here.
+                    │           SolverDecoder::veto rejects non-swap order shapes here.
                     ▼
            ┌─────────────────┐  the settling solver's own declaration:
            │ declared decode │    calldata — find the solver frame, ask its registry entry's
@@ -102,9 +102,8 @@ trait SolverDecoder {
 ```
 
 The calldata question is one method: a solver's parse fills the whole `SwapIntent` in one pass,
-including the recipient. `integrator` is the only log question left on the trait — it decodes a
-string out of an event, so it needs code. Rejecting a non-swap order shape needs none: the marking
-event's topic0 is address-book data (`bridge_order_events`, read by `Registry::log_veto`).
+including the recipient. The other two read logs, and are on the trait because the match step and
+venue attribution need protocol knowledge dispatched by address.
 
 Every method defaults to "this solver's data does not carry that", so most solvers need no code
 at all — one address-book line covers matching, attribution, and labels. An implementation is one
@@ -122,11 +121,20 @@ give the same solver call different results depending on the wrapper. Decoding b
 the call once, identically everywhere; the venue is looked up afterwards from the entry point
 and the registry fingerprints.
 
-Venue fees never change the declared amounts: the fee is charged on top whichever solver fills,
-so it cancels out of the Fynd comparison. It is recorded on the trade
-(`venue_fee_in`/`venue_fee_out`) for transparency, from the venue's fee collectors in the
-address book. Only the netting fallback must *back fees out* of its amounts — the reason netted
-records are the marked tier.
+### Venue fees are not modelled
+
+A venue's fee is charged whichever solver fills the order, so it cancels out of the Fynd
+comparison and hindsight does not track it. A declared `amount_in` needs no adjustment either: an
+input-side fee is taken before the solver frame, so the frame's own figure is already what entered
+the swap.
+
+One correction survives, and it is not about the fee itself. When a known fee wallet
+(`[venue_fees]`) is paid out of the routing path, the trader's receipt — netted or declared — is
+short of the swap's gross output by that amount, while Fynd's quote is gross. That amount is added
+back into `amount_out`, or the comparison would hand Fynd the venue's cut as savings.
+
+Netted amounts otherwise keep any fee inside them. That is part of what the netted marker warns
+about.
 
 ### Venue attribution (`attribution.rs`)
 
@@ -155,13 +163,11 @@ record (`solver_source`).
 ### Per protocol, not per chain
 
 A venue or solver deployed on several chains behaves the same everywhere, so one `SolverDecoder`
-serves all of them; what differs per chain — entry points, router addresses, fee collectors,
-stablecoins — lives in the per-chain address book.
+serves all of them; what differs per chain — entry points, router addresses, stablecoins — lives
+in the per-chain address book.
 
-A wrong sameness assumption mostly surfaces as trades failing to decode or `verify` — but not
-always: a diverged fee scheme, with the fee collector missing from that chain's book, nets
-trades with the fee still inside the amounts. Those records are marked netted either way, but
-fee collectors are still re-verified on every chain a venue is added on.
+A wrong sameness assumption surfaces as trades failing to decode, or as `verify` reporting gaps
+against Allium.
 
 ### Where does new code go?
 
@@ -169,8 +175,8 @@ fee collectors are still re-verified on every chain a venue is added on.
 |---|---|---|
 | Track a new solver | One line in the address book's `[solvers]` section. No code — its trades match and net like any other | Trades sent directly to the solver's router never match; trades a known venue routed through it decode, but the solver is recorded as "unknown" |
 | Make a solver's trades declared (trusted) instead of netted | A `SolverDecoder` impl in `solvers/` with `declared_swap`, one row in `solvers::IMPLEMENTATIONS` | The solver's trades stay netted: marked, excluded from the report by default, and missing `min_amount_out` / `declared_quote` / `quote_timestamp` |
-| Skip a solver's non-swap orders | The marking event's topic0 in the address book's `bridge_order_events` | Those orders decode as trades that never happened, with absurd rates |
-| Add a venue | A `[venues.<name>]` section in the address book — entry points and fee collectors. No code | The venue's trades still decode when a known solver's frame or log is inside; the venue label falls back to the raw entry address, and netted amounts keep the venue's fee inside |
+| Skip a solver's non-swap orders | A `veto` method on its `SolverDecoder` impl | Those orders decode as trades that never happened, with absurd rates |
+| Add a venue | A `[venues.<name>]` section in the address book — its entry points. No code | The venue's trades still decode when a known solver's frame or log is inside, but the venue label falls back to the raw entry address |
 | Attribute a new venue (owner / appData tag / fee wallet / integrator tag) | The matching address-book map (`[venue_owners]` / `[venue_appdata]` / `[venue_fees]` / `[venue_integrators]`) | The venue's trades are attributed to the underlying router or settler, not the venue |
 | Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |
 | Support a new chain | A `registry/<chain>.toml` address book, an entry in `registry::BUILTIN_CHAINS` | The chain has no built-in book and must be passed via `--registry` |
@@ -203,12 +209,11 @@ algorithm.
 
 ### The address book (`src/decoder/registry/<chain>.toml`)
 
-All chain- and protocol-specific data — solver routers, venue entry points and fee collectors,
-batch settlers, bridge-order event signatures, infrastructure contracts, USD-anchor stablecoins,
-display labels — lives in a
-per-chain TOML loaded by `Registry`. One book is embedded at compile time per chain — ethereum,
-base, unichain, arbitrum, bsc, polygon, robinhood — and `--chain <name>` picks one. Pass
-`--registry <path>` to extend or replace a book without recompiling.
+All chain- and protocol-specific data — solver routers, venue entry points, batch settlers,
+infrastructure contracts, USD-anchor stablecoins, display labels — lives in a per-chain TOML
+loaded by `Registry`. One book is embedded at compile time per chain — ethereum,
+base, unichain, arbitrum, bsc, polygon, robinhood — and `--chain <name>` picks one. Pass `--registry <path>`
+to extend or replace a book without recompiling.
 
 The books are not uniform, because the chains are not: CoW does not settle on Unichain and LiFi is
 not deployed there, so that book has no batch settlers, no LiFi solver, and no CoW-appData or

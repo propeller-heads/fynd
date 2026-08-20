@@ -64,7 +64,6 @@ entry_points = [
     "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
     "0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7",
 ]
-fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 
 # MetaMask Swap Router on Base. Verified on-chain: 25/25 sampled fee-paying swaps entered through
 # 0xdb9b1e94… (a contract), paying the fee to 0xe3478b0b… — the mainnet fee wallet 1; mainnet
@@ -72,7 +71,6 @@ fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 # 0xb1aa0a09d43b6b4f289ef14f2441339acdb551ac is NOT the live entry point on Base.
 [venues.metamask]
 entry_points = ["0xdb9b1e94b5b69df7e401ddbede43491141047db3"]
-fee_collectors = ["0xe3478b0bb1a5084567c319096437924948be1964"]
 
 
 # Rabby SwapProxy — same address as mainnet, deployed on Base. Verified on-chain: 837 fee legs in
@@ -82,13 +80,11 @@ fee_collectors = ["0xe3478b0bb1a5084567c319096437924948be1964"]
 # are recognised by the fee leg (see rabby.rs), not by tx.to.
 [venues.rabby]
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
-fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
 
 # Rainbow's own router — same address as mainnet (Rainbow deploys it identically across chains).
 # Input-side fee read from calldata; no fee collector (see rainbow.rs).
 [venues.rainbow]
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
-fee_collectors = []
 
 # Venues identified by the fee they take on a shared router. Coinbase's Base App is the heaviest
 # such venue on Base by a wide margin — 2942 fee legs in an 8k-block sample, 2292 paid by the LiFi

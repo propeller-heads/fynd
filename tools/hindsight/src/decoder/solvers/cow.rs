@@ -100,18 +100,15 @@ pub(crate) fn settlement_trade(logs: &[Log], registry: &Registry) -> Option<Trad
     let amount_in = trade
         .sellAmount
         .saturating_sub(trade.feeAmount);
-    let fee = (!trade.feeAmount.is_zero()).then_some(trade.feeAmount);
-    Some(TraderFlow {
-        tracked: trade.owner,
-        swap: NetSwap {
+    Some(TraderFlow::new(
+        trade.owner,
+        NetSwap {
             token_in: normalize_native(trade.sellToken),
             amount_in,
             token_out: normalize_native(trade.buyToken),
             amount_out: trade.buyAmount,
         },
-        venue_fee_in: fee,
-        venue_fee_out: None,
-    })
+    ))
 }
 
 fn normalize_native(token: Address) -> Address {
@@ -172,7 +169,6 @@ mod tests {
         let flow = decode(&[trade_log(COW_SETTLEMENT, owner, sell, buy, 1000, 2000, 10)]).unwrap();
         assert_eq!(flow.tracked, owner);
         assert_eq!(flow.swap, swap(sell, 990, buy, 2000));
-        assert_eq!(flow.venue_fee_in, Some(U256::from(10)));
     }
 
     #[test]
@@ -181,7 +177,6 @@ mod tests {
             decode(&[trade_log(COW_SETTLEMENT, addr(100), addr(10), COW_NATIVE_ETH, 1000, 5, 0)])
                 .unwrap();
         assert_eq!(flow.swap.token_out, Address::ZERO);
-        assert_eq!(flow.venue_fee_in, None);
     }
 
     #[test]

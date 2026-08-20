@@ -428,8 +428,6 @@ mod tests {
             token_out,
             amount_in: U256::from(1000),
             amount_out: U256::from(2000),
-            venue_fee_in: None,
-            venue_fee_out: None,
             min_amount_out: None,
             declared_quote: None,
             quote_timestamp: None,
