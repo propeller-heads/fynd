@@ -262,12 +262,6 @@ impl BellmanFordAlgorithm {
         })
     }
 
-    /// Runs the SPFA relaxation loop and reconstructs the best route from a pre-built context.
-    ///
-    /// This is the repeatable, synchronous solve phase. Call it multiple times with different
-    /// `opts.overrides` to evaluate alternative component states without redoing the setup in
-    /// `ctx`. Overrides shadow the corresponding component in `ctx.market_data` for both
-    /// relaxation and route construction.
     /// Every token the source reaches, with the route to it and what that route returns, from one
     /// relaxation.
     ///
@@ -310,6 +304,12 @@ impl BellmanFordAlgorithm {
         routes
     }
 
+    /// Runs the SPFA relaxation loop and reconstructs the best route from a pre-built context.
+    ///
+    /// This is the repeatable, synchronous solve phase. Call it multiple times with different
+    /// `opts.overrides` to evaluate alternative component states without redoing the setup in
+    /// `ctx`. Overrides shadow the corresponding component in `ctx.market_data` for both
+    /// relaxation and route construction.
     pub(crate) fn find_single_route(
         &self,
         ctx: &BellmanFordContext,
