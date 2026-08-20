@@ -14,7 +14,10 @@ use alloy::{
     rpc::types::Log,
 };
 
-use crate::decoder::solvers::{Declaration, SolverDecoder, SwapIntent};
+use crate::decoder::{
+    solvers::{Declaration, SolverDecoder, SwapIntent},
+    veto::Veto,
+};
 
 /// Byte length of an ABI-encoded word.
 const WORD_LEN: usize = 32;
@@ -59,10 +62,12 @@ impl SolverDecoder for Paraswap {
         input: &[u8],
         _logs: &[Log],
         amount_in_hint: Option<U256>,
-    ) -> Option<Declaration> {
-        let amount_in = amount_in_hint.filter(|hint| !hint.is_zero())?;
+    ) -> Result<Option<Declaration>, Veto> {
+        let Some(amount_in) = amount_in_hint.filter(|hint| !hint.is_zero()) else {
+            return Ok(None);
+        };
         if input.len() < 4 {
-            return None;
+            return Ok(None);
         }
         let words: Vec<U256> = input[4..]
             .as_chunks::<WORD_LEN>()
@@ -91,9 +96,9 @@ impl SolverDecoder for Paraswap {
                 amount_in,
                 to_amount,
             );
-            return Some(Declaration::Terms(intent.with_quote(quoted, None)));
+            return Ok(Some(Declaration::Terms(intent.with_quote(quoted, None))));
         }
-        None
+        Ok(None)
     }
 }
 
@@ -101,7 +106,11 @@ impl SolverDecoder for Paraswap {
 mod tests {
     /// The terms this solver reads from `input`, for tests that only care about the calldata path.
     fn terms(input: &[u8], hint: Option<U256>) -> Option<SwapIntent> {
-        match Paraswap.declared(input, &[], hint)? {
+        match Paraswap
+            .declared(input, &[], hint)
+            .ok()
+            .flatten()?
+        {
             Declaration::Terms(intent) => Some(intent),
             Declaration::Settled(_) => None,
         }

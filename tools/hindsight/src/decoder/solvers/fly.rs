@@ -14,7 +14,10 @@ use alloy::{
     rpc::types::Log,
 };
 
-use crate::decoder::solvers::{Declaration, SolverDecoder, SwapIntent};
+use crate::decoder::{
+    solvers::{Declaration, SolverDecoder, SwapIntent},
+    veto::Veto,
+};
 
 /// Selectors sharing `LibRouter`'s packed layout (`swapWithBackendSignature`,
 /// `swapWithMagpieSignature`, `swapWithUserSignature`, `swapWithoutSignature`, `swap`).
@@ -105,22 +108,22 @@ impl SolverDecoder for Fly {
         input: &[u8],
         _logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Option<Declaration> {
-        let data = parse(input)?;
+    ) -> Result<Option<Declaration>, Veto> {
+        let Some(data) = parse(input) else { return Ok(None) };
         if data.amount_in.is_zero() || data.amount_out_min.is_zero() {
-            return None;
+            return Ok(None);
         }
         if !data.expected_amount_out.is_zero() && data.amount_out_min > data.expected_amount_out {
-            return None;
+            return Ok(None);
         }
         let intent =
             SwapIntent::new(data.from_asset, data.to_asset, data.amount_in, data.amount_out_min)
                 .with_recipient(data.to_address);
-        Some(Declaration::Terms(if data.expected_amount_out.is_zero() {
+        Ok(Some(Declaration::Terms(if data.expected_amount_out.is_zero() {
             intent
         } else {
             intent.with_quote(data.expected_amount_out, None)
-        }))
+        })))
     }
 }
 
@@ -128,7 +131,11 @@ impl SolverDecoder for Fly {
 mod tests {
     /// The terms this solver reads from `input`, for tests that only care about the calldata path.
     fn terms(input: &[u8], hint: Option<U256>) -> Option<SwapIntent> {
-        match Fly.declared(input, &[], hint)? {
+        match Fly
+            .declared(input, &[], hint)
+            .ok()
+            .flatten()?
+        {
             Declaration::Terms(intent) => Some(intent),
             Declaration::Settled(_) => None,
         }

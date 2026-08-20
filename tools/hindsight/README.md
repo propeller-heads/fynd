@@ -45,8 +45,7 @@ call, so decoding starts there, and the venue is attributed afterwards as a labe
            ┌─────────────────┐  keep a transaction when a known solver's frame is in its
            │      match      │  trace, its entry point is a known venue / solver / batch
            └────────┬────────┘  settler, or a known solver emitted one of its logs; skip
-                    │           everything else, never decoded. A solver's veto
-                    │           SolverDecoder::veto rejects non-swap order shapes here.
+                    │           everything else, never decoded.
                     ▼
            ┌─────────────────┐  the settling solver's own declaration:
            │ declared decode │    calldata — find the solver frame, ask its registry entry's
@@ -92,26 +91,34 @@ One trait per solver — everything the solver's own calldata and logs can say:
 
 ```rust
 trait SolverDecoder {
-    /// The swap terms in the solver call's own calldata — tokens, amounts, the on-chain floor,
-    /// and (when declared) the off-chain quote and the output recipient whose receipt anchors
-    /// amount_out.
-    fn declared_swap(&self, input: &[u8], amount_in_hint: Option<U256>) -> Option<SwapIntent>;
-    /// The frontend tag this solver records in its logs (LiFi fronts other apps).
-    fn integrator(&self, logs: &[Log]) -> Option<String>;
+    /// What this solver's own data says about the transaction: terms from its calldata, the
+    /// settled trade from its logs, nothing (Ok(None)), or a veto — the transaction is not a
+    /// same-chain swap and must not be decoded at all.
+    fn declared(&self, input: &[u8], logs: &[Log], amount_in_hint: Option<U256>)
+        -> Result<Option<Declaration>, Veto>;
+}
+
+enum Declaration {
+    /// Terms from calldata; the caller recovers amount_out from the named recipient's receipt.
+    Terms(SwapIntent),
+    /// The executed trade, amounts included — nothing left to recover.
+    Settled(SettledSwap),
 }
 ```
 
-The calldata question is one method: a solver's parse fills the whole `SwapIntent` in one pass,
-including the recipient. The other two read logs, and are on the trait because the match step and
-venue attribution need protocol knowledge dispatched by address.
+One method, because one question is being asked: what does this solver say about this
+transaction? A solver's parse fills the whole `SwapIntent` in one pass, including the recipient.
+Anything else a solver can read from its own data is an ordinary function in its own module —
+LiFi's bridge-order veto, called from its own `declared`, and its integrator tag, called by venue
+attribution.
 
-Every method defaults to "this solver's data does not carry that", so most solvers need no code
+The method defaults to "this solver's data does not carry that", so most solvers need no code
 at all — one address-book line covers matching, attribution, and labels. An implementation is one
 row in `solvers::IMPLEMENTATIONS`, joined onto the registry's `Solver` entry when the address
 book loads; at trade time every lookup is `registry.solver(address)`, never a name search.
 Today: Fly (packed calldata), KyberSwap (ABI `swap` params + `clientData` quote), 0x
-(`AllowanceHolder.exec` / `Settler.execute`), ParaSwap (quote scan), LiFi (veto + integrator
-tag), and CoW's `Trade`-log read keyed by the batch-settler entry.
+(`AllowanceHolder.exec` / `Settler.execute`), ParaSwap (quote scan), 1inch (v6 `swap`
+calldata), okx (`OrderRecord` log), LiFi (veto + integrator tag), and CoW's `Trade`-log read.
 
 ### Why decoding is per solver, not per venue
 
@@ -152,7 +159,7 @@ four maps from the address book:
   Wallets are checked in address order, so a trade cut by two venues' wallets resolves the same
   way on every run.
 - **provider integrator tag** (`[venue_integrators]`) — a provider's event carried an integrator
-  string mapped to a venue (LiFi frontends), read by that provider's `SolverDecoder::integrator`.
+  string mapped to a venue (LiFi frontends), read by `solvers::lifi::integrator`.
 
 The solver label comes from its own evidence tiers, most- to least-trusted: the venue-declared
 calldata id (MetaMask's `aggregatorId`, normalized through the alias list in `solvers/`), the entry
@@ -174,8 +181,8 @@ against Allium.
 | You want to… | Touch | Without it |
 |---|---|---|
 | Track a new solver | One line in the address book's `[solvers]` section. No code — its trades match and net like any other | Trades sent directly to the solver's router never match; trades a known venue routed through it decode, but the solver is recorded as "unknown" |
-| Make a solver's trades declared (trusted) instead of netted | A `SolverDecoder` impl in `solvers/` with `declared_swap`, one row in `solvers::IMPLEMENTATIONS` | The solver's trades stay netted: marked, excluded from the report by default, and missing `min_amount_out` / `declared_quote` / `quote_timestamp` |
-| Skip a solver's non-swap orders | A `veto` method on its `SolverDecoder` impl | Those orders decode as trades that never happened, with absurd rates |
+| Make a solver's trades declared (trusted) instead of netted | A `SolverDecoder` impl in `solvers/` with `declared`, one row in `solvers::IMPLEMENTATIONS` | The solver's trades stay netted: marked, excluded from the report by default, and missing `min_amount_out` / `declared_quote` / `quote_timestamp` |
+| Skip a solver's non-swap orders | An `Err(Veto)` from its `declared`, off a log its own module reads | Those orders decode as trades that never happened, with absurd rates |
 | Add a venue | A `[venues.<name>]` section in the address book — its entry points. No code | The venue's trades still decode when a known solver's frame or log is inside, but the venue label falls back to the raw entry address |
 | Attribute a new venue (owner / appData tag / fee wallet / integrator tag) | The matching address-book map (`[venue_owners]` / `[venue_appdata]` / `[venue_fees]` / `[venue_integrators]`) | The venue's trades are attributed to the underlying router or settler, not the venue |
 | Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |

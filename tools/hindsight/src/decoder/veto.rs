@@ -1,9 +1,9 @@
 //! Vetoes: rejections that keep non-trades out of the records, and the `Veto` type they all
 //! share.
 //!
-//! There are two veto points. Solver-specific vetoes run at match time on logs alone (see
-//! `solvers::solver_veto`), before a transaction costs a trace. The checks in this module run
-//! after decoding: netting can pair value legs that were never a swap — the payment side of an
+//! There are two veto points. A solver vetoes from its own `SolverDecoder::declared`, which the
+//! settling solver answers before anything is decoded. The checks in this module run after
+//! decoding: netting can pair value legs that were never a swap — the payment side of an
 //! NFT purchase, or a cross-chain deposit's dust refund. Each check recognizes one such shape
 //! from the transaction itself (no prices, no external data); `check` is the single entry
 //! point the decoder runs on every decoded flow, so adding a check never touches the
@@ -17,9 +17,8 @@ use alloy::{
 };
 
 use crate::decoder::{
-    netting::TraderFlow,
     registry::Registry,
-    transfer_ledger::{NetSwap, Transfer, TransferLedger, RESIDUE_GROSS_RATIO},
+    transfer_ledger::{SettledSwap, Transfer, TransferLedger, RESIDUE_GROSS_RATIO},
 };
 
 /// A transaction rejected as not a comparable trade, by the shape that disqualified it.
@@ -34,8 +33,8 @@ pub(crate) enum Veto {
     /// mis-paired cross-chain deposit whose only same-chain receipt is a dust remainder refund.
     MispairedWrapPair,
     /// A cross-chain bridge order settled by a solver router: the real output lands on the
-    /// destination chain, so there is no same-chain swap to record. Placed at match time by
-    /// `solvers::solver_veto`, never by `check`.
+    /// destination chain, so there is no same-chain swap to record. Returned by the settling
+    /// solver's own `SolverDecoder::declared`, never by `check`.
     BridgeOrder,
     /// Part of the trade's value was taken by a fee on transfer: the token contract (or an
     /// unregistered fee) split a transfer, landing a significant share on an address that only
@@ -49,7 +48,7 @@ pub(crate) enum Veto {
 
 /// Check a decoded flow against every post-decode veto, returning the first.
 pub(crate) fn check(
-    flow: &TraderFlow,
+    flow: &SettledSwap,
     transfer_ledger: &TransferLedger,
     logs: &[Log],
     registry: &Registry,
@@ -57,7 +56,7 @@ pub(crate) fn check(
     if received_nft(logs, flow.tracked) {
         return Some(Veto::NftPurchase);
     }
-    if wrap_pair_mispaired(&flow.swap, registry.wrapped_native()) {
+    if wrap_pair_mispaired(flow, registry.wrapped_native()) {
         return Some(Veto::MispairedWrapPair);
     }
     if fee_on_transfer(flow, transfer_ledger, registry) {
@@ -73,12 +72,12 @@ pub(crate) fn check(
 /// Registered venue fee collectors are exempt — their fees are backed out downstream. A leg
 /// under the residue line (1% of the trade amount, `RESIDUE_GROSS_RATIO`) is dust, not a fee.
 fn fee_on_transfer(
-    flow: &TraderFlow,
+    flow: &SettledSwap,
     transfer_ledger: &TransferLedger,
     registry: &Registry,
 ) -> bool {
     let sides =
-        [(flow.swap.token_in, flow.swap.amount_in), (flow.swap.token_out, flow.swap.amount_out)];
+        [(flow.token_in, flow.amount_in), (flow.token_out, flow.amount_out)];
     for (token, trade_amount) in sides {
         for (recipient, total) in transfer_ledger.sink_payments(token) {
             if registry.is_fee_collector(recipient) || registry.is_infrastructure(recipient) {
@@ -144,7 +143,7 @@ const WRAP_PAIR_MAX_RATIO: u64 = 2;
 /// Seen with cross-chain deposits where the trader sends WETH and the only same-chain receipt is
 /// a dust remainder refund in native ETH — netting pairs the two into a trade that never happened,
 /// orders of magnitude off parity.
-fn wrap_pair_mispaired(swap: &NetSwap, wrapped_native: Address) -> bool {
+fn wrap_pair_mispaired(swap: &SettledSwap, wrapped_native: Address) -> bool {
     let pair = [swap.token_in, swap.token_out];
     if !(pair.contains(&Address::ZERO) && pair.contains(&wrapped_native)) {
         return false;
@@ -225,8 +224,8 @@ mod tests {
         assert!(!wrap_pair_mispaired(&swap(weth, 1000, Address::ZERO, 900), weth));
     }
 
-    fn flow(tracked: Address, net: NetSwap) -> TraderFlow {
-        TraderFlow::without_fees(tracked, net)
+    fn flow(tracked: Address, net: SettledSwap) -> SettledSwap {
+        SettledSwap { tracked, ..net }
     }
 
     #[test]

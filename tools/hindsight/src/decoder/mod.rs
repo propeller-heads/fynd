@@ -88,7 +88,7 @@ pub(crate) struct DecodedTrade {
     /// back, so the settled amount is the full swap proceeds, comparable to Fynd's gross output.
     pub amount_out: U256,
     /// The on-chain enforced floor declared in the settling solver frame's own calldata (see
-    /// `SolverDecoder::declared_swap` for the solvers that declare one). A settled trade cleared
+    /// `SolverDecoder::declared` for the solvers that declare one). A settled trade cleared
     /// this by construction; it is recorded so avoidance analysis has the same field on both
     /// settled and reverted trades. `None` when no solver frame was found or its calldata did
     /// not parse.
@@ -236,17 +236,6 @@ impl<P: Provider> Decoder<P> {
             {
                 continue;
             }
-            // Match-time vetoes read logs alone (a solver marking a non-swap order shape).
-            if let Some(veto) = solvers::solver_veto(receipt.logs(), entry_point, &self.registry) {
-                debug!(
-                    tx = %receipt.transaction_hash,
-                    venue = %self.registry.label(entry_point),
-                    ?veto,
-                    "matched transaction is not a same-chain swap; skipping"
-                );
-                continue;
-            }
-
             let tx_index = receipt
                 .transaction_index
                 .unwrap_or(index as u64);
@@ -281,8 +270,11 @@ impl<P: Provider> Decoder<P> {
         let transfer_ledger = TransferLedger::from_transaction(logs, &native);
 
         // The declared decode runs first: the settling solver's own data is the trusted reading.
-        // Netting is the fallback, and its records are marked.
-        let declared = declared::declared_flow(root, registry, logs, &transfer_ledger, sender);
+        // Netting is the fallback, and its records are marked. A solver that declares the
+        // transaction is not a swap at all vetoes it here, before netting gets a chance to pair
+        // its legs into a trade that never happened.
+        let declared =
+            declared::declared_flow(root, registry, logs, &transfer_ledger, sender).ok()?;
         let (decoder, mut flow, intent, amounts_declared) =
             if let Some((decoder, flow, intent)) = declared {
                 (decoder, flow, intent, true)
@@ -320,7 +312,7 @@ impl<P: Provider> Decoder<P> {
         // A venue fingerprint (owning trader, CoW appData tag, fee wallet, or integrator tag —
         // see `attribution`) overrides the entry-point label. The appData tag is read from a
         // batch settler's calldata; other transactions carry none.
-        let integrator = solvers::integrator(logs, registry);
+        let integrator = solvers::lifi::integrator(logs);
         let app_data = solvers::cow::venue_tag(registry, entry_point, &root.input);
         let venue = attribution::venue(
             registry,
@@ -360,10 +352,10 @@ impl<P: Provider> Decoder<P> {
             decoder,
             decode,
             sender: flow.tracked,
-            token_in: flow.swap.token_in,
-            token_out: flow.swap.token_out,
-            amount_in: flow.swap.amount_in,
-            amount_out: flow.swap.amount_out,
+            token_in: flow.token_in,
+            token_out: flow.token_out,
+            amount_in: flow.amount_in,
+            amount_out: flow.amount_out,
             min_amount_out,
             declared_quote,
             quote_timestamp,

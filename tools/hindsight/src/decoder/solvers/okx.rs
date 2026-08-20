@@ -19,9 +19,9 @@ use alloy::{
 };
 
 use crate::decoder::{
-    netting::TraderFlow,
     solvers::{Declaration, SolverDecoder},
-    transfer_ledger::{to_primitive_log, NetSwap},
+    transfer_ledger::{to_primitive_log, SettledSwap},
+    veto::Veto,
 };
 
 sol! {
@@ -58,27 +58,27 @@ impl SolverDecoder for Okx {
         _input: &[u8],
         logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Option<Declaration> {
+    ) -> Result<Option<Declaration>, Veto> {
         let mut records = logs
             .iter()
             .filter(|log| log.topics().first() == Some(&OrderRecord::SIGNATURE_HASH));
-        let first = records.next()?;
+        let Some(first) = records.next() else { return Ok(None) };
         if records.next().is_some() {
-            return None;
+            return Ok(None);
         }
-        let record = OrderRecord::decode_log(&to_primitive_log(first)).ok()?;
+        let Ok(record) = OrderRecord::decode_log(&to_primitive_log(first)) else {
+            return Ok(None);
+        };
         if record.fromAmount.is_zero() || record.returnAmount.is_zero() {
-            return None;
+            return Ok(None);
         }
-        Some(Declaration::Settled(TraderFlow::new(
-            record.sender,
-            NetSwap {
-                token_in: normalize_native(record.fromToken),
-                amount_in: record.fromAmount,
-                token_out: normalize_native(record.toToken),
-                amount_out: record.returnAmount,
-            },
-        )))
+        Ok(Some(Declaration::Settled(SettledSwap {
+            tracked: record.sender,
+            token_in: normalize_native(record.fromToken),
+            amount_in: record.fromAmount,
+            token_out: normalize_native(record.toToken),
+            amount_out: record.returnAmount,
+        })))
     }
 }
 
@@ -112,8 +112,12 @@ mod tests {
         Log { inner: primitive, ..Default::default() }
     }
 
-    fn settled(logs: &[Log]) -> Option<TraderFlow> {
-        match Okx.declared(&[], logs, None)? {
+    fn settled(logs: &[Log]) -> Option<SettledSwap> {
+        match Okx
+            .declared(&[], logs, None)
+            .ok()
+            .flatten()?
+        {
             Declaration::Settled(flow) => Some(flow),
             Declaration::Terms(_) => None,
         }
@@ -145,10 +149,10 @@ mod tests {
         )])
         .unwrap();
         assert_eq!(flow.tracked, trader);
-        assert_eq!(flow.swap.token_in, usdt);
-        assert_eq!(flow.swap.amount_in, U256::from(35_551_438u64));
-        assert_eq!(flow.swap.token_out, token_out);
-        assert_eq!(flow.swap.amount_out, U256::from(699_080_168_573_611_654_796_604_356u128));
+        assert_eq!(flow.token_in, usdt);
+        assert_eq!(flow.amount_in, U256::from(35_551_438u64));
+        assert_eq!(flow.token_out, token_out);
+        assert_eq!(flow.amount_out, U256::from(699_080_168_573_611_654_796_604_356u128));
     }
 
     #[test]
@@ -163,7 +167,7 @@ mod tests {
             56_277_456,
         )])
         .unwrap();
-        assert_eq!(flow.swap, swap(Address::ZERO, 30_000_000_000_000_000, usdc, 56_277_456));
+        assert_eq!(flow, swap(Address::ZERO, 30_000_000_000_000_000, usdc, 56_277_456));
     }
 
     #[test]
