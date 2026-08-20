@@ -20,7 +20,9 @@ use alloy::{
 use serde::Serialize;
 
 use crate::decoder::{
-    netting::TraderFlow, registry::Registry, solvers, trace, transfer_ledger::TransferLedger,
+    registry::Registry,
+    solvers, trace,
+    transfer_ledger::{SettledSwap, TransferLedger},
 };
 
 /// The evidence tier that produced a record's solver label, most- to least-trusted.
@@ -127,7 +129,7 @@ pub(crate) fn venue_declared_solver(
 /// is already past it, and a netted one carries the marker that says so.
 pub(crate) fn venue(
     registry: &Registry,
-    flow: &mut TraderFlow,
+    flow: &mut SettledSwap,
     ledger: &TransferLedger,
     integrator: Option<&str>,
     app_data: Option<B256>,
@@ -138,13 +140,9 @@ pub(crate) fn venue(
     if let Some(venue) = app_data.and_then(|hash| registry.venue_for_appdata(hash)) {
         return Some(venue.to_string());
     }
-    if let Some((venue, fee)) = fee_venue(registry, ledger, flow.swap.token_in, flow.swap.token_out)
-    {
+    if let Some((venue, fee)) = fee_venue(registry, ledger, flow.token_in, flow.token_out) {
         if let VenueFee::Output(amount) = fee {
-            flow.swap.amount_out = flow
-                .swap
-                .amount_out
-                .saturating_add(amount);
+            flow.amount_out = flow.amount_out.saturating_add(amount);
         }
         return Some(venue);
     }
@@ -401,7 +399,7 @@ mod tests {
         let registry = Registry::ethereum();
         let kpk_safe = address!("0x4f2083f5fbede34c2714affb3105539775f7fe64");
         let ledger = TransferLedger::from_transaction(&[], &[]);
-        let mut flow = TraderFlow::new(kpk_safe, swap(addr(10), 1, addr(11), 2));
+        let mut flow = SettledSwap { tracked: kpk_safe, ..swap(addr(10), 1, addr(11), 2) };
         assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("kpk"));
     }
 
@@ -409,7 +407,7 @@ mod tests {
     fn test_unknown_owner_is_not_a_venue() {
         let registry = Registry::ethereum();
         let ledger = TransferLedger::from_transaction(&[], &[]);
-        let mut flow = TraderFlow::new(addr(9), swap(addr(10), 1, addr(11), 2));
+        let mut flow = SettledSwap { tracked: addr(9), ..swap(addr(10), 1, addr(11), 2) };
         assert_eq!(venue(&registry, &mut flow, &ledger, None, None), None);
     }
 
@@ -420,7 +418,7 @@ mod tests {
         let registry = Registry::ethereum();
         let ledger = TransferLedger::from_transaction(&[], &[]);
         let defillama = b256!("0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422");
-        let mut flow = TraderFlow::new(addr(1), swap(addr(10), 1, addr(11), 2));
+        let mut flow = SettledSwap { tracked: addr(1), ..swap(addr(10), 1, addr(11), 2) };
         assert_eq!(
             venue(&registry, &mut flow, &ledger, None, Some(defillama)).as_deref(),
             Some("llamaswap")
@@ -444,10 +442,10 @@ mod tests {
             make_transfer_log(token_out, pool, phantom, U256::from(85)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::new(user, swap(token_in, 1000, token_out, 9915));
+        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
 
         assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("phantom"));
-        assert_eq!(flow.swap.amount_out, U256::from(10000));
+        assert_eq!(flow.amount_out, U256::from(10000));
     }
 
     #[test]
@@ -467,10 +465,10 @@ mod tests {
             make_transfer_log(token_out, pool, phantom, U256::from(85)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::new(user, swap(token_in, 1000, token_out, 9915));
+        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
 
         assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("phantom"));
-        assert_eq!(flow.swap.amount_out, U256::from(10000));
+        assert_eq!(flow.amount_out, U256::from(10000));
     }
 
     #[test]
@@ -489,10 +487,10 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::new(user, swap(token_in, 9905, token_out, 2000));
+        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 9905, token_out, 2000) };
 
         assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("coinbase"));
-        assert_eq!(flow.swap.amount_in, U256::from(9905));
+        assert_eq!(flow.amount_in, U256::from(9905));
     }
 
     #[test]
@@ -501,7 +499,7 @@ mod tests {
         // not.
         let registry = Registry::ethereum();
         let ledger = TransferLedger::from_transaction(&[], &[]);
-        let mut flow = TraderFlow::new(addr(1), swap(addr(10), 1, addr(11), 2));
+        let mut flow = SettledSwap { tracked: addr(1), ..swap(addr(10), 1, addr(11), 2) };
         assert_eq!(
             venue(&registry, &mut flow, &ledger, Some("Infinex"), None).as_deref(),
             Some("infinex")
@@ -526,15 +524,15 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::new(user, swap(token_in, 10000, token_out, 2000));
+        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 10000, token_out, 2000) };
 
         assert_eq!(
             venue(&registry, &mut flow, &ledger, Some("base-app"), None).as_deref(),
             Some("coinbase")
         );
-        assert_eq!(flow.swap.amount_in, U256::from(10000));
+        assert_eq!(flow.amount_in, U256::from(10000));
         // The output side is untouched: this venue took nothing out of the buy token.
-        assert_eq!(flow.swap.amount_out, U256::from(2000));
+        assert_eq!(flow.amount_out, U256::from(2000));
     }
 
     #[test]
@@ -551,11 +549,11 @@ mod tests {
             make_transfer_log(token_out, addr(50), phantom, U256::from(85)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::new(user, swap(token_in, 1000, token_out, 9915));
+        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
 
         assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("phantom"));
-        assert_eq!(flow.swap.amount_out, U256::from(10000));
-        assert_eq!(flow.swap.amount_in, U256::from(1000));
+        assert_eq!(flow.amount_out, U256::from(10000));
+        assert_eq!(flow.amount_in, U256::from(1000));
     }
 
     #[test]
@@ -571,7 +569,7 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = TraderFlow::new(user, swap(token_in, 1000, token_out, 2000));
+        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 2000) };
         assert_eq!(venue(&registry, &mut flow, &ledger, None, None), None);
     }
 }

@@ -18,10 +18,10 @@ use alloy::{
 };
 
 use crate::decoder::{
-    netting::TraderFlow,
     registry::Registry,
     solvers::{Declaration, SolverDecoder},
-    transfer_ledger::{to_primitive_log, NetSwap},
+    transfer_ledger::{to_primitive_log, SettledSwap},
+    veto::Veto,
 };
 
 sol! {
@@ -95,14 +95,14 @@ impl SolverDecoder for Cow {
         _input: &[u8],
         logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Option<Declaration> {
-        settlement_trade(logs).map(Declaration::Settled)
+    ) -> Result<Option<Declaration>, Veto> {
+        Ok(settlement_trade(logs).map(Declaration::Settled))
     }
 }
 
 /// The single settled order's trade, read from the `GPv2` `Trade` event. `None` when no `Trade`
 /// event is present, or the batch settles more than one order (left to the netting fallback).
-fn settlement_trade(logs: &[Log]) -> Option<TraderFlow> {
+fn settlement_trade(logs: &[Log]) -> Option<SettledSwap> {
     let mut trades = logs
         .iter()
         .filter(|log| log.topics().first() == Some(&Trade::SIGNATURE_HASH));
@@ -117,15 +117,13 @@ fn settlement_trade(logs: &[Log]) -> Option<TraderFlow> {
     let amount_in = trade
         .sellAmount
         .saturating_sub(trade.feeAmount);
-    Some(TraderFlow::new(
-        trade.owner,
-        NetSwap {
-            token_in: normalize_native(trade.sellToken),
-            amount_in,
-            token_out: normalize_native(trade.buyToken),
-            amount_out: trade.buyAmount,
-        },
-    ))
+    Some(SettledSwap {
+        tracked: trade.owner,
+        token_in: normalize_native(trade.sellToken),
+        amount_in,
+        token_out: normalize_native(trade.buyToken),
+        amount_out: trade.buyAmount,
+    })
 }
 
 fn normalize_native(token: Address) -> Address {
@@ -173,7 +171,7 @@ mod tests {
         Log { inner: primitive, ..Default::default() }
     }
 
-    fn decode(logs: &[Log]) -> Option<TraderFlow> {
+    fn decode(logs: &[Log]) -> Option<SettledSwap> {
         settlement_trade(logs)
     }
 
@@ -184,8 +182,7 @@ mod tests {
         let buy = addr(11);
         // Fee is taken from the sell token: 10 of the 1000 sold is the fee, 990 reached the market.
         let flow = decode(&[trade_log(COW_SETTLEMENT, owner, sell, buy, 1000, 2000, 10)]).unwrap();
-        assert_eq!(flow.tracked, owner);
-        assert_eq!(flow.swap, swap(sell, 990, buy, 2000));
+        assert_eq!(flow, SettledSwap { tracked: owner, ..swap(sell, 990, buy, 2000) });
     }
 
     #[test]
@@ -193,7 +190,7 @@ mod tests {
         let flow =
             decode(&[trade_log(COW_SETTLEMENT, addr(100), addr(10), COW_NATIVE_ETH, 1000, 5, 0)])
                 .unwrap();
-        assert_eq!(flow.swap.token_out, Address::ZERO);
+        assert_eq!(flow.token_out, Address::ZERO);
     }
 
     #[test]

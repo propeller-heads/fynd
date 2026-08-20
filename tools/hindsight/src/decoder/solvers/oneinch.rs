@@ -24,7 +24,10 @@ use alloy::{
     sol_types::SolCall,
 };
 
-use crate::decoder::solvers::{Declaration, SolverDecoder, SwapIntent};
+use crate::decoder::{
+    solvers::{Declaration, SolverDecoder, SwapIntent},
+    veto::Veto,
+};
 
 sol! {
     /// The v6 router's swap terms. `srcReceiver` is the executor the input is routed to and
@@ -70,10 +73,10 @@ impl SolverDecoder for OneInch {
         input: &[u8],
         _logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Option<Declaration> {
-        let call = swapCall::abi_decode(input).ok()?;
+    ) -> Result<Option<Declaration>, Veto> {
+        let Ok(call) = swapCall::abi_decode(input) else { return Ok(None) };
         if call.desc.amount.is_zero() {
-            return None;
+            return Ok(None);
         }
         let intent = SwapIntent::new(
             normalize_native(call.desc.srcToken),
@@ -82,7 +85,7 @@ impl SolverDecoder for OneInch {
             call.desc.minReturnAmount,
         )
         .with_recipient(call.desc.dstReceiver);
-        Some(Declaration::Terms(intent))
+        Ok(Some(Declaration::Terms(intent)))
     }
 }
 
@@ -107,7 +110,11 @@ mod tests {
     const MIN_AMOUNT_OUT: u128 = 1_526_167_226_586_071_441;
 
     fn terms(input: &[u8]) -> Option<SwapIntent> {
-        match OneInch.declared(input, &[], None)? {
+        match OneInch
+            .declared(input, &[], None)
+            .ok()
+            .flatten()?
+        {
             Declaration::Terms(intent) => Some(intent),
             Declaration::Settled(_) => None,
         }

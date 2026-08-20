@@ -15,39 +15,50 @@ use alloy::{
 };
 
 use crate::decoder::{
-    netting::TraderFlow,
     registry::Registry,
     solvers::{self, Declaration, SwapIntent},
     trace,
-    transfer_ledger::{NetSwap, TransferLedger},
+    transfer_ledger::{SettledSwap, TransferLedger},
+    veto::Veto,
 };
 
-/// Decode a transaction from the settling solver's own declaration: the decoder label recorded on
-/// the trade, the flow, and the parsed terms when the read was a calldata one (their columns land
-/// on the record).
+/// What the settling solver read: the decoder label recorded on the trade, the flow, and the
+/// parsed terms when the read was a calldata one (their columns land on the record). `None` when
+/// the solver declared nothing.
+type DeclaredRead = Option<(&'static str, SettledSwap, Option<SwapIntent>)>;
+
+/// Decode a transaction from the settling solver's own declaration.
 ///
 /// Only the settling solver is asked — the outermost known solver in the trace — so a record's
 /// amounts and its solver label always come from the same solver. A transaction that merely
 /// touches another solver's router somewhere is not read by that solver.
+///
+/// `Ok(None)` means the solver declared nothing and the caller should fall back to netting.
+/// `Err(veto)` means the solver declared the transaction is not a swap, which rules out netting
+/// too — the transaction is dropped.
 pub(crate) fn declared_flow(
     root: &CallFrame,
     registry: &Registry,
     logs: &[Log],
     transfer_ledger: &TransferLedger,
     sender: Address,
-) -> Option<(&'static str, TraderFlow, Option<SwapIntent>)> {
-    let solver_frame = trace::find_solver_frame(root, registry)?;
-    let solver = registry.solver(solver_frame.to?)?;
+) -> Result<DeclaredRead, Veto> {
+    let Some(solver_frame) = trace::find_solver_frame(root, registry) else { return Ok(None) };
+    let Some(solver) = solver_frame
+        .to
+        .and_then(|address| registry.solver(address))
+    else {
+        return Ok(None);
+    };
     match solver
         .decoder
         .declared(&solver_frame.input, logs, None)?
     {
+        None => Ok(None),
         // Stated outright in the solver's own logs: amounts included, nothing to recover.
-        Declaration::Settled(flow) => Some(("solver-logs", flow, None)),
-        Declaration::Terms(intent) => {
-            let flow = anchor_output(intent, transfer_ledger, sender)?;
-            Some(("solver-calldata", flow, Some(intent)))
-        }
+        Some(Declaration::Settled(flow)) => Ok(Some(("solver-logs", flow, None))),
+        Some(Declaration::Terms(intent)) => Ok(anchor_output(intent, transfer_ledger, sender)
+            .map(|flow| ("solver-calldata", flow, Some(intent)))),
     }
 }
 
@@ -63,7 +74,7 @@ fn anchor_output(
     intent: SwapIntent,
     transfer_ledger: &TransferLedger,
     sender: Address,
-) -> Option<TraderFlow> {
+) -> Option<SettledSwap> {
     let recipient = intent
         .output_recipient
         .unwrap_or(sender);
@@ -76,15 +87,13 @@ fn anchor_output(
             return None;
         }
     }
-    Some(TraderFlow::new(
-        sender,
-        NetSwap {
-            token_in: intent.token_in,
-            amount_in: intent.amount_in,
-            token_out: intent.token_out,
-            amount_out,
-        },
-    ))
+    Some(SettledSwap {
+        tracked: sender,
+        token_in: intent.token_in,
+        amount_in: intent.amount_in,
+        token_out: intent.token_out,
+        amount_out,
+    })
 }
 
 #[cfg(test)]
@@ -96,7 +105,7 @@ mod tests {
 
     /// Fly's own router — same address on every chain (`docs.fly.trade`).
     const FLY: Address = address!("0x20f6ee51340adeed01a59b0e65cb3703f3dc860c");
-    /// 0x's v4 exchange proxy — a registered solver with no `declared_swap` support.
+    /// 0x's v4 exchange proxy — a registered solver with no declared read.
     const ZEROX: Address = address!("0xdef1c0ded9bec7f1a1670819833240f027b25eff");
     /// Relay's own router — in the live fixture this is both the entry point and the
     /// declared output recipient Fly's calldata carries (Relay receives and forwards).
@@ -124,6 +133,54 @@ mod tests {
         root
     }
 
+    /// `LiFi`'s Diamond, and a bridge-shaped log emitted by it.
+    const LIFI: Address = address!("0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae");
+
+    fn bridge_log(emitter: Address) -> Log {
+        use alloy::sol_types::SolEvent;
+
+        let primitive = alloy::primitives::Log::new_unchecked(
+            emitter,
+            vec![solvers::lifi::LiFiTransferStarted::SIGNATURE_HASH],
+            alloy::primitives::Bytes::default(),
+        );
+        Log { inner: primitive, ..Default::default() }
+    }
+
+    #[test]
+    fn test_bridge_order_vetoes_the_whole_transaction() {
+        // LiFi is the settling solver and its log says the order bridged out: the veto reaches
+        // the caller, which drops the transaction instead of letting netting pair the input with
+        // the dust refund.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let root = root_with_solver_frame(sender, ROUTER, LIFI);
+        let ledger = TransferLedger::from_transaction(&[], &[]);
+
+        let logs = vec![bridge_log(LIFI)];
+        assert_eq!(
+            declared_flow(&root, &registry, &logs, &ledger, sender).err(),
+            Some(Veto::BridgeOrder)
+        );
+    }
+
+    #[test]
+    fn test_bridge_log_from_another_solvers_transaction_does_not_veto() {
+        // The same bridge-shaped log, but Fly settled this transaction. Only the settling solver
+        // is asked, so LiFi's veto cannot reach a trade that is not LiFi's.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let root = root_with_solver_frame(sender, ROUTER, FLY);
+        let logs = vec![bridge_log(LIFI)];
+        let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
+        let ledger = TransferLedger::from_transaction(&[], &native);
+
+        let (_, flow, _) = declared_flow(&root, &registry, &logs, &ledger, sender)
+            .unwrap()
+            .unwrap();
+        assert_eq!(flow.amount_in, U256::from(AMOUNT_IN));
+    }
+
     #[test]
     fn test_decode_recovers_output_from_recipient_receipt() {
         // The router — the declared recipient — receives native ETH above the floor; the
@@ -135,13 +192,15 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (_, flow, intent) = declared_flow(&root, &registry, &[], &ledger, sender).unwrap();
+        let (_, flow, intent) = declared_flow(&root, &registry, &[], &ledger, sender)
+            .unwrap()
+            .unwrap();
         let intent = intent.unwrap();
         assert_eq!(flow.tracked, sender);
-        assert_eq!(flow.swap.token_in, TOKEN_IN);
-        assert_eq!(flow.swap.token_out, Address::ZERO);
-        assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
-        assert_eq!(flow.swap.amount_out, U256::from(MIN_AMOUNT_OUT + 1_000));
+        assert_eq!(flow.token_in, TOKEN_IN);
+        assert_eq!(flow.token_out, Address::ZERO);
+        assert_eq!(flow.amount_in, U256::from(AMOUNT_IN));
+        assert_eq!(flow.amount_out, U256::from(MIN_AMOUNT_OUT + 1_000));
         assert_eq!(intent.min_amount_out, U256::from(MIN_AMOUNT_OUT));
     }
 
@@ -155,7 +214,9 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT - 1))];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &[], &ledger, sender).is_none());
+        assert!(declared_flow(&root, &registry, &[], &ledger, sender)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -165,7 +226,9 @@ mod tests {
         let root = root_with_solver_frame(sender, ROUTER, FLY);
         let ledger = TransferLedger::from_transaction(&[], &[]);
 
-        assert!(declared_flow(&root, &registry, &[], &ledger, sender).is_none());
+        assert!(declared_flow(&root, &registry, &[], &ledger, sender)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -176,13 +239,15 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &[], &ledger, sender).is_none());
+        assert!(declared_flow(&root, &registry, &[], &ledger, sender)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn test_decode_solver_without_declared_swap_declines() {
+    fn test_decode_solver_without_a_declared_read_declines() {
         // 0x's v4 proxy is a registered solver (matches `find_solver_frame`) but has no
-        // `declared_swap` implementation: the calldata path has nothing to recover, so it falls
+        // `declared` implementation: the calldata path has nothing to recover, so it falls
         // through to netting.
         let registry = Registry::ethereum();
         let sender = addr(1);
@@ -190,7 +255,9 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &[], &ledger, sender).is_none());
+        assert!(declared_flow(&root, &registry, &[], &ledger, sender)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -205,7 +272,9 @@ mod tests {
         let native = vec![(addr(50), ROUTER, implausible)];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &[], &ledger, sender).is_none());
+        assert!(declared_flow(&root, &registry, &[], &ledger, sender)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -220,9 +289,11 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (_, flow, _) = declared_flow(&root, &registry, &[], &ledger, sender).unwrap();
+        let (_, flow, _) = declared_flow(&root, &registry, &[], &ledger, sender)
+            .unwrap()
+            .unwrap();
         assert_eq!(flow.tracked, sender);
-        assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
+        assert_eq!(flow.amount_in, U256::from(AMOUNT_IN));
     }
 
     #[test]
@@ -239,8 +310,10 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (_, flow, _) = declared_flow(&root, &registry, &[], &ledger, sender).unwrap();
-        assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
+        let (_, flow, _) = declared_flow(&root, &registry, &[], &ledger, sender)
+            .unwrap()
+            .unwrap();
+        assert_eq!(flow.amount_in, U256::from(AMOUNT_IN));
     }
 
     #[test]
@@ -257,8 +330,10 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (_, flow, _) = declared_flow(&root, &registry, &[], &ledger, sender).unwrap();
-        assert_eq!(flow.swap.amount_in, U256::from(AMOUNT_IN));
-        assert_eq!(flow.swap.amount_out, U256::from(MIN_AMOUNT_OUT + 1_000));
+        let (_, flow, _) = declared_flow(&root, &registry, &[], &ledger, sender)
+            .unwrap()
+            .unwrap();
+        assert_eq!(flow.amount_in, U256::from(AMOUNT_IN));
+        assert_eq!(flow.amount_out, U256::from(MIN_AMOUNT_OUT + 1_000));
     }
 }

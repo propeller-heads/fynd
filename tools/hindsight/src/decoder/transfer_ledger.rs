@@ -49,10 +49,16 @@ pub(crate) fn to_primitive_log(log: &Log) -> PrimitiveLog {
     PrimitiveLog::new_unchecked(log.address(), log.topics().to_vec(), log.data().data.clone())
 }
 
-/// A netted swap: the single token (and amount) that left an address and the
-/// single token that came back. Native ETH is `Address::ZERO`.
+/// One address's trade: the single token (and amount) that left it and the single token that came
+/// back. Native ETH is `Address::ZERO`.
+///
+/// Every decode path produces one of these — netting by reading what moved, a declared read from
+/// the solver's own logs — and it is the shape the rest of the decoder works on. There is no
+/// separate "amounts without an owner" type: whose trade it is has to be known to record it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NetSwap {
+pub(crate) struct SettledSwap {
+    /// The address whose flow the trade was read from.
+    pub tracked: Address,
     pub token_in: Address,
     pub amount_in: U256,
     pub token_out: Address,
@@ -138,7 +144,7 @@ impl TransferLedger {
     /// tx `0xd01666df…` on Arbitrum fills 6,164 DAI → 3.2313 WETH to the order's receiver and
     /// pays the tracked trader 0.00009 WETH; the pair decoded as a $6k win. The output leg must
     /// therefore itself pass the residue proof — see `is_dust_output`.
-    pub(crate) fn net_swap(&self, tracked: Address) -> Option<NetSwap> {
+    pub(crate) fn net_swap(&self, tracked: Address) -> Option<SettledSwap> {
         let mut amounts_by_token: HashMap<Address, TokenAmounts> = HashMap::new();
         for &(token, from, to, value) in &self.transfers {
             let amounts = amounts_by_token
@@ -156,7 +162,7 @@ impl TransferLedger {
             }
         }
 
-        net_trade(&amounts_by_token)
+        net_trade(tracked, &amounts_by_token)
     }
 
     /// Every address that sent or received value, ordered for deterministic iteration.
@@ -224,7 +230,10 @@ impl TransferLedger {
 pub(crate) const RESIDUE_GROSS_RATIO: u64 = 100;
 
 /// Net the per-token amounts into a single swap (see `TransferLedger::net_swap`).
-fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwap> {
+fn net_trade(
+    tracked: Address,
+    amounts_by_token: &HashMap<Address, TokenAmounts>,
+) -> Option<SettledSwap> {
     let mut net_sent: HashMap<Address, U256> = HashMap::new();
     let mut net_received: HashMap<Address, U256> = HashMap::new();
 
@@ -263,7 +272,7 @@ fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwa
         );
         return None;
     }
-    Some(NetSwap { token_in, amount_in, token_out, amount_out })
+    Some(SettledSwap { tracked, token_in, amount_in, token_out, amount_out })
 }
 
 /// Whether the lone output leg is dust rather than the trade's output: one-directional,
@@ -344,7 +353,7 @@ mod tests {
         logs: &[Log],
         native: &[(Address, Address, U256)],
         tracked: Address,
-    ) -> Option<NetSwap> {
+    ) -> Option<SettledSwap> {
         TransferLedger::from_transaction(logs, native).net_swap(tracked)
     }
 

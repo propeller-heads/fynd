@@ -25,7 +25,10 @@ use alloy::{
     sol_types::SolCall,
 };
 
-use crate::decoder::solvers::{Declaration, SolverDecoder, SwapIntent};
+use crate::decoder::{
+    solvers::{Declaration, SolverDecoder, SwapIntent},
+    veto::Veto,
+};
 
 sol! {
     /// `IAllowanceHolder.exec` — Relay's 0x flow always enters through this wrapper before
@@ -115,12 +118,12 @@ impl SolverDecoder for ZeroEx {
         input: &[u8],
         _logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Option<Declaration> {
-        let call = execCall::abi_decode(input).ok()?;
+    ) -> Result<Option<Declaration>, Veto> {
+        let Ok(call) = execCall::abi_decode(input) else { return Ok(None) };
         if call.amount.is_zero() {
-            return None;
+            return Ok(None);
         }
-        let terms = decode_execute(&call.data)?;
+        let Some(terms) = decode_execute(&call.data) else { return Ok(None) };
         // Settler's `AllowedSlippage.recipient` — the address whose receipt anchors the settled
         // amount, same as Fly/KyberSwap.
         let intent = SwapIntent::new(
@@ -130,10 +133,10 @@ impl SolverDecoder for ZeroEx {
             terms.min_amount_out,
         )
         .with_recipient(terms.recipient);
-        Some(Declaration::Terms(match terms.declared_quote {
+        Ok(Some(Declaration::Terms(match terms.declared_quote {
             Some(quote) => intent.with_quote(quote, None),
             None => intent,
-        }))
+        })))
     }
 }
 
@@ -141,7 +144,11 @@ impl SolverDecoder for ZeroEx {
 mod tests {
     /// The terms this solver reads from `input`, for tests that only care about the calldata path.
     fn terms(input: &[u8], hint: Option<U256>) -> Option<SwapIntent> {
-        match ZeroEx.declared(input, &[], hint)? {
+        match ZeroEx
+            .declared(input, &[], hint)
+            .ok()
+            .flatten()?
+        {
             Declaration::Terms(intent) => Some(intent),
             Declaration::Settled(_) => None,
         }

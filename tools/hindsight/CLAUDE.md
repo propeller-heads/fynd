@@ -67,7 +67,7 @@ attribute. [README.md](README.md) holds the full pipeline diagram and the two-ti
 | `veto.rs` | The shared `Veto` type, plus post-decode vetoes of non-comparable shapes (NFT purchases, mis-paired wrap trades, fee-on-transfer skims) |
 | `registry.rs` | Per-chain address book, loaded from TOML; joins each solver to its `SolverDecoder` at load |
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |
-| `solvers/` | One `SolverDecoder` per solver with code: declared swaps (`fly.rs` packed calldata, `kyberswap.rs` ABI `swap` params, `zeroex.rs` `AllowanceHolder.exec`/`Settler.execute`), vetoes and integrator tags (`lifi.rs`), and `cow.rs`'s `Trade`-log read for batch settlements |
+| `solvers/` | One `SolverDecoder` per solver with code: declared swaps from calldata (`fly.rs` packed, `kyberswap.rs` ABI `swap` params, `zeroex.rs` `AllowanceHolder.exec`/`Settler.execute`, `oneinch.rs` v6 `swap`) or from logs (`okx.rs` `OrderRecord`, `cow.rs` `Trade`), plus `lifi.rs`'s bridge veto and integrator tag |
 | `trace.rs` | Whole-block trace fetching (`debug_traceBlockByNumber`) and frame walks |
 
 `src/verify/` contains the Allium integration:
@@ -208,10 +208,10 @@ It surfaces three ways:
 
 - **Solver** (a router Fynd competes with): one line in the address book's `[solvers]` section
   covers matching, attribution, and metric labels. To make its trades declared (trusted) instead
-  of netted: a `SolverDecoder` impl in `solvers/` with a `declared_swap` method, registered as one
-  row in `solvers::IMPLEMENTATIONS`. One parse fills the whole `SwapIntent`, including the output
-  recipient when the calldata declares one. Add a `veto` method if some of its orders are not
-  same-chain swaps.
+  of netted: a `SolverDecoder` impl in `solvers/` with a `declared` method, registered as one row
+  in `solvers::IMPLEMENTATIONS`. One parse fills the whole `SwapIntent`, including the output
+  recipient when the calldata declares one. Return `Err(Veto)` from the same method if some of its
+  orders are not same-chain swaps.
 - **Venue** (a platform users enter through): a `[venues.<name>]` address-book section — its
   entry points. No code. A venue with no entry point of its own is identified by its fee wallet
   (`[venue_fees]`) instead.

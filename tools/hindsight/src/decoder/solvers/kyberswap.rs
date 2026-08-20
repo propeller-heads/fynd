@@ -16,7 +16,10 @@ use alloy::{
     sol_types::SolCall,
 };
 
-use crate::decoder::solvers::{Declaration, SolverDecoder, SwapIntent};
+use crate::decoder::{
+    solvers::{Declaration, SolverDecoder, SwapIntent},
+    veto::Veto,
+};
 
 /// `KyberSwap` represents native ETH with this sentinel address rather than the zero address —
 /// hindsight's convention — so it is normalized on the way out.
@@ -114,11 +117,11 @@ impl SolverDecoder for Kyberswap {
         input: &[u8],
         _logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Option<Declaration> {
-        let call = swapCall::abi_decode(input).ok()?;
+    ) -> Result<Option<Declaration>, Veto> {
+        let Ok(call) = swapCall::abi_decode(input) else { return Ok(None) };
         let desc = call.execution.desc;
         if desc.amount.is_zero() || desc.minReturnAmount.is_zero() {
-            return None;
+            return Ok(None);
         }
         // `dstReceiver` — KyberSwap passes this straight down to the inner pool, which pays it
         // directly; the router itself never touches the output.
@@ -129,10 +132,10 @@ impl SolverDecoder for Kyberswap {
             desc.minReturnAmount,
         )
         .with_recipient(desc.dstReceiver);
-        Some(Declaration::Terms(match declared_quote(input) {
+        Ok(Some(Declaration::Terms(match declared_quote(input) {
             Some((amount_out, timestamp)) => intent.with_quote(amount_out, timestamp),
             None => intent,
-        }))
+        })))
     }
 }
 
@@ -142,7 +145,11 @@ mod tests {
 
     /// The terms this solver reads from `input`, for tests that only care about the calldata path.
     fn terms(input: &[u8], hint: Option<U256>) -> Option<SwapIntent> {
-        match Kyberswap.declared(input, &[], hint)? {
+        match Kyberswap
+            .declared(input, &[], hint)
+            .ok()
+            .flatten()?
+        {
             Declaration::Terms(intent) => Some(intent),
             Declaration::Settled(_) => None,
         }
@@ -241,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn test_declared_swap_round_trip() {
+    fn test_declared_round_trip() {
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
         let intent = terms(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, ""), None).unwrap();
@@ -263,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn test_declared_swap_with_declared_quote() {
+    fn test_declared_with_declared_quote() {
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
         let intent = terms(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, BLOB), None).unwrap();
@@ -273,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn test_declared_swap_malformed_quote_does_not_fail_the_intent() {
+    fn test_declared_malformed_quote_does_not_fail_the_intent() {
         // clientData present but missing AmountOut: the ABI-decoded terms are still recovered,
         // the quote is just absent.
         let src = Address::repeat_byte(0x11);
@@ -286,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn test_declared_swap_normalizes_native_eth() {
+    fn test_declared_normalizes_native_eth() {
         let intent = terms(
             &swap_calldata_with_terms(KYBERSWAP_NATIVE, Address::repeat_byte(0x22), 1_000, 900, ""),
             None,
@@ -297,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn test_declared_swap_zero_amounts_rejected() {
+    fn test_declared_zero_amounts_rejected() {
         let a = Address::repeat_byte(0x11);
         let b = Address::repeat_byte(0x22);
         assert!(terms(&swap_calldata_with_terms(a, b, 0, 900, ""), None).is_none());
@@ -305,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn test_declared_swap_garbage_input() {
+    fn test_declared_garbage_input() {
         assert!(terms(&[], None).is_none());
         assert!(terms(&[0xde, 0xad, 0xbe, 0xef], None).is_none());
         // A well-formed but unrelated call (KyberSwap's own clientData blob calldata) must not

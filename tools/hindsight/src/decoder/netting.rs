@@ -19,21 +19,8 @@ use tracing::warn;
 
 use crate::decoder::{
     registry::Registry,
-    transfer_ledger::{NetSwap, TransferLedger},
+    transfer_ledger::{SettledSwap, TransferLedger},
 };
-
-/// The trader's side of a matched transaction.
-pub(crate) struct TraderFlow {
-    /// The address whose flow the swap was read from.
-    pub tracked: Address,
-    pub swap: NetSwap,
-}
-
-impl TraderFlow {
-    pub(crate) fn new(tracked: Address, swap: NetSwap) -> Self {
-        Self { tracked, swap }
-    }
-}
 
 /// Net the trade the declared decode could not read, picking whose balances count as the trade
 /// from the entry point:
@@ -50,7 +37,7 @@ pub(crate) async fn fallback_flow<P: Provider>(
     transfer_ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
-) -> Option<(&'static str, TraderFlow)> {
+) -> Option<(&'static str, SettledSwap)> {
     if registry
         .venue_name(entry_point)
         .is_some()
@@ -81,15 +68,10 @@ pub(crate) fn sender_flow(
     transfer_ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
-) -> Option<TraderFlow> {
+) -> Option<SettledSwap> {
     transfer_ledger
         .net_swap(sender)
-        .map(|swap| TraderFlow::new(sender, swap))
-        .or_else(|| {
-            transfer_ledger
-                .net_swap(entry_point)
-                .map(|swap| TraderFlow::new(entry_point, swap))
-        })
+        .or_else(|| transfer_ledger.net_swap(entry_point))
 }
 
 /// Find the order swapper's trade in a solver-initiated intent fill.
@@ -117,10 +99,10 @@ pub(crate) async fn find_intent_trade<P: Provider>(
     exclude: &[Address],
     registry: &Registry,
     code_cache: &mut HashMap<Address, bool>,
-) -> Option<TraderFlow> {
-    for (candidate, trade) in intent_candidates(transfer_ledger, exclude, registry) {
-        if !is_contract(provider, candidate, code_cache).await {
-            return Some(TraderFlow::new(candidate, trade));
+) -> Option<SettledSwap> {
+    for flow in intent_candidates(transfer_ledger, exclude, registry) {
+        if !is_contract(provider, flow.tracked, code_cache).await {
+            return Some(flow);
         }
     }
     None
@@ -133,18 +115,18 @@ fn intent_candidates(
     transfer_ledger: &TransferLedger,
     exclude: &[Address],
     registry: &Registry,
-) -> Vec<(Address, NetSwap)> {
+) -> Vec<SettledSwap> {
     let mut candidates = transfer_ledger.participants();
     candidates.remove(&Address::ZERO);
     candidates.retain(|address| !exclude.contains(address) && !registry.is_known(*address));
 
-    let mut swaps = Vec::new();
+    let mut flows = Vec::new();
     for candidate in candidates {
-        if let Some(trade) = transfer_ledger.net_swap(candidate) {
-            swaps.push((candidate, trade));
+        if let Some(flow) = transfer_ledger.net_swap(candidate) {
+            flows.push(flow);
         }
     }
-    swaps
+    flows
 }
 
 /// Whether an address has contract code, cached across blocks. On RPC failure
@@ -235,8 +217,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(decoder, "venue-netting");
-        assert_eq!(flow.tracked, user);
-        assert_eq!(flow.swap, swap(token_in, 1000, token_out, 2000));
+        assert_eq!(flow, SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 2000) });
     }
 
     #[tokio::test]
@@ -260,8 +241,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(decoder, "sender-netting");
-        assert_eq!(flow.tracked, user);
-        assert_eq!(flow.swap, swap(addr(10), 1000, addr(11), 2000));
+        assert_eq!(flow, SettledSwap { tracked: user, ..swap(addr(10), 1000, addr(11), 2000) });
     }
 
     #[tokio::test]
@@ -297,8 +277,10 @@ mod tests {
         let flow = find_intent_trade(&provider, &inverse_swap_ledger(), &[], &registry, &mut cache)
             .await
             .unwrap();
-        assert_eq!(flow.tracked, addr(100));
-        assert_eq!(flow.swap, swap(addr(10), 1000, addr(11), 2000));
+        assert_eq!(
+            flow,
+            SettledSwap { tracked: addr(100), ..swap(addr(10), 1000, addr(11), 2000) }
+        );
     }
 
     #[tokio::test]
@@ -336,11 +318,18 @@ mod tests {
 
         let found: HashMap<Address, _> = intent_candidates(&transfer_ledger, &[solver], &registry)
             .into_iter()
+            .map(|flow| (flow.tracked, flow))
             .collect();
         assert_eq!(found.len(), 2);
-        assert_eq!(found[&swapper], swap(token_a, 1000, token_b, 2000));
+        assert_eq!(
+            found[&swapper],
+            SettledSwap { tracked: swapper, ..swap(token_a, 1000, token_b, 2000) }
+        );
         // The pool nets the inverse swap; the EOA filter discards it later.
-        assert_eq!(found[&pool], swap(token_b, 2000, token_a, 1000));
+        assert_eq!(
+            found[&pool],
+            SettledSwap { tracked: pool, ..swap(token_b, 2000, token_a, 1000) }
+        );
     }
 
     #[test]
@@ -360,6 +349,6 @@ mod tests {
         // Excluding the swapper leaves only the pool.
         let candidates = intent_candidates(&transfer_ledger, &[swapper], &registry);
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].0, pool);
+        assert_eq!(candidates[0].tracked, pool);
     }
 }
