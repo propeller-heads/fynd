@@ -16,6 +16,10 @@ env:
 jobs:
   build:
     name: Build Docker image (${{ matrix.platform }})
+    # release-plz PRs only bump versions and changelogs; the code in them was already
+    # image-built on the PRs that introduced it, and merging one immediately fires the
+    # release event that rebuilds the same source. Skip the redundant PR-side build.
+    if: github.event_name == 'release' || !contains(github.event.pull_request.labels.*.name, 'release')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
