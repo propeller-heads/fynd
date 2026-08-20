@@ -22,8 +22,8 @@ pub struct PricesQuery {
     /// Valid values: `depths`, `spot_prices`.
     #[param(example = "depths,spot_prices")]
     pub include: Option<String>,
-    /// Maximum number of spot_prices and component_depths entries (default: 1000).
-    #[param(example = 1000)]
+    /// Maximum number of spot_prices and component_depths entries (default and maximum: 1000).
+    #[param(maximum = 1000, example = 1000)]
     pub limit: Option<usize>,
 }
 
