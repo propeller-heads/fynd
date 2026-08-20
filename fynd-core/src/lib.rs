@@ -40,6 +40,8 @@ pub mod price_guard;
 pub mod propamm_fallback;
 /// Re-execute an already-built route against a (possibly newer) market state.
 pub mod replay;
+/// `eth_call` plumbing shared by the tasks that read contract state.
+mod rpc;
 /// [`FyndBuilder`](solver::FyndBuilder) assembles the full pipeline and returns a
 /// [`Solver`](solver::Solver).
 pub mod solver;
