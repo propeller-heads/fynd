@@ -20,7 +20,7 @@ use alloy::{
 use serde::Serialize;
 
 use crate::decoder::{
-    netting::TraderFlow, registry::Registry, trace, transfer_ledger::TransferLedger,
+    netting::TraderFlow, registry::Registry, solvers, trace, transfer_ledger::TransferLedger,
 };
 
 /// The evidence tier that produced a record's solver label, most- to least-trusted.
@@ -87,9 +87,14 @@ sol! {
     function swap(string aggregatorId, address tokenFrom, uint256 amount, bytes data);
 }
 
+/// The address-book venue whose router the `swap` call above belongs to. The read is gated on it
+/// because a declared solver outranks every trace tier: another venue's router sharing the
+/// selector would otherwise override a correct trace attribution.
+const DECLARING_VENUE: &str = "metamask";
+
 /// The solver the venue's entry calldata declares, normalized to the address book's solver names
-/// via the venue's `solver_aliases` section. `None` when the entry point is not a venue that
-/// declares its solver, or the calldata is not the declaring call.
+/// (see `solvers::normalize_declared_name`). `None` when the entry point is not the declaring
+/// venue's router, or its calldata is not the declaring call.
 ///
 /// `MetaMask` states which solver API it routed through (e.g. "oneInchV6FeeDynamic",
 /// "uniswapPermit2FeeDynamic"). Trace attribution often cannot resolve these — a token→token
@@ -100,12 +105,11 @@ pub(crate) fn venue_declared_solver(
     entry_point: Address,
     input: &[u8],
 ) -> Option<String> {
-    let venue = registry
-        .venue_name(entry_point)
-        .and_then(|name| registry.venue(name))
-        .filter(|venue| venue.declares_solver())?;
+    if registry.venue_name(entry_point) != Some(DECLARING_VENUE) {
+        return None;
+    }
     let call = swapCall::abi_decode(input).ok()?;
-    Some(venue.normalize_solver(&call.aggregatorId))
+    Some(solvers::normalize_declared_name(&call.aggregatorId))
 }
 
 /// The order-flow venue for a decoded flow, when a fingerprint matches — overriding the
@@ -383,7 +387,7 @@ mod tests {
         // Another selector on the declaring venue: no declaration.
         assert_eq!(venue_declared_solver(&registry, router, &[0xde, 0xad, 0xbe, 0xef, 0x00]), None);
         assert_eq!(venue_declared_solver(&registry, router, &[]), None);
-        // A venue with no solver aliases (Relay) never declares, even with matching calldata.
+        // Another venue's router (Relay) never declares, even with matching calldata.
         let relay = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
         let call = swapCall {
             aggregatorId: "oneInchV6FeeDynamic".to_string(),
