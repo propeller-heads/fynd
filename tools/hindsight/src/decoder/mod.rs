@@ -298,9 +298,7 @@ impl<P: Provider> Decoder<P> {
         )
         .unwrap_or_else(|| registry.label(entry_point));
 
-        let declared_solver =
-            attribution::venue_declared_solver(registry, entry_point, &root.input);
-        let attribution = attribution::solver(declared_solver, root, entry_point, sender, registry);
+        let attribution = attribution::solver(root, entry_point, sender, registry);
 
         let (min_amount_out, declared_quote, quote_timestamp) = declared_terms(declared.as_ref());
         let decode = if declared.is_some() { "declared" } else { "netted" };

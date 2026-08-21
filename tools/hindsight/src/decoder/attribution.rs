@@ -14,14 +14,12 @@ use std::collections::HashSet;
 use alloy::{
     primitives::{Address, B256, U256},
     rpc::types::trace::geth::CallFrame,
-    sol,
-    sol_types::SolCall,
 };
 use serde::Serialize;
 
 use crate::decoder::{
     registry::Registry,
-    solvers, trace,
+    trace,
     transfer_ledger::{SettledSwap, TransferLedger},
 };
 
@@ -29,8 +27,6 @@ use crate::decoder::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AttributionSource {
-    /// The venue's entry calldata names the solver (`MetaMask`'s `aggregatorId`).
-    Declared,
     /// The entry point (`tx.to`) is itself a known solver router: the trade settled there.
     EntryPoint,
     /// A known solver router was called inside the trace (venue-wrapped entries).
@@ -52,19 +48,15 @@ pub(crate) struct Attribution {
 
 /// Attribute the solver that settled a matched transaction.
 ///
-/// `declared` is the venue calldata's own claim (see `venue_declared_solver`), which outranks
-/// everything; the remaining tiers read the trace, ending at the entry-point label as the honest
-/// "don't know".
+/// Every tier reads the trace or the address book, ending at the entry-point label as the honest
+/// "don't know". A venue's own claim about which solver it routed to is not consulted: the router
+/// that settled the trade is in the trace, which is the harder fact.
 pub(crate) fn solver(
-    declared: Option<String>,
     root: &CallFrame,
     entry_point: Address,
     sender: Address,
     registry: &Registry,
 ) -> Attribution {
-    if let Some(solver) = declared {
-        return Attribution { solver, source: AttributionSource::Declared };
-    }
     if registry.is_solver(entry_point) {
         return Attribution {
             solver: registry.label(entry_point),
@@ -81,37 +73,6 @@ pub(crate) fn solver(
         };
     }
     Attribution { solver: registry.label(entry_point), source: AttributionSource::Fallback }
-}
-
-sol! {
-    /// The `MetaMask` Swap Router entry point (selector `0x5f575529`): `aggregatorId` names the
-    /// solver API that produced the route.
-    function swap(string aggregatorId, address tokenFrom, uint256 amount, bytes data);
-}
-
-/// The address-book venue whose router the `swap` call above belongs to. The read is gated on it
-/// because a declared solver outranks every trace tier: another venue's router sharing the
-/// selector would otherwise override a correct trace attribution.
-const DECLARING_VENUE: &str = "metamask";
-
-/// The solver the venue's entry calldata declares, normalized to the address book's solver names
-/// (see `solvers::normalize_declared_name`). `None` when the entry point is not the declaring
-/// venue's router, or its calldata is not the declaring call.
-///
-/// `MetaMask` states which solver API it routed through (e.g. "oneInchV6FeeDynamic",
-/// "uniswapPermit2FeeDynamic"). Trace attribution often cannot resolve these — a token→token
-/// route moves no native value and enters through Permit2 — so the calldata declaration is the
-/// authoritative source.
-pub(crate) fn venue_declared_solver(
-    registry: &Registry,
-    entry_point: Address,
-    input: &[u8],
-) -> Option<String> {
-    if registry.venue_name(entry_point) != Some(DECLARING_VENUE) {
-        return None;
-    }
-    let call = swapCall::abi_decode(input).ok()?;
-    Some(solvers::normalize_declared_name(&call.aggregatorId))
 }
 
 /// The order-flow venue for a decoded flow, when a fingerprint matches — overriding the
@@ -194,24 +155,24 @@ fn fee_venue(
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{address, b256, Bytes};
+    use alloy::primitives::{address, b256};
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::*;
     use crate::decoder::test_utils::{addr, frame, make_transfer_log, swap, PERMIT2};
 
     #[test]
-    fn test_declared_solver_with_trace_candidate() {
-        // MetaMask declares its solver in calldata; even a known router in the trace must not
-        // override it.
+    fn test_venue_wrapped_entry_reads_the_trace() {
+        // A venue-wrapped entry: the router that settled the trade is inside the trace, and that
+        // is what the record is labelled with — no venue's own claim is consulted.
         let registry = Registry::ethereum();
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
         let mut root = frame("CALL", addr(1), addr(2), 0);
         root.calls = vec![frame("CALL", addr(2), oneinch, 1000)];
 
-        let attribution = solver(Some("uniswap".to_string()), &root, addr(2), addr(1), &registry);
-        assert_eq!(attribution.solver, "uniswap");
-        assert_eq!(attribution.source, AttributionSource::Declared);
+        let attribution = solver(&root, addr(2), addr(1), &registry);
+        assert_eq!(attribution.solver, "1inch");
+        assert_eq!(attribution.source, AttributionSource::TraceMatch);
     }
 
     #[test]
@@ -220,7 +181,7 @@ mod tests {
         let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
         let root = frame("CALL", addr(1), oneinch, 0);
 
-        let attribution = solver(None, &root, oneinch, addr(1), &registry);
+        let attribution = solver(&root, oneinch, addr(1), &registry);
         assert_eq!(attribution.solver, "1inch");
         assert_eq!(attribution.source, AttributionSource::EntryPoint);
     }
@@ -237,7 +198,7 @@ mod tests {
         let mut root = frame("CALL", sender, relay, 0);
         root.calls = vec![frame("CALL", relay, relay, 0), frame("CALL", relay, zerox, 1000)];
 
-        let attribution = solver(None, &root, relay, sender, &registry);
+        let attribution = solver(&root, relay, sender, &registry);
         assert_eq!(attribution.solver, "0x");
         assert_eq!(attribution.source, AttributionSource::TraceMatch);
     }
@@ -257,7 +218,7 @@ mod tests {
         let mut root = frame("CALL", sender, relay_proxy, 0);
         root.calls = vec![router_call];
 
-        let attribution = solver(None, &root, relay_proxy, sender, &registry);
+        let attribution = solver(&root, relay_proxy, sender, &registry);
         assert_eq!(attribution.solver, "tycho");
         assert_eq!(attribution.source, AttributionSource::TraceMatch);
     }
@@ -279,7 +240,7 @@ mod tests {
             frame("CALL", client, unknown_router, 5000), // largest external call
         ];
 
-        let attribution = solver(None, &root, client, sender, &registry);
+        let attribution = solver(&root, client, sender, &registry);
         assert_eq!(attribution.solver, unknown_router.to_string());
         assert_eq!(attribution.source, AttributionSource::LargestCall);
     }
@@ -299,7 +260,7 @@ mod tests {
             frame("CALL", client, addr(50), 0), // unknown solver, zero value
         ];
 
-        let attribution = solver(None, &root, client, sender, &registry);
+        let attribution = solver(&root, client, sender, &registry);
         assert_eq!(attribution.solver, client.to_string());
         assert_eq!(attribution.source, AttributionSource::Fallback);
     }
@@ -320,7 +281,7 @@ mod tests {
             frame("CALL", client, unknown, 100),
         ];
 
-        let attribution = solver(None, &root, client, sender, &registry);
+        let attribution = solver(&root, client, sender, &registry);
         assert_eq!(attribution.solver, unknown.to_string());
         assert_eq!(attribution.source, AttributionSource::LargestCall);
     }
@@ -337,60 +298,9 @@ mod tests {
         root.calls =
             vec![frame("CALL", client, PERMIT2, 9000), frame("CALL", client, unknown, 100)];
 
-        let attribution = solver(None, &root, client, sender, &registry);
+        let attribution = solver(&root, client, sender, &registry);
         assert_eq!(attribution.solver, unknown.to_string());
         assert_eq!(attribution.source, AttributionSource::LargestCall);
-    }
-
-    fn metamask_router(registry: &Registry) -> Address {
-        *registry
-            .venue("metamask")
-            .unwrap()
-            .entry_points
-            .iter()
-            .next()
-            .unwrap()
-    }
-
-    #[test]
-    fn test_venue_declared_solver_known_ids() {
-        let registry = Registry::ethereum();
-        let router = metamask_router(&registry);
-        for (id, want) in [
-            ("oneInchV6FeeDynamic", "1inch"),
-            ("uniswapPermit2FeeDynamic", "uniswap"),
-            ("okx6", "okx"),
-            ("someFutureSolver", "someFutureSolver"),
-        ] {
-            let call = swapCall {
-                aggregatorId: id.to_string(),
-                tokenFrom: addr(10),
-                amount: U256::from(1000),
-                data: Bytes::default(),
-            };
-            assert_eq!(
-                venue_declared_solver(&registry, router, &call.abi_encode()).as_deref(),
-                Some(want)
-            );
-        }
-    }
-
-    #[test]
-    fn test_venue_declared_solver_other_selectors_and_venues() {
-        let registry = Registry::ethereum();
-        let router = metamask_router(&registry);
-        // Another selector on the declaring venue: no declaration.
-        assert_eq!(venue_declared_solver(&registry, router, &[0xde, 0xad, 0xbe, 0xef, 0x00]), None);
-        assert_eq!(venue_declared_solver(&registry, router, &[]), None);
-        // Another venue's router (Relay) never declares, even with matching calldata.
-        let relay = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
-        let call = swapCall {
-            aggregatorId: "oneInchV6FeeDynamic".to_string(),
-            tokenFrom: addr(10),
-            amount: U256::from(1000),
-            data: Bytes::default(),
-        };
-        assert_eq!(venue_declared_solver(&registry, relay, &call.abi_encode()), None);
     }
 
     #[test]
