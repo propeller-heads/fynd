@@ -141,6 +141,12 @@ beats the committed amount and records the difference as `SurplusInfo`
 (`OrderQuote::surplus_amount()`, `committed_amount_out()`, `Swap::committed_amount_out()`). All are
 `#[serde(skip)]` — internal, not on the wire.
 
+Two gauges report what the overlay is worth, in whole gas tokens: `exclusive_fee_amount` (LP fee
+capture) and `exclusive_user_savings_amount` (user improvement over the public reference).
+`to_gas_token_amount` converts without a price lookup — the quote states its gas cost both in wei
+(`gas_estimate * gas_price`) and in output-token units (`amount_out - amount_out_net_gas`), so that
+pair is the rate. An unpriced output token increments `exclusive_unpriced_output_total` instead.
+
 Enable by setting the scope per pool via `PoolConfig::with_liquidity_scope()` or
 `liquidity_scope = "include_exclusive"` in `worker_pools.toml`. A deployment where every pool sets it
 fails the build (`SolverBuildError::NoPublicPool`) — there would be no pool left to establish the
