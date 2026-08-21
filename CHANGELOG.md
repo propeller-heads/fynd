@@ -1,4 +1,16 @@
 
+## [0.99.12](https://github.com/propeller-heads/fynd/compare/0.99.11...0.99.12) (2026-08-21)
+
+### Features
+
+* add configurable calldata watermark ([7232c0c](https://github.com/propeller-heads/fynd/commit/7232c0ca6ce92d63b4ef66f4a8cf5b1b3499e29b))
+* count exclusive candidates dropped for invalid route shape ([dd16584](https://github.com/propeller-heads/fynd/commit/dd16584c41710f338245a4cf483e3c85df2b43be))
+
+### Bug Fixes
+
+* **api:** bound experimental list query limits ([521dd3c](https://github.com/propeller-heads/fynd/commit/521dd3c179af1f82401cd8ce50fc054ed927babb))
+
+
 ## [0.99.11](https://github.com/propeller-heads/fynd/compare/0.99.10...0.99.11) (2026-08-20)
 
 ### Features
