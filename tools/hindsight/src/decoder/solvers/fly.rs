@@ -103,12 +103,7 @@ impl SolverDecoder for Fly {
     /// carry Fly's packed layout (e.g. it is `None` when `input` is the outer Relay wrapper, not
     /// Fly's own frame); the hint is unused — Fly's fields sit at fixed offsets, not located by
     /// value.
-    fn declared(
-        &self,
-        input: &[u8],
-        _logs: &[Log],
-        _amount_in_hint: Option<U256>,
-    ) -> Result<Option<DeclaredSwap>, Veto> {
+    fn declared(&self, input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         let Some(data) = parse(input) else { return Ok(None) };
         if data.amount_in.is_zero() || data.amount_out_min.is_zero() {
             return Ok(None);
@@ -134,10 +129,8 @@ impl SolverDecoder for Fly {
 #[cfg(test)]
 mod tests {
     /// The terms this solver reads from `input`, for tests that only care about the calldata path.
-    fn terms(input: &[u8], hint: Option<U256>) -> Option<DeclaredSwap> {
-        Fly.declared(input, &[], hint)
-            .ok()
-            .flatten()
+    fn terms(input: &[u8]) -> Option<DeclaredSwap> {
+        Fly.declared(input, &[]).ok().flatten()
     }
 
     use alloy::primitives::address;
@@ -154,7 +147,7 @@ mod tests {
 
     #[test]
     fn test_real_fixture_declared_swap() {
-        let intent = terms(&real_input(), None).unwrap();
+        let intent = terms(&real_input()).unwrap();
         assert_eq!(intent.token_in, address!("0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"));
         assert_eq!(intent.token_out, Address::ZERO);
         assert_eq!(intent.amount_in, U256::from(19_694_643u64));
@@ -165,7 +158,7 @@ mod tests {
     #[test]
     fn test_real_fixture_output_recipient() {
         // Relay's own router — the delivery address, not the trader (see `parse`).
-        let intent = terms(&real_input(), None).unwrap();
+        let intent = terms(&real_input()).unwrap();
         assert_eq!(
             intent.output_recipient,
             Some(address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"))
@@ -176,21 +169,21 @@ mod tests {
     fn test_wrong_selector() {
         let mut input = real_input();
         input[0] = 0xff;
-        assert!(terms(&input, None).is_none());
+        assert!(terms(&input).is_none());
     }
 
     #[test]
     fn test_truncated_input() {
         let full = real_input();
         // Cut before the fixed-offset fields are readable at all.
-        assert!(terms(&full[..100], None).is_none());
+        assert!(terms(&full[..100]).is_none());
         // Cut inside the packed-header pointer's target word.
-        assert!(terms(&full[..300], None).is_none());
+        assert!(terms(&full[..300]).is_none());
     }
 
     #[test]
     fn test_empty_input() {
-        assert!(terms(&[], None).is_none());
+        assert!(terms(&[]).is_none());
     }
 
     #[test]
@@ -198,7 +191,7 @@ mod tests {
         let mut input = real_input();
         // Zero out the word the amountOutMin pointer resolves to (ptr 281 in this fixture).
         input[281..313].fill(0);
-        assert!(terms(&input, None).is_none());
+        assert!(terms(&input).is_none());
     }
 
     #[test]
@@ -211,6 +204,6 @@ mod tests {
         // fixture (ptrs 281 and 289), so filling the word instead would corrupt both readings
         // identically and leave them equal, not violate the check.
         input[AMOUNT_OUT_MIN_HEADER] = 0;
-        assert!(terms(&input, None).is_none());
+        assert!(terms(&input).is_none());
     }
 }

@@ -48,7 +48,7 @@ pub(crate) fn declared_flow(
     };
     let Some(declared) = solver
         .decoder
-        .declared(&solver_frame.input, logs, None)?
+        .declared(&solver_frame.input, logs)?
     else {
         return Ok(None);
     };
