@@ -380,7 +380,7 @@ mod tests {
             record_worth(2, "win", 9000.0, Some(0.5)),
         ];
         let groups = group_stats(&records, |r| &r.venue);
-        assert_eq!(groups[0].median_net_bps, Some(10.0));
+        assert_eq!(groups[0].median_bps, Some(10.0));
         // The verdict counts still describe every trade in the group.
         assert_eq!(groups[0].count, 2);
         assert_eq!(groups[0].wins, 2);
