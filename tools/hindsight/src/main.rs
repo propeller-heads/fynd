@@ -1,3 +1,4 @@
+mod decay;
 mod decoder;
 mod report;
 mod resolve;
@@ -16,6 +17,7 @@ use tracing_subscriber::EnvFilter;
 use tycho_simulation::tycho_common::models::Chain;
 
 use crate::{
+    decay::DecayArgs,
     decoder::{DecodedTrade, Decoder, Registry},
     report::ReportArgs,
     resolve::monitor::MonitorArgs,
@@ -38,6 +40,9 @@ enum Command {
     /// Live monitor: drive an in-process solver block-by-block, re-solving each block's settled
     /// trades at top-of-block (N-1) and back-of-block (N).
     Monitor(MonitorArgs),
+    /// Measure route decay: quote a sample of trade shapes, then replay those routes at each of
+    /// the next few blocks, splitting the move into market drift and stale-route loss.
+    Decay(DecayArgs),
     /// Render an offline HTML report from a monitor run's comparison JSONL.
     Report(ReportArgs),
 }
@@ -159,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Decode(args) => run_decode(args).await,
         Command::Verify(args) => run_verify(args).await,
         Command::Monitor(args) => resolve::monitor::run(args).await,
+        Command::Decay(args) => decay::run(args).await,
         Command::Report(args) => report::run(args),
     };
 

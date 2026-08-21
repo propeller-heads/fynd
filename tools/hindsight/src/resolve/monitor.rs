@@ -9,47 +9,25 @@
 //! parent module via a mock `SteppingSolver`; this live driver is exercised by the gated
 //! integration test in `tests/` (requires `TYCHO_URL` + `RPC_URL`).
 
-use std::{
-    future::Future,
-    pin::Pin,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-use alloy::{
-    primitives::{Address, U256},
-    providers::Provider,
-};
-use async_trait::async_trait;
-use fynd_core::{
-    types::{
-        EncodingOptions, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, QuoteStatus,
-    },
-    BlockStepController, FyndBuilder, Solver,
-};
-use num_bigint::BigUint;
+use alloy::{primitives::Address, providers::Provider};
+use fynd_core::Solver;
 use tracing::{debug, info, warn};
 use tycho_simulation::tycho_common::models::{Address as CoreAddress, Chain};
 
 use crate::{
     decoder::{DecodedTrade, Decoder, Registry},
     provider_from,
-    resolve::{resolve_block_range, Outcome, SolvedAmount, SteppingSolver},
+    resolve::{
+        resolve_block_range,
+        session::{self, Session, SolverArgs},
+        step::{Encoding, StepAdapter},
+        SteppingSolver,
+    },
     telemetry,
     usd::Prices,
 };
-
-/// How often to warn while the solver has not applied the next block.
-const STALL_WARN_INTERVAL: Duration = Duration::from_mins(5);
-/// No block for this long means the feed is dead, not slow. The observed failure mode: one
-/// server-side subscription goes silent, tycho-client's block synchronizer stops emitting while
-/// it waits for it, and ~35 minutes later backpressure kills the remaining subscriptions
-/// ("Buffer full, unsubscribing!"). Nothing resubscribes, so the stream never recovers — the
-/// monitor rebuilds the solver instead of waiting.
-const FEED_DEAD_TIMEOUT: Duration = Duration::from_mins(15);
-/// Pause between solver rebuild attempts after a feed death, so a struggling Tycho server is not
-/// hammered in a tight loop.
-const REBUILD_BACKOFF: Duration = Duration::from_secs(30);
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How far the receipts RPC may trail the Tycho stream before the monitor decodes the target block
 /// anyway. In blocks, not seconds, because an RPC node trails by blocks.
@@ -58,62 +36,12 @@ const DECODE_RPC_LAG_BUDGET_BLOCKS: u32 = 3;
 /// monitor only idles until the block lands, and `eth_blockNumber` is cheap.
 const DECODE_RPC_LAG_POLL: Duration = Duration::from_millis(250);
 
-/// Wall-clock budget behind chain head that `default_lag_blocks` converts into a block count.
-const LAG_BUDGET_SECS: u64 = 20 * 60;
-
 /// Inputs for the live monitor — the `monitor` subcommand's CLI arguments, used directly as its
 /// configuration.
 #[derive(clap::Args)]
 pub(crate) struct MonitorArgs {
     #[command(flatten)]
-    pub chain: crate::ChainArgs,
-
-    /// Tycho WebSocket URL feeding the in-process solver
-    #[arg(long, env = "TYCHO_URL")]
-    pub tycho_url: String,
-
-    /// Protocols to index, comma-separated. Defaults to every native on-chain protocol; use
-    /// `all_onchain` to include VM-simulated ones too (see `fynd serve --protocols`)
-    #[arg(long, value_delimiter = ',', default_value = "native_onchain")]
-    pub protocols: Vec<String>,
-
-    /// Minimum pool TVL filter for the solver
-    #[arg(long, default_value_t = 100.0)]
-    pub min_tvl: f64,
-
-    /// Tycho API key (if the endpoint requires one)
-    #[arg(long, env = "TYCHO_API_KEY")]
-    pub tycho_api_key: Option<String>,
-
-    /// Worker-pools TOML config (algorithm/hops/workers); the default path falls back to Fynd's
-    /// built-in default pools when absent, like `fynd serve`. Custom paths that don't exist fail
-    /// fast
-    #[arg(long, env = "WORKER_POOLS_CONFIG", default_value = "worker_pools.toml")]
-    pub worker_pools_config: std::path::PathBuf,
-
-    /// Per-quote timeout in milliseconds. Defaults to the budget `fynd serve` gives a real quote,
-    /// because the comparison only means "what would Fynd have returned" if Fynd is given the same
-    /// time it would have had in production. A request-level timeout overrides the router's
-    /// default outright (see `WorkerPoolRouter::effective_timeout`), so a generous value here
-    /// silently hands the re-solve more time than any production quote gets — overstating
-    /// savings — and, on a sub-second chain, lets one solve outlast several blocks.
-    #[arg(long, default_value_t = fynd_rpc::config::defaults::WORKER_ROUTER_TIMEOUT_MS)]
-    pub timeout_ms: u64,
-
-    /// Serve Prometheus metrics on this port
-    #[arg(long)]
-    pub metrics_port: Option<u16>,
-
-    /// Stop after this many blocks (runs until interrupted if omitted)
-    #[arg(long)]
-    pub max_blocks: Option<u64>,
-
-    /// Chain-head lag (in blocks) beyond which the session is considered unhealthy and the solver
-    /// is rebuilt — seen live: a worker died, every solve crawled, and the monitor slid hours
-    /// behind while the feed-dead watchdog never fired (blocks still trickled through). When
-    /// omitted, defaults to roughly 20 minutes' worth of blocks for the chain's block time
-    #[arg(long)]
-    pub max_lag_blocks: Option<u64>,
+    pub solver: SolverArgs,
 
     /// Write one JSON line per re-solved trade (every comparison — wins, losses, and unsolvable
     /// coverage gaps) into this directory as `comparisons-YYYY-MM-DD.jsonl`, rotated at each UTC
@@ -122,171 +50,6 @@ pub(crate) struct MonitorArgs {
     /// reason; filter downstream for the improvement or coverage view
     #[arg(long)]
     pub comparisons_dir: Option<std::path::PathBuf>,
-}
-
-/// Drives the in-process solver, stepping the chain one block per `SteppingSolver::advance`.
-struct StepAdapter<'a> {
-    solver: &'a Solver,
-    controller: &'a BlockStepController,
-    timeout_ms: u64,
-}
-
-impl StepAdapter<'_> {
-    /// The block number of the solver's currently-applied market state, if any.
-    async fn current_block(&self) -> Option<u64> {
-        self.solver
-            .market_data()
-            .read()
-            .await
-            .last_updated()
-            .map(fynd_core::BlockInfo::number)
-    }
-}
-
-#[async_trait]
-impl SteppingSolver for StepAdapter<'_> {
-    async fn solve(&self, token_in: Address, token_out: Address, amount_in: U256) -> Outcome {
-        let Ok(amount) = amount_in.to_string().parse::<BigUint>() else {
-            return Outcome::Unsolvable("unparseable amount_in".to_string());
-        };
-        // Placeholder receiver: routing/amounts are receiver-independent; it only fills the encoded
-        // calldata's recipient. Encoding is requested so each quote carries its on-chain
-        // transaction (note: this refines gas estimates and a failed encode yields
-        // Unsolvable).
-        let order = Order::new(
-            CoreAddress::from(token_in.into_array()),
-            CoreAddress::from(token_out.into_array()),
-            amount,
-            OrderSide::Sell,
-            CoreAddress::from([0x11u8; 20]),
-        );
-        let request = QuoteRequest::new(
-            vec![order],
-            QuoteOptions::default()
-                .with_timeout_ms(self.timeout_ms)
-                .with_encoding_options(EncodingOptions::new(0.005)),
-        );
-
-        let quote = match self.solver.quote(request).await {
-            Ok(quote) => quote,
-            Err(e) => return Outcome::Unsolvable(format!("solve error: {e}")),
-        };
-        let Some(order) = quote.orders().first() else {
-            return Outcome::Unsolvable("solver returned no order quote".to_string());
-        };
-        order_quote_to_outcome(order)
-    }
-
-    async fn reexecute(&self, top: &SolvedAmount) -> Outcome {
-        let Some(route) = top.solved_route.as_ref() else {
-            return Outcome::Unsolvable("top-of-block quote carried no route".to_string());
-        };
-        let market = self.solver.market_data();
-        let view = market.read().await;
-        match fynd_core::replay_route(route, view.base_market_state()) {
-            Ok(replay) => {
-                let amount_out = biguint_to_u256(&replay.amount_out);
-                // Same route ⇒ same gas: reuse the top quote's gas deduction (in token_out
-                // units) and its encoding-refined gas estimate instead of re-deriving gas
-                // prices at the new block state.
-                let gas_deduction = top
-                    .amount_out
-                    .saturating_sub(top.amount_out_net_gas);
-                Outcome::Solved(SolvedAmount {
-                    amount_out,
-                    amount_out_net_gas: amount_out.saturating_sub(gas_deduction),
-                    gas_estimate: top.gas_estimate,
-                    // Same route re-executed: attribution carries over from the top quote. The
-                    // route itself does not — nothing serializes a re-executed outcome's route
-                    // (it only feeds the slippage numbers via its amounts).
-                    algorithm: top.algorithm.clone(),
-                    quote_json: top.quote_json.clone(),
-                    solved_route: None,
-                })
-            }
-            Err(e) => Outcome::Unsolvable(format!("re-execution failed: {e}")),
-        }
-    }
-
-    async fn advance(&self) -> anyhow::Result<()> {
-        let before = self.current_block().await;
-        self.controller
-            .trigger_next_block()
-            .map_err(|_| anyhow::anyhow!("tycho stream ended (trigger channel closed)"))?;
-
-        // Deterministic barrier: wait until the solver applies a block strictly newer than
-        // `before`. An error here means the feed died — either its stream ended (peek returns
-        // None once the gating task exits) or it jammed without ending (no block within
-        // FEED_DEAD_TIMEOUT). The caller rebuilds the solver on any error.
-        let stall_started = Instant::now();
-        let mut next_warn = stall_started + STALL_WARN_INTERVAL;
-        loop {
-            if let Some(now) = self.current_block().await {
-                if before.is_none_or(|b| now > b) {
-                    return Ok(());
-                }
-            }
-            if stall_started.elapsed() >= FEED_DEAD_TIMEOUT {
-                anyhow::bail!(
-                    "no block applied in {}s; tycho feed presumed dead",
-                    stall_started.elapsed().as_secs()
-                );
-            }
-            if Instant::now() >= next_warn {
-                warn!(
-                    waited_s = stall_started.elapsed().as_secs(),
-                    last_applied_block = ?before,
-                    "tycho stream stalled; waiting for the next block"
-                );
-                next_warn += STALL_WARN_INTERVAL;
-            }
-            tokio::select! {
-                () = tokio::time::sleep(POLL_INTERVAL) => {}
-                peeked = self.controller.peek_next_block() => {
-                    if peeked.is_none() {
-                        anyhow::bail!("tycho stream ended while waiting for the next block");
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn order_quote_to_outcome(quote: &OrderQuote) -> Outcome {
-    if quote.status() != QuoteStatus::Success {
-        return Outcome::Unsolvable(format!("{:?}", quote.status()));
-    }
-    // Project the quote to a slim route + calldata, built directly from the quote object. We must
-    // NOT serialize the whole `OrderQuote`: it embeds each hop's `protocol_state`, which both
-    // dominates size and fails to serialize for vm pools (e.g. Curve) — dropping the entire route
-    // for exactly the deep-liquidity stable trades we care about.
-    let quote_json = serde_json::to_string(&super::jsonl::slim_quote(quote)).ok();
-    Outcome::Solved(SolvedAmount {
-        amount_out: biguint_to_u256(quote.amount_out()),
-        amount_out_net_gas: biguint_to_u256(quote.amount_out_net_gas()),
-        gas_estimate: biguint_to_u256(quote.gas_estimate()),
-        // Which algorithm won the quote — the winning quote is the one the `WorkerPoolRouter`
-        // ranked first across every configured pool, so this is the pool that beat the others on
-        // this order. The readable path is derived from `solved_route` at serialization time
-        // (see `resolve::render_route`), not stored here.
-        algorithm: quote.algorithm().to_string(),
-        quote_json,
-        // Kept in memory so the route can be re-executed at back-of-block.
-        solved_route: quote.route().cloned().map(Box::new),
-    })
-}
-
-fn biguint_to_u256(value: &BigUint) -> U256 {
-    // Convert via big-endian bytes: avoids a decimal string round-trip and catches overflow
-    // without relying on parse. U256 fits in 32 bytes; a larger value is a solver bug.
-    let bytes = value.to_bytes_be();
-    if bytes.len() > 32 {
-        warn!(bits = value.bits(), "solver quote amount overflows U256; treating as zero");
-        return U256::ZERO;
-    }
-    let mut buf = [0u8; 32];
-    buf[32 - bytes.len()..].copy_from_slice(&bytes);
-    U256::from_be_bytes(buf)
 }
 
 /// Decode `block`, first waiting out any RPC lag. The HTTP RPC used for receipts can trail the
@@ -350,56 +113,6 @@ struct Totals {
     skipped_blocks: u64,
 }
 
-/// Build the in-process solver and its block-step controller.
-async fn build_solver(
-    cfg: &MonitorArgs,
-    chain: Chain,
-    protocols: &[String],
-    pools_config: &fynd_rpc::config::WorkerPoolsConfig,
-) -> anyhow::Result<(Solver, BlockStepController)> {
-    info!(
-        chain = cfg.chain.name,
-        protocols = protocols.len(),
-        "building in-process solver (loading tokens may take minutes)…"
-    );
-    let mut builder = FyndBuilder::new(
-        chain,
-        &cfg.tycho_url,
-        &cfg.chain.rpc_url,
-        protocols.to_vec(),
-        cfg.min_tvl,
-    );
-    if let Some(key) = cfg.tycho_api_key.as_deref() {
-        builder = builder.tycho_api_key(key);
-    }
-    for (name, pool) in pools_config.pools() {
-        builder = builder
-            .add_pool(name, pool)
-            .map_err(|e| anyhow::anyhow!("failed to add worker pool {name}: {e}"))?;
-    }
-    builder
-        .build_with_step_controller()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to build solver: {e}"))
-}
-
-/// The chain's block time, which every pacing budget in the monitor is expressed against. A custom
-/// chain with no registered block time falls back to 12-second blocks.
-fn block_time(chain: Chain) -> Duration {
-    let secs = chain
-        .try_block_time_secs()
-        .unwrap_or(12)
-        .max(1);
-    Duration::from_secs(secs)
-}
-
-/// The default `--max-lag-blocks`: a ~20-minute wall-clock budget for how far behind chain head the
-/// monitor may fall before rebuilding, expressed as a block count at the chain's block time so the
-/// budget stays about the same wall-clock length on every chain.
-fn default_lag_blocks(chain: Chain) -> u64 {
-    (LAG_BUDGET_SECS / block_time(chain).as_secs()).max(1)
-}
-
 /// The pacing budgets one session runs against, both scaled to the chain's block time.
 struct Pacing {
     /// Chain-head lag beyond which the session is unhealthy and the solver is rebuilt.
@@ -411,44 +124,8 @@ struct Pacing {
 impl Pacing {
     fn for_chain(chain: Chain, max_lag_blocks: Option<u64>) -> Self {
         Self {
-            max_lag_blocks: max_lag_blocks.unwrap_or_else(|| default_lag_blocks(chain)),
-            rpc_lag_budget: block_time(chain) * DECODE_RPC_LAG_BUDGET_BLOCKS,
-        }
-    }
-}
-
-/// Resolves when the process receives Ctrl-C (SIGINT), the signal the monitor treats as "stop".
-/// If the handler cannot be installed the future never resolves, so a failed registration disables
-/// graceful shutdown rather than tearing the run down immediately.
-async fn shutdown_signal() {
-    if let Err(e) = tokio::signal::ctrl_c().await {
-        warn!(error = %e, "failed to install Ctrl-C handler; graceful shutdown disabled");
-        std::future::pending::<()>().await;
-    }
-}
-
-/// Rebuild the solver after a feed death, retrying with backoff until it succeeds. Returns `None`
-/// when `shutdown` resolves first (Ctrl-C during the retry loop or a build), so the caller stops
-/// instead of rebuilding.
-async fn rebuild_after_feed_death<S: Future<Output = ()>>(
-    cfg: &MonitorArgs,
-    chain: Chain,
-    protocols: &[String],
-    pools_config: &fynd_rpc::config::WorkerPoolsConfig,
-    mut shutdown: Pin<&mut S>,
-) -> Option<(Solver, BlockStepController)> {
-    loop {
-        let rebuilt = tokio::select! {
-            biased;
-            () = shutdown.as_mut() => return None,
-            result = async {
-                tokio::time::sleep(REBUILD_BACKOFF).await;
-                build_solver(cfg, chain, protocols, pools_config).await
-            } => result,
-        };
-        match rebuilt {
-            Ok(built) => return Some(built),
-            Err(e) => warn!(error = %e, "solver rebuild failed; retrying"),
+            max_lag_blocks: max_lag_blocks.unwrap_or_else(|| session::default_lag_blocks(chain)),
+            rpc_lag_budget: session::block_time(chain) * DECODE_RPC_LAG_BUDGET_BLOCKS,
         }
     }
 }
@@ -460,47 +137,23 @@ async fn rebuild_after_feed_death<S: Future<Output = ()>>(
 /// Ctrl-C stops the run cleanly at any await point, tearing the current solver down before
 /// returning.
 pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
-    let chain = cfg.chain.chain()?;
+    let comparisons_dir = cfg.comparisons_dir;
+    let session = Session::prepare(cfg.solver).await?;
+    let chain = session.chain();
 
-    // Expand protocol tokens (e.g. `native_onchain`/`all_onchain`) against Tycho, like serve/scale.
-    let protocols = fynd_rpc::protocols::resolve_protocols(
-        &cfg.tycho_url,
-        cfg.tycho_api_key.as_deref(),
-        true,
-        chain,
-        &cfg.protocols,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("failed to resolve protocols: {e}"))?;
+    let mut decoder = Decoder::new(
+        provider_from(&session.args().chain.rpc_url)?,
+        session.args().chain.load_registry()?,
+    );
 
-    // Load worker pools like `fynd serve`: the default path falls back to the built-in default
-    // pools when absent; custom paths that don't exist fail fast.
-    let default_path = std::path::Path::new("worker_pools.toml");
-    let pools_config =
-        if cfg.worker_pools_config.as_path() == default_path && !default_path.exists() {
-            info!("worker_pools.toml not found; using Fynd's built-in default pools");
-            fynd_rpc::config::WorkerPoolsConfig::builtin_default()
-        } else {
-            fynd_rpc::config::WorkerPoolsConfig::load_from_file(&cfg.worker_pools_config).map_err(
-                |e| {
-                    anyhow::anyhow!(
-                        "failed to load worker pools config {}: {e}",
-                        cfg.worker_pools_config.display()
-                    )
-                },
-            )?
-        };
-
-    let mut decoder = Decoder::new(provider_from(&cfg.chain.rpc_url)?, cfg.chain.load_registry()?);
-
-    if let Some(port) = cfg.metrics_port {
+    if let Some(port) = session.args().metrics_port {
         telemetry::install_exporter(port)?;
         info!(port, "serving Prometheus metrics at /metrics");
     }
 
-    let mut comparisons = match cfg.comparisons_dir.as_ref() {
+    let mut comparisons = match comparisons_dir.as_ref() {
         Some(dir) => {
-            let writer = super::jsonl::RotatingWriter::open(dir)?;
+            let writer = super::jsonl::RotatingWriter::open(dir, super::jsonl::COMPARISONS_PREFIX)?;
             info!(path = %writer.current_path().display(), "appending comparisons to JSONL");
             Some(writer)
         }
@@ -508,7 +161,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
     };
 
     let mut totals = Totals::default();
-    let pacing = Pacing::for_chain(chain, cfg.max_lag_blocks);
+    let pacing = Pacing::for_chain(chain, session.args().max_lag_blocks);
     info!(
         max_lag_blocks = pacing.max_lag_blocks,
         rpc_lag_budget_ms = pacing.rpc_lag_budget.as_millis(),
@@ -518,7 +171,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
     // Resolves on Ctrl-C, so a long run stops cleanly at any await below — including the
     // multi-minute solver builds. On shutdown the in-flight block is abandoned, the solver's
     // workers and background tasks are torn down, and `comparisons` flushes as it drops.
-    let shutdown = shutdown_signal();
+    let shutdown = session::shutdown_signal();
     tokio::pin!(shutdown);
 
     // The first build fails fast — an error here is a configuration problem. Rebuilds after a
@@ -526,11 +179,12 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
     let (mut solver, mut controller) = tokio::select! {
         biased;
         () = &mut shutdown => return Ok(()),
-        built = build_solver(&cfg, chain, &protocols, &pools_config) => built?,
+        built = session.build() => built?,
     };
     loop {
+        // Encoding on: each comparison record carries the quote's on-chain transaction.
         let adapter =
-            StepAdapter { solver: &solver, controller: &controller, timeout_ms: cfg.timeout_ms };
+            StepAdapter::new(&solver, &controller, session.args().timeout_ms, Encoding::Requested);
         let reason = tokio::select! {
             biased;
             () = &mut shutdown => {
@@ -538,7 +192,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
                 break;
             }
             end = run_session(
-                &cfg,
+                &session,
                 &pacing,
                 &adapter,
                 &mut decoder,
@@ -552,10 +206,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         warn!(reason, "session unhealthy; rebuilding the solver to resubscribe");
         telemetry::record_feed_rebuild();
         solver.shutdown();
-        let Some(built) =
-            rebuild_after_feed_death(&cfg, chain, &protocols, &pools_config, shutdown.as_mut())
-                .await
-        else {
+        let Some(built) = session.rebuild(shutdown.as_mut()).await else {
             info!("received Ctrl-C during rebuild; shutting down");
             return Ok(());
         };
@@ -568,7 +219,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
 /// Drive one solver session: step blocks and re-solve each block's settled trades until the run
 /// completes or the feed dies.
 async fn run_session<P: Provider>(
-    cfg: &MonitorArgs,
+    session: &Session,
     pacing: &Pacing,
     adapter: &StepAdapter<'_>,
     decoder: &mut Decoder<P>,
@@ -585,7 +236,7 @@ async fn run_session<P: Provider>(
 
     loop {
         if adapter
-            .controller
+            .controller()
             .peek_next_block()
             .await
             .is_none()
@@ -638,14 +289,14 @@ async fn run_session<P: Provider>(
         let start = Instant::now();
         // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
         // USD valuation.
-        let prices_top = snapshot_prices(adapter.solver, decoder.registry()).await;
+        let prices_top = snapshot_prices(adapter.solver(), decoder.registry()).await;
         let ranges = match resolve_block_range(adapter, &trades, &prices_top).await {
             Ok(ranges) => ranges,
             Err(e) => return SessionEnd::Unhealthy(e.to_string()),
         };
         // resolve_block_range advanced the solver to back-of-block (N); snapshot again so the
         // back-of-block improvement is valued against the state it was solved at.
-        let prices_back = snapshot_prices(adapter.solver, decoder.registry()).await;
+        let prices_back = snapshot_prices(adapter.solver(), decoder.registry()).await;
         // The back-of-block solve should land on `target`. On a reorg/gap/resync the stream can
         // apply a different block, silently pairing the back state with another block's trades.
         // The top-of-block (N-1) headline is unaffected; warn so the mispaired back state is
@@ -661,7 +312,7 @@ async fn run_session<P: Provider>(
         for range in &ranges {
             telemetry::record_range(
                 range,
-                &cfg.chain.name,
+                &session.args().chain.name,
                 &prices_top,
                 &prices_back,
                 decoder.registry(),
@@ -676,7 +327,8 @@ async fn run_session<P: Provider>(
         info!(block = target, trades = ranges.len(), elapsed_s, "re-solved block (top/back)");
 
         totals.processed += 1;
-        if cfg
+        if session
+            .args()
             .max_blocks
             .is_some_and(|max| totals.processed >= max)
         {
@@ -728,13 +380,6 @@ fn core_to_alloy(address: &CoreAddress) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_default_lag_blocks_scales_with_block_time() {
-        assert_eq!(default_lag_blocks(Chain::Ethereum), 100); // 12s blocks
-        assert_eq!(default_lag_blocks(Chain::Base), 600); // 2s blocks
-        assert_eq!(default_lag_blocks(Chain::Unichain), 1200); // 1s blocks
-    }
 
     #[test]
     fn test_pacing_scales_both_budgets_with_block_time() {
@@ -805,17 +450,19 @@ mod tests {
         let tycho_url = std::env::var("TYCHO_URL").expect("set TYCHO_URL");
         let api_key = std::env::var("TYCHO_API_KEY").ok();
         run(MonitorArgs {
-            chain: crate::ChainArgs { name: "ethereum".to_string(), rpc_url, registry: None },
-            tycho_url,
-            protocols: vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
-            // High TVL floor → fewer pools → faster load for a smoke test.
-            min_tvl: 10_000.0,
-            tycho_api_key: api_key,
-            worker_pools_config: std::path::PathBuf::from("worker_pools.toml"),
-            timeout_ms: fynd_rpc::config::defaults::WORKER_ROUTER_TIMEOUT_MS,
-            metrics_port: None,
-            max_blocks: Some(1),
-            max_lag_blocks: Some(100),
+            solver: SolverArgs {
+                chain: crate::ChainArgs { name: "ethereum".to_string(), rpc_url, registry: None },
+                tycho_url,
+                protocols: vec!["uniswap_v2".to_string(), "uniswap_v3".to_string()],
+                // High TVL floor → fewer pools → faster load for a smoke test.
+                min_tvl: 10_000.0,
+                tycho_api_key: api_key,
+                worker_pools_config: std::path::PathBuf::from("worker_pools.toml"),
+                timeout_ms: fynd_rpc::config::defaults::WORKER_ROUTER_TIMEOUT_MS,
+                metrics_port: None,
+                max_blocks: Some(1),
+                max_lag_blocks: Some(100),
+            },
             comparisons_dir: None,
         })
         .await

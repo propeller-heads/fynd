@@ -11,6 +11,8 @@
 mod compare;
 pub(crate) mod jsonl;
 pub(crate) mod monitor;
+pub(crate) mod session;
+pub(crate) mod step;
 
 use std::collections::HashMap;
 
@@ -272,6 +274,10 @@ pub(crate) trait SteppingSolver {
     /// Re-execute `top`'s route at the solver's current block state — same pools, splits, and
     /// input amount against the pools as the block left them.
     async fn reexecute(&self, top: &SolvedAmount) -> Outcome;
+    /// The block number of the currently-applied state, or `None` before the first block lands.
+    /// On the trait rather than the live adapter so a measurement loop that reads which block it is
+    /// on stays testable against a mock.
+    async fn current_block(&self) -> Option<u64>;
 }
 
 /// Build a `RangeComparison` from a trade's three outcomes: the top-of-block solve, the fresh
@@ -428,6 +434,15 @@ mod tests {
 
     #[async_trait]
     impl SteppingSolver for MockStepping {
+        /// One block before `advance()`, the next after — enough for the two-state pipeline, which
+        /// never reads the number itself.
+        async fn current_block(&self) -> Option<u64> {
+            Some(u64::from(
+                self.advanced
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ))
+        }
+
         async fn solve(&self, _: Address, _: Address, _: U256) -> Outcome {
             if self
                 .advanced
