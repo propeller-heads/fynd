@@ -427,6 +427,7 @@ pub struct FyndBuilder {
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
+    calldata_watermark: Option<Vec<u8>>,
     pools: Vec<PoolEntry>,
     price_guard_enabled: bool,
     price_providers: Vec<Box<dyn PriceProvider>>,
@@ -460,6 +461,7 @@ impl FyndBuilder {
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
+            calldata_watermark: None,
             pools: Vec::new(),
             price_guard_enabled: false,
             price_providers: Vec::new(),
@@ -552,6 +554,14 @@ impl FyndBuilder {
     /// Overrides the default encoder.
     pub fn encoder(mut self, encoder: Encoder) -> Self {
         self.encoder = Some(encoder);
+        self
+    }
+
+    /// Sets a watermark appended to every encoded transaction's calldata (e.g. `"fynd"`), so
+    /// on-chain observers can attribute router calls to this deployment. Applied to the encoder
+    /// at build time, whether default or overridden. Default: no watermark.
+    pub fn calldata_watermark(mut self, watermark: impl Into<Vec<u8>>) -> Self {
+        self.calldata_watermark = Some(watermark.into());
         self
     }
 
@@ -832,6 +842,10 @@ impl FyndBuilder {
                 Encoder::new(self.chain, registry)
                     .map_err(|e| SolverBuildError::Encoder(e.to_string()))?
             }
+        };
+        let encoder = match self.calldata_watermark {
+            Some(watermark) => encoder.with_calldata_watermark(watermark),
+            None => encoder,
         };
 
         let chain = self.chain;

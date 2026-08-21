@@ -185,6 +185,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Sets a watermark appended to every encoded transaction's calldata (e.g. `"fynd"`), so
+    /// on-chain observers can attribute router calls to this deployment. Default: no watermark.
+    pub fn calldata_watermark(mut self, watermark: impl Into<Vec<u8>>) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .calldata_watermark(watermark);
+        self
+    }
+
     /// Sets the gas price staleness threshold. Health returns 503 when exceeded.
     pub fn gas_price_stale_threshold(mut self, threshold: Option<Duration>) -> Self {
         self.gas_price_stale_threshold = threshold;

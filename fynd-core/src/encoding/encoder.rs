@@ -54,6 +54,10 @@ pub struct Encoder {
     router_fees: SharedRouterFees,
     /// Signs exclusive legs. `None` disables signing (no controller key configured).
     exclusive_swap_signer: Option<ExclusiveSwapSigner>,
+    /// Bytes appended to every encoded transaction's calldata to tag its origin. Trailing
+    /// calldata beyond the ABI-encoded arguments is ignored by the EVM, so the tag is free of
+    /// on-chain effect. `None` (the default) appends nothing.
+    calldata_watermark: Option<Vec<u8>>,
 }
 
 /// Maps a successful quote onto an encodable solution, leaving `min_amount_out` equal to the
@@ -174,7 +178,17 @@ impl Encoder {
             router_address,
             router_fees: SharedRouterFees::default(),
             exclusive_swap_signer,
+            calldata_watermark: None,
         })
+    }
+
+    /// Sets a watermark appended to every encoded transaction's calldata (e.g. `"fynd"`), so
+    /// on-chain observers can attribute router calls to this deployment. The EVM ignores
+    /// calldata past the ABI-encoded arguments, so the watermark does not change execution.
+    #[must_use]
+    pub fn with_calldata_watermark(mut self, watermark: impl Into<Vec<u8>>) -> Self {
+        self.calldata_watermark = Some(watermark.into());
+        self
     }
 
     /// Overrides the exclusive-swap signer, replacing whatever was read from the environment.
@@ -521,8 +535,11 @@ impl Encoder {
             )));
         };
 
-        let contract_interaction =
+        let mut contract_interaction =
             Self::encode_input(encoded_solution.function_signature(), method_calldata);
+        if let Some(watermark) = &self.calldata_watermark {
+            contract_interaction.extend_from_slice(watermark);
+        }
 
         let value =
             if token_in == router_eth { solution.amount_in().clone() } else { BigUint::ZERO };
@@ -794,6 +811,7 @@ mod tests {
             router_address: Some(Bytes::from([0u8; 20].as_ref())),
             router_fees,
             exclusive_swap_signer: None,
+            calldata_watermark: None,
         }
     }
 
@@ -1195,6 +1213,99 @@ mod tests {
         let mut calldata = tx.data().to_vec();
         calldata[offset..offset + 65].copy_from_slice(&real_sig);
         assert_eq!(&calldata[offset..offset + 65], &real_sig[..]);
+    }
+
+    // ==================== Calldata Watermark Tests ====================
+
+    #[tokio::test]
+    async fn test_encode_appends_calldata_watermark() {
+        let encoder = real_encoder().with_calldata_watermark("fynd");
+        let quote = make_order_quote(990)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+
+        let result = encoder
+            .encode(vec![quote], EncodingOptions::new(0.01))
+            .await
+            .unwrap();
+
+        let tx = result[0].transaction().unwrap();
+        assert!(
+            tx.data().ends_with(b"fynd"),
+            "calldata must end with the watermark bytes, got suffix {:?}",
+            &tx.data()[tx.data().len().saturating_sub(4)..]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_encode_without_watermark_leaves_calldata_unchanged() {
+        let make_quote = || {
+            make_order_quote(990)
+                .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]))
+        };
+
+        let plain = real_encoder()
+            .encode(vec![make_quote()], EncodingOptions::new(0.01))
+            .await
+            .unwrap();
+        let watermarked = real_encoder()
+            .with_calldata_watermark("fynd")
+            .encode(vec![make_quote()], EncodingOptions::new(0.01))
+            .await
+            .unwrap();
+
+        let plain_data = plain[0].transaction().unwrap().data();
+        let watermarked_data = watermarked[0]
+            .transaction()
+            .unwrap()
+            .data();
+        // The watermark is a pure suffix: stripping it yields the unwatermarked calldata.
+        assert_eq!(*plain_data, watermarked_data[..watermarked_data.len() - 4]);
+    }
+
+    #[tokio::test]
+    async fn test_watermarked_calldata_still_decodes() {
+        let encoder = real_encoder().with_calldata_watermark("fynd");
+        let quote = make_order_quote(1_000_000_000)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+        let amount_in = quote.amount_in().clone();
+        let opts = EncodingOptions::new(0.01).with_client_fee_params(make_client_fee(100));
+
+        let result = encoder
+            .encode(vec![quote], opts)
+            .await
+            .unwrap();
+
+        let tx = result[0].transaction().unwrap();
+        // Solidity's ABI decoder ignores trailing calldata, so decoding the args without the
+        // 4-byte watermark suffix must still work.
+        let (encoded_amount_in, _, _, _, _, _, _, _) =
+            <SingleSwapCalldata as SolValue>::abi_decode_params(&tx.data()[4..tx.data().len() - 4])
+                .unwrap();
+        assert_eq!(encoded_amount_in, biguint_to_u256(&amount_in));
+    }
+
+    #[tokio::test]
+    async fn test_signature_offset_unaffected_by_watermark() {
+        let encoder = real_encoder().with_calldata_watermark("fynd");
+        let real_sig = vec![0xFF; 65];
+        let quote = make_order_quote(990)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+        let opts = EncodingOptions::new(0.01).with_client_fee_params(make_client_fee(100));
+
+        let result = encoder
+            .encode(vec![quote], opts)
+            .await
+            .unwrap();
+
+        let tx = result[0].transaction().unwrap();
+        let offset = tx
+            .client_fee_signature_offset()
+            .unwrap();
+
+        let mut calldata = tx.data().to_vec();
+        calldata[offset..offset + 65].copy_from_slice(&real_sig);
+        assert_eq!(&calldata[offset..offset + 65], &real_sig[..]);
+        assert!(calldata.ends_with(b"fynd"));
     }
 
     // ==================== Fee Breakdown Tests ====================
