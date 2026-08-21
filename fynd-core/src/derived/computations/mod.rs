@@ -10,4 +10,4 @@ pub mod token_gas_price;
 
 pub use component_depth::ComponentDepthComputation;
 pub use spot_price::SpotPriceComputation;
-pub use token_gas_price::{PricingMode, TokenGasPriceComputation};
+pub use token_gas_price::TokenGasPriceComputation;

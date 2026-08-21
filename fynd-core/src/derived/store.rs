@@ -10,8 +10,8 @@ use super::{
     computation::{ComputationId, DerivedComputation, FailedItem, FailedItemError},
     computations::{ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
     types::{
-        ComponentDepthKey, ComponentDepths, SpotPriceKey, SpotPrices, TokenGasPriceDirections,
-        TokenGasPriceKey, TokenGasPrices, TokenPricesWithDeps,
+        ComponentDepthKey, ComponentDepths, SpotPriceKey, SpotPrices, TokenGasPriceKey,
+        TokenGasPrices, TokenPricesWithDeps,
     },
 };
 use crate::derived::SharedDerivedDataRef;
@@ -189,10 +189,9 @@ impl DerivedData {
             .map(|(block, error)| (*block, error))
     }
 
-    /// Clears token prices, their direction rates, and their failure map.
+    /// Clears token prices and their failure map.
     pub fn clear_token_prices(&mut self) {
         self.clear_output(TokenGasPriceComputation::ID);
-        self.clear_output(TokenGasPriceComputation::DIRECTIONS_ID);
         self.token_prices_failed.clear();
     }
 
@@ -222,25 +221,6 @@ impl DerivedData {
     /// Clears token prices with dependencies.
     pub fn clear_token_prices_deps(&mut self) {
         self.token_prices_deps = None;
-    }
-
-    // -------------------------------------------------------------------------
-    // Token Price Directions (Mid pricing mode)
-    // -------------------------------------------------------------------------
-
-    /// Returns the per-token buy and sell rates if computed (only in `Mid` pricing mode).
-    pub fn token_price_directions(&self) -> Option<&TokenGasPriceDirections> {
-        self.output(TokenGasPriceComputation::DIRECTIONS_ID)
-    }
-
-    /// Returns the block at which the direction rates were last computed.
-    pub fn token_price_directions_block(&self) -> Option<u64> {
-        self.output_block(TokenGasPriceComputation::DIRECTIONS_ID)
-    }
-
-    /// Sets the per-token buy and sell rates.
-    pub fn set_token_price_directions(&mut self, directions: TokenGasPriceDirections, block: u64) {
-        self.set_output(TokenGasPriceComputation::DIRECTIONS_ID, directions, block);
     }
 
     // -------------------------------------------------------------------------

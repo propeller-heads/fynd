@@ -2,13 +2,19 @@
 //!
 //! The ComputationManager:
 //! - Subscribes to MarketEvents from TychoFeed
-//! - Runs derived computations (token prices, spot prices, component depths)
-//! - Updates DerivedDataStore (exclusive write access)
+//! - Runs derived computations and updates the DerivedData store
 //! - Provides read access to workers via shared store reference
+//!
+//! Two instances share one store and one event channel: the per-block manager
+//! ([`ComputationManager::new`] + [`run`](ComputationManager::run)) recomputes spot prices and
+//! component depths every block, and the token-pricing manager
+//! ([`token_pricing`](ComputationManager::token_pricing) +
+//! [`run_throttled`](ComputationManager::run_throttled)) solves token prices on its own
+//! interval, so its per-token sell legs never delay the per-block data.
 
 use std::{
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -105,9 +111,7 @@ fn coalesce_market_events(events: &[MarketEvent]) -> Option<ChangedComponents> {
 
 use super::{
     computation::{ComputationId, ComputationRequirements, DerivedComputation},
-    computations::{
-        ComponentDepthComputation, PricingMode, SpotPriceComputation, TokenGasPriceComputation,
-    },
+    computations::{ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
     error::ComputationError,
     events::DerivedDataEvent,
     registry::ErasedComputation,
@@ -130,8 +134,6 @@ pub struct ComputationManagerConfig {
     max_hop: usize,
     /// Slippage threshold for component depth computation (0.0 < threshold < 1.0).
     depth_slippage_threshold: f64,
-    /// How token prices are derived.
-    token_pricing_mode: PricingMode,
 }
 
 impl ComputationManagerConfig {
@@ -158,12 +160,6 @@ impl ComputationManagerConfig {
         self
     }
 
-    /// Sets how token prices are derived.
-    pub fn with_token_pricing_mode(mut self, mode: PricingMode) -> Self {
-        self.token_pricing_mode = mode;
-        self
-    }
-
     /// Returns the gas token address.
     pub fn gas_token(&self) -> &Address {
         &self.gas_token
@@ -182,12 +178,7 @@ impl ComputationManagerConfig {
 
 impl Default for ComputationManagerConfig {
     fn default() -> Self {
-        Self {
-            gas_token: Address::zero(20),
-            max_hop: 2,
-            depth_slippage_threshold: 0.01,
-            token_pricing_mode: PricingMode::BuyOnly,
-        }
+        Self { gas_token: Address::zero(20), max_hop: 2, depth_slippage_threshold: 0.01 }
     }
 }
 
@@ -212,7 +203,8 @@ struct ComputationSchedule {
 }
 
 impl ComputationManager {
-    /// Creates a new ComputationManager.
+    /// Creates the per-block manager: spot prices and component depths, run for every block
+    /// by [`run`](Self::run).
     ///
     /// Returns the manager and a receiver for derived data events.
     /// Workers can subscribe to the event sender via `event_sender()` to track
@@ -223,14 +215,29 @@ impl ComputationManager {
     ) -> Result<(Self, broadcast::Receiver<DerivedDataEvent>), ComputationError> {
         let (mut manager, event_rx) = Self::empty(market_data);
         manager.register(SpotPriceComputation::new())?;
+        manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
+        Ok((manager, event_rx))
+    }
+
+    /// Creates the token-pricing manager: only [`TokenGasPriceComputation`], writing to the
+    /// same store and event channel as `per_block`, so consumers see one coherent set of
+    /// derived data and one event stream.
+    pub fn token_pricing(
+        config: &ComputationManagerConfig,
+        per_block: &ComputationManager,
+    ) -> Result<Self, ComputationError> {
+        let mut manager = Self {
+            market_data: per_block.market_data.clone(),
+            store: per_block.store(),
+            computations: Vec::new(),
+            event_tx: per_block.event_sender(),
+        };
         manager.register(
             TokenGasPriceComputation::default()
                 .with_max_hops(config.max_hop)
-                .with_gas_token(config.gas_token)
-                .with_mode(config.token_pricing_mode),
+                .with_gas_token(config.gas_token.clone()),
         )?;
-        manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
-        Ok((manager, event_rx))
+        Ok(manager)
     }
 
     /// Creates a manager with no computations registered.
@@ -284,6 +291,60 @@ impl ComputationManager {
     /// Returns the event sender for workers to subscribe.
     pub fn event_sender(&self) -> broadcast::Sender<DerivedDataEvent> {
         self.event_tx.clone()
+    }
+
+    /// Runs the loop of a [`token_pricing`](Self::token_pricing) manager: solve at most once
+    /// per `min_interval`, coalescing the market events that arrive in between into one
+    /// incremental recomputation, so no change is lost to the throttle. The first batch of
+    /// events solves immediately.
+    ///
+    /// **Note:** Consumes `self`. Call [`store()`](Self::store) before this to retain access.
+    pub async fn run_throttled(
+        self,
+        mut event_rx: broadcast::Receiver<MarketEvent>,
+        mut shutdown_rx: broadcast::Receiver<()>,
+        min_interval: Duration,
+    ) {
+        info!(min_interval_ms = min_interval.as_millis() as u64, "throttled manager started");
+
+        let mut pending_events: Vec<MarketEvent> = Vec::new();
+        let mut last_solve: Option<Instant> = None;
+
+        loop {
+            let next_solve_at = last_solve.map_or_else(Instant::now, |at| at + min_interval);
+            tokio::select! {
+                biased;
+
+                _ = shutdown_rx.recv() => {
+                    info!("throttled manager shutting down");
+                    break;
+                }
+
+                event_result = event_rx.recv() => {
+                    match event_result {
+                        Ok(event) => pending_events.push(event),
+                        Err(broadcast::error::RecvError::Closed) => {
+                            info!("event channel closed, throttled manager shutting down");
+                            break;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            // Dropped changes self-correct on the affected components'
+                            // next update, the same trade-off `recover_from_lag` makes.
+                            warn!(skipped, "throttled manager lagged; continuing with buffered events");
+                            counter!("derived_manager_lagged_events_total").increment(skipped);
+                        }
+                    }
+                }
+
+                _ = tokio::time::sleep_until(next_solve_at.into()), if !pending_events.is_empty() => {
+                    if let Some(changed) = coalesce_market_events(&pending_events) {
+                        self.compute_all(&changed).await;
+                        last_solve = Some(Instant::now());
+                    }
+                    pending_events.clear();
+                }
+            }
+        }
     }
 
     /// Runs the main loop until shutdown or channel close.
@@ -758,7 +819,7 @@ mod tests {
         let store = manager.store();
         let guard = store.read().await;
         assert!(guard.spot_prices().is_some());
-        assert!(guard.token_prices().is_some());
+        assert!(guard.component_depths().is_some());
         drop(guard);
         // ...and the receiver is back at the live tail (buffer drained).
         assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
@@ -905,8 +966,10 @@ mod tests {
 
         let store = manager.store();
         let guard = store.read().await;
-        assert!(guard.token_prices().is_some());
         assert!(guard.spot_prices().is_some());
+        assert!(guard.component_depths().is_some());
+        // Token prices live in their own throttled manager, not the per-block set.
+        assert!(guard.token_prices().is_none());
     }
 
     #[tokio::test]
@@ -1309,10 +1372,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spot_price_failure_does_not_stop_token_prices() {
+    async fn spot_price_failure_cascades_to_depths() {
         // Real fynd flow: a full recompute with no sim state makes spot prices fail outright.
-        // Pool depths depend on them and fail with them; token prices solve their own routes and
-        // read no derived data, so they still complete.
+        // Pool depths depend on them and fail with them. Token prices are unaffected by
+        // construction — they run in their own manager and read no derived data.
         let (manager, _event_rx) = ComputationManager::new(
             ComputationManagerConfig::new(),
             market_with_component_no_sim_state(),
@@ -1323,13 +1386,104 @@ mod tests {
 
         assert_eq!(
             event_summary(&events),
-            vec![
-                ("new_block", ""),
-                ("failed", "spot_prices"),
-                ("complete", "token_prices"),
-                ("failed", "pool_depths"),
-            ]
+            vec![("new_block", ""), ("failed", "spot_prices"), ("failed", "pool_depths")]
         );
+    }
+
+    #[tokio::test]
+    async fn token_pricing_manager_writes_to_the_shared_store() {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let (market, _) = setup_market_weighted(vec![(
+            "eth_usdc",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(2000.0).with_gas(0),
+        )]);
+
+        let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
+        let (per_block, _event_rx) = ComputationManager::new(config.clone(), market).unwrap();
+        let mut pricing = ComputationManager::token_pricing(&config, &per_block).unwrap();
+
+        let event = MarketEvent::MarketUpdated {
+            added_components: HashMap::from([(
+                "eth_usdc".to_string(),
+                vec![eth.address.clone(), usdc.address.clone()],
+            )]),
+            removed_components: vec![],
+            updated_components: vec![],
+        };
+        pricing
+            .handle_event(&event)
+            .await
+            .unwrap();
+
+        // Prices land in the per-block manager's store: it is shared.
+        let store = per_block.store();
+        let guard = store.read().await;
+        assert!(guard.token_prices().is_some());
+        assert!(guard.spot_prices().is_none(), "the pricing manager runs no other computation");
+    }
+
+    #[tokio::test]
+    async fn run_throttled_solves_a_buffered_batch_once() {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let (market, _) = setup_market_weighted(vec![(
+            "eth_usdc",
+            &eth,
+            &usdc,
+            MockProtocolSim::new(2000.0).with_gas(0),
+        )]);
+
+        let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
+        let (per_block, mut derived_rx) = ComputationManager::new(config.clone(), market).unwrap();
+        let pricing = ComputationManager::token_pricing(&config, &per_block).unwrap();
+        let store = per_block.store();
+
+        // Buffer several events before the loop starts: they must coalesce into one solve.
+        let (event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
+        for _ in 0..3 {
+            event_tx
+                .send(MarketEvent::MarketUpdated {
+                    added_components: HashMap::from([(
+                        "eth_usdc".to_string(),
+                        vec![eth.address.clone(), usdc.address.clone()],
+                    )]),
+                    removed_components: vec![],
+                    updated_components: vec![],
+                })
+                .unwrap();
+        }
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        let handle = tokio::spawn(async move {
+            pricing
+                .run_throttled(event_rx, shutdown_rx, Duration::from_secs(3600))
+                .await;
+        });
+
+        // Wait for the solve to land, then stop the loop.
+        while store
+            .read()
+            .await
+            .token_prices()
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+        shutdown_tx.send(()).unwrap();
+        handle.await.unwrap();
+
+        let mut completions = 0;
+        while let Ok(event) = derived_rx.try_recv() {
+            if let DerivedDataEvent::ComputationComplete {
+                computation_id: "token_prices", ..
+            } = event
+            {
+                completions += 1;
+            }
+        }
+        assert_eq!(completions, 1, "three buffered events must coalesce into one solve");
     }
 
     /// Creates a market with a component in topology but WITHOUT simulation state.

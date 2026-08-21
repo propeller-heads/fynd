@@ -3,10 +3,18 @@
 //!
 //! # Algorithm
 //!
-//! For each token in the graph:
+//! One relaxation from the gas token yields the best buy route to every token it reaches. Each
+//! bought token is then sold back with its own solve, and the price is the mean of what the two
+//! routes imply:
 //!
-//! One relaxation from the gas token yields the best route to every token it reaches, and a token's
-//! price is what its route returns over what it was given: `buy_out / simulation_amount`.
+//! - `buy_price` = `buy_out / simulation_amount`
+//! - `sell_price` = `buy_out / sell_out`
+//! - price = `(buy_price + sell_price) / 2`, held as an exact fraction
+//!
+//! The mean includes the round-trip cost, so prices are comparable across tokens (a token that
+//! is expensive to exit prices lower). A token missing either route is unpriced: consumers treat
+//! a missing price as "gas converts to zero", so quoting such a token still works, just
+//! gas-blind.
 //!
 //! The router runs with gas-aware scoring off. Off is what keeps this non-circular: gas-aware
 //! scoring converts a route's gas into output-token terms, which needs the prices this computation
@@ -14,25 +22,17 @@
 //!
 //! A router already ranks paths by what they return, so pricing needs no ranking rule of its own.
 //!
-//! # Modes: the default price is what you pay to buy
+//! # Why this runs outside the per-block chain
 //!
-//! [`PricingMode::BuyOnly`] (default) does not solve selling back. Those solves are many sources
-//! into one destination, each starting from its own buy output, and slippage makes the relaxation
-//! amount-dependent, so they cannot share the single pass the buy side gets — one per token does
-//! not fit in a block. The price then omits what leaving the token would cost: it converts gas
-//! cost into output-token units, but must not compare value across tokens, because a buy-only
-//! rate flatters a token that is expensive to exit.
-//!
-//! [`PricingMode::Mid`] pays that per-token cost behind a minimum interval: it adds the sell leg
-//! and stores both rates in the directions slot, for consumers that value tokens against each
-//! other (e.g. TVL) and tolerate staleness. The price map itself holds the buy rate in every
-//! mode, so its meaning never depends on configuration.
+//! The buy side costs one relaxation however many tokens are priced. The sell side costs one
+//! solve per token: those solves are many sources into one destination, each starting from its
+//! own buy output, and slippage makes the relaxation amount-dependent, so they cannot share the
+//! buy side's single pass. Solving every token both ways does not fit in a block, so this
+//! computation is not part of the per-block chain: the manager drives it on its own throttled
+//! loop ([`run_throttled`](crate::derived::ComputationManager::run_throttled)), where a slow
+//! solve delays only token prices — which tolerate staleness — never spot prices or depths.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
@@ -54,10 +54,7 @@ use crate::{
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
-        types::{
-            TokenGasPriceDirections, TokenGasPrices, TokenPriceDirections, TokenPriceEntry,
-            TokenPricesOutput, TokenPricesWithDeps,
-        },
+        types::{TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
     },
     feed::market_data::MarketData,
     graph::{GraphManager, PetgraphStableDiGraphManager},
@@ -78,31 +75,6 @@ fn route_output(route: &Route, token_out: &Address) -> BigUint {
         .sum()
 }
 
-/// How token prices are derived from the router.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PricingMode {
-    /// One relaxation per block prices every token from its buy route. What the router's gas
-    /// ranking needs; the default.
-    BuyOnly,
-    /// Buy plus a per-token sell solve, keeping both rates in the directions slot. The price
-    /// map still holds the buy rate.
-    ///
-    /// The sell side costs one solve per token, so the computation re-solves at most once per
-    /// `min_interval` and returns its cached output in between. For consumers that value tokens
-    /// against each other and tolerate staleness.
-    Mid {
-        /// Minimum time between solves; zero re-solves every block.
-        min_interval: Duration,
-    },
-}
-
-/// A finished solve and when it ran, served unchanged while `Mid`'s interval has not passed.
-#[derive(Debug)]
-struct CachedSolve {
-    at: Instant,
-    output: ComputationOutput<TokenPricesOutput>,
-}
-
 /// Computes token prices relative to the gas token from the routes that trade it.
 #[derive(Debug, Clone)]
 pub struct TokenGasPriceComputation {
@@ -112,10 +84,6 @@ pub struct TokenGasPriceComputation {
     max_hops: usize,
     /// Amount of gas token to buy with (affects slippage).
     simulation_amount: BigUint,
-    /// How prices are derived.
-    mode: PricingMode,
-    /// Last solve, for `Mid`'s interval throttle. Shared so the computation stays `Clone`.
-    cache: Arc<Mutex<Option<CachedSolve>>>,
 }
 
 impl Default for TokenGasPriceComputation {
@@ -124,21 +92,16 @@ impl Default for TokenGasPriceComputation {
             gas_token: Address::zero(20), // ETH address
             max_hops: 3,
             simulation_amount: BigUint::from(10u64).pow(18), // 1 ETH
-            mode: PricingMode::BuyOnly,
-            cache: Arc::default(),
         }
     }
 }
 
 impl TokenGasPriceComputation {
-    /// Creates a computation with explicit parameters and the default mode.
+    /// Creates a computation with explicit parameters.
     #[cfg(test)]
     pub fn new(gas_token: Address, max_hops: usize, simulation_amount: BigUint) -> Self {
-        Self { gas_token, max_hops, simulation_amount, ..Self::default() }
+        Self { gas_token, max_hops, simulation_amount }
     }
-
-    /// Store slot for the direction rates `Mid` mode keeps next to the prices.
-    pub const DIRECTIONS_ID: ComputationId = "token_price_directions";
 
     /// Sets the longest path the router may use.
     pub fn with_max_hops(self, max_hops: usize) -> Self {
@@ -150,51 +113,18 @@ impl TokenGasPriceComputation {
         Self { gas_token, ..self }
     }
 
-    /// Sets how prices are derived.
-    pub fn with_mode(self, mode: PricingMode) -> Self {
-        Self { mode, ..self }
-    }
-
-    /// The cached output while `Mid`'s `min_interval` has not elapsed, `None` otherwise.
-    fn cached_within_interval(&self) -> Option<ComputationOutput<TokenPricesOutput>> {
-        let PricingMode::Mid { min_interval } = self.mode else {
-            return None;
-        };
-        let Ok(guard) = self.cache.lock() else {
-            return None;
-        };
-        guard
-            .as_ref()
-            .filter(|cached| cached.at.elapsed() < min_interval)
-            .map(|cached| cached.output.clone())
-    }
-
-    /// Remembers `output` so `Mid` mode can serve it until `min_interval` passes.
-    fn remember_solve(&self, output: &ComputationOutput<TokenPricesOutput>) {
-        let PricingMode::Mid { min_interval: _ } = self.mode else {
-            return;
-        };
-        if let Ok(mut guard) = self.cache.lock() {
-            *guard = Some(CachedSolve { at: Instant::now(), output: output.clone() });
-        }
-    }
-
-    /// Solves every token, or only `filter_tokens` when given: the buy route always, plus a sell
-    /// solve in [`PricingMode::Mid`].
+    /// Solves every token, or only `filter_tokens` when given: one relaxation for every buy
+    /// route, plus a sell solve per token.
     ///
-    /// Returns the priced tokens, the block the market was read at, and one failed item per token
-    /// the router found no buy route for.
+    /// Returns the priced tokens, the block the market was read at, and one failed item per
+    /// token that could not be priced — no buy route, or no sell route back.
     #[allow(clippy::type_complexity)]
     async fn solve_token_prices(
         &self,
         market: &MarketData,
         filter_tokens: Option<&HashSet<Address>>,
     ) -> Result<
-        (
-            HashMap<Address, (Price, Option<TokenPriceDirections>, HashSet<ComponentId>)>,
-            u64,
-            Vec<FailedItem>,
-        ),
+        (HashMap<Address, (Price, HashSet<ComponentId>)>, u64, Vec<FailedItem>),
         ComputationError,
     > {
         let (topology, block) = {
@@ -232,13 +162,10 @@ impl TokenGasPriceComputation {
                 .price_token(&router, graph, market, &token, buys.get(&token))
                 .await
             {
-                Some(priced) => {
+                Ok(priced) => {
                     prices.insert(token, priced);
                 }
-                None => failed_items.push(FailedItem {
-                    key: token.to_string(),
-                    error: FailedItemError::UnreachableFromGasToken,
-                }),
+                Err(error) => failed_items.push(FailedItem { key: token.to_string(), error }),
             }
         }
 
@@ -292,11 +219,13 @@ impl TokenGasPriceComputation {
             .collect()
     }
 
-    /// Prices one token from its buy route, adding the sell leg in [`PricingMode::Mid`].
+    /// Prices one token as the mean of what its buy and sell routes imply.
     ///
-    /// The returned price is the buy rate in every mode; `Mid` additionally returns both
-    /// direction rates. A token that can be bought but not sold back keeps its buy price and
-    /// gets no directions entry. `None` when there is no buy route or it returns nothing.
+    /// With `buy_price = buy_out / simulation_amount` and `sell_price = buy_out / sell_out`,
+    /// the mean is `buy_out * (simulation_amount + sell_out)` over
+    /// `2 * simulation_amount * sell_out`, kept as an exact fraction. A token missing either
+    /// route is an error, not a price: a buy rate alone would flatter a token that is expensive
+    /// to exit, and prices must stay comparable across tokens.
     async fn price_token(
         &self,
         router: &BellmanFordAlgorithm,
@@ -304,30 +233,22 @@ impl TokenGasPriceComputation {
         market: &MarketData,
         token: &Address,
         buy: Option<&Route>,
-    ) -> Option<(Price, Option<TokenPriceDirections>, HashSet<ComponentId>)> {
-        let buy = buy?;
+    ) -> Result<(Price, HashSet<ComponentId>), FailedItemError> {
+        let buy = buy.ok_or(FailedItemError::UnreachableFromGasToken)?;
         let buy_out = route_output(buy, token);
         if buy_out.is_zero() {
-            return None;
+            return Err(FailedItemError::UnreachableFromGasToken);
         }
-        let buy_price =
-            Price { numerator: buy_out.clone(), denominator: self.simulation_amount.clone() };
         let mut components: HashSet<ComponentId> = buy
             .swaps()
             .iter()
             .map(|swap| swap.component_id().to_string())
             .collect();
 
-        let PricingMode::Mid { min_interval: _ } = self.mode else {
-            return Some((buy_price, None, components));
-        };
-
-        let Some(sell) = self
+        let sell = self
             .sell_route(router, graph, market, token, buy_out.clone())
             .await
-        else {
-            return Some((buy_price, None, components));
-        };
+            .ok_or(FailedItemError::NoSellRoute)?;
         let sell_out = route_output(&sell, &self.gas_token);
         components.extend(
             sell.swaps()
@@ -335,16 +256,18 @@ impl TokenGasPriceComputation {
                 .map(|swap| swap.component_id().to_string()),
         );
 
-        let sell_price = Price { numerator: buy_out, denominator: sell_out };
-        let directions = TokenPriceDirections { buy: buy_price.clone(), sell: sell_price };
-        Some((buy_price, Some(directions), components))
+        let mid_price = Price {
+            numerator: &buy_out * (&self.simulation_amount + &sell_out),
+            denominator: BigUint::from(2u8) * &self.simulation_amount * sell_out,
+        };
+        Ok((mid_price, components))
     }
 
     /// The route that sells `amount` of `token` back to the gas token, or `None` when there is no
     /// route or it returns nothing.
     ///
     /// Each call builds its own context, so the sell side costs one solve per token — the reason
-    /// [`PricingMode::Mid`] runs behind an interval.
+    /// this computation runs behind an interval instead of in the per-block chain.
     async fn sell_route(
         &self,
         router: &BellmanFordAlgorithm,
@@ -382,8 +305,8 @@ impl TokenGasPriceComputation {
         market: &MarketData,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
-    ) -> Result<Option<ComputationOutput<TokenPricesOutput>>, ComputationError> {
-        let (existing_deps, existing_prices, existing_directions) = {
+    ) -> Result<Option<ComputationOutput<TokenGasPrices>>, ComputationError> {
+        let (existing_deps, existing_prices) = {
             let store_guard = store.read().await;
             let Some(existing_deps) = store_guard.token_prices_deps().cloned() else {
                 return Ok(None);
@@ -391,17 +314,7 @@ impl TokenGasPriceComputation {
             let Some(existing_prices) = store_guard.token_prices().cloned() else {
                 return Ok(None);
             };
-            (
-                existing_deps,
-                existing_prices,
-                store_guard
-                    .token_price_directions()
-                    .cloned(),
-            )
-        };
-        let mut result_directions = match self.mode {
-            PricingMode::BuyOnly => None,
-            PricingMode::Mid { min_interval: _ } => Some(existing_directions.unwrap_or_default()),
+            (existing_deps, existing_prices)
         };
 
         let changed_components = changed.all_changed_ids();
@@ -416,10 +329,7 @@ impl TokenGasPriceComputation {
             .collect();
 
         if tokens_to_recompute.is_empty() {
-            return Ok(Some(ComputationOutput::success(TokenPricesOutput {
-                prices: existing_prices,
-                directions: result_directions,
-            })));
+            return Ok(Some(ComputationOutput::success(existing_prices)));
         }
 
         debug!(
@@ -436,21 +346,15 @@ impl TokenGasPriceComputation {
         let mut new_deps = existing_deps;
 
         for token in &tokens_to_recompute {
-            if let Some((price, directions, components)) = solved.get(token) {
+            if let Some((price, components)) = solved.get(token) {
                 new_deps.insert(
                     token.clone(),
                     TokenPriceEntry { price: price.clone(), path_components: components.clone() },
                 );
                 result.insert(token.clone(), price.clone());
-                if let (Some(map), Some(directions)) = (&mut result_directions, directions) {
-                    map.insert(token.clone(), directions.clone());
-                }
             } else {
                 result.remove(token);
                 new_deps.remove(token);
-                if let Some(map) = &mut result_directions {
-                    map.remove(token);
-                }
             }
         }
 
@@ -460,19 +364,16 @@ impl TokenGasPriceComputation {
             .set_token_prices_deps(new_deps, block);
         Span::current().record("updated_token_prices", result.len());
 
-        Ok(Some(ComputationOutput::with_failures(
-            TokenPricesOutput { prices: result, directions: result_directions },
-            failed_items,
-        )))
+        Ok(Some(ComputationOutput::with_failures(result, failed_items)))
     }
 
-    /// The full or incremental solve behind [`Self::compute`], without the `Mid` interval cache.
-    async fn compute_uncached(
+    /// The full or incremental solve behind [`DerivedComputation::compute`].
+    async fn compute_prices(
         &self,
         market: &MarketData,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
-    ) -> Result<ComputationOutput<TokenPricesOutput>, ComputationError> {
+    ) -> Result<ComputationOutput<TokenGasPrices>, ComputationError> {
         if !changed.is_full_recompute && !changed.is_topology_change() {
             if let Some(result) = self
                 .try_incremental_compute(market, store, changed)
@@ -488,13 +389,9 @@ impl TokenGasPriceComputation {
 
         let mut token_prices_with_deps = TokenPricesWithDeps::new();
         let mut token_prices = TokenGasPrices::new();
-        let mut token_directions = TokenGasPriceDirections::new();
-        for (token, (price, directions, path_components)) in solved {
+        for (token, (price, path_components)) in solved {
             token_prices_with_deps
                 .insert(token.clone(), TokenPriceEntry { price: price.clone(), path_components });
-            if let Some(directions) = directions {
-                token_directions.insert(token.clone(), directions);
-            }
             token_prices.insert(token, price);
         }
 
@@ -507,19 +404,6 @@ impl TokenGasPriceComputation {
             self.gas_token.clone(),
             TokenPriceEntry { price: gas_token_price.clone(), path_components: HashSet::new() },
         );
-        let directions = match self.mode {
-            PricingMode::BuyOnly => None,
-            PricingMode::Mid { min_interval: _ } => {
-                token_directions.insert(
-                    self.gas_token.clone(),
-                    TokenPriceDirections {
-                        buy: gas_token_price.clone(),
-                        sell: gas_token_price.clone(),
-                    },
-                );
-                Some(token_directions)
-            }
-        };
         token_prices.insert(self.gas_token.clone(), gas_token_price);
 
         store
@@ -530,16 +414,13 @@ impl TokenGasPriceComputation {
         debug!(priced = token_prices.len() - 1, "token price computation complete");
         Span::current().record("updated_token_prices", token_prices.len());
 
-        Ok(ComputationOutput::with_failures(
-            TokenPricesOutput { prices: token_prices, directions },
-            failed_items,
-        ))
+        Ok(ComputationOutput::with_failures(token_prices, failed_items))
     }
 }
 
 #[async_trait]
 impl DerivedComputation for TokenGasPriceComputation {
-    type Output = TokenPricesOutput;
+    type Output = TokenGasPrices;
 
     const ID: ComputationId = "token_prices";
 
@@ -554,11 +435,7 @@ impl DerivedComputation for TokenGasPriceComputation {
         block: u64,
         is_full_recompute: bool,
     ) {
-        let TokenPricesOutput { prices, directions } = output.data;
-        store.set_token_prices(prices, output.failed_items, block, is_full_recompute);
-        if let Some(directions) = directions {
-            store.set_token_price_directions(directions, block);
-        }
+        store.set_token_prices(output.data, output.failed_items, block, is_full_recompute);
     }
 
     #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_token_prices))]
@@ -568,14 +445,8 @@ impl DerivedComputation for TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        if let Some(cached) = self.cached_within_interval() {
-            return Ok(cached);
-        }
-        let output = self
-            .compute_uncached(market, store, changed)
-            .await?;
-        self.remember_solve(&output);
-        Ok(output)
+        self.compute_prices(market, store, changed)
+            .await
     }
 }
 
@@ -615,23 +486,42 @@ mod tests {
             .await
             .expect("pricing must not fail")
             .data
-            .prices
     }
 
     #[tokio::test]
-    async fn test_prices_a_token_from_the_route_that_buys_it() {
+    async fn test_prices_a_token_from_its_round_trip() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
         let prices =
             prices_for(&eth, vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]).await;
 
-        // The gas token is 1:1 with itself, and a fee-free pool returns its rate exactly.
+        // The gas token is 1:1 with itself. A fee-free symmetric pool buys and sells back at the
+        // same rate, so the mean is that rate exactly.
         let eth_price = prices
             .get(&eth.address)
             .expect("gas token should be priced");
         assert_eq!(eth_price.numerator, eth_price.denominator);
         assert!((ratio(&prices[&usdc.address]) - 2000.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_price_is_the_mean_of_buy_and_sell() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        // A 1% fee splits the two implied rates apart:
+        //   buy_out  = 1e18 * 2000 * 0.99          → buy_price  = 1980
+        //   sell_out = buy_out / 2000 * 0.99       → sell_price = 2000 / 0.99
+        // so the fee's round-trip cost shows up in the price.
+        let prices = prices_for(
+            &eth,
+            vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0).with_fee(0.01))],
+        )
+        .await;
+
+        let expected_mean = (1980.0 + 2000.0 / 0.99) / 2.0;
+        assert!((ratio(&prices[&usdc.address]) - expected_mean).abs() < 1e-6);
     }
 
     #[tokio::test]
@@ -649,7 +539,8 @@ mod tests {
         )
         .await;
 
-        // 1 ETH buys 2 MID buys 6 TARGET, so the price is 6.
+        // 1 ETH buys 2 MID buys 6 TARGET, and the fee-free reverse returns the ETH, so the
+        // mean is 6.
         assert!((ratio(&prices[&target.address]) - 6.0).abs() < 1e-6);
     }
 
@@ -672,79 +563,5 @@ mod tests {
 
         assert!(prices.contains_key(&usdc.address));
         assert!(!prices.contains_key(&island.address), "an unreachable token has no price");
-    }
-
-    #[tokio::test]
-    async fn test_buy_only_mode_stores_no_directions() {
-        let eth = token(0, "ETH");
-        let usdc = token(1, "USDC");
-
-        let (market, _) =
-            setup_market_weighted(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]);
-        let store = DerivedData::new_shared();
-        let output = computation_for(&eth.address)
-            .compute(&market, &store, &ChangedComponents::default())
-            .await
-            .expect("pricing must not fail");
-
-        assert!(output.data.directions.is_none());
-        assert!(store
-            .read()
-            .await
-            .token_price_directions()
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn test_mid_mode_prices_at_buy_and_keeps_both_rates() {
-        let eth = token(0, "ETH");
-        let usdc = token(1, "USDC");
-
-        let (market, _) =
-            setup_market_weighted(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]);
-        let store = DerivedData::new_shared();
-        let output = computation_for(&eth.address)
-            .with_mode(PricingMode::Mid { min_interval: Duration::ZERO })
-            .compute(&market, &store, &ChangedComponents::default())
-            .await
-            .expect("pricing must not fail");
-
-        // The price map holds the buy rate; a fee-free pool buys at exactly 2000.
-        assert!((ratio(&output.data.prices[&usdc.address]) - 2000.0).abs() < 1e-6);
-
-        let directions = output
-            .data
-            .directions
-            .expect("mid mode keeps both rates");
-        let usdc_directions = &directions[&usdc.address];
-        assert!((ratio(&usdc_directions.buy) - 2000.0).abs() < 1e-6);
-        assert!((ratio(&usdc_directions.sell) - 2000.0).abs() < 1e-6);
-    }
-
-    #[tokio::test]
-    async fn test_mid_mode_returns_cached_output_within_interval() {
-        let eth = token(0, "ETH");
-        let usdc = token(1, "USDC");
-        let store = DerivedData::new_shared();
-        let computation = computation_for(&eth.address)
-            .with_mode(PricingMode::Mid { min_interval: Duration::from_secs(3600) });
-
-        let (market, _) =
-            setup_market_weighted(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]);
-        let full_recompute = ChangedComponents { is_full_recompute: true, ..Default::default() };
-        computation
-            .compute(&market, &store, &full_recompute)
-            .await
-            .expect("pricing must not fail");
-
-        // The market moved to 3000, but the interval has not passed: the cached 2000 is served
-        // even though a full recompute was requested.
-        let (moved, _) =
-            setup_market_weighted(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(3000.0))]);
-        let second = computation
-            .compute(&moved, &store, &full_recompute)
-            .await
-            .expect("pricing must not fail");
-        assert!((ratio(&second.data.prices[&usdc.address]) - 2000.0).abs() < 1e-6);
     }
 }
