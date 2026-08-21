@@ -44,6 +44,9 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 # Uniswap Universal Router (V1_2) and SwapRouter02 on Base
 "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad" = "uniswap"
 "0x2626664c2603336e57b271c5c0b26f421741e481" = "uniswap"
+# Universal Router 2.0, 2.1.1 (developers.uniswap.org supported-chains table)
+"0x6ff5693b99212da76ad316178a184ab56d299b43" = "uniswap"
+"0xfdf682f51fe81aa4898f0ae2163d8a55c127fbc7" = "uniswap"
 # OKX DEX Router on Base — router and exactOut router (OKX onchain-OS docs)
 "0x5e2f47bd7d4b357fcfd0bb224eb665773b1b9801" = "okx"
 "0x77449ff075c0a385796da0762bcb46fd5cc884c6" = "okx"

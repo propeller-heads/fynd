@@ -58,6 +58,8 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad" = "uniswap"
 "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45" = "uniswap"
 "0xe592427a0aece92de3edee1f18e0157c05861564" = "uniswap"
+# Universal Router 2.1.1 (developers.uniswap.org supported-chains table)
+"0x8b844f885672f333bc0042cb669255f93a4c1e6b" = "uniswap"
 # OKX DEX routers (okxlabs/DEX-Router-EVM-V1 deployments plus OKX's own docs). Several versions run
 # concurrently; each was confirmed OKX by the Polygon TokenApproveProxy and WNativeRelayer
 # addresses embedded in its bytecode. 0xf6e1b4b2… is the one Phantom's decoded Polygon swap routed
