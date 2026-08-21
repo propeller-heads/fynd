@@ -59,9 +59,13 @@ jobs:
           cache-on-failure: true
 
       - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@71b48393496777ee11188c07a34d48b048a985cd  # v2
+        # The version is explicit because cargo-semver-checks reads the rustdoc JSON built below,
+        # and each Rust release can change that file format. Without a version the action installs
+        # whatever its own pinned commit knows about, which fell behind current Rust and could not
+        # read the file. 0.50.0 reads what stable and nightly Rust write today.
+        uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f  # v2.86.4
         with:
-          tool: cargo-semver-checks
+          tool: cargo-semver-checks@0.50.0
 
       - name: Build baseline rustdoc from full workspace
         # cargo semver-checks --baseline-rev builds each package in an isolated placeholder
