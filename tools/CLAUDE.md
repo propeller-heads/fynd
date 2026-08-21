@@ -4,10 +4,43 @@ Developer and operational tooling for the Fynd solver.
 
 | Tool | Crate | Description |
 |---|---|---|
+| [exclusive-pool-pnl](#exclusive-pool-pnl) | `tools/exclusive-pool-pnl/` | LP fee revenue and markout for the exclusive Ekubo pool |
 | [fynd-benchmark](#fynd-benchmark) | `tools/benchmark/` | Load testing, solver comparison, trade dataset download |
 | [fynd-swap-cli](#fynd-swap-cli) | `tools/fynd-swap-cli/` | Quote and execute token swaps (ERC-20 or Permit2) |
 | [hindsight](#hindsight) | `tools/hindsight/` | Decode solver swaps from on-chain data and live-monitor re-solve quality |
 | [record-market](#record-market) | `tools/record-market/` | Record Tycho market state and expected outputs for integration tests |
+
+---
+
+## exclusive-pool-pnl
+
+One-shot report on the Fynd exclusive Ekubo V3 pool, hardcoded in `src/pool.rs`. Run with
+`cargo run -p exclusive-pool-pnl --release --` and an `RPC_URL` pointing at an archive node.
+
+### Module Map
+
+| File | Purpose |
+|---|---|
+| `pool.rs` | Pool identity: id, extension, Ekubo core, event topics, token decimals |
+| `chain.rs` | Chunked `eth_getLogs` scan, retries, and the swap / fee / signed-fee decoders |
+| `prices.rs` | Binance one-minute klines used as the markout reference |
+| `pnl.rs` | Fee attribution across Ekubo's one-interaction lag, plus markout math |
+| `report.rs` | Per-swap table, totals block, JSON artifact |
+
+### Key Behaviors
+
+- **Discovery starts at the extension**, which indexes the pool id as topic1. Ekubo core emits its
+  swap event with `log0` and cannot be filtered server-side, so swaps are decoded from the receipts
+  of the transactions the extension points at. Position updates share the extension's topic and are
+  separated by whether that receipt holds a core swap log.
+- **Fees are measured from `FeesAccumulated`**, not recomputed from the signed rate. Ekubo credits
+  an accrued fee on the next pool interaction, so `pnl::attribute_fees` shifts each credit back one
+  interaction. A swap whose fee never reached the pool reports zero LP revenue.
+- **Markout, not LVR**: no arbitrageur can trade a signature-gated pool, so the report measures
+  adverse selection on Fynd's routed flow against Binance ETHUSDC.
+- `price_guard` providers are deliberately unused — they are live-only and keep no history.
+
+See [`tools/exclusive-pool-pnl/README.md`](exclusive-pool-pnl/README.md) for flags and caveats.
 
 ---
 
