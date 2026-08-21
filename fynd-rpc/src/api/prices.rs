@@ -74,7 +74,7 @@ impl fmt::Display for IncludeField {
 /// Block numbers at which each computation was last run.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ComputationBlocks {
-    /// Block at which the token price directions were computed.
+    /// Block at which the token prices were computed.
     pub token_prices: u64,
     /// Block at which spot prices were computed. `None` if not yet available.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,8 +89,7 @@ pub struct ComputationBlocks {
 pub struct PricesResponse {
     /// Per-token mid prices relative to the native gas token, sorted by token address.
     ///
-    /// Served only by instances that solve both directions; a token that could not be sold
-    /// back is absent.
+    /// A token that could not be sold back is absent.
     pub prices: Vec<TokenPriceEntry>,
     /// The gas token address (e.g. WETH).
     #[schema(value_type = String, example = "0x0000000000000000000000000000000000000000")]

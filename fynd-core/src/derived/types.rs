@@ -67,29 +67,3 @@ pub struct TokenPriceEntry {
 ///
 /// Used internally by `TokenGasPriceComputation` to enable incremental updates.
 pub type TokenPricesWithDeps = FxHashMap<TokenGasPriceKey, TokenPriceEntry>;
-
-/// A token's two directional rates, kept when `PricingMode::Mid` solves the sell side.
-///
-/// Both are token units per one gas-token unit. An entry always has both rates from one solve;
-/// a token that could not be solved in both directions is absent here, though its buy-only
-/// price may still be in the price map.
-#[derive(Debug, Clone)]
-pub struct TokenPriceDirections {
-    /// What one gas-token unit buys via the best route.
-    pub buy: Price,
-    /// What selling that output back implies.
-    pub sell: Price,
-}
-
-/// Direction rates per token address.
-pub type TokenGasPriceDirections = FxHashMap<TokenGasPriceKey, TokenPriceDirections>;
-
-/// Output of the token gas price computation: the price map plus, in `Mid` mode, the
-/// direction rates it was derived from.
-#[derive(Debug, Clone)]
-pub struct TokenPricesOutput {
-    /// The buy rate per token, in every mode.
-    pub prices: TokenGasPrices,
-    /// Both rates per token; `None` in `BuyOnly` mode.
-    pub directions: Option<TokenGasPriceDirections>,
-}
