@@ -1118,10 +1118,10 @@ pub struct Route {
     tokens: FxHashMap<Bytes, Token>,
     /// Amount out this route delivers if its pAMM legs fall back to Uniswap V3.
     ///
-    /// Set by the worker for routes that contain a `propammrouter:` leg; `None` for every other
-    /// route. The encoder derives `min_amount_out` from it, because a value derived from the pAMM
-    /// quote is too high for the fallback to clear. In-process only — `#[serde(skip)]`, so it
-    /// never enters the wire format.
+    /// Set by the worker for routes that contain a `propammfallback:` leg; `None` for every other
+    /// route. The encoder drops the quote when this amount cannot clear `min_amount_out`, which
+    /// stays derived from the pAMM quote and the user's slippage. In-process only —
+    /// `#[serde(skip)]`, so it never enters the wire format.
     #[serde(skip, default)]
     fallback_amount_out: Option<BigUint>,
 }
@@ -2061,8 +2061,7 @@ mod tests {
         let swaps: Vec<Swap> = (0..num_swaps)
             .map(|i| make_swap(i as u8, (i + 1) as u8, 1000, 990))
             .collect();
-        let route =
-            Route { swaps, tokens: FxHashMap::default(), fallback_amount_out: None };
+        let route = Route { swaps, tokens: FxHashMap::default(), fallback_amount_out: None };
         assert_eq!(route.total_gas(), BigUint::from(expected_gas));
     }
 

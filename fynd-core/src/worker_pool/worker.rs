@@ -30,7 +30,7 @@ use crate::{
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     propamm_fallback::{
-        fallback_amount_out, FallbackAmountOut, FallbackPoolIndex, SharedFallbackFees,
+        fallback_amount_out, has_pamm_leg, FallbackAmountOut, FallbackPoolIndex, SharedFallbackFees,
     },
     types::internal::SolveTask,
     worker_pool_router::LiquidityScope,
@@ -305,36 +305,37 @@ where
                 }
 
                 // A route with a pAMM leg needs the amount out its Uniswap V3 fallback would
-                // deliver, because `min_amount_out` derived from the pAMM quote is too high for
-                // the fallback to clear. A route whose fallback cannot be priced is dropped: we
-                // would have no justifiable `min_amount_out` for it.
-                let fallback = {
+                // deliver: the encoder checks it against `min_amount_out` and drops the quote when
+                // it falls short. A route whose fallback cannot be priced is dropped here, because
+                // there is nothing to check that floor against.
+                if has_pamm_leg(&route) {
                     let market = self.market_data.read().await;
-                    fallback_amount_out(
-                        route.swaps(),
+                    match fallback_amount_out(
+                        &route,
                         &market,
                         &self.fallback_fees.snapshot(),
                         &self.fallback_pools,
-                    )
-                };
-                match fallback {
-                    FallbackAmountOut::NoPropAmmLeg => {}
-                    FallbackAmountOut::AmountOut(amount) => route.set_fallback_amount_out(amount),
-                    FallbackAmountOut::NoFallbackPool { component_id, fee } => {
-                        debug!(
-                            order_id = %order.id(),
-                            %component_id,
-                            fee,
-                            "dropping pAMM route: no Uniswap V3 pool at the router's fee tier"
-                        );
-                        return Err(SolveError::no_route_found(order.id()));
-                    }
-                    FallbackAmountOut::SplitNotSupported => {
-                        debug!(
-                            order_id = %order.id(),
-                            "dropping pAMM route: split routes are not supported yet"
-                        );
-                        return Err(SolveError::no_route_found(order.id()));
+                    ) {
+                        FallbackAmountOut::AmountOut(amount) => {
+                            route.set_fallback_amount_out(amount)
+                        }
+                        FallbackAmountOut::NoFallbackPool { component_id, fee } => {
+                            debug!(
+                                order_id = %order.id(),
+                                %component_id,
+                                fee,
+                                "dropping pAMM route: no Uniswap V3 pool at the router's fee tier"
+                            );
+                            return Err(SolveError::no_route_found(order.id()));
+                        }
+                        FallbackAmountOut::NotPriceable { reason } => {
+                            debug!(
+                                order_id = %order.id(),
+                                %reason,
+                                "dropping pAMM route: the Uniswap V3 fallback could not be simulated"
+                            );
+                            return Err(SolveError::no_route_found(order.id()));
+                        }
                     }
                 }
 
@@ -704,7 +705,7 @@ mod tests {
             DerivedData,
         },
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
-        propamm_fallback::PROPAMM_ROUTER_PREFIX,
+        propamm_fallback::PROPAMM_FALLBACK_PREFIX,
         types::{OrderSide, Route, RouteResult, Swap},
         AlgorithmError,
     };
@@ -866,7 +867,7 @@ mod tests {
             let token_b = token(0x02, "B");
             let swap = Swap::new(
                 "pamm".to_string(),
-                format!("{PROPAMM_ROUTER_PREFIX}fermiswap"),
+                format!("{PROPAMM_FALLBACK_PREFIX}fermiswap"),
                 token_a.address.clone(),
                 token_b.address.clone(),
                 BigUint::from(100u64),
@@ -875,7 +876,7 @@ mod tests {
                 component("pamm", &[token_a.clone(), token_b.clone()]),
                 Box::new(MockProtocolSim::new(2.0)),
             );
-            let route = Route::new(vec![swap], HashMap::new()).expect("non-empty route");
+            let route = Route::new(vec![swap], FxHashMap::default()).expect("non-empty route");
             Ok(RouteResult::new(route, num_bigint::BigInt::from(200), BigUint::from(1u64)))
         }
 
@@ -888,10 +889,10 @@ mod tests {
         }
     }
 
-    /// Without a Uniswap V3 pool at the router's fee tier the fallback reverts too, so quoting the
-    /// route would produce calldata with no justifiable `min_amount_out`.
+    /// Without a Uniswap V3 pool at the router's fee tier the fallback reverts too, so there is no
+    /// fallback amount to check `min_amount_out` against.
     #[tokio::test]
-    async fn test_quote_drops_pamm_route_without_a_fallback_pool() {
+    async fn test_quote_pamm_route_without_fallback_pool() {
         let (market, _) = setup_market_weighted(vec![]);
         let derived = DerivedData::new_shared();
         let mut worker =

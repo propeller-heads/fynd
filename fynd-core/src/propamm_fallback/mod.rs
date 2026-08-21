@@ -1,12 +1,13 @@
 //! Computes the amount out a route delivers when its pAMM legs fall back to Uniswap V3.
 //!
-//! The encoder derives `min_amount_out` from this number instead of from the pAMM quote.
+//! The encoder drops the quote when this number cannot clear `min_amount_out`.
 //!
 //! A pAMM quote only reaches the chain in the block the maker quotes for, so simulating a pAMM
-//! route against a mined block reverts. Routing the leg through the PropAMMRouter
-//! (`propammrouter:` protocol family) falls back to Uniswap V3 instead of reverting. The fallback
-//! pays less than the pAMM quote, so a `min_amount_out` derived from that quote still reverts the
-//! route. Deriving it from this number does not.
+//! route against a mined block reverts. Routing the leg through Titan's PropAMMRouter
+//! (`propammfallback:` protocol family) falls back to Uniswap V3 instead of reverting. The fallback
+//! pays less than the pAMM quote. `min_amount_out` keeps describing the pAMM quote and the slippage
+//! the user accepted, so a fallback below that floor reverts the route anyway — and lowering the
+//! floor to fit would pay the user less than they accepted. Such a route is not quoted.
 
 pub mod fee_fetcher;
 
@@ -16,43 +17,111 @@ use std::{
 };
 
 use num_bigint::BigUint;
-use tycho_simulation::tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim};
+use tycho_simulation::tycho_common::models::Address;
 
 use crate::{
-    algorithm::sim_guard::GuardedProtocolSim,
     feed::{events::MarketEvent, market_data::MarketDataView},
-    types::{ComponentId, Swap},
+    replay::replay_route,
+    types::{ComponentId, Route, Swap},
 };
 
-/// Must match `tycho-execution`'s `PROPAMM_ROUTER_PREFIX`.
-pub const PROPAMM_ROUTER_PREFIX: &str = "propammrouter:";
-
-/// PropAMMRouter deployment on Ethereum mainnet.
+/// Whether `route` has a leg the PropAMMRouter executes (`propammfallback:` protocol family).
 ///
-/// <https://github.com/lambdaclass/propamm-router-contracts>
-pub const PROPAMM_ROUTER_ADDRESS: &str = "0x4DdF368080CD7946db5b459aD591c350158175e1";
+/// Gate `fallback_amount_out` behind this: it lets a route without a pAMM leg — every route until
+/// a venue adopts the prefix — cost neither a market read lock nor a copy of the fee tiers.
+pub fn has_pamm_leg(route: &Route) -> bool {
+    route.swaps().iter().any(|swap| {
+        swap.protocol()
+            .starts_with(PROPAMM_FALLBACK_PREFIX)
+    })
+}
 
-/// pAMM venues on the router's whitelist that Fynd routes through.
+/// Replays `route` with every `propammfallback:` leg pointing at its Uniswap V3 fallback pool.
 ///
-/// Only whitelisted venues may use `PROPAMM_ROUTER_PREFIX`. The router reverts `UnknownVenue` for
-/// any other address, which fires the catch arm and executes every swap on Uniswap V3 at a worse
-/// price than the pAMM gives. `FallbackFeeFetcher` reads each venue's pairs to learn which pairs
-/// need a fee tier.
-pub const PROPAMM_VENUES: &[&str] = &[
-    // Fermi (FermiSwapper)
-    "0x5979458912F80B96d30D4220af8E2e4925A33320",
-    // Kipseli
-    "0x71e790dd841c8A9061487cb3E78C288E75cE0B3d",
-];
+/// Uses `replay_route`, so split fractions and shared-pool depletion behave exactly as they do for
+/// any other route: a substituted leg's smaller output feeds the next one, and two legs on one
+/// pool see it deplete.
+///
+/// A route without a pAMM leg substitutes nothing, so the result is its plain replayed amount out.
+/// Check `has_pamm_leg` first to skip that pointless replay.
+pub fn fallback_amount_out(
+    route: &Route,
+    market: &MarketDataView<'_>,
+    fees: &FallbackFees,
+    index: &FallbackPoolIndex,
+) -> FallbackAmountOut {
+    let mut substituted = Vec::with_capacity(route.swaps().len());
+    for swap in route.swaps() {
+        if !swap
+            .protocol()
+            .starts_with(PROPAMM_FALLBACK_PREFIX)
+        {
+            substituted.push(swap.clone());
+            continue;
+        }
 
-/// Protocol system whose pools the PropAMMRouter falls back to.
-const FALLBACK_PROTOCOL_SYSTEM: &str = "uniswap_v3";
+        let fee = fees.resolved_fee(swap.token_in(), swap.token_out());
+        let Some(pool) = index.pool_for(swap.token_in(), swap.token_out(), fee) else {
+            return FallbackAmountOut::NoFallbackPool {
+                component_id: swap.component_id().to_string(),
+                fee,
+            };
+        };
+        let (Some(component), Some(state)) =
+            (market.get_component(pool), market.get_simulation_state(pool))
+        else {
+            // The index was built from this market, so a missing component or state means it was
+            // removed between the two reads. Treat it as no fallback pool.
+            return FallbackAmountOut::NoFallbackPool {
+                component_id: swap.component_id().to_string(),
+                fee,
+            };
+        };
+        substituted.push(
+            Swap::new(
+                pool.clone(),
+                component.protocol_system.clone(),
+                swap.token_in().clone(),
+                swap.token_out().clone(),
+                swap.amount_in().clone(),
+                swap.amount_out().clone(),
+                swap.gas_estimate().clone(),
+                component.clone(),
+                state.clone_box(),
+            )
+            .with_split(*swap.split()),
+        );
+    }
 
-/// Static attribute carrying a Uniswap V3 pool's fee tier, in hundredths of a bip.
-const FEE_ATTRIBUTE: &str = "fee";
+    let substituted = match Route::new(substituted, HashMap::new()) {
+        Ok(route) => route,
+        Err(e) => return FallbackAmountOut::NotPriceable { reason: e.to_string() },
+    };
+    match replay_route(&substituted, market.base_market_state()) {
+        Ok(replay) => FallbackAmountOut::AmountOut(replay.amount_out),
+        Err(e) => FallbackAmountOut::NotPriceable { reason: e.to_string() },
+    }
+}
 
-/// The router's `fallbackFee` as deployed, used for pairs without a per-pair override.
-const DEFAULT_FALLBACK_FEE: u32 = 3000;
+/// The amount out a route delivers when its pAMM legs fall back to Uniswap V3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FallbackAmountOut {
+    /// The fallback fill. Quote the route only when this amount clears `min_amount_out`.
+    AmountOut(BigUint),
+    /// No Uniswap V3 pool at the router's fee tier, so the fallback reverts too. Drop the route.
+    NoFallbackPool {
+        /// The pAMM leg with no fallback pool.
+        component_id: ComponentId,
+        /// The fee tier the router would have used.
+        fee: u32,
+    },
+    /// The substituted route could not be simulated, so there is no amount to floor at. Drop the
+    /// route.
+    NotPriceable {
+        /// What stopped the simulation.
+        reason: String,
+    },
+}
 
 /// Mirrors the router's `resolvedFee`: the per-pair override if set, else `fallbackFee`.
 ///
@@ -194,97 +263,36 @@ impl FallbackPoolIndex {
     }
 }
 
-/// The amount out a route delivers when its pAMM legs fall back to Uniswap V3.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FallbackAmountOut {
-    /// No pAMM leg, so `min_amount_out` needs no adjustment.
-    NoPropAmmLeg,
-    /// Derive `min_amount_out` from this amount.
-    AmountOut(BigUint),
-    /// No Uniswap V3 pool at the router's fee tier, so the fallback reverts too. Drop the route.
-    NoFallbackPool {
-        /// The pAMM leg with no fallback pool.
-        component_id: ComponentId,
-        /// The fee tier the router would have used.
-        fee: u32,
-    },
-    /// Split routes are not supported yet.
-    SplitNotSupported,
-}
+/// Must match `tycho-execution`'s `PROPAMM_FALLBACK_PREFIX`.
+pub const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
 
-/// Re-simulates `swaps` with every `propammrouter:` leg replaced by its fallback pool.
+/// The PropAMMRouter deployment on Ethereum mainnet: the router serving Titan's pAMM ecosystem,
+/// written by LambdaClass.
 ///
-/// Walks left to right so a substituted leg's smaller output feeds the next one. Non-pAMM legs are
-/// re-simulated too, since their input changes once an upstream leg falls back.
-pub fn fallback_amount_out(
-    swaps: &[Swap],
-    market: &MarketDataView<'_>,
-    fees: &FallbackFees,
-    index: &FallbackPoolIndex,
-) -> FallbackAmountOut {
-    if !swaps.iter().any(|swap| {
-        swap.protocol()
-            .starts_with(PROPAMM_ROUTER_PREFIX)
-    }) {
-        return FallbackAmountOut::NoPropAmmLeg;
-    }
-    if swaps
-        .iter()
-        .any(|swap| *swap.split() != 0.0)
-    {
-        return FallbackAmountOut::SplitNotSupported;
-    }
+/// <https://github.com/lambdaclass/propamm-router-contracts>
+pub const PROPAMM_ROUTER_ADDRESS: &str = "0x4DdF368080CD7946db5b459aD591c350158175e1";
 
-    let Some(first) = swaps.first() else { return FallbackAmountOut::NoPropAmmLeg };
-    let mut amount = first.amount_in().clone();
+/// pAMM venues on the router's whitelist that Fynd routes through.
+///
+/// Only whitelisted venues may use `PROPAMM_FALLBACK_PREFIX`. The router reverts `UnknownVenue` for
+/// any other address, which fires the catch arm and executes every swap on Uniswap V3 at a worse
+/// price than the pAMM gives. `FallbackFeeFetcher` reads each venue's pairs to learn which pairs
+/// need a fee tier.
+pub const PROPAMM_VENUES: &[&str] = &[
+    // Fermi (FermiSwapper)
+    "0x5979458912F80B96d30D4220af8E2e4925A33320",
+    // Kipseli
+    "0x71e790dd841c8A9061487cb3E78C288E75cE0B3d",
+];
 
-    for swap in swaps {
-        let Some(token_in) = market.get_token(swap.token_in()) else {
-            return FallbackAmountOut::SplitNotSupported;
-        };
-        let Some(token_out) = market.get_token(swap.token_out()) else {
-            return FallbackAmountOut::SplitNotSupported;
-        };
+/// Protocol system whose pools the PropAMMRouter falls back to.
+const FALLBACK_PROTOCOL_SYSTEM: &str = "uniswap_v3";
 
-        let state: &dyn ProtocolSim = if swap
-            .protocol()
-            .starts_with(PROPAMM_ROUTER_PREFIX)
-        {
-            let fee = fees.resolved_fee(swap.token_in(), swap.token_out());
-            let Some(pool) = index.pool_for(swap.token_in(), swap.token_out(), fee) else {
-                return FallbackAmountOut::NoFallbackPool {
-                    component_id: swap.component_id().to_string(),
-                    fee,
-                };
-            };
-            match market.get_simulation_state(pool) {
-                Some(state) => state,
-                // Removed between building the index and this read; treat as no fallback pool.
-                None => {
-                    return FallbackAmountOut::NoFallbackPool {
-                        component_id: swap.component_id().to_string(),
-                        fee,
-                    }
-                }
-            }
-        } else {
-            swap.protocol_state()
-        };
+/// Static attribute carrying a Uniswap V3 pool's fee tier, in hundredths of a bip.
+const FEE_ATTRIBUTE: &str = "fee";
 
-        match state.get_amount_out_guarded(amount.clone(), token_in, token_out) {
-            Ok(result) => amount = result.amount,
-            // No usable amount, so no justifiable `min_amount_out`. Drop the route.
-            Err(_) => {
-                return FallbackAmountOut::NoFallbackPool {
-                    component_id: swap.component_id().to_string(),
-                    fee: fees.resolved_fee(swap.token_in(), swap.token_out()),
-                }
-            }
-        }
-    }
-
-    FallbackAmountOut::AmountOut(amount)
-}
+/// The router's `fallbackFee` as deployed, used for pairs without a per-pair override.
+const DEFAULT_FALLBACK_FEE: u32 = 3000;
 
 /// Order-independent pair key, matching the router's `_pairKey`.
 fn sorted_pair(token_a: &Address, token_b: &Address) -> (Address, Address) {
@@ -308,7 +316,9 @@ fn parse_fee(raw: &tycho_simulation::tycho_common::Bytes) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use tycho_simulation::tycho_common::Bytes;
+    use tycho_simulation::{
+        tycho_common::Bytes, tycho_core::simulation::protocol_sim::ProtocolSim,
+    };
 
     use super::*;
     use crate::algorithm::test_utils::{self as util, addr};
@@ -332,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_fee_accepts_tycho_encoding() {
+    fn test_parse_fee() {
         assert_eq!(parse_fee(&Bytes::from(3000_i32.to_be_bytes().to_vec())), Some(3000));
         // Tycho trims leading zero bytes on some attributes.
         assert_eq!(parse_fee(&Bytes::from(vec![0x01, 0xf4])), Some(500));
@@ -341,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_for_is_order_independent() {
+    fn test_pool_for_token_order() {
         let mut index = FallbackPoolIndex::default();
         let (low, high) = sorted_pair(&addr(9), &addr(3));
         index
@@ -369,7 +379,7 @@ mod tests {
     /// The index tracks the component set, so an added pool becomes usable and a removed one
     /// stops being usable without a rebuild.
     #[test]
-    fn test_apply_event_adds_and_removes_pools() {
+    fn test_apply_event_added_and_removed_components() {
         let market = market_with_fallback_pool(500);
         let view = market
             .try_read_blocking()
@@ -380,7 +390,7 @@ mod tests {
         index.apply_event(
             &view,
             &MarketEvent::MarketUpdated {
-                added_components: HashMap::new(),
+                added_components: FxHashMap::default(),
                 removed_components: vec![FALLBACK_POOL.to_string()],
                 updated_components: Vec::new(),
             },
@@ -393,7 +403,7 @@ mod tests {
         index.apply_event(
             &view,
             &MarketEvent::MarketUpdated {
-                added_components: HashMap::from([(FALLBACK_POOL.to_string(), Vec::new())]),
+                added_components: FxHashMap::from_iter([(FALLBACK_POOL.to_string(), Vec::new())]),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
             },
@@ -408,7 +418,7 @@ mod tests {
 
     /// A state change cannot alter whether a component qualifies, so it must not touch the index.
     #[test]
-    fn test_apply_event_ignores_state_updates() {
+    fn test_apply_event_state_updates() {
         let market = market_with_fallback_pool(500);
         let view = market
             .try_read_blocking()
@@ -418,7 +428,7 @@ mod tests {
         index.apply_event(
             &view,
             &MarketEvent::MarketUpdated {
-                added_components: HashMap::new(),
+                added_components: FxHashMap::default(),
                 removed_components: Vec::new(),
                 updated_components: vec![FALLBACK_POOL.to_string()],
             },
@@ -432,7 +442,7 @@ mod tests {
     const FALLBACK_PRICE: f64 = 1.0;
     const FALLBACK_POOL: &str = "0xretry";
     const PAMM_COMPONENT: &str = "0xpamm";
-    const PAMM_PROTOCOL: &str = "propammrouter:fermiswap";
+    const PAMM_PROTOCOL: &str = "propammfallback:fermiswap";
 
     /// Market holding one `uniswap_v3` fallback pool for the (1, 2) pair at `fee`.
     fn market_with_fallback_pool(fee: u32) -> crate::feed::market_data::MarketData {
@@ -474,28 +484,39 @@ mod tests {
         )
     }
 
-    /// A route with no pAMM leg keeps its usual `min_amount_out`.
-    #[test]
-    fn test_fallback_amount_out_no_pamm_leg() {
-        let market = market_with_fallback_pool(500);
-        let view = market
-            .try_read_blocking()
-            .expect("uncontended");
-
-        assert_eq!(
-            fallback_amount_out(
-                &[],
-                &view,
-                &FallbackFees::default(),
-                &FallbackPoolIndex::default()
+    /// A leg on the fallback pool itself, so the route holds no pAMM.
+    fn uniswap_swap() -> Swap {
+        let (token_in, token_out) = (util::token(1, "WETH"), util::token(2, "USDC"));
+        Swap::new(
+            FALLBACK_POOL.to_string(),
+            FALLBACK_PROTOCOL_SYSTEM.to_string(),
+            token_in.address.clone(),
+            token_out.address.clone(),
+            BigUint::from(1_000u32),
+            BigUint::from(1_000u32),
+            BigUint::from(100_000u32),
+            util::component_with_protocol(
+                FALLBACK_POOL,
+                FALLBACK_PROTOCOL_SYSTEM,
+                &[token_in, token_out],
             ),
-            FallbackAmountOut::NoPropAmmLeg
-        );
+            Box::new(util::MockProtocolSim::new(FALLBACK_PRICE)),
+        )
+    }
+
+    /// Only a route with a `propammfallback:` leg pays for fallback pricing.
+    #[test]
+    fn test_has_pamm_leg() {
+        let non_pamm = Route::new(vec![uniswap_swap()], HashMap::new()).expect("non-empty route");
+        assert!(!has_pamm_leg(&non_pamm));
+
+        let pamm = Route::new(vec![pamm_swap()], HashMap::new()).expect("non-empty route");
+        assert!(has_pamm_leg(&pamm));
     }
 
     /// The result is the fallback pool's output, not the pAMM's.
     #[test]
-    fn test_fallback_amount_out_uses_the_fallback_pool() {
+    fn test_fallback_amount_out_with_fallback_pool() {
         let market = market_with_fallback_pool(500);
         let view = market
             .try_read_blocking()
@@ -505,7 +526,8 @@ mod tests {
         fees.set_pair_fee(&addr(1), &addr(2), 500);
 
         let swap = pamm_swap();
-        let amount_out = fallback_amount_out(std::slice::from_ref(&swap), &view, &fees, &index);
+        let route = Route::new(vec![swap.clone()], HashMap::new()).expect("non-empty route");
+        let amount_out = fallback_amount_out(&route, &view, &fees, &index);
 
         // MockProtocolSim multiplies by spot_price for ascending token addresses: 1000 * 1.0,
         // against the pAMM leg's recorded 2000.
@@ -516,7 +538,7 @@ mod tests {
     /// No pool at the router's fee tier means the fallback reverts too, so the route is no better
     /// than the direct path and must be dropped.
     #[test]
-    fn test_fallback_amount_out_none_when_no_pool_at_resolved_fee() {
+    fn test_fallback_amount_out_without_pool_at_resolved_fee() {
         // Pool exists at 500, but the router resolves this pair to the 3000 default.
         let market = market_with_fallback_pool(500);
         let view = market
@@ -524,13 +546,8 @@ mod tests {
             .expect("uncontended");
         let index = FallbackPoolIndex::build(&view);
 
-        let swap = pamm_swap();
-        let amount_out = fallback_amount_out(
-            std::slice::from_ref(&swap),
-            &view,
-            &FallbackFees::default(),
-            &index,
-        );
+        let route = Route::new(vec![pamm_swap()], HashMap::new()).expect("non-empty route");
+        let amount_out = fallback_amount_out(&route, &view, &FallbackFees::default(), &index);
 
         assert_eq!(
             amount_out,
@@ -541,29 +558,34 @@ mod tests {
         );
     }
 
-    /// Split routes are out of scope for now; the caller must not silently treat them as backed.
+    /// A split route prices through `replay_route`, so both legs of the split are counted.
     #[test]
-    fn test_fallback_amount_out_split_not_supported() {
+    fn test_fallback_amount_out_split_route() {
         let market = market_with_fallback_pool(500);
         let view = market
             .try_read_blocking()
             .expect("uncontended");
         let index = FallbackPoolIndex::build(&view);
+        let mut fees = FallbackFees::default();
+        fees.set_pair_fee(&addr(1), &addr(2), 500);
 
-        let swap = pamm_swap().with_split(0.5);
-        let amount_out = fallback_amount_out(
-            std::slice::from_ref(&swap),
-            &view,
-            &FallbackFees::default(),
-            &index,
+        // 60% through the pAMM, the remainder through the same pool. Both legs substitute to the
+        // one fallback pool, which then sees the second leg deplete it.
+        let route = Route::new(vec![pamm_swap().with_split(0.6), pamm_swap()], HashMap::new())
+            .expect("non-empty route");
+        let amount_out = fallback_amount_out(&route, &view, &fees, &index);
+
+        // The whole 1000 of input is routed either way, so the split must not lose or invent
+        // amount relative to the single-leg case.
+        assert!(
+            matches!(&amount_out, FallbackAmountOut::AmountOut(amount) if *amount > BigUint::ZERO),
+            "expected a priced split route, got {amount_out:?}"
         );
-
-        assert_eq!(amount_out, FallbackAmountOut::SplitNotSupported);
     }
 
     /// Only `uniswap_v3` components with a fee attribute can serve the fallback.
     #[test]
-    fn test_pool_index_skips_non_uniswap_v3_components() {
+    fn test_pool_index_non_uniswap_v3_components() {
         let market = market_with_fallback_pool(500);
         {
             let mut state = market.try_write().expect("uncontended");

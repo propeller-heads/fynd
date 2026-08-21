@@ -1,4 +1,4 @@
-//! Background task that mirrors the PropAMMRouter's fee tiers into `SharedFallbackFees`.
+//! Background task that mirrors the fee tiers of Titan's PropAMMRouter into `SharedFallbackFees`.
 //!
 //! The router picks the Uniswap V3 pool it falls back to with
 //! `resolvedFee(tokenIn, tokenOut)`: the per-pair override if one is set, else the global
@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_fees_reads_default_and_pair_overrides() {
+    async fn test_fetch_fees_default_and_pair_overrides() {
         let asserter = Asserter::new();
         asserter.push_success(&ret(IPropAMMRouter::fallbackFeeCall::abi_encode_returns(
             &alloy::primitives::Uint::<24, 1>::from(3000),
@@ -280,7 +280,7 @@ mod tests {
 
     /// A pair with no override must resolve through the default, not be stored as fee 0.
     #[tokio::test]
-    async fn test_fetch_fees_treats_zero_override_as_default() {
+    async fn test_fetch_fees_zero_override() {
         let asserter = Asserter::new();
         asserter.push_success(&ret(IPropAMMRouter::fallbackFeeCall::abi_encode_returns(
             &alloy::primitives::Uint::<24, 1>::from(3000),
@@ -301,7 +301,7 @@ mod tests {
 
     /// One unreachable venue must not discard the tiers already read.
     #[tokio::test]
-    async fn test_fetch_fees_skips_a_failing_venue() {
+    async fn test_fetch_fees_failing_venue() {
         let asserter = Asserter::new();
         asserter.push_success(&ret(IPropAMMRouter::fallbackFeeCall::abi_encode_returns(
             &alloy::primitives::Uint::<24, 1>::from(100),
@@ -320,7 +320,7 @@ mod tests {
     /// Without the global fee no pair can be resolved, so the refresh must fail and keep the
     /// previous tiers.
     #[tokio::test]
-    async fn test_fetch_fees_fails_without_the_default_fee() {
+    async fn test_fetch_fees_without_default_fee() {
         let asserter = Asserter::new();
         asserter.push_failure_msg("router unreachable");
 
@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_rejects_a_short_address() {
+    fn test_new_short_address() {
         let result = FallbackFeeFetcher::new(
             "http://localhost:8545",
             &Bytes::from(vec![0u8; 19]),
