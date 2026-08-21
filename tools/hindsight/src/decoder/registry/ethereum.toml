@@ -42,8 +42,9 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x9008d19f58aabd9ed0d60971565aa8510560ab41" = "cow"
 # ParaSwap Augustus v6.2
 "0x6a000f20005980200259b80c5102003040001068" = "paraswap"
-# Uniswap Universal Router
+# Uniswap Universal Router, v1.2 and v2 (`execute`, selector 0x3593564c)
 "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad" = "uniswap"
+"0x66a9893cc07d91d95644aedd05d03f95e1dba8af" = "uniswap"
 # UniswapX Dutch order reactor (filler-initiated; found via its log)
 "0x00000011f84b9aa48e5f8aa8b9897600006289be" = "uniswapx"
 # OKX DEX Router, and OKX DEX Router 6 (per OKX docs; the former is an older deployment)
