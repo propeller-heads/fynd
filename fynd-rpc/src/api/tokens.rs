@@ -17,8 +17,8 @@ use utoipa::{IntoParams, ToSchema};
 /// Query parameters for GET /v1/tokens.
 #[derive(Debug, Default, Deserialize, IntoParams)]
 pub struct TokensQuery {
-    /// Maximum number of tokens returned (default: 1000).
-    #[param(example = 1000)]
+    /// Maximum number of tokens returned (default and maximum: 1000).
+    #[param(maximum = 1000, example = 1000)]
     pub limit: Option<usize>,
     /// Number of tokens to skip from the start of the ranked list (default: 0).
     ///

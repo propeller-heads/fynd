@@ -58,7 +58,7 @@ export interface paths {
          *     # Query Parameters
          *
          *     - `include` - Comma-separated list: `depths`, `spot_prices`
-         *     - `limit` - Max entries for spot_prices / component_depths (default: 1000)
+         *     - `limit` - Max entries for spot_prices / component_depths (default and maximum: 1000)
          */
         get: operations["get_prices"];
         put?: never;
@@ -117,7 +117,7 @@ export interface paths {
          *
          *     # Query Parameters
          *
-         *     - `limit` - Maximum number of tokens returned (default: 1000)
+         *     - `limit` - Maximum number of tokens returned (default and maximum: 1000)
          *     - `offset` - Number of tokens to skip from the start of the ranked list (default: 0)
          */
         get: operations["get_tokens"];
@@ -831,7 +831,7 @@ export interface operations {
                  */
                 include?: string | null;
                 /**
-                 * @description Maximum number of spot_prices and component_depths entries (default: 1000).
+                 * @description Maximum number of spot_prices and component_depths entries (default and maximum: 1000).
                  * @example 1000
                  */
                 limit?: number | null;
@@ -851,7 +851,7 @@ export interface operations {
                     "application/json": components["schemas"]["PricesResponse"];
                 };
             };
-            /** @description Invalid query parameter */
+            /** @description Invalid query parameter or limit exceeds 1000 */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -926,7 +926,7 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description Maximum number of tokens returned (default: 1000).
+                 * @description Maximum number of tokens returned (default and maximum: 1000).
                  * @example 1000
                  */
                 limit?: number | null;
@@ -952,6 +952,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TokensResponse"];
+                };
+            };
+            /** @description Invalid query parameter or limit exceeds 1000 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Data not yet available */
