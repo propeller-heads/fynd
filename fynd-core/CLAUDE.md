@@ -98,6 +98,32 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
 2. Each pool dispatches to a `SolverWorker` → `Algorithm::find_best_route` → `RouteResult`
 3. Selects best by `amount_out_net_gas` → optional `Encoder` → `Quote`
 
+## Non-Tycho Liquidity Sources
+
+Two kinds of `--protocols` entry name a stream other than Tycho's, each with its own endpoint and
+its own registration function in `feed/protocol_registry.rs`:
+
+| Entry | Registered by | Stream |
+|---|---|---|
+| `rfq:<protocol>` | `register_rfq` | RFQ client, driven by a supervised task writing into an mpsc channel |
+| `pricelevelstream:<venue>` | `open_price_level_stream` | Titan pAMM price level WebSocket, an `impl Stream<Item = Update>` polled directly (it reconnects on its own, so there is no task to supervise) |
+
+`register_exchanges` skips both prefixes, and `has_tycho_protocols` / `has_rfq_protocols` tell
+`TychoFeed` which sources to open. All three feed loops (`run`, `run_with_pending`,
+`run_with_step_controller`) select over whichever sources are configured and hand every `Update`
+to the same `handle_tycho_message`. Both non-Tycho streams are opened before the loop answers its
+`pending_tx` / `controller_tx` handshake, so a configuration error reaches the caller as an error
+rather than as a handle to a feed that dies.
+
+Price level venues must be one of tycho-simulation's `default_served_pamms` — an unrecognised name
+is a `DataFeedError::Config`, not a warning, because these entries are always hand-written. The
+stream is Ethereum-only (`PRICE_LEVEL_STREAM_CHAIN` tracks upstream's venue set, which carries no
+chain of its own). A venue served this way may also exist as a Tycho protocol system
+(`vm:fermiswap` and `pricelevelstream:fermiswap` price the same maker inventory), so drop the
+Tycho one with an `exclude:` entry rather than streaming both. `EXCLUDE_PREFIX` and
+`parse_exclusion` live here with the other entry prefixes; `fynd_rpc::protocols` applies them
+after expanding `all_onchain`.
+
 ## Exclusive Liquidity (restricted)
 
 A limited, opt-in service for specific deployments — **not** part of the normal routing path. With no

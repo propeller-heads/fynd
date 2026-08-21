@@ -5,14 +5,14 @@
 //! - Updates MarketState (exclusive write access)
 //! - Broadcasts MarketEvents to Solvers
 
-use std::{collections::HashSet, time::Instant};
+use std::{collections::HashSet, pin::Pin, time::Instant};
 
 use metrics::{gauge, histogram};
 use tokio::{
     sync::{broadcast, oneshot},
     task::JoinHandle,
 };
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 use tracing::{debug, info, instrument, span, trace, Instrument, Level};
 #[cfg(feature = "experimental")]
 use tycho_simulation::evm::stream::BlockStepController;
@@ -30,7 +30,10 @@ use crate::{
     feed::{
         events::MarketEvent,
         market_data::MarketData,
-        protocol_registry::{register_exchanges, register_rfq},
+        protocol_registry::{
+            has_rfq_protocols, has_tycho_protocols, open_price_level_stream, register_exchanges,
+            register_rfq,
+        },
         DataFeedError, TychoFeedConfig,
     },
     types::BlockInfo,
@@ -57,6 +60,26 @@ pub(crate) struct TychoFeed {
 /// Client-metadata entries Fynd reports to Tycho via the `X-Tycho-Client-Metadata` header.
 fn fynd_client_metadata() -> [(&'static str, &'static str); 1] {
     [("fynd_version", env!("CARGO_PKG_VERSION"))]
+}
+
+/// Yields the next update from the pAMM price level stream, pending forever when none is
+/// configured.
+///
+/// The stream reconnects on its own for as long as it is polled, so it ending means it gave up
+/// for good. That is a feed error rather than a clean stop, the same way an RFQ client task
+/// returning is.
+async fn next_price_level_update<S>(
+    stream: &mut Option<Pin<Box<S>>>,
+) -> Result<Update, DataFeedError>
+where
+    S: Stream<Item = Update> + Send + ?Sized,
+{
+    let Some(stream) = stream else {
+        return std::future::pending().await;
+    };
+    stream.next().await.ok_or_else(|| {
+        DataFeedError::StreamError("price level stream ended unexpectedly".to_string())
+    })
 }
 
 impl TychoFeed {
@@ -117,12 +140,13 @@ impl TychoFeed {
 
         debug!("Loaded {} tokens from Tycho", all_tokens.len());
 
-        let mut protocol_stream = if !self
-            .config
-            .protocols
-            .iter()
-            .all(|p| p.starts_with("rfq:"))
-        {
+        // Opened before the Tycho stream so a bad venue or chain fails on the configuration
+        // rather than after the connection work.
+        let mut price_level_stream =
+            open_price_level_stream(self.config.chain, &self.config.protocols, &all_tokens)?
+                .map(Box::pin);
+
+        let mut protocol_stream = if has_tycho_protocols(&self.config.protocols) {
             let tvl_filter = ComponentFilter::with_tvl_range(
                 self.config.min_tvl / self.config.tvl_buffer_ratio,
                 self.config.min_tvl,
@@ -162,12 +186,7 @@ impl TychoFeed {
         };
 
         // Spawn rfq stream
-        let (mut rfq_rx, mut rfq_handle) = if self
-            .config
-            .protocols
-            .iter()
-            .any(|p| p.starts_with("rfq:"))
-        {
+        let (mut rfq_rx, mut rfq_handle) = if has_rfq_protocols(&self.config.protocols) {
             let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
 
             let rfq_stream_builder = register_rfq(
@@ -235,6 +254,11 @@ impl TychoFeed {
                             break;
                         }
                     }
+                }
+                msg = next_price_level_update(&mut price_level_stream) => {
+                    let msg = msg?;
+                    trace!("Received message from price level stream: {:?}", msg);
+                    self.handle_tycho_message(msg).await?;
                 }
                 // Check if RFQ handle has finished or errored
                 rfq_result = async {
@@ -311,6 +335,17 @@ impl TychoFeed {
 
         debug!("Loaded {} tokens from Tycho", all_tokens.len());
 
+        // Opened before `pending_tx` is answered: a bad venue or chain has to reach the caller as
+        // an error, not as a processor for a feed that dies on the next line.
+        let mut price_level_stream =
+            match open_price_level_stream(self.config.chain, &self.config.protocols, &all_tokens) {
+                Ok(stream) => stream.map(Box::pin),
+                Err(e) => {
+                    let _ = pending_tx.send(Err(e.to_string()));
+                    return Err(e);
+                }
+            };
+
         let mut stream_builder = match register_exchanges(
             ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
                 .skip_state_decode_failures(true),
@@ -370,12 +405,7 @@ impl TychoFeed {
         }
 
         // Spawn RFQ stream (same as run()) — runs alongside the EVM pending stream.
-        let (mut rfq_rx, mut rfq_handle) = if self
-            .config
-            .protocols
-            .iter()
-            .any(|p| p.starts_with("rfq:"))
-        {
+        let (mut rfq_rx, mut rfq_handle) = if has_rfq_protocols(&self.config.protocols) {
             let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
             let rfq_stream_builder = register_rfq(
                 RFQStreamBuilder::new()
@@ -429,6 +459,11 @@ impl TychoFeed {
                         }
                     }
                 }
+                msg = next_price_level_update(&mut price_level_stream) => {
+                    let msg = msg?;
+                    trace!("Received message from price level stream: {:?}", msg);
+                    self.handle_tycho_message(msg).await?;
+                }
                 rfq_result = async {
                     if let Some(handle) = &mut rfq_handle { handle.await }
                     else { std::future::pending().await }
@@ -459,8 +494,8 @@ impl TychoFeed {
     /// built and before the first block is processed. The caller must call
     /// [`BlockStepController::trigger_next_block`] for each block to be processed.
     ///
-    /// Only valid when at least one non-RFQ protocol is configured. Returns
-    /// [`DataFeedError::Config`] if all protocols are RFQ.
+    /// Only valid when at least one Tycho-streamed protocol is configured. Returns
+    /// [`DataFeedError::Config`] if every entry names an RFQ client or the price level stream.
     #[cfg(feature = "experimental")]
     pub(crate) async fn run_with_step_controller(
         self,
@@ -472,13 +507,8 @@ impl TychoFeed {
             "Starting Data Feed (with step controller)..."
         );
 
-        if self
-            .config
-            .protocols
-            .iter()
-            .all(|p| p.starts_with("rfq:"))
-        {
-            let msg = "step controller requires at least one non-RFQ protocol".to_string();
+        if !has_tycho_protocols(&self.config.protocols) {
+            let msg = "step controller requires at least one Tycho-streamed protocol".to_string();
             let _ = controller_tx.send(Err(msg.clone()));
             return Err(DataFeedError::Config(msg));
         }
@@ -509,6 +539,17 @@ impl TychoFeed {
         };
 
         debug!("Loaded {} tokens from Tycho", all_tokens.len());
+
+        // Opened before `controller_tx` is answered: a bad venue or chain has to reach the caller
+        // as an error, not as a controller for a feed that dies on the next line.
+        let mut price_level_stream =
+            match open_price_level_stream(self.config.chain, &self.config.protocols, &all_tokens) {
+                Ok(stream) => stream.map(Box::pin),
+                Err(e) => {
+                    let _ = controller_tx.send(Err(e.to_string()));
+                    return Err(e);
+                }
+            };
 
         let tvl_filter = ComponentFilter::with_tvl_range(
             self.config.min_tvl / self.config.tvl_buffer_ratio,
@@ -559,12 +600,7 @@ impl TychoFeed {
         };
 
         // Spawn rfq stream (same as run()).
-        let (mut rfq_rx, mut rfq_handle) = if self
-            .config
-            .protocols
-            .iter()
-            .any(|p| p.starts_with("rfq:"))
-        {
+        let (mut rfq_rx, mut rfq_handle) = if has_rfq_protocols(&self.config.protocols) {
             let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
             let rfq_stream_builder = register_rfq(
                 RFQStreamBuilder::new()
@@ -617,6 +653,11 @@ impl TychoFeed {
                             break;
                         }
                     }
+                }
+                msg = next_price_level_update(&mut price_level_stream) => {
+                    let msg = msg?;
+                    trace!("Received message from price level stream: {:?}", msg);
+                    self.handle_tycho_message(msg).await?;
                 }
                 rfq_result = async {
                     if let Some(handle) = &mut rfq_handle { handle.await }
