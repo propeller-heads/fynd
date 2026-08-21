@@ -56,6 +56,8 @@ batch_settlers = []
 # where most of its swap flow settles.
 "0xef740bf23acae26f6492b10de645d6b98dc8eaf3" = "uniswap"
 "0x73855d06de49d0fe4a9c42636ba96c62da12ff9c" = "uniswap"
+# Universal Router 2.1.1 (developers.uniswap.org supported-chains table)
+"0xfdf682f51fe81aa4898f0ae2163d8a55c127fbc7" = "uniswap"
 # Tycho (PropellerHeads) routers on Unichain: V3 and the V2 deployment still in use
 # (tycho-execution config/router_addresses.json and the contract-addresses docs)
 "0x764bc67b1036b00bc91221e988261f971a1c7ce4" = "tycho"

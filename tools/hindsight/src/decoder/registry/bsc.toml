@@ -72,6 +72,8 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad" = "uniswap"
 "0xb971ef87ede563556b2ed4b1c0b0019111dd85d2" = "uniswap"
 "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24" = "uniswap"
+# Universal Router 2.1.1 (developers.uniswap.org supported-chains table)
+"0x8b844f885672f333bc0042cb669255f93a4c1e6b" = "uniswap"
 # OKX DEX routers (okxlabs/DEX-Router-EVM-V1 deployments plus OKX's own docs). Several versions
 # run concurrently; each was confirmed OKX by the BSC TokenApproveProxy and WNativeRelayer
 # addresses embedded in its bytecode.
