@@ -107,6 +107,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `WORKER_POOLS_CONFIG` | Worker pools config file (default: `worker_pools.toml`) |
 | `BLOCKLIST_CONFIG` | Blocklist config file |
 | `EXCLUSIVE_SWAP_CONTROLLER_KEY` | Restricted exclusive-liquidity deployments only — see [Exclusive liquidity](#exclusive-liquidity-restricted). Unset in ordinary deployments |
+| `CALLDATA_WATERMARK` | Watermark bytes appended to every encoded transaction's calldata (also `--calldata-watermark`). Ignored by the EVM; attributes router calls to this deployment. Unset by default |
 | `RUST_LOG` | Tracing filter (e.g. `info,fynd=debug`) |
 | `METRICS_PORT` | Prometheus metrics server port (default: `9898`, requires `metrics` feature) |
 | `FYND_HOSTED_SWAGGER_URL` | Server URL advertised by the hosted OpenAPI spec. When unset, the hosted Swagger UI (`/docs/hosted/`) is not served — only the self-hosted `/docs/` |
