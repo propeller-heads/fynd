@@ -18,7 +18,7 @@
 //!   compared against.
 
 use alloy::{
-    primitives::{address, Address, U256},
+    primitives::{address, Address},
     rpc::types::Log,
     sol,
     sol_types::SolCall,
@@ -68,12 +68,7 @@ impl SolverDecoder for OneInch {
     /// through as declared, including a zero — the router's per-hop checks can leave the top-level
     /// floor at zero, and the terms are still worth recording. The hint is unused: every field is
     /// read by ABI position.
-    fn declared(
-        &self,
-        input: &[u8],
-        _logs: &[Log],
-        _amount_in_hint: Option<U256>,
-    ) -> Result<Option<DeclaredSwap>, Veto> {
+    fn declared(&self, input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         let Ok(call) = swapCall::abi_decode(input) else { return Ok(None) };
         if call.desc.amount.is_zero() {
             return Ok(None);
@@ -91,7 +86,7 @@ impl SolverDecoder for OneInch {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::Bytes;
+    use alloy::primitives::{Bytes, U256};
 
     use super::*;
 
@@ -111,7 +106,7 @@ mod tests {
 
     fn terms(input: &[u8]) -> Option<DeclaredSwap> {
         OneInch
-            .declared(input, &[], None)
+            .declared(input, &[])
             .ok()
             .flatten()
     }

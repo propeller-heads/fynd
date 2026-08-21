@@ -1,17 +1,22 @@
-//! ParaSwap-specific calldata extraction.
+//! `ParaSwap` (Velora) Augustus v6 calldata extraction.
 //!
-//! Augustus v6 swap methods carry the trade parameters as consecutive 32-byte words:
-//! `…, srcToken, destToken, …, fromAmount, toAmount, quotedAmount, …`. `toAmount` is the
-//! slippage floor and `quotedAmount` the off-chain quoted output, kept on-chain for `ParaSwap`'s
-//! surplus accounting (the user is capped at the quote, so settled often equals it exactly). The
-//! triple sits at a different offset per method selector, so instead of per-selector ABI decoding
-//! it is located by value: find the word equal to the trade's known input amount — the caller's
-//! hint, there is no other way to find it — then read the floor-and-quote pair that follows it and
-//! the token pair that precedes it.
+//! `swapExactAmountIn` carries every term in one static struct: both tokens, the input amount, the
+//! floor the trade reverts below, `ParaSwap`'s own quote, and the address the output is paid to.
+//! The struct holds only fixed-size fields, so it is ABI-encoded in place rather than behind an
+//! offset — a plain decode reaches all of it.
+//!
+//! `quotedAmount` is worth more here than for most solvers: `ParaSwap` caps the user at its quote
+//! and keeps the surplus, so a settled amount usually sits between the floor and the quote.
+//!
+//! Verified against two live Ethereum trades (blocks 25741801 and 25741809): both decoded
+//! `fromAmount` matched the settled record exactly, and both settled outputs cleared the decoded
+//! floor and stayed under the decoded quote. One paid an ERC-20 input, the other native ETH.
 
 use alloy::{
-    primitives::{Address, U256},
+    primitives::{address, Address},
     rpc::types::Log,
+    sol,
+    sol_types::SolCall,
 };
 
 use crate::decoder::{
@@ -19,208 +24,190 @@ use crate::decoder::{
     veto::Veto,
 };
 
-/// Byte length of an ABI-encoded word.
-const WORD_LEN: usize = 32;
-/// A `bytes32` word encoding an `address` has 12 zero prefix bytes, then the 20-byte address.
-const ADDRESS_PREFIX_LEN: usize = 12;
+sol! {
+    /// Augustus v6's generic swap terms. Every field is fixed-size, so the struct is encoded
+    /// inline. `metadata` is `ParaSwap`'s own bookkeeping and is not read.
+    struct SwapExactAmountInParams {
+        address srcToken;
+        address destToken;
+        uint256 fromAmount;
+        uint256 toAmount;
+        uint256 quotedAmount;
+        bytes32 metadata;
+        address beneficiary;
+    }
 
-/// Whether a word is address-shaped: 12 zero prefix bytes and a non-zero address. Rejects a
-/// coincidental match against unrelated calldata bytes.
-fn is_address_word(word: U256) -> bool {
-    let bytes = word.to_be_bytes::<WORD_LEN>();
-    bytes[..ADDRESS_PREFIX_LEN]
-        .iter()
-        .all(|&byte| byte == 0) &&
-        bytes[ADDRESS_PREFIX_LEN..]
-            .iter()
-            .any(|&byte| byte != 0)
+    /// Augustus v6's generic entry (selector `0xe3ead59e`).
+    function swapExactAmountIn(
+        address executor,
+        SwapExactAmountInParams params,
+        uint256 partnerAndFee,
+        bytes permit,
+        bytes executorData
+    ) external payable returns (uint256 receivedAmount, uint256 paraswapShare, uint256 partnerShare);
 }
 
-/// The address encoded in a word already known to be address-shaped.
-fn address_from_word(word: U256) -> Address {
-    Address::from_slice(&word.to_be_bytes::<WORD_LEN>()[ADDRESS_PREFIX_LEN..])
+/// `ParaSwap`'s sentinel for native ETH, normalized to the zero address like every other flow.
+const PARASWAP_NATIVE_ETH: Address = address!("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE");
+
+fn normalize_native(token: Address) -> Address {
+    if token == PARASWAP_NATIVE_ETH {
+        Address::ZERO
+    } else {
+        token
+    }
 }
 
 /// The `ParaSwap` solver.
 pub(crate) struct Paraswap;
 
 impl SolverDecoder for Paraswap {
-    /// Extract the trader's swap terms from Augustus calldata: the enforced floor and declared
-    /// quote by scanning for the word equal to `amount_in_hint`, the tokens from the two words
-    /// immediately preceding it.
+    /// The trader's swap terms from a `swapExactAmountIn` call's params.
     ///
-    /// A false positive would need a word that equals the exact input amount *and* is followed
-    /// by a plausible floor/quote pair (`0 < toAmount <= quotedAmount <= 2 * toAmount`) *and*
-    /// preceded by two address-shaped words — and the caller's settled-amount plausibility check
-    /// still applies to the quote afterward. Returns `None` when no such shape exists (e.g. a
-    /// partner fee made the decoded input differ from `fromAmount`, or the words before it are
-    /// not a token pair) — the intent is lost along with the quote, since there is nothing left
-    /// to recover the floor from. A reverted trade has no netted flow to draw a hint from, so
-    /// `amount_in_hint: None` always yields `None`.
-    fn declared(
-        &self,
-        input: &[u8],
-        _logs: &[Log],
-        amount_in_hint: Option<U256>,
-    ) -> Result<Option<DeclaredSwap>, Veto> {
-        let Some(amount_in) = amount_in_hint.filter(|hint| !hint.is_zero()) else {
-            return Ok(None);
-        };
-        if input.len() < 4 {
+    /// `beneficiary` is the declared output recipient, except when it is the zero address —
+    /// Augustus reads that as "pay the caller", so it is left unset and the caller anchors on the
+    /// transaction sender. A floor above the quote is inconsistent (the quote is what `ParaSwap`
+    /// promised, the floor what it would accept) and is declined rather than recorded.
+    fn declared(&self, input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
+        let Ok(call) = swapExactAmountInCall::abi_decode(input) else { return Ok(None) };
+        let params = call.params;
+        if params.fromAmount.is_zero() || params.toAmount.is_zero() {
             return Ok(None);
         }
-        let words: Vec<U256> = input[4..]
-            .as_chunks::<WORD_LEN>()
-            .0
-            .iter()
-            .map(|word| U256::from_be_slice(word))
-            .collect();
-        for (index, window) in words.windows(3).enumerate() {
-            let (from_amount, to_amount, quoted) = (window[0], window[1], window[2]);
-            if from_amount != amount_in || to_amount.is_zero() {
-                continue;
-            }
-            if quoted < to_amount || quoted > to_amount.saturating_mul(U256::from(2)) {
-                continue;
-            }
-            if index < 2 {
-                continue;
-            }
-            let (src_token, dst_token) = (words[index - 2], words[index - 1]);
-            if !is_address_word(src_token) || !is_address_word(dst_token) {
-                continue;
-            }
-            let intent = DeclaredSwap::from_calldata(
-                address_from_word(src_token),
-                address_from_word(dst_token),
-                amount_in,
-                to_amount,
-            );
-            return Ok(Some(intent.with_quote(quoted, None)));
+        if params.toAmount > params.quotedAmount {
+            return Ok(None);
         }
-        Ok(None)
+        let declared = DeclaredSwap::from_calldata(
+            normalize_native(params.srcToken),
+            normalize_native(params.destToken),
+            params.fromAmount,
+            params.toAmount,
+        )
+        .with_quote(params.quotedAmount, None);
+        Ok(Some(if params.beneficiary.is_zero() {
+            declared
+        } else {
+            declared.with_recipient(params.beneficiary)
+        }))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    /// The terms this solver reads from `input`, for tests that only care about the calldata path.
-    fn terms(input: &[u8], hint: Option<U256>) -> Option<DeclaredSwap> {
+    use alloy::primitives::U256;
+
+    use super::*;
+
+    /// The `swapExactAmountIn` calldata of a real settled trade (tx `0x6bb77fe6…`, block
+    /// 25741801): 5,599.115792 of `0xce6170ea…` in, WETH out. The settled record netted
+    /// 2,997,199,455,534,478,910 wei out — just above the floor below, under the quote.
+    fn real_input() -> Vec<u8> {
+        let text = include_str!("fixtures/paraswap_input.txt").trim();
+        alloy::hex::decode(text.strip_prefix("0x").unwrap_or(text)).unwrap()
+    }
+
+    const TOKEN_IN: Address = address!("0xce6170ea245dc8d1f275a710a062b70f125f0110");
+    const WETH: Address = address!("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
+    const BENEFICIARY: Address = address!("0xfdff0b569f14af593d446e51b3e42f502124ac85");
+    const AMOUNT_IN: u64 = 5_599_115_792;
+    const FLOOR: u128 = 2_997_199_455_316_012_230;
+    const QUOTE: u128 = 2_997_499_205_236_535_884;
+
+    fn terms(input: &[u8]) -> Option<DeclaredSwap> {
         Paraswap
-            .declared(input, &[], hint)
+            .declared(input, &[])
             .ok()
             .flatten()
     }
 
-    use super::*;
-
-    /// Word-aligned Augustus-style calldata: selector, then 32-byte words.
-    fn calldata(words: &[U256]) -> Vec<u8> {
-        let mut input = vec![0xe3u8, 0xea, 0xd5, 0x9e];
-        for word in words {
-            input.extend_from_slice(&word.to_be_bytes::<32>());
+    /// A `swapExactAmountIn` call encoded through the `sol!` types, mirroring a real trade.
+    fn call_with(
+        src: Address,
+        dst: Address,
+        from_amount: u64,
+        to_amount: u64,
+        quoted: u64,
+        beneficiary: Address,
+    ) -> Vec<u8> {
+        swapExactAmountInCall {
+            executor: Address::ZERO,
+            params: SwapExactAmountInParams {
+                srcToken: src,
+                destToken: dst,
+                fromAmount: U256::from(from_amount),
+                toAmount: U256::from(to_amount),
+                quotedAmount: U256::from(quoted),
+                metadata: alloy::primitives::B256::ZERO,
+                beneficiary,
+            },
+            partnerAndFee: U256::ZERO,
+            permit: alloy::primitives::Bytes::default(),
+            executorData: alloy::primitives::Bytes::default(),
         }
-        input
+        .abi_encode()
     }
 
     #[test]
-    fn test_real_swap_exact_amount_in_layout() {
-        // Live tx 0x1192b394… (block range of run5): srcToken, destToken, fromAmount, toAmount
-        // (floor, -10bps), quotedAmount — the settled amount was 171,602,265, one unit under the
-        // quote (ParaSwap caps the user at the quote and keeps the surplus).
-        let src_token = U256::from(0x1111u64);
-        let dst_token = U256::from(0x2222u64);
-        let amount_in = U256::from(171_521_496u64);
-        let words = [
-            src_token,
-            dst_token,
-            amount_in,
-            U256::from(171_430_663u64),
-            U256::from(171_602_266u64),
-            U256::ZERO, // metadata
-        ];
-        let intent = terms(&calldata(&words), Some(amount_in)).unwrap();
-        assert_eq!(intent.token_in, address_from_word(src_token));
-        assert_eq!(intent.token_out, address_from_word(dst_token));
-        assert_eq!(intent.amount_in, amount_in);
-        assert_eq!(intent.min_amount_out, Some(U256::from(171_430_663u64)));
-        assert_eq!(intent.promised_amount_out().unwrap(), U256::from(171_602_266u64));
+    fn test_selector_against_the_deployed_router() {
+        // The selector observed on both sampled trades. A wrong `sol!` declaration would compile
+        // and silently never match, so it is pinned here.
+        assert_eq!(swapExactAmountInCall::SELECTOR, [0xe3, 0xea, 0xd5, 0x9e]);
     }
 
     #[test]
-    fn test_missing_input_amount() {
-        // A partner fee (or any decode difference) means no word equals the decoded input.
-        let words = [
-            U256::from(0x1111u64),
-            U256::from(0x2222u64),
-            U256::from(171_521_496u64),
-            U256::from(171_430_663u64),
-            U256::from(171_602_266u64),
-        ];
-        assert!(terms(&calldata(&words), Some(U256::from(999u64))).is_none());
-        assert!(terms(&[], Some(U256::from(1u64))).is_none());
-        assert!(terms(&calldata(&words), Some(U256::ZERO)).is_none());
+    fn test_real_fixture_declared_swap() {
+        let declared = terms(&real_input()).unwrap();
+        assert_eq!(declared.token_in, TOKEN_IN);
+        assert_eq!(declared.token_out, WETH);
+        assert_eq!(declared.amount_in, U256::from(AMOUNT_IN));
+        assert_eq!(declared.min_amount_out, Some(U256::from(FLOOR)));
+        assert_eq!(declared.declared_quote, Some(U256::from(QUOTE)));
+        // Calldata states no settled output, so the caller recovers it.
+        assert_eq!(declared.amount_out, None);
+        assert_eq!(declared.tracked, None);
     }
 
     #[test]
-    fn test_no_hint_never_yields_an_intent() {
-        // The revert path: no netted flow means no hint, so there is no way to locate the
-        // triple even when the calldata is otherwise well-formed.
-        let words = [
-            U256::from(0x1111u64),
-            U256::from(0x2222u64),
-            U256::from(171_521_496u64),
-            U256::from(171_430_663u64),
-            U256::from(171_602_266u64),
-        ];
-        assert!(terms(&calldata(&words), None).is_none());
+    fn test_real_fixture_beneficiary_is_the_output_recipient() {
+        let declared = terms(&real_input()).unwrap();
+        assert_eq!(declared.output_recipient, Some(BENEFICIARY));
     }
 
     #[test]
-    fn test_implausible_floor_quote_pair() {
-        // The words after the input match are not a floor/quote pair: quote below the floor, or
-        // wildly above it (different units).
-        let amount_in = U256::from(1_000_000u64);
-        let below = [
-            U256::from(0x1111u64),
-            U256::from(0x2222u64),
-            amount_in,
-            U256::from(990_000u64),
-            U256::from(400_000u64),
-        ];
-        assert!(terms(&calldata(&below), Some(amount_in)).is_none());
-        let far_above = [
-            U256::from(0x1111u64),
-            U256::from(0x2222u64),
-            amount_in,
-            U256::from(990_000u64),
-            U256::from(10_000_000u64),
-        ];
-        assert!(terms(&calldata(&far_above), Some(amount_in)).is_none());
+    fn test_native_sentinel_normalized() {
+        // Live tx 0xd427bdec… paid native ETH in, which Augustus writes as 0xeeee…ee.
+        let call = call_with(PARASWAP_NATIVE_ETH, WETH, 1_000, 900, 950, Address::ZERO);
+        assert_eq!(terms(&call).unwrap().token_in, Address::ZERO);
     }
 
     #[test]
-    fn test_non_address_shaped_tokens_rejected() {
-        // The words before fromAmount are not address-shaped (top bytes set): the intent is
-        // dropped even though the floor/quote pair itself is plausible — there is nothing to
-        // build a trustworthy token pair from.
-        let amount_in = U256::from(1_000_000u64);
-        let words = [
-            U256::MAX, // not address-shaped: every byte set
-            U256::from(0x2222u64),
-            amount_in,
-            U256::from(990_000u64),
-            U256::from(995_000u64),
-        ];
-        assert!(terms(&calldata(&words), Some(amount_in)).is_none());
+    fn test_zero_beneficiary_leaves_the_recipient_unset() {
+        // Augustus reads a zero beneficiary as "pay the caller", so there is no declared
+        // recipient and the caller anchors on the transaction sender instead.
+        let call = call_with(TOKEN_IN, WETH, 1_000, 900, 950, Address::ZERO);
+        assert_eq!(terms(&call).unwrap().output_recipient, None);
     }
 
     #[test]
-    fn test_fromamount_too_early_for_token_words() {
-        // fromAmount at the very start of the calldata: no room for the two preceding token
-        // words, even though the hint matches and the floor/quote pair is plausible.
-        let amount_in = U256::from(1_000_000u64);
-        let words = [amount_in, U256::from(990_000u64), U256::from(995_000u64)];
-        assert!(terms(&calldata(&words), Some(amount_in)).is_none());
+    fn test_zero_amounts_declined() {
+        assert!(terms(&call_with(TOKEN_IN, WETH, 0, 900, 950, Address::ZERO)).is_none());
+        assert!(terms(&call_with(TOKEN_IN, WETH, 1_000, 0, 950, Address::ZERO)).is_none());
+    }
+
+    #[test]
+    fn test_floor_above_quote_declined() {
+        // The floor cannot exceed the amount ParaSwap quoted; such calldata is inconsistent.
+        assert!(terms(&call_with(TOKEN_IN, WETH, 1_000, 960, 950, Address::ZERO)).is_none());
+    }
+
+    #[test]
+    fn test_garbage_and_truncated_input_declined() {
+        assert!(terms(&[]).is_none());
+        assert!(terms(&[0xde, 0xad, 0xbe, 0xef]).is_none());
+        assert!(terms(&real_input()[..100]).is_none());
+        // Another Augustus entry never decodes as this one.
+        let mut wrong = real_input();
+        wrong[0] = 0xff;
+        assert!(terms(&wrong).is_none());
     }
 }

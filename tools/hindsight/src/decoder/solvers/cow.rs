@@ -11,7 +11,7 @@
 //! like-for-like — modern `CoW` records a zero on-chain fee (it is priced into the order).
 
 use alloy::{
-    primitives::{address, Address, B256, U256},
+    primitives::{address, Address, B256},
     rpc::types::Log,
     sol,
     sol_types::{SolCall, SolEvent},
@@ -90,12 +90,7 @@ impl SolverDecoder for Cow {
     /// The settled order's trade, read from `CoW`'s own `Trade` event: the executed amounts and
     /// the owner, stated outright. The calldata is not read — a settlement's inner router frames
     /// are order plumbing, not the trade.
-    fn declared(
-        &self,
-        _input: &[u8],
-        logs: &[Log],
-        _amount_in_hint: Option<U256>,
-    ) -> Result<Option<DeclaredSwap>, Veto> {
+    fn declared(&self, _input: &[u8], logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         Ok(settlement_trade(logs))
     }
 }

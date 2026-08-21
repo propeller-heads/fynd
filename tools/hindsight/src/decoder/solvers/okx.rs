@@ -12,7 +12,7 @@
 //! below the trader's gross spend, the commission OKX records in a separate event.
 
 use alloy::{
-    primitives::{address, Address, U256},
+    primitives::{address, Address},
     rpc::types::Log,
     sol,
     sol_types::SolEvent,
@@ -53,12 +53,7 @@ pub(crate) struct Okx;
 impl SolverDecoder for Okx {
     /// The settled trade, read from `OrderRecord`. Declines a transaction carrying more than one
     /// record: that is several orders in one transaction, and one record is not the trade.
-    fn declared(
-        &self,
-        _input: &[u8],
-        logs: &[Log],
-        _amount_in_hint: Option<U256>,
-    ) -> Result<Option<DeclaredSwap>, Veto> {
+    fn declared(&self, _input: &[u8], logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         let mut records = logs
             .iter()
             .filter(|log| log.topics().first() == Some(&OrderRecord::SIGNATURE_HASH));
@@ -84,7 +79,7 @@ impl SolverDecoder for Okx {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{b256, Log as PrimitiveLog};
+    use alloy::primitives::{b256, Log as PrimitiveLog, U256};
 
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log};
@@ -113,9 +108,7 @@ mod tests {
     }
 
     fn settled(logs: &[Log]) -> Option<DeclaredSwap> {
-        Okx.declared(&[], logs, None)
-            .ok()
-            .flatten()
+        Okx.declared(&[], logs).ok().flatten()
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! `LiFi`'s Diamond settles both same-chain swaps (decoded like any solver) and cross-chain
 //! bridge orders, which must never decode as swaps.
 
-use alloy::{primitives::U256, rpc::types::Log, sol, sol_types::SolEvent};
+use alloy::{rpc::types::Log, sol, sol_types::SolEvent};
 
 use crate::decoder::{
     solvers::{DeclaredSwap, SolverDecoder},
@@ -18,12 +18,7 @@ impl SolverDecoder for Lifi {
     /// `LiFi` declares no swap terms this decoder reads — its Diamond delegates to a facet whose
     /// calldata shape is per-bridge — so the only thing it says is whether the transaction is a
     /// swap at all.
-    fn declared(
-        &self,
-        _input: &[u8],
-        logs: &[Log],
-        _amount_in_hint: Option<U256>,
-    ) -> Result<Option<DeclaredSwap>, Veto> {
+    fn declared(&self, _input: &[u8], logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         if let Some(veto) = bridge_order(logs) {
             return Err(veto);
         }
@@ -99,7 +94,7 @@ sol! {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Bytes, Log as PrimitiveLog};
+    use alloy::primitives::{Bytes, Log as PrimitiveLog, U256};
 
     use super::*;
     use crate::decoder::test_utils::{addr, make_transfer_log};
@@ -115,13 +110,13 @@ mod tests {
             Bytes::default(),
         );
         let logs = vec![Log { inner: primitive, ..Default::default() }];
-        assert_eq!(Lifi.declared(&[], &logs, None).err(), Some(Veto::BridgeOrder));
+        assert_eq!(Lifi.declared(&[], &logs).err(), Some(Veto::BridgeOrder));
 
         // A same-chain LiFi swap is not vetoed; it carries no terms this decoder reads, so it
         // decodes by netting.
         let swap_logs = vec![make_transfer_log(addr(10), addr(1), addr(2), U256::from(1000))];
         assert!(Lifi
-            .declared(&[], &swap_logs, None)
+            .declared(&[], &swap_logs)
             .is_ok_and(|declared| declared.is_none()));
     }
 

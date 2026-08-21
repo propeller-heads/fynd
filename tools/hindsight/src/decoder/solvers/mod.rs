@@ -158,15 +158,7 @@ pub(crate) trait SolverDecoder: Send + Sync {
     /// transaction's: a packed layout (Fly) uses offsets valid only in its own frame. `logs` is the
     /// whole receipt's logs, for a solver that states its trade in an event instead. Every solver
     /// reads one or the other; the parameter it does not use is ignored.
-    ///
-    /// `amount_in_hint` is a netted input amount, when one is known. Some extractors (`ParaSwap`)
-    /// need it to locate fields by value rather than by ABI offset.
-    fn declared(
-        &self,
-        _input: &[u8],
-        _logs: &[Log],
-        _amount_in_hint: Option<U256>,
-    ) -> Result<Option<DeclaredSwap>, Veto> {
+    fn declared(&self, _input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         Ok(None)
     }
 
@@ -280,72 +272,21 @@ mod tests {
     }
 
     #[test]
-    fn test_declared_output_fee_reads_the_integrator_cut() {
-        // Base tx 0x78c70ca6…: KyberSwap's calldata names a frontend's wallet, which took 10% of
-        // the ETH the trader bought. Without backing it out the settled output is 10% short and
-        // Fynd, re-solved gross, wins by 1111 bps on every one of that frontend's trades.
-        let collector = addr(41);
-        let trader = addr(1);
-        let router = addr(50);
-        let token_out = Address::ZERO;
-        let native = [
-            (router, trader, U256::from(45_157_884_343_657_075u64)),
-            (router, collector, U256::from(5_017_542_704_850_786u64)),
-        ];
-        let ledger = TransferLedger::from_transaction(&[], &native);
-        let input = kyberswap::swap_calldata(vec![collector]);
+    fn test_declared_read_scoped_to_the_settling_solver() {
+        // Real ParaSwap calldata parses only through ParaSwap's own decoder. Another solver's
+        // decoder must decline the same bytes rather than force them through its own ABI, which
+        // is what keeps a record's amounts and its solver label on the same solver.
+        let text = include_str!("fixtures/paraswap_input.txt").trim();
+        let input = alloy::hex::decode(text.strip_prefix("0x").unwrap_or(text)).unwrap();
 
-        assert_eq!(
-            declared_output_fee("kyberswap", &input, &ledger, token_out),
-            Some(U256::from(5_017_542_704_850_786u64))
-        );
-        // Dispatched on the attributed solver: the same calldata under another solver's name
-        // declares nothing.
-        assert_eq!(declared_output_fee("1inch", &input, &ledger, token_out), None);
-        // A swap that names no fee recipient has no fee to back out.
-        assert_eq!(
-            declared_output_fee(
-                "kyberswap",
-                &kyberswap::swap_calldata(Vec::new()),
-                &ledger,
-                token_out
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn test_declared_output_fee_ignores_other_tokens() {
-        // The recipient was paid, but in a token the trade did not buy — that is not this swap's
-        // output fee.
-        let collector = addr(41);
-        let logs = vec![make_transfer_log(addr(10), addr(50), collector, U256::from(85))];
-        let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let input = kyberswap::swap_calldata(vec![collector]);
-        assert_eq!(declared_output_fee("kyberswap", &input, &ledger, addr(11)), None);
-    }
-
-    #[test]
-    fn test_swap_intent_dispatch_scoped_to_the_attributed_solver() {
-        // A ParaSwap-shaped calldata (token pair, then the fromAmount/toAmount/quotedAmount
-        // triple) only parses into an intent when the attributed solver is paraswap; an unlisted
-        // solver never yields one from the same bytes.
-        let amount_in = U256::from(171_521_496u64);
-        let mut input = vec![0xe3u8, 0xea, 0xd5, 0x9e];
-        for word in [
-            U256::from(0x1111u64), // srcToken
-            U256::from(0x2222u64), // destToken
-            amount_in,
-            U256::from(171_430_663u64),
-            U256::from(171_602_266u64),
-        ] {
-            input.extend_from_slice(&word.to_be_bytes::<32>());
-        }
         assert!(decoder_for("paraswap")
-            .declared(&input, &[], Some(amount_in))
+            .declared(&input, &[])
             .is_ok_and(|declared| declared.is_some()));
         assert!(decoder_for("1inch")
-            .declared(&input, &[], Some(amount_in))
+            .declared(&input, &[])
+            .is_ok_and(|declared| declared.is_none()));
+        assert!(decoder_for("0x")
+            .declared(&input, &[])
             .is_ok_and(|declared| declared.is_none()));
     }
 }

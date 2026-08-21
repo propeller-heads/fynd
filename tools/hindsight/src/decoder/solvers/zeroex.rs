@@ -113,12 +113,7 @@ impl SolverDecoder for ZeroEx {
     /// treats a zero floor sanely (trivially fillable, no margin to compute). `amount_in_hint` is
     /// unused: `AllowanceHolder`'s own parameter is the real amount, not a value to locate a field
     /// by.
-    fn declared(
-        &self,
-        input: &[u8],
-        _logs: &[Log],
-        _amount_in_hint: Option<U256>,
-    ) -> Result<Option<DeclaredSwap>, Veto> {
+    fn declared(&self, input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         let Ok(call) = execCall::abi_decode(input) else { return Ok(None) };
         if call.amount.is_zero() {
             return Ok(None);
@@ -143,9 +138,9 @@ impl SolverDecoder for ZeroEx {
 #[cfg(test)]
 mod tests {
     /// The terms this solver reads from `input`, for tests that only care about the calldata path.
-    fn terms(input: &[u8], hint: Option<U256>) -> Option<DeclaredSwap> {
+    fn terms(input: &[u8]) -> Option<DeclaredSwap> {
         ZeroEx
-            .declared(input, &[], hint)
+            .declared(input, &[])
             .ok()
             .flatten()
     }
@@ -177,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_real_settled_declared_swap() {
-        let intent = terms(&settled_input(), None).unwrap();
+        let intent = terms(&settled_input()).unwrap();
         assert_eq!(intent.token_in, Address::ZERO); // 0x's native-ETH sentinel, normalized
         assert_eq!(intent.token_out, USDC);
         assert_eq!(intent.amount_in, U256::from(214_715_436_309_542_453u64));
@@ -187,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_real_settled_output_recipient() {
-        let intent = terms(&settled_input(), None).unwrap();
+        let intent = terms(&settled_input()).unwrap();
         assert_eq!(intent.output_recipient, Some(RELAY_ROUTER));
     }
 
@@ -195,7 +190,7 @@ mod tests {
     fn test_real_reverted_declared_swap() {
         // The reverted trade's terms decode the same way a settled one's do — a revert emits no
         // logs, so calldata is the only source, and it is read no differently here.
-        let intent = terms(&reverted_input(), None).unwrap();
+        let intent = terms(&reverted_input()).unwrap();
         assert_eq!(intent.token_in, Address::ZERO);
         assert_eq!(intent.token_out, USDC);
         assert_eq!(intent.amount_in, U256::from(2_018_128_791_326_365_345u64));
@@ -205,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_real_reverted_output_recipient() {
-        let intent = terms(&reverted_input(), None).unwrap();
+        let intent = terms(&reverted_input()).unwrap();
         assert_eq!(intent.output_recipient, Some(RELAY_ROUTER));
     }
 
@@ -230,12 +225,12 @@ mod tests {
             zidAndAffiliate: alloy::primitives::FixedBytes::default(),
         };
         let input = executeCall::abi_encode(&call);
-        assert!(terms(&input, None).is_none());
+        assert!(terms(&input).is_none());
     }
 
     #[test]
     fn test_garbage_input_declines() {
-        assert!(terms(&[0xde, 0xad, 0xbe, 0xef], None).is_none());
+        assert!(terms(&[0xde, 0xad, 0xbe, 0xef]).is_none());
     }
 
     #[test]
@@ -249,7 +244,7 @@ mod tests {
             data: alloy::primitives::Bytes::new(),
         };
         let input = execCall::abi_encode(&call);
-        assert!(terms(&input, None).is_none());
+        assert!(terms(&input).is_none());
     }
 
     #[test]
@@ -273,7 +268,7 @@ mod tests {
             data: executeCall::abi_encode(&execute_call).into(),
         };
         let input = execCall::abi_encode(&call);
-        let intent = terms(&input, None).unwrap();
+        let intent = terms(&input).unwrap();
         assert_eq!(intent.min_amount_out, Some(U256::ZERO));
     }
 
