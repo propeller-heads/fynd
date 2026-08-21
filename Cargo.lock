@@ -263,14 +263,14 @@ dependencies = [
 
 [[package]]
 name = "alloy-chains"
-version = "0.2.34"
+version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84e0378e959aa6a885897522080a990e80eb317f1e9a222a604492ea50e13096"
+checksum = "e5fdcfed8f106be3df944054aaa42bc13ae103a3ac8a9f4b08d4f053e3a743f8"
 dependencies = [
  "alloy-primitives 1.6.0",
  "num_enum",
+ "phf 0.14.0",
  "serde",
- "strum 0.27.2",
 ]
 
 [[package]]
@@ -3150,7 +3150,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4142,7 +4142,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -4944,7 +4944,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5343,8 +5343,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
 dependencies = [
  "phf_macros",
- "phf_shared",
+ "phf_shared 0.11.3",
  "serde",
+]
+
+[[package]]
+name = "phf"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "010378780309880b08997fae13be7834dba947d36393bd372f2b1556deb2a2f6"
+dependencies = [
+ "phf_shared 0.14.0",
 ]
 
 [[package]]
@@ -5353,7 +5362,7 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
 dependencies = [
- "phf_shared",
+ "phf_shared 0.11.3",
  "rand 0.8.6",
 ]
 
@@ -5364,7 +5373,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
 dependencies = [
  "phf_generator",
- "phf_shared",
+ "phf_shared 0.11.3",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -5375,6 +5384,15 @@ name = "phf_shared"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6fd9027e2d9319be6349febd1db4e8d02aa544921200c9b777720ac34a3aa89"
 dependencies = [
  "siphasher",
 ]
@@ -5691,7 +5709,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5729,7 +5747,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -6092,7 +6110,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66c52031b73cae95d84cd1b07725808b5fd1500da3e5e24574a3b2dc13d9f16d"
 dependencies = [
  "bitvec",
- "phf",
+ "phf 0.11.3",
  "revm-primitives",
  "serde",
 ]
@@ -6484,7 +6502,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6543,7 +6561,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7131,15 +7149,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "290d54ea6f91c969195bdbcd7442c8c2a2ba87da8bf60a7ee86a235d4bc1e125"
 
 [[package]]
-name = "strum"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
-dependencies = [
- "strum_macros 0.27.2",
-]
-
-[[package]]
 name = "strum_macros"
 version = "0.25.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7149,18 +7158,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rustversion",
- "syn 2.0.118",
-]
-
-[[package]]
-name = "strum_macros"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
-dependencies = [
- "heck 0.5.0",
- "proc-macro2",
- "quote",
  "syn 2.0.118",
 ]
 
@@ -7267,7 +7264,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7918,9 +7915,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.356.0"
+version = "0.360.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "201efd6fbee8d147b8618d8172d95a10ece41849fb0dc83da4fe33dc1321a021"
+checksum = "f00318dc92d0925fd26e2beb3029d9464f1744c87404f1dfa22846c70952c696"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7948,9 +7945,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.356.0"
+version = "0.360.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84a79decf01f50919f440055f5eff3be35a9a39ca9fe19f2929370ee54a8b447"
+checksum = "f8b47d5eefc6ab03a3d1de312fbaf5811ab63e4a1c6d1ca90c1a0f9d5dbab61b"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -7965,8 +7962,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "strum 0.25.0",
- "strum_macros 0.25.3",
+ "strum",
+ "strum_macros",
  "thiserror 1.0.69",
  "tiny-keccak",
  "tracing",
@@ -7977,9 +7974,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.356.0"
+version = "0.360.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d62dbcece72e1aca907b4fcee6d794621b35a2e495a0dfc565f3ecbd6d4a584"
+checksum = "84713120713a8f9b27d669ce6671f197c766dd5bbaca369cc5a88921fd258c60"
 dependencies = [
  "alloy",
  "async-trait",
@@ -7999,9 +7996,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.356.0"
+version = "0.360.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d8f223a1cf8c3efac6d2428a0e9fbc84d9d61735867f40fac81d27ad36eead1"
+checksum = "f6210d9f1bf4bd66735cae154b94169abbbced42544193d29292cec720752659"
 dependencies = [
  "alloy",
  "chrono",
@@ -8021,9 +8018,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.356.0"
+version = "0.360.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8ae288e2bc78ad1266103e9be9f413b26b345c5ddeb9858703fc9e271649db2"
+checksum = "e42606370dd6b4ef8f3dc530aca3b234b1485298ff91b8ae1de3b1aa78923001"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -8051,7 +8048,7 @@ dependencies = [
  "ruint",
  "serde",
  "serde_json",
- "strum_macros 0.25.3",
+ "strum_macros",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
@@ -8547,7 +8544,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
