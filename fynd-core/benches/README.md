@@ -91,11 +91,12 @@ Every other option works as it does offline, plus:
 | option | what it does |
 |---|---|
 | `--protocols A,B` | Protocol systems to stream. Defaults to every one Tycho has for the chain, including those it serves through the Dynamic Contract Indexer |
+| `--include-protocols A,B` | Protocol systems to add to the streamed list — how a source Tycho does not list gets into a capture, see [pAMM price levels](#pamm-price-levels). A name already streamed, or one that brings no component into the market, stops the run. Unlike `--exclude-protocols`, which filters an already-captured market, this changes what is streamed, so it is live-only |
 | `--chain NAME` | Chain to capture. Defaults to `ethereum` |
 | `--min-tvl X` | Minimum component TVL in ETH. The main lever on how big the market is |
 | `--min-token-quality N` | Minimum token quality score |
 | `--traded-n-days-ago N` | Only tokens traded within this many days |
-| `--capture-timeout-secs N` | How long to wait for the snapshot before giving up |
+| `--capture-timeout-secs N` | How long to wait for the snapshot, and for the price level frame, before giving up |
 | `--tycho-url HOST` | Overrides `TYCHO_URL`. Scheme optional |
 | `--tycho-api-key KEY` | Overrides `TYCHO_API_KEY` |
 | `--rpc-url URL` | Overrides `RPC_URL`, read for the live gas price |
@@ -103,6 +104,28 @@ Every other option works as it does offline, plus:
 Without `--gas-price-gwei` a live run prices gas at whatever the chain is charging, read from
 `RPC_URL`. Pass the flag and it wins. An offline run has no such price to read — the fixture
 carries none — so it keeps using the default.
+
+### pAMM price levels
+
+Titan streams a per-block quote ladder for a handful of proprietary AMMs. Those are not Tycho
+protocol systems, so no `--protocols` list and no discovery brings them in — name them with
+`--include-protocols`:
+
+```bash
+./scripts/bench.sh --market live --name price-levels \
+  --include-protocols pricelevelstream:fermiswap \
+  --exclude-protocols vm:fermiswap
+```
+
+The served venues are `fermiswap`, `kipseli`, `metric`, `bebop` and `taurusfi`, and the stream is
+Ethereum-only. One frame is taken after the Tycho snapshot — last, so the ladders are as close to
+the captured block as they get — and merged into it, which also means every config solves the same
+frozen ladder. A venue that sends nothing before `--capture-timeout-secs` stops the run, and so
+does one whose frame brings no component into the market — the venue is in the capture only
+because of that frame, so a run that quietly loses it is benching a different market.
+
+`--exclude-protocols vm:fermiswap` is not optional bookkeeping. FermiSwap is reachable both ways
+and both price the same maker inventory, so leaving the VM one in double-counts it.
 
 The profiler takes the same flags, so a slow order from a live run can be profiled against a fresh
 market: `./scripts/profile.sh --market live --config water_fill_d3 --orders 200`. It will be a

@@ -396,6 +396,15 @@ pub struct LiveFlags {
     #[arg(long, value_delimiter = ',')]
     pub protocols: Option<Vec<String>>,
 
+    /// Protocol systems to add to the streamed list, comma separated. This is how a source Tycho
+    /// does not list gets into a capture, e.g. `--include-protocols pricelevelstream:fermiswap`
+    /// for a pAMM served from Titan's price level stream.
+    ///
+    /// A name that is already streamed, or that brings no component into the captured market,
+    /// stops the run. Live runs only.
+    #[arg(long, value_delimiter = ',')]
+    pub include_protocols: Vec<String>,
+
     /// Minimum component TVL in ETH. The main lever on how big the captured market is.
     #[arg(long, default_value_t = 10.0)]
     pub min_tvl: f64,
@@ -435,6 +444,7 @@ impl LiveFlags {
             chain,
             chain_name: self.chain.to_ascii_lowercase(),
             protocols: self.protocols,
+            include_protocols: self.include_protocols,
             min_tvl: self.min_tvl,
             min_token_quality: self.min_token_quality,
             traded_n_days_ago: self.traded_n_days_ago,

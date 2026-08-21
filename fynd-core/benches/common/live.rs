@@ -10,18 +10,27 @@
 //! every Uniswap v4, Balancer, Curve and Maverick pool in the recorded fixture is a component with
 //! no state, and so unroutable. Captured live they are all there.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
-use fynd_core::feed::protocol_registry::register_exchanges_for_recording;
+use fynd_core::feed::protocol_registry::{
+    open_price_level_stream_for_recording, register_exchanges_for_recording,
+};
 use num_bigint::BigUint;
 use tokio_stream::StreamExt;
 use tycho_simulation::{
     evm::stream::ProtocolStreamBuilder,
+    protocol::models::Update,
     tycho_client::{
         feed::component_tracker::ComponentFilter,
         rpc::{HttpRPCClient, HttpRPCClientOptions, ProtocolSystemsParams, RPCClient},
     },
-    tycho_common::models::Chain,
+    tycho_common::{
+        models::{token::Token, Chain},
+        Bytes,
+    },
     tycho_core::traits::FeePriceGetter,
     tycho_ethereum::rpc::EthereumRpcClient,
     utils::load_all_tokens,
@@ -82,6 +91,9 @@ pub struct LiveOptions {
     pub chain_name: String,
     /// Protocol systems to stream. `None` asks Tycho for every one it has.
     pub protocols: Option<Vec<String>>,
+    /// Protocol systems to stream on top of `protocols`, including sources Tycho does not list
+    /// such as `pricelevelstream:{venue}`.
+    pub include_protocols: Vec<String>,
     pub min_tvl: f64,
     pub min_token_quality: i32,
     pub traded_n_days_ago: u64,
@@ -102,10 +114,11 @@ pub struct LiveOptions {
 pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     let mut steps = Steps::new();
     header_line("tycho", &opts.tycho_host);
-    let protocols = match &opts.protocols {
+    let mut protocols = match &opts.protocols {
         Some(list) if !list.is_empty() => list.clone(),
         _ => discover_protocols(&opts.tycho_host, &opts.tycho_api_key, opts.chain).await?,
     };
+    add_streamed_protocols(&mut protocols, &opts.include_protocols)?;
     header_line("protocols", protocols.join(", "));
     steps.done("protocols in");
 
@@ -137,7 +150,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     let builder = builder
         .auth_key(Some(opts.tycho_api_key.clone()))
         .skip_state_decode_failures(true)
-        .set_tokens(tokens)
+        .set_tokens(tokens.clone())
         .await;
     steps.done("tokens set in");
 
@@ -150,7 +163,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     steps.done("stream built in");
 
     header_line("waiting", format!("for the snapshot, up to {}s", opts.capture_timeout_secs));
-    let snapshot =
+    let mut snapshot =
         match tokio::time::timeout(Duration::from_secs(opts.capture_timeout_secs), stream.next())
             .await
         {
@@ -164,6 +177,26 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
                 ))
             }
         };
+
+    // Taken after the Tycho snapshot rather than alongside it: the ladders are quoted for the
+    // block being built, so the freshest frame is the one asked for last.
+    if let Some(levels) =
+        capture_price_levels(opts.chain, &protocols, &tokens, opts.capture_timeout_secs).await?
+    {
+        header_line(
+            "price levels",
+            format!(
+                "{} pairs quoted for block {}",
+                levels.new_pairs.len(),
+                levels.block_number_or_timestamp
+            ),
+        );
+        snapshot
+            .new_pairs
+            .extend(levels.new_pairs);
+        snapshot.states.extend(levels.states);
+        steps.done("price levels in");
+    }
 
     let block = snapshot.block_number_or_timestamp;
     let components = snapshot.new_pairs.len();
@@ -184,6 +217,23 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
         .map(String::as_str)
         .filter(|protocol| !present.contains(protocol))
         .collect();
+    // An explicitly included protocol bringing nothing is a different case: the run was asked for
+    // it by name, and a typo there benches a market silently missing the venue -- especially with
+    // the companion `--exclude-protocols` dropping the on-chain path to the same one.
+    let missing: Vec<&str> = opts
+        .include_protocols
+        .iter()
+        .map(String::as_str)
+        .filter(|protocol| !present.contains(protocol))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "--include-protocols: {} brought no component into the market.\nStreamed: {}",
+            missing.join(", "),
+            protocols.join(", ")
+        ));
+    }
+
     if !empty.is_empty() {
         header_line(
             "no pools from",
@@ -211,6 +261,54 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
             min_tvl: opts.min_tvl,
         },
     })
+}
+
+/// Appends the `--include-protocols` entries to the streamed list.
+///
+/// A name that is already streamed stops the run, because an entry adding nothing to the market
+/// is a mistake worth seeing rather than a silent no-op.
+fn add_streamed_protocols(protocols: &mut Vec<String>, requested: &[String]) -> Result<(), String> {
+    for protocol in requested {
+        if protocols.contains(protocol) {
+            return Err(format!(
+                "--include-protocols: {protocol} is already streamed.\nStreamed: {}",
+                protocols.join(", ")
+            ));
+        }
+        protocols.push(protocol.clone());
+    }
+    Ok(())
+}
+
+/// Takes one frame from the pAMM price level stream, or `None` when no `pricelevelstream:` venue
+/// was asked for.
+///
+/// A venue named here is in the market solely because of this frame, so a stream that says
+/// nothing is an error rather than something to capture without.
+///
+/// # Errors
+///
+/// Returns a message for an unserved venue, a stream that ends, or one that sends no frame inside
+/// `timeout_secs`.
+async fn capture_price_levels(
+    chain: Chain,
+    protocols: &[String],
+    tokens: &HashMap<Bytes, Token>,
+    timeout_secs: u64,
+) -> Result<Option<Update>, String> {
+    let Some(stream) = open_price_level_stream_for_recording(chain, protocols, tokens)? else {
+        return Ok(None);
+    };
+    let mut stream = Box::pin(stream);
+    header_line("waiting", format!("for pAMM price levels, up to {timeout_secs}s"));
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), stream.next()).await {
+        Ok(Some(update)) => Ok(Some(update)),
+        Ok(None) => Err("the pAMM price level stream ended before sending a frame".to_string()),
+        Err(_) => Err(format!(
+            "no pAMM price levels within {timeout_secs}s -- check the venues named in \
+             --include-protocols"
+        )),
+    }
 }
 
 /// Every protocol system Tycho has for this chain, streamable and DCI alike.
