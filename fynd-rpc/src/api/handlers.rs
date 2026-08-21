@@ -229,12 +229,13 @@ const DEFAULT_PRICES_LIMIT: usize = 1000;
 const MAX_PRICES_LIMIT: usize = 1000;
 
 #[cfg(feature = "experimental")]
-/// GET /v1/prices - Return derived token prices and optional market data.
+/// GET /v1/prices - Return per-token mid prices and optional market data.
 ///
-/// By default returns token gas prices only. Each `prices[].price` is a plain decimal string
-/// holding raw target-token units divided by raw gas-token units; consumers must normalize
-/// both tokens' decimals before using it. Use `include` query parameter to add spot prices
-/// and/or component depths.
+/// Serves the token price directions, so it needs an instance that solves both directions
+/// (`PricingMode::Mid`); on a buy-only instance it returns 503. Each `prices[].price` is a
+/// plain decimal string holding raw target-token units divided by raw gas-token units;
+/// consumers must normalize both tokens' decimals before using it. Use the `include` query
+/// parameter to add spot prices and/or component depths.
 ///
 /// # Query Parameters
 ///
@@ -273,7 +274,7 @@ pub async fn get_prices(
     // Acquire read lock, check staleness first (avoid cloning if 503), then clone
     let store = state.derived_data.read().await;
     let token_prices_block = store
-        .token_prices_block()
+        .token_price_directions_block()
         .ok_or(ApiError::StaleData { age_ms: u64::MAX })?;
     if want_spot && store.spot_prices_block().is_none() {
         return Err(ApiError::StaleData { age_ms: u64::MAX });
@@ -283,17 +284,23 @@ pub async fn get_prices(
     }
     let spot_prices_block = store.spot_prices_block();
     let component_depths_block = store.component_depths_block();
-    let token_prices = store.token_prices().cloned();
+    let token_directions = store.token_price_directions().cloned();
     let spot_prices_data = if want_spot { store.spot_prices().cloned() } else { None };
     let component_depths_data = if want_depths { store.component_depths().cloned() } else { None };
     drop(store);
 
-    // Convert token gas prices
+    // Convert the direction rates
     let mut prices = Vec::new();
     let mut skipped_tokens = 0usize;
-    if let Some(token_prices) = &token_prices {
-        for (address, price) in token_prices {
-            match price_to_decimal_string(&price.numerator, &price.denominator) {
+    if let Some(token_directions) = &token_directions {
+        for (address, rates) in token_directions {
+            // Mid = (buy + sell) / 2, kept as an exact fraction for decimal serialization.
+            let numerator = &rates.buy.numerator * &rates.sell.denominator +
+                &rates.sell.numerator * &rates.buy.denominator;
+            let denominator = num_bigint::BigUint::from(2u8) *
+                &rates.buy.denominator *
+                &rates.sell.denominator;
+            match price_to_decimal_string(&numerator, &denominator) {
                 Some(price) => {
                     prices.push(TokenPriceEntry { token: address.clone(), price });
                 }
