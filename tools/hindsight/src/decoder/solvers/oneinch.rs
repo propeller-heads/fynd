@@ -25,7 +25,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    solvers::{Declaration, SolverDecoder, SwapIntent},
+    solvers::{DeclaredSwap, SolverDecoder},
     veto::Veto,
 };
 
@@ -73,19 +73,19 @@ impl SolverDecoder for OneInch {
         input: &[u8],
         _logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Result<Option<Declaration>, Veto> {
+    ) -> Result<Option<DeclaredSwap>, Veto> {
         let Ok(call) = swapCall::abi_decode(input) else { return Ok(None) };
         if call.desc.amount.is_zero() {
             return Ok(None);
         }
-        let intent = SwapIntent::new(
+        let intent = DeclaredSwap::from_calldata(
             normalize_native(call.desc.srcToken),
             normalize_native(call.desc.dstToken),
             call.desc.amount,
             call.desc.minReturnAmount,
         )
         .with_recipient(call.desc.dstReceiver);
-        Ok(Some(Declaration::Terms(intent)))
+        Ok(Some(intent))
     }
 }
 
@@ -109,15 +109,11 @@ mod tests {
     const AMOUNT_IN: u128 = 51_014_996_100_000_000_000_000;
     const MIN_AMOUNT_OUT: u128 = 1_526_167_226_586_071_441;
 
-    fn terms(input: &[u8]) -> Option<SwapIntent> {
-        match OneInch
+    fn terms(input: &[u8]) -> Option<DeclaredSwap> {
+        OneInch
             .declared(input, &[], None)
             .ok()
-            .flatten()?
-        {
-            Declaration::Terms(intent) => Some(intent),
-            Declaration::Settled(_) => None,
-        }
+            .flatten()
     }
 
     #[test]
@@ -134,9 +130,9 @@ mod tests {
         // The calldata names 1inch's native sentinel; the record's token_out is the zero address.
         assert_eq!(intent.token_out, Address::ZERO);
         assert_eq!(intent.amount_in, U256::from(AMOUNT_IN));
-        assert_eq!(intent.min_amount_out, U256::from(MIN_AMOUNT_OUT));
+        assert_eq!(intent.min_amount_out, Some(U256::from(MIN_AMOUNT_OUT)));
         // `swap` carries no off-chain quote, so the floor is the best available promise.
-        assert_eq!(intent.declared_quote(), None);
+        assert_eq!(intent.declared_quote, None);
     }
 
     #[test]

@@ -10,24 +10,20 @@
 //! knowledge is needed to decode.
 
 use alloy::{
-    primitives::Address,
+    primitives::{Address, U256},
     rpc::types::{trace::geth::CallFrame, Log},
 };
 
 use crate::decoder::{
     registry::Registry,
-    solvers::{self, Declaration, SwapIntent},
+    solvers::{self, DeclaredSwap},
     trace,
     transfer_ledger::{SettledSwap, TransferLedger},
     veto::Veto,
 };
 
-/// What the settling solver read: the decoder label recorded on the trade, the flow, and the
-/// parsed terms when the read was a calldata one (their columns land on the record). `None` when
-/// the solver declared nothing.
-type DeclaredRead = Option<(&'static str, SettledSwap, Option<SwapIntent>)>;
-
-/// Decode a transaction from the settling solver's own declaration.
+/// Decode a transaction from the settling solver's own declaration: the decoder label recorded on
+/// the trade, the settled swap, and the terms the solver declared alongside it.
 ///
 /// Only the settling solver is asked — the outermost known solver in the trace — so a record's
 /// amounts and its solver label always come from the same solver. A transaction that merely
@@ -42,7 +38,7 @@ pub(crate) fn declared_flow(
     logs: &[Log],
     transfer_ledger: &TransferLedger,
     sender: Address,
-) -> Result<DeclaredRead, Veto> {
+) -> Result<Option<(&'static str, SettledSwap, DeclaredSwap)>, Veto> {
     let Some(solver_frame) = trace::find_solver_frame(root, registry) else { return Ok(None) };
     let Some(solver) = solver_frame
         .to
@@ -50,50 +46,65 @@ pub(crate) fn declared_flow(
     else {
         return Ok(None);
     };
-    match solver
+    let Some(declared) = solver
         .decoder
         .declared(&solver_frame.input, logs, None)?
-    {
-        None => Ok(None),
-        // Stated outright in the solver's own logs: amounts included, nothing to recover.
-        Some(Declaration::Settled(flow)) => Ok(Some(("solver-logs", flow, None))),
-        Some(Declaration::Terms(intent)) => Ok(anchor_output(intent, transfer_ledger, sender)
-            .map(|flow| ("solver-calldata", flow, Some(intent)))),
-    }
+    else {
+        return Ok(None);
+    };
+    // An event states the output outright; calldata never does, so it is recovered from the
+    // recipient's receipt. That is the only difference between the two, and the label records it.
+    let (label, amount_out) = match declared.amount_out {
+        Some(amount_out) => ("solver-logs", amount_out),
+        None => (
+            "solver-calldata",
+            match recover_output(&declared, transfer_ledger, sender) {
+                Some(amount_out) => amount_out,
+                None => return Ok(None),
+            },
+        ),
+    };
+    let settled = SettledSwap {
+        tracked: declared.tracked.unwrap_or(sender),
+        token_in: declared.token_in,
+        amount_in: declared.amount_in,
+        token_out: declared.token_out,
+        amount_out,
+    };
+    Ok(Some((label, settled, declared)))
 }
 
-/// Recover the settled `amount_out` for calldata terms: the gross amount the declared recipient
-/// received (a solver that declares none delivers to the caller, so the transaction sender is the
-/// fallback anchor).
+/// Recover a settled `amount_out` the solver's data did not state: the gross amount the declared
+/// recipient received (a solver that declares none delivers to the caller, so the transaction
+/// sender is the fallback anchor).
 ///
 /// Two guards protect against the recipient-receipt query picking up a multi-order transaction's
-/// output: the recovered output must clear the intent's on-chain floor (a successful trade cleared
+/// output: the recovered output must clear the declared on-chain floor (a successful trade cleared
 /// it by construction, so a violation means the wrong legs were picked up), and, when the calldata
 /// also declares a quote, it must sit within `plausible_quote`'s band of the recovered output.
-fn anchor_output(
-    intent: SwapIntent,
+fn recover_output(
+    declared: &DeclaredSwap,
     transfer_ledger: &TransferLedger,
     sender: Address,
-) -> Option<SettledSwap> {
-    let recipient = intent
+) -> Option<U256> {
+    let recipient = declared
         .output_recipient
         .unwrap_or(sender);
-    let amount_out = transfer_ledger.received_by_address(recipient, intent.token_out);
-    if amount_out.is_zero() || amount_out < intent.min_amount_out {
+    let amount_out = transfer_ledger.received_by_address(recipient, declared.token_out);
+    if amount_out.is_zero() ||
+        amount_out <
+            declared
+                .min_amount_out
+                .unwrap_or(U256::ZERO)
+    {
         return None;
     }
-    if let Some(quoted) = intent.declared_quote() {
+    if let Some(quoted) = declared.declared_quote {
         if !solvers::plausible_quote(quoted, amount_out) {
             return None;
         }
     }
-    Some(SettledSwap {
-        tracked: sender,
-        token_in: intent.token_in,
-        amount_in: intent.amount_in,
-        token_out: intent.token_out,
-        amount_out,
-    })
+    Some(amount_out)
 }
 
 #[cfg(test)]
@@ -192,16 +203,15 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
         let ledger = TransferLedger::from_transaction(&logs, &native);
 
-        let (_, flow, intent) = declared_flow(&root, &registry, &[], &ledger, sender)
+        let (_, flow, declared) = declared_flow(&root, &registry, &[], &ledger, sender)
             .unwrap()
             .unwrap();
-        let intent = intent.unwrap();
         assert_eq!(flow.tracked, sender);
         assert_eq!(flow.token_in, TOKEN_IN);
         assert_eq!(flow.token_out, Address::ZERO);
         assert_eq!(flow.amount_in, U256::from(AMOUNT_IN));
         assert_eq!(flow.amount_out, U256::from(MIN_AMOUNT_OUT + 1_000));
-        assert_eq!(intent.min_amount_out, U256::from(MIN_AMOUNT_OUT));
+        assert_eq!(declared.min_amount_out, Some(U256::from(MIN_AMOUNT_OUT)));
     }
 
     #[test]

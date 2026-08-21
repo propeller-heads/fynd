@@ -15,7 +15,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    solvers::{Declaration, SolverDecoder, SwapIntent},
+    solvers::{DeclaredSwap, SolverDecoder},
     veto::Veto,
 };
 
@@ -108,7 +108,7 @@ impl SolverDecoder for Fly {
         input: &[u8],
         _logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Result<Option<Declaration>, Veto> {
+    ) -> Result<Option<DeclaredSwap>, Veto> {
         let Some(data) = parse(input) else { return Ok(None) };
         if data.amount_in.is_zero() || data.amount_out_min.is_zero() {
             return Ok(None);
@@ -116,29 +116,28 @@ impl SolverDecoder for Fly {
         if !data.expected_amount_out.is_zero() && data.amount_out_min > data.expected_amount_out {
             return Ok(None);
         }
-        let intent =
-            SwapIntent::new(data.from_asset, data.to_asset, data.amount_in, data.amount_out_min)
-                .with_recipient(data.to_address);
-        Ok(Some(Declaration::Terms(if data.expected_amount_out.is_zero() {
+        let intent = DeclaredSwap::from_calldata(
+            data.from_asset,
+            data.to_asset,
+            data.amount_in,
+            data.amount_out_min,
+        )
+        .with_recipient(data.to_address);
+        Ok(Some(if data.expected_amount_out.is_zero() {
             intent
         } else {
             intent.with_quote(data.expected_amount_out, None)
-        })))
+        }))
     }
 }
 
 #[cfg(test)]
 mod tests {
     /// The terms this solver reads from `input`, for tests that only care about the calldata path.
-    fn terms(input: &[u8], hint: Option<U256>) -> Option<SwapIntent> {
-        match Fly
-            .declared(input, &[], hint)
+    fn terms(input: &[u8], hint: Option<U256>) -> Option<DeclaredSwap> {
+        Fly.declared(input, &[], hint)
             .ok()
-            .flatten()?
-        {
-            Declaration::Terms(intent) => Some(intent),
-            Declaration::Settled(_) => None,
-        }
+            .flatten()
     }
 
     use alloy::primitives::address;
@@ -159,8 +158,8 @@ mod tests {
         assert_eq!(intent.token_in, address!("0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"));
         assert_eq!(intent.token_out, Address::ZERO);
         assert_eq!(intent.amount_in, U256::from(19_694_643u64));
-        assert_eq!(intent.min_amount_out, U256::from(10_217_898_321_149_381u64));
-        assert_eq!(intent.quoted_amount_out(), U256::from(10_321_109_415_302_405u64));
+        assert_eq!(intent.min_amount_out, Some(U256::from(10_217_898_321_149_381u64)));
+        assert_eq!(intent.promised_amount_out().unwrap(), U256::from(10_321_109_415_302_405u64));
     }
 
     #[test]

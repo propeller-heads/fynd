@@ -50,7 +50,7 @@ pub(crate) use crate::decoder::{
     attribution::AttributionSource, registry::Registry, sandwich::SandwichEvidence,
 };
 use crate::decoder::{
-    solvers::SwapIntent,
+    solvers::DeclaredSwap,
     trace::{collect_native_transfers, fetch_block_traces},
     transfer_ledger::TransferLedger,
 };
@@ -109,37 +109,14 @@ pub(crate) struct DecodedTrade {
     pub sandwich: Option<SandwichEvidence>,
 }
 
-/// Copy the calldata-declared terms off a parsed intent, or all-`None` when no intent was
-/// recovered. Split out of `decode_transaction` purely to keep it under the line limit.
-/// The trader's swap terms, when the settling solver frame's own calldata declares them.
-///
-/// Dispatched with the solver frame's input, not the root transaction's — a packed calldata layout
-/// (Fly) uses offsets valid only in its own frame — and with the decoded flow's input amount as a
-/// hint for scan-based extractors (`ParaSwap`). A declared quote that fails the unit-plausibility
-/// check against `settled_amount_out` is dropped (quotes are self-reported); the ABI-decoded terms
-/// stay either way.
-fn solver_intent(
-    root: &CallFrame,
-    registry: &Registry,
-    solver: &str,
-    amount_in: U256,
-    settled_amount_out: U256,
-) -> Option<SwapIntent> {
-    let frame = trace::find_solver_frame(root, registry)?;
-    let mut intent = solvers::swap_intent(solver, &frame.input, Some(amount_in))?;
-    if let Some(quoted) = intent.declared_quote() {
-        if !solvers::plausible_quote(quoted, settled_amount_out) {
-            intent.clear_quote();
-        }
-    }
-    Some(intent)
-}
-
-fn intent_fields(intent: Option<&SwapIntent>) -> (Option<U256>, Option<U256>, Option<u64>) {
-    let min_amount_out = intent.map(|intent| intent.min_amount_out);
-    let declared_quote = intent.and_then(SwapIntent::declared_quote);
-    let quote_timestamp = intent.and_then(|intent| intent.timestamp);
-    (min_amount_out, declared_quote, quote_timestamp)
+/// The terms the solver declared alongside the trade, or all-`None` for a netted record where no
+/// solver was read. Split out of `decode_transaction` purely to keep it under the line limit.
+fn declared_terms(declared: Option<&DeclaredSwap>) -> (Option<U256>, Option<U256>, Option<u64>) {
+    (
+        declared.and_then(|declared| declared.min_amount_out),
+        declared.and_then(|declared| declared.declared_quote),
+        declared.and_then(|declared| declared.timestamp),
+    )
 }
 
 /// Stateful trade decoder: owns the RPC provider, the chain's address
@@ -273,31 +250,29 @@ impl<P: Provider> Decoder<P> {
         // Netting is the fallback, and its records are marked. A solver that declares the
         // transaction is not a swap at all vetoes it here, before netting gets a chance to pair
         // its legs into a trade that never happened.
-        let declared =
-            declared::declared_flow(root, registry, logs, &transfer_ledger, sender).ok()?;
-        let (decoder, mut flow, intent, amounts_declared) =
-            if let Some((decoder, flow, intent)) = declared {
-                (decoder, flow, intent, true)
-            } else {
-                let netted = netting::fallback_flow(
-                    provider,
-                    code_cache,
-                    registry,
-                    &transfer_ledger,
-                    sender,
-                    entry_point,
-                )
-                .await;
-                let Some((decoder, flow)) = netted else {
-                    warn!(
-                        tx = %receipt.transaction_hash,
-                        venue = %registry.label(entry_point),
-                        "no decoder recovered a trade from this transaction"
-                    );
-                    return None;
-                };
-                (decoder, flow, None, false)
+        let read = declared::declared_flow(root, registry, logs, &transfer_ledger, sender).ok()?;
+        let (decoder, mut flow, declared) = if let Some((decoder, flow, declared)) = read {
+            (decoder, flow, Some(declared))
+        } else {
+            let netted = netting::fallback_flow(
+                provider,
+                code_cache,
+                registry,
+                &transfer_ledger,
+                sender,
+                entry_point,
+            )
+            .await;
+            let Some((decoder, flow)) = netted else {
+                warn!(
+                    tx = %receipt.transaction_hash,
+                    venue = %registry.label(entry_point),
+                    "no decoder recovered a trade from this transaction"
+                );
+                return None;
             };
+            (decoder, flow, None)
+        };
 
         if let Some(veto) = veto::check(&flow, &transfer_ledger, logs, registry) {
             debug!(
@@ -327,20 +302,8 @@ impl<P: Provider> Decoder<P> {
             attribution::venue_declared_solver(registry, entry_point, &root.input);
         let attribution = attribution::solver(declared_solver, root, entry_point, sender, registry);
 
-        // A frontend routing through the solver can take a cut of the output without owning a
-        // venue section, declaring its fee recipients in the solver's own calldata. Backed out
-        // here so the settled output is gross, like Fynd's re-solve; a no-op when a venue
-        // fingerprint already accounted an output fee.
-        if let Some(fee) = solvers::declared_output_fee(
-            &attribution.solver,
-            &root.input,
-            &transfer_ledger,
-            flow.swap.token_out,
-        ) {
-            flow.gross_output_fee(fee);
-        }
-        let (min_amount_out, declared_quote, quote_timestamp) = intent_fields(intent.as_ref());
-        let decode = if amounts_declared { "declared" } else { "netted" };
+        let (min_amount_out, declared_quote, quote_timestamp) = declared_terms(declared.as_ref());
+        let decode = if declared.is_some() { "declared" } else { "netted" };
 
         Some(DecodedTrade {
             tx_hash: receipt.transaction_hash,

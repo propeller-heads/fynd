@@ -17,7 +17,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    solvers::{Declaration, SolverDecoder, SwapIntent},
+    solvers::{DeclaredSwap, SolverDecoder},
     veto::Veto,
 };
 
@@ -117,7 +117,7 @@ impl SolverDecoder for Kyberswap {
         input: &[u8],
         _logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Result<Option<Declaration>, Veto> {
+    ) -> Result<Option<DeclaredSwap>, Veto> {
         let Ok(call) = swapCall::abi_decode(input) else { return Ok(None) };
         let desc = call.execution.desc;
         if desc.amount.is_zero() || desc.minReturnAmount.is_zero() {
@@ -125,17 +125,17 @@ impl SolverDecoder for Kyberswap {
         }
         // `dstReceiver` — KyberSwap passes this straight down to the inner pool, which pays it
         // directly; the router itself never touches the output.
-        let intent = SwapIntent::new(
+        let intent = DeclaredSwap::from_calldata(
             normalize_native(desc.srcToken),
             normalize_native(desc.dstToken),
             desc.amount,
             desc.minReturnAmount,
         )
         .with_recipient(desc.dstReceiver);
-        Ok(Some(Declaration::Terms(match declared_quote(input) {
+        Ok(Some(match declared_quote(input) {
             Some((amount_out, timestamp)) => intent.with_quote(amount_out, timestamp),
             None => intent,
-        })))
+        }))
     }
 }
 
@@ -144,15 +144,11 @@ mod tests {
     use alloy::primitives::address;
 
     /// The terms this solver reads from `input`, for tests that only care about the calldata path.
-    fn terms(input: &[u8], hint: Option<U256>) -> Option<SwapIntent> {
-        match Kyberswap
+    fn terms(input: &[u8], hint: Option<U256>) -> Option<DeclaredSwap> {
+        Kyberswap
             .declared(input, &[], hint)
             .ok()
-            .flatten()?
-        {
-            Declaration::Terms(intent) => Some(intent),
-            Declaration::Settled(_) => None,
-        }
+            .flatten()
     }
 
     use super::*;
@@ -255,9 +251,9 @@ mod tests {
         assert_eq!(intent.token_in, src);
         assert_eq!(intent.token_out, dst);
         assert_eq!(intent.amount_in, U256::from(1_000_000u64));
-        assert_eq!(intent.min_amount_out, U256::from(990_000u64));
+        assert_eq!(intent.min_amount_out, Some(U256::from(990_000u64)));
         // No clientData quote declared: the accessor falls back to the floor.
-        assert_eq!(intent.quoted_amount_out(), U256::from(990_000u64));
+        assert_eq!(intent.promised_amount_out().unwrap(), U256::from(990_000u64));
         assert_eq!(intent.timestamp, None);
     }
 
@@ -274,8 +270,8 @@ mod tests {
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
         let intent = terms(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, BLOB), None).unwrap();
-        assert_eq!(intent.min_amount_out, U256::from(990_000u64));
-        assert_eq!(intent.quoted_amount_out(), U256::from(70_400_409_935u64));
+        assert_eq!(intent.min_amount_out, Some(U256::from(990_000u64)));
+        assert_eq!(intent.promised_amount_out().unwrap(), U256::from(70_400_409_935u64));
         assert_eq!(intent.timestamp, Some(1_783_421_726));
     }
 
@@ -288,7 +284,7 @@ mod tests {
         let intent =
             terms(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, "{\"Source\":\"relay\"}"), None)
                 .unwrap();
-        assert_eq!(intent.quoted_amount_out(), U256::from(990_000u64));
+        assert_eq!(intent.promised_amount_out().unwrap(), U256::from(990_000u64));
         assert_eq!(intent.timestamp, None);
     }
 
