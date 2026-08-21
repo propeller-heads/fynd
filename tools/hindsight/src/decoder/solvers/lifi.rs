@@ -6,7 +6,7 @@
 use alloy::{primitives::U256, rpc::types::Log, sol, sol_types::SolEvent};
 
 use crate::decoder::{
-    solvers::{Declaration, SolverDecoder},
+    solvers::{DeclaredSwap, SolverDecoder},
     transfer_ledger::to_primitive_log,
     veto::Veto,
 };
@@ -23,7 +23,7 @@ impl SolverDecoder for Lifi {
         _input: &[u8],
         logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Result<Option<Declaration>, Veto> {
+    ) -> Result<Option<DeclaredSwap>, Veto> {
         if let Some(veto) = bridge_order(logs) {
             return Err(veto);
         }

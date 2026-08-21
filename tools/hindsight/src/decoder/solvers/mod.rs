@@ -3,9 +3,9 @@
 //! Solver addresses live in the address book's `[solvers]` section, and for most solvers that
 //! line is all that is needed: matching, attribution, and metric labels work from the address
 //! alone. A solver whose calldata or logs carry more than that gets a module here with a
-//! `SolverDecoder` impl registered in `IMPLEMENTATIONS`: a swap intent recovered from calldata,
-//! or a matching veto for order shapes that are not same-chain swaps. The impl is joined onto
-//! the registry's solver entry once, at address-book load (see `decoder_for`); at trade time
+//! `SolverDecoder` impl registered in `IMPLEMENTATIONS`: a `DeclaredSwap` read from its calldata
+//! or its own event, or a veto for order shapes that are not same-chain swaps. The impl is joined
+//! onto the registry's solver entry once, at address-book load (see `decoder_for`); at trade time
 //! every lookup is by address through `Registry::solver`.
 
 pub(crate) mod cow;
@@ -24,47 +24,52 @@ use alloy::{
     rpc::types::Log,
 };
 
-use crate::decoder::{transfer_ledger::SettledSwap, veto::Veto};
+use crate::decoder::veto::Veto;
 
-/// A trader's swap terms recovered from a solver frame's own calldata: what the trade moved, the
-/// floor the trader would accept, and — when the calldata declares one — the solver's own
-/// off-chain quote.
+/// The trade a solver's own data states: always the two tokens and the input amount, plus
+/// whatever else its source happens to carry.
 ///
-/// `token_in`/`token_out`/`amount_in`/`min_amount_out` are the on-chain enforced terms of the
-/// swap itself, recovered so a reverted swap can still be judged against its floor, since a
-/// revert emits no logs to net a settled amount from. The declared quote is different: it is the
-/// number the venue compared against at decision time — what the solver's API promised — as
-/// opposed to the settled amount, which is what execution delivered. It is self-reported and not
-/// every solver declares one, so it is read through [`SwapIntent::quoted_amount_out`] (falls back
-/// to the floor) or [`SwapIntent::declared_quote`] (the raw value, for callers that must tell a
-/// real quote from the fallback).
+/// One shape for every solver, whether it was read from calldata or from an event, because the
+/// caller does not care which — it cares which fields arrived. A field is `None` when the source
+/// could not carry it, so the absence is the instruction:
+///
+/// - `amount_out` absent means the source stated no output (all calldata does this), so the caller
+///   recovers it from `output_recipient`'s receipt in the transfer ledger.
+/// - `tracked` absent means the source did not name the trader, so the caller falls back to the
+///   transaction sender.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct SwapIntent {
+pub(crate) struct DeclaredSwap {
     /// `Address::ZERO` for native ETH.
     pub token_in: Address,
     /// `Address::ZERO` for native ETH.
     pub token_out: Address,
     pub amount_in: U256,
-    /// The trader's on-chain enforced floor for `token_out` — the swap reverts below it.
-    pub min_amount_out: U256,
-    /// The output recipient the calldata declares, when it carries one — whose receipt the
-    /// settled amount is read from, since calldata never carries a settled amount. `None` when
-    /// the solver delivers to the caller implicitly; the caller then anchors on the transaction
-    /// sender.
+    /// The settled output, when the source stated it outright (an event). `None` for calldata,
+    /// which never carries one.
+    pub amount_out: Option<U256>,
+    /// The trader, when the source named them (an event's owner or sender).
+    pub tracked: Option<Address>,
+    /// The trader's on-chain enforced floor for `token_out` — the swap reverts below it. Recorded
+    /// so a reverted swap can still be judged against its floor, since a revert emits no logs to
+    /// net a settled amount from.
+    pub min_amount_out: Option<U256>,
+    /// Who the output is paid to, when the calldata names them — whose receipt `amount_out` is
+    /// recovered from when the source stated none.
     pub output_recipient: Option<Address>,
-    /// The solver's declared off-chain quote, when its calldata carries one. Private: the
-    /// ABI-decoded fields above are hard facts, this one is self-reported, so it is read only
-    /// through the accessors, never assumed present.
-    quoted_amount_out: Option<U256>,
-    /// Unix timestamp of the declared quote, when present. Only `KyberSwap`'s `clientData`
-    /// exposes one.
+    /// The solver's own off-chain quote: the number the venue compared against at decision time,
+    /// as opposed to `amount_out`, which is what execution delivered. Self-reported, and not
+    /// every solver declares one.
+    pub declared_quote: Option<U256>,
+    /// Unix timestamp of `declared_quote`. Only `KyberSwap`'s `clientData` exposes one.
     pub timestamp: Option<u64>,
 }
 
-impl SwapIntent {
-    /// A swap intent with just the ABI-enforced terms: token in/out, amount in, and the on-chain
-    /// floor. No declared quote or timestamp — attach one with [`SwapIntent::with_quote`].
-    pub(crate) fn new(
+impl DeclaredSwap {
+    /// A swap read from a solver's **calldata**: the terms it enforces on-chain. No settled
+    /// output — calldata never carries one — so the caller recovers it from the recipient's
+    /// receipt. Add the recipient with [`DeclaredSwap::with_recipient`] and an off-chain quote
+    /// with [`DeclaredSwap::with_quote`].
+    pub(crate) fn from_calldata(
         token_in: Address,
         token_out: Address,
         amount_in: U256,
@@ -74,9 +79,34 @@ impl SwapIntent {
             token_in,
             token_out,
             amount_in,
-            min_amount_out,
+            amount_out: None,
+            tracked: None,
+            min_amount_out: Some(min_amount_out),
             output_recipient: None,
-            quoted_amount_out: None,
+            declared_quote: None,
+            timestamp: None,
+        }
+    }
+
+    /// A swap read from a solver's **event**: the trade it already executed, both amounts and the
+    /// trader stated outright. Nothing is left to recover. No floor — an event reports what
+    /// happened, not what was required.
+    pub(crate) fn from_event(
+        tracked: Address,
+        token_in: Address,
+        amount_in: U256,
+        token_out: Address,
+        amount_out: U256,
+    ) -> Self {
+        Self {
+            token_in,
+            token_out,
+            amount_in,
+            amount_out: Some(amount_out),
+            tracked: Some(tracked),
+            min_amount_out: None,
+            output_recipient: None,
+            declared_quote: None,
             timestamp: None,
         }
     }
@@ -88,14 +118,14 @@ impl SwapIntent {
     }
 
     /// Attach the solver's declared off-chain quote and, when known, its timestamp.
-    pub(crate) fn with_quote(mut self, quoted_amount_out: U256, timestamp: Option<u64>) -> Self {
-        self.quoted_amount_out = Some(quoted_amount_out);
+    pub(crate) fn with_quote(mut self, declared_quote: U256, timestamp: Option<u64>) -> Self {
+        self.declared_quote = Some(declared_quote);
         self.timestamp = timestamp;
         self
     }
 
-    /// The best available "what was promised": the solver's declared quote, or — when absent —
-    /// the enforced floor.
+    /// The best available "what was promised": the declared quote, or — when absent — the
+    /// enforced floor. `None` when the source carried neither.
     #[cfg_attr(
         not(test),
         expect(
@@ -104,27 +134,10 @@ impl SwapIntent {
                       reverted-swap path in the stacked follow-up PR"
         )
     )]
-    pub(crate) fn quoted_amount_out(&self) -> U256 {
-        self.quoted_amount_out
-            .unwrap_or(self.min_amount_out)
+    pub(crate) fn promised_amount_out(&self) -> Option<U256> {
+        self.declared_quote
+            .or(self.min_amount_out)
     }
-
-    /// The raw declared quote, `None` when the calldata carried none. Distinct from
-    /// [`SwapIntent::quoted_amount_out`], which falls back to the floor — analysts need to tell
-    /// a real quote from the fallback.
-    pub(crate) fn declared_quote(&self) -> Option<U256> {
-        self.quoted_amount_out
-    }
-}
-
-/// What a solver's own data says about a transaction.
-pub(crate) enum Declaration {
-    /// Swap terms read from the solver's calldata. Calldata never carries a settled amount, so
-    /// the caller recovers `amount_out` from the declared recipient's receipt.
-    Terms(SwapIntent),
-    /// The executed trade, amounts included — a solver that states them in its own logs. Nothing
-    /// is left to recover.
-    Settled(SettledSwap),
 }
 
 /// One solver's decoder: what the solver's own calldata and logs say about a trade.
@@ -133,6 +146,9 @@ pub(crate) enum Declaration {
 /// most solvers need none at all. Anything else a solver can read from its own data — a veto, an
 /// integrator tag — is an ordinary function in that solver's module, called from here or from the
 /// attribution that wants it, not another row on this trait.
+///
+/// Whether the read came from calldata or from an event is not recorded on the trait: the caller
+/// only needs to know which fields arrived, which the `Option`s on [`DeclaredSwap`] already say.
 pub(crate) trait SolverDecoder: Send + Sync {
     /// What this solver's own data says about the transaction: `Ok(None)` when it says nothing
     /// this solver can read, `Err(veto)` when it says the transaction is not a swap at all and
@@ -150,7 +166,7 @@ pub(crate) trait SolverDecoder: Send + Sync {
         _input: &[u8],
         _logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Result<Option<Declaration>, Veto> {
+    ) -> Result<Option<DeclaredSwap>, Veto> {
         Ok(None)
     }
 

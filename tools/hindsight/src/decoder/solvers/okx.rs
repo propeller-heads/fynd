@@ -19,8 +19,8 @@ use alloy::{
 };
 
 use crate::decoder::{
-    solvers::{Declaration, SolverDecoder},
-    transfer_ledger::{to_primitive_log, SettledSwap},
+    solvers::{DeclaredSwap, SolverDecoder},
+    transfer_ledger::to_primitive_log,
     veto::Veto,
 };
 
@@ -58,7 +58,7 @@ impl SolverDecoder for Okx {
         _input: &[u8],
         logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Result<Option<Declaration>, Veto> {
+    ) -> Result<Option<DeclaredSwap>, Veto> {
         let mut records = logs
             .iter()
             .filter(|log| log.topics().first() == Some(&OrderRecord::SIGNATURE_HASH));
@@ -72,13 +72,13 @@ impl SolverDecoder for Okx {
         if record.fromAmount.is_zero() || record.returnAmount.is_zero() {
             return Ok(None);
         }
-        Ok(Some(Declaration::Settled(SettledSwap {
-            tracked: record.sender,
-            token_in: normalize_native(record.fromToken),
-            amount_in: record.fromAmount,
-            token_out: normalize_native(record.toToken),
-            amount_out: record.returnAmount,
-        })))
+        Ok(Some(DeclaredSwap::from_event(
+            record.sender,
+            normalize_native(record.fromToken),
+            record.fromAmount,
+            normalize_native(record.toToken),
+            record.returnAmount,
+        )))
     }
 }
 
@@ -87,7 +87,7 @@ mod tests {
     use alloy::primitives::{b256, Log as PrimitiveLog};
 
     use super::*;
-    use crate::decoder::test_utils::{addr, make_transfer_log, swap};
+    use crate::decoder::test_utils::{addr, make_transfer_log};
 
     /// The `DexRouter` address every sampled trade entered through.
     const ROUTER: Address = address!("0x28b1dc1a5e3699a428bc51d234dfab7c9cb2a183");
@@ -112,15 +112,10 @@ mod tests {
         Log { inner: primitive, ..Default::default() }
     }
 
-    fn settled(logs: &[Log]) -> Option<SettledSwap> {
-        match Okx
-            .declared(&[], logs, None)
+    fn settled(logs: &[Log]) -> Option<DeclaredSwap> {
+        Okx.declared(&[], logs, None)
             .ok()
-            .flatten()?
-        {
-            Declaration::Settled(flow) => Some(flow),
-            Declaration::Terms(_) => None,
-        }
+            .flatten()
     }
 
     #[test]
@@ -148,11 +143,11 @@ mod tests {
             699_080_168_573_611_654_796_604_356,
         )])
         .unwrap();
-        assert_eq!(flow.tracked, trader);
+        assert_eq!(flow.tracked, Some(trader));
         assert_eq!(flow.token_in, usdt);
         assert_eq!(flow.amount_in, U256::from(35_551_438u64));
         assert_eq!(flow.token_out, token_out);
-        assert_eq!(flow.amount_out, U256::from(699_080_168_573_611_654_796_604_356u128));
+        assert_eq!(flow.amount_out, Some(U256::from(699_080_168_573_611_654_796_604_356u128)));
     }
 
     #[test]
@@ -167,7 +162,16 @@ mod tests {
             56_277_456,
         )])
         .unwrap();
-        assert_eq!(flow, swap(Address::ZERO, 30_000_000_000_000_000, usdc, 56_277_456));
+        assert_eq!(
+            flow,
+            DeclaredSwap::from_event(
+                addr(1),
+                Address::ZERO,
+                U256::from(30_000_000_000_000_000u64),
+                usdc,
+                U256::from(56_277_456u64),
+            )
+        );
     }
 
     #[test]

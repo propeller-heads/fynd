@@ -26,7 +26,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    solvers::{Declaration, SolverDecoder, SwapIntent},
+    solvers::{DeclaredSwap, SolverDecoder},
     veto::Veto,
 };
 
@@ -118,7 +118,7 @@ impl SolverDecoder for ZeroEx {
         input: &[u8],
         _logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Result<Option<Declaration>, Veto> {
+    ) -> Result<Option<DeclaredSwap>, Veto> {
         let Ok(call) = execCall::abi_decode(input) else { return Ok(None) };
         if call.amount.is_zero() {
             return Ok(None);
@@ -126,32 +126,28 @@ impl SolverDecoder for ZeroEx {
         let Some(terms) = decode_execute(&call.data) else { return Ok(None) };
         // Settler's `AllowedSlippage.recipient` — the address whose receipt anchors the settled
         // amount, same as Fly/KyberSwap.
-        let intent = SwapIntent::new(
+        let intent = DeclaredSwap::from_calldata(
             normalize_native(call.token),
             terms.buy_token,
             call.amount,
             terms.min_amount_out,
         )
         .with_recipient(terms.recipient);
-        Ok(Some(Declaration::Terms(match terms.declared_quote {
+        Ok(Some(match terms.declared_quote {
             Some(quote) => intent.with_quote(quote, None),
             None => intent,
-        })))
+        }))
     }
 }
 
 #[cfg(test)]
 mod tests {
     /// The terms this solver reads from `input`, for tests that only care about the calldata path.
-    fn terms(input: &[u8], hint: Option<U256>) -> Option<SwapIntent> {
-        match ZeroEx
+    fn terms(input: &[u8], hint: Option<U256>) -> Option<DeclaredSwap> {
+        ZeroEx
             .declared(input, &[], hint)
             .ok()
-            .flatten()?
-        {
-            Declaration::Terms(intent) => Some(intent),
-            Declaration::Settled(_) => None,
-        }
+            .flatten()
     }
 
     use alloy::primitives::address;
@@ -185,8 +181,8 @@ mod tests {
         assert_eq!(intent.token_in, Address::ZERO); // 0x's native-ETH sentinel, normalized
         assert_eq!(intent.token_out, USDC);
         assert_eq!(intent.amount_in, U256::from(214_715_436_309_542_453u64));
-        assert_eq!(intent.min_amount_out, U256::from(388_129_000u64));
-        assert_eq!(intent.declared_quote(), Some(U256::from(396_058_371u64)));
+        assert_eq!(intent.min_amount_out, Some(U256::from(388_129_000u64)));
+        assert_eq!(intent.declared_quote, Some(U256::from(396_058_371u64)));
     }
 
     #[test]
@@ -203,8 +199,8 @@ mod tests {
         assert_eq!(intent.token_in, Address::ZERO);
         assert_eq!(intent.token_out, USDC);
         assert_eq!(intent.amount_in, U256::from(2_018_128_791_326_365_345u64));
-        assert_eq!(intent.min_amount_out, U256::from(3_643_640_000u64));
-        assert_eq!(intent.declared_quote(), Some(U256::from(3_718_000_789u64)));
+        assert_eq!(intent.min_amount_out, Some(U256::from(3_643_640_000u64)));
+        assert_eq!(intent.declared_quote, Some(U256::from(3_718_000_789u64)));
     }
 
     #[test]
@@ -278,7 +274,7 @@ mod tests {
         };
         let input = execCall::abi_encode(&call);
         let intent = terms(&input, None).unwrap();
-        assert_eq!(intent.min_amount_out, U256::ZERO);
+        assert_eq!(intent.min_amount_out, Some(U256::ZERO));
     }
 
     #[test]

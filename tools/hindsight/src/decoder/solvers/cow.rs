@@ -19,8 +19,8 @@ use alloy::{
 
 use crate::decoder::{
     registry::Registry,
-    solvers::{Declaration, SolverDecoder},
-    transfer_ledger::{to_primitive_log, SettledSwap},
+    solvers::{DeclaredSwap, SolverDecoder},
+    transfer_ledger::to_primitive_log,
     veto::Veto,
 };
 
@@ -95,14 +95,14 @@ impl SolverDecoder for Cow {
         _input: &[u8],
         logs: &[Log],
         _amount_in_hint: Option<U256>,
-    ) -> Result<Option<Declaration>, Veto> {
-        Ok(settlement_trade(logs).map(Declaration::Settled))
+    ) -> Result<Option<DeclaredSwap>, Veto> {
+        Ok(settlement_trade(logs))
     }
 }
 
 /// The single settled order's trade, read from the `GPv2` `Trade` event. `None` when no `Trade`
 /// event is present, or the batch settles more than one order (left to the netting fallback).
-fn settlement_trade(logs: &[Log]) -> Option<SettledSwap> {
+fn settlement_trade(logs: &[Log]) -> Option<DeclaredSwap> {
     let mut trades = logs
         .iter()
         .filter(|log| log.topics().first() == Some(&Trade::SIGNATURE_HASH));
@@ -117,13 +117,13 @@ fn settlement_trade(logs: &[Log]) -> Option<SettledSwap> {
     let amount_in = trade
         .sellAmount
         .saturating_sub(trade.feeAmount);
-    Some(SettledSwap {
-        tracked: trade.owner,
-        token_in: normalize_native(trade.sellToken),
+    Some(DeclaredSwap::from_event(
+        trade.owner,
+        normalize_native(trade.sellToken),
         amount_in,
-        token_out: normalize_native(trade.buyToken),
-        amount_out: trade.buyAmount,
-    })
+        normalize_native(trade.buyToken),
+        trade.buyAmount,
+    ))
 }
 
 fn normalize_native(token: Address) -> Address {
@@ -139,7 +139,7 @@ mod tests {
     use alloy::primitives::{address, b256, Bytes, U256};
 
     use super::*;
-    use crate::decoder::test_utils::{addr, swap};
+    use crate::decoder::test_utils::addr;
 
     /// The Ethereum `CoW` settlement contract (a registered batch settler).
     const COW_SETTLEMENT: Address = address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41");
@@ -171,7 +171,7 @@ mod tests {
         Log { inner: primitive, ..Default::default() }
     }
 
-    fn decode(logs: &[Log]) -> Option<SettledSwap> {
+    fn decode(logs: &[Log]) -> Option<DeclaredSwap> {
         settlement_trade(logs)
     }
 
@@ -182,7 +182,10 @@ mod tests {
         let buy = addr(11);
         // Fee is taken from the sell token: 10 of the 1000 sold is the fee, 990 reached the market.
         let flow = decode(&[trade_log(COW_SETTLEMENT, owner, sell, buy, 1000, 2000, 10)]).unwrap();
-        assert_eq!(flow, SettledSwap { tracked: owner, ..swap(sell, 990, buy, 2000) });
+        assert_eq!(
+            flow,
+            DeclaredSwap::from_event(owner, sell, U256::from(990), buy, U256::from(2000))
+        );
     }
 
     #[test]

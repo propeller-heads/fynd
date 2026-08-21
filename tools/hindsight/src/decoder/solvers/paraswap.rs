@@ -15,7 +15,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    solvers::{Declaration, SolverDecoder, SwapIntent},
+    solvers::{DeclaredSwap, SolverDecoder},
     veto::Veto,
 };
 
@@ -62,7 +62,7 @@ impl SolverDecoder for Paraswap {
         input: &[u8],
         _logs: &[Log],
         amount_in_hint: Option<U256>,
-    ) -> Result<Option<Declaration>, Veto> {
+    ) -> Result<Option<DeclaredSwap>, Veto> {
         let Some(amount_in) = amount_in_hint.filter(|hint| !hint.is_zero()) else {
             return Ok(None);
         };
@@ -90,13 +90,13 @@ impl SolverDecoder for Paraswap {
             if !is_address_word(src_token) || !is_address_word(dst_token) {
                 continue;
             }
-            let intent = SwapIntent::new(
+            let intent = DeclaredSwap::from_calldata(
                 address_from_word(src_token),
                 address_from_word(dst_token),
                 amount_in,
                 to_amount,
             );
-            return Ok(Some(Declaration::Terms(intent.with_quote(quoted, None))));
+            return Ok(Some(intent.with_quote(quoted, None)));
         }
         Ok(None)
     }
@@ -105,15 +105,11 @@ impl SolverDecoder for Paraswap {
 #[cfg(test)]
 mod tests {
     /// The terms this solver reads from `input`, for tests that only care about the calldata path.
-    fn terms(input: &[u8], hint: Option<U256>) -> Option<SwapIntent> {
-        match Paraswap
+    fn terms(input: &[u8], hint: Option<U256>) -> Option<DeclaredSwap> {
+        Paraswap
             .declared(input, &[], hint)
             .ok()
-            .flatten()?
-        {
-            Declaration::Terms(intent) => Some(intent),
-            Declaration::Settled(_) => None,
-        }
+            .flatten()
     }
 
     use super::*;
@@ -147,8 +143,8 @@ mod tests {
         assert_eq!(intent.token_in, address_from_word(src_token));
         assert_eq!(intent.token_out, address_from_word(dst_token));
         assert_eq!(intent.amount_in, amount_in);
-        assert_eq!(intent.min_amount_out, U256::from(171_430_663u64));
-        assert_eq!(intent.quoted_amount_out(), U256::from(171_602_266u64));
+        assert_eq!(intent.min_amount_out, Some(U256::from(171_430_663u64)));
+        assert_eq!(intent.promised_amount_out().unwrap(), U256::from(171_602_266u64));
     }
 
     #[test]
