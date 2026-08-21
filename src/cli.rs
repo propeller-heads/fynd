@@ -69,6 +69,10 @@ pub struct ServeArgs {
     /// e.g., --protocols all_onchain,rfq:bebop.
     /// Prefix a protocol with "exclusive:" to also stream its exclusive pools,
     /// e.g., --protocols all_onchain,exclusive:ekubo_v3.
+    /// Prefix a protocol with "exclude:" to drop it from the list,
+    /// e.g., --protocols all_onchain,exclude:vm:fermiswap.
+    /// Use "pricelevelstream:<venue>" to serve a pAMM from the Titan price level stream,
+    /// e.g., --protocols all_onchain,exclude:vm:fermiswap,pricelevelstream:fermiswap.
     #[arg(short, long, value_delimiter = ',', value_name = "PROTO1,PROTO2")]
     pub protocols: Vec<String>,
 

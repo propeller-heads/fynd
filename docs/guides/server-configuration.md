@@ -61,6 +61,25 @@ fynd serve \
 
 * RFQ protocols require API keys passed via environment variables. Check the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the specific variables each protocol needs.
 
+### pAMM Price Level Stream
+
+Serve a proprietary AMM from Titan's pAMM price level stream instead of simulating it in the EVM. Titan publishes a quote ladder per pair every block, so quotes come from interpolating those levels — much cheaper than a VM simulation.
+
+Name a venue with the `pricelevelstream:` prefix. The served venues are `fermiswap`, `kipseli`, `metric`, `bebop`, and `taurusfi`:
+
+```bash
+fynd serve \
+  --protocols all_onchain,exclude:vm:fermiswap,pricelevelstream:fermiswap
+```
+
+The `exclude:` prefix drops a protocol from the list. It matters here: `vm:fermiswap` and `pricelevelstream:fermiswap` price the same maker inventory, so streaming both double-counts that liquidity. Drop the Tycho-streamed one whenever you serve the same venue from the price level stream. An `exclude:` entry that matches no streamed protocol stops the solver rather than warning, so a typo cannot silently ship the double-counted market.
+
+**Limitations:**
+
+* Ethereum mainnet only — the venue addresses are mainnet deployments.
+* Quotes below the smallest ladder level are rejected rather than extrapolated, and quotes above the largest come back as a partial fill at the limit.
+* A quote executes only in the block it was quoted for. The venue rejects a fill priced off a stale reading, so a quote that misses its block reverts rather than filling at the old price.
+
 ### Self-hosted Tycho
 
 By default `--tycho-url` points at the [Fynd hosted endpoint](https://docs.propellerheads.xyz/tycho/for-solvers/hosted-endpoints#tycho-fynd) for the selected chain. Fynd talks to Tycho purely over its RPC/WebSocket API, so whether that Tycho is PropellerHeads-hosted or one you run yourself is transparent to Fynd — you only change where it points.
@@ -115,7 +134,7 @@ Run `fynd serve --help` for the full list.
 | `--tycho-url`                      | `TYCHO_URL`           | _(chain-specific)_         | Tycho URL. Defaults to the [Fynd hosted endpoint](https://docs.propellerheads.xyz/tycho/for-solvers/hosted-endpoints#tycho-fynd) for the selected chain.                                                       |
 | `--chain`                          | —                     | `Ethereum`                 | Target chain                                                                                                                                                                                                   |
 | `--chains-config`                  | `TYCHO_CHAINS_CONFIG` | _(none)_                   | Path to the custom-chains `chains.yaml`. Required for a chain Tycho does not know as a built-in.                                                                                                              |
-| `-p, --protocols`                  | —                     | _(all on-chain)_           | Protocols to index (comma-separated). If omitted, all on-chain protocols available on your configured Tycho endpoint are fetched. Use `all_onchain` to combine auto-fetched protocols with explicit entries (e.g. `all_onchain,rfq:bebop`). |
+| `-p, --protocols`                  | —                     | _(all on-chain)_           | Protocols to index (comma-separated). If omitted, all on-chain protocols available on your configured Tycho endpoint are fetched. Use `all_onchain` to combine auto-fetched protocols with explicit entries (e.g. `all_onchain,rfq:bebop`), and the `exclude:` prefix to drop one (e.g. `all_onchain,exclude:vm:fermiswap`). |
 | `--http-host`                      | `HTTP_HOST`           | `0.0.0.0`                  | HTTP bind address                                                                                                                                                                                              |
 | `--http-port`                      | `HTTP_PORT`           | `3000`                     | API port                                                                                                                                                                                                       |
 | `--min-tvl`                        | —                     | `10.0`                     | Minimum pool TVL in native token (ETH)                                                                                                                                                                         |
