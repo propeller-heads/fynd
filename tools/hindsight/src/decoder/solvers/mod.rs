@@ -17,8 +17,6 @@ pub(crate) mod oneinch;
 pub(crate) mod paraswap;
 pub(crate) mod zeroex;
 
-use std::collections::HashSet;
-
 use alloy::{
     primitives::{Address, U256},
     rpc::types::Log,
@@ -160,12 +158,6 @@ pub(crate) trait SolverDecoder: Send + Sync {
     /// reads one or the other; the parameter it does not use is ignored.
     fn declared(&self, _input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         Ok(None)
-    }
-
-    /// The fee recipients this solver's calldata names, for routers that let an integrator take a
-    /// cut of the swap. Only who is paid — `declared_output_fee` reads how much off the ledger.
-    fn fee_recipients(&self, _input: &[u8]) -> Vec<Address> {
-        Vec::new()
     }
 }
 

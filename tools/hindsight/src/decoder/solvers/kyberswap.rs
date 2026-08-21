@@ -136,8 +136,6 @@ impl SolverDecoder for Kyberswap {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::address;
-
     /// The terms this solver reads from `input`, for tests that only care about the calldata path.
     fn terms(input: &[u8]) -> Option<DeclaredSwap> {
         Kyberswap
@@ -173,26 +171,6 @@ mod tests {
     fn test_declared_quote_without_blob() {
         assert!(declared_quote(&calldata_with("")).is_none());
         assert!(declared_quote(&[]).is_none());
-    }
-
-    #[test]
-    fn test_fee_recipients_from_swap_calldata() {
-        let collector = address!("0x41ec04c311d54f787f9e6c83d3fc7036f572fea0");
-        assert_eq!(Kyberswap.fee_recipients(&swap_calldata(vec![collector])), vec![collector]);
-        // A swap with no integrator fee names nobody.
-        assert!(Kyberswap
-            .fee_recipients(&swap_calldata(Vec::new()))
-            .is_empty());
-    }
-
-    #[test]
-    fn test_fee_recipients_from_foreign_calldata() {
-        // Kyber's blob nested in a wrapper's calldata is not a root Kyber call: that venue owns
-        // the fee. Neither is an empty input.
-        assert!(Kyberswap
-            .fee_recipients(&calldata_with(BLOB))
-            .is_empty());
-        assert!(Kyberswap.fee_recipients(&[]).is_empty());
     }
 
     #[test]
@@ -256,7 +234,7 @@ mod tests {
     fn test_output_recipient_round_trip() {
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
-        let intent = terms(&swap_calldata(src, dst, 1_000_000, 990_000, "")).unwrap();
+        let intent = terms(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, "")).unwrap();
         assert_eq!(intent.output_recipient, Some(Address::repeat_byte(0x77)));
     }
 
@@ -276,17 +254,28 @@ mod tests {
         // the quote is just absent.
         let src = Address::repeat_byte(0x11);
         let dst = Address::repeat_byte(0x22);
-        let intent =
-            terms(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, "{\"Source\":\"relay\"}")).unwrap();
+        let intent = terms(&swap_calldata_with_terms(
+            src,
+            dst,
+            1_000_000,
+            990_000,
+            "{\"Source\":\"relay\"}",
+        ))
+        .unwrap();
         assert_eq!(intent.promised_amount_out().unwrap(), U256::from(990_000u64));
         assert_eq!(intent.timestamp, None);
     }
 
     #[test]
     fn test_declared_normalizes_native_eth() {
-        let intent =
-            terms(&swap_calldata_with_terms(KYBERSWAP_NATIVE, Address::repeat_byte(0x22), 1_000, 900, ""))
-                .unwrap();
+        let intent = terms(&swap_calldata_with_terms(
+            KYBERSWAP_NATIVE,
+            Address::repeat_byte(0x22),
+            1_000,
+            900,
+            "",
+        ))
+        .unwrap();
         assert_eq!(intent.token_in, Address::ZERO);
         assert_eq!(intent.token_out, Address::repeat_byte(0x22));
     }

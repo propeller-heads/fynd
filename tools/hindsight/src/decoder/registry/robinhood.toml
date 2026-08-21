@@ -120,21 +120,11 @@ entry_points = [
     "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f", # RelayRouterV3
     "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be", # RelayApprovalProxyV3
 ]
-fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 
 # MetaMask's Swap Router on this chain (see the header note). Only the second of its two mainnet fee
 # wallets is used here — 54 fee legs in the sample, all from this router; the first took nothing.
 [venues.metamask]
 entry_points = ["0xf5307745c61de69bf033edfe6a8771256275a323"]
-fee_collectors = ["0xf326e4de8f66a0bdc0970b79e0924e33c79f1915"]
-
-# The aggregator ids this router named in the sample, mapped to the solver names above. "0xV2" is
-# 0x's Settler-era id, which the mainnet book's "zeroex" substring does not catch.
-[venues.metamask.solver_aliases]
-"0xv2" = "0x"
-kyber = "kyberswap"
-uniswap = "uniswap"
-openocean = "openocean"
 
 # Rabby SwapProxy — same address as mainnet, and the only Rabby entry point: its other swaps go
 # through shared routers (the 0x Settler, 1inch, Uniswap, Fly) and are recognised by the fee leg
@@ -142,14 +132,12 @@ openocean = "openocean"
 # 0x39041f… took nothing.
 [venues.rabby]
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
-fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
 
 # Rainbow's own router ("Rainbow: Router", same address as mainnet). It takes its fee on the input
 # side and keeps it in the router, so the fee is read from calldata (see rainbow.rs) and there is no
 # collector. Live here: 105 outgoing token transfers in the sample.
 [venues.rainbow]
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
-fee_collectors = []
 
 # Venues identified by the fee they take on a shared router. Each wallet's legs were traced to a
 # settlement contract, so the dust-spray gotcha does not apply — one unverified contract

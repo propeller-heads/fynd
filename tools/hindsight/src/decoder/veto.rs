@@ -76,8 +76,7 @@ fn fee_on_transfer(
     transfer_ledger: &TransferLedger,
     registry: &Registry,
 ) -> bool {
-    let sides =
-        [(flow.token_in, flow.amount_in), (flow.token_out, flow.amount_out)];
+    let sides = [(flow.token_in, flow.amount_in), (flow.token_out, flow.amount_out)];
     for (token, trade_amount) in sides {
         for (recipient, total) in transfer_ledger.sink_payments(token) {
             if registry.is_fee_collector(recipient) || registry.is_infrastructure(recipient) {
@@ -284,10 +283,8 @@ mod tests {
         // decoders back out, not a token tax.
         let registry = Registry::ethereum();
         let collector = *registry
-            .venue("metamask")
-            .unwrap()
-            .fee_collectors
-            .iter()
+            .venue_fees()
+            .keys()
             .next()
             .unwrap();
         let trader = addr(1);

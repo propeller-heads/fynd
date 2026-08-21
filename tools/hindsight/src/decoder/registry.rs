@@ -282,15 +282,12 @@ impl Registry {
         self.infrastructure.contains(&address) || address == self.wrapped_native
     }
 
-    /// Whether the address is a registered fee collector: a venue section's collector or a
-    /// fee-identified venue wallet. Fees paid to these are venue fees — backed out by the venue
-    /// decoders and `venue_attribution` — not token-level transfer fees (see
-    /// `veto::Veto::FeeOnTransfer`).
+    /// Whether the address is a venue's fee wallet (`[venue_fees]`). A fee paid to one of these
+    /// is the venue's cut, not the token taxing its own transfers, so it must not read as
+    /// `veto::Veto::FeeOnTransfer`. Venue sections no longer carry their own collector list —
+    /// venue fees are not modelled — so `[venue_fees]` is the whole set.
     pub(crate) fn is_fee_collector(&self, address: Address) -> bool {
-        self.venue_fees.contains_key(&address) ||
-            self.venues
-                .values()
-                .any(|venue| venue.fee_collectors.contains(&address))
+        self.venue_fees.contains_key(&address)
     }
 
     /// The chain's `(stablecoin, decimals)` anchors for USD valuation.
