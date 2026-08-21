@@ -105,7 +105,9 @@ fn coalesce_market_events(events: &[MarketEvent]) -> Option<ChangedComponents> {
 
 use super::{
     computation::{ComputationId, ComputationRequirements, DerivedComputation},
-    computations::{ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
+    computations::{
+        ComponentDepthComputation, PricingMode, SpotPriceComputation, TokenGasPriceComputation,
+    },
     error::ComputationError,
     events::DerivedDataEvent,
     registry::ErasedComputation,
@@ -128,6 +130,8 @@ pub struct ComputationManagerConfig {
     max_hop: usize,
     /// Slippage threshold for component depth computation (0.0 < threshold < 1.0).
     depth_slippage_threshold: f64,
+    /// How token prices are derived.
+    token_pricing_mode: PricingMode,
 }
 
 impl ComputationManagerConfig {
@@ -154,6 +158,12 @@ impl ComputationManagerConfig {
         self
     }
 
+    /// Sets how token prices are derived.
+    pub fn with_token_pricing_mode(mut self, mode: PricingMode) -> Self {
+        self.token_pricing_mode = mode;
+        self
+    }
+
     /// Returns the gas token address.
     pub fn gas_token(&self) -> &Address {
         &self.gas_token
@@ -172,7 +182,12 @@ impl ComputationManagerConfig {
 
 impl Default for ComputationManagerConfig {
     fn default() -> Self {
-        Self { gas_token: Address::zero(20), max_hop: 2, depth_slippage_threshold: 0.01 }
+        Self {
+            gas_token: Address::zero(20),
+            max_hop: 2,
+            depth_slippage_threshold: 0.01,
+            token_pricing_mode: PricingMode::BuyOnly,
+        }
     }
 }
 
@@ -211,7 +226,8 @@ impl ComputationManager {
         manager.register(
             TokenGasPriceComputation::default()
                 .with_max_hops(config.max_hop)
-                .with_gas_token(config.gas_token),
+                .with_gas_token(config.gas_token)
+                .with_mode(config.token_pricing_mode),
         )?;
         manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
         Ok((manager, event_rx))

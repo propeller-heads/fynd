@@ -62,6 +62,10 @@ pub(crate) mod types;
 // Only export the public API: manager, config, store, shared reference type, and the
 // map aliases the store getters already expose in their signatures
 pub use computation::FailedItemError;
+pub use computations::{PricingMode, TokenGasPriceComputation};
 pub use manager::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef};
 pub use store::DerivedData;
-pub use types::{ComponentDepths, TokenGasPrices};
+pub use types::{
+    ComponentDepths, TokenGasPriceDirections, TokenGasPrices, TokenPriceDirections,
+    TokenPricesOutput,
+};
