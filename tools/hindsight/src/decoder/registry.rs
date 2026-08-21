@@ -25,12 +25,20 @@ const UNICHAIN_TOML: &str = include_str!("registry/unichain.toml");
 const ARBITRUM_TOML: &str = include_str!("registry/arbitrum.toml");
 const BSC_TOML: &str = include_str!("registry/bsc.toml");
 const POLYGON_TOML: &str = include_str!("registry/polygon.toml");
+const ROBINHOOD_TOML: &str = include_str!("registry/robinhood.toml");
 
 /// The chains that have a built-in address book, only for enumerating them: the tests cover every
 /// book through this, and `Registry::builtin` names them when asked for a chain that has none.
 /// The lookup itself is `builtin_book`, so no list is walked to resolve a chain.
-const BUILTIN_CHAINS: [Chain; 6] =
-    [Chain::Ethereum, Chain::Base, Chain::Unichain, Chain::Arbitrum, Chain::Bsc, Chain::Polygon];
+const BUILTIN_CHAINS: [Chain; 7] = [
+    Chain::Ethereum,
+    Chain::Base,
+    Chain::Unichain,
+    Chain::Arbitrum,
+    Chain::Bsc,
+    Chain::Polygon,
+    Chain::Robinhood,
+];
 
 /// The address book embedded for `chain`, or `None` for a chain Hindsight has none for.
 ///
@@ -46,6 +54,7 @@ fn builtin_book(chain: Chain) -> Option<&'static str> {
         Chain::Arbitrum => Some(ARBITRUM_TOML),
         Chain::Bsc => Some(BSC_TOML),
         Chain::Polygon => Some(POLYGON_TOML),
+        Chain::Robinhood => Some(ROBINHOOD_TOML),
         _ => None,
     }
 }
@@ -404,6 +413,7 @@ mod tests {
             Chain::Unichain,
             Chain::Polygon,
             Chain::Plasma,
+            Chain::Robinhood,
         ];
         for chain in tycho_chains {
             assert_eq!(

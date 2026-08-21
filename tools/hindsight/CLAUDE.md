@@ -13,8 +13,8 @@ Four subcommands via `cargo run -p hindsight --release --`. The on-chain ones (`
 and `--registry <path>` / `HINDSIGHT_REGISTRY` to load a custom address book. `report` is offline
 and takes neither.
 
-Built-in address books: `ethereum`, `base`, `unichain`, `arbitrum`, `bsc`, `polygon`. Any other
-name needs `--registry`.
+Built-in address books: `ethereum`, `base`, `unichain`, `arbitrum`, `bsc`, `polygon`, `robinhood`.
+Any other name needs `--registry`.
 
 - **`decode`** — Fetch block receipts, match solver transactions, trace each one, and emit decoded
   trades (token in/out, amounts, venue, solver, gas, sandwich evidence). Accepts `--block N`,
@@ -79,10 +79,12 @@ trade), **liquidity venues** (pools inside traces — not modeled here).
 
 ### The address book (`registry/<chain>.toml`)
 
-All chain- and protocol-specific data lives in a per-chain TOML, embedded for the six chains listed
-above (`registry::BUILTIN_CHAINS`) and loadable via `--registry`. A book carries only the tiers its
-chain has — Unichain has no batch settlers because CoW does not settle there, and no LiFi or
-integrator tier because the Diamond is not deployed; each book's header says what was checked.
+All chain- and protocol-specific data lives in a per-chain TOML, embedded for the seven chains
+listed above (`registry::BUILTIN_CHAINS`) and loadable via `--registry`. A book carries only the
+tiers its chain has — Unichain has no batch settlers because CoW does not settle there, and no LiFi
+or integrator tier because the Diamond is not deployed; each book's header says what was checked.
+An address also moves per chain: Robinhood Chain's LiFi Diamond, 0x Settler, OKX router and
+MetaMask router all sit at chain-specific addresses, re-derived rather than copied.
 Sections: `wrapped_native`, `infrastructure` (Permit2 etc. —
 addresses attribution and sandwich detection skip), `usd_stablecoins` (USD anchors for
 reporting), `batch_settlers`, `[solvers]` (router address → name), `[labels]` (display-only

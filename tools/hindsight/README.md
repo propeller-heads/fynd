@@ -261,8 +261,8 @@ algorithm.
 All chain- and protocol-specific data — solver routers, venue entry points and fee collectors,
 batch settlers, infrastructure contracts, USD-anchor stablecoins, display labels — lives in a
 per-chain TOML loaded by `Registry`. One book is embedded at compile time per chain — ethereum,
-base, unichain, arbitrum, bsc, polygon — and `--chain <name>` picks one. Pass `--registry <path>`
-to extend or replace a book without recompiling.
+base, unichain, arbitrum, bsc, polygon, robinhood — and `--chain <name>` picks one. Pass
+`--registry <path>` to extend or replace a book without recompiling.
 
 The books are not uniform, because the chains are not: CoW does not settle on Unichain and LiFi is
 not deployed there, so that book has no batch settlers, no LiFi solver, and no CoW-appData or
