@@ -128,6 +128,18 @@ entry_points = [
 # router — no fee transfer, so the fee is read from calldata (see rainbow.rs). No fee collector.
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
 
+[venues.definitive]
+# Definitive (definitive.fi) — a non-custodial trading platform that mints one segregated trading
+# vault per client per chain, all clones of the same 82-byte proxy, from its vault factory
+# `0xdef00000cc0a125ba7962e8113d3b69786851736` ("Definitive: Vault Factory"). `tx.to` is the
+# client's own vault, so every client is a separate address here and this list covers only the
+# vaults observed so far — a Definitive trade through an unlisted vault stays unmatched.
+#
+# The transaction sender is never the client: Definitive routes each fill through a rotating proxy
+# ("Performer Address") to mask order flow (docs.definitive.fi/institutions-and-funds), so the
+# sender carries no venue signal and the vault is the only fingerprint.
+entry_points = ["0x7957e5a88f0389997b352315e70ab20d77ec410a"]
+
 # Order-flow venues identified by the trader address that owns the order, not by tx.to. kpk is a
 # treasury manager whose Safes trade through CoW: tx.from is the CoW solver, so the venue is only
 # visible as the Safe owning the settled order. Addresses from docs.kpk.io / karpatkey.
