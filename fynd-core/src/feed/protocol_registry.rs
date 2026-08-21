@@ -61,6 +61,10 @@ const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
 /// `rfq:bebop`.
 const RFQ_PREFIX: &str = "rfq:";
 
+/// Marks a `--protocols` entry that drops a protocol system from the list rather than adding one,
+/// e.g. `exclude:vm:fermiswap`.
+pub const EXCLUDE_PREFIX: &str = "exclude:";
+
 /// The only chain the Titan pAMM price level stream serves.
 ///
 /// Tracks tycho-simulation's `default_served_pamms`, whose venue addresses are all Ethereum
@@ -131,6 +135,23 @@ impl ProtocolSpec {
         }
         Ok(Self { system: system.to_string(), exclusive: true })
     }
+}
+
+/// Parses a `--protocols` entry that drops a protocol system, e.g. `exclude:vm:fermiswap`.
+///
+/// Returns `None` for an entry that names a protocol to stream instead. The part after the prefix
+/// goes through [`ProtocolSpec::parse`], so `exclude:ekubo_v3` and `exclude:exclusive:ekubo_v3`
+/// both name the system `ekubo_v3` and a malformed exclusion fails the same way a malformed
+/// request does. An entry naming nothing (`exclude:`) yields an empty system for the caller to
+/// reject.
+///
+/// # Errors
+///
+/// Returns `UnsupportedExclusiveProtocol` when the excluded entry carries the `exclusive:` prefix
+/// for a protocol system that has no exclusive variant.
+pub fn parse_exclusion(entry: &str) -> Option<Result<String, UnsupportedExclusiveProtocol>> {
+    let excluded = entry.strip_prefix(EXCLUDE_PREFIX)?;
+    Some(ProtocolSpec::parse(excluded).map(|protocol| protocol.system))
 }
 
 impl fmt::Display for ProtocolSpec {
@@ -520,6 +541,48 @@ mod tests {
             ProtocolSpec::parse("vm:curve").unwrap(),
             ProtocolSpec { system: "vm:curve".to_string(), exclusive: false }
         );
+    }
+
+    #[test]
+    fn test_parse_exclusion() {
+        assert_eq!(
+            parse_exclusion("exclude:vm:fermiswap")
+                .unwrap()
+                .unwrap(),
+            "vm:fermiswap"
+        );
+    }
+
+    #[test]
+    fn test_parse_exclusion_strips_the_exclusive_prefix() {
+        assert_eq!(
+            parse_exclusion("exclude:exclusive:ekubo_v3")
+                .unwrap()
+                .unwrap(),
+            "ekubo_v3"
+        );
+    }
+
+    #[test]
+    fn test_parse_exclusion_rejects_unsupported_exclusive() {
+        assert!(parse_exclusion("exclude:exclusive:uniswap_v3")
+            .unwrap()
+            .is_err());
+    }
+
+    #[test]
+    fn test_parse_exclusion_without_protocol() {
+        assert_eq!(
+            parse_exclusion("exclude:")
+                .unwrap()
+                .unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_parse_exclusion_of_a_plain_entry() {
+        assert!(parse_exclusion("uniswap_v3").is_none());
     }
 
     #[test]

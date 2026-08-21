@@ -9,7 +9,7 @@ infrastructure.
 |---|---|
 | `builder.rs` | `FyndRPCBuilder` wraps `FyndBuilder`, adds HTTP server config. `FyndRPC` struct runs the server with graceful shutdown |
 | `config.rs` | `WorkerPoolsConfig` (TOML loader), `BlocklistConfig`, `defaults` module re-exporting `fynd-core` defaults + HTTP-specific ones |
-| `protocols.rs` | `fetch_protocol_systems()` — Tycho RPC call to discover available protocols; `resolve_protocols()` — higher-level wrapper used by `serve` and `scale` that parses each explicit entry into a `ProtocolSpec` (before the RPC call, so a bad `exclusive:` prefix fails fast), expands `all_onchain`/`native_onchain` tokens, and merges the two by protocol system — one entry per system, exclusive winning over public regardless of order |
+| `protocols.rs` | `fetch_protocol_systems()` — Tycho RPC call to discover available protocols; `resolve_protocols()` — higher-level wrapper used by `serve` and `scale` that parses each explicit entry into a `ProtocolSpec` (before the RPC call, so a bad `exclusive:` prefix fails fast), expands `all_onchain`/`native_onchain` tokens, merges the two by protocol system — one entry per system, exclusive winning over public regardless of order — and finally drops every system named with an `exclude:` entry (parsed through `ProtocolSpec` so `exclude:exclusive:x` and `exclude:x` both name system `x`; a protocol both requested and excluded, an exclusion naming nothing, and an exclusion matching no streamed protocol are all errors) |
 | `api/` | HTTP endpoint handlers and OpenAPI documentation |
 
 ## Features
