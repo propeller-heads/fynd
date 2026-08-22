@@ -15,6 +15,7 @@ pub(crate) mod lifi;
 pub(crate) mod okx;
 pub(crate) mod oneinch;
 pub(crate) mod paraswap;
+pub(crate) mod uniswap;
 pub(crate) mod zeroex;
 
 use alloy::{
@@ -173,6 +174,7 @@ const IMPLEMENTATIONS: &[(&str, &'static dyn SolverDecoder)] = &[
     ("1inch", &oneinch::OneInch),
     ("okx", &okx::Okx),
     ("paraswap", &paraswap::Paraswap),
+    ("uniswap", &uniswap::Uniswap),
     ("0x", &zeroex::ZeroEx),
 ];
 
