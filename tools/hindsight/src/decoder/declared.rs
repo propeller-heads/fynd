@@ -29,9 +29,12 @@ use crate::decoder::{
 /// amounts and its solver label always come from the same solver. A transaction that merely
 /// touches another solver's router somewhere is not read by that solver.
 ///
-/// `Ok(None)` means the solver declared nothing and the caller should fall back to netting.
-/// `Err(veto)` means the solver declared the transaction is not a swap, which rules out netting
-/// too — the transaction is dropped.
+/// `Ok(None)` means no solver was read at all — no known solver frame, or the settling solver's
+/// own data carried nothing it could parse — so the caller falls back to netting.
+///
+/// `Err(veto)` means the transaction is dropped, and netting is not tried. Either the solver said
+/// it is not a swap, or it named an output that the transfers do not show: once a solver has told
+/// us the trade, netting would answer a different question, so its answer is not substituted.
 pub(crate) fn declared_flow(
     root: &CallFrame,
     registry: &Registry,
@@ -46,7 +49,7 @@ pub(crate) fn declared_flow(
     else {
         return Ok(None);
     };
-    let Some(declared) = solver
+    let Some(mut declared) = solver
         .decoder
         .declared(&solver_frame.input, logs)?
     else {
@@ -58,12 +61,18 @@ pub(crate) fn declared_flow(
         Some(amount_out) => ("solver-logs", amount_out),
         None => (
             "solver-calldata",
-            match recover_output(&declared, transfer_ledger, sender) {
-                Some(amount_out) => amount_out,
-                None => return Ok(None),
-            },
+            recover_output(&declared, transfer_ledger, sender).ok_or(Veto::OutputNotFound)?,
         ),
     };
+    // A quote is self-reported decoration: integrators sometimes fill it in a different token or
+    // decimal basis, which would fabricate a huge slippage. One that far from the settled amount
+    // is dropped, and the trade — whose tokens and amounts are ABI-decoded facts — is kept.
+    if let Some(quoted) = declared.declared_quote {
+        if !solvers::plausible_quote(quoted, amount_out) {
+            declared.declared_quote = None;
+            declared.timestamp = None;
+        }
+    }
     let settled = SettledSwap {
         tracked: declared.tracked.unwrap_or(sender),
         token_in: declared.token_in,
@@ -78,10 +87,10 @@ pub(crate) fn declared_flow(
 /// recipient received (a solver that declares none delivers to the caller, so the transaction
 /// sender is the fallback anchor).
 ///
-/// Two guards protect against the recipient-receipt query picking up a multi-order transaction's
-/// output: the recovered output must clear the declared on-chain floor (a successful trade cleared
-/// it by construction, so a violation means the wrong legs were picked up), and, when the calldata
-/// also declares a quote, it must sit within `plausible_quote`'s band of the recovered output.
+/// `None` when the recipient received none of the token, or less than the floor the same calldata
+/// enforces — a settled trade cleared its floor by construction, so a smaller receipt means the
+/// query read the wrong legs of a multi-order transaction. The caller drops the transaction on
+/// either, rather than letting netting answer instead.
 fn recover_output(
     declared: &DeclaredSwap,
     transfer_ledger: &TransferLedger,
@@ -98,11 +107,6 @@ fn recover_output(
                 .unwrap_or(U256::ZERO)
     {
         return None;
-    }
-    if let Some(quoted) = declared.declared_quote {
-        if !solvers::plausible_quote(quoted, amount_out) {
-            return None;
-        }
     }
     Some(amount_out)
 }
@@ -224,21 +228,25 @@ mod tests {
         let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT - 1))];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &[], &ledger, sender)
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            declared_flow(&root, &registry, &[], &ledger, sender).err(),
+            Some(Veto::OutputNotFound)
+        );
     }
 
     #[test]
-    fn test_decode_no_recipient_receipt_declines() {
+    fn test_decode_no_recipient_receipt_drops_the_transaction() {
+        // Fly's calldata names the token and the address it is paid to, and that address received
+        // none of it. Netting is not asked instead — the solver already told us the trade.
         let registry = Registry::ethereum();
         let sender = addr(1);
         let root = root_with_solver_frame(sender, ROUTER, FLY);
         let ledger = TransferLedger::from_transaction(&[], &[]);
 
-        assert!(declared_flow(&root, &registry, &[], &ledger, sender)
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            declared_flow(&root, &registry, &[], &ledger, sender).err(),
+            Some(Veto::OutputNotFound)
+        );
     }
 
     #[test]
@@ -271,10 +279,9 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_implausible_quote_declines() {
-        // A recovered output more than 2x the declared quote: `plausible_quote`'s band would
-        // reject it as a unit mismatch or a mis-attributed receipt, even though it clears the
-        // floor comfortably.
+    fn test_decode_implausible_quote_drops_the_quote_not_the_trade() {
+        // A recovered output more than 2x the declared quote reads as a unit mismatch, so the
+        // quote goes. The tokens and amounts are ABI-decoded facts, so the trade stays.
         let registry = Registry::ethereum();
         let sender = addr(1);
         let root = root_with_solver_frame(sender, ROUTER, FLY);
@@ -282,9 +289,12 @@ mod tests {
         let native = vec![(addr(50), ROUTER, implausible)];
         let ledger = TransferLedger::from_transaction(&[], &native);
 
-        assert!(declared_flow(&root, &registry, &[], &ledger, sender)
+        let (_, flow, declared) = declared_flow(&root, &registry, &[], &ledger, sender)
             .unwrap()
-            .is_none());
+            .unwrap();
+        assert_eq!(flow.amount_out, implausible);
+        assert_eq!(declared.declared_quote, None);
+        assert_eq!(declared.min_amount_out, Some(U256::from(MIN_AMOUNT_OUT)));
     }
 
     #[test]
