@@ -36,6 +36,11 @@ pub(crate) enum Veto {
     /// destination chain, so there is no same-chain swap to record. Returned by the settling
     /// solver's own `SolverDecoder::declared`, never by `check`.
     BridgeOrder,
+    /// The settling solver's calldata named the output token and the address it is paid to, but
+    /// that address received none of it, or less than the floor the same calldata enforces. The
+    /// trade cannot be read from the source that named it, and netting would answer a different
+    /// question, so the transaction is dropped. Returned by `declared::declared_flow`.
+    OutputNotFound,
     /// Part of the trade's value was taken by a fee on transfer: the token contract (or an
     /// unregistered fee) split a transfer, landing a significant share on an address that only
     /// accumulates — its fee wallet. Selling such a token, the fee nets into `amount_in`;
