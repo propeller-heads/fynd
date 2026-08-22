@@ -36,7 +36,7 @@ pub mod graph;
 /// External price validation for quotes.
 pub mod price_guard;
 /// Computes the amount out a route delivers when its pAMM legs fall back to Uniswap V3, so the
-/// encoder can derive a `min_amount_out` that survives an integrator's simulation.
+/// encoder can drop a quote whose fallback pays less than `min_amount_out`.
 pub mod propamm_fallback;
 /// Re-execute an already-built route against a (possibly newer) market state.
 pub mod replay;
