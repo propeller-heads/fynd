@@ -184,6 +184,15 @@ impl TransferLedger {
             .fold(U256::ZERO, |total, &(_, _, _, value)| total.saturating_add(value))
     }
 
+    /// Gross amount of `token` sent by `sender`, regardless of recipient (native ETH is
+    /// `Address::ZERO`). Zero when the address sent none of it.
+    pub(crate) fn sent_by_address(&self, sender: Address, token: Address) -> U256 {
+        self.transfers
+            .iter()
+            .filter(|&&(transfer_token, from, _, _)| transfer_token == token && from == sender)
+            .fold(U256::ZERO, |total, &(_, _, _, value)| total.saturating_add(value))
+    }
+
     /// Totals of `token` paid to pure sinks — addresses that received value in the transaction
     /// but never sent any — by senders that never received the token themselves: a trader
     /// spending it or a pool paying out a swap, never a router forwarding what it was paid.
