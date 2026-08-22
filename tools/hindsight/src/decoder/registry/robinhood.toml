@@ -1,0 +1,188 @@
+# Robinhood Chain (chain-id 4663) address book for trade decoding. Same structure as ethereum.toml —
+# see it and registry.rs for what each section drives. Addresses gathered 2026-08-20.
+#
+# Accuracy note: a wrong or missing *solver* address only costs coverage (the swap fails to
+# match), but a wrong *venue fee collector* produces wrong records (the fee stays inside the
+# amounts). Every contract below was checked to be deployed on Robinhood Chain, and every venue was
+# confirmed live by its own on-chain fee legs in a 100k-block sample (~28 hours at 1-second blocks)
+# ending block 41578851.
+#
+# Robinhood Chain is an Arbitrum Orbit (Nitro) rollup with ETH as the gas token, so several
+# contracts sit at chain-specific addresses rather than their mainnet ones. Each was re-derived
+# rather than assumed:
+#   - 0x: the Settler is 0x39b38686… ("RobinHoodSettler"), read from 0x's registry
+#     (0x00000000000004533Fe15556B1E086BB1A72cEae, `ownerOf(2)`). AllowanceHolder is at its usual
+#     cross-chain address.
+#   - OKX: neither published DEX Router address is deployed. The router here is 0xe58b3089…,
+#     identified by its `smartSwapByOrderId` / `unxswapByOrderId` ABI.
+#   - LiFi: the Diamond is at 0xb477751b…, not the cross-chain 0x1231deb6… address.
+#   - MetaMask: the mainnet Swap Router has no code. Its router here is 0xf5307745…, identified by
+#     MetaMask's `swap(string,address,uint256,bytes)` selector and its fee legs.
+#   - 1inch: v6 is deployed twice, at its usual address and at 0x5a705de8…; both are verified
+#     AggregationRouterV6. v5 is not deployed.
+#
+# Absent tiers, each checked rather than assumed:
+#   - CoW Protocol: the settlement contract has no code, so there are no batch settlers and no
+#     CoW-appData venue tier.
+#   - UniswapX: the Dutch order reactor has no code, so no uniswapx solver.
+#   - Coinbase: both mainnet swap proxies have no code and the mainnet fee wallet took nothing.
+#     Coinbase flow here enters through its smart wallets, so there is no entry point to key on —
+#     it is attributed by its current fee wallet and its LiFi integrator tag instead.
+#   - Phantom, Robinhood Wallet: no venue section. Both enter through shared routers (the 0x
+#     Settler, OKX's router) or an ERC-4337 EntryPoint, so the fee leg is the only fingerprint.
+#   - Sushi, 1inch v5: not deployed.
+#
+# The public RPC (rpc.mainnet.chain.robinhood.com) serves no `debug_traceTransaction`, so `decode`
+# and `monitor` need a tracing endpoint.
+#
+# Known coverage gap, not a wrong record: matching keys on `tx.to` or a log a known solver emitted
+# (see matching::select). Robinhood Wallet's own swaps are user operations, so `tx.to` is an
+# ERC-4337 EntryPoint, and Coinbase's are sent by its smart wallets, so `tx.to` is the user's own
+# account. Neither the EntryPoint nor a smart account is a solver, and the 0x Settler emits no log
+# of its own, so those swaps never match — 41% of Robinhood's fee legs in the sample entered that
+# way. Both venues still decode when they enter through a shared router (0x's AllowanceHolder,
+# OKX's router, the LiFi Diamond), which is where the fee tiers below apply.
+#
+# A decode run over blocks 41701320-41701650 (2026-08-20) returned 689 trades, attributed to
+# uniswap (624), relay (29), okx (16), metamask (4), arcus (3), 1inch (3), lifi (3), 0x (3),
+# phantom (2), fly and kyberswap, and solved by uniswap, 0x, okx, kyberswap, 1inch, rialto, lifi,
+# fly and relay.
+
+# Wrapped-native token: WETH on Robinhood Chain (matches `Chain::Robinhood.wrapped_native_token()`).
+wrapped_native = "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+
+# Permit2 sits at its usual cross-chain address. The two ERC-4337 EntryPoints are listed because
+# most wallet swaps here are user operations: without them, two unrelated 4337 swaps in one block
+# share the EntryPoint's logs and read as a sandwich bracket (see sandwich::pool_addresses).
+infrastructure = [
+    "0x000000000022d473030f116ddee9f6b43ac78ba3", # Permit2
+    "0x0000000071727de22e5e9d8baf0edac6f37da032", # ERC-4337 EntryPoint v0.7
+    "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789", # ERC-4337 EntryPoint v0.6
+]
+
+# No batch settlers: CoW does not settle on Robinhood Chain (see the header note).
+batch_settlers = []
+
+# Stablecoins anchoring the native token to USD (address = decimals). USDG (Paxos' Global Dollar) is
+# the chain's stablecoin and the token every venue fee leg in the sample was paid in. The
+# 18-decimal "USDC" and "USDG" tokens the explorer lists are unrelated clones, so USDG is the one
+# anchor here.
+[usd_stablecoins]
+"0x5fc5360d0400a0fd4f2af552add042d716f1d168" = 6 # USDG (Global Dollar, Paxos)
+
+# Solver routers — the venue that actually settles a swap.
+[solvers]
+# 1inch v6, both deployments (see the header note).
+"0x111111125421ca6dc452d289314280a0f8842a65" = "1inch"
+"0x5a705de8982235a7fa45bb83dcacf03a211389c7" = "1inch"
+# 0x Settler AllowanceHolder — the stable entry, same address on every Cancun chain
+"0x0000000000001ff3684f28c67538d4d072c22734" = "0x"
+# 0x Settler itself. 0x redeploys Settler and tells integrators not to hardcode it, but order flow
+# enters through Settler directly as well as through AllowanceHolder — it paid 632 of Robinhood's
+# 659 fee legs in the sample — so without it those swaps never match. Re-derive from 0x's registry
+# (0x00000000000004533Fe15556B1E086BB1A72cEae, `ownerOf(2)`) when coverage drops.
+"0x39b38686a19836ac10162c490e4558e120cbbe5f" = "0x"
+# OKX DexRouter (see the header note)
+"0xe58b3089df6667fbf99b75595a1671baf6797d6d" = "okx"
+# LiFi Diamond (see the header note)
+"0xb477751b76cf82d00a686a1232f5fcd772414af3" = "lifi"
+# KyberSwap MetaAggregationRouter v2 (same address as mainnet)
+"0x6131b5fae19ea4f9d964eac0408e4408b66337b5" = "kyberswap"
+# ParaSwap Augustus v6.2 (same address as mainnet). Deployed, but moved no tokens in the sample.
+"0x6a000f20005980200259b80c5102003040001068" = "paraswap"
+# OpenOcean Exchange — settled one of the Rabby fee legs in the sample, and MetaMask's router names
+# it in calldata ("openOceanFeeDynamic").
+"0x6352a56caadc4f1e25cd6c75970fa768a3304e64" = "openocean"
+# Fly (formerly Magpie) DexAggregator — same address on most chains
+# (docs.fly.trade/developers/deployments)
+"0x20f6ee51340adeed01a59b0e65cb3703f3dc860c" = "fly"
+# Uniswap routers. Robinhood Chain runs a forked Uniswap v4, and Uniswap is its public DEX, so most
+# swap flow settles here: Universal Router 2.1.1 (the version the Uniswap API defaults to on this
+# chain), Universal Router 2.0, SwapRouter02, and the v2 router.
+"0x8876789976decbfcbbbe364623c63652db8c0904" = "uniswap"
+"0x53bf6b0684ec7ef91e1387da3d1a1769bc5a6f77" = "uniswap"
+"0xcaf681a66d020601342297493863e78c959e5cb2" = "uniswap"
+"0x89e5db8b5aa49aa85ac63f691524311aeb649eba" = "uniswap"
+# Rialto — the chain's PropAMM-driven aggregator. Read from Rialto's own router registry
+# (0x71a120CbBf3Ce7cD910a3c50fF77aFc62735687E, `ownerOf(2)` for taker-submitted swaps and
+# `ownerOf(3)` for gasless ones; both resolve to this router today). Re-derive from the registry
+# after a Rialto migration.
+"0xc94135b63772b91d79d0a2daab2a8801f32359bd" = "rialto"
+# Tycho (PropellerHeads) router V3 on Robinhood Chain (docs.propellerheads.xyz contract addresses)
+"0x345e48768a65ae596ac6a2aee71202753c4866f5" = "tycho"
+
+# Venues. Relay's fee collector is the same address as mainnet; of its mainnet contracts only the
+# v3 router and the v3 approval proxy are deployed here, and they paid 193 of the 360 fee legs in
+# the sample. The rest came from Relay's Depository, which fills orders bridged in from another
+# chain rather than settling a same-chain swap, so it is not an entry point.
+[venues.relay]
+entry_points = [
+    "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f", # RelayRouterV3
+    "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be", # RelayApprovalProxyV3
+]
+fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
+
+# MetaMask's Swap Router on this chain (see the header note). Only the second of its two mainnet fee
+# wallets is used here — 54 fee legs in the sample, all from this router; the first took nothing.
+[venues.metamask]
+entry_points = ["0xf5307745c61de69bf033edfe6a8771256275a323"]
+fee_collectors = ["0xf326e4de8f66a0bdc0970b79e0924e33c79f1915"]
+
+# The aggregator ids this router named in the sample, mapped to the solver names above. "0xV2" is
+# 0x's Settler-era id, which the mainnet book's "zeroex" substring does not catch.
+[venues.metamask.solver_aliases]
+"0xv2" = "0x"
+kyber = "kyberswap"
+uniswap = "uniswap"
+openocean = "openocean"
+
+# Rabby SwapProxy — same address as mainnet, and the only Rabby entry point: its other swaps go
+# through shared routers (the 0x Settler, 1inch, Uniswap, Fly) and are recognised by the fee leg
+# (see rabby.rs). The current fee wallet took 1452 legs in the sample; the historical wallet
+# 0x39041f… took nothing.
+[venues.rabby]
+entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
+fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
+
+# Rainbow's own router ("Rainbow: Router", same address as mainnet). It takes its fee on the input
+# side and keeps it in the router, so the fee is read from calldata (see rainbow.rs) and there is no
+# collector. Live here: 105 outgoing token transfers in the sample.
+[venues.rainbow]
+entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
+fee_collectors = []
+
+# Venues identified by the fee they take on a shared router. Each wallet's legs were traced to a
+# settlement contract, so the dust-spray gotcha does not apply — one unverified contract
+# (0x30f3916201e49bd6e5f47566bb59a68e6cede5c5) sent 36 legs to each of three of these wallets in
+# the sample, which is a spray, not a fee, and is only ever read inside a matched solver trade.
+[venue_fees]
+# Robinhood Wallet: 659 fee legs, 632 of them paid by the 0x Settler. Swaps enter through an
+# ERC-4337 EntryPoint, so identify by the fee leg, never the bundler sender.
+"0xad01c20d5886137e056775af56915de824c8fce5" = "robinhood"
+# Phantom: 207 legs, mostly paid by OKX's router. The wallet retired on mainnet in 2025 took
+# nothing here, so it is absent.
+"0x2cffed5d56eb6a17662756ca0fdf350e732c9818" = "phantom"
+# Coinbase's Base App: a 0.95% fee skimmed off the SELL token before routing. 206 legs, 92 paid by
+# the LiFi Diamond.
+"0x5aafc1f252d544f744d17a4e734afd6efc47ede4" = "coinbase"
+
+# LiFi frontends identified by the integrator tag in the LiFi swap event. Keys are lowercase. Every
+# tag below was read off decoded LiFi generic-swap events on this chain (1359 events in the
+# sample); counts are that sample's. Robinhood's tag here is "robinhood-fees-enabled", not the
+# plain "robinhood" the other books key on.
+[venue_integrators]
+"robinhood-fees-enabled" = "robinhood" # 527
+"base-app" = "coinbase"                # Coinbase's Base App — 82
+"_binancewallet" = "binancewallet"     # Binance Wallet — 76
+"jumper.exchange" = "jumper"           # Jumper Exchange, LiFi's own frontend — 61
+"zerion" = "zerion"                    # 34
+"backpack-wallet" = "backpack"          # 27
+
+# Display-only names. Label, not solver: Arcus' swaps are relayer-sent, so the taker is not the
+# transaction sender and they only decode through the intent path, which a solver entry would
+# replace with sender netting (verified: registering it as a solver loses the trade).
+[labels]
+# Arcus SwapShell — the entry-point router wrapper for Arcus' spot router, which fills from its own
+# RFQ and routes the rest to Rialto and LiFi (arcus-xyz/spot-contracts-abis). Key on the proxy; its
+# implementation is upgraded behind it.
+"0x4262efbd176f02824af27010bea218429c33c7e8" = "arcus"

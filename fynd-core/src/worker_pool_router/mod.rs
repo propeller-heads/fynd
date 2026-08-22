@@ -37,7 +37,7 @@ use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use num_traits::{CheckedSub, ToPrimitive};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -64,6 +64,9 @@ const DEFAULT_USER_IMPROVEMENT_SHARE_BPS: u32 = 1_000;
 
 /// Basis-point denominator: `10_000` bps is the whole improvement.
 const BPS_DENOMINATOR: u32 = 10_000;
+
+/// Wei per whole gas token. The exclusive metrics report whole gas tokens, not wei.
+const WEI_PER_GAS_TOKEN: f64 = 1e18;
 
 /// The configured user share, parsed from [`ENV_USER_IMPROVEMENT_SHARE_BPS`].
 static USER_IMPROVEMENT_SHARE_BPS: LazyLock<u32> = LazyLock::new(user_improvement_share_bps_env);
@@ -840,13 +843,45 @@ fn combine_with_surplus(
     // no public amount_out to diff against.
     if let Some(public_reference) = public_reference {
         let user_savings = &committed_amount_out - public_reference.amount_out();
-        gauge!("exclusive_user_savings_amount").increment(user_savings.to_f64().unwrap_or(0.0));
+        record_gas_token_amount(
+            "exclusive_user_savings_amount",
+            exclusive_candidate,
+            &user_savings,
+        );
     }
 
     let mut result = Vec::with_capacity(public_ranked.len() + 1);
     result.push(pin_commitment(exclusive_candidate, committed_amount_out));
     result.extend(public_ranked);
     result
+}
+
+/// Restates an output-token `amount` of `quote` in wei.
+///
+/// The quote states its gas cost in both units, so that pair is the rate. `None` when either side
+/// is zero, which is how an unpriced output token shows up.
+fn to_gas_token_amount(quote: &OrderQuote, amount: &BigUint) -> Option<BigUint> {
+    let gas_cost_out = quote
+        .amount_out()
+        .checked_sub(quote.amount_out_net_gas())?;
+    let gas_cost_wei = quote.gas_estimate() * quote.gas_price()?;
+    if gas_cost_out == BigUint::ZERO || gas_cost_wei == BigUint::ZERO {
+        return None;
+    }
+    Some(amount * gas_cost_wei / gas_cost_out)
+}
+
+/// Records an output-token `amount` under `metric`, in whole gas tokens.
+///
+/// Output-token base units are not summable across tokens, so a total over them means nothing. An
+/// amount with no rate increments `exclusive_unpriced_output_total`; a zero would read as "captured
+/// nothing".
+fn record_gas_token_amount(metric: &'static str, quote: &OrderQuote, amount: &BigUint) {
+    let Some(gas_token_amount) = to_gas_token_amount(quote, amount) else {
+        counter!("exclusive_unpriced_output_total").increment(1);
+        return;
+    };
+    gauge!(metric).increment(gas_token_amount.to_f64().unwrap_or(0.0) / WEI_PER_GAS_TOKEN);
 }
 
 /// Whether a quote is eligible to be ranked against the others for this request.
@@ -957,7 +992,7 @@ fn pin_commitment(exclusive_candidate: &OrderQuote, committed_amount_out: BigUin
     let exclusive_gas_cost = exclusive_route_amount_out - exclusive_candidate.amount_out_net_gas();
     let surplus_amount = exclusive_route_amount_out - &committed_amount_out;
 
-    gauge!("exclusive_fee_amount").increment(surplus_amount.to_f64().unwrap_or(0.0));
+    record_gas_token_amount("exclusive_fee_amount", exclusive_candidate, &surplus_amount);
 
     let mut surplus_quote = exclusive_candidate.clone();
 
@@ -2831,5 +2866,73 @@ mod tests {
         ]);
 
         assert!(!has_valid_exclusive_route(&quote, SimChain::Ethereum));
+    }
+
+    /// A quote stating its gas cost twice, in output-token units and in wei.
+    fn make_rate_quote(amount_out: u64, amount_out_net_gas: u64, gas_estimate: u64) -> OrderQuote {
+        OrderQuote::new(
+            "rate-order".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1_000u64),
+            BigUint::from(amount_out),
+            BigUint::from(gas_estimate),
+            BigUint::from(amount_out_net_gas),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
+        )
+    }
+
+    /// 300k gas at 5 gwei is 0.0015 ETH, charged as 3 USDC: 2000 USDC per ETH.
+    fn usdc_quote() -> OrderQuote {
+        make_rate_quote(100_000_000, 97_000_000, 300_000)
+            .with_gas_price(BigUint::from(5_000_000_000u64))
+    }
+
+    #[test]
+    fn test_to_gas_token_amount() {
+        // 100 USDC at 2000 USDC per ETH is 0.05 ETH.
+        let wei = to_gas_token_amount(&usdc_quote(), &BigUint::from(100_000_000u64));
+
+        assert_eq!(wei, Some(BigUint::from(50_000_000_000_000_000u64)));
+    }
+
+    #[test]
+    fn test_to_gas_token_amount_of_zero() {
+        assert_eq!(to_gas_token_amount(&usdc_quote(), &BigUint::ZERO), Some(BigUint::ZERO));
+    }
+
+    #[test]
+    fn test_to_gas_token_amount_unpriced_output() {
+        // Derived data has not priced the output token, so the algorithm netted no gas off it.
+        let quote = make_rate_quote(100_000_000, 100_000_000, 300_000)
+            .with_gas_price(BigUint::from(5_000_000_000u64));
+
+        assert_eq!(to_gas_token_amount(&quote, &BigUint::from(100_000_000u64)), None);
+    }
+
+    #[test]
+    fn test_to_gas_token_amount_without_gas_price() {
+        let quote = make_rate_quote(100_000_000, 97_000_000, 300_000);
+
+        assert_eq!(to_gas_token_amount(&quote, &BigUint::from(100_000_000u64)), None);
+    }
+
+    #[test]
+    fn test_to_gas_token_amount_without_gas_estimate() {
+        let quote = make_rate_quote(100_000_000, 97_000_000, 0).with_gas_price(BigUint::from(5u64));
+
+        assert_eq!(to_gas_token_amount(&quote, &BigUint::from(100_000_000u64)), None);
+    }
+
+    #[test]
+    fn test_to_gas_token_amount_net_gas_above_output() {
+        // Gas refinement can overwrite the net output. Subtracting it must not panic.
+        let quote = make_rate_quote(97_000_000, 100_000_000, 300_000)
+            .with_gas_price(BigUint::from(5_000_000_000u64));
+
+        assert_eq!(to_gas_token_amount(&quote, &BigUint::from(100_000_000u64)), None);
     }
 }

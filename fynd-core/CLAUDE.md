@@ -16,7 +16,7 @@ applications.
 | `graph/`              | `pub` — `GraphManager` trait (initialize + incremental update), `PetgraphStableDiGraphManager`, `StableDiGraph` (re-exported), `EdgeWeightUpdaterWithDerived`, `Path` type           |
 | `price_guard/`        | Price guard: external price validation for quotes. Sub-modules: `guard` (validation logic), `binance_ws` (Binance WebSocket price provider), `hyperliquid` (Hyperliquid oracle provider), `provider_registry`, `config`, `utils` |
 | `replay.rs`           | `replay_route(&Route, &MarketState)` — re-execute an already-built route against a (possibly newer) market state, honoring split fractions and shared-pool depletion. Used by `hindsight` to measure quote-to-execution slippage |
-| `encoding/`           | `Encoder` wraps `tycho-execution` to produce ABI-encoded calldata (singleSwap, sequentialSwap, Permit2 variants). Computes `FeeBreakdown` mirroring on-chain `FeeCalculator` logic. `RouterFees`/`SharedRouterFees` hold default + per-client fee rates; `RouterFeeFetcher` refreshes them from the FeeCalculator contract every 5 min |
+| `encoding/`           | `Encoder` wraps `tycho-execution` to produce ABI-encoded calldata (singleSwap, sequentialSwap, Permit2 variants). Optional calldata watermark (`with_calldata_watermark`) appends attribution bytes the EVM ignores. Computes `FeeBreakdown` mirroring on-chain `FeeCalculator` logic. `RouterFees`/`SharedRouterFees` hold default + per-client fee rates; `RouterFeeFetcher` refreshes them from the FeeCalculator contract every 5 min |
 | `types/`              | Core types: `Order`, `Route`, `Swap`, `Quote`, `QuoteRequest`, `BlockInfo`, `EncodingOptions`, `FeeBreakdown`, error types                                                         |
 
 ## Key Traits
@@ -166,6 +166,12 @@ After public ranking, `combine_with_surplus` overlays any `IncludeExclusive`-sco
 beats the committed amount and records the difference as `SurplusInfo`
 (`OrderQuote::surplus_amount()`, `committed_amount_out()`, `Swap::committed_amount_out()`). All are
 `#[serde(skip)]` — internal, not on the wire.
+
+Two gauges report what the overlay is worth, in whole gas tokens: `exclusive_fee_amount` (LP fee
+capture) and `exclusive_user_savings_amount` (user improvement over the public reference).
+`to_gas_token_amount` converts without a price lookup — the quote states its gas cost both in wei
+(`gas_estimate * gas_price`) and in output-token units (`amount_out - amount_out_net_gas`), so that
+pair is the rate. An unpriced output token increments `exclusive_unpriced_output_total` instead.
 
 Enable by setting the scope per pool via `PoolConfig::with_liquidity_scope()` or
 `liquidity_scope = "include_exclusive"` in `worker_pools.toml`. A deployment where every pool sets it

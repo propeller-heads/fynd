@@ -142,6 +142,13 @@ pub struct ServeArgs {
     #[arg(long)]
     pub enable_price_guard: bool,
 
+    /// Watermark appended to every encoded transaction's calldata (e.g. "fynd"), so on-chain
+    /// observers can attribute router calls to this deployment. The EVM ignores calldata past
+    /// the ABI-encoded arguments, so the watermark does not change execution. Disabled by
+    /// default.
+    #[arg(long, env)]
+    pub calldata_watermark: Option<String>,
+
     /// URL of the hosted gateway fronting this instance. When set, a second Swagger UI is served
     /// at /docs/hosted/, describing the gateway's per-chain paths and API-key auth. When unset,
     /// only the self-hosted /docs/ is served.
@@ -257,6 +264,19 @@ mod cli_tests {
     fn test_openapi_subcommand() {
         let cli = Cli::try_parse_from(vec!["fynd", "openapi"]).expect("parse errored");
         assert_eq!(cli.command, Commands::Openapi);
+    }
+
+    #[test]
+    fn test_parses_calldata_watermark() {
+        std::env::remove_var("CALLDATA_WATERMARK");
+        let cli = Cli::try_parse_from(vec!["fynd", "serve", "--calldata-watermark", "fynd"])
+            .expect("parse errored");
+        let Commands::Serve(args) = cli.command else { panic!("expected serve") };
+        assert_eq!(args.calldata_watermark, Some("fynd".to_string()));
+
+        let cli = Cli::try_parse_from(vec!["fynd", "serve"]).expect("parse errored");
+        let Commands::Serve(args) = cli.command else { panic!("expected serve") };
+        assert_eq!(args.calldata_watermark, None);
     }
 
     #[test]

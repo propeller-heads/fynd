@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.99.1"
+    "version": "0.99.11"
   },
   "paths": {
     "/v1/health": {
@@ -69,7 +69,7 @@
           "prices"
         ],
         "summary": "GET /v1/prices - Return derived token prices and optional market data.",
-        "description": "By default returns token gas prices only. Each `prices[].price` is a plain decimal string\nholding raw target-token units divided by raw gas-token units; consumers must normalize\nboth tokens' decimals before using it. Use `include` query parameter to add spot prices\nand/or component depths.\n\n# Query Parameters\n\n- `include` - Comma-separated list: `depths`, `spot_prices`\n- `limit` - Max entries for spot_prices / component_depths (default: 1000)",
+        "description": "By default returns token gas prices only. Each `prices[].price` is a plain decimal string\nholding raw target-token units divided by raw gas-token units; consumers must normalize\nboth tokens' decimals before using it. Use `include` query parameter to add spot prices\nand/or component depths.\n\n# Query Parameters\n\n- `include` - Comma-separated list: `depths`, `spot_prices`\n- `limit` - Max entries for spot_prices / component_depths (default and maximum: 1000)",
         "operationId": "get_prices",
         "parameters": [
           {
@@ -88,13 +88,14 @@
           {
             "name": "limit",
             "in": "query",
-            "description": "Maximum number of spot_prices and component_depths entries (default: 1000).",
+            "description": "Maximum number of spot_prices and component_depths entries (default and maximum: 1000).",
             "required": false,
             "schema": {
               "type": [
                 "integer",
                 "null"
               ],
+              "maximum": 1000,
               "minimum": 0
             },
             "example": 1000
@@ -112,7 +113,7 @@
             }
           },
           "400": {
-            "description": "Invalid query parameter",
+            "description": "Invalid query parameter or limit exceeds 1000",
             "content": {
               "application/json": {
                 "schema": {
@@ -203,19 +204,20 @@
           "tokens"
         ],
         "summary": "GET /v1/tokens - Return the tokens currently in the routing graph, ranked by usefulness.",
-        "description": "Serves metadata (symbol, decimals, tax, gas, quality) for exactly the tokens present in\nthe routing graph, sorted by approximate routable `liquidity` in raw gas-token units\n(descending), then `component_count`, then address. The list is recomputed lazily at\nmost once per derived-data update and cached; nothing runs on the quote path.\n\nPaginate with `offset`/`limit` (e.g. `?limit=100&offset=1000` returns tokens ranked\n#1001-#1100). Pages are consistent while the response `block` is unchanged; restart\nfrom offset 0 when it advances mid-pagination.\n\n# Query Parameters\n\n- `limit` - Maximum number of tokens returned (default: 1000)\n- `offset` - Number of tokens to skip from the start of the ranked list (default: 0)",
+        "description": "Serves metadata (symbol, decimals, tax, gas, quality) for exactly the tokens present in\nthe routing graph, sorted by approximate routable `liquidity` in raw gas-token units\n(descending), then `component_count`, then address. The list is recomputed lazily at\nmost once per derived-data update and cached; nothing runs on the quote path.\n\nPaginate with `offset`/`limit` (e.g. `?limit=100&offset=1000` returns tokens ranked\n#1001-#1100). Pages are consistent while the response `block` is unchanged; restart\nfrom offset 0 when it advances mid-pagination.\n\n# Query Parameters\n\n- `limit` - Maximum number of tokens returned (default and maximum: 1000)\n- `offset` - Number of tokens to skip from the start of the ranked list (default: 0)",
         "operationId": "get_tokens",
         "parameters": [
           {
             "name": "limit",
             "in": "query",
-            "description": "Maximum number of tokens returned (default: 1000).",
+            "description": "Maximum number of tokens returned (default and maximum: 1000).",
             "required": false,
             "schema": {
               "type": [
                 "integer",
                 "null"
               ],
+              "maximum": 1000,
               "minimum": 0
             },
             "example": 1000
@@ -242,6 +244,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TokensResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameter or limit exceeds 1000",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }

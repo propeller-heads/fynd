@@ -225,6 +225,10 @@ pub(crate) async fn info(state: web::Data<AppState>) -> HttpResponse {
 const DEFAULT_PRICES_LIMIT: usize = 1000;
 
 #[cfg(feature = "experimental")]
+/// Maximum accepted limit for spot_prices and component_depths entries.
+const MAX_PRICES_LIMIT: usize = 1000;
+
+#[cfg(feature = "experimental")]
 /// GET /v1/prices - Return derived token prices and optional market data.
 ///
 /// By default returns token gas prices only. Each `prices[].price` is a plain decimal string
@@ -235,7 +239,7 @@ const DEFAULT_PRICES_LIMIT: usize = 1000;
 /// # Query Parameters
 ///
 /// - `include` - Comma-separated list: `depths`, `spot_prices`
-/// - `limit` - Max entries for spot_prices / component_depths (default: 1000)
+/// - `limit` - Max entries for spot_prices / component_depths (default and maximum: 1000)
 #[utoipa::path(
     get,
     path = "/v1/prices",
@@ -243,7 +247,7 @@ const DEFAULT_PRICES_LIMIT: usize = 1000;
     params(PricesQuery),
     responses(
         (status = 200, description = "Prices returned", body = PricesResponse),
-        (status = 400, description = "Invalid query parameter", body = ErrorResponse),
+        (status = 400, description = "Invalid query parameter or limit exceeds 1000", body = ErrorResponse),
         (status = 503, description = "Data not yet available", body = ErrorResponse),
     )
 )]
@@ -260,6 +264,9 @@ pub async fn get_prices(
     let limit = query
         .limit
         .unwrap_or(DEFAULT_PRICES_LIMIT);
+    if limit > MAX_PRICES_LIMIT {
+        return Err(ApiError::BadRequest(format!("limit must be at most {MAX_PRICES_LIMIT}")));
+    }
     let want_depths = include_fields.contains(&IncludeField::Depths);
     let want_spot = include_fields.contains(&IncludeField::SpotPrices);
 
@@ -385,6 +392,10 @@ pub async fn get_prices(
 const DEFAULT_TOKENS_LIMIT: usize = 1000;
 
 #[cfg(feature = "experimental")]
+/// Maximum accepted limit for GET /v1/tokens.
+const MAX_TOKENS_LIMIT: usize = 1000;
+
+#[cfg(feature = "experimental")]
 /// GET /v1/tokens - Return the tokens currently in the routing graph, ranked by usefulness.
 ///
 /// Serves metadata (symbol, decimals, tax, gas, quality) for exactly the tokens present in
@@ -398,7 +409,7 @@ const DEFAULT_TOKENS_LIMIT: usize = 1000;
 ///
 /// # Query Parameters
 ///
-/// - `limit` - Maximum number of tokens returned (default: 1000)
+/// - `limit` - Maximum number of tokens returned (default and maximum: 1000)
 /// - `offset` - Number of tokens to skip from the start of the ranked list (default: 0)
 #[utoipa::path(
     get,
@@ -407,6 +418,7 @@ const DEFAULT_TOKENS_LIMIT: usize = 1000;
     params(TokensQuery),
     responses(
         (status = 200, description = "Graph tokens returned", body = TokensResponse),
+        (status = 400, description = "Invalid query parameter or limit exceeds 1000", body = ErrorResponse),
         (status = 503, description = "Data not yet available", body = ErrorResponse),
     )
 )]
@@ -418,6 +430,9 @@ pub async fn get_tokens(
     let limit = query
         .limit
         .unwrap_or(DEFAULT_TOKENS_LIMIT);
+    if limit > MAX_TOKENS_LIMIT {
+        return Err(ApiError::BadRequest(format!("limit must be at most {MAX_TOKENS_LIMIT}")));
+    }
     let offset = query.offset.unwrap_or(0);
 
     let cache_key = {
@@ -502,6 +517,8 @@ mod tests {
     #[cfg(feature = "experimental")]
     use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
+    #[cfg(feature = "experimental")]
+    use crate::api::tokens::{GraphTokenEntry, TokensCache};
     use crate::api::{dto::QuoteRequest, AppState, HealthTracker};
 
     /// Minimal handler that mirrors the real quote handler's JSON extraction.
@@ -561,6 +578,130 @@ mod tests {
             #[cfg(feature = "experimental")]
             market_data,
         )
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_rejects_limit_over_maximum_before_derived_data() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices?limit=1001")
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_applies_limit_boundaries() {
+        use num_bigint::BigUint;
+
+        let state = make_test_state();
+        let token = test_addr(1);
+        let token_in = test_addr(2);
+        let token_out = test_addr(3);
+        let spot_prices = (0usize..1001)
+            .map(|index| {
+                (
+                    (format!("component-{index:04}"), token_in.clone(), token_out.clone()),
+                    index as f64,
+                )
+            })
+            .collect();
+        let component_depths = (0usize..1001)
+            .map(|index| {
+                (
+                    (format!("component-{index:04}"), token_in.clone(), token_out.clone()),
+                    BigUint::from(index + 1),
+                )
+            })
+            .collect();
+        {
+            let mut store = state.derived_data.write().await;
+            store.set_token_prices(
+                [(token, Price::new(1u8.into(), 1u8.into()))]
+                    .into_iter()
+                    .collect(),
+                vec![],
+                19_000_000,
+                true,
+            );
+            store.set_spot_prices(spot_prices, vec![], 19_000_000, true);
+            store.set_component_depths(component_depths, vec![], 19_000_000, true);
+        }
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        for uri in [
+            "/v1/prices?include=spot_prices,depths",
+            "/v1/prices?include=spot_prices,depths&limit=1000",
+        ] {
+            let body: Value = test::call_and_read_body_json(
+                &app,
+                test::TestRequest::get()
+                    .uri(uri)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(body["prices"].as_array().unwrap().len(), 1, "body was: {body}");
+            assert_eq!(
+                body["spot_prices"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1000,
+                "body was: {body}"
+            );
+            assert_eq!(
+                body["component_depths"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1000,
+                "body was: {body}"
+            );
+        }
+
+        let zero_limit: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices?include=spot_prices,depths&limit=0")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            zero_limit["prices"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(zero_limit["spot_prices"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(zero_limit["component_depths"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[cfg(feature = "experimental")]
@@ -808,6 +949,20 @@ mod tests {
         );
         assert_eq!(limited["tokens"][0]["symbol"], "USDC");
 
+        // A zero-sized page is valid and retains the total count.
+        let zero_limit: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/tokens?limit=0")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(zero_limit["total"], 3);
+        assert!(zero_limit["tokens"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
         // Offset pages into the ranked list: limit=1&offset=1 is the #2 token.
         let paged: Value = test::call_and_read_body_json(
             &app,
@@ -832,6 +987,78 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_tokens_handler_rejects_limit_over_maximum_before_derived_data() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/tokens", web::get().to(super::get_tokens)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/tokens?limit=1001")
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_tokens_handler_applies_limit_boundaries() {
+        let state = make_test_state();
+        state
+            .derived_data
+            .write()
+            .await
+            .set_token_prices(Default::default(), vec![], 19_000_000, true);
+        let entries = (0..1001)
+            .map(|index| {
+                let mut address = [0u8; 20];
+                address[12..].copy_from_slice(&(index as u64).to_be_bytes());
+                GraphTokenEntry {
+                    address: address.into(),
+                    symbol: format!("TOKEN-{index}"),
+                    decimals: 18,
+                    tax: 0,
+                    gas: vec![],
+                    quality: 100,
+                    component_count: 1,
+                    liquidity: None,
+                }
+            })
+            .collect();
+        *state.tokens_cache.write().await =
+            Some(TokensCache { key: (19_000_000, None), entries: Arc::new(entries) });
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/tokens", web::get().to(super::get_tokens)),
+        )
+        .await;
+
+        for uri in ["/v1/tokens", "/v1/tokens?limit=1000"] {
+            let body: Value = test::call_and_read_body_json(
+                &app,
+                test::TestRequest::get()
+                    .uri(uri)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(body["total"], 1001, "body was: {body}");
+            assert_eq!(body["tokens"].as_array().unwrap().len(), 1000, "body was: {body}");
+        }
     }
 
     #[cfg(feature = "experimental")]
@@ -969,6 +1196,36 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
         assert!(body["error"].is_string(), "body was: {body}");
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_limit_deserialization_errors_return_json() {
+        let app = test::init_service(
+            App::new()
+                .configure(crate::api::configure_error_handlers)
+                .app_data(web::Data::new(make_test_state()))
+                .route("/v1/prices", web::get().to(super::get_prices))
+                .route("/v1/tokens", web::get().to(super::get_tokens)),
+        )
+        .await;
+
+        for endpoint in ["/v1/prices", "/v1/tokens"] {
+            for limit in ["not-a-number", "-1", "18446744073709551616"] {
+                let resp = test::call_service(
+                    &app,
+                    test::TestRequest::get()
+                        .uri(&format!("{endpoint}?limit={limit}"))
+                        .to_request(),
+                )
+                .await;
+
+                assert_eq!(resp.status().as_u16(), 400);
+                let body = body_json(resp).await;
+                assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+                assert!(body["error"].is_string(), "body was: {body}");
+            }
+        }
     }
 
     #[actix_web::test]
