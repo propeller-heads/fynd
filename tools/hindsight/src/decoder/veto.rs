@@ -46,6 +46,29 @@ pub(crate) enum Veto {
     FeeOnTransfer,
 }
 
+/// A shortfall this far below the declared input is the token taking a cut, not rounding: one
+/// basis point of the amount.
+const TAX_DETECTION_BPS: u64 = 10_000;
+
+/// Whether the trader delivered less of the input token than the trade's own `amount_in` says.
+///
+/// A normal ERC-20 transfer of X delivers X, so a shortfall means the token took a cut in transit.
+/// Tycho labels these tokens quality 100 and quotes them as if transfers were free, so a re-solve
+/// computes the output for the full amount while the pools only ever received the taxed
+/// remainder — the comparison would credit Fynd with the token's own fee. Seen on `EverRise`
+/// (RISE), which delivered 0.95 of every 1.0 its Universal Router calldata authorised.
+///
+/// A trader who sent none of the input token funded the swap some other way (a solver rebalance,
+/// a third-party funder), which this cannot judge, so it is not a veto.
+fn input_short_of_declared(flow: &SettledSwap, transfer_ledger: &TransferLedger) -> bool {
+    let sent = transfer_ledger.sent_by_address(flow.tracked, flow.token_in);
+    if sent.is_zero() || sent >= flow.amount_in {
+        return false;
+    }
+    let shortfall = flow.amount_in - sent;
+    shortfall.saturating_mul(U256::from(TAX_DETECTION_BPS)) >= flow.amount_in
+}
+
 /// Check a decoded flow against every post-decode veto, returning the first.
 pub(crate) fn check(
     flow: &SettledSwap,
@@ -58,6 +81,9 @@ pub(crate) fn check(
     }
     if wrap_pair_mispaired(flow, registry.wrapped_native()) {
         return Some(Veto::MispairedWrapPair);
+    }
+    if input_short_of_declared(flow, transfer_ledger) {
+        return Some(Veto::FeeOnTransfer);
     }
     if fee_on_transfer(flow, transfer_ledger, registry) {
         return Some(Veto::FeeOnTransfer);
@@ -275,6 +301,59 @@ mod tests {
             check(&taxed, &transfer_ledger, &logs, &Registry::ethereum()),
             Some(Veto::FeeOnTransfer)
         );
+    }
+
+    #[test]
+    fn test_input_short_of_declared_is_a_fee_token() {
+        // EverRise (RISE), live tx 0x40235d0b…: the Universal Router calldata authorised 1.0 and
+        // the trader's transfer delivered 0.95. Tycho quotes RISE as fee-free, so the comparison
+        // would hand Fynd the token's 5% cut.
+        let trader = addr(1);
+        let pool = addr(50);
+        let rise = addr(10);
+        let logs =
+            vec![make_transfer_log(rise, trader, pool, U256::from(950_000_000_000_000_000u64))];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let declared = SettledSwap {
+            tracked: trader,
+            ..swap(rise, 1_000_000_000_000_000_000, Address::ZERO, 6_238_916_653)
+        };
+        assert!(input_short_of_declared(&declared, &ledger));
+    }
+
+    #[test]
+    fn test_input_matching_the_transfer_is_not_a_fee_token() {
+        let trader = addr(1);
+        let token = addr(10);
+        let logs = vec![make_transfer_log(token, trader, addr(50), U256::from(1_000u64))];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let flow = SettledSwap { tracked: trader, ..swap(token, 1_000, addr(11), 2_000) };
+        assert!(!input_short_of_declared(&flow, &ledger));
+    }
+
+    #[test]
+    fn test_input_larger_than_declared_is_a_fee_taken_before_the_swap() {
+        // ParaSwap's shape: the trader spends more than the calldata's amount_in because a fee
+        // was taken before the solver frame. The calldata figure is the amount that reached the
+        // pools, which is correct — not a taxed token.
+        let trader = addr(1);
+        let token = addr(10);
+        let logs = vec![make_transfer_log(token, trader, addr(50), U256::from(1_010u64))];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let flow = SettledSwap { tracked: trader, ..swap(token, 1_000, addr(11), 2_000) };
+        assert!(!input_short_of_declared(&flow, &ledger));
+    }
+
+    #[test]
+    fn test_third_party_funded_input_is_not_judged() {
+        // The trader sent none of the input token — a solver rebalance or a third-party funder.
+        // Nothing here can tell whether the token taxes transfers, so it is not a veto.
+        let trader = addr(1);
+        let token = addr(10);
+        let logs = vec![make_transfer_log(token, addr(99), addr(50), U256::from(1_000u64))];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let flow = SettledSwap { tracked: trader, ..swap(token, 1_000, addr(11), 2_000) };
+        assert!(!input_short_of_declared(&flow, &ledger));
     }
 
     #[test]
