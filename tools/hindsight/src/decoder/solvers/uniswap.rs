@@ -16,18 +16,32 @@
 //! `WRAP_ETH` and `UNWRAP_WETH` bracket a swap whose path names WETH but whose trader side is
 //! native ETH, so they rewrite the corresponding token to `Address::ZERO`.
 //!
-//! Two shapes are declined rather than guessed, both verified against live traffic (40 Universal
-//! Router trades over Ethereum blocks 25741800-25741815):
+//! `V4_SWAP` (`0x10`) carries a nested stream of its own: `abi.encode(bytes actions, bytes[]
+//! params)`, where `SWAP_EXACT_IN_SINGLE` (`0x06`) holds a `PoolKey`, the swap direction, the
+//! input amount and the floor. v4 names native ETH as the zero address directly, with no wrapping,
+//! so its currencies need no translation. The pool's two currencies are sorted, so `zeroForOne`
+//! says which is being sold.
 //!
-//! - Anything containing `V4_SWAP` (`0x10`), 27 of the 40. A v4 leg carries its own action
-//!   encoding, and a route can begin in v3 and finish in v4 — reading only the v3 leg reports the
-//!   wrong `token_out`, which is what one sampled trade did.
-//! - More than one exact-input swap, 3 of the 40: a split route, where no single command is the
-//!   trade.
+//! Universal Router 2.1.1 inserts a `minHopPriceX36` field into that struct, after every field
+//! read here, which is the second reason for reading by position.
 //!
-//! On the remaining 10, every decoded token pair matched the settled record. Nine matched
-//! `amount_in` exactly; the tenth reads 0.87% lower, which is a fee taken before the swap — the
-//! calldata figure is the amount that reached the pools, which is the basis a re-solve needs.
+//! What is declined, measured over live traffic (40 Universal Router trades on Ethereum blocks
+//! 25741800-25741815, carrying 28 v4 swaps between them):
+//!
+//! - **More than one swap in the stream**, counting v2, v3 and v4 together. A split route has no
+//!   single command that is the trade, and a route can begin in v3 and finish in v4 — one sampled
+//!   trade did, where reading only its v3 leg reported the wrong `token_out`.
+//! - **Exact-output swaps** (`V3_SWAP_EXACT_OUT`, `SWAP_EXACT_OUT_SINGLE`), 8 of the 28 v4 swaps.
+//!   These fix the output and bound the input, so the calldata states no input amount — only a
+//!   ceiling. Reading that ceiling as the amount spent would overstate every one.
+//! - **Multi-hop v4** (`SWAP_EXACT_IN`, `0x07`), 3 of the 28. Its 2.1.1 layout inserts an array
+//!   before the amounts rather than after them, so the fields this reads move with the router
+//!   version — the one shape where reading by position is not safe.
+//!
+//! Verified on what remains: 10 v3/v2 trades and 16 v4 exact-in-single swaps. Every decoded token
+//! pair matched the settled record, and every `amount_in` matched exactly except one v3 trade
+//! reading 0.87% lower — a fee taken before the swap, so the calldata figure is the amount that
+//! reached the pools, which is the basis a re-solve needs.
 
 use alloy::{
     primitives::{Address, U256},
@@ -52,10 +66,20 @@ sol! {
 const COMMAND_TYPE_MASK: u8 = 0x7f;
 
 const V3_SWAP_EXACT_IN: u8 = 0x00;
+const V3_SWAP_EXACT_OUT: u8 = 0x01;
 const V2_SWAP_EXACT_IN: u8 = 0x08;
+const V2_SWAP_EXACT_OUT: u8 = 0x09;
 const WRAP_ETH: u8 = 0x0b;
 const UNWRAP_WETH: u8 = 0x0c;
 const V4_SWAP: u8 = 0x10;
+
+/// v4's own action bytes, inside a `V4_SWAP` command (`v4-periphery`'s `Actions` library). Only
+/// the single-hop exact-input swap is read; the rest either state no input amount or move the
+/// fields this reads between router versions.
+const V4_SWAP_EXACT_IN_SINGLE: u8 = 0x06;
+const V4_SWAP_EXACT_IN: u8 = 0x07;
+const V4_SWAP_EXACT_OUT_SINGLE: u8 = 0x08;
+const V4_SWAP_EXACT_OUT: u8 = 0x09;
 
 const WORD: usize = 32;
 const ADDRESS_LEN: usize = 20;
@@ -90,6 +114,18 @@ fn address_at(input: &[u8], index: usize) -> Option<Address> {
     Some(Address::from_slice(bytes))
 }
 
+/// The bytes of element `index` of a `bytes[]` whose length word sits at `array_offset`.
+///
+/// An array element's offset is measured from the start of the array's data, after the length
+/// word — not from the start of the enclosing blob, which is what `dynamic_at` assumes.
+fn array_element(input: &[u8], array_offset: usize, index: usize) -> Option<&[u8]> {
+    let data = array_offset + WORD;
+    let relative = usize::try_from(word(input, data / WORD + index)?).ok()?;
+    let start = data + relative;
+    let length = usize::try_from(word(input, start / WORD)?).ok()?;
+    input.get(start + WORD..start + WORD + length)
+}
+
 /// The bytes of a dynamic field whose offset word sits at `index`.
 fn dynamic_at(input: &[u8], index: usize) -> Option<&[u8]> {
     let offset = usize::try_from(word(input, index)?).ok()?;
@@ -117,6 +153,54 @@ fn v2_path_ends(input: &[u8], index: usize) -> Option<(Address, Address)> {
     }
     let base = offset / WORD + 1;
     Some((address_at(input, base)?, address_at(input, base + length - 1)?))
+}
+
+/// The one exact-input swap in a `V4_SWAP` command's nested action stream, or `None` when it
+/// carries none, several, or a shape this does not read.
+///
+/// The command's input is `abi.encode(bytes actions, bytes[] params)`. `SWAP_EXACT_IN_SINGLE`'s
+/// params are a dynamic struct — it ends in `bytes hookData` — so they sit behind an offset word:
+///
+/// ```text
+///   currency0  currency1  fee  tickSpacing  hooks  zeroForOne  amountIn  amountOutMinimum
+/// ```
+///
+/// The pool's currencies are sorted, so `zeroForOne` says which one is being sold. There is no
+/// recipient here: a later `TAKE`/`TAKE_ALL` action pays it out, so the caller reads the
+/// transaction sender's receipt.
+fn read_v4_swap(command_input: &[u8]) -> Option<Swap> {
+    let actions = dynamic_at(command_input, 0)?;
+    let params_offset = usize::try_from(word(command_input, 1)?).ok()?;
+    let count = usize::try_from(word(command_input, params_offset / WORD)?).ok()?;
+    let mut found = None;
+    for (index, action) in actions.iter().enumerate() {
+        match *action {
+            V4_SWAP_EXACT_IN_SINGLE => {}
+            // Exact output states no input amount, and multi-hop moves the amounts between
+            // router versions; either means this command is not readable.
+            V4_SWAP_EXACT_IN | V4_SWAP_EXACT_OUT_SINGLE | V4_SWAP_EXACT_OUT => return None,
+            _ => continue,
+        }
+        if found.is_some() || index >= count {
+            return None;
+        }
+        let params = array_element(command_input, params_offset, index)?;
+        // A dynamic struct is encoded behind its own offset word.
+        let base = usize::from(word(params, 0)? == U256::from(WORD));
+        let currency0 = address_at(params, base)?;
+        let currency1 = address_at(params, base + 1)?;
+        let zero_for_one = !word(params, base + 5)?.is_zero();
+        let (token_in, token_out) =
+            if zero_for_one { (currency0, currency1) } else { (currency1, currency0) };
+        found = Some(Swap {
+            token_in,
+            token_out,
+            amount_in: word(params, base + 6)?,
+            min_amount_out: word(params, base + 7)?,
+            recipient: None,
+        });
+    }
+    found
 }
 
 /// A recipient that names an address whose receipt can be read, or `None` for the router's
@@ -162,21 +246,31 @@ impl SolverDecoder for Uniswap {
             .iter()
             .zip(call.inputs.iter())
         {
-            match command & COMMAND_TYPE_MASK {
-                V4_SWAP => return Ok(None),
-                WRAP_ETH => wrapped = true,
-                UNWRAP_WETH => unwrapped = true,
-                command @ (V3_SWAP_EXACT_IN | V2_SWAP_EXACT_IN) => {
-                    if swap.is_some() {
-                        return Ok(None);
-                    }
-                    let Some(read) = read_swap(command, command_input) else {
-                        return Ok(None);
-                    };
-                    swap = Some(read);
+            let read = match command & COMMAND_TYPE_MASK {
+                WRAP_ETH => {
+                    wrapped = true;
+                    continue;
                 }
-                _ => {}
+                UNWRAP_WETH => {
+                    unwrapped = true;
+                    continue;
+                }
+                // Exact output bounds the input instead of stating it, so there is no amount
+                // spent to record.
+                V3_SWAP_EXACT_OUT | V2_SWAP_EXACT_OUT => return Ok(None),
+                V4_SWAP => read_v4_swap(command_input),
+                command @ (V3_SWAP_EXACT_IN | V2_SWAP_EXACT_IN) => {
+                    read_swap(command, command_input)
+                }
+                _ => continue,
+            };
+            // Every swap counts, whichever pool version it names: a route split across commands
+            // has no single one that is the trade.
+            if swap.is_some() {
+                return Ok(None);
             }
+            let Some(read) = read else { return Ok(None) };
+            swap = Some(read);
         }
         let Some(swap) = swap else { return Ok(None) };
         if swap.amount_in.is_zero() {
@@ -332,13 +426,177 @@ mod tests {
         assert_eq!(terms(&call).unwrap().output_recipient, None);
     }
 
+    sol! {
+        /// v4's pool identity: the two currencies sorted, so `zeroForOne` names the sold side.
+        struct PoolKey {
+            address currency0;
+            address currency1;
+            uint24 fee;
+            int24 tickSpacing;
+            address hooks;
+        }
+
+        /// `IV4Router.ExactInputSingleParams`. Encoding through `sol!` checks the reader's
+        /// positional reads against alloy's own encoder.
+        struct ExactInputSingleParams {
+            PoolKey poolKey;
+            bool zeroForOne;
+            uint128 amountIn;
+            uint128 amountOutMinimum;
+            bytes hookData;
+        }
+    }
+
+    /// A `V4_SWAP` command input: `abi.encode(bytes actions, bytes[] params)`.
+    fn v4_input(actions: &[u8], params: Vec<Bytes>) -> Bytes {
+        use alloy::sol_types::SolValue;
+        (Bytes::from(actions.to_vec()), params)
+            .abi_encode_params()
+            .into()
+    }
+
+    /// One `SWAP_EXACT_IN_SINGLE` params blob.
+    fn v4_exact_in_single(
+        currency0: Address,
+        currency1: Address,
+        zero_for_one: bool,
+        amount_in: u128,
+        floor: u128,
+    ) -> Bytes {
+        use alloy::sol_types::SolValue;
+        ExactInputSingleParams {
+            poolKey: PoolKey {
+                currency0,
+                currency1,
+                fee: alloy::primitives::Uint::<24, 1>::from(3000u32),
+                tickSpacing: alloy::primitives::Signed::<24, 1>::try_from(60i32).unwrap(),
+                hooks: Address::ZERO,
+            },
+            zeroForOne: zero_for_one,
+            amountIn: amount_in,
+            amountOutMinimum: floor,
+            hookData: Bytes::default(),
+        }
+        .abi_encode()
+        .into()
+    }
+
+    /// The action stream a live v4 swap carries: swap, settle the input, take the output.
+    const V4_SETTLE_ALL: u8 = 0x0c;
+    const V4_TAKE_ALL: u8 = 0x0f;
+
     #[test]
-    fn test_v4_swap_declined() {
-        // A route can start in v3 and finish in v4, so the v3 leg's token_out is not the trade's.
+    fn test_v4_exact_in_single_zero_for_one() {
+        // currency0 sold for currency1.
+        let call = execute_call(
+            &[V4_SWAP],
+            vec![v4_input(
+                &[V4_SWAP_EXACT_IN_SINGLE, V4_SETTLE_ALL, V4_TAKE_ALL],
+                vec![
+                    v4_exact_in_single(USDC, WETH, true, 100_000_000, 5),
+                    Bytes::default(),
+                    Bytes::default(),
+                ],
+            )],
+        );
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.token_in, USDC);
+        assert_eq!(declared.token_out, WETH);
+        assert_eq!(declared.amount_in, U256::from(100_000_000u64));
+        assert_eq!(declared.min_amount_out, Some(U256::from(5u64)));
+        // A later TAKE pays the output out, so there is no recipient in the swap params.
+        assert_eq!(declared.output_recipient, None);
+    }
+
+    #[test]
+    fn test_v4_exact_in_single_one_for_zero() {
+        // The same pool, sold the other way: currency1 in, currency0 out.
+        let call = execute_call(
+            &[V4_SWAP],
+            vec![v4_input(
+                &[V4_SWAP_EXACT_IN_SINGLE, V4_SETTLE_ALL, V4_TAKE_ALL],
+                vec![
+                    v4_exact_in_single(USDC, WETH, false, 2_000, 7),
+                    Bytes::default(),
+                    Bytes::default(),
+                ],
+            )],
+        );
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.token_in, WETH);
+        assert_eq!(declared.token_out, USDC);
+    }
+
+    #[test]
+    fn test_v4_native_currency_needs_no_translation() {
+        // v4 names native ETH as the zero address directly, with no wrapping, which is already
+        // hindsight's convention — so no WRAP_ETH appears and nothing is rewritten.
+        let call = execute_call(
+            &[V4_SWAP],
+            vec![v4_input(
+                &[V4_SWAP_EXACT_IN_SINGLE, V4_SETTLE_ALL, V4_TAKE_ALL],
+                vec![
+                    v4_exact_in_single(Address::ZERO, USDC, true, 6_340_000, 1),
+                    Bytes::default(),
+                    Bytes::default(),
+                ],
+            )],
+        );
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.token_in, Address::ZERO);
+        assert_eq!(declared.token_out, USDC);
+    }
+
+    #[test]
+    fn test_v4_exact_out_declined() {
+        // Exact output bounds the input instead of stating it, so there is no amount spent.
+        let call = execute_call(
+            &[V4_SWAP],
+            vec![v4_input(
+                &[V4_SWAP_EXACT_OUT_SINGLE, V4_SETTLE_ALL, V4_TAKE_ALL],
+                vec![
+                    v4_exact_in_single(USDC, WETH, true, 100, 1),
+                    Bytes::default(),
+                    Bytes::default(),
+                ],
+            )],
+        );
+        assert!(terms(&call).is_none());
+    }
+
+    #[test]
+    fn test_v4_multi_hop_declined() {
+        // SWAP_EXACT_IN's 2.1.1 layout moves the amounts, so reading by position is not safe.
+        let call = execute_call(
+            &[V4_SWAP],
+            vec![v4_input(&[V4_SWAP_EXACT_IN, V4_SETTLE_ALL], vec![Bytes::default(); 2])],
+        );
+        assert!(terms(&call).is_none());
+    }
+
+    #[test]
+    fn test_v3_and_v4_in_one_stream_declined() {
+        // A route can start in v3 and finish in v4, so neither leg alone is the trade.
         let trader = address!("0x000000000000000000000000000000000000dead");
         let call = execute_call(
             &[V3_SWAP_EXACT_IN, V4_SWAP],
-            vec![v3_input(trader, 100, 1, &[USDC, WETH]), Bytes::default()],
+            vec![
+                v3_input(trader, 100, 1, &[USDC, WETH]),
+                v4_input(
+                    &[V4_SWAP_EXACT_IN_SINGLE, V4_TAKE_ALL],
+                    vec![v4_exact_in_single(WETH, USDC, true, 100, 1), Bytes::default()],
+                ),
+            ],
+        );
+        assert!(terms(&call).is_none());
+    }
+
+    #[test]
+    fn test_v4_stream_with_no_swap_declined() {
+        // Settle/take only: no trade in the stream.
+        let call = execute_call(
+            &[V4_SWAP],
+            vec![v4_input(&[V4_SETTLE_ALL, V4_TAKE_ALL], vec![Bytes::default(); 2])],
         );
         assert!(terms(&call).is_none());
     }
