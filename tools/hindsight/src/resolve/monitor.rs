@@ -122,6 +122,25 @@ pub(crate) struct MonitorArgs {
     /// reason; filter downstream for the improvement or coverage view
     #[arg(long)]
     pub comparisons_dir: Option<std::path::PathBuf>,
+
+    /// Run the APEX batching-validation experiment on each block's settled trades (at
+    /// top-of-block state, alongside the fynd re-solve) and write its JSONL records and
+    /// per-block `ApexInputData` dumps into this directory
+    #[arg(long)]
+    pub apex_batching_dir: Option<std::path::PathBuf>,
+
+    /// Per-order deadline for the experiment's S1 (single-order) solves, in milliseconds
+    #[arg(long, default_value_t = 500)]
+    pub apex_s1_deadline_ms: u64,
+
+    /// Whole-batch deadline for the experiment's S2 solve, in milliseconds
+    #[arg(long, default_value_t = 3000)]
+    pub apex_s2_deadline_ms: u64,
+
+    /// Iteration cap for APEX's price search (its default is 1000; the deadline still
+    /// bounds wall-clock time)
+    #[arg(long)]
+    pub apex_max_iterations: Option<u32>,
 }
 
 /// Drives the in-process solver, stepping the chain one block per `SteppingSolver::advance`.
@@ -507,6 +526,8 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         None => None,
     };
 
+    let mut apex_batching = build_apex_batching(&cfg)?;
+
     let mut totals = Totals::default();
     let pacing = Pacing::for_chain(chain, cfg.max_lag_blocks);
     info!(
@@ -543,6 +564,7 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
                 &adapter,
                 &mut decoder,
                 &mut comparisons,
+                &mut apex_batching,
                 &mut totals,
             ) => match end {
                 SessionEnd::Complete => break,
@@ -573,6 +595,7 @@ async fn run_session<P: Provider>(
     adapter: &StepAdapter<'_>,
     decoder: &mut Decoder<P>,
     comparisons: &mut Option<super::jsonl::RotatingWriter>,
+    apex_batching: &mut Option<crate::batching::BatchingEngine>,
     totals: &mut Totals,
 ) -> SessionEnd {
     // Establish a baseline applied state (N-1) before the first comparison.
@@ -635,6 +658,8 @@ async fn run_session<P: Provider>(
             }
         };
 
+        run_apex_batching(apex_batching, target, &trades, adapter.solver).await;
+
         let start = Instant::now();
         // Snapshot token prices at top-of-block (N-1) for the headline metric and the top-of-block
         // USD valuation.
@@ -683,6 +708,45 @@ async fn run_session<P: Provider>(
             info!(processed = totals.processed, "reached --max-blocks");
             return SessionEnd::Complete;
         }
+    }
+}
+
+/// Build the APEX batching engine when the experiment is enabled via `--apex-batching-dir`.
+fn build_apex_batching(
+    cfg: &MonitorArgs,
+) -> anyhow::Result<Option<crate::batching::BatchingEngine>> {
+    let Some(dir) = cfg.apex_batching_dir.as_ref() else {
+        return Ok(None);
+    };
+    let engine = crate::batching::BatchingEngine::new(
+        dir,
+        crate::batching::SolveBudget {
+            s1_deadline_ms: cfg.apex_s1_deadline_ms,
+            s2_deadline_ms: cfg.apex_s2_deadline_ms,
+            max_iterations: cfg.apex_max_iterations,
+        },
+    )?;
+    info!(dir = %dir.display(), "apex batching experiment enabled");
+    Ok(Some(engine))
+}
+
+/// Run the APEX batching experiment on the block's settled trades. Must be called while the
+/// solver still holds top-of-block state (N-1) — `resolve_block_range` advances it. A failed
+/// block is logged and skipped; it must never end the session.
+async fn run_apex_batching(
+    engine: &mut Option<crate::batching::BatchingEngine>,
+    block: u64,
+    trades: &[DecodedTrade],
+    solver: &Solver,
+) {
+    let Some(engine) = engine.as_mut() else {
+        return;
+    };
+    if let Err(error) = engine
+        .process_block(block, trades, solver)
+        .await
+    {
+        warn!(block, %error, "apex batching: block skipped");
     }
 }
 
@@ -817,6 +881,10 @@ mod tests {
             max_blocks: Some(1),
             max_lag_blocks: Some(100),
             comparisons_dir: None,
+            apex_batching_dir: None,
+            apex_s1_deadline_ms: 500,
+            apex_s2_deadline_ms: 3000,
+            apex_max_iterations: None,
         })
         .await
         .expect("monitor should process one block without error");

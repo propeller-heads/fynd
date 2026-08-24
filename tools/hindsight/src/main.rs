@@ -1,3 +1,4 @@
+mod batching;
 mod decoder;
 mod report;
 mod resolve;

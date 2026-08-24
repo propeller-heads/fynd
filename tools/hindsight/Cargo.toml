@@ -17,6 +17,8 @@ fynd-rpc = { workspace = true }
 tycho-simulation = { workspace = true }
 # Shared tooling (BPS comparison math, FyndAggregator wrapper)
 fynd-tools-common = { workspace = true }
+# APEX batch solver, driven per block by the batching-validation experiment (see `src/batching/`)
+apex-solver = { path = "../../../apex-solver", features = ["serde", "multithread"] }
 num-bigint = { workspace = true }
 
 # Async runtime
