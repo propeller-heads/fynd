@@ -59,6 +59,10 @@ sol! {
     /// The Universal Router's entry point (selector `0x3593564c`). `commands` and `inputs` are
     /// read positionally; `deadline` is not.
     function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable;
+
+    /// The same entry without a deadline (selector `0x24856bc3`), which integrators also call.
+    /// The command stream is identical, so both decode through one path.
+    function execute(bytes commands, bytes[] inputs) external payable;
 }
 
 /// The command byte's low bits name the operation; the high bit is an allow-revert flag
@@ -228,6 +232,18 @@ fn read_swap(command: u8, input: &[u8]) -> Option<Swap> {
     Some(Swap { token_in, token_out, amount_in, min_amount_out, recipient })
 }
 
+/// The command stream of either `execute` overload: with a deadline or without. The two carry
+/// the same commands and inputs, so the rest of the read does not care which was called.
+fn command_stream(
+    input: &[u8],
+) -> Option<(alloy::primitives::Bytes, Vec<alloy::primitives::Bytes>)> {
+    if let Ok(call) = execute_0Call::abi_decode(input) {
+        return Some((call.commands, call.inputs));
+    }
+    let call = execute_1Call::abi_decode(input).ok()?;
+    Some((call.commands, call.inputs))
+}
+
 /// The Uniswap Universal Router solver.
 pub(crate) struct Uniswap;
 
@@ -237,15 +253,11 @@ impl SolverDecoder for Uniswap {
     /// Declines a stream carrying a `V4_SWAP` or more than one exact-input swap — see the module
     /// docs for why neither can be read from the v3/v2 parameters alone.
     fn declared(&self, input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
-        let Ok(call) = executeCall::abi_decode(input) else { return Ok(None) };
+        let Some((commands, inputs)) = command_stream(input) else { return Ok(None) };
         let mut swap = None;
         let mut wrapped = false;
         let mut unwrapped = false;
-        for (command, command_input) in call
-            .commands
-            .iter()
-            .zip(call.inputs.iter())
-        {
+        for (command, command_input) in commands.iter().zip(inputs.iter()) {
             let read = match command & COMMAND_TYPE_MASK {
                 WRAP_ETH => {
                     wrapped = true;
@@ -309,7 +321,7 @@ mod tests {
 
     /// An `execute` call with one command per input.
     fn execute_call(commands: &[u8], inputs: Vec<Bytes>) -> Vec<u8> {
-        executeCall { commands: commands.to_vec().into(), inputs, deadline: U256::from(1_u64) }
+        execute_0Call { commands: commands.to_vec().into(), inputs, deadline: U256::from(1_u64) }
             .abi_encode()
     }
 
@@ -337,9 +349,25 @@ mod tests {
     }
 
     #[test]
-    fn test_selector_against_the_deployed_router() {
-        // The selector every sampled Universal Router trade entered through.
-        assert_eq!(executeCall::SELECTOR, [0x35, 0x93, 0x56, 0x4c]);
+    fn test_selectors_against_the_deployed_router() {
+        // Both overloads observed in live traffic: with a deadline and without.
+        assert_eq!(execute_0Call::SELECTOR, [0x35, 0x93, 0x56, 0x4c]);
+        assert_eq!(execute_1Call::SELECTOR, [0x24, 0x85, 0x6b, 0xc3]);
+    }
+
+    #[test]
+    fn test_deadline_free_overload_reads_the_same_stream() {
+        use alloy::sol_types::SolCall;
+        let trader = address!("0x000000000000000000000000000000000000dead");
+        let call = execute_1Call {
+            commands: vec![V3_SWAP_EXACT_IN].into(),
+            inputs: vec![v3_input(trader, 100_000_000, 5, &[USDC, WETH])],
+        }
+        .abi_encode();
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.token_in, USDC);
+        assert_eq!(declared.token_out, WETH);
+        assert_eq!(declared.amount_in, U256::from(100_000_000u64));
     }
 
     #[test]
