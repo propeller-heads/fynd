@@ -4,6 +4,7 @@ use alloy::{
     primitives::{aliases::U48, keccak256, Address, Keccak256, U160, U256},
     sol_types::SolValue,
 };
+use metrics::counter;
 use num_bigint::BigUint;
 use tycho_execution::encoding::{
     errors::EncodingError,
@@ -248,7 +249,7 @@ impl Encoder {
         let router_fees = self.router_fees.snapshot();
         let mut to_encode: Vec<(usize, Solution, FeeBreakdown, FeeRates)> = Vec::new();
 
-        for (i, quote) in quotes.iter().enumerate() {
+        for (i, quote) in quotes.iter_mut().enumerate() {
             if quote.status() != QuoteStatus::Success {
                 continue;
             }
@@ -295,6 +296,38 @@ impl Encoder {
                     solution
                 }
             };
+
+            // A pAMM leg fills on the venue when the maker's quote reaches the chain, and on a
+            // Uniswap V3 pool when it does not. `min_amount_out` keeps describing the venue quote
+            // and the slippage the user accepted, so a fallback that pays less than that floor
+            // reverts. Drop the quote rather than ship one that cannot execute, or lower the floor
+            // past what the user accepted.
+            let fallback_amount_out = quote
+                .route()
+                .and_then(|route| route.fallback_amount_out())
+                .cloned();
+            if let Some(fallback) = &fallback_amount_out {
+                if !Self::fallback_clears_floor(
+                    fee_breakdown.min_amount_received(),
+                    fallback,
+                    encoding_options
+                        .client_fee_params()
+                        .map_or(0, |f| f.bps()),
+                    fee_rates,
+                )? {
+                    counter!("propamm_fallback_quotes_total", "outcome" => "dropped").increment(1);
+                    tracing::debug!(
+                        order_id = %quote.order_id(),
+                        %fallback,
+                        slippage,
+                        "dropping pAMM quote: the Uniswap V3 fallback pays less than the \
+                         user's accepted slippage"
+                    );
+                    quote.set_status(QuoteStatus::NoRouteFound);
+                    continue;
+                }
+                counter!("propamm_fallback_quotes_total", "outcome" => "kept").increment(1);
+            }
             to_encode.push((i, solution, fee_breakdown, fee_rates));
         }
 
@@ -601,6 +634,27 @@ impl Encoder {
         }
         call_data.extend(encoded_args);
         call_data
+    }
+
+    /// Whether a pAMM route's Uniswap V3 fallback fill clears the floor the router checks.
+    ///
+    /// `floor` is `min_amount_out`: the venue quote, less fees, less the slippage the user
+    /// accepted. The fallback pays less than the venue quote, and when it pays less than the floor
+    /// the router reverts. Lowering the floor to fit would hand the user less than the slippage
+    /// they accepted, so the quote is dropped instead.
+    ///
+    /// A fallback fill credits `fallback_amount_out` less fees. Running the fee math at zero
+    /// slippage returns exactly that amount, which is what the on-chain post-fee check compares
+    /// against the floor.
+    fn fallback_clears_floor(
+        floor: &BigUint,
+        fallback_amount_out: &BigUint,
+        client_fee_bps: u16,
+        fee_rates: FeeRates,
+    ) -> Result<bool, EncodingError> {
+        let fallback_fill =
+            Self::calculate_fee_breakdown(fallback_amount_out, client_fee_bps, 0.0, fee_rates)?;
+        Ok(fallback_fill.min_amount_received() >= floor)
     }
 
     /// Mirrors the on-chain `FeeCalculator.calculateFee` using identical integer arithmetic.
@@ -1143,6 +1197,62 @@ mod tests {
             .unwrap();
 
         assert!(result[0].transaction().is_some());
+    }
+
+    /// Encodes one quote whose route carries `fallback_amount_out`, at 1% slippage on a quoted
+    /// 990 out.
+    async fn encode_with_fallback(fallback_amount_out: u64) -> OrderQuote {
+        let encoder = real_encoder();
+        let mut route = make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]);
+        route.set_fallback_amount_out(BigUint::from(fallback_amount_out));
+        let quote = make_order_quote(990).with_route(route);
+
+        encoder
+            .encode(vec![quote], EncodingOptions::new(0.01))
+            .await
+            .expect("encode")
+            .remove(0)
+    }
+
+    /// A fallback that pays less than the user's accepted slippage cannot be quoted: the floor
+    /// stays where the user put it, so the route would only revert.
+    #[tokio::test]
+    async fn test_encode_drops_pamm_quote_when_fallback_misses_the_floor() {
+        let quote = encode_with_fallback(500).await;
+
+        assert_eq!(quote.status(), QuoteStatus::NoRouteFound);
+        assert!(quote.transaction().is_none());
+        assert!(quote.fee_breakdown().is_none());
+    }
+
+    /// A fallback that clears the floor changes nothing: `min_amount_out` still describes the
+    /// venue quote less fees and the user's slippage.
+    #[tokio::test]
+    async fn test_encode_keeps_floor_when_fallback_clears_it() {
+        let encoder = real_encoder();
+        let venue_quote = make_order_quote(990)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+        let venue = encoder
+            .encode(vec![venue_quote], EncodingOptions::new(0.01))
+            .await
+            .expect("encode")
+            .remove(0);
+
+        let with_fallback = encode_with_fallback(985).await;
+
+        let venue_fees = venue
+            .fee_breakdown()
+            .expect("venue fee breakdown");
+        let fallback_fees = with_fallback
+            .fee_breakdown()
+            .expect("fallback fee breakdown");
+
+        assert_eq!(with_fallback.status(), QuoteStatus::Success);
+        assert!(with_fallback.transaction().is_some());
+        assert_eq!(fallback_fees.min_amount_received(), venue_fees.min_amount_received());
+        assert_eq!(fallback_fees.router_fee(), venue_fees.router_fee());
+        assert_eq!(fallback_fees.client_fee(), venue_fees.client_fee());
+        assert_eq!(fallback_fees.max_slippage(), venue_fees.max_slippage());
     }
 
     // ==================== Signature Offset Tests ====================

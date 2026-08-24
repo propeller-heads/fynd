@@ -10,9 +10,8 @@ use std::time::Duration;
 
 use alloy::{
     network::Ethereum,
-    primitives::{Address, Bytes as AlloyBytes, TxKind, U256},
-    providers::{Provider, ProviderBuilder, RootProvider},
-    rpc::types::TransactionRequest,
+    primitives::{Address, U256},
+    providers::{ProviderBuilder, RootProvider},
     sol,
     sol_types::SolCall,
 };
@@ -20,7 +19,10 @@ use tokio::time::{interval, MissedTickBehavior};
 use tracing::{info, warn};
 use tycho_simulation::tycho_common::Bytes;
 
-use crate::encoding::router_fees::{RouterFees, SharedRouterFees};
+use crate::{
+    encoding::router_fees::{RouterFees, SharedRouterFees},
+    rpc,
+};
 
 sol! {
     /// Mirror of the FeeCalculator's `CustomFees` storage struct.
@@ -91,14 +93,10 @@ impl RouterFeeFetcher {
         let url = rpc_url.parse().map_err(|e| {
             RouterFeeFetchError::Config(format!("invalid RPC URL {rpc_url:?}: {e}"))
         })?;
-        if router_address.len() != 20 {
-            return Err(RouterFeeFetchError::Config(format!(
-                "router address {router_address:?} is not 20 bytes"
-            )));
-        }
         Ok(Self {
             provider: ProviderBuilder::default().connect_http(url),
-            router_address: Address::from_slice(router_address.as_ref()),
+            router_address: rpc::to_address(router_address, "router address")
+                .map_err(RouterFeeFetchError::Config)?,
             shared_fees,
             refresh_interval,
         })
@@ -233,20 +231,9 @@ impl RouterFeeFetcher {
         method: &'static str,
         calldata: Vec<u8>,
     ) -> Result<C::Return, RouterFeeFetchError> {
-        let response = self
-            .provider
-            .call(TransactionRequest {
-                to: Some(TxKind::Call(contract)),
-                input: AlloyBytes::from(calldata).into(),
-                ..Default::default()
-            })
+        rpc::eth_call::<C>(&self.provider, contract, calldata)
             .await
-            .map_err(|e| RouterFeeFetchError::Call { method, contract, reason: e.to_string() })?;
-        C::abi_decode_returns(&response).map_err(|e| RouterFeeFetchError::Call {
-            method,
-            contract,
-            reason: format!("failed to decode response: {e}"),
-        })
+            .map_err(|reason| RouterFeeFetchError::Call { method, contract, reason })
     }
 }
 
@@ -254,7 +241,9 @@ impl RouterFeeFetcher {
 mod tests {
     use std::str::FromStr;
 
-    use alloy::{rpc::client::RpcClient, transports::mock::Asserter};
+    use alloy::{
+        primitives::Bytes as AlloyBytes, rpc::client::RpcClient, transports::mock::Asserter,
+    };
 
     use super::*;
 

@@ -15,7 +15,10 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 use num_cpus;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
-use tokio::{sync::broadcast, task::JoinHandle};
+use tokio::{
+    sync::broadcast,
+    task::{AbortHandle, JoinHandle},
+};
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
 #[cfg(feature = "experimental")]
 use tycho_simulation::evm::stream::BlockStepController;
@@ -43,6 +46,9 @@ use crate::{
     graph::EdgeWeightUpdaterWithDerived,
     price_guard::{
         guard::PriceGuard, provider::PriceProvider, provider_registry::PriceProviderRegistry,
+    },
+    propamm_fallback::{
+        fee_tier_fetcher::FeeTierFetcher, SharedFeeTiers, PROPAMM_ROUTER_ADDRESS, PROPAMM_VENUES,
     },
     types::constants::native_token,
     worker_pool::{
@@ -77,6 +83,9 @@ pub mod defaults {
     pub const METRICS_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
     /// How often router fees are refreshed from the on-chain FeeCalculator contract.
     pub const ROUTER_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+    /// How often the PropAMMRouter's Uniswap V3 fee tiers are refreshed. Governance changes them
+    /// rarely, so this is deliberately slower than a block.
+    pub const FALLBACK_FEE_TIER_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
     /// Delay before reconnecting to the Tycho feed after a disconnect.
     pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
     /// Minimum number of solver pool responses required before returning a quote (`0` = wait for
@@ -304,6 +313,10 @@ pub enum SolverBuildError {
     /// The router fee fetcher could not be created (e.g. malformed RPC URL).
     #[error("failed to create router fee fetcher: {0}")]
     RouterFeeFetcher(String),
+    /// The PropAMMRouter fee tier fetcher could not be created (e.g. malformed RPC URL, or a
+    /// malformed router or venue address constant).
+    #[error("failed to create fallback fee tier fetcher: {0}")]
+    FeeTierFetcher(String),
     /// A worker pool referenced an algorithm name that is not registered.
     #[error(transparent)]
     UnknownAlgorithm(#[from] UnknownAlgorithmError),
@@ -389,6 +402,7 @@ struct BuiltComponents {
     tycho_feed: TychoFeed,
     gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
     router_fee_fetcher: Option<RouterFeeFetcher>,
+    fee_tier_fetcher: Option<FeeTierFetcher>,
     computation_manager: ComputationManager,
     computation_event_rx: broadcast::Receiver<MarketEvent>,
     computation_shutdown_tx: broadcast::Sender<()>,
@@ -756,6 +770,8 @@ impl FyndBuilder {
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
+        // Created before the pools so every worker reads the same tiers the fetcher refreshes.
+        let fallback_fee_tiers = SharedFeeTiers::default();
 
         let pools = std::mem::take(&mut self.pools);
 
@@ -795,7 +811,8 @@ impl FyndBuilder {
                         .algorithm_config(algo_cfg)
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
-                        .liquidity_scope(pool_scope);
+                        .liquidity_scope(pool_scope)
+                        .fallback_fee_tiers(fallback_fee_tiers.clone());
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),
@@ -815,7 +832,8 @@ impl FyndBuilder {
                         .algorithm_config(algo_cfg)
                         .num_workers(custom.num_workers)
                         .task_queue_capacity(custom.task_queue_capacity)
-                        .liquidity_scope(pool_scope);
+                        .liquidity_scope(pool_scope)
+                        .fallback_fee_tiers(fallback_fee_tiers.clone());
                     let builder = (custom.configure)(builder);
                     builder.build(
                         market_data.clone(),
@@ -871,6 +889,39 @@ impl FyndBuilder {
             }
         };
 
+        // The PropAMMRouter is an Ethereum mainnet deployment, so no other chain has fee tiers to
+        // read. Without the fetcher the tiers stay empty and every pAMM route is dropped.
+        //
+        // The router and venue addresses are compile-time constants, so a malformed one is a typo
+        // that would silently lose that venue's fee tiers. Fail the build instead.
+        let fee_tier_fetcher = if chain == Chain::Ethereum {
+            let router = Bytes::from_str(PROPAMM_ROUTER_ADDRESS).map_err(|e| {
+                SolverBuildError::FeeTierFetcher(format!(
+                    "PropAMMRouter address {PROPAMM_ROUTER_ADDRESS}: {e}"
+                ))
+            })?;
+            let venues = PROPAMM_VENUES
+                .iter()
+                .map(|venue| {
+                    Bytes::from_str(venue).map_err(|e| {
+                        SolverBuildError::FeeTierFetcher(format!("pAMM venue {venue}: {e}"))
+                    })
+                })
+                .collect::<Result<Vec<Bytes>, _>>()?;
+            Some(
+                FeeTierFetcher::new(
+                    self.rpc_url.as_str(),
+                    &router,
+                    &venues,
+                    fallback_fee_tiers.clone(),
+                    defaults::FALLBACK_FEE_TIER_REFRESH_INTERVAL,
+                )
+                .map_err(|e| SolverBuildError::FeeTierFetcher(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
         // Only start price providers when the guard is enabled.
         // When disabled, per-request attempts to enable the guard return an error.
         let router_config = WorkerPoolRouterConfig::default()
@@ -893,6 +944,7 @@ impl FyndBuilder {
             tycho_feed,
             gas_price_fetcher,
             router_fee_fetcher,
+            fee_tier_fetcher,
             computation_manager,
             computation_event_rx,
             computation_shutdown_tx,
@@ -933,6 +985,10 @@ impl FyndBuilder {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
+        let fee_tier_handle = match c.fee_tier_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -949,6 +1005,7 @@ impl FyndBuilder {
             gas_price_handle,
             metrics_sampler_handle,
             router_fee_handle,
+            fee_tier_handle,
             computation_handle,
             computation_shutdown_tx: c.computation_shutdown_tx,
             chain: c.chain,
@@ -997,6 +1054,10 @@ impl FyndBuilder {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
+        let fee_tier_handle = match c.fee_tier_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -1019,6 +1080,7 @@ impl FyndBuilder {
                 gas_price_handle,
                 metrics_sampler_handle,
                 router_fee_handle,
+                fee_tier_handle,
                 computation_handle,
                 computation_shutdown_tx: c.computation_shutdown_tx,
                 chain: c.chain,
@@ -1071,6 +1133,10 @@ impl FyndBuilder {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
+        let fee_tier_handle = match c.fee_tier_fetcher {
+            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
+            None => tokio::spawn(async {}),
+        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -1093,6 +1159,7 @@ impl FyndBuilder {
                 gas_price_handle,
                 metrics_sampler_handle,
                 router_fee_handle,
+                fee_tier_handle,
                 computation_handle,
                 computation_shutdown_tx: c.computation_shutdown_tx,
                 chain: c.chain,
@@ -1115,6 +1182,7 @@ pub struct Solver {
     gas_price_handle: JoinHandle<()>,
     metrics_sampler_handle: JoinHandle<()>,
     router_fee_handle: JoinHandle<()>,
+    fee_tier_handle: JoinHandle<()>,
     computation_handle: JoinHandle<()>,
     computation_shutdown_tx: broadcast::Sender<()>,
     chain: Chain,
@@ -1366,6 +1434,7 @@ impl Solver {
         let gas_price_handle = tokio::spawn(async { /* no-op */ });
         let metrics_sampler_handle = tokio::spawn(async { /* no-op */ });
         let router_fee_handle = tokio::spawn(async { /* no-op */ });
+        let fee_tier_handle = tokio::spawn(async { /* no-op */ });
 
         Ok(Solver {
             router,
@@ -1377,6 +1446,7 @@ impl Solver {
             gas_price_handle,
             metrics_sampler_handle,
             router_fee_handle,
+            fee_tier_handle,
             computation_handle,
             computation_shutdown_tx,
             chain,
@@ -1395,6 +1465,7 @@ impl Solver {
         self.gas_price_handle.abort();
         self.metrics_sampler_handle.abort();
         self.router_fee_handle.abort();
+        self.fee_tier_handle.abort();
     }
 
     /// Consumes the solver into its raw parts for callers that add their own layer.
@@ -1409,6 +1480,7 @@ impl Solver {
             gas_price_handle: self.gas_price_handle,
             metrics_sampler_handle: self.metrics_sampler_handle,
             router_fee_handle: self.router_fee_handle,
+            fee_tier_handle: self.fee_tier_handle,
             computation_handle: self.computation_handle,
             computation_shutdown_tx: self.computation_shutdown_tx,
             chain: self.chain,
@@ -1439,6 +1511,11 @@ pub struct SolverParts {
     metrics_sampler_handle: JoinHandle<()>,
     /// Background task refreshing router fees from the on-chain FeeCalculator.
     router_fee_handle: JoinHandle<()>,
+    /// Background task refreshing the PropAMMRouter's Uniswap V3 fee tiers.
+    ///
+    /// Handed out as an [`AbortHandle`] by [`SolverParts::fee_tier_abort_handle`] rather than by
+    /// [`SolverParts::into_components`], so adding it did not change that function's signature.
+    fee_tier_handle: JoinHandle<()>,
     /// Background task running the computation manager.
     computation_handle: JoinHandle<()>,
     /// Send a unit value on this channel to trigger a graceful computation-manager shutdown.
@@ -1478,6 +1555,15 @@ impl SolverParts {
     /// Returns a reference to the shared router fee configuration.
     pub fn router_fees(&self) -> &SharedRouterFees {
         &self.router_fees
+    }
+
+    /// Returns a handle that stops the task refreshing the PropAMMRouter's fee tiers.
+    ///
+    /// The handle outlives [`into_components`](Self::into_components), which drops the task's
+    /// `JoinHandle` and so detaches the task. Take this before calling it, and abort it wherever
+    /// the other background tasks are aborted.
+    pub fn fee_tier_abort_handle(&self) -> AbortHandle {
+        self.fee_tier_handle.abort_handle()
     }
 
     /// Consumes the parts and returns the router.

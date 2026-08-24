@@ -26,9 +26,12 @@ use crate::{
     feed::{
         events::{MarketEvent, MarketEventHandler},
         exclusivity::{remove_exclusive_components, scope_event},
-        market_data::MarketData,
+        market_data::{MarketData, MarketDataView, StateLabel},
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
+    propamm_fallback::{
+        fallback_amount_out, has_pamm_leg, FallbackAmountOut, FallbackPoolIndex, SharedFeeTiers,
+    },
     types::internal::SolveTask,
     worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
@@ -83,6 +86,10 @@ where
     pool_name: String,
     /// Which liquidity this worker ingests.
     liquidity_scope: LiquidityScope,
+    /// Uniswap V3 pools the PropAMMRouter can fall back to, kept current from market events.
+    fallback_pools: FallbackPoolIndex,
+    /// Fee tiers the PropAMMRouter falls back on, read from chain by `FeeTierFetcher`.
+    fallback_fee_tiers: SharedFeeTiers,
 }
 
 impl<A> SolverWorker<A>
@@ -121,13 +128,41 @@ where
             worker_id,
             pool_name,
             liquidity_scope: LiquidityScope::default(),
+            fallback_pools: FallbackPoolIndex::default(),
+            fallback_fee_tiers: SharedFeeTiers::default(),
         }
+    }
+
+    /// Sets the fee tiers used to locate a pAMM leg's Uniswap V3 fallback pool.
+    pub(crate) fn with_fallback_fee_tiers(mut self, fallback_fee_tiers: SharedFeeTiers) -> Self {
+        self.fallback_fee_tiers = fallback_fee_tiers;
+        self
     }
 
     /// Sets which liquidity this worker ingests.
     pub(crate) fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = scope;
         self
+    }
+
+    /// A read view of the market the solve runs against: the overlay `label` names, else the live
+    /// base state.
+    ///
+    /// # Errors
+    ///
+    /// [`SolveError::NotReady`] when `label` names no registered overlay.
+    async fn read_market(
+        &self,
+        label: Option<&StateLabel>,
+    ) -> Result<MarketDataView<'_>, SolveError> {
+        match label {
+            Some(label) => self
+                .market_data
+                .read_labeled(label)
+                .await
+                .map_err(|e| SolveError::NotReady(e.to_string())),
+            None => Ok(self.market_data.read().await),
+        }
     }
 
     /// Initializes the graph from MarketState.
@@ -149,6 +184,10 @@ where
 
         self.graph_manager
             .initialize_graph(&topology);
+        {
+            let market = self.market_data.read().await;
+            self.fallback_pools = FallbackPoolIndex::build(&market);
+        }
         self.initialized = true;
     }
 
@@ -163,6 +202,11 @@ where
         };
         match event {
             MarketEvent::MarketUpdated { .. } => {
+                {
+                    let market = self.market_data.read().await;
+                    self.fallback_pools
+                        .apply_event(&market, &event);
+                }
                 if let Err(e) = self
                     .graph_manager
                     .handle_event(&event)
@@ -220,14 +264,9 @@ where
         let (block_info, solved_against) = {
             // Read briefly to capture block info; drop the lock before solving so it is not held
             // across the algorithm's own read call.
-            let view = match params.state_label() {
-                Some(l) => self
-                    .market_data
-                    .read_labeled(l)
-                    .await
-                    .map_err(|e| SolveError::NotReady(e.to_string()))?,
-                None => self.market_data.read().await,
-            };
+            let view = self
+                .read_market(params.state_label())
+                .await?;
             let last_block = view
                 .last_updated()
                 .ok_or(SolveError::NotReady("No block info".to_string()))?;
@@ -265,7 +304,7 @@ where
                     .unwrap_or(BigUint::ZERO);
                 let gas_price = result.gas_price().clone();
                 let algo_price_impact = result.price_impact();
-                let route = result.into_route();
+                let mut route = result.into_route();
 
                 if let Err(err) = route.validate() {
                     error!(
@@ -278,6 +317,47 @@ where
                         "{} produced an invalid route: {err}",
                         self.algorithm.name()
                     )));
+                }
+
+                // A route with a pAMM leg needs the amount out its Uniswap V3 fallback would
+                // deliver: the encoder checks it against `min_amount_out` and drops the quote when
+                // it falls short. A route whose fallback cannot be priced is dropped here, because
+                // there is nothing to check that floor against.
+                if has_pamm_leg(&route) {
+                    let Some(fee_tiers) = self.fallback_fee_tiers.snapshot() else {
+                        debug!(
+                            order_id = %order.id(),
+                            "dropping pAMM route: the router's fee tiers are not read yet"
+                        );
+                        return Err(SolveError::no_route_found(order.id()));
+                    };
+                    // The same view the algorithm solved against, so the fallback is priced on the
+                    // requested overlay rather than the base state.
+                    let market = self
+                        .read_market(params.state_label())
+                        .await?;
+                    match fallback_amount_out(&route, &market, &fee_tiers, &self.fallback_pools) {
+                        FallbackAmountOut::AmountOut(amount) => {
+                            route.set_fallback_amount_out(amount)
+                        }
+                        FallbackAmountOut::NoFallbackPool { component_id, fee_tier } => {
+                            debug!(
+                                order_id = %order.id(),
+                                %component_id,
+                                fee_tier,
+                                "dropping pAMM route: no Uniswap V3 pool at the router's fee tier"
+                            );
+                            return Err(SolveError::no_route_found(order.id()));
+                        }
+                        FallbackAmountOut::NotPriceable { reason } => {
+                            debug!(
+                                order_id = %order.id(),
+                                %reason,
+                                "dropping pAMM route: the Uniswap V3 fallback could not be simulated"
+                            );
+                            return Err(SolveError::no_route_found(order.id()));
+                        }
+                    }
                 }
 
                 // This is a first naive approach to getting the total gas of this quote
@@ -646,6 +726,7 @@ mod tests {
             DerivedData,
         },
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+        propamm_fallback::PROPAMM_FALLBACK_PREFIX,
         types::{OrderSide, Route, RouteResult, Swap},
         AlgorithmError,
     };
@@ -780,6 +861,97 @@ mod tests {
             }
             other => panic!("expected AlgorithmError for invalid route, got {other:?}"),
         }
+    }
+
+    /// Mock algorithm that returns a single-leg route through a pAMM executed via the
+    /// PropAMMRouter. The market holds no Uniswap V3 pool for the pair, so the router's fallback
+    /// would revert and the worker must drop the route.
+    struct PropAMMRouteAlgorithm;
+
+    impl Algorithm for PropAMMRouteAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "propamm_route_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            _graph: &Self::GraphType,
+            _market: MarketData,
+            _label: Option<crate::feed::market_data::StateLabel>,
+            _derived: Option<SharedDerivedDataRef>,
+            _order: &Order,
+        ) -> Result<RouteResult, AlgorithmError> {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let swap = Swap::new(
+                "pamm".to_string(),
+                format!("{PROPAMM_FALLBACK_PREFIX}fermiswap"),
+                token_a.address.clone(),
+                token_b.address.clone(),
+                BigUint::from(100u64),
+                BigUint::from(200u64),
+                BigUint::from(1u64),
+                component("pamm", &[token_a.clone(), token_b.clone()]),
+                Box::new(MockProtocolSim::new(2.0)),
+            );
+            let route = Route::new(vec![swap], FxHashMap::default()).expect("non-empty route");
+            Ok(RouteResult::new(route, num_bigint::BigInt::from(200), BigUint::from(1u64)))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    /// Quotes the pAMM route above through a worker holding `fee_tiers`.
+    async fn quote_pamm_route(fee_tiers: SharedFeeTiers) -> Result<SingleOrderQuote, SolveError> {
+        let (market, _) = setup_market_weighted(vec![]);
+        let derived = DerivedData::new_shared();
+        let mut worker =
+            SolverWorker::new(market, derived, PropAMMRouteAlgorithm, 0, "test_pool".to_string())
+                .with_fallback_fee_tiers(fee_tiers);
+
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        worker
+            .quote(&ord, SolveParams::default())
+            .await
+    }
+
+    /// Without a Uniswap V3 pool at the router's fee tier the fallback reverts too, so there is no
+    /// fallback amount to check `min_amount_out` against.
+    #[tokio::test]
+    async fn test_quote_pamm_route_without_fallback_pool() {
+        let fee_tiers = SharedFeeTiers::default();
+        fee_tiers.set(crate::propamm_fallback::FeeTiers::new(3000));
+
+        let result = quote_pamm_route(fee_tiers).await;
+
+        assert!(
+            matches!(result, Err(SolveError::NoRouteFound { .. })),
+            "expected the unbacked pAMM route to be dropped, got {result:?}"
+        );
+    }
+
+    /// Before the fetcher reads the router's tiers there is no tier to price the fallback at, so
+    /// the route is dropped rather than priced against a guessed one.
+    #[tokio::test]
+    async fn test_quote_pamm_route_without_fee_tiers() {
+        let result = quote_pamm_route(SharedFeeTiers::default()).await;
+
+        assert!(
+            matches!(result, Err(SolveError::NoRouteFound { .. })),
+            "expected the pAMM route to be dropped, got {result:?}"
+        );
     }
 
     // ==================== wait_until_ready Tests ====================
