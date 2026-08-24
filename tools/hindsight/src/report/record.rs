@@ -93,6 +93,7 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
+            min_amount_out: None,
             quote: None,
             sandwich: None,
         };

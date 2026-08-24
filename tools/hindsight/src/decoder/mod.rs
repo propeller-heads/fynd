@@ -100,6 +100,12 @@ pub(crate) struct DecodedTrade {
     /// rebalances) or the route's gas could not be isolated from the trace.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settled_gas: Option<U256>,
+    /// The user's minimum acceptable output for this swap (their signed slippage limit), in
+    /// `token_out` native units, recovered from router calldata (`solvers::min_amount_out`) —
+    /// scanned in the root calldata first, then in the inner solver frame for venue-wrapped
+    /// transactions. `None` when no plausible limit was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_amount_out: Option<U256>,
     /// The solver's own off-chain quote for this swap, recovered from calldata (see
     /// `solvers::embedded_quote` for the solvers that declare one). Informational — it is what
     /// the venue compared against at decision time, as opposed to `amount_out`, which is what
@@ -330,6 +336,21 @@ impl<P: Provider> Decoder<P> {
         let quote = solvers::embedded_quote(&attribution.solver, &root.input, flow.swap.amount_in)
             .filter(|quote| solvers::plausible_quote(quote, flow.swap.amount_out));
 
+        // The user's signed slippage limit: scan the root calldata, then the inner solver
+        // frame — a venue wrapper (MetaMask, Relay) embeds the router call whose words the
+        // root-aligned scan cannot see.
+        let min_amount_out =
+            solvers::min_amount_out(&root.input, flow.swap.amount_in, flow.swap.amount_out)
+                .or_else(|| {
+                    trace::find_solver_frame(root, registry).and_then(|frame| {
+                        solvers::min_amount_out(
+                            &frame.input,
+                            flow.swap.amount_in,
+                            flow.swap.amount_out,
+                        )
+                    })
+                });
+
         Some(DecodedTrade {
             tx_hash: receipt.transaction_hash,
             block_number,
@@ -346,6 +367,7 @@ impl<P: Provider> Decoder<P> {
             venue_fee_in: flow.venue_fee_in,
             venue_fee_out: flow.venue_fee_out,
             settled_gas,
+            min_amount_out,
             quote,
             // The full receipts slice isn't available here (this fn only sees the one matched
             // transaction); the caller (`decode_block`) fills this in once decoding succeeds.

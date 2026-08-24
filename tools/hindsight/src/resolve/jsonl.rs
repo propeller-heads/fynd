@@ -343,6 +343,7 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
+            min_amount_out: None,
             quote: Some(SolverQuote {
                 amount_out: U256::from(70_400_409_935u64),
                 source: Some("relay".to_string()),
@@ -422,6 +423,7 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
+            min_amount_out: None,
             quote: None,
             sandwich: None,
         };
@@ -544,6 +546,7 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
+            min_amount_out: None,
             quote: None,
             sandwich: None,
         };
@@ -601,6 +604,7 @@ mod tests {
             venue_fee_in: None,
             venue_fee_out: None,
             settled_gas: None,
+            min_amount_out: None,
             quote: None,
             sandwich: None,
         };

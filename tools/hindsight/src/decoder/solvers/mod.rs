@@ -110,6 +110,38 @@ pub(crate) fn integrator(logs: &[Log]) -> Option<String> {
         .find_map(|(_, knowledge)| knowledge.integrator(logs))
 }
 
+/// The user's minimum acceptable output (their signed slippage limit), recovered from router
+/// calldata by a word scan.
+///
+/// Every major aggregator ABI encodes the pair `(amountIn, minReturn)` in adjacent calldata
+/// words — 1inch v6 `SwapDescription`, `KyberSwap` `SwapDescriptionV2`, Paraswap Augustus v6,
+/// Uniswap Universal Router's `V3_SWAP_EXACT_IN` — so the scan looks for a word equal to the
+/// swap's input amount whose successor is a plausible minimum: on-chain execution enforced
+/// `min ≤ settled`, and a floor of half the settled output rejects lookalike words (flags,
+/// deadlines) while accepting any realistic slippage tolerance. Returns `None` when no such
+/// pair exists; a missed extraction just leaves the record without a limit.
+pub(crate) fn min_amount_out(input: &[u8], amount_in: U256, settled_out: U256) -> Option<U256> {
+    if amount_in.is_zero() || settled_out.is_zero() || input.len() < 4 {
+        return None;
+    }
+    let words: Vec<U256> = input[4..]
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .map(|word| U256::from_be_slice(word))
+        .collect();
+    for window in words.windows(2) {
+        let (amount, candidate) = (window[0], window[1]);
+        if amount != amount_in || candidate.is_zero() {
+            continue;
+        }
+        if candidate <= settled_out && candidate >= settled_out / U256::from(2) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// The solver's off-chain quote declared in the transaction's calldata, when the attributed
 /// solver is known to embed one.
 pub(crate) fn embedded_quote(solver: &str, input: &[u8], amount_in: U256) -> Option<SolverQuote> {
@@ -282,6 +314,24 @@ mod tests {
         let ledger = TransferLedger::from_transaction(&logs, &[]);
         let input = kyberswap::swap_calldata(vec![collector]);
         assert_eq!(declared_output_fee("kyberswap", &input, &ledger, addr(11)), None);
+    }
+
+    #[test]
+    fn test_min_amount_out_adjacent_pair() {
+        // Calldata words: [noise, amount_in, min_out, noise]. Settled 1000, min 995.
+        let mut input = vec![0u8; 4];
+        for value in [7u64, 500, 995, 3] {
+            input.extend_from_slice(&U256::from(value).to_be_bytes::<32>());
+        }
+        let amount_in = U256::from(500u64);
+        assert_eq!(
+            min_amount_out(&input, amount_in, U256::from(1000u64)),
+            Some(U256::from(995u64))
+        );
+        // A candidate below half the settled output is rejected (lookalike word).
+        assert_eq!(min_amount_out(&input, amount_in, U256::from(2000u64)), None);
+        // A candidate above the settled output is impossible (execution enforced min <= out).
+        assert_eq!(min_amount_out(&input, amount_in, U256::from(900u64)), None);
     }
 
     #[test]
