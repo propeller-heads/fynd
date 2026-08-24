@@ -3148,7 +3148,7 @@ dependencies = [
 
 [[package]]
 name = "erc20-overrides"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3449,7 +3449,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
 name = "fynd"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "actix-web",
  "alloy",
@@ -3486,7 +3486,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-benchmark"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3510,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-client"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "alloy",
  "bytes",
@@ -3528,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-core"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "alloy",
  "async-channel",
@@ -3568,7 +3568,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-gas-audit"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3593,7 +3593,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3625,7 +3625,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc-types"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "bytes",
  "fynd-core",
@@ -3641,7 +3641,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-swap-cli"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3658,7 +3658,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-test-fixtures"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "anyhow",
  "fynd-core",
@@ -3676,7 +3676,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-tools-common"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3926,7 +3926,7 @@ dependencies = [
 
 [[package]]
 name = "hindsight"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "actix-web",
  "alloy",
@@ -5918,7 +5918,7 @@ dependencies = [
 
 [[package]]
 name = "record-market"
-version = "0.99.12"
+version = "0.99.13"
 dependencies = [
  "anyhow",
  "clap",
