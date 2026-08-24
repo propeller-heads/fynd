@@ -7,13 +7,10 @@
 //! - Uses an Algorithm to find routes through the market graph
 //! - Coordinates market event and solve task processing
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use num_bigint::BigUint;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 use tycho_simulation::tycho_core::Bytes;
 
@@ -58,6 +55,17 @@ fn record_solve_duration(pool_name: &str, solve_time: Duration) {
         .record(solve_time.as_secs_f64());
 }
 
+/// A task dequeued by this worker but waiting for its derived-data requirements, with the
+/// deadline at which it stops waiting and answers `NotReady`.
+///
+/// Keeping it as loop state, instead of awaiting readiness inline in the task branch, keeps
+/// market and derived events flowing during the wait; an inline await blocks the same
+/// select loop that consumes the completion the task is waiting for.
+struct ParkedTask {
+    task: SolveTask,
+    deadline: tokio::time::Instant,
+}
+
 /// A solver worker instance that maintains a market graph and processes solve requests.
 pub(crate) struct SolverWorker<A>
 where
@@ -76,8 +84,6 @@ where
     requirements: ComputationRequirements,
     /// Tracks readiness of required derived data computations.
     readiness_tracker: ReadinessTracker,
-    /// Notified when readiness state may have changed.
-    ready_notify: Arc<Notify>,
     /// Whether the graph has been initialized.
     initialized: bool,
     /// Worker identifier (for logging).
@@ -123,7 +129,6 @@ where
             derived_data,
             requirements: requirements.clone(),
             readiness_tracker: ReadinessTracker::new(requirements),
-            ready_notify: Arc::new(Notify::new()),
             initialized: false,
             worker_id,
             pool_name,
@@ -438,74 +443,119 @@ where
         Ok(SingleOrderQuote::new(order_quote, solve_time.as_millis() as u64))
     }
 
-    /// Waits for required derived data to become ready, or until timeout.
-    ///
-    /// Uses a Notify pattern to know when it's available to solve.
-    ///
-    /// Returns `Ok(())` if ready or no requirements, `Err` if timeout reached or computation
-    /// failed.
-    async fn wait_until_ready(&self, timeout: Duration) -> Result<(), SolveError> {
-        // Fast path: no requirements or already ready
+    /// The error for a task whose required computation failed for the current block.
+    fn blocked_error(&self) -> SolveError {
+        SolveError::ComputationFailed(format!(
+            "required computation failed for current block: {:?}",
+            self.readiness_tracker.missing()
+        ))
+    }
+
+    /// The error for a task whose readiness wait ran out of time.
+    fn not_ready_error(&self) -> SolveError {
+        SolveError::NotReady(format!(
+            "timeout waiting for derived data: missing {:?}",
+            self.readiness_tracker.missing()
+        ))
+    }
+
+    /// Updates readiness and edge weights from one derived-data event. Both live here so a
+    /// parked task is only released after the graph already reflects the event.
+    async fn apply_derived_event(&mut self, event: &DerivedDataEvent)
+    where
+        A::GraphManager: EdgeWeightUpdaterWithDerived,
+    {
+        self.readiness_tracker
+            .handle_event(event);
+        if let DerivedDataEvent::ComputationComplete { computation_id, block, .. } = event {
+            if self
+                .requirements
+                .is_required(computation_id)
+            {
+                let market = self.market_data.read().await;
+                let derived = self.derived_data.read().await;
+                let updated = self
+                    .graph_manager
+                    .update_edge_weights_with_derived(market, &derived);
+                debug!(
+                    self.worker_id,
+                    computation_id, block, updated, "updated edge weights with derived data"
+                );
+            }
+        }
+    }
+
+    /// Rebuilds edge weights from the store after the derived event stream lost
+    /// messages. The readiness projection is NOT rebuilt here, so a parked task whose
+    /// completion rode a dropped event still times out at its deadline, exactly as the
+    /// pre-park worker behaved on lag.
+    async fn recover_from_derived_lag(&mut self)
+    where
+        A::GraphManager: EdgeWeightUpdaterWithDerived,
+    {
+        let market = self.market_data.read().await;
+        let derived = self.derived_data.read().await;
+        let updated = self
+            .graph_manager
+            .update_edge_weights_with_derived(market, &derived);
+        debug!(self.worker_id, updated, "recovered edge weights after lag");
+    }
+
+    /// Handles a newly received task: executes it immediately when the algorithm's
+    /// requirements are already satisfied, fails fast when a required computation already
+    /// failed for this block, and otherwise returns it parked with the algorithm timeout
+    /// as its readiness deadline.
+    async fn handle_task(&mut self, task: SolveTask) -> Option<ParkedTask> {
         if !self
             .readiness_tracker
             .has_requirements() ||
             self.readiness_tracker.is_ready()
         {
-            return Ok(());
+            self.execute_task(task).await;
+            return None;
         }
-
-        let deadline = Instant::now() + timeout;
-
-        loop {
-            // Create notified future BEFORE checking state (important for race-free waiting)
-            let notified = self.ready_notify.notified();
-
-            // Check if ready
-            if self.readiness_tracker.is_ready() {
-                return Ok(());
-            }
-
-            // Check if blocked before waiting for a notification that may never come
-            if self
-                .readiness_tracker
-                .is_blocked_for_current_block()
-            {
-                return Err(SolveError::ComputationFailed(format!(
-                    "required computation failed for current block: {:?}",
-                    self.readiness_tracker.missing()
-                )));
-            }
-
-            // Calculate remaining time
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(SolveError::NotReady(format!(
-                    "timeout waiting for derived data: missing {:?}",
-                    self.readiness_tracker.missing()
-                )));
-            }
-
-            // Wait for notification or timeout
-            tokio::select! {
-                _ = tokio::time::sleep(remaining) => {
-                    return Err(SolveError::NotReady(format!(
-                        "timeout waiting for derived data: missing {:?}",
-                        self.readiness_tracker.missing()
-                    )));
-                }
-                _ = notified => {
-                    // Check if any require_fresh computation permanently failed this block
-                    if self.readiness_tracker.is_blocked_for_current_block() {
-                        return Err(SolveError::ComputationFailed(format!(
-                            "required computation failed for current block: {:?}",
-                            self.readiness_tracker.missing()
-                        )));
-                    }
-                    // Woken up by notify, loop to check readiness again
-                    continue;
-                }
-            }
+        if self
+            .readiness_tracker
+            .is_blocked_for_current_block()
+        {
+            let error = self.blocked_error();
+            warn!(self.worker_id, task_id = %task.id(), error = %error, "not ready to solve");
+            task.respond(Err(error));
+            return None;
         }
+        debug!(
+            self.worker_id,
+            task_id = %task.id(),
+            missing = ?self.readiness_tracker.missing(),
+            "task parked waiting for derived readiness"
+        );
+        Some(ParkedTask { task, deadline: tokio::time::Instant::now() + self.algorithm.timeout() })
+    }
+
+    /// Fails the parked task with `error` and clears the park.
+    fn fail_parked(&self, parked: &mut Option<ParkedTask>, error: SolveError) {
+        if let Some(parked) = parked.take() {
+            warn!(self.worker_id, task_id = %parked.task.id(), error = %error, "not ready to solve");
+            parked.task.respond(Err(error));
+        }
+    }
+
+    /// Executes the parked task now that its requirements are satisfied.
+    async fn release_parked(&mut self, parked: &mut Option<ParkedTask>) {
+        if let Some(parked) = parked.take() {
+            self.execute_task(parked.task).await;
+        }
+    }
+
+    /// Runs one solve and responds. The specific failure cause is already logged in
+    /// `quote()` and returned to the caller, so it is not re-logged here.
+    async fn execute_task(&mut self, task: SolveTask) {
+        let result = {
+            let params = task.params().clone();
+            let order = task.order();
+            self.quote(order, params).await
+        };
+        task.respond(result);
     }
 
     /// Runs the worker's main loop, processing market events and solve tasks.
@@ -535,14 +585,37 @@ where
         // disables the arm so the worker keeps solving with the last derived data it saw.
         let mut derived_closed = false;
 
+        // At most one task is in flight per worker: the task arm is disabled while one is
+        // parked, so queue order and the one-solve-per-worker model are preserved.
+        let mut parked: Option<ParkedTask> = None;
+
         loop {
+            // Snapshots for the guarded arms; they borrow nothing, and a disabled arm's
+            // expression is still evaluated (hence the deadline dummy below).
+            let deadline = parked
+                .as_ref()
+                .map(|parked| parked.deadline);
+            let parked_ready = parked.is_some() && self.readiness_tracker.is_ready();
+            let parked_blocked = parked.is_some() &&
+                !parked_ready &&
+                self.readiness_tracker
+                    .is_blocked_for_current_block();
+
             tokio::select! {
-                biased; // prioritize events in this order: shutdown, market update, derived data, solve task
+                biased; // priority: shutdown, readiness deadline, market, derived, park transitions, new task
 
                 // Check for shutdown
                 _ = shutdown_rx.recv() => {
                     info!(self.worker_id, "worker shutting down");
                     break;
+                }
+
+                // The parked task's wait budget ran out. Above the event arms so queued
+                // events cannot starve it between select iterations, and a completion
+                // racing the deadline loses.
+                _ = tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)), if deadline.is_some() => {
+                    let error = self.not_ready_error();
+                    self.fail_parked(&mut parked, error);
                 }
 
                 // Process market events
@@ -572,27 +645,7 @@ where
                 derived_result = derived_event_rx.recv(), if !derived_closed => {
                     match derived_result {
                         Ok(event) => {
-                            // Always update tracker with every event
-                            self.readiness_tracker.handle_event(&event);
-
-                            // Signal waiters that readiness may have changed
-                            self.ready_notify.notify_waiters();
-
-                            // Update edge weights when a relevant computation completes.
-                            if let DerivedDataEvent::ComputationComplete { computation_id, block, .. } = &event {
-                                if self.requirements.is_required(computation_id) {
-                                    let market = self.market_data.read().await;
-                                    let derived = self.derived_data.read().await;
-                                    let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
-                                    debug!(
-                                        self.worker_id,
-                                        computation_id,
-                                        block,
-                                        updated,
-                                        "updated edge weights with derived data"
-                                    );
-                                }
-                            }
+                            self.apply_derived_event(&event).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             warn!(self.worker_id, "derived event receiver closed; continuing with last derived data");
@@ -605,53 +658,34 @@ where
                                 "derived event receiver lagged, skipped {} events",
                                 skipped
                             );
-                            // Recover by updating with whatever derived data is available.
-                            let market = self.market_data.read().await;
-                            let derived = self.derived_data.read().await;
-                            let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
-                            debug!(
-                                self.worker_id,
-                                updated,
-                                "recovered edge weights after lag"
-                            );
+                            self.recover_from_derived_lag().await;
                         }
                     }
                 }
 
-                // Get next solve task
-                task = task_rx.recv() => {
+                // A required computation failed for the parked task's block.
+                _ = std::future::ready(()), if parked_blocked => {
+                    let error = self.blocked_error();
+                    self.fail_parked(&mut parked, error);
+                }
+
+                // The parked task's requirements are satisfied. Below the event arms, so
+                // when an event and this transition are ready in the same select poll
+                // the event is applied before the release.
+                _ = std::future::ready(()), if parked_ready => {
+                    self.release_parked(&mut parked).await;
+                }
+
+                // Take a new task only while none is parked.
+                task = task_rx.recv(), if parked.is_none() => {
                     match task.ok() {
                         Some(task) => {
-                            let task_id = task.id();
                             record_task_pickup_metrics(
                                 &self.pool_name,
                                 task.wait_time(),
                                 task_rx.len(),
                             );
-
-                            // Wait for derived data readiness before solving
-                            // Use algorithm timeout as the max wait time
-                            if let Err(e) = self.wait_until_ready(self.algorithm.timeout()).await {
-                                warn!(
-                                    self.worker_id,
-                                    task_id = %task_id,
-                                    error = %e,
-                                    "not ready to solve"
-                                );
-                                task.respond(Err(e));
-                                continue;
-                            }
-
-                            // Process the task
-                            let result = {
-                                let params = task.params().clone();
-                                let order = task.order();
-                                self.quote(order, params).await
-                            };
-
-                            // Send response. The specific failure cause is already logged in
-                            // `quote()` and returned to the caller, so we don't re-log here.
-                            task.respond(result);
+                            parked = self.handle_task(task).await;
                         }
                         None => {
                             // Channel closed, exit
@@ -662,6 +696,10 @@ where
                 }
             }
         }
+
+        // Every exit path answers a still-parked task deliberately instead of dropping its
+        // response channel (a drop reads as an internal malfunction at the caller).
+        self.fail_parked(&mut parked, SolveError::NotReady("worker shutting down".to_string()));
     }
 }
 
@@ -721,9 +759,7 @@ mod tests {
             test_utils::{component, order, setup_market_weighted, token, MockProtocolSim},
         },
         derived::{
-            computation::DerivedComputation,
-            computations::{SpotPriceComputation, TokenGasPriceComputation},
-            DerivedData,
+            computation::DerivedComputation, computations::SpotPriceComputation, DerivedData,
         },
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
         propamm_fallback::PROPAMM_FALLBACK_PREFIX,
@@ -733,19 +769,35 @@ mod tests {
 
     /// A minimal mock algorithm for testing the worker.
     /// Uses DepthAndPrice as the edge weight type to satisfy trait bounds.
+    /// Counts `find_best_route` invocations so tests can assert the solve actually RAN
+    /// (a positive signal), not merely that some error text was absent.
     struct MockAlgorithm {
         requirements: ComputationRequirements,
         timeout: Duration,
+        invocations: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl MockAlgorithm {
         fn new() -> Self {
-            Self { requirements: ComputationRequirements::none(), timeout: Duration::from_secs(1) }
+            Self {
+                requirements: ComputationRequirements::none(),
+                timeout: Duration::from_secs(1),
+                invocations: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
         }
 
         fn with_requirements(mut self, requirements: ComputationRequirements) -> Self {
             self.requirements = requirements;
             self
+        }
+
+        fn with_timeout(mut self, timeout: Duration) -> Self {
+            self.timeout = timeout;
+            self
+        }
+
+        fn invocations(&self) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+            self.invocations.clone()
         }
     }
 
@@ -765,6 +817,8 @@ mod tests {
             _derived: Option<SharedDerivedDataRef>,
             _order: &Order,
         ) -> Result<crate::types::RouteResult, crate::AlgorithmError> {
+            self.invocations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(crate::AlgorithmError::Other("not implemented".to_string()))
         }
 
@@ -954,312 +1008,98 @@ mod tests {
         );
     }
 
-    // ==================== wait_until_ready Tests ====================
+    // ==================== Readiness / parked-task Tests ====================
+    //
+    // These tests drive the real `run()` loop through channels on a paused clock:
+    // sleeps auto-advance only once every task is idle, so "the worker has parked
+    // the task" is a deterministic state.
 
-    #[tokio::test]
-    async fn wait_until_ready_returns_immediately_when_no_requirements() {
-        let (market, _) = setup_market_weighted(vec![]);
-        let derived = DerivedData::new_shared();
+    use tokio::sync::oneshot;
+    use uuid::Uuid;
 
-        let algorithm = MockAlgorithm::new();
-        let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
+    use crate::types::internal::SolveResult;
 
-        // Should return immediately since there are no requirements
-        let result = worker
-            .wait_until_ready(Duration::from_millis(10))
-            .await;
-        assert!(result.is_ok());
+    /// The channel handles driving one spawned worker `run()` loop.
+    struct RunningWorker {
+        market: MarketData,
+        _event_tx: broadcast::Sender<MarketEvent>,
+        derived_tx: broadcast::Sender<DerivedDataEvent>,
+        task_tx: async_channel::Sender<SolveTask>,
+        shutdown_tx: broadcast::Sender<()>,
+        handle: tokio::task::JoinHandle<()>,
     }
 
-    #[tokio::test]
-    async fn wait_until_ready_returns_immediately_when_already_ready() {
+    fn spawn_worker(algorithm: MockAlgorithm) -> RunningWorker {
         let (market, _) = setup_market_weighted(vec![]);
         let derived = DerivedData::new_shared();
-
-        let requirements = ComputationRequirements::none()
-            .allow_stale(SpotPriceComputation::ID)
-            .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
-
-        // Mark as ready by handling a completion event
-        worker
-            .readiness_tracker
-            .handle_event(&DerivedDataEvent::ComputationComplete {
-                computation_id: SpotPriceComputation::ID,
-                block: 1,
-                failed_items: vec![],
-            });
-
-        // Should return immediately since already ready
-        let result = worker
-            .wait_until_ready(Duration::from_millis(10))
-            .await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn wait_until_ready_times_out_when_not_ready() {
-        let (market, _) = setup_market_weighted(vec![]);
-        let derived = DerivedData::new_shared();
-
-        let requirements = ComputationRequirements::none()
-            .require_fresh(SpotPriceComputation::ID)
-            .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
-
-        // Should timeout since no events are received
-        let result = worker
-            .wait_until_ready(Duration::from_millis(50))
-            .await;
-
-        assert!(result.is_err());
-        match result {
-            Err(SolveError::NotReady(msg)) => {
-                assert!(msg.contains("timeout"));
-                assert!(msg.contains("spot_prices"));
-            }
-            other => panic!("Expected NotReady error, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn wait_until_ready_wakes_up_on_notify() {
-        let (market, _) = setup_market_weighted(vec![]);
-        let derived = DerivedData::new_shared();
-
-        let requirements = ComputationRequirements::none()
-            .require_fresh(SpotPriceComputation::ID)
-            .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
-
-        // Clone the notify handle to simulate the main loop notifying
-        let notify = worker.ready_notify.clone();
-
-        // Spawn a task that will notify after a short delay
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            notify.notify_waiters();
-        });
-
-        // wait_until_ready should wake up when notified but still timeout
-        // because we didn't actually update the tracker
-        let result = worker
-            .wait_until_ready(Duration::from_millis(100))
-            .await;
-
-        handle.await.unwrap();
-
-        // Should still timeout because notify woke us up but we're not actually ready
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn wait_until_ready_succeeds_when_notified_and_ready() {
-        let (market, _) = setup_market_weighted(vec![]);
-        let derived = DerivedData::new_shared();
-
-        let requirements = ComputationRequirements::none()
-            .require_fresh(SpotPriceComputation::ID)
-            .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
-
-        // Clone the notify handle and get a reference to the tracker
-        let notify = worker.ready_notify.clone();
-
-        // Spawn a task that will update tracker and notify
-        let handle = tokio::spawn({
-            // We need to update the tracker from outside, so we simulate
-            // what the main loop does: update tracker then notify
-            async move {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                notify.notify_waiters();
-            }
-        });
-
-        // Manually update the tracker to simulate what would happen in the main loop
-        // In real usage, the main loop updates tracker THEN notifies
-        worker
-            .readiness_tracker
-            .handle_event(&DerivedDataEvent::ComputationComplete {
-                computation_id: SpotPriceComputation::ID,
-                block: 1,
-                failed_items: vec![],
-            });
-
-        // Now wait - should succeed immediately since we're already ready
-        let result = worker
-            .wait_until_ready(Duration::from_millis(100))
-            .await;
-
-        handle.abort(); // Don't need to wait for the spawned task
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn notify_pattern_handles_multiple_waiters() {
-        let (market, _) = setup_market_weighted(vec![]);
-        let derived = DerivedData::new_shared();
-
-        let requirements = ComputationRequirements::none()
-            .allow_stale(TokenGasPriceComputation::ID)
-            .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
-
-        let notify = worker.ready_notify.clone();
-
-        // Spawn multiple waiting tasks
-        let notify1 = notify.clone();
-        let waiter1 = tokio::spawn(async move {
-            notify1.notified().await;
-            true
-        });
-
-        let notify2 = notify.clone();
-        let waiter2 = tokio::spawn(async move {
-            notify2.notified().await;
-            true
-        });
-
-        // Give waiters time to register
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Update tracker and notify all waiters
-        worker
-            .readiness_tracker
-            .handle_event(&DerivedDataEvent::ComputationComplete {
-                computation_id: TokenGasPriceComputation::ID,
-                block: 1,
-                failed_items: vec![],
-            });
-        notify.notify_waiters();
-
-        // Both waiters should complete
-        let (r1, r2) = tokio::join!(waiter1, waiter2);
-        assert!(r1.unwrap());
-        assert!(r2.unwrap());
-    }
-
-    #[tokio::test]
-    async fn wait_until_ready_returns_immediately_on_blocked_state() {
-        let (market, _) = setup_market_weighted(vec![]);
-        let derived = DerivedData::new_shared();
-
-        let requirements = ComputationRequirements::none()
-            .require_fresh(SpotPriceComputation::ID)
-            .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
-
-        // Mark the current block and record a failure for spot_prices
-        worker
-            .readiness_tracker
-            .handle_event(&DerivedDataEvent::NewBlock { block: 1 });
-        worker
-            .readiness_tracker
-            .handle_event(&DerivedDataEvent::ComputationFailed {
-                computation_id: SpotPriceComputation::ID,
-                block: 1,
-            });
-
-        // Notify AFTER wait_until_ready starts waiting (must arrive after the
-        // Notified future is registered, not before).
-        let notify = worker.ready_notify.clone();
-        let notifier = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            notify.notify_waiters();
-        });
-
-        // wait_until_ready is woken by the notification, then checks
-        // is_blocked_for_current_block() → true → returns Err immediately.
-        let result = worker
-            .wait_until_ready(Duration::from_secs(5))
-            .await;
-        notifier.await.unwrap();
-
-        match result {
-            Err(SolveError::ComputationFailed(msg)) => {
-                assert!(
-                    msg.contains("required computation failed"),
-                    "expected 'required computation failed' message, got: {msg}"
-                );
-            }
-            other => panic!("Expected ComputationFailed error, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn wait_until_ready_returns_blocked_when_failure_already_processed() {
-        let (market, _) = setup_market_weighted(vec![]);
-        let derived = DerivedData::new_shared();
-
-        let requirements = ComputationRequirements::none()
-            .require_fresh(SpotPriceComputation::ID)
-            .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
-
-        // Mark the current block and record a failure for spot_prices
-        worker
-            .readiness_tracker
-            .handle_event(&DerivedDataEvent::NewBlock { block: 1 });
-        worker
-            .readiness_tracker
-            .handle_event(&DerivedDataEvent::ComputationFailed {
-                computation_id: SpotPriceComputation::ID,
-                block: 1,
-            });
-
-        // Do NOT spawn a notifier — the failure was already processed
-        // before wait_until_ready starts. Without the is_blocked_for_current_block() check in the
-        // loop body, this hangs for 1 second and returns NotReady.
-        let result = worker
-            .wait_until_ready(Duration::from_secs(1))
-            .await;
-
-        match result {
-            Err(SolveError::ComputationFailed(msg)) => {
-                assert!(
-                    msg.contains("required computation failed"),
-                    "expected 'required computation failed' message, got: {msg}"
-                );
-            }
-            other => panic!("Expected ComputationFailed error, got {:?}", other),
-        }
-    }
-
-    // ==================== Integration Tests with run() ====================
-
-    #[tokio::test]
-    async fn worker_updates_tracker_and_notifies_on_derived_event() {
-        let (market, _) = setup_market_weighted(vec![]);
-        let derived = DerivedData::new_shared();
-
-        let requirements = ComputationRequirements::none()
-            .require_fresh(SpotPriceComputation::ID)
-            .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
-        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
-
-        // Create channels
-        let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
+        let mut worker =
+            SolverWorker::new(market.clone(), derived, algorithm, 0, "test_pool".to_string());
+        let (event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
         let (derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
-        let (_task_tx, task_rx) = async_channel::bounded::<crate::types::internal::SolveTask>(16);
+        let (task_tx, task_rx) = async_channel::unbounded::<SolveTask>();
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-
-        // Spawn worker
         let handle = tokio::spawn(async move {
             worker
                 .run(event_rx, derived_rx, task_rx, shutdown_rx)
                 .await;
         });
+        RunningWorker { market, _event_tx: event_tx, derived_tx, task_tx, shutdown_tx, handle }
+    }
 
-        // Send a derived data event
-        derived_tx
+    fn submit_task(task_tx: &async_channel::Sender<SolveTask>) -> oneshot::Receiver<SolveResult> {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (resp_tx, resp_rx) = oneshot::channel();
+        task_tx
+            .try_send(SolveTask::new(
+                Uuid::new_v4(),
+                order(&token_a, &token_b, 100, OrderSide::Sell),
+                resp_tx,
+            ))
+            .expect("task channel accepts the task");
+        resp_rx
+    }
+
+    /// Lets the paused runtime go idle. On the paused clock this sleep completes only
+    /// once every other task is parked waiting, so everything sent so far has been
+    /// processed; the 1ms it adds to the readiness clock is irrelevant to the 500ms
+    /// test deadlines.
+    async fn worker_idle() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    fn fresh_spot_prices() -> ComputationRequirements {
+        ComputationRequirements::none()
+            .require_fresh(SpotPriceComputation::ID)
+            .unwrap()
+    }
+
+    /// A completion received after task pickup must release the parked solve.
+    #[tokio::test(start_paused = true)]
+    async fn test_completion_after_pickup_releases_parked_solve() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_millis(500));
+        let invocations = algorithm.invocations();
+        let worker = spawn_worker(algorithm);
+
+        let resp = submit_task(&worker.task_tx);
+        worker_idle().await;
+        assert_eq!(
+            worker.task_tx.len(),
+            0,
+            "the worker must pick up and park the task before the completion arrives"
+        );
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the solve must not run before its requirements are met"
+        );
+
+        // Before this fix, the inline wait blocked this same loop from receiving
+        // the completion.
+        worker
+            .derived_tx
             .send(DerivedDataEvent::ComputationComplete {
                 computation_id: SpotPriceComputation::ID,
                 block: 1,
@@ -1267,16 +1107,482 @@ mod tests {
             })
             .unwrap();
 
-        // Give worker time to process
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Shutdown
-        let _ = shutdown_tx.send(());
-
-        tokio::time::timeout(Duration::from_secs(1), handle)
+        let result = resp
             .await
-            .expect("worker should shutdown")
-            .expect("worker task should not panic");
+            .expect("the worker answers the parked task");
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the completion delivered during the wait must release the solve, got {result:?}"
+        );
+        assert!(
+            matches!(result, Err(SolveError::AlgorithmError(_))),
+            "the mock's own error proves the algorithm ran, got {result:?}"
+        );
+
+        let _ = worker.shutdown_tx.send(());
+        let _ = worker.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_readiness_timeout() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_millis(500));
+        let invocations = algorithm.invocations();
+        let worker = spawn_worker(algorithm);
+
+        let resp = submit_task(&worker.task_tx);
+        let result = resp
+            .await
+            .expect("the worker answers the parked task");
+        match result {
+            Err(SolveError::NotReady(msg)) => {
+                assert!(msg.contains("timeout"), "unexpected message: {msg}");
+                assert!(msg.contains("spot_prices"), "unexpected message: {msg}");
+            }
+            other => panic!("expected NotReady, got {other:?}"),
+        }
+        assert_eq!(invocations.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let _ = worker.shutdown_tx.send(());
+        let _ = worker.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_failure_during_wait() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_secs(5));
+        let worker = spawn_worker(algorithm);
+
+        // The tracker records a failure only for its CURRENT block, so pin it first.
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::NewBlock { block: 1 })
+            .unwrap();
+        worker_idle().await;
+
+        let resp = submit_task(&worker.task_tx);
+        worker_idle().await;
+
+        // A failure received while the task is parked must fail it immediately.
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::ComputationFailed {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+            })
+            .unwrap();
+
+        let result = resp
+            .await
+            .expect("the worker answers the parked task");
+        match result {
+            Err(SolveError::ComputationFailed(msg)) => {
+                assert!(msg.contains("required computation failed"), "unexpected message: {msg}");
+            }
+            other => panic!("expected ComputationFailed, got {other:?}"),
+        }
+
+        let _ = worker.shutdown_tx.send(());
+        let _ = worker.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_failed_block_rejected_on_admission() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_secs(5));
+        let worker = spawn_worker(algorithm);
+
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::NewBlock { block: 1 })
+            .unwrap();
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::ComputationFailed {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+            })
+            .unwrap();
+        worker_idle().await;
+
+        let resp = submit_task(&worker.task_tx);
+        let result = resp
+            .await
+            .expect("the worker answers immediately");
+        assert!(
+            matches!(result, Err(SolveError::ComputationFailed(_))),
+            "an already-failed block must fail fast, got {result:?}"
+        );
+
+        let _ = worker.shutdown_tx.send(());
+        let _ = worker.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_shutdown_while_parked() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_secs(60));
+        let worker = spawn_worker(algorithm);
+
+        let resp = submit_task(&worker.task_tx);
+        worker_idle().await;
+
+        worker.shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), worker.handle)
+            .await
+            .expect("worker exits during a readiness wait")
+            .expect("worker does not panic");
+        let result = resp
+            .await
+            .expect("the parked task gets a deliberate answer on shutdown");
+        match result {
+            Err(SolveError::NotReady(msg)) => {
+                assert!(msg.contains("shutting down"), "unexpected message: {msg}");
+            }
+            other => panic!("expected NotReady on shutdown, got {other:?}"),
+        }
+    }
+
+    /// A failure and a LATER completion for the same block, both in the backlog when the
+    /// transitions are evaluated, must release the task: Ready wins over Blocked, the
+    /// same priority admission and the pre-park wait used.
+    #[tokio::test(start_paused = true)]
+    async fn test_completion_after_failure_releases_task() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_millis(500));
+        let invocations = algorithm.invocations();
+        let worker = spawn_worker(algorithm);
+
+        // The tracker records a failure only for its CURRENT block, so pin it first.
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::NewBlock { block: 1 })
+            .unwrap();
+        worker_idle().await;
+
+        let resp = submit_task(&worker.task_tx);
+        worker_idle().await;
+
+        // Queued back to back with no await between the sends, so the parked worker
+        // drains BOTH before it evaluates the release transitions.
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::ComputationFailed {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+            })
+            .unwrap();
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::ComputationComplete {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+                failed_items: vec![],
+            })
+            .unwrap();
+
+        let result = resp
+            .await
+            .expect("the worker answers the parked task");
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the completion behind the failure must still release the solve, got {result:?}"
+        );
+
+        let _ = worker.shutdown_tx.send(());
+        let _ = worker.handle.await;
+    }
+
+    /// The already-ready fast path stays differential with the pre-park worker: a task
+    /// admitted after its requirement completed executes immediately, no parking and no
+    /// deadline involved.
+    #[tokio::test(start_paused = true)]
+    async fn test_already_ready_task() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_millis(500));
+        let invocations = algorithm.invocations();
+        let worker = spawn_worker(algorithm);
+
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::ComputationComplete {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+                failed_items: vec![],
+            })
+            .unwrap();
+        worker_idle().await;
+
+        let resp = submit_task(&worker.task_tx);
+        let result = resp
+            .await
+            .expect("the worker answers the ready task");
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an already-ready task must execute immediately, got {result:?}"
+        );
+
+        let _ = worker.shutdown_tx.send(());
+        let _ = worker.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_second_task_stays_queued_while_parked() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_millis(500));
+        let invocations = algorithm.invocations();
+        let worker = spawn_worker(algorithm);
+
+        let resp_first = submit_task(&worker.task_tx);
+        let mut resp_second = submit_task(&worker.task_tx);
+        worker_idle().await;
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "nothing runs while the first task is parked"
+        );
+        assert!(
+            resp_second.try_recv().is_err(),
+            "the second task is not picked while the first is parked"
+        );
+        assert_eq!(worker.task_tx.len(), 1, "the second task stays queued");
+
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::ComputationComplete {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+                failed_items: vec![],
+            })
+            .unwrap();
+
+        let first = resp_first
+            .await
+            .expect("the first task is answered");
+        let second = resp_second
+            .await
+            .expect("the second task is answered after the first");
+        assert!(matches!(first, Err(SolveError::AlgorithmError(_))), "got {first:?}");
+        assert!(matches!(second, Err(SolveError::AlgorithmError(_))), "got {second:?}");
+        assert_eq!(invocations.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let _ = worker.shutdown_tx.send(());
+        let _ = worker.handle.await;
+    }
+
+    /// A queued newer block must defer the release: the parked solve runs only after the
+    /// event backlog is drained and readiness holds for the block the worker caught up to.
+    #[tokio::test(start_paused = true)]
+    async fn test_queued_newer_block_defers_release() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_millis(500));
+        let invocations = algorithm.invocations();
+        let worker = spawn_worker(algorithm);
+
+        let resp = submit_task(&worker.task_tx);
+        worker_idle().await;
+
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::ComputationComplete {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+                failed_items: vec![],
+            })
+            .unwrap();
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::NewBlock { block: 2 })
+            .unwrap();
+        worker_idle().await;
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "block-1 readiness must not release the solve with block 2 already queued"
+        );
+
+        // Production order: the market reaches block 2 before its derived completion.
+        worker
+            .market
+            .write()
+            .await
+            .update_last_updated(BlockInfo::new(2, "0x00".into(), 0));
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::ComputationComplete {
+                computation_id: SpotPriceComputation::ID,
+                block: 2,
+                failed_items: vec![],
+            })
+            .unwrap();
+        let result = resp
+            .await
+            .expect("the worker answers the parked task");
+        assert!(matches!(result, Err(SolveError::AlgorithmError(_))), "got {result:?}");
+        assert_eq!(invocations.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let _ = worker.shutdown_tx.send(());
+        let _ = worker.handle.await;
+    }
+
+    /// A caller that dropped its response receiver must not poison the worker: the
+    /// release still runs and the next task is served normally.
+    #[tokio::test(start_paused = true)]
+    async fn test_dropped_response_receiver() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_millis(500));
+        let invocations = algorithm.invocations();
+        let worker = spawn_worker(algorithm);
+
+        let resp = submit_task(&worker.task_tx);
+        worker_idle().await;
+        drop(resp);
+
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::ComputationComplete {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+                failed_items: vec![],
+            })
+            .unwrap();
+        worker_idle().await;
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the release runs even though nobody listens"
+        );
+
+        let resp = submit_task(&worker.task_tx);
+        let result = resp
+            .await
+            .expect("the next task is served normally");
+        assert!(matches!(result, Err(SolveError::AlgorithmError(_))), "got {result:?}");
+        assert_eq!(invocations.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let _ = worker.shutdown_tx.send(());
+        let _ = worker.handle.await;
+    }
+
+    /// Closing the market event channel exits the worker, and the parked task still gets
+    /// a deliberate answer through the exit drain.
+    #[tokio::test(start_paused = true)]
+    async fn test_closed_market_channel_answers_parked_task() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_secs(60));
+        let worker = spawn_worker(algorithm);
+
+        let resp = submit_task(&worker.task_tx);
+        worker_idle().await;
+        drop(worker._event_tx);
+
+        let result = resp
+            .await
+            .expect("the parked task gets a deliberate answer on exit");
+        match result {
+            Err(SolveError::NotReady(msg)) => {
+                assert!(msg.contains("shutting down"), "unexpected message: {msg}");
+            }
+            other => panic!("expected NotReady on exit, got {other:?}"),
+        }
+        tokio::time::timeout(Duration::from_secs(1), worker.handle)
+            .await
+            .expect("worker exits on a closed market channel")
+            .expect("worker does not panic");
+    }
+
+    /// A shutdown queued together with a releasing completion wins: the parked task is
+    /// answered, not solved.
+    #[tokio::test(start_paused = true)]
+    async fn test_shutdown_beats_simultaneous_completion() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_secs(60));
+        let invocations = algorithm.invocations();
+        let worker = spawn_worker(algorithm);
+
+        let resp = submit_task(&worker.task_tx);
+        worker_idle().await;
+
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::ComputationComplete {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+                failed_items: vec![],
+            })
+            .unwrap();
+        worker.shutdown_tx.send(()).unwrap();
+
+        let result = resp
+            .await
+            .expect("the parked task gets a deliberate answer");
+        assert!(matches!(result, Err(SolveError::NotReady(_))), "got {result:?}");
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "shutdown wins over a simultaneous completion"
+        );
+        let _ = worker.handle.await;
+    }
+
+    /// A completion that arrives after the deadline already answered the task must not run
+    /// a stale solve; it readies the worker for the next task instead.
+    #[tokio::test(start_paused = true)]
+    async fn test_late_completion_only_serves_next_task() {
+        let algorithm = MockAlgorithm::new()
+            .with_requirements(fresh_spot_prices())
+            .with_timeout(Duration::from_millis(500));
+        let invocations = algorithm.invocations();
+        let worker = spawn_worker(algorithm);
+
+        let resp = submit_task(&worker.task_tx);
+        worker_idle().await;
+
+        // Advance exactly past the deadline, then queue the completion right behind the
+        // expiry: the deadline answer must stand.
+        tokio::time::advance(Duration::from_millis(500)).await;
+        worker
+            .derived_tx
+            .send(DerivedDataEvent::ComputationComplete {
+                computation_id: SpotPriceComputation::ID,
+                block: 1,
+                failed_items: vec![],
+            })
+            .unwrap();
+        let result = resp
+            .await
+            .expect("the worker answers the parked task");
+        assert!(matches!(result, Err(SolveError::NotReady(_))), "got {result:?}");
+        worker_idle().await;
+        assert_eq!(
+            invocations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a late completion must not resurrect the expired task"
+        );
+
+        let resp_next = submit_task(&worker.task_tx);
+        let result = resp_next
+            .await
+            .expect("the worker answers the next task");
+        assert!(matches!(result, Err(SolveError::AlgorithmError(_))), "got {result:?}");
+        assert_eq!(invocations.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let _ = worker.shutdown_tx.send(());
+        let _ = worker.handle.await;
     }
 
     /// Captures log output for assertions, shared between the subscriber and the test.
