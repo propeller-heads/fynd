@@ -4,6 +4,7 @@ use alloy::{
     primitives::{aliases::U48, keccak256, Address, Keccak256, U160, U256},
     sol_types::SolValue,
 };
+use metrics::counter;
 use num_bigint::BigUint;
 use tycho_execution::encoding::{
     errors::EncodingError,
@@ -314,6 +315,7 @@ impl Encoder {
                         .map_or(0, |f| f.bps()),
                     fee_rates,
                 )? {
+                    counter!("propamm_fallback_quotes_total", "outcome" => "dropped").increment(1);
                     tracing::debug!(
                         order_id = %quote.order_id(),
                         %fallback,
@@ -324,6 +326,7 @@ impl Encoder {
                     quote.set_status(QuoteStatus::NoRouteFound);
                     continue;
                 }
+                counter!("propamm_fallback_quotes_total", "outcome" => "kept").increment(1);
             }
             to_encode.push((i, solution, fee_breakdown, fee_rates));
         }
