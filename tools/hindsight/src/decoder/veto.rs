@@ -41,6 +41,10 @@ pub(crate) enum Veto {
     /// trade cannot be read from the source that named it, and netting would answer a different
     /// question, so the transaction is dropped. Returned by `declared::declared_flow`.
     OutputNotFound,
+    /// The settling solver's calldata fixed the output and only bounded the input, and the sender
+    /// paid none of the input token, or more than that bound. Same reasoning as `OutputNotFound`
+    /// on the other side of the trade. Returned by `declared::declared_flow`.
+    InputNotFound,
     /// Part of the trade's value was taken by a fee on transfer: the token contract (or an
     /// unregistered fee) split a transfer, landing a significant share on an address that only
     /// accumulates — its fee wallet. Selling such a token, the fee nets into `amount_in`;

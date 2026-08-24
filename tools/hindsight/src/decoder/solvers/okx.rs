@@ -138,7 +138,7 @@ mod tests {
         .unwrap();
         assert_eq!(flow.tracked, Some(trader));
         assert_eq!(flow.token_in, usdt);
-        assert_eq!(flow.amount_in, U256::from(35_551_438u64));
+        assert_eq!(flow.amount_in, Some(U256::from(35_551_438u64)));
         assert_eq!(flow.token_out, token_out);
         assert_eq!(flow.amount_out, Some(U256::from(699_080_168_573_611_654_796_604_356u128)));
     }

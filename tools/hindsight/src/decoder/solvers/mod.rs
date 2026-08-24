@@ -25,26 +25,33 @@ use alloy::{
 
 use crate::decoder::veto::Veto;
 
-/// The trade a solver's own data states: always the two tokens and the input amount, plus
+/// The trade a solver's own data states: always the two tokens and one of the two amounts, plus
 /// whatever else its source happens to carry.
 ///
 /// One shape for every solver, whether it was read from calldata or from an event, because the
 /// caller does not care which — it cares which fields arrived. A field is `None` when the source
 /// could not carry it, so the absence is the instruction:
 ///
-/// - `amount_out` absent means the source stated no output (all calldata does this), so the caller
-///   recovers it from `output_recipient`'s receipt in the transfer ledger.
+/// - `amount_out` absent means the source stated no output (exact-input calldata does this), so the
+///   caller recovers it from `output_recipient`'s receipt in the transfer ledger.
+/// - `amount_in` absent means the source fixed the output and only bounded the input (exact-output
+///   calldata), so the caller recovers it from the payer's net payment.
 /// - `tracked` absent means the source did not name the trader, so the caller falls back to the
 ///   transaction sender.
+///
+/// One of the two amounts is always present: calldata fixes one side and bounds the other, and an
+/// event states both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct DeclaredSwap {
     /// `Address::ZERO` for native ETH.
     pub token_in: Address,
     /// `Address::ZERO` for native ETH.
     pub token_out: Address,
-    pub amount_in: U256,
-    /// The settled output, when the source stated it outright (an event). `None` for calldata,
-    /// which never carries one.
+    /// The amount spent, when the source stated it. `None` for exact-output calldata, which states
+    /// only `max_amount_in`.
+    pub amount_in: Option<U256>,
+    /// The settled output, when the source stated it outright (an event, or exact-output
+    /// calldata). `None` for exact-input calldata, which states only `min_amount_out`.
     pub amount_out: Option<U256>,
     /// The trader, when the source named them (an event's owner or sender).
     pub tracked: Option<Address>,
@@ -52,6 +59,9 @@ pub(crate) struct DeclaredSwap {
     /// so a reverted swap can still be judged against its floor, since a revert emits no logs to
     /// net a settled amount from.
     pub min_amount_out: Option<U256>,
+    /// The trader's on-chain enforced ceiling for `token_in`, on an exact-output swap — the swap
+    /// reverts above it. Bounds the recovered `amount_in`.
+    pub max_amount_in: Option<U256>,
     /// Who the output is paid to, when the calldata names them — whose receipt `amount_out` is
     /// recovered from when the source stated none.
     pub output_recipient: Option<Address>,
@@ -64,10 +74,10 @@ pub(crate) struct DeclaredSwap {
 }
 
 impl DeclaredSwap {
-    /// A swap read from a solver's **calldata**: the terms it enforces on-chain. No settled
-    /// output — calldata never carries one — so the caller recovers it from the recipient's
-    /// receipt. Add the recipient with [`DeclaredSwap::with_recipient`] and an off-chain quote
-    /// with [`DeclaredSwap::with_quote`].
+    /// A swap read from an **exact-input** solver call: the amount spent, and the floor the call
+    /// enforces on the output. No settled output — this calldata never carries one — so the caller
+    /// recovers it from the recipient's receipt. Add the recipient with
+    /// [`DeclaredSwap::with_recipient`] and an off-chain quote with [`DeclaredSwap::with_quote`].
     pub(crate) fn from_calldata(
         token_in: Address,
         token_out: Address,
@@ -77,10 +87,34 @@ impl DeclaredSwap {
         Self {
             token_in,
             token_out,
-            amount_in,
+            amount_in: Some(amount_in),
             amount_out: None,
             tracked: None,
             min_amount_out: Some(min_amount_out),
+            max_amount_in: None,
+            output_recipient: None,
+            declared_quote: None,
+            timestamp: None,
+        }
+    }
+
+    /// A swap read from an **exact-output** solver call: the output is fixed, so it is the settled
+    /// amount, and the input is only bounded by `max_amount_in`. The caller recovers the amount
+    /// actually spent from the payer's net payment.
+    pub(crate) fn from_calldata_exact_out(
+        token_in: Address,
+        token_out: Address,
+        amount_out: U256,
+        max_amount_in: U256,
+    ) -> Self {
+        Self {
+            token_in,
+            token_out,
+            amount_in: None,
+            amount_out: Some(amount_out),
+            tracked: None,
+            min_amount_out: None,
+            max_amount_in: Some(max_amount_in),
             output_recipient: None,
             declared_quote: None,
             timestamp: None,
@@ -88,8 +122,8 @@ impl DeclaredSwap {
     }
 
     /// A swap read from a solver's **event**: the trade it already executed, both amounts and the
-    /// trader stated outright. Nothing is left to recover. No floor — an event reports what
-    /// happened, not what was required.
+    /// trader stated outright. Nothing is left to recover. No floor or ceiling — an event reports
+    /// what happened, not what was required.
     pub(crate) fn from_event(
         tracked: Address,
         token_in: Address,
@@ -100,10 +134,11 @@ impl DeclaredSwap {
         Self {
             token_in,
             token_out,
-            amount_in,
+            amount_in: Some(amount_in),
             amount_out: Some(amount_out),
             tracked: Some(tracked),
             min_amount_out: None,
+            max_amount_in: None,
             output_recipient: None,
             declared_quote: None,
             timestamp: None,
