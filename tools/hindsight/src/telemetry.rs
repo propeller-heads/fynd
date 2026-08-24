@@ -96,6 +96,7 @@ pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
         Verdict::CoverageMiss => "coverage_miss",
         Verdict::Unsolvable => "unsolvable",
         Verdict::Sandwiched => "sandwiched",
+        Verdict::ImplausibleSettledAmount => "implausible_settled_amount",
     }
 }
 
@@ -317,9 +318,12 @@ fn record_state(
         .increment(1);
     }
 
-    let sandwiched = state.verdict == Verdict::Sandwiched;
+    // Neither a sandwich nor an implausible settled amount measures routing quality, so both
+    // stay out of the savings aggregates while keeping their own labelled trade count.
+    let excluded_from_savings =
+        matches!(state.verdict, Verdict::Sandwiched | Verdict::ImplausibleSettledAmount);
 
-    if above_floor && !sandwiched {
+    if above_floor && !excluded_from_savings {
         if let Some(bps) = state.deltas.raw_bps {
             histogram!(
                 SAVINGS_BPS,
@@ -338,7 +342,9 @@ fn record_state(
         return None;
     };
     let usd = prices.savings_usd(range.token_out, solved.amount_out, range.settled_amount_out)?;
-    if sandwiched {
+    if excluded_from_savings {
+        // The verdict already records why this delta is not routing quality; the outlier warning
+        // below is for deltas that claim to be.
         return Some(usd);
     }
 
