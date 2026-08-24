@@ -33,26 +33,34 @@
 //!
 //! # Whether the delay fits, per chain
 //!
-//! `Chain::try_block_time_secs` (tycho-common 0.363.0) against the seven address books in
-//! `registry::BUILTIN_CHAINS`. Only Ethereum is measured; the 570 ms column for every other chain
-//! is unknown, because both of its drivers — trades per block and node latency — are per chain.
+//! The batch is one round trip whose size scales with trades per block, so Ethereum's 570 ms is the
+//! **worst** case rather than a constant: a chain with a handful of aggregator trades per block
+//! costs about one call (~245 ms, latency rather than count), and a block with no decoded trades
+//! costs nothing extra.
 //!
-//! | chain | block time | trace + batch, Ethereum's numbers | verdict |
+//! Block times from `Chain::try_block_time_secs` (tycho-common 0.363.0), against the seven address
+//! books in `registry::BUILTIN_CHAINS`. Only Ethereum is measured — both cost drivers, trades per
+//! block and node latency, are per chain.
+//!
+//! | chain | block time | measured | headroom |
 //! |---|---|---|---|
-//! | ethereum | 12 s | 2.1 s | fits, ~18% of the budget |
-//! | base | 2 s | 2.1 s | must be measured |
-//! | polygon | 2 s | 2.1 s | must be measured |
-//! | arbitrum | 1 s | 2.1 s | already over budget before this |
-//! | bsc | 1 s | 2.1 s | already over budget before this |
-//! | unichain | 1 s | 2.1 s | already over budget before this |
-//! | robinhood | 1 s | 2.1 s | already over budget before this |
+//! | ethereum | 12 s | 2.1 s for 17 trades | spare |
+//! | base | 2 s | not measured | tight |
+//! | polygon | 2 s | not measured | tight |
+//! | arbitrum | 1 s | not measured | none |
+//! | bsc | 1 s | not measured | none |
+//! | unichain | 1 s | not measured | none |
+//! | robinhood | 1 s | not measured | none |
 //!
-//! The four 1-second chains are over budget on the existing per-block trace alone, so this feature
-//! does not create that problem — it adds about a third to a path that already relies on
-//! `--max-lag-blocks` to skip ahead. Even on Ethereum the monitor already skips blocks under load:
-//! staging covered 3,183 distinct blocks against prod's 3,415 over the same range.
+//! Having no headroom does not make this infeasible on those chains. The monitor is already a
+//! sampling one: `--max-lag-blocks` exists because it cannot keep every block on a fast chain, and
+//! it skips blocks on Ethereum too — staging covered 3,183 distinct blocks against prod's 3,415
+//! over the same range. So the cost of this feature outside Ethereum is **sample rate**, not
+//! correctness. Roughly a third fewer blocks covered, against a comparison with no intra-block
+//! drift in it.
 //!
-//! That is the argument for making this **opt-in per chain** rather than always on.
+//! Whether that trade is worth taking depends on how many trades a day each chain needs for a
+//! stable number, which is why this should be **opt-in per chain**.
 //!
 //! # Open questions
 //!
