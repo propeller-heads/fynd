@@ -1,4 +1,22 @@
 
+## [0.99.14](https://github.com/propeller-heads/fynd/compare/0.99.12...0.99.14) (2026-08-24)
+
+### Features
+
+* **core:** count pAMM quotes dropped for a weak fallback ([aa75d1a](https://github.com/propeller-heads/fynd/commit/aa75d1a4d55ef044eb7c5c9d1659b20aee9fcae0))
+* **core:** drop a pAMM quote whose fallback misses the floor ([46c05b0](https://github.com/propeller-heads/fynd/commit/46c05b03b775f7037774fd34de4583bf10a354dc))
+* **core:** stamp the fallback amount out on pAMM routes ([4c0a8f3](https://github.com/propeller-heads/fynd/commit/4c0a8f362a75d03665ef51797ec4bcdfe1da8d01))
+* **core:** keep the fallback pool index current in each worker ([687c684](https://github.com/propeller-heads/fynd/commit/687c684da7d4d337071014d19dde77f368562ef9))
+* **core:** read the PropAMMRouter fee tiers from chain on a timer ([1158486](https://github.com/propeller-heads/fynd/commit/11584867e67b8ea9971571a3ff6de3aa73751754))
+* **core:** compute the route output when pAMM legs fall back ([b474bfb](https://github.com/propeller-heads/fynd/commit/b474bfb3c89bae07a58c411204c6c93bbf41134b))
+* report exclusive surplus in gas-token units ([049ca4b](https://github.com/propeller-heads/fynd/commit/049ca4b9ba5d7c54c2068b1cf7992e00377a0e60))
+
+### Bug Fixes
+
+* **core:** abort the fee tier fetcher on shutdown ([3cc41ad](https://github.com/propeller-heads/fynd/commit/3cc41ad1502658aa7288f2dd66f4e5ea16e872be))
+* **core:** price the pAMM fallback on the state it was solved on ([d378c45](https://github.com/propeller-heads/fynd/commit/d378c458788fb1ed67358d459c052edcdea2e7fd))
+
+
 ## [0.99.13](https://github.com/propeller-heads/fynd/compare/0.99.12...0.99.13) (2026-08-24)
 
 ### Features
