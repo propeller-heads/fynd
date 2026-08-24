@@ -21,6 +21,10 @@
 //! # Opt a protocol into streaming its exclusive pools:
 //! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
 //!            --protocols all_onchain,exclusive:ekubo_v3
+//!
+//! # Serve FermiSwap from the Titan pAMM price level stream instead of simulating it in the EVM:
+//! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
+//!            --protocols all_onchain,exclude:vm:fermiswap,pricelevelstream:fermiswap
 //! ```
 //!
 //! `--rpc-url` defaults to a chain-specific public endpoint. For production, provide a dedicated

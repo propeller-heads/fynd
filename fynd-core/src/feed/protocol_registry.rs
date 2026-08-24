@@ -1,5 +1,6 @@
 use std::{collections::HashMap, env, fmt, time::Duration};
 
+use tokio_stream::Stream;
 use tracing::{info, warn};
 use tycho_simulation::{
     evm::{
@@ -27,6 +28,8 @@ use tycho_simulation::{
         stream::ProtocolStreamBuilder,
         tycho_models::Chain,
     },
+    price_level_stream::{config::default_served_pamms, stream::PriceLevelStreamBuilder},
+    protocol::models::Update,
     rfq::{
         protocols::{
             bebop::{client_builder::BebopClientBuilder, state::BebopState},
@@ -35,6 +38,7 @@ use tycho_simulation::{
         stream::RFQStreamBuilder,
     },
     tycho_client::feed::component_tracker::ComponentFilter,
+    tycho_common::models::token::Token,
     tycho_core::Bytes,
 };
 
@@ -48,6 +52,69 @@ const EXCLUSIVE_PREFIX: &str = "exclusive:";
 /// Protocol systems that offer an exclusive-liquidity stream variant, i.e. the ones that may be
 /// requested with the `exclusive:` prefix.
 const EXCLUSIVE_CAPABLE_PROTOCOLS: &[&str] = &["ekubo_v3"];
+
+/// Marks a `--protocols` entry served from the Titan pAMM price level stream rather than from
+/// Tycho, e.g. `pricelevelstream:fermiswap`.
+const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
+
+/// Marks a component whose swaps execute through Titan's PropAMMRouter rather than against the
+/// venue directly, e.g. `propammfallback:fermiswap`.
+///
+/// tycho-simulation gives a venue on the router's on-chain whitelist this family instead of
+/// [`PRICE_LEVEL_STREAM_PREFIX`], so one `pricelevelstream:{venue}` entry can bring in components
+/// under either prefix depending on the whitelist. Fynd never requests this family: it names the
+/// venue, and the stream decides which of the two labels its components carry.
+const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
+
+/// Marks a `--protocols` entry served from an RFQ client rather than from Tycho, e.g.
+/// `rfq:bebop`.
+const RFQ_PREFIX: &str = "rfq:";
+
+/// Marks a `--protocols` entry that drops a protocol system from the list rather than adding one,
+/// e.g. `exclude:vm:fermiswap`.
+pub const EXCLUDE_PREFIX: &str = "exclude:";
+
+/// The only chain the Titan pAMM price level stream serves.
+///
+/// Tracks tycho-simulation's `default_served_pamms`, whose venue addresses are all Ethereum
+/// mainnet deployments; it carries no chain of its own, so this has to move when it gains a venue
+/// elsewhere.
+const PRICE_LEVEL_STREAM_CHAIN: Chain = Chain::Ethereum;
+
+/// Whether any requested protocol is streamed from Tycho.
+///
+/// The RFQ clients and the pAMM price level stream each connect to their own endpoint, so a list
+/// naming only those needs no Tycho protocol stream at all.
+pub(crate) fn has_tycho_protocols(protocols: &[String]) -> bool {
+    protocols.iter().any(|protocol| {
+        !protocol.starts_with(RFQ_PREFIX) && !protocol.starts_with(PRICE_LEVEL_STREAM_PREFIX)
+    })
+}
+
+/// Whether the components labelled `protocol_system` are the ones a `--protocols` entry asked for.
+///
+/// Most entries name their own label. A `pricelevelstream:{venue}` entry names the venue to
+/// stream, and its components arrive labelled `propammfallback:{venue}` when that venue is on the
+/// PropAMMRouter whitelist, so both prefixes answer for the same entry.
+pub fn matches_streamed_system(entry: &str, protocol_system: &str) -> bool {
+    if entry == protocol_system {
+        return true;
+    }
+    match (
+        entry.strip_prefix(PRICE_LEVEL_STREAM_PREFIX),
+        protocol_system.strip_prefix(PROPAMM_FALLBACK_PREFIX),
+    ) {
+        (Some(requested_venue), Some(streamed_venue)) => requested_venue == streamed_venue,
+        _ => false,
+    }
+}
+
+/// Whether any requested protocol is served by an RFQ client.
+pub(crate) fn has_rfq_protocols(protocols: &[String]) -> bool {
+    protocols
+        .iter()
+        .any(|protocol| protocol.starts_with(RFQ_PREFIX))
+}
 
 /// The `exclusive:` prefix was applied to a protocol system that has no exclusive variant.
 #[derive(Debug, thiserror::Error)]
@@ -95,6 +162,23 @@ impl ProtocolSpec {
         }
         Ok(Self { system: system.to_string(), exclusive: true })
     }
+}
+
+/// Parses a `--protocols` entry that drops a protocol system, e.g. `exclude:vm:fermiswap`.
+///
+/// Returns `None` for an entry that names a protocol to stream instead. The part after the prefix
+/// goes through [`ProtocolSpec::parse`], so `exclude:ekubo_v3` and `exclude:exclusive:ekubo_v3`
+/// both name the system `ekubo_v3` and a malformed exclusion fails the same way a malformed
+/// request does. An entry naming nothing (`exclude:`) yields an empty system for the caller to
+/// reject.
+///
+/// # Errors
+///
+/// Returns `UnsupportedExclusiveProtocol` when the excluded entry carries the `exclusive:` prefix
+/// for a protocol system that has no exclusive variant.
+pub fn parse_exclusion(entry: &str) -> Option<Result<String, UnsupportedExclusiveProtocol>> {
+    let excluded = entry.strip_prefix(EXCLUDE_PREFIX)?;
+    Some(ProtocolSpec::parse(excluded).map(|protocol| protocol.system))
 }
 
 impl fmt::Display for ProtocolSpec {
@@ -287,8 +371,9 @@ pub(crate) fn register_exchanges(
             "lunarbase" => {
                 builder = builder.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
             }
-            p if p.starts_with("rfq:") => {
-                // RFQ protocols are handled in register_rfq
+            p if p.starts_with(RFQ_PREFIX) || p.starts_with(PRICE_LEVEL_STREAM_PREFIX) => {
+                // Handled by register_rfq and open_price_level_stream, which stream from their
+                // own endpoints rather than from Tycho.
                 continue;
             }
             _ => {
@@ -332,7 +417,7 @@ pub(crate) fn register_rfq(
                 rfq_stream_builder = rfq_stream_builder
                     .add_client::<HashflowState>("hashflow", Box::new(hashflow_client));
             }
-            p if p.starts_with("rfq:") => {
+            p if p.starts_with(RFQ_PREFIX) => {
                 warn!("Skipping unknown RFQ protocol: {}", p);
             }
             _ => {}
@@ -341,12 +426,86 @@ pub(crate) fn register_rfq(
     Ok(rfq_stream_builder)
 }
 
+/// Opens the Titan pAMM price level stream for the requested `pricelevelstream:` venues.
+///
+/// Returns `None` when no entry names the stream. Every named venue must be one of the venues
+/// tycho-simulation knows how to execute against ([`default_served_pamms`]); a name outside that
+/// set is a configuration error rather than a warning, because these entries are always written
+/// by hand and a typo would otherwise silently stream nothing.
+///
+/// The stream reconnects on its own for as long as it is polled, so — unlike the RFQ clients —
+/// it needs no supervising task.
+///
+/// A venue served here may also be integrated as a Tycho protocol system (FermiSwap is also
+/// `vm:fermiswap`), in which case both price the same maker inventory. Streaming both
+/// double-counts that liquidity, so drop the Tycho one from `--protocols` instead.
+///
+/// # Errors
+///
+/// Returns [`DataFeedError::Config`] if the chain is not [`PRICE_LEVEL_STREAM_CHAIN`], or if an
+/// entry names a venue that is not served.
+pub(crate) fn open_price_level_stream(
+    chain: Chain,
+    protocols: &[String],
+    tokens: &HashMap<Bytes, Token>,
+) -> Result<Option<impl Stream<Item = Update> + Send>, DataFeedError> {
+    let venues: Vec<&str> = protocols
+        .iter()
+        .filter_map(|protocol| protocol.strip_prefix(PRICE_LEVEL_STREAM_PREFIX))
+        .collect();
+    if venues.is_empty() {
+        return Ok(None);
+    }
+    if chain != PRICE_LEVEL_STREAM_CHAIN {
+        return Err(DataFeedError::Config(format!(
+            "the pAMM price level stream serves {PRICE_LEVEL_STREAM_CHAIN} only, but this feed \
+             runs on {chain}"
+        )));
+    }
+
+    let served = default_served_pamms();
+    let mut builder = PriceLevelStreamBuilder::new().with_tokens(tokens.clone());
+    for venue in venues {
+        let Some(config) = served
+            .iter()
+            .find(|config| config.protocol == venue)
+        else {
+            return Err(DataFeedError::Config(format!(
+                "unknown pAMM '{venue}' for the price level stream; served venues are: {}",
+                served
+                    .iter()
+                    .map(|config| config.protocol.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        };
+        info!("Adding {PRICE_LEVEL_STREAM_PREFIX}{venue} price level venue...");
+        builder = builder.add_pamm(config.clone());
+    }
+    Ok(Some(builder.build()))
+}
+
+/// Opens the pAMM price level stream for test tooling (the benchmark's live capture).
+///
+/// Wrapper over [`open_price_level_stream`] so the capture serves the same venues as
+/// production without exposing the crate-private `DataFeedError`.
+#[cfg(feature = "test-utils")]
+pub fn open_price_level_stream_for_recording(
+    chain: Chain,
+    protocols: &[String],
+    tokens: &HashMap<Bytes, Token>,
+) -> Result<Option<impl Stream<Item = Update> + Send>, String> {
+    open_price_level_stream(chain, protocols, tokens).map_err(|e| e.to_string())
+}
+
 fn get_env(var: &str) -> Result<String, DataFeedError> {
     env::var(var).map_err(|_| DataFeedError::Config(format!("{} env var not set", var)))
 }
 
 #[cfg(test)]
 mod tests {
+    use tycho_simulation::price_level_stream::config::PRICE_LEVEL_STREAM_FAMILY;
+
     use super::*;
 
     fn register(entries: &[&str]) -> Result<ProtocolStreamBuilder, DataFeedError> {
@@ -357,6 +516,20 @@ mod tests {
                 .iter()
                 .map(|entry| (*entry).to_string())
                 .collect::<Vec<_>>(),
+        )
+    }
+
+    fn price_level_stream(
+        chain: Chain,
+        entries: &[&str],
+    ) -> Result<Option<impl Stream<Item = Update> + Send>, DataFeedError> {
+        open_price_level_stream(
+            chain,
+            &entries
+                .iter()
+                .map(|entry| (*entry).to_string())
+                .collect::<Vec<_>>(),
+            &HashMap::new(),
         )
     }
 
@@ -395,6 +568,48 @@ mod tests {
             ProtocolSpec::parse("vm:curve").unwrap(),
             ProtocolSpec { system: "vm:curve".to_string(), exclusive: false }
         );
+    }
+
+    #[test]
+    fn test_parse_exclusion() {
+        assert_eq!(
+            parse_exclusion("exclude:vm:fermiswap")
+                .unwrap()
+                .unwrap(),
+            "vm:fermiswap"
+        );
+    }
+
+    #[test]
+    fn test_parse_exclusion_strips_the_exclusive_prefix() {
+        assert_eq!(
+            parse_exclusion("exclude:exclusive:ekubo_v3")
+                .unwrap()
+                .unwrap(),
+            "ekubo_v3"
+        );
+    }
+
+    #[test]
+    fn test_parse_exclusion_rejects_unsupported_exclusive() {
+        assert!(parse_exclusion("exclude:exclusive:uniswap_v3")
+            .unwrap()
+            .is_err());
+    }
+
+    #[test]
+    fn test_parse_exclusion_without_protocol() {
+        assert_eq!(
+            parse_exclusion("exclude:")
+                .unwrap()
+                .unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_parse_exclusion_of_a_plain_entry() {
+        assert!(parse_exclusion("uniswap_v3").is_none());
     }
 
     #[test]
@@ -441,5 +656,105 @@ mod tests {
     #[test]
     fn test_register_exchanges_allows_repeated_protocol() {
         assert!(register(&["uniswap_v3", "uniswap_v3"]).is_ok());
+    }
+    #[test]
+    fn test_price_level_stream_prefix_matches_family() {
+        assert_eq!(PRICE_LEVEL_STREAM_PREFIX, format!("{PRICE_LEVEL_STREAM_FAMILY}:"));
+    }
+
+    #[test]
+    fn test_matches_streamed_system() {
+        assert!(matches_streamed_system("uniswap_v3", "uniswap_v3"));
+        assert!(matches_streamed_system(
+            "pricelevelstream:fermiswap",
+            "pricelevelstream:fermiswap"
+        ));
+        // The whitelisted venue arrives under the router's family for the same entry.
+        assert!(matches_streamed_system("pricelevelstream:fermiswap", "propammfallback:fermiswap"));
+    }
+
+    #[test]
+    fn test_matches_streamed_system_rejects_another_venue() {
+        assert!(!matches_streamed_system("pricelevelstream:fermiswap", "propammfallback:kipseli"));
+        assert!(!matches_streamed_system("pricelevelstream:fermiswap", "vm:fermiswap"));
+        assert!(!matches_streamed_system("uniswap_v3", "propammfallback:fermiswap"));
+        assert!(!matches_streamed_system("vm:fermiswap", "propammfallback:fermiswap"));
+    }
+
+    #[test]
+    fn test_has_tycho_protocols() {
+        assert!(has_tycho_protocols(&["uniswap_v3".to_string()]));
+        assert!(has_tycho_protocols(&["rfq:bebop".to_string(), "uniswap_v3".to_string()]));
+        assert!(!has_tycho_protocols(&[
+            "rfq:bebop".to_string(),
+            "pricelevelstream:fermiswap".to_string(),
+        ]));
+        assert!(!has_tycho_protocols(&[]));
+    }
+
+    #[test]
+    fn test_register_exchanges_skips_price_level_entries() {
+        assert!(register(&["uniswap_v3", "pricelevelstream:fermiswap"]).is_ok());
+    }
+
+    #[test]
+    fn test_open_price_level_stream_without_entries() {
+        let Ok(None) = price_level_stream(Chain::Ethereum, &["uniswap_v3", "rfq:bebop"]) else {
+            panic!("expected no price level stream without a `pricelevelstream:` entry");
+        };
+    }
+
+    #[test]
+    fn test_open_price_level_stream_served_venue() {
+        let Ok(Some(_)) = price_level_stream(Chain::Ethereum, &["pricelevelstream:fermiswap"])
+        else {
+            panic!("expected fermiswap to be served");
+        };
+    }
+
+    #[test]
+    fn test_open_price_level_stream_several_venues() {
+        let Ok(Some(_)) = price_level_stream(
+            Chain::Ethereum,
+            &["pricelevelstream:fermiswap", "pricelevelstream:kipseli"],
+        ) else {
+            panic!("expected both venues to be served");
+        };
+    }
+
+    #[test]
+    fn test_open_price_level_stream_unknown_venue() {
+        for entries in [
+            vec!["pricelevelstream:nope"],
+            vec!["pricelevelstream:fermiswap", "pricelevelstream:nope"],
+        ] {
+            let Err(err) = price_level_stream(Chain::Ethereum, &entries) else {
+                panic!("expected an unserved venue to be rejected in {entries:?}");
+            };
+            assert!(
+                err.to_string()
+                    .contains("unknown pAMM 'nope'"),
+                "got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_open_price_level_stream_without_entries_off_ethereum() {
+        let Ok(None) = price_level_stream(Chain::Base, &["uniswap_v3"]) else {
+            panic!("expected chains without a `pricelevelstream:` entry to be left alone");
+        };
+    }
+
+    #[test]
+    fn test_open_price_level_stream_other_chain() {
+        let Err(err) = price_level_stream(Chain::Base, &["pricelevelstream:fermiswap"]) else {
+            panic!("expected the price level stream to be rejected off Ethereum");
+        };
+        assert!(
+            err.to_string()
+                .contains("serves ethereum only"),
+            "got {err}"
+        );
     }
 }
