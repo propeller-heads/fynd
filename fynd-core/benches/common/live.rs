@@ -16,7 +16,8 @@ use std::{
 };
 
 use fynd_core::feed::protocol_registry::{
-    open_price_level_stream_for_recording, register_exchanges_for_recording,
+    matches_streamed_system, open_price_level_stream_for_recording,
+    register_exchanges_for_recording,
 };
 use num_bigint::BigUint;
 use tokio_stream::StreamExt;
@@ -212,10 +213,15 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
         .values()
         .map(|component| component.protocol_system.as_str())
         .collect();
+    let brought_components = |protocol: &str| {
+        present
+            .iter()
+            .any(|system| matches_streamed_system(protocol, system))
+    };
     let empty: Vec<&str> = protocols
         .iter()
         .map(String::as_str)
-        .filter(|protocol| !present.contains(protocol))
+        .filter(|protocol| !brought_components(protocol))
         .collect();
     // An explicitly included protocol bringing nothing is a different case: the run was asked for
     // it by name, and a typo there benches a market silently missing the venue -- especially with
@@ -224,7 +230,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
         .include_protocols
         .iter()
         .map(String::as_str)
-        .filter(|protocol| !present.contains(protocol))
+        .filter(|protocol| !brought_components(protocol))
         .collect();
     if !missing.is_empty() {
         return Err(format!(

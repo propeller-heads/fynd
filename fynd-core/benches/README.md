@@ -127,6 +127,12 @@ because of that frame, so a run that quietly loses it is benching a different ma
 `--exclude-protocols vm:fermiswap` is not optional bookkeeping. FermiSwap is reachable both ways
 and both price the same maker inventory, so leaving the VM one in double-counts it.
 
+A venue on the PropAMMRouter's on-chain whitelist arrives labelled `propammfallback:{venue}`
+instead, because its swaps execute through that router. The `--include-protocols` name stays
+`pricelevelstream:{venue}` either way: it names the venue, and the stream picks the label. The
+stream reads the whitelist through the node at the `RPC_URL` environment variable — `--rpc-url`
+does not set it, so passing the flag alone leaves every venue on the direct path.
+
 The profiler takes the same flags, so a slow order from a live run can be profiled against a fresh
 market: `./scripts/profile.sh --market live --config water_fill_d3 --orders 200`. It will be a
 different block, so it is a different market.

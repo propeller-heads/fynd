@@ -57,6 +57,15 @@ const EXCLUSIVE_CAPABLE_PROTOCOLS: &[&str] = &["ekubo_v3"];
 /// Tycho, e.g. `pricelevelstream:fermiswap`.
 const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
 
+/// Marks a component whose swaps execute through Titan's PropAMMRouter rather than against the
+/// venue directly, e.g. `propammfallback:fermiswap`.
+///
+/// tycho-simulation gives a venue on the router's on-chain whitelist this family instead of
+/// [`PRICE_LEVEL_STREAM_PREFIX`], so one `pricelevelstream:{venue}` entry can bring in components
+/// under either prefix depending on the whitelist. Fynd never requests this family: it names the
+/// venue, and the stream decides which of the two labels its components carry.
+const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
+
 /// Marks a `--protocols` entry served from an RFQ client rather than from Tycho, e.g.
 /// `rfq:bebop`.
 const RFQ_PREFIX: &str = "rfq:";
@@ -80,6 +89,24 @@ pub(crate) fn has_tycho_protocols(protocols: &[String]) -> bool {
     protocols.iter().any(|protocol| {
         !protocol.starts_with(RFQ_PREFIX) && !protocol.starts_with(PRICE_LEVEL_STREAM_PREFIX)
     })
+}
+
+/// Whether the components labelled `protocol_system` are the ones a `--protocols` entry asked for.
+///
+/// Most entries name their own label. A `pricelevelstream:{venue}` entry names the venue to
+/// stream, and its components arrive labelled `propammfallback:{venue}` when that venue is on the
+/// PropAMMRouter whitelist, so both prefixes answer for the same entry.
+pub fn matches_streamed_system(entry: &str, protocol_system: &str) -> bool {
+    if entry == protocol_system {
+        return true;
+    }
+    match (
+        entry.strip_prefix(PRICE_LEVEL_STREAM_PREFIX),
+        protocol_system.strip_prefix(PROPAMM_FALLBACK_PREFIX),
+    ) {
+        (Some(requested_venue), Some(streamed_venue)) => requested_venue == streamed_venue,
+        _ => false,
+    }
 }
 
 /// Whether any requested protocol is served by an RFQ client.
@@ -633,6 +660,25 @@ mod tests {
     #[test]
     fn test_price_level_stream_prefix_matches_family() {
         assert_eq!(PRICE_LEVEL_STREAM_PREFIX, format!("{PRICE_LEVEL_STREAM_FAMILY}:"));
+    }
+
+    #[test]
+    fn test_matches_streamed_system() {
+        assert!(matches_streamed_system("uniswap_v3", "uniswap_v3"));
+        assert!(matches_streamed_system(
+            "pricelevelstream:fermiswap",
+            "pricelevelstream:fermiswap"
+        ));
+        // The whitelisted venue arrives under the router's family for the same entry.
+        assert!(matches_streamed_system("pricelevelstream:fermiswap", "propammfallback:fermiswap"));
+    }
+
+    #[test]
+    fn test_matches_streamed_system_rejects_another_venue() {
+        assert!(!matches_streamed_system("pricelevelstream:fermiswap", "propammfallback:kipseli"));
+        assert!(!matches_streamed_system("pricelevelstream:fermiswap", "vm:fermiswap"));
+        assert!(!matches_streamed_system("uniswap_v3", "propammfallback:fermiswap"));
+        assert!(!matches_streamed_system("vm:fermiswap", "propammfallback:fermiswap"));
     }
 
     #[test]
