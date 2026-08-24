@@ -28,7 +28,10 @@ use crate::{
     feed::{events::MarketEvent, market_data::MarketData},
     propamm_fallback::SharedFeeTiers,
     types::internal::SolveTask,
-    worker_pool::worker::SolverWorker,
+    worker_pool::{
+        supervisor::{run_supervised, WorkerIdentity},
+        worker::SolverWorker,
+    },
     worker_pool_router::LiquidityScope,
 };
 
@@ -166,7 +169,7 @@ where
         let event_rx = params.event_rx.resubscribe();
         let derived_event_rx = params.derived_event_rx.resubscribe();
         let algorithm_config = params.algorithm_config.clone();
-        let shutdown_rx = params.shutdown_tx.subscribe();
+        let shutdown_tx = params.shutdown_tx.clone();
         let algorithm_name = params.algorithm.clone();
         let pool_name = params.pool_name.clone();
         let factory = factory.clone();
@@ -181,23 +184,39 @@ where
                     .build()
                     .expect("failed to create tokio runtime");
 
-                rt.block_on(async move {
-                    let algorithm = factory(algorithm_config);
+                let identity = WorkerIdentity {
+                    pool: pool_name.clone(),
+                    algorithm: algorithm_name,
+                    worker_id,
+                };
 
-                    let mut worker = SolverWorker::new(
-                        market_data,
-                        derived_data,
-                        algorithm,
-                        worker_id,
-                        pool_name,
-                    )
-                    .with_liquidity_scope(liquidity_scope)
-                    .with_fallback_fee_tiers(fallback_fee_tiers);
+                // Every input is rebuilt per attempt: a restarted worker rebuilds its graph from
+                // the shared market state, and picks up events from where it resubscribes rather
+                // than replaying what it missed while it was down.
+                run_supervised(&identity, &shutdown_tx, |shutdown_rx| {
+                    rt.block_on(async {
+                        let algorithm = factory(algorithm_config.clone());
 
-                    worker.initialize_graph().await;
-                    worker
-                        .run(event_rx, derived_event_rx, task_rx, shutdown_rx)
-                        .await;
+                        let mut worker = SolverWorker::new(
+                            market_data.clone(),
+                            Arc::clone(&derived_data),
+                            algorithm,
+                            worker_id,
+                            pool_name.clone(),
+                        )
+                        .with_liquidity_scope(liquidity_scope)
+                        .with_fallback_fee_tiers(fallback_fee_tiers.clone());
+
+                        worker.initialize_graph().await;
+                        worker
+                            .run(
+                                event_rx.resubscribe(),
+                                derived_event_rx.resubscribe(),
+                                task_rx.clone(),
+                                shutdown_rx,
+                            )
+                            .await;
+                    });
                 });
             })
             .expect("failed to spawn worker thread");
