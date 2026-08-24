@@ -11,6 +11,7 @@
 mod compare;
 pub(crate) mod jsonl;
 pub(crate) mod monitor;
+pub(crate) mod settled_at_top;
 
 use std::collections::HashMap;
 
@@ -247,6 +248,15 @@ pub(crate) struct RangeComparison {
     /// Evidence that a front-run and a back-run bracketed this trade (from the decoder). `None`
     /// when no bracket pair was found.
     pub sandwich: Option<SandwichEvidence>,
+    /// What the settled swap would have paid on state N-1 — the same state `top` was solved
+    /// against. `settled_amount_out` is what it really paid, at its own position inside block N,
+    /// so comparing `top` against this one removes intra-block drift, transaction position and MEV
+    /// from the difference.
+    ///
+    /// `None` when the re-simulation was not run or could not produce a figure; the reason is not
+    /// carried on the record, it is counted in the monitor's own metrics. See
+    /// [`settled_at_top`] — **not implemented yet**, so this is always `None`.
+    pub settled_amount_out_at_top: Option<U256>,
     /// Optimistic: solved at state N-1, before the block's swaps moved the pools.
     pub top: StateResult,
     /// Pessimistic: solved fresh at state N, after the block's swaps moved the pools — what
@@ -324,6 +334,8 @@ pub(crate) fn build_range(
         declared_quote: trade.declared_quote,
         quote_timestamp: trade.quote_timestamp,
         sandwich: trade.sandwich.clone(),
+        // `settled_at_top` is a sketch, so no re-simulation runs and this stays `None`.
+        settled_amount_out_at_top: None,
         top,
         back,
         verdict,

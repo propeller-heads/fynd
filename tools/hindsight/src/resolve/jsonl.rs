@@ -177,6 +177,11 @@ fn comparison_record(
         "quoted_amount_out": range.declared_quote.map(|amount| amount.to_string()),
         "quote_timestamp": range.quote_timestamp,
         "sandwich": range.sandwich,
+        // Always null: `resolve::settled_at_top` is a sketch. Here so the column the dashboard
+        // would read is visible in the proposal.
+        "settled_amount_out_at_top": range
+            .settled_amount_out_at_top
+            .map(|amount| amount.to_string()),
         "slippage": slippage,
         "top": state_record(&range.top, range, prices_top),
         "back": state_record(&range.back, range, prices_back),
