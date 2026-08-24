@@ -159,7 +159,7 @@ mod tests {
         let declared = terms(&real_input()).unwrap();
         assert_eq!(declared.token_in, TOKEN_IN);
         assert_eq!(declared.token_out, WETH);
-        assert_eq!(declared.amount_in, U256::from(AMOUNT_IN));
+        assert_eq!(declared.amount_in, Some(U256::from(AMOUNT_IN)));
         assert_eq!(declared.min_amount_out, Some(U256::from(FLOOR)));
         assert_eq!(declared.declared_quote, Some(U256::from(QUOTE)));
         // Calldata states no settled output, so the caller recovers it.

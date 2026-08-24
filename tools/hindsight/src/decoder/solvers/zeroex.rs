@@ -175,7 +175,7 @@ mod tests {
         let intent = terms(&settled_input()).unwrap();
         assert_eq!(intent.token_in, Address::ZERO); // 0x's native-ETH sentinel, normalized
         assert_eq!(intent.token_out, USDC);
-        assert_eq!(intent.amount_in, U256::from(214_715_436_309_542_453u64));
+        assert_eq!(intent.amount_in, Some(U256::from(214_715_436_309_542_453u64)));
         assert_eq!(intent.min_amount_out, Some(U256::from(388_129_000u64)));
         assert_eq!(intent.declared_quote, Some(U256::from(396_058_371u64)));
     }
@@ -193,7 +193,7 @@ mod tests {
         let intent = terms(&reverted_input()).unwrap();
         assert_eq!(intent.token_in, Address::ZERO);
         assert_eq!(intent.token_out, USDC);
-        assert_eq!(intent.amount_in, U256::from(2_018_128_791_326_365_345u64));
+        assert_eq!(intent.amount_in, Some(U256::from(2_018_128_791_326_365_345u64)));
         assert_eq!(intent.min_amount_out, Some(U256::from(3_643_640_000u64)));
         assert_eq!(intent.declared_quote, Some(U256::from(3_718_000_789u64)));
     }

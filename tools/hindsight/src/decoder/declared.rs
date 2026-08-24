@@ -55,14 +55,21 @@ pub(crate) fn declared_flow(
     else {
         return Ok(None);
     };
-    // An event states the output outright; calldata never does, so it is recovered from the
-    // recipient's receipt. That is the only difference between the two, and the label records it.
-    let (label, amount_out) = match declared.amount_out {
-        Some(amount_out) => ("solver-logs", amount_out),
-        None => (
-            "solver-calldata",
-            recover_output(&declared, transfer_ledger, sender).ok_or(Veto::OutputNotFound)?,
-        ),
+    // Calldata fixes one side of the trade and only bounds the other, so whichever side it left
+    // bounded is recovered from the transfers. An event states both and nothing is recovered,
+    // which is what the label records.
+    let label = if declared.amount_out.is_some() && declared.amount_in.is_some() {
+        "solver-logs"
+    } else {
+        "solver-calldata"
+    };
+    let amount_out = match declared.amount_out {
+        Some(amount_out) => amount_out,
+        None => recover_output(&declared, transfer_ledger, sender).ok_or(Veto::OutputNotFound)?,
+    };
+    let amount_in = match declared.amount_in {
+        Some(amount_in) => amount_in,
+        None => recover_input(&declared, transfer_ledger, sender).ok_or(Veto::InputNotFound)?,
     };
     // A quote is self-reported decoration: integrators sometimes fill it in a different token or
     // decimal basis, which would fabricate a huge slippage. One that far from the settled amount
@@ -76,7 +83,7 @@ pub(crate) fn declared_flow(
     let settled = SettledSwap {
         tracked: declared.tracked.unwrap_or(sender),
         token_in: declared.token_in,
-        amount_in: declared.amount_in,
+        amount_in,
         token_out: declared.token_out,
         amount_out,
     };
@@ -109,6 +116,37 @@ fn recover_output(
         return None;
     }
     Some(amount_out)
+}
+
+/// Recover an `amount_in` the solver's calldata did not state: an exact-output call fixes the
+/// output and only bounds the input, so what was spent is the payer's net payment of `token_in` —
+/// gross paid less any refund. A native-ETH input is overfunded up to the ceiling and the
+/// remainder is swept back, which is the refund this subtracts.
+///
+/// The payer is the transaction sender: a Permit2 pull names the trader as the sender of the
+/// transfer, and native ETH arrives as the transaction's own value.
+///
+/// `None` when the sender paid none of the token — the swap was funded from the router's own
+/// balance, which says nothing about what this trade spent — or more than the ceiling the same
+/// calldata enforces, which means the query read the wrong legs of a multi-order transaction. The
+/// caller drops the transaction on either, rather than letting netting answer instead.
+fn recover_input(
+    declared: &DeclaredSwap,
+    transfer_ledger: &TransferLedger,
+    sender: Address,
+) -> Option<U256> {
+    let paid = transfer_ledger.sent_by_address(sender, declared.token_in);
+    let refunded = transfer_ledger.received_by_address(sender, declared.token_in);
+    let amount_in = paid.saturating_sub(refunded);
+    if amount_in.is_zero() ||
+        amount_in >
+            declared
+                .max_amount_in
+                .unwrap_or(U256::MAX)
+    {
+        return None;
+    }
+    Some(amount_in)
 }
 
 #[cfg(test)]
@@ -247,6 +285,59 @@ mod tests {
             declared_flow(&root, &registry, &[], &ledger, sender).err(),
             Some(Veto::OutputNotFound)
         );
+    }
+
+    /// An exact-output read: the output is fixed at 500, the input bounded at 1,000.
+    fn exact_out() -> DeclaredSwap {
+        DeclaredSwap::from_calldata_exact_out(
+            TOKEN_IN,
+            Address::ZERO,
+            U256::from(500u64),
+            U256::from(1_000u64),
+        )
+    }
+
+    #[test]
+    fn test_recover_input_from_the_senders_payment() {
+        let sender = addr(1);
+        let logs = vec![make_transfer_log(TOKEN_IN, sender, addr(50), U256::from(900u64))];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+
+        assert_eq!(recover_input(&exact_out(), &ledger, sender), Some(U256::from(900u64)));
+    }
+
+    #[test]
+    fn test_recover_input_subtracts_the_swept_remainder() {
+        // The router is funded up to the ceiling and sweeps back what the swap did not need.
+        let sender = addr(1);
+        let router = addr(50);
+        let logs = vec![
+            make_transfer_log(TOKEN_IN, sender, router, U256::from(1_000u64)),
+            make_transfer_log(TOKEN_IN, router, sender, U256::from(150u64)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+
+        assert_eq!(recover_input(&exact_out(), &ledger, sender), Some(U256::from(850u64)));
+    }
+
+    #[test]
+    fn test_recover_input_without_a_payment_declines() {
+        // The swap was funded from the router's own balance, which says nothing about what this
+        // trade spent.
+        let ledger = TransferLedger::from_transaction(&[], &[]);
+
+        assert_eq!(recover_input(&exact_out(), &ledger, addr(1)), None);
+    }
+
+    #[test]
+    fn test_recover_input_above_the_ceiling_declines() {
+        // A settled swap stayed under its ceiling by construction, so a larger figure means the
+        // query read the wrong legs of a multi-order transaction.
+        let sender = addr(1);
+        let logs = vec![make_transfer_log(TOKEN_IN, sender, addr(50), U256::from(1_500u64))];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+
+        assert_eq!(recover_input(&exact_out(), &ledger, sender), None);
     }
 
     #[test]

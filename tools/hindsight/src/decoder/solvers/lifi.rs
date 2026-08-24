@@ -237,7 +237,7 @@ mod tests {
         .unwrap();
         assert_eq!(declared.tracked, Some(trader));
         assert_eq!(declared.token_in, Address::ZERO);
-        assert_eq!(declared.amount_in, U256::from(326_595_334_876_135_158u64));
+        assert_eq!(declared.amount_in, Some(U256::from(326_595_334_876_135_158u64)));
         assert_eq!(declared.token_out, usdt);
         assert_eq!(declared.amount_out, Some(U256::from(802_642_717u64)));
         // An event states the trade outright, so there is no floor to enforce.

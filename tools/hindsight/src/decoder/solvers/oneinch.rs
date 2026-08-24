@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(intent.token_in, TOKEN_IN);
         // The calldata names 1inch's native sentinel; the record's token_out is the zero address.
         assert_eq!(intent.token_out, Address::ZERO);
-        assert_eq!(intent.amount_in, U256::from(AMOUNT_IN));
+        assert_eq!(intent.amount_in, Some(U256::from(AMOUNT_IN)));
         assert_eq!(intent.min_amount_out, Some(U256::from(MIN_AMOUNT_OUT)));
         // `swap` carries no off-chain quote, so the floor is the best available promise.
         assert_eq!(intent.declared_quote, None);

@@ -223,7 +223,7 @@ mod tests {
         let intent = terms(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, "")).unwrap();
         assert_eq!(intent.token_in, src);
         assert_eq!(intent.token_out, dst);
-        assert_eq!(intent.amount_in, U256::from(1_000_000u64));
+        assert_eq!(intent.amount_in, Some(U256::from(1_000_000u64)));
         assert_eq!(intent.min_amount_out, Some(U256::from(990_000u64)));
         // No clientData quote declared: the accessor falls back to the floor.
         assert_eq!(intent.promised_amount_out().unwrap(), U256::from(990_000u64));
