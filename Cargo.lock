@@ -2044,6 +2044,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "balancer-maths-rust"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41d64ad259dd7ffe34754fb6f6a99e888fd18943bb0e620ae1e4b4e05c4f128f"
+dependencies = [
+ "alloy-primitives 1.6.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7915,9 +7926,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.360.0"
+version = "0.363.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f00318dc92d0925fd26e2beb3029d9464f1744c87404f1dfa22846c70952c696"
+checksum = "495509ca2849ab944e9a44b9be8c6a02762e810881193c7589bfb35490a9ac13"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7945,9 +7956,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.360.0"
+version = "0.363.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8b47d5eefc6ab03a3d1de312fbaf5811ab63e4a1c6d1ca90c1a0f9d5dbab61b"
+checksum = "cac008f37ad8c90010f345ddcba1645dc5e5a49bb9a1bd92ccdb6fe6e1adaf24"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -7974,9 +7985,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.360.0"
+version = "0.363.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84713120713a8f9b27d669ce6671f197c766dd5bbaca369cc5a88921fd258c60"
+checksum = "adefb46182ff889f10037f4d1180a8c977b69cdfda729b1f120efb4070870aa2"
 dependencies = [
  "alloy",
  "async-trait",
@@ -7996,9 +8007,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.360.0"
+version = "0.363.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6210d9f1bf4bd66735cae154b94169abbbced42544193d29292cec720752659"
+checksum = "749df85a0645dd7e2df6147caed3d9134a58d913df4c5267c7fbfac2b4b05246"
 dependencies = [
  "alloy",
  "chrono",
@@ -8018,15 +8029,16 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.360.0"
+version = "0.363.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e42606370dd6b4ef8f3dc530aca3b234b1485298ff91b8ae1de3b1aa78923001"
+checksum = "ad7dd495bc9260ec898d25cc0d1ff758a128b0ad89aec9985fbe8621dee443db"
 dependencies = [
  "alloy",
  "alloy-chains",
  "alloy-primitives 1.6.0",
  "async-stream",
  "async-trait",
+ "balancer-maths-rust",
  "chrono",
  "dotenv",
  "ekubo_sdk",
