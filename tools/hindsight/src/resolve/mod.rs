@@ -295,8 +295,12 @@ pub(crate) fn build_range(
     let slippage = compare::slippage(&top, reexecuted);
     let mut top = StateResult::new(top, trade.amount_out);
     let mut back = StateResult::new(back, trade.amount_out);
-    if trade.sandwich.is_some() {
-        for state in [&mut top, &mut back] {
+    // An implausible settled amount outranks a sandwich: if the settled output is not the trade's
+    // real output, then how MEV moved it is not the story either.
+    for state in [&mut top, &mut back] {
+        if compare::implausible_settled_amount(&state.outcome, trade.amount_out) {
+            state.verdict = Verdict::ImplausibleSettledAmount;
+        } else if trade.sandwich.is_some() {
             if let Outcome::Solved(_) = state.outcome {
                 state.verdict = Verdict::Sandwiched;
             }

@@ -70,6 +70,39 @@ pub(crate) enum Verdict {
     /// this is not a fair win or loss. The bps/USD deltas are still computed and written to
     /// JSONL for offline analysis; only the classification changes.
     Sandwiched,
+    /// Fynd's output is more than `MAX_WIN_RATIO` times the settled output, which no routing edge
+    /// produces: the settled amount this is measured against is not the trade's real output. Like
+    /// `Sandwiched`, the deltas are still written to JSONL so the record stays studyable, and the
+    /// classification keeps it out of the aggregates.
+    ImplausibleSettledAmount,
+}
+
+/// The most output Fynd can produce against a settled trade before the settled amount itself is
+/// the thing that must be wrong.
+///
+/// A real routing edge is a few percent, occasionally tens of percent on a thin pair. Above two
+/// orders of magnitude the comparison is not measuring routing: netting has paired the trade's
+/// input with a dust receipt, so the settled output belongs to a different trade or to no trade.
+/// Seen live on Ethereum: 3,555.90 USDC in, paired with 0.00000063 ETH out, reported as a
+/// $3,555.81 win because Fynd correctly quoted 1.44 ETH.
+///
+/// Measured over one staging day (2,527 solved-and-settled Ethereum records): the largest genuine
+/// win was 2.66x and the smallest broken one 1,472,381x, so anything in that gap separates them.
+/// 100x leaves both sides a wide margin.
+const MAX_WIN_RATIO: f64 = 100.0;
+
+/// Whether Fynd's output is too far above the settled output for the settled amount to be real.
+///
+/// Both amounts are in `token_out` units, so their ratio is unit-free and needs no prices. Only a
+/// solved outcome can be judged, and a settled amount of zero is left to the coverage buckets —
+/// there is no ratio to take.
+pub(crate) fn implausible_settled_amount(outcome: &Outcome, settled_amount_out: U256) -> bool {
+    let Outcome::Solved(solved) = outcome else {
+        return false;
+    };
+    let settled = usd::u256_to_f64(settled_amount_out);
+    let fynd = usd::u256_to_f64(solved.amount_out);
+    settled > 0.0 && fynd > MAX_WIN_RATIO * settled
 }
 
 /// Minimum fraction of the settled output Fynd must produce for the result to count as a real
@@ -137,6 +170,40 @@ pub(crate) fn verdict(outcome: &Outcome, deltas: &Deltas) -> Verdict {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_implausible_settled_amount_dust_pairing() {
+        // Live staging record 0x24edb6ad…: 3,555.90 USDC in, which netting paired with a
+        // 0.00000063 ETH receipt. Fynd correctly quoted 1.44 ETH, so the record claimed a
+        // $3,555.81 win — 2.29 billion times the settled output.
+        let outcome = solved(1_443_961_056_940_373_096, 1_443_961_056_940_373_096);
+        assert!(implausible_settled_amount(&outcome, U256::from(630_533_677u64)));
+    }
+
+    #[test]
+    fn test_largest_real_win_is_not_implausible() {
+        // The largest genuine win in the same staging day was 2.66x, far under the ceiling.
+        let outcome = solved(266, 266);
+        assert!(!implausible_settled_amount(&outcome, U256::from(100u64)));
+    }
+
+    #[test]
+    fn test_ratio_either_side_of_the_ceiling() {
+        // 100x is allowed; past it the settled amount is the thing that must be wrong.
+        assert!(!implausible_settled_amount(&solved(100, 100), U256::from(1u64)));
+        assert!(implausible_settled_amount(&solved(101, 101), U256::from(1u64)));
+    }
+
+    #[test]
+    fn test_zero_settled_and_unsolved_are_left_alone() {
+        // No ratio to take: a zero settled amount and an unsolved outcome belong to the coverage
+        // buckets, not here.
+        assert!(!implausible_settled_amount(&solved(1_000, 1_000), U256::ZERO));
+        assert!(!implausible_settled_amount(
+            &Outcome::Unsolvable("no route".to_string()),
+            U256::from(1u64)
+        ));
+    }
+
     use super::*;
     use crate::resolve::SolvedAmount;
 
