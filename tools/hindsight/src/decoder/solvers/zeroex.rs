@@ -110,12 +110,16 @@ impl SolverDecoder for ZeroEx {
     /// `minAmountOut`, the output side). `minAmountOut` is passed through as-is, including a
     /// legitimate zero (Settler's per-action slippage checks can leave the top-level floor at
     /// zero) — the intent is still worth recording, and the fillable/margin judgment already
-    /// treats a zero floor sanely (trivially fillable, no margin to compute). `amount_in_hint` is
-    /// unused: `AllowanceHolder`'s own parameter is the real amount, not a value to locate a field
-    /// by.
+    /// treats a zero floor sanely (trivially fillable, no margin to compute).
+    ///
+    /// `amount` is the allowance the taker authorises, which is normally the exact input — it
+    /// matched the netted `amount_in` on both audited trades. An unlimited approval passes
+    /// `U256::MAX` instead, which states no amount at all, so the transaction goes to netting.
+    /// Reading that sentinel as the amount spent asked the re-solve to sell `2^256 - 1` USDC and
+    /// scored the answer as a win worth tens of millions of dollars.
     fn declared(&self, input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         let Ok(call) = execCall::abi_decode(input) else { return Ok(None) };
-        if call.amount.is_zero() {
+        if call.amount.is_zero() || call.amount == U256::MAX {
             return Ok(None);
         }
         let Some(terms) = decode_execute(&call.data) else { return Ok(None) };
@@ -245,6 +249,30 @@ mod tests {
         };
         let input = execCall::abi_encode(&call);
         assert!(terms(&input).is_none());
+    }
+
+    #[test]
+    fn test_unlimited_allowance_rejected() {
+        // An unlimited approval authorises `U256::MAX` and states no amount. Seven live records
+        // read it as the amount spent, which asked the re-solve to sell 2^256 - 1 USDC and scored
+        // the answer as a win worth tens of millions of dollars.
+        let execute_call = executeCall {
+            slippage: AllowedSlippage {
+                recipient: RELAY_ROUTER,
+                buyToken: USDC,
+                minAmountOut: U256::from(1_000u64),
+            },
+            actions: vec![],
+            zidAndAffiliate: alloy::primitives::FixedBytes::default(),
+        };
+        let call = execCall {
+            operator: RELAY_ROUTER,
+            token: USDC,
+            amount: U256::MAX,
+            target: RELAY_ROUTER,
+            data: executeCall::abi_encode(&execute_call).into(),
+        };
+        assert!(terms(&execCall::abi_encode(&call)).is_none());
     }
 
     #[test]
