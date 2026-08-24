@@ -89,6 +89,7 @@ const V3_SWAP_EXACT_IN: u8 = 0x00;
 const V3_SWAP_EXACT_OUT: u8 = 0x01;
 const V2_SWAP_EXACT_IN: u8 = 0x08;
 const V2_SWAP_EXACT_OUT: u8 = 0x09;
+const SWEEP: u8 = 0x04;
 const WRAP_ETH: u8 = 0x0b;
 const UNWRAP_WETH: u8 = 0x0c;
 const V4_SWAP: u8 = 0x10;
@@ -146,6 +147,40 @@ struct Swap {
 
 /// A reader of one v4 swap action's params blob: single-pool or multi-hop, either side fixed.
 type ReadV4Params = fn(&[u8], Side) -> Option<Swap>;
+
+/// The command that pays the trade's output out to the trader, when the swap sent it to the router
+/// instead of naming an address.
+///
+/// A swap that pays the router names `ADDRESS_THIS` and enforces **no floor at all** — the floor
+/// moves to this command, along with the trader's address. Reading it matters twice over: without
+/// the address, `recover_output` falls back to the transaction sender, which for an ERC-4337
+/// bundle is the bundler; and without the floor there is nothing to reject the bundler's gas
+/// refund with.
+#[derive(Clone, Copy)]
+struct Payout {
+    /// The token paid out. `Address::ZERO` for `UNWRAP_WETH`, which always pays native ETH.
+    token: Address,
+    recipient: Address,
+    min_amount_out: U256,
+}
+
+/// `UNWRAP_WETH(address recipient, uint256 amountMinimum)`.
+fn read_unwrap(input: &[u8]) -> Option<Payout> {
+    Some(Payout {
+        token: Address::ZERO,
+        recipient: readable_recipient(address_at(input, 0)?)?,
+        min_amount_out: word(input, 1)?,
+    })
+}
+
+/// `SWEEP(address token, address recipient, uint256 amountMinimum)`.
+fn read_sweep(input: &[u8]) -> Option<Payout> {
+    Some(Payout {
+        token: address_at(input, 0)?,
+        recipient: readable_recipient(address_at(input, 1)?)?,
+        min_amount_out: word(input, 2)?,
+    })
+}
 
 /// Read the 32-byte word at `index`, or `None` when the input is shorter.
 fn word(input: &[u8], index: usize) -> Option<U256> {
@@ -429,6 +464,63 @@ fn trader_tokens(swap: &Swap, wrapped_before: bool, unwrapped_after: bool) -> (A
     (swap.token_in, swap.token_out)
 }
 
+/// Everything one `execute` command stream says about the trade.
+struct Stream {
+    swap: Swap,
+    /// A `WRAP_ETH` before the swap: the trader paid native ETH.
+    wrapped_before: bool,
+    /// An `UNWRAP_WETH` before the swap: the trader paid wrapped native into a native pool.
+    unwrapped_before: bool,
+    /// An `UNWRAP_WETH` after the swap: the trader is paid native ETH.
+    unwrapped_after: bool,
+    /// The first command after the swap that pays the output out.
+    payout: Option<Payout>,
+}
+
+/// Walk an `execute` command stream for its one swap and the commands around it.
+///
+/// `None` when the stream carries no swap, or more than one: a route split across commands has no
+/// single one that is the trade, whichever pool versions they name.
+fn read_stream(commands: &[u8], inputs: &[alloy::primitives::Bytes]) -> Option<Stream> {
+    let mut swap = None;
+    let mut wrapped_before = false;
+    let mut unwrapped_before = false;
+    let mut unwrapped_after = false;
+    let mut payout = None;
+    for (command, command_input) in commands.iter().zip(inputs.iter()) {
+        let read = match command & COMMAND_TYPE_MASK {
+            WRAP_ETH => {
+                wrapped_before |= swap.is_none();
+                continue;
+            }
+            UNWRAP_WETH => {
+                if swap.is_some() {
+                    unwrapped_after = true;
+                    payout = payout.or_else(|| read_unwrap(command_input));
+                } else {
+                    unwrapped_before = true;
+                }
+                continue;
+            }
+            SWEEP => {
+                if swap.is_some() {
+                    payout = payout.or_else(|| read_sweep(command_input));
+                }
+                continue;
+            }
+            V4_SWAP => read_v4_swap(command_input),
+            command @ (V3_SWAP_EXACT_IN | V2_SWAP_EXACT_IN | V3_SWAP_EXACT_OUT |
+            V2_SWAP_EXACT_OUT) => read_swap(command, command_input),
+            _ => continue,
+        };
+        if swap.is_some() {
+            return None;
+        }
+        swap = Some(read?);
+    }
+    Some(Stream { swap: swap?, wrapped_before, unwrapped_before, unwrapped_after, payout })
+}
+
 impl SolverDecoder for Uniswap {
     /// The trader's swap terms from the one swap in an `execute` command stream, whether it names a
     /// v2, v3 or v4 pool and whether it fixes the input or the output.
@@ -436,42 +528,15 @@ impl SolverDecoder for Uniswap {
     /// An exact-output swap states the settled output and only a ceiling on the input, so the
     /// caller recovers what was spent from the payer's net payment.
     ///
+    /// A swap that pays the router rather than the trader names neither a recipient nor a floor, so
+    /// both are taken from the `UNWRAP_WETH` or `SWEEP` that pays the output out.
+    ///
     /// Declines a stream carrying more than one swap, or a path that ends in the token it started
     /// from — see the module docs for why neither can be priced.
     fn declared(&self, input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         let Some((commands, inputs)) = command_stream(input) else { return Ok(None) };
-        let mut swap = None;
-        let mut wrapped_before = false;
-        let mut unwrapped_before = false;
-        let mut unwrapped_after = false;
-        for (command, command_input) in commands.iter().zip(inputs.iter()) {
-            let read = match command & COMMAND_TYPE_MASK {
-                WRAP_ETH => {
-                    wrapped_before |= swap.is_none();
-                    continue;
-                }
-                UNWRAP_WETH => {
-                    if swap.is_some() {
-                        unwrapped_after = true;
-                    } else {
-                        unwrapped_before = true;
-                    }
-                    continue;
-                }
-                V4_SWAP => read_v4_swap(command_input),
-                command @ (V3_SWAP_EXACT_IN | V2_SWAP_EXACT_IN | V3_SWAP_EXACT_OUT |
-                V2_SWAP_EXACT_OUT) => read_swap(command, command_input),
-                _ => continue,
-            };
-            // Every swap counts, whichever pool version it names: a route split across commands
-            // has no single one that is the trade.
-            if swap.is_some() {
-                return Ok(None);
-            }
-            let Some(read) = read else { return Ok(None) };
-            swap = Some(read);
-        }
-        let Some(swap) = swap else { return Ok(None) };
+        let Some(stream) = read_stream(&commands, &inputs) else { return Ok(None) };
+        let swap = stream.swap;
         if swap.amounts.is_zero() {
             return Ok(None);
         }
@@ -479,19 +544,28 @@ impl SolverDecoder for Uniswap {
         // the pool wants, so the swap names native where the trader paid the wrapped token. Naming
         // that token needs the chain's wrapped-native address, which this reader does not have, so
         // the transaction goes to netting instead of guessing.
-        if unwrapped_before && !wrapped_before {
+        if stream.unwrapped_before && !stream.wrapped_before {
             return Ok(None);
         }
-        let (token_in, token_out) = trader_tokens(&swap, wrapped_before, unwrapped_after);
+        let (token_in, token_out) =
+            trader_tokens(&swap, stream.wrapped_before, stream.unwrapped_after);
         // A path that ends in the token it started from is a bot cycling pools, not a trade a
         // re-solve can price.
         if token_in == token_out {
             return Ok(None);
         }
+        // Only a payout of this trade's own output token says anything about it.
+        let payout = stream
+            .payout
+            .filter(|payout| payout.token == token_out);
         let declared = match swap.amounts {
-            Amounts::ExactIn { amount_in, min_amount_out } => {
-                DeclaredSwap::from_calldata(token_in, token_out, amount_in, min_amount_out)
-            }
+            Amounts::ExactIn { amount_in, min_amount_out } => DeclaredSwap::from_calldata(
+                token_in,
+                token_out,
+                amount_in,
+                // The stricter of the two floors: a swap paying the router leaves its own at zero.
+                min_amount_out.max(payout.map_or(U256::ZERO, |payout| payout.min_amount_out)),
+            ),
             Amounts::ExactOut { amount_out, max_amount_in } => {
                 DeclaredSwap::from_calldata_exact_out(
                     token_in,
@@ -501,7 +575,10 @@ impl SolverDecoder for Uniswap {
                 )
             }
         };
-        Ok(Some(match swap.recipient {
+        let recipient = swap
+            .recipient
+            .or_else(|| payout.map(|payout| payout.recipient));
+        Ok(Some(match recipient {
             Some(recipient) => declared.with_recipient(recipient),
             None => declared,
         }))
@@ -640,6 +717,107 @@ mod tests {
         let declared = terms(&call).unwrap();
         assert_eq!(declared.token_in, Address::ZERO);
         assert_eq!(declared.token_out, USDC);
+    }
+
+    /// An `UNWRAP_WETH` input: recipient, then the floor it enforces on the payout.
+    fn unwrap_input(recipient: Address, amount_min: u64) -> Bytes {
+        use alloy::sol_types::SolValue;
+        (recipient, U256::from(amount_min))
+            .abi_encode_params()
+            .into()
+    }
+
+    /// A `SWEEP` input: token, recipient, then the floor.
+    fn sweep_input(token: Address, recipient: Address, amount_min: u64) -> Bytes {
+        use alloy::sol_types::SolValue;
+        (token, recipient, U256::from(amount_min))
+            .abi_encode_params()
+            .into()
+    }
+
+    #[test]
+    fn test_payout_names_the_trader_the_swap_left_as_a_sentinel() {
+        // The live shape that produced five records claiming a bundler's gas refund as the settled
+        // output: `V3_SWAP_EXACT_IN(ADDRESS_THIS, floor 0) UNWRAP_WETH(trader, real floor) SWEEP`.
+        // The floor and the address both live on the payout command.
+        let trader = address!("0x541a02f8685db041ba872bc5c0bb336377b8be35");
+        let call = execute_call(
+            &[V3_SWAP_EXACT_IN, UNWRAP_WETH, SWEEP],
+            vec![
+                v3_input(Address::with_last_byte(2), 1_736_236_160, 0, &[USDC, WETH]),
+                unwrap_input(trader, 693_216_921),
+                sweep_input(Address::ZERO, trader, 0),
+            ],
+        );
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.token_in, USDC);
+        assert_eq!(declared.token_out, Address::ZERO);
+        assert_eq!(declared.output_recipient, Some(trader));
+        // Without this the recovered output is whatever the transaction sender happened to
+        // receive, with a zero floor to reject it.
+        assert_eq!(declared.min_amount_out, Some(U256::from(693_216_921u64)));
+    }
+
+    #[test]
+    fn test_sweep_names_a_token_payout() {
+        let trader = address!("0x000000000000000000000000000000000000dead");
+        let call = execute_call(
+            &[V3_SWAP_EXACT_IN, SWEEP],
+            vec![
+                v3_input(Address::with_last_byte(2), 1_000, 0, &[WETH, USDC]),
+                sweep_input(USDC, trader, 990),
+            ],
+        );
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.output_recipient, Some(trader));
+        assert_eq!(declared.min_amount_out, Some(U256::from(990u64)));
+    }
+
+    #[test]
+    fn test_payout_of_another_token_is_ignored() {
+        // A sweep of leftover input, not of the trade's output.
+        let trader = address!("0x000000000000000000000000000000000000dead");
+        let call = execute_call(
+            &[V3_SWAP_EXACT_IN, SWEEP],
+            vec![
+                v3_input(Address::with_last_byte(2), 1_000, 0, &[WETH, USDC]),
+                sweep_input(WETH, trader, 5),
+            ],
+        );
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.output_recipient, None);
+        assert_eq!(declared.min_amount_out, Some(U256::ZERO));
+    }
+
+    #[test]
+    fn test_the_swaps_own_recipient_and_floor_win() {
+        // A swap that names the trader directly does not need the payout command, and the stricter
+        // of the two floors is kept.
+        let trader = address!("0x000000000000000000000000000000000000dead");
+        let other = address!("0x00000000000000000000000000000000000000ff");
+        let call = execute_call(
+            &[V3_SWAP_EXACT_IN, SWEEP],
+            vec![v3_input(trader, 1_000, 995, &[WETH, USDC]), sweep_input(USDC, other, 5)],
+        );
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.output_recipient, Some(trader));
+        assert_eq!(declared.min_amount_out, Some(U256::from(995u64)));
+    }
+
+    #[test]
+    fn test_payout_before_the_swap_is_not_the_output() {
+        // A sweep that runs before the swap is clearing a previous balance.
+        let trader = address!("0x000000000000000000000000000000000000dead");
+        let call = execute_call(
+            &[SWEEP, V3_SWAP_EXACT_IN],
+            vec![
+                sweep_input(USDC, trader, 900),
+                v3_input(Address::with_last_byte(2), 1_000, 0, &[WETH, USDC]),
+            ],
+        );
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.output_recipient, None);
+        assert_eq!(declared.min_amount_out, Some(U256::ZERO));
     }
 
     #[test]
