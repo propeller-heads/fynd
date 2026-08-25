@@ -1,4 +1,15 @@
 
+## [0.99.15](https://github.com/propeller-heads/fynd/compare/0.99.14...0.99.15) (2026-08-25)
+
+### Features
+
+* exclude protocol systems per worker pool ([52807f3](https://github.com/propeller-heads/fynd/commit/52807f3cd18210fe01ae7ebeb5e727a9308c5314))
+
+### Bug Fixes
+
+* drop pAMM quotes under min_amount_out before ranking ([5df7259](https://github.com/propeller-heads/fynd/commit/5df72591f7276b44afbd601df6ba2ec8ef5ecb7d))
+
+
 ## [0.99.14](https://github.com/propeller-heads/fynd/compare/0.99.12...0.99.14) (2026-08-24)
 
 ### Features
