@@ -95,8 +95,10 @@ chain-specific addresses, re-derived rather than copied. Sections: `wrapped_nati
 `infrastructure` (Permit2 etc.), `usd_stablecoins` (USD anchors for reporting), `batch_settlers`,
 `[solvers]` (router address → name; the name joins to a `SolverDecoder` at load), `[labels]`
 (display-only names), `[venues.<name>]` (entry points), and the venue fingerprints
-(`[venue_owners]`, `[venue_fees]`, `[venue_integrators]`, `[venue_appdata]`). Venue fees are not
-modelled: a fee is charged whichever solver fills, so it cancels out of the comparison.
+(`[venue_owners]`, `[venue_fees]`, `[venue_integrators]`, `[venue_appdata]`). A fee paid to a
+`[venue_fees]` wallet is corrected out of the amounts (`attribution::venue`): subtracted from
+`amount_in` when the wallet took the sell token, added back to `amount_out` when it took the buy
+token. Every other venue fee is left inside the amounts.
 
 ### Re-solve engine (`src/resolve/`)
 
@@ -146,9 +148,9 @@ vanished at N).
 the output recipient the same calldata declares (falling back to the transaction sender) — the
 one field calldata can never carry. Two guards protect the recipient-receipt query: the recovered
 output must clear the intent's `min_amount_out` floor, and any declared quote must sit within
-`plausible_quote`'s band of it; either failure falls through to the netting fallback. The
-declared `amount_in` is already on the solver-task basis: an input-side venue fee left before the
-solver frame. Venue fees are not modelled otherwise (see the README). See
+`plausible_quote`'s band of it; either failure falls through to the netting fallback. A fee paid
+to a `[venue_fees]` wallet is corrected out of both amounts by `attribution::venue`, on whichever
+side the wallet was paid; no other venue fee is modelled (see the README). See
 `.claude/plans/calldata-first-decoding.md` for the empirics behind calldata-first ordering: on a
 315-transaction Base sample, coverage rises from 60.0% (netting alone) to 91.4% (calldata-first
 union), with zero divergences across the 165 trades both paths could decode.

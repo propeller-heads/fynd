@@ -93,8 +93,8 @@ struct AddressBook {
 }
 
 /// A venue's address-book section on one chain: the contracts users enter through. Pure
-/// addresses — a venue has no code, and no fee handling either: an amount is either declared by
-/// the solver's own calldata (already past any venue fee) or netted and marked as such.
+/// addresses — a venue has no code, and no fee handling either: a fee is corrected only when its
+/// wallet is listed in `[venue_fees]`, and only by `attribution::venue`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VenueAddresses {

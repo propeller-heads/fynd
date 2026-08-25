@@ -83,11 +83,16 @@ pub(crate) fn solver(
 /// (`[venue_appdata]`; the hash is extracted by the caller), fee wallet (`[venue_fees]`),
 /// provider integrator tag (`[venue_integrators]`; extracted by the caller).
 ///
-/// A fee-wallet match also grosses an output-side fee back into `amount_out`. The wallet is paid
-/// from the routing path, so the trader's receipt — netted or declared — is short of the swap's
-/// gross output by exactly the fee, and Fynd's quote is gross. Without this the comparison hands
-/// Fynd the venue's cut as savings. An input-side fee is not corrected: the declared `amount_in`
-/// is already past it, and a netted one carries the marker that says so.
+/// A fee-wallet match also corrects the amounts onto the swap's own basis, on whichever side the
+/// wallet was paid. Fynd quotes the swap alone, so both corrections are what keep the comparison
+/// like-for-like:
+///
+/// - Output side: the wallet is paid out of the routing path, so the trader's receipt — netted or
+///   declared — is short of the gross output by exactly the fee. The fee is added back. Without
+///   this the comparison hands Fynd the venue's cut as savings.
+/// - Input side: the wallet is paid out of the amount the trader authorized, so the swap saw less
+///   than `amount_in` states. The fee is subtracted. Without this Fynd is re-solved on more input
+///   than reached the pools, which overstates its output.
 pub(crate) fn venue(
     registry: &Registry,
     flow: &mut SettledSwap,
@@ -102,8 +107,9 @@ pub(crate) fn venue(
         return Some(venue.to_string());
     }
     if let Some((venue, fee)) = fee_venue(registry, ledger, flow.token_in, flow.token_out) {
-        if let VenueFee::Output(amount) = fee {
-            flow.amount_out = flow.amount_out.saturating_add(amount);
+        match fee {
+            VenueFee::Input(amount) => flow.amount_in = flow.amount_in.saturating_sub(amount),
+            VenueFee::Output(amount) => flow.amount_out = flow.amount_out.saturating_add(amount),
         }
         return Some(venue);
     }
@@ -382,28 +388,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_wallet_input_fee_on_declared_amounts_is_recorded_only() {
-        // An input-side wallet fee on a declared decode: the declared amount_in was read from
-        // the solver frame, after the fee left — netting it out again would double-subtract.
-        let registry = Registry::builtin(Chain::Bsc).unwrap();
-        let coinbase = address!("0x5aafc1f252d544f744d17a4e734afd6efc47ede4");
-        let user = addr(1);
-        let pool = addr(50);
-        let token_in = addr(10);
-        let token_out = addr(11);
-        let logs = vec![
-            make_transfer_log(token_in, user, coinbase, U256::from(95)),
-            make_transfer_log(token_in, user, pool, U256::from(9905)),
-            make_transfer_log(token_out, pool, user, U256::from(2000)),
-        ];
-        let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 9905, token_out, 2000) };
-
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("coinbase"));
-        assert_eq!(flow.amount_in, U256::from(9905));
-    }
-
-    #[test]
     fn test_integrator_tag_attributes_venue() {
         // A provider integrator tag maps to its venue, case-insensitively; an unknown tag does
         // not.
@@ -418,10 +402,10 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_wallet_input_side_fee_identifies_without_adjusting() {
-        // A LiFi-routed Coinbase Base App swap: the 0.95% cut is skimmed off the sell token before
-        // routing. The wallet identifies the venue, but the amount is left as netted — a declared
-        // amount_in is already past the fee, and a netted one carries the marker that says so.
+    fn test_fee_wallet_input_side_fee_nets_the_input_down() {
+        // A LiFi-routed Coinbase Base App swap: the 0.95% cut is skimmed off the sell token, so
+        // the pools saw 9905 of the 10000 the trader authorized. The fee is subtracted, else Fynd
+        // is re-solved on 10000 and its larger output reads as savings.
         let registry = Registry::builtin(Chain::Bsc).unwrap();
         let coinbase = address!("0x5aafc1f252d544f744d17a4e734afd6efc47ede4");
         let user = addr(1);
@@ -440,7 +424,7 @@ mod tests {
             venue(&registry, &mut flow, &ledger, Some("base-app"), None).as_deref(),
             Some("coinbase")
         );
-        assert_eq!(flow.amount_in, U256::from(10000));
+        assert_eq!(flow.amount_in, U256::from(9905));
         // The output side is untouched: this venue took nothing out of the buy token.
         assert_eq!(flow.amount_out, U256::from(2000));
     }
