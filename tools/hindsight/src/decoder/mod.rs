@@ -286,21 +286,21 @@ impl<P: Provider> Decoder<P> {
             return None;
         }
 
-        // A venue fingerprint (owning trader, CoW appData tag, fee wallet, or integrator tag —
-        // see `attribution`) overrides the entry-point label. The appData tag is read from a
-        // batch settler's calldata; other transactions carry none.
-        let integrator = solvers::lifi::integrator(logs);
-        let app_data = solvers::cow::venue_tag(registry, entry_point, &root.input);
-        let venue = attribution::venue(
-            registry,
-            &mut flow,
-            &transfer_ledger,
-            integrator.as_deref(),
-            app_data,
-        )
-        .unwrap_or_else(|| registry.label(entry_point));
-
         let attribution = attribution::solver(root, entry_point, sender, registry);
+
+        // A venue fingerprint overrides the entry-point label (see `attribution`). Two of the four
+        // are read from the settling solver's own data, dispatched through its address-book entry
+        // so this file names no solver; the other two are pure address-book lookups.
+        let tag = attribution
+            .address
+            .and_then(|address| registry.solver(address))
+            .and_then(|solver| {
+                solver
+                    .decoder
+                    .venue_fingerprint(&root.input, logs)
+            });
+        let venue = attribution::venue(registry, &mut flow, &transfer_ledger, tag.as_ref())
+            .unwrap_or_else(|| registry.label(entry_point));
 
         let (min_amount_out, declared_quote, quote_timestamp) = declared_terms(declared.as_ref());
         let decode = if declared.is_some() { "declared" } else { "netted" };
@@ -388,5 +388,80 @@ mod tests {
         // Only the untraceable transaction is lost; before, it took the whole block with it.
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].tx_hash, tx_hash(2));
+    }
+
+    #[tokio::test]
+    async fn test_venue_fingerprint_reaches_the_settling_solvers_decoder() {
+        use alloy::{
+            primitives::B256,
+            rpc::types::{
+                trace::{common::TraceResult, geth::GethTrace},
+                Log,
+            },
+            sol_types::SolEvent,
+        };
+
+        use crate::decoder::solvers::lifi::LiFiGenericSwapCompleted;
+
+        // An Infinex swap through the shared LiFi Diamond: the venue is named only by the
+        // integrator tag in LiFi's own event. The fixture names LiFi because it needs concrete
+        // bytes; the decode path under test does not — it asks whatever decoder the Diamond's
+        // address-book entry carries. So this asserts the dispatch, not the parse (`lifi.rs`
+        // tests that).
+        let lifi = address!("0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae");
+        let trader = addr(1);
+        let pool = addr(0x50);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+
+        let swap_event = LiFiGenericSwapCompleted {
+            transactionId: B256::ZERO,
+            integrator: "infinex".to_string(),
+            referrer: String::new(),
+            receiver: trader,
+            fromAssetId: token_in,
+            toAssetId: token_out,
+            fromAmount: U256::from(1_000),
+            toAmount: U256::from(2_000),
+        };
+        let log_data = swap_event.encode_log_data();
+        let lifi_log = Log {
+            inner: alloy::primitives::Log::new_unchecked(
+                lifi,
+                log_data.topics().to_vec(),
+                log_data.data.clone(),
+            ),
+            ..Default::default()
+        };
+
+        let asserter = Asserter::new();
+        asserter.push_success(&vec![receipt(
+            tx_hash(1),
+            trader,
+            Some(lifi),
+            vec![
+                make_transfer_log(token_in, trader, pool, U256::from(1_000)),
+                make_transfer_log(token_out, pool, trader, U256::from(2_000)),
+                lifi_log,
+            ],
+        )]);
+        let traces: Vec<TraceResult<GethTrace, String>> = vec![TraceResult::Success {
+            result: GethTrace::CallTracer(frame("CALL", trader, lifi, 0)),
+            tx_hash: Some(tx_hash(1)),
+        }];
+        asserter.push_success(&traces);
+
+        let mut decoder = Decoder::new(
+            ProviderBuilder::default().connect_mocked_client(asserter),
+            Registry::ethereum(),
+        );
+        let trades = decoder
+            .decode_block(21_000_000)
+            .await
+            .unwrap();
+
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].solver, "lifi");
+        // Without the fingerprint dispatch this reads "lifi" — the router, not the frontend.
+        assert_eq!(trades[0].venue, "infinex");
     }
 }

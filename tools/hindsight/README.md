@@ -91,34 +91,41 @@ One trait per solver — everything the solver's own calldata and logs can say:
 
 ```rust
 trait SolverDecoder {
-    /// What this solver's own data says about the transaction: terms from its calldata, the
-    /// settled trade from its logs, nothing (Ok(None)), or a veto — the transaction is not a
-    /// same-chain swap and must not be decoded at all.
-    fn declared(&self, input: &[u8], logs: &[Log], amount_in_hint: Option<U256>)
-        -> Result<Option<Declaration>, Veto>;
+    /// What this solver's own data says about the transaction: nothing (Ok(None)), the trade its
+    /// calldata or logs declare, or a veto — the transaction is not a same-chain swap and must
+    /// not be decoded at all.
+    fn declared(&self, input: &[u8], logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto>;
+
+    /// The frontend tag this solver's data carries, for venues that share its router.
+    fn venue_fingerprint(&self, input: &[u8], logs: &[Log]) -> Option<VenueTag>;
 }
 
-enum Declaration {
-    /// Terms from calldata; the caller recovers amount_out from the named recipient's receipt.
-    Terms(SwapIntent),
-    /// The executed trade, amounts included — nothing left to recover.
-    Settled(SettledSwap),
+enum VenueTag {
+    /// A frontend string the solver records in its own swap event (LiFi).
+    Integrator(String),
+    /// An order's committed appData hash (CoW).
+    AppData(B256),
 }
 ```
 
-One method, because one question is being asked: what does this solver say about this
-transaction? A solver's parse fills the whole `SwapIntent` in one pass, including the recipient.
-Anything else a solver can read from its own data is an ordinary function in its own module —
-LiFi's bridge-order veto, called from its own `declared`, and its integrator tag, called by venue
-attribution.
+Two methods, one per question the decoder asks a solver. `declared` answers "what does this
+solver say this transaction traded?", and a solver's parse fills the whole `DeclaredSwap` in one
+pass, including the recipient. `venue_fingerprint` answers "does this solver's data name the
+frontend that built the order?" — LiFi's integrator tag, CoW's `appData` hash. A solver's veto is
+not a third method: it rides on `declared`'s `Err`, because a veto is a statement about the same
+read.
 
-The method defaults to "this solver's data does not carry that", so most solvers need no code
-at all — one address-book line covers matching, attribution, and labels. An implementation is one
-row in `solvers::IMPLEMENTATIONS`, joined onto the registry's `Solver` entry when the address
-book loads; at trade time every lookup is `registry.solver(address)`, never a name search.
+Both default to "this solver's data does not carry that", so most solvers need no code at all —
+one address-book line covers matching, attribution, and labels. An implementation is one row in
+`solvers::IMPLEMENTATIONS`, joined onto the registry's `Solver` entry when the address book loads;
+at trade time every lookup is `registry.solver(address)`, never a name search. That dispatch is
+why no caller names a solver module: `decode_transaction` asks the settling solver's entry for a
+fingerprint without knowing which solver carries one.
+
 Today: Fly (packed calldata), KyberSwap (ABI `swap` params + `clientData` quote), 0x
 (`AllowanceHolder.exec` / `Settler.execute`), ParaSwap (quote scan), 1inch (v6 `swap`
-calldata), okx (`OrderRecord` log), LiFi (veto + integrator tag), and CoW's `Trade`-log read.
+calldata), okx (`OrderRecord` log), LiFi (bridge veto + integrator tag), and CoW's `Trade`-log
+read plus its `appData` tag.
 
 ### Why decoding is per solver, not per venue
 
@@ -189,6 +196,7 @@ against Allium.
 | Skip a solver's non-swap orders | An `Err(Veto)` from its `declared`, off a log its own module reads | Those orders decode as trades that never happened, with absurd rates |
 | Add a venue | A `[venues.<name>]` section in the address book — its entry points. No code | The venue's trades still decode when a known solver's frame or log is inside, but the venue label falls back to the raw entry address |
 | Attribute a new venue (owner / appData tag / fee wallet / integrator tag) | The matching address-book map (`[venue_owners]` / `[venue_appdata]` / `[venue_fees]` / `[venue_integrators]`) | The venue's trades are attributed to the underlying router or settler, not the venue |
+| Read a tag from a *new* solver's own data | A `venue_fingerprint` on its `SolverDecoder`, returning the `VenueTag` variant its data carries | The tag is never read, so venues sharing that solver's router fall back to its label |
 | Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |
 | Support a new chain | A `registry/<chain>.toml` address book, an entry in `registry::BUILTIN_CHAINS` | The chain has no built-in book and must be passed via `--registry` |
 

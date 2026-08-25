@@ -18,8 +18,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    registry::Registry,
-    solvers::{DeclaredSwap, SolverDecoder},
+    solvers::{DeclaredSwap, SolverDecoder, VenueTag},
     transfer_ledger::to_primitive_log,
     veto::Veto,
 };
@@ -65,14 +64,10 @@ sol! {
     );
 }
 
-/// The settled order's `appData` hash, when the entry point is a batch settler and the batch
-/// settles exactly one order — the same single-order rule `settlement_trade` applies, since a
-/// multi-order batch has no single frontend to attribute. Venue attribution maps the hash to a
-/// venue (`[venue_appdata]`).
-pub(crate) fn venue_tag(registry: &Registry, entry_point: Address, input: &[u8]) -> Option<B256> {
-    if !registry.is_batch_settler(entry_point) {
-        return None;
-    }
+/// The settled order's `appData` hash, when the batch settles exactly one order — the same
+/// single-order rule `settlement_trade` applies, since a multi-order batch has no single frontend
+/// to attribute. A transaction that is not a `settle` call fails to decode and yields `None`.
+fn venue_tag(input: &[u8]) -> Option<B256> {
     let call = settleCall::abi_decode(input).ok()?;
     let [trade] = call.trades.as_slice() else {
         return None;
@@ -92,6 +87,12 @@ impl SolverDecoder for Cow {
     /// are order plumbing, not the trade.
     fn declared(&self, _input: &[u8], logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         Ok(settlement_trade(logs))
+    }
+
+    /// The `appData` hash the settled order committed — the frontend tag (`appCode`) the `Trade`
+    /// event does not carry, so it is read from the settle calldata instead.
+    fn venue_fingerprint(&self, input: &[u8], _logs: &[Log]) -> Option<VenueTag> {
+        venue_tag(input).map(VenueTag::AppData)
     }
 }
 
@@ -236,25 +237,27 @@ mod tests {
 
     #[test]
     fn test_single_order_reads_app_data() {
-        let registry = Registry::ethereum();
         let app = b256!("0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422");
         assert_eq!(
-            venue_tag(&registry, COW_SETTLEMENT, &settle_calldata(vec![settle_trade(app)])),
-            Some(app)
+            Cow.venue_fingerprint(&settle_calldata(vec![settle_trade(app)]), &[]),
+            Some(VenueTag::AppData(app))
         );
     }
 
     #[test]
     fn test_multi_order_batch_has_no_single_app_data() {
-        let registry = Registry::ethereum();
         let trades = vec![settle_trade(B256::ZERO), settle_trade(B256::ZERO)];
-        assert!(venue_tag(&registry, COW_SETTLEMENT, &settle_calldata(trades)).is_none());
+        assert!(Cow
+            .venue_fingerprint(&settle_calldata(trades), &[])
+            .is_none());
     }
 
     #[test]
-    fn test_non_settler_entry_has_no_app_data() {
-        let registry = Registry::ethereum();
-        let app = b256!("0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422");
-        assert!(venue_tag(&registry, addr(9), &settle_calldata(vec![settle_trade(app)])).is_none());
+    fn test_calldata_that_is_not_a_settlement_has_no_app_data() {
+        // The settle decode is its own guard: another router's calldata does not parse, so a
+        // transaction CoW did not shape yields no tag even though CoW's decoder was asked.
+        assert!(Cow
+            .venue_fingerprint(&alloy::hex::decode("0xdeadbeef").unwrap(), &[])
+            .is_none());
     }
 }
