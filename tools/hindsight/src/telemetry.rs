@@ -31,6 +31,7 @@ const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
 const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
 const UNTRACED_TRANSACTIONS: &str = "hindsight_untraced_transactions_total";
 const SEVERAL_LEGS: &str = "hindsight_several_legs_total";
+const VETOED_TRANSACTIONS: &str = "hindsight_vetoed_transactions_total";
 
 /// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
@@ -104,6 +105,7 @@ pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
 /// Register metric descriptions with the active recorder.
 pub(crate) fn describe() {
     describe_trade_metrics();
+    describe_coverage_metrics();
 }
 
 /// Register descriptions for the per-trade re-solve metrics: savings, slippage, volume, and the
@@ -184,6 +186,12 @@ fn describe_trade_metrics() {
          including the head check itself. The receipts RPC trails the tycho stream that picks the \
          target, so this is a floor on the lag that no amount of solving speed removes"
     );
+}
+
+/// Register descriptions for the coverage counters: what the decoder did not record, and why.
+/// Every one of these is a trade or block missing from the aggregates, named so the gap is
+/// attributable rather than invisible.
+fn describe_coverage_metrics() {
     describe_counter!(
         SKIPPED_BLOCKS,
         "Blocks skipped because the RPC could not provide receipts (e.g. it lagged the tycho \
@@ -199,6 +207,12 @@ fn describe_trade_metrics() {
         "Matched solver transactions dropped because the RPC could not trace them. Their block \
          still contributes its other trades, so this counts trades missing from the aggregates \
          rather than blocks"
+    );
+    describe_counter!(
+        VETOED_TRANSACTIONS,
+        "Matched transactions dropped by a veto, labelled by the veto that dropped them. A \
+         transaction counted here produces no record at all, so this is where coverage the \
+         decoder deliberately refuses shows up instead of vanishing"
     );
     describe_counter!(
         SEVERAL_LEGS,
@@ -480,6 +494,12 @@ pub(crate) fn record_skipped_block() {
 
 pub(crate) fn record_untraced_transaction() {
     counter!(UNTRACED_TRANSACTIONS).increment(1);
+}
+
+/// Count a transaction dropped by a veto. `veto` is the `Debug` name of the variant, which is a
+/// closed set, so it is safe as a label.
+pub(crate) fn record_veto(veto: &str) {
+    counter!(VETOED_TRANSACTIONS, "veto" => veto.to_string()).increment(1);
 }
 
 pub(crate) fn record_several_legs() {
