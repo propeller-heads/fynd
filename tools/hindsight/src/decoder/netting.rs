@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fallback_batch_settler_with_no_swapper_is_declined() {
+    async fn test_fallback_batch_settler_without_a_swapper() {
         // The same CoW batch, but every candidate carries contract code, so no trader is found.
         // The settler's sender is a solver: its net flow is inventory and rounding across many
         // orders, not one swap. Netting it would invent a trade, so the transaction is declined.

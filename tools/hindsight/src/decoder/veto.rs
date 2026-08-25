@@ -382,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn test_declared_payee_is_not_a_transfer_fee_sink() {
+    fn test_fee_on_transfer_with_a_declared_payee_anchor() {
         // A different-receiver trade, which only the declared read can reach: the pool pays the
         // whole output straight to the payee the calldata named (KyberSwap's `dstReceiver`), who
         // sends nothing. That payee looks exactly like a fee wallet collecting the entire output,

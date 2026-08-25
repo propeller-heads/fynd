@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_wallet_attributes_the_venue_and_reports_the_cut() {
+    fn test_venue_fee_output_side() {
         // A 0x-routed Phantom swap: the buy-token fee reaches Phantom's wallet, which both names
         // the venue and is the cut the caller has to correct out.
         let registry = Registry::ethereum();
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_is_reported_even_when_another_fingerprint_names_the_venue() {
+    fn test_venue_fee_with_an_owner_match() {
         // A kpk trade (owner match) that also paid a Phantom fee leg. The owner wins the label,
         // and the cut is still reported: the correction must not depend on which fingerprint won.
         let registry = Registry::ethereum();
@@ -420,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_wallet_paid_in_the_sell_token_is_an_input_fee() {
+    fn test_venue_fee_input_side() {
         // A LiFi-routed Coinbase Base App swap: the 0.95% cut is skimmed off the sell token, so
         // the cut is reported on the input side for the caller to subtract.
         let registry = Registry::builtin(Chain::Bsc).unwrap();
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fee_wallet_taking_both_tokens_is_read_as_an_output_fee() {
+    fn test_venue_fee_wallet_paid_in_both_tokens() {
         // A wallet that received both swap tokens is being paid its cut in the token the user
         // bought; the sell-token leg is the swap's own routing, not a second fee.
         let registry = Registry::ethereum();
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn test_no_fee_transfer_is_not_a_venue() {
+    fn test_venue_fee_without_a_fee_transfer() {
         // Dust to the fee wallet in a token other than the output is not this trade's fee.
         let registry = Registry::ethereum();
         let user = addr(1);

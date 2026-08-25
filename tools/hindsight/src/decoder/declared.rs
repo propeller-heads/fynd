@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn test_several_legs_are_declined_to_netting() {
+    fn test_declared_flow_several_legs() {
         // Two independent entries into a solver router, the shape an arbitrage contract routing
         // several legs produces. One frame's calldata states one leg, not the trade, so no frame
         // is read and the caller falls back to netting — `Ok(None)`, not a veto, because netting
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn test_a_solver_inside_another_solvers_frame_is_not_a_second_leg() {
+    fn test_declared_flow_solver_nested_in_a_solver_frame() {
         // 0x reached from inside Fly's own frame is a step in Fly's route, not a leg of its own,
         // so this is still a one-leg transaction and Fly's calldata is read.
         let registry = Registry::ethereum();
