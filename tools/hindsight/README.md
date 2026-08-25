@@ -146,13 +146,18 @@ on the swap's own basis, on whichever side the wallet was paid:
 
 - **paid in the buy token** — the trader's receipt is short of the swap's gross output by the fee,
   so the fee is added back into `amount_out`. Without it the comparison hands Fynd the venue's cut
-  as savings.
+  as savings. Skipped when the recorded figure already contains the cut: a solver's own event
+  states the gross output outright, and a receipt measured at the router that then paid the fee
+  wallet is gross too. Adding it there would count the cut twice.
 - **paid in the sell token** — the pools saw less than `amount_in` states, so the fee is
   subtracted. Without it Fynd is re-solved on more input than reached the pools and its larger
   output reads as savings.
 
-Both corrections apply on either tier, declared or netted. A fee paid to any other address stays
-inside the amounts, which is part of what the netted marker warns about.
+Both corrections apply on either tier, declared or netted. `decode_transaction` applies them
+(`apply_venue_fee`), not the venue label search: it is the one step that knows which decoder
+produced the amounts, and running it there means the correction does not depend on which
+fingerprint happened to name the venue. A fee paid to any other address stays inside the amounts,
+which is part of what the netted marker warns about.
 
 ### Venue attribution (`attribution.rs`)
 
@@ -166,9 +171,9 @@ four maps from the address book:
 - **CoW appData tag** (`[venue_appdata]`) — the settled order committed a frontend tag
   (`appCode`) whose appData hash maps to a venue (LlamaSwap).
 - **fee wallet** (`[venue_fees]`) — a known venue fee wallet took a cut (Phantom, Robinhood,
-  Coinbase's Base App). The cut is corrected out of the amounts on whichever side it was paid, on
-  either tier. Wallets are checked in address order, so a trade cut by two venues' wallets
-  resolves the same way on every run.
+  Coinbase's Base App). `venue_fee` reports the cut and the caller corrects it out of the amounts
+  (see above); every function in `attribution.rs` only reads. Wallets are checked in address
+  order, so a trade cut by two venues' wallets resolves the same way on every run.
 - **provider integrator tag** (`[venue_integrators]`) — a provider's event carried an integrator
   string mapped to a venue (LiFi frontends), read by `solvers::lifi::integrator`.
 
