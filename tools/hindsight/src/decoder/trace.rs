@@ -89,14 +89,9 @@ fn transfers_value(call_type: &str) -> bool {
 /// walk returned whichever solver frame it reached first going down — the same frame on a single
 /// chain of calls, the wrong one when two frames sit on separate branches.
 ///
-/// Live traces reach that second shape when one transaction swaps several times through the same
-/// router, each leg entering it at its own depth (seen on arbitrage contracts routing several legs
-/// through Uniswap's universal router). This is not a `[batch_settlers]` settlement, which is many
-/// signed orders in one transaction and is declined to netting instead.
-///
-/// Such a transaction has no single settling frame, so no walk order is right: only one of its
-/// legs is recorded either way, and the caller has no marker saying so. Taking the outermost at
-/// least makes the choice the documented one (see `declared::declared_flow`).
+/// Only meaningful when the transaction has one leg. A transaction that entered a solver router
+/// several times independently has no single settling frame, and `declared::declared_flow` declines
+/// it on [`solver_frames`] before asking this — so the walk order decides a label, never an amount.
 ///
 /// The one walk serves both questions asked of a trace: *who* settled the swap (the frame's
 /// `to`, for attribution) and *what the route cost* (the frame's `gas_used`, for gas
@@ -106,6 +101,22 @@ pub(crate) fn find_solver_frame<'a>(
     frame: &'a CallFrame,
     registry: &Registry,
 ) -> Option<&'a CallFrame> {
+    let mut frames = solver_frames(frame, registry);
+    frames.truncate(1);
+    frames.pop()
+}
+
+/// Every outermost call frame into a known solver: the legs of the transaction. A solver called
+/// from inside another solver's frame is a step in that solver's route, not a leg of its own, so a
+/// matched frame's subtree is not searched.
+///
+/// One leg is the normal case. Several means the transaction swapped more than once, so no single
+/// leg is the trade and `declared::declared_flow` declines to read one — an arbitrage contract
+/// routing several legs through Uniswap's universal router is the shape seen live. This is not a
+/// `[batch_settlers]` settlement, which is many signed orders in one transaction and is declined
+/// one layer up.
+pub(crate) fn solver_frames<'a>(frame: &'a CallFrame, registry: &Registry) -> Vec<&'a CallFrame> {
+    let mut found = Vec::new();
     let mut queue = VecDeque::from([frame]);
     while let Some(frame) = queue.pop_front() {
         if frame.error.is_some() {
@@ -115,11 +126,12 @@ pub(crate) fn find_solver_frame<'a>(
             .to
             .is_some_and(|to| registry.is_solver(to))
         {
-            return Some(frame);
+            found.push(frame);
+            continue;
         }
         queue.extend(&frame.calls);
     }
-    None
+    found
 }
 
 /// Best guess at an unknown router: the entry point's direct child call that moved the most

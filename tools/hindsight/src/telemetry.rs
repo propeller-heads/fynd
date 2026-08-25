@@ -30,6 +30,7 @@ const RPC_INDEX_WAIT: &str = "hindsight_rpc_index_wait_seconds";
 const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
 const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
 const UNTRACED_TRANSACTIONS: &str = "hindsight_untraced_transactions_total";
+const SEVERAL_LEGS: &str = "hindsight_several_legs_total";
 
 /// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
@@ -198,6 +199,12 @@ fn describe_trade_metrics() {
         "Matched solver transactions dropped because the RPC could not trace them. Their block \
          still contributes its other trades, so this counts trades missing from the aggregates \
          rather than blocks"
+    );
+    describe_counter!(
+        SEVERAL_LEGS,
+        "Transactions whose declared read was declined because they entered a solver router \
+         several times: the legs are separate swaps, so one frame states a fragment of the trade. \
+         Netting still runs, so these are not all lost — they are the declared tier giving up"
     );
 }
 
@@ -473,6 +480,10 @@ pub(crate) fn record_skipped_block() {
 
 pub(crate) fn record_untraced_transaction() {
     counter!(UNTRACED_TRANSACTIONS).increment(1);
+}
+
+pub(crate) fn record_several_legs() {
+    counter!(SEVERAL_LEGS).increment(1);
 }
 
 pub(crate) fn record_feed_rebuild() {
