@@ -17,15 +17,10 @@
 //!   Those trades stay on the netting fallback until we decide what a limit order should be
 //!   compared against.
 
-use alloy::{
-    primitives::{address, Address},
-    rpc::types::Log,
-    sol,
-    sol_types::SolCall,
-};
+use alloy::{rpc::types::Log, sol, sol_types::SolCall};
 
 use crate::decoder::{
-    solvers::{DeclaredSwap, SolverDecoder},
+    solvers::{normalize_native, DeclaredSwap, SolverDecoder},
     veto::Veto,
 };
 
@@ -47,17 +42,6 @@ sol! {
         external
         payable
         returns (uint256 returnAmount, uint256 spentAmount);
-}
-
-/// 1inch's sentinel for native ETH, normalized to the zero address like every other flow.
-const ONEINCH_NATIVE_ETH: Address = address!("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE");
-
-fn normalize_native(token: Address) -> Address {
-    if token == ONEINCH_NATIVE_ETH {
-        Address::ZERO
-    } else {
-        token
-    }
 }
 
 /// The 1inch solver.
@@ -86,7 +70,7 @@ impl SolverDecoder for OneInch {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Bytes, U256};
+    use alloy::primitives::{address, Address, Bytes, U256};
 
     use super::*;
 

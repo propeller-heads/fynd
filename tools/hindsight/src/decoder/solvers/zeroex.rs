@@ -26,7 +26,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    solvers::{DeclaredSwap, SolverDecoder},
+    solvers::{normalize_native, DeclaredSwap, SolverDecoder},
     veto::Veto,
 };
 
@@ -58,19 +58,6 @@ sol! {
     /// off-chain quote for the trade, usable as this solver's declared quote.
     function POSITIVE_SLIPPAGE(address recipient, address token, uint256 expectedAmount, uint256 maxBps)
         external;
-}
-
-/// 0x's own native-ETH sentinel — distinct from hindsight's `Address::ZERO` convention, so it is
-/// normalized on the way out (matching `KyberSwap`'s equivalent).
-const ZEROEX_NATIVE: Address =
-    alloy::primitives::address!("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE");
-
-fn normalize_native(token: Address) -> Address {
-    if token == ZEROEX_NATIVE {
-        Address::ZERO
-    } else {
-        token
-    }
 }
 
 /// Settler's own terms, decoded from an `execute` call regardless of how it was reached (wrapped
@@ -298,11 +285,5 @@ mod tests {
         let input = execCall::abi_encode(&call);
         let intent = terms(&input).unwrap();
         assert_eq!(intent.min_amount_out, Some(U256::ZERO));
-    }
-
-    #[test]
-    fn test_native_eth_sentinel_normalized() {
-        assert_eq!(normalize_native(ZEROEX_NATIVE), Address::ZERO);
-        assert_eq!(normalize_native(USDC), USDC);
     }
 }

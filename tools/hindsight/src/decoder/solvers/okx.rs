@@ -11,15 +11,10 @@
 //! `toToken`/`returnAmount` matched the settled record exactly, while `fromAmount` sat 0 to 85 bps
 //! below the trader's gross spend, the commission OKX records in a separate event.
 
-use alloy::{
-    primitives::{address, Address},
-    rpc::types::Log,
-    sol,
-    sol_types::SolEvent,
-};
+use alloy::{rpc::types::Log, sol, sol_types::SolEvent};
 
 use crate::decoder::{
-    solvers::{DeclaredSwap, SolverDecoder},
+    solvers::{normalize_native, DeclaredSwap, SolverDecoder},
     transfer_ledger::to_primitive_log,
     veto::Veto,
 };
@@ -34,17 +29,6 @@ sol! {
         uint256 fromAmount,
         uint256 returnAmount
     );
-}
-
-/// OKX's sentinel for native ETH, normalized to the zero address like every other flow.
-const OKX_NATIVE_ETH: Address = address!("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE");
-
-fn normalize_native(token: Address) -> Address {
-    if token == OKX_NATIVE_ETH {
-        Address::ZERO
-    } else {
-        token
-    }
 }
 
 /// The OKX solver.
@@ -79,10 +63,13 @@ impl SolverDecoder for Okx {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{b256, Log as PrimitiveLog, U256};
+    use alloy::primitives::{address, b256, Address, Log as PrimitiveLog, U256};
 
     use super::*;
-    use crate::decoder::test_utils::{addr, make_transfer_log};
+    use crate::decoder::{
+        solvers::NATIVE_TOKEN_SENTINEL,
+        test_utils::{addr, make_transfer_log},
+    };
 
     /// The `DexRouter` address every sampled trade entered through.
     const ROUTER: Address = address!("0x28b1dc1a5e3699a428bc51d234dfab7c9cb2a183");
@@ -148,7 +135,7 @@ mod tests {
         // Live tx 0xceabae7f…: native ETH in, USDC out. OKX writes native as 0xeeee…ee.
         let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         let flow = settled(&[order_record(
-            OKX_NATIVE_ETH,
+            NATIVE_TOKEN_SENTINEL,
             usdc,
             addr(1),
             30_000_000_000_000_000,

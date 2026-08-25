@@ -41,7 +41,7 @@ use crate::decoder::veto::Veto;
 ///
 /// One of the two amounts is always present: calldata fixes one side and bounds the other, and an
 /// event states both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DeclaredSwap {
     /// `Address::ZERO` for native ETH.
     pub token_in: Address,
@@ -157,20 +157,21 @@ impl DeclaredSwap {
         self.timestamp = timestamp;
         self
     }
+}
 
-    /// The best available "what was promised": the declared quote, or — when absent — the
-    /// enforced floor. `None` when the source carried neither.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "only called from tests in this PR; its production caller is the \
-                      reverted-swap path in the stacked follow-up PR"
-        )
-    )]
-    pub(crate) fn promised_amount_out(&self) -> Option<U256> {
-        self.declared_quote
-            .or(self.min_amount_out)
+/// The address the ecosystem uses in calldata and events to mean native ETH, where hindsight uses
+/// `Address::ZERO`. Not a per-solver fact: every solver that names native ETH names this address,
+/// on every chain — so the name says nothing about a solver or about ETH specifically.
+pub(crate) const NATIVE_TOKEN_SENTINEL: Address =
+    alloy::primitives::address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+
+/// A token address on hindsight's convention: the native sentinel becomes `Address::ZERO`, and
+/// every other address passes through.
+pub(crate) fn normalize_native(token: Address) -> Address {
+    if token == NATIVE_TOKEN_SENTINEL {
+        Address::ZERO
+    } else {
+        token
     }
 }
 
@@ -265,6 +266,17 @@ pub(crate) fn plausible_quote(quoted_amount_out: U256, settled_amount_out: U256)
 mod tests {
     use super::*;
     use crate::decoder::registry::Registry;
+
+    #[test]
+    fn test_native_sentinel_normalizes_and_leaves_every_other_token() {
+        assert_eq!(normalize_native(NATIVE_TOKEN_SENTINEL), Address::ZERO);
+        // The sentinel is matched case-insensitively by `address!`, so the checksummed spelling
+        // solvers write in their own constants is the same address.
+        let checksummed = alloy::primitives::address!("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE");
+        assert_eq!(normalize_native(checksummed), Address::ZERO);
+        let usdc = alloy::primitives::address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+        assert_eq!(normalize_native(usdc), usdc);
+    }
 
     #[test]
     fn test_implementation_names_against_the_address_book() {
