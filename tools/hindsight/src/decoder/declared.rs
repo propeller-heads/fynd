@@ -30,8 +30,15 @@ use crate::decoder::{
 /// amounts and its solver label always come from the same solver. A transaction that merely
 /// touches another solver's router somewhere is not read by that solver.
 ///
-/// `Ok(None)` means no solver was read at all — no known solver frame, or the settling solver's
-/// own data carried nothing it could parse — so the caller falls back to netting.
+/// A transaction that entered a solver router several times independently is declined here: its
+/// legs are separate swaps, so one frame's calldata states a fragment of what was traded, not the
+/// trade. Netting still runs — it reads the trader's own balances rather than one frame, so it
+/// either finds a single net swap or declines. That keeps the honest reading and drops the
+/// fragment.
+///
+/// `Ok(None)` means no solver was read at all — no known solver frame, several independent frames,
+/// or the settling solver's own data carried nothing it could parse — so the caller falls back to
+/// netting.
 ///
 /// `Err(veto)` means the transaction is dropped, and netting is not tried. Either the solver said
 /// it is not a swap, or it named an output that the transfers do not show: once a solver has told
@@ -43,7 +50,12 @@ pub(crate) fn declared_flow(
     transfer_ledger: &TransferLedger,
     sender: Address,
 ) -> Result<Option<(DecodeSource, SettledSwap, DeclaredSwap)>, Veto> {
-    let Some(solver_frame) = trace::find_solver_frame(root, registry) else { return Ok(None) };
+    let frames = trace::solver_frames(root, registry);
+    if frames.len() > 1 {
+        crate::telemetry::record_several_legs();
+        return Ok(None);
+    }
+    let Some(solver_frame) = frames.first().copied() else { return Ok(None) };
     let Some(solver) = solver_frame
         .to
         .and_then(|address| registry.solver(address))
@@ -185,6 +197,45 @@ mod tests {
         let mut root = frame("CALL", sender, router, 0);
         root.calls = vec![solver_call];
         root
+    }
+
+    #[test]
+    fn test_several_legs_are_declined_to_netting() {
+        // Two independent entries into a solver router, the shape an arbitrage contract routing
+        // several legs produces. One frame's calldata states one leg, not the trade, so no frame
+        // is read and the caller falls back to netting — `Ok(None)`, not a veto, because netting
+        // reads the trader's balances rather than a frame and may still find a single swap.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let mut first = frame("CALL", ROUTER, FLY, 0);
+        first.input = fly_input().into();
+        let mut second = frame("CALL", ROUTER, FLY, 0);
+        second.input = fly_input().into();
+        let mut root = frame("CALL", sender, ROUTER, 0);
+        root.calls = vec![first, second];
+        let ledger = TransferLedger::from_transaction(&[], &[]);
+
+        assert!(declared_flow(&root, &registry, &[], &ledger, sender)
+            .expect("several legs decline rather than veto")
+            .is_none());
+    }
+
+    #[test]
+    fn test_a_solver_inside_another_solvers_frame_is_not_a_second_leg() {
+        // 0x reached from inside Fly's own frame is a step in Fly's route, not a leg of its own,
+        // so this is still a one-leg transaction and Fly's calldata is read.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let mut root = root_with_solver_frame(sender, ROUTER, FLY);
+        root.calls[0].calls = vec![frame("CALL", FLY, ZEROX, 0)];
+        let logs = vec![make_transfer_log(TOKEN_IN, sender, ROUTER, U256::from(AMOUNT_IN))];
+        let native = vec![(addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000))];
+        let ledger = TransferLedger::from_transaction(&logs, &native);
+
+        let (_, flow, _) = declared_flow(&root, &registry, &[], &ledger, sender)
+            .unwrap()
+            .expect("one leg, so Fly's calldata is read");
+        assert_eq!(flow.amount_in, U256::from(AMOUNT_IN));
     }
 
     /// `LiFi`'s Diamond, and a bridge-shaped log emitted by it.
