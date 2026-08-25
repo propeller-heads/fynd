@@ -4,7 +4,6 @@ use alloy::{
     primitives::{aliases::U48, keccak256, Address, Keccak256, U160, U256},
     sol_types::SolValue,
 };
-use metrics::counter;
 use num_bigint::BigUint;
 use tycho_execution::encoding::{
     errors::EncodingError,
@@ -296,38 +295,6 @@ impl Encoder {
                     solution
                 }
             };
-
-            // A pAMM leg fills on the venue when the maker's quote reaches the chain, and on a
-            // Uniswap V3 pool when it does not. `min_amount_out` keeps describing the venue quote
-            // and the slippage the user accepted, so a fallback that pays less than that floor
-            // reverts. Drop the quote rather than ship one that cannot execute, or lower the floor
-            // past what the user accepted.
-            let fallback_amount_out = quote
-                .route()
-                .and_then(|route| route.fallback_amount_out())
-                .cloned();
-            if let Some(fallback) = &fallback_amount_out {
-                if !Self::fallback_clears_floor(
-                    fee_breakdown.min_amount_received(),
-                    fallback,
-                    encoding_options
-                        .client_fee_params()
-                        .map_or(0, |f| f.bps()),
-                    fee_rates,
-                )? {
-                    counter!("propamm_fallback_quotes_total", "outcome" => "dropped").increment(1);
-                    tracing::debug!(
-                        order_id = %quote.order_id(),
-                        %fallback,
-                        slippage,
-                        "dropping pAMM quote: the Uniswap V3 fallback pays less than the \
-                         user's accepted slippage"
-                    );
-                    quote.set_status(QuoteStatus::NoRouteFound);
-                    continue;
-                }
-                counter!("propamm_fallback_quotes_total", "outcome" => "kept").increment(1);
-            }
             to_encode.push((i, solution, fee_breakdown, fee_rates));
         }
 
@@ -634,6 +601,53 @@ impl Encoder {
         }
         call_data.extend(encoded_args);
         call_data
+    }
+
+    /// Whether the quote's pAMM legs fall back to a Uniswap V3 fill that still pays the user's
+    /// `min_amount_out`.
+    ///
+    /// A pAMM leg fills on the venue when the maker's quote reaches the chain, and on a Uniswap V3
+    /// pool when it does not. `min_amount_out` keeps describing the venue quote and the slippage
+    /// the user accepted, so a fallback below that floor reverts. Such a quote must be dropped
+    /// before the router picks it, so the next-best candidate is quoted instead.
+    ///
+    /// Returns `true` for a quote whose route carries no fallback amount — there is no floor to
+    /// miss. The fee math mirrors `encode`, so both read the same floor for the same quote.
+    pub(crate) fn fallback_clears_min_amount_out(
+        &self,
+        quote: &OrderQuote,
+        encoding_options: &EncodingOptions,
+    ) -> Result<bool, SolveError> {
+        let Some(fallback_amount_out) = quote
+            .route()
+            .and_then(|route| route.fallback_amount_out())
+        else {
+            return Ok(true);
+        };
+
+        let client_fee_bps = encoding_options
+            .client_fee_params()
+            .map_or(0, |f| f.bps());
+        let fee_client = encoding_options
+            .client_fee_params()
+            .map_or_else(|| quote.sender(), |f| f.receiver());
+        let fee_rates = self
+            .router_fees
+            .snapshot()
+            .fees_for(fee_client);
+        let floor = Self::calculate_fee_breakdown(
+            quote.amount_out(),
+            client_fee_bps,
+            encoding_options.slippage(),
+            fee_rates,
+        )?;
+
+        Ok(Self::fallback_clears_floor(
+            floor.min_amount_received(),
+            fallback_amount_out,
+            client_fee_bps,
+            fee_rates,
+        )?)
     }
 
     /// Whether a pAMM route's Uniswap V3 fallback fill clears the floor the router checks.
@@ -1214,15 +1228,36 @@ mod tests {
             .remove(0)
     }
 
-    /// A fallback that pays less than the user's accepted slippage cannot be quoted: the floor
-    /// stays where the user put it, so the route would only revert.
-    #[tokio::test]
-    async fn test_encode_drops_pamm_quote_when_fallback_misses_the_floor() {
-        let quote = encode_with_fallback(500).await;
+    /// A fallback that pays less than the user's accepted slippage misses the floor: the floor
+    /// stays where the user put it, so the route would only revert. The router drops such a
+    /// candidate before ranking.
+    #[rstest]
+    #[case::below_the_floor(500, false)]
+    #[case::above_the_floor(985, true)]
+    fn test_fallback_clears_min_amount_out(#[case] fallback: u64, #[case] clears: bool) {
+        let encoder = real_encoder();
+        let mut route = make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]);
+        route.set_fallback_amount_out(BigUint::from(fallback));
+        let quote = make_order_quote(990).with_route(route);
 
-        assert_eq!(quote.status(), QuoteStatus::NoRouteFound);
-        assert!(quote.transaction().is_none());
-        assert!(quote.fee_breakdown().is_none());
+        assert_eq!(
+            encoder
+                .fallback_clears_min_amount_out(&quote, &EncodingOptions::new(0.01))
+                .expect("floor check"),
+            clears
+        );
+    }
+
+    /// A route without a pAMM leg carries no fallback amount, so there is no floor to miss.
+    #[test]
+    fn test_fallback_clears_min_amount_out_without_a_fallback_amount() {
+        let encoder = real_encoder();
+        let quote = make_order_quote(990)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+
+        assert!(encoder
+            .fallback_clears_min_amount_out(&quote, &EncodingOptions::new(0.01))
+            .expect("floor check"));
     }
 
     /// A fallback that clears the floor changes nothing: `min_amount_out` still describes the

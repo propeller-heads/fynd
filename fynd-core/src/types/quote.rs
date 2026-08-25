@@ -1119,8 +1119,8 @@ pub struct Route {
     /// Amount out this route delivers if its pAMM legs fall back to Uniswap V3.
     ///
     /// Set by the worker for routes that contain a `propammfallback:` leg; `None` for every other
-    /// route. The encoder drops the quote when this amount cannot clear `min_amount_out`, which
-    /// stays derived from the pAMM quote and the user's slippage. In-process only —
+    /// route. The router drops the candidate when this amount cannot clear `min_amount_out`,
+    /// which stays derived from the pAMM quote and the user's slippage. In-process only —
     /// `#[serde(skip)]`, so it never enters the wire format.
     #[serde(skip, default)]
     fallback_amount_out: Option<BigUint>,

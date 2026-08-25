@@ -320,9 +320,9 @@ where
                 }
 
                 // A route with a pAMM leg needs the amount out its Uniswap V3 fallback would
-                // deliver: the encoder checks it against `min_amount_out` and drops the quote when
-                // it falls short. A route whose fallback cannot be priced is dropped here, because
-                // there is nothing to check that floor against.
+                // deliver: the router checks it against `min_amount_out` before ranking and drops
+                // the candidate when it falls short. A route whose fallback cannot be priced is
+                // dropped here, because there is nothing to check that floor against.
                 if has_pamm_leg(&route) {
                     let Some(fee_tiers) = self.fallback_fee_tiers.snapshot() else {
                         debug!(
