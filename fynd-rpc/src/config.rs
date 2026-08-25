@@ -35,6 +35,16 @@ timeout_ms = 500
 # max_hops = 2
 # timeout_ms = 500
 # liquidity_scope = "include_exclusive"
+
+# Example: a worker pool that never routes through a protocol system. An entry names a system
+# exactly ("uniswap_v2"), or a whole family when it ends with ":" — "propammfallback:" covers
+# every venue on the PropAMMRouter. Absent = no restriction, which is the default.
+# [pools.no_pamm]
+# algorithm = "bellman_ford"
+# num_workers = 3
+# max_hops = 2
+# timeout_ms = 500
+# exclude_protocols = ["propammfallback:"]
 "#;
 
 /// Worker pools configuration loaded from TOML file.
@@ -156,6 +166,7 @@ mod tests {
             timeout_ms = 200
             max_routes = 50
             liquidity_scope = "include_exclusive"
+            exclude_protocols = ["propammfallback:", "uniswap_v2"]
         "#;
         let config: WorkerPoolsConfig = toml::from_str(toml).unwrap();
         let pool = &config.pools()["custom"];
@@ -167,6 +178,22 @@ mod tests {
         assert_eq!(pool.timeout_ms(), 200);
         assert_eq!(pool.max_routes(), Some(50));
         assert_eq!(pool.liquidity_scope(), Some(LiquidityScope::IncludeExclusive));
+        assert_eq!(
+            pool.exclude_protocols(),
+            Some(["propammfallback:".to_string(), "uniswap_v2".to_string()].as_slice())
+        );
+    }
+
+    /// A config written before `exclude_protocols` existed keeps parsing, and excludes nothing.
+    #[test]
+    fn test_pool_config_without_exclude_protocols() {
+        let toml = r#"
+            [pools.basic]
+            algorithm = "most_liquid"
+        "#;
+        let config: WorkerPoolsConfig = toml::from_str(toml).unwrap();
+
+        assert_eq!(config.pools()["basic"].exclude_protocols(), None);
     }
 }
 

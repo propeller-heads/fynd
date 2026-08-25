@@ -3,9 +3,11 @@ use std::time::Duration;
 use rustc_hash::FxHashSet;
 use tycho_simulation::tycho_common::models::Chain;
 
+/// Per-worker component filtering: which components reach one worker's graph.
+pub(crate) mod component_filter;
 /// Market events broadcast by the Tycho feed on every block update.
 pub mod events;
-/// Exclusive-component classification and per-worker graph filtering.
+/// Exclusive-component classification.
 pub mod exclusivity;
 pub(crate) mod gas;
 /// Shared market data store (`MarketState`, `MarketData`).

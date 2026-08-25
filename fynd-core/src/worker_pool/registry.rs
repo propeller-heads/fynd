@@ -63,6 +63,8 @@ pub(crate) struct SpawnWorkersParams {
     pub shutdown_tx: broadcast::Sender<()>,
     /// Liquidity scope applied to every worker in this worker pool.
     pub liquidity_scope: LiquidityScope,
+    /// Protocol systems every worker in this worker pool leaves out of its graph.
+    pub exclude_protocols: Vec<String>,
     /// PropAMMRouter fee tiers, shared with the fetcher that refreshes them.
     pub fallback_fee_tiers: SharedFeeTiers,
 }
@@ -171,6 +173,7 @@ where
         let pool_name = params.pool_name.clone();
         let factory = factory.clone();
         let liquidity_scope = params.liquidity_scope;
+        let exclude_protocols = params.exclude_protocols.clone();
         let fallback_fee_tiers = params.fallback_fee_tiers.clone();
 
         let handle = thread::Builder::new()
@@ -192,6 +195,7 @@ where
                         pool_name,
                     )
                     .with_liquidity_scope(liquidity_scope)
+                    .with_exclude_protocols(exclude_protocols)
                     .with_fallback_fee_tiers(fallback_fee_tiers);
 
                     worker.initialize_graph().await;
@@ -272,6 +276,7 @@ mod tests {
             derived_event_rx,
             shutdown_tx,
             liquidity_scope: LiquidityScope::default(),
+            exclude_protocols: Vec::new(),
             fallback_fee_tiers: SharedFeeTiers::default(),
         }
     }
@@ -312,6 +317,7 @@ mod tests {
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
             liquidity_scope: LiquidityScope::default(),
+            exclude_protocols: Vec::new(),
             fallback_fee_tiers: SharedFeeTiers::default(),
         };
 
@@ -355,6 +361,7 @@ mod tests {
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
                 liquidity_scope: LiquidityScope::default(),
+                exclude_protocols: Vec::new(),
                 fallback_fee_tiers: SharedFeeTiers::default(),
             });
         assert!(registry_err.is_err());
@@ -384,6 +391,7 @@ mod tests {
                 derived_event_rx: derived_event_tx.subscribe(),
                 shutdown_tx: shutdown_tx.clone(),
                 liquidity_scope: LiquidityScope::default(),
+                exclude_protocols: Vec::new(),
                 fallback_fee_tiers: SharedFeeTiers::default(),
             });
 
@@ -414,6 +422,7 @@ mod tests {
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
             liquidity_scope: LiquidityScope::default(),
+            exclude_protocols: Vec::new(),
             fallback_fee_tiers: SharedFeeTiers::default(),
         };
 
@@ -447,6 +456,7 @@ mod tests {
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
             liquidity_scope: LiquidityScope::default(),
+            exclude_protocols: Vec::new(),
             fallback_fee_tiers: SharedFeeTiers::default(),
         };
 

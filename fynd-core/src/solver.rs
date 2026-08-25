@@ -173,6 +173,10 @@ pub struct PoolConfig {
     /// Which liquidity this worker pool routes through.
     #[serde(default)]
     liquidity_scope: Option<LiquidityScope>,
+    /// Protocol systems this worker pool's workers never route through, e.g.
+    /// `["propammfallback:"]`. Absent = no restriction.
+    #[serde(default)]
+    exclude_protocols: Option<Vec<String>>,
 }
 
 impl PoolConfig {
@@ -189,6 +193,7 @@ impl PoolConfig {
             max_routes: None,
             connector_tokens: None,
             liquidity_scope: None,
+            exclude_protocols: None,
         }
     }
 
@@ -205,6 +210,19 @@ impl PoolConfig {
     /// Sets the worker pool's liquidity scope.
     pub fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = Some(scope);
+        self
+    }
+
+    /// Returns the protocol systems this worker pool never routes through.
+    pub fn exclude_protocols(&self) -> Option<&[String]> {
+        self.exclude_protocols.as_deref()
+    }
+
+    /// Sets the protocol systems this worker pool never routes through. An entry names a protocol
+    /// system exactly (`"uniswap_v2"`), or the whole family under a prefix when it ends with `:`
+    /// (`"propammfallback:"` covers every venue on the PropAMMRouter).
+    pub fn with_exclude_protocols(mut self, exclude_protocols: Vec<String>) -> Self {
+        self.exclude_protocols = Some(exclude_protocols);
         self
     }
 
@@ -368,6 +386,7 @@ enum PoolEntry {
         max_routes: Option<usize>,
         connector_tokens: Option<FxHashSet<Address>>,
         liquidity_scope: Option<LiquidityScope>,
+        exclude_protocols: Vec<String>,
     },
     Custom(CustomPoolEntry),
 }
@@ -592,6 +611,7 @@ impl FyndBuilder {
             max_routes: None,
             connector_tokens: None,
             liquidity_scope: None,
+            exclude_protocols: Vec::new(),
         });
         self
     }
@@ -697,6 +717,10 @@ impl FyndBuilder {
             max_routes: config.max_routes(),
             connector_tokens,
             liquidity_scope: config.liquidity_scope(),
+            exclude_protocols: config
+                .exclude_protocols()
+                .map(<[String]>::to_vec)
+                .unwrap_or_default(),
         });
         Ok(self)
     }
@@ -795,6 +819,7 @@ impl FyndBuilder {
                     max_routes,
                     connector_tokens,
                     liquidity_scope: _,
+                    exclude_protocols,
                 } => {
                     let mut algo_cfg = AlgorithmConfig::new(
                         min_hops,
@@ -812,6 +837,7 @@ impl FyndBuilder {
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
                         .liquidity_scope(pool_scope)
+                        .exclude_protocols(exclude_protocols)
                         .fallback_fee_tiers(fallback_fee_tiers.clone());
                     builder.build(
                         market_data.clone(),

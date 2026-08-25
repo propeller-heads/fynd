@@ -9,9 +9,9 @@ applications.
 |-----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `algorithm/`          | `Algorithm` trait + built-in `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`, `WaterFillAlgorithm`. Pluggable via associated graph types. `AlgorithmConfig` shared by built-ins |
 | `solver.rs`           | `FyndBuilder` assembles the full pipeline (feed + gas + computations + pools + encoder + router). `Solver` runs it                                                                 |
-| `worker_pool/`        | `WorkerPool` manages dedicated OS threads. `SolverWorker` runs a prioritized select loop (shutdown > market events > derived events > tasks). `TaskQueue` is `async_channel`-based |
+| `worker_pool/`        | `WorkerPool` manages dedicated OS threads. `SolverWorker` runs a prioritized select loop (shutdown > market events > derived events > tasks). `TaskQueue` is `async_channel`-based. `SolverWorker::drops_component` decides what stays out of one worker's graph: exclusive components in a `PublicOnly` pool, plus every protocol system in the pool's `exclude_protocols` |
 | `worker_pool_router/` | `WorkerPoolRouter` allocates the worker pools that serve each order (`allocation`: `OrderClass` matched by `SolverPoolHandle::serves`), fans out to those, drops candidates whose pAMM fallback misses `min_amount_out`, ranks the rest by `amount_out_net_gas` descending; price guard (if enabled) validates in rank order; optionally encodes |
-| `feed/`               | `TychoFeed` (WebSocket → MarketState), `GasPriceFetcher`, `MarketEvent` broadcasting, `ProtocolRegistry`                                                                           |
+| `feed/`               | `TychoFeed` (WebSocket → MarketState), `GasPriceFetcher`, `MarketEvent` broadcasting, `ProtocolRegistry`. `component_filter` drops components from one worker's graph topology and incoming events; `exclusivity` classifies exclusive components |
 | `derived/`            | `ComputationManager` runs `SpotPriceComputation`, `ComponentDepthComputation`, `TokenGasPriceComputation` in dependency order. `ReadinessTracker` gates workers until data is fresh     |
 | `graph/`              | `pub` — `GraphManager` trait (initialize + incremental update), `PetgraphStableDiGraphManager`, `StableDiGraph` (re-exported), `EdgeWeightUpdaterWithDerived`, `Path` type           |
 | `propamm_fallback/`   | `fallback_amount_out` computes the amount out a route delivers when its `propammfallback:` legs fall back to Uniswap V3; the router drops the candidate before ranking when that amount cannot clear `min_amount_out`, which keeps describing the pAMM quote and the user's slippage. `FeeTiers` mirrors the router's `resolvedFee`; `FallbackPoolIndex` indexes `uniswap_v3` components by pair and fee tier; `FeeTierFetcher` reads the tiers from the PropAMMRouter on a timer, in one Multicall3 batch per round. `SharedFeeTiers` is empty until the first successful read, and a worker that finds it empty drops the pAMM route |
@@ -162,7 +162,8 @@ component. There is no per-deployment policy to configure.
 
 Isolation is per worker, not per state: `MarketState` is never duplicated. `PublicOnly` workers filter
 exclusive components out of their local graph topology and incoming `MarketEvent`s (via
-`remove_exclusive_components`/`scope_event`); `IncludeExclusive` workers ingest everything.
+`feed/component_filter.rs`, which every worker also uses for `exclude_protocols`);
+`IncludeExclusive` workers ingest everything.
 
 After public ranking, `combine_with_surplus` overlays any `IncludeExclusive`-scope candidate that
 beats the committed amount and records the difference as `SurplusInfo`
