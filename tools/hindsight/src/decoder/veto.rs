@@ -79,11 +79,16 @@ fn input_short_of_declared(flow: &SettledSwap, transfer_ledger: &TransferLedger)
 }
 
 /// Check a decoded flow against every post-decode veto, returning the first.
+///
+/// `payee` is the address the flow's output was anchored on — the declared output recipient, or
+/// the tracked trader when nothing named one. The fee-on-transfer test needs it so a named payee
+/// is not mistaken for a token's fee wallet.
 pub(crate) fn check(
     flow: &SettledSwap,
     transfer_ledger: &TransferLedger,
     logs: &[Log],
     registry: &Registry,
+    payee: Address,
 ) -> Option<Veto> {
     if received_nft(logs, flow.tracked) {
         return Some(Veto::NftPurchase);
@@ -94,7 +99,7 @@ pub(crate) fn check(
     if input_short_of_declared(flow, transfer_ledger) {
         return Some(Veto::FeeOnTransfer);
     }
-    if fee_on_transfer(flow, transfer_ledger, registry) {
+    if fee_on_transfer(flow, transfer_ledger, registry, payee) {
         return Some(Veto::FeeOnTransfer);
     }
     None
@@ -106,15 +111,26 @@ pub(crate) fn check(
 /// quotes fee-free amounts, so the comparison would credit Fynd with the token's own fee.
 /// Registered venue fee collectors are exempt — their fees are backed out downstream. A leg
 /// under the residue line (1% of the trade amount, `RESIDUE_GROSS_RATIO`) is dust, not a fee.
+///
+/// `payee` is exempt too: the address the trade's output was anchored on. Under netting the
+/// tracked trader always both sent and received, so no anchor could look like a pure sink. A
+/// declared decode can anchor on an address the solver's own calldata named as the payee
+/// (`KyberSwap`'s `dstReceiver`, paid straight from the pool), which sends nothing and would
+/// otherwise be read as a fee wallet collecting the entire output — discarding exactly the
+/// different-receiver trades the declared read exists to reach.
 fn fee_on_transfer(
     flow: &SettledSwap,
     transfer_ledger: &TransferLedger,
     registry: &Registry,
+    payee: Address,
 ) -> bool {
     let sides = [(flow.token_in, flow.amount_in), (flow.token_out, flow.amount_out)];
     for (token, trade_amount) in sides {
         for (recipient, total) in transfer_ledger.sink_payments(token) {
-            if registry.is_fee_collector(recipient) || registry.is_infrastructure(recipient) {
+            if recipient == payee ||
+                registry.is_fee_collector(recipient) ||
+                registry.is_infrastructure(recipient)
+            {
                 continue;
             }
             if total.saturating_mul(U256::from(RESIDUE_GROSS_RATIO)) >= trade_amount {
@@ -282,7 +298,7 @@ mod tests {
         let taxed = flow(trader, swap(token_in, 1000, token_out, 2000));
 
         assert_eq!(
-            check(&taxed, &transfer_ledger, &logs, &Registry::ethereum()),
+            check(&taxed, &transfer_ledger, &logs, &Registry::ethereum(), trader),
             Some(Veto::FeeOnTransfer)
         );
     }
@@ -307,7 +323,7 @@ mod tests {
         let taxed = flow(trader, swap(token_in, 1000, token_out, 1900));
 
         assert_eq!(
-            check(&taxed, &transfer_ledger, &logs, &Registry::ethereum()),
+            check(&taxed, &transfer_ledger, &logs, &Registry::ethereum(), trader),
             Some(Veto::FeeOnTransfer)
         );
     }
@@ -366,6 +382,35 @@ mod tests {
     }
 
     #[test]
+    fn test_declared_payee_is_not_a_transfer_fee_sink() {
+        // A different-receiver trade, which only the declared read can reach: the pool pays the
+        // whole output straight to the payee the calldata named (KyberSwap's `dstReceiver`), who
+        // sends nothing. That payee looks exactly like a fee wallet collecting the entire output,
+        // so without the exemption the trade is discarded as a token tax.
+        let registry = Registry::ethereum();
+        let trader = addr(1);
+        let payee = addr(2);
+        let pool = addr(50);
+        let token_in = addr(10);
+        let token_out = addr(11);
+
+        let logs = vec![
+            make_transfer_log(token_in, trader, pool, U256::from(1000)),
+            make_transfer_log(token_out, pool, payee, U256::from(2000)),
+        ];
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+        let delivered = flow(trader, swap(token_in, 1000, token_out, 2000));
+
+        assert_eq!(check(&delivered, &transfer_ledger, &logs, &registry, payee), None);
+        // Anchored on the trader instead, the same payee is an unexplained sink — which is what
+        // the veto is for, and why the anchor has to be passed in rather than assumed.
+        assert_eq!(
+            check(&delivered, &transfer_ledger, &logs, &registry, trader),
+            Some(Veto::FeeOnTransfer)
+        );
+    }
+
+    #[test]
     fn test_fee_collector_sink_is_not_a_transfer_fee() {
         // The same split, but the sink is a registered venue fee collector: a venue fee the
         // decoders back out, not a token tax.
@@ -388,7 +433,7 @@ mod tests {
         let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
         let fee_paying = flow(trader, swap(token_in, 1000, token_out, 2000));
 
-        assert_eq!(check(&fee_paying, &transfer_ledger, &logs, &registry), None);
+        assert_eq!(check(&fee_paying, &transfer_ledger, &logs, &registry, trader), None);
     }
 
     #[test]
@@ -412,7 +457,10 @@ mod tests {
         let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
         let partner_fee = flow(trader, swap(token_in, 1000, token_out, 1970));
 
-        assert_eq!(check(&partner_fee, &transfer_ledger, &logs, &Registry::ethereum()), None);
+        assert_eq!(
+            check(&partner_fee, &transfer_ledger, &logs, &Registry::ethereum(), trader),
+            None
+        );
     }
 
     #[test]
@@ -433,7 +481,7 @@ mod tests {
         let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
         let split = flow(trader, swap(token_in, 1000, token_out, 2000));
 
-        assert_eq!(check(&split, &transfer_ledger, &logs, &Registry::ethereum()), None);
+        assert_eq!(check(&split, &transfer_ledger, &logs, &Registry::ethereum(), trader), None);
     }
 
     #[test]
@@ -453,7 +501,7 @@ mod tests {
         let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
         let dusty = flow(trader, swap(token_in, 10_000, token_out, 20_000));
 
-        assert_eq!(check(&dusty, &transfer_ledger, &logs, &Registry::ethereum()), None);
+        assert_eq!(check(&dusty, &transfer_ledger, &logs, &Registry::ethereum(), trader), None);
     }
 
     #[test]

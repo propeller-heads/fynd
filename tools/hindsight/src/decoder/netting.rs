@@ -51,15 +51,24 @@ pub(crate) async fn fallback_flow<P: Provider>(
         return sender_flow(transfer_ledger, sender, entry_point)
             .map(|flow| (DecodeSource::SenderNetting, flow));
     }
-    // Batch settlements and log-matched intent fills: the sender acts for the trader. A
-    // frame-matched transaction through an unknown wrapper has no other trader to find, so it
-    // falls through to the sender's own flow.
+    // Batch settlements and log-matched intent fills: the sender acts for the trader, so the
+    // trader is found in the transfers.
     if let Some(flow) =
         find_intent_trade(provider, transfer_ledger, &[entry_point, sender], registry, code_cache)
             .await
     {
         return Some((DecodeSource::IntentNetting, flow));
     }
+    // No trader found. Netting the sender instead is only right where the sender *is* the trader,
+    // which a batch settler's sender never is: it is a solver settling many orders, so its net
+    // flow is inventory and rounding rather than one swap (see `Registry::is_batch_settler`).
+    // Recording that as a trade invents amounts and compares them against a fresh quote, which
+    // is worse than the coverage miss.
+    if registry.is_batch_settler(entry_point) {
+        return None;
+    }
+    // A frame-matched transaction through an unknown wrapper has no other trader to find, and its
+    // sender is the trader.
     sender_flow(transfer_ledger, sender, entry_point)
         .map(|flow| (DecodeSource::SenderNetting, flow))
 }
@@ -266,6 +275,33 @@ mod tests {
                 .unwrap();
         assert_eq!(decoder, DecodeSource::IntentNetting);
         assert_eq!(flow.tracked, addr(100));
+    }
+
+    #[tokio::test]
+    async fn test_fallback_batch_settler_with_no_swapper_is_declined() {
+        // The same CoW batch, but every candidate carries contract code, so no trader is found.
+        // The settler's sender is a solver: its net flow is inventory and rounding across many
+        // orders, not one swap. Netting it would invent a trade, so the transaction is declined.
+        let registry = Registry::ethereum();
+        let cow: Address = "0x9008d19f58aabd9ed0d60971565aa8510560ab41"
+            .parse()
+            .unwrap();
+        let asserter = Asserter::new();
+        asserter.push_success(&Bytes::from(vec![0xfe]));
+        asserter.push_success(&Bytes::from(vec![0xfe]));
+        let provider = mocked_provider(&asserter);
+        let mut cache = HashMap::new();
+
+        assert!(fallback_flow(
+            &provider,
+            &mut cache,
+            &registry,
+            &inverse_swap_ledger(),
+            addr(2),
+            cow
+        )
+        .await
+        .is_none());
     }
 
     #[tokio::test]

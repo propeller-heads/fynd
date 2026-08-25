@@ -399,7 +399,13 @@ impl<P: Provider> Decoder<P> {
             (decoder, flow, None)
         };
 
-        if let Some(veto) = veto::check(&flow, &transfer_ledger, logs, registry) {
+        // The address `amount_out` was anchored on: the payee the solver's calldata named, or the
+        // trader when it named none. The fee-on-transfer test exempts it (see `veto::check`).
+        let payee = declared
+            .as_ref()
+            .and_then(|declared| declared.output_recipient)
+            .unwrap_or(flow.tracked);
+        if let Some(veto) = veto::check(&flow, &transfer_ledger, logs, registry, payee) {
             debug!(
                 tx = %receipt.transaction_hash,
                 venue = %registry.label(entry_point),
