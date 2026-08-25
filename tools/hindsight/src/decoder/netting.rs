@@ -76,7 +76,7 @@ pub(crate) async fn fallback_flow<P: Provider>(
 /// Net the sender's flow. When the sender nets nothing, fall back to the contract the transaction
 /// entered through (`tx.to`), for the rare shape where the swap output is delivered to that
 /// contract rather than back to the sender.
-pub(crate) fn sender_flow(
+fn sender_flow(
     transfer_ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
@@ -105,7 +105,7 @@ pub(crate) fn sender_flow(
 ///   decode can attribute the wrong account's flow.
 /// - **Smart-wallet swappers are declined.** A swapper behind contract code (account abstraction,
 ///   EIP-7702 delegation) is indistinguishable from a pool here, so its fills are dropped.
-pub(crate) async fn find_intent_trade<P: Provider>(
+async fn find_intent_trade<P: Provider>(
     provider: &P,
     transfer_ledger: &TransferLedger,
     exclude: &[Address],

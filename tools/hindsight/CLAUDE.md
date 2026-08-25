@@ -146,9 +146,12 @@ vanished at N).
 `declared_flow` reads `token_in`/`token_out`/`amount_in` from the settling solver frame's own
 `DeclaredSwap` and recovers the settled `amount_out` as the gross amount of `token_out` received by
 the output recipient the same calldata declares (falling back to the transaction sender) — the
-one field calldata can never carry. Two guards protect the recipient-receipt query: the recovered
-output must clear the intent's `min_amount_out` floor, and any declared quote must sit within
-`plausible_quote`'s band of it; either failure falls through to the netting fallback. A fee paid
+one field calldata can never carry. Two guards protect the recipient-receipt query, and they act
+differently: a recovered output below the declared `min_amount_out` floor drops the transaction
+(`Veto::OutputNotFound`) rather than falling through to netting, because once a solver has stated
+the trade, netting would answer a different question; a declared quote outside `plausible_quote`'s
+band drops only the quote and keeps the trade. Dropped transactions are counted by
+`hindsight_vetoed_transactions_total`, labelled by veto. A fee paid
 to a `[venue_fees]` wallet is corrected out of both amounts by `attribution::venue`, on whichever
 side the wallet was paid; no other venue fee is modelled (see the README).
 

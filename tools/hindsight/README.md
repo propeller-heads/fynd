@@ -57,15 +57,15 @@ call, so decoding starts there, and the venue is attributed afterwards as a labe
                     │
                     │ declined ──▶ ┌──────────────────┐  net the balances instead, picked by
                     │              │ netting fallback │  the entry point: venue → sender
-                    │              └────────┬─────────┘  netting + fee back-out; batch settler
+                    │              └────────┬─────────┘  netting; a batch settler
                     │                       │            or solver log → find the trader in the
                     │                       │            transfers; solver → sender netting.
                     │                       │            Records are marked decode: "netted".
                     ▼                       ▼
            ┌─────────────────┐  veto (reject non-trades) → venue attribution (entry point →
            │ post-processing │  owner → appData → fee wallet → integrator tag) → solver
-           └────────┬────────┘  attribution (venue-declared id → entry point → trace frame →
-                    │           guess) → sandwich scan
+           └────────┬────────┘  attribution (entry point → trace frame → guess) →
+                    │           sandwich scan
                     ▼
               DecodedTrade      carries decode: "declared" or "netted"
 ```
@@ -76,9 +76,9 @@ call, so decoding starts there, and the venue is attributed afterwards as a labe
 data states it. Calldata carries `token_in`/`token_out`/`amount_in`/`min_amount_out` (and
 sometimes the solver's off-chain quote); the one field it can never carry — the settled
 `amount_out` — is anchored as the gross amount the declared output recipient received in the
-transfer ledger. The declared amounts are already on the solver-task basis: any venue fee left
-the input before the solver frame, so no venue knowledge is needed to decode. These are the
-trusted records, and the report's default scope.
+transfer ledger. No venue knowledge is needed to decode: a `[venue_fees]` wallet's cut is
+corrected out afterwards, by the step that knows which decoder produced the amounts (see below).
+These are the trusted records, and the report's default scope.
 
 **Netted** (`decoder/netting.rs`): recover the swap from what moved — ERC-20 transfers plus
 native flows from the trace. Works for any solver with no parser, but a fee the ledger does not
@@ -175,13 +175,14 @@ four maps from the address book:
   (see above); every function in `attribution.rs` only reads. Wallets are checked in address
   order, so a trade cut by two venues' wallets resolves the same way on every run.
 - **provider integrator tag** (`[venue_integrators]`) — a provider's event carried an integrator
-  string mapped to a venue (LiFi frontends), read by `solvers::lifi::integrator`.
+  string mapped to a venue (LiFi frontends), read through `SolverDecoder::venue_fingerprint`.
 
-The solver label comes from its own evidence tiers, most- to least-trusted: the venue-declared
-calldata id (MetaMask's `aggregatorId`, normalized through the alias list in `solvers/`), the entry
-point itself, the solver frame in the trace, the largest external call (a guess, for unknown
-routers), and the entry-point label as the honest "don't know". The tier is recorded on the
-record (`solver_source`).
+The solver label comes from its own evidence tiers, most- to least-trusted: the entry point
+itself, the outermost solver frame in the trace, the largest external call (a guess, for unknown
+routers), and the entry-point label as the honest "don't know". The tier is recorded on the record
+(`solver_source`). A venue's own claim about which solver it routed to is not consulted — the
+router that settled the trade is in the trace, which is the harder fact, and the `solver_aliases`
+tables the claim was read from are gone from the address books.
 
 ### Per protocol, not per chain
 

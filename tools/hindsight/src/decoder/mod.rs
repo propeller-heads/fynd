@@ -375,7 +375,22 @@ impl<P: Provider> Decoder<P> {
         // Netting is the fallback, and its records are marked. A solver that declares the
         // transaction is not a swap at all vetoes it here, before netting gets a chance to pair
         // its legs into a trade that never happened.
-        let read = declared::declared_flow(root, registry, logs, &transfer_ledger, sender).ok()?;
+        let read = match declared::declared_flow(root, registry, logs, &transfer_ledger, sender) {
+            Ok(read) => read,
+            Err(veto) => {
+                // Counted and logged rather than swallowed: a misparsed floor or an off-basis
+                // amount in any solver's decoder deletes real trades from here, and the operator
+                // would otherwise see only lower coverage with nothing naming the cause.
+                debug!(
+                    tx = %receipt.transaction_hash,
+                    venue = %registry.label(entry_point),
+                    ?veto,
+                    "the settling solver's own data rejected this transaction; skipping"
+                );
+                crate::telemetry::record_veto(&format!("{veto:?}"));
+                return None;
+            }
+        };
         let (decoder, mut flow, declared) = if let Some((decoder, flow, declared)) = read {
             (decoder, flow, Some(declared))
         } else {
@@ -412,6 +427,7 @@ impl<P: Provider> Decoder<P> {
                 ?veto,
                 "decoded flow is not a comparable trade; skipping"
             );
+            crate::telemetry::record_veto(&format!("{veto:?}"));
             return None;
         }
 
