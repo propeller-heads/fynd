@@ -85,6 +85,15 @@ batch settler's `Trade` log) are the trusted tier and the report's default scope
 (balance netting) can hide an unaccounted fee inside the amounts; the report excludes them unless
 `--include-netted`.
 
+### Batch transactions are not supported
+
+A transaction that swaps several times has no single trade to record, and one record holds one
+swap. Both forms are declined rather than guessed: a transaction entering a solver router more
+than once declines its declared read (`trace::solver_frames`, counted by
+`hindsight_several_legs_total`) and falls to netting; a `[batch_settlers]` settlement of several
+orders is declined by `cow.rs` and again by netting when no single trader is found. See the
+README.
+
 ### The address book (`registry/<chain>.toml`)
 
 All chain- and protocol-specific data lives in a per-chain TOML, embedded for the seven chains

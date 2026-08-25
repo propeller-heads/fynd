@@ -85,6 +85,18 @@ native flows from the trace. Works for any solver with no parser, but a fee the 
 show (or whose collector is not in the address book) sits inside the amounts. Netted records are
 marked (`decode: "netted"`) and excluded from the report unless `--include-netted`.
 
+### Batch transactions are not supported
+
+A transaction that swaps several times — an arbitrage contract routing legs through the same
+router, or a settler filling several signed orders — has no single trade to record. One record
+holds one swap, so recording a leg would compare Fynd against a fragment of what traded.
+
+Both are declined rather than guessed. A transaction that enters a solver router more than once
+declines its declared read (counted by `hindsight_several_legs_total`) and falls to netting, which
+reads the trader's own balances and either finds one net swap or declines. A `[batch_settlers]`
+settlement of several orders is declined by `CoW`'s decoder, and declined again by netting if no
+single trader is found. Coverage the tool gives up, in both cases, rather than amounts it invents.
+
 ### SolverDecoder (`src/decoder/solvers/`)
 
 One trait per solver — everything the solver's own calldata and logs can say:
