@@ -52,7 +52,7 @@ pub(crate) use crate::decoder::{
 use crate::decoder::{
     solvers::DeclaredSwap,
     trace::{collect_native_transfers, fetch_block_traces},
-    transfer_ledger::TransferLedger,
+    transfer_ledger::{SettledSwap, TransferLedger},
 };
 
 /// Which decoder recovered a record's settled amounts.
@@ -138,12 +138,12 @@ pub(crate) struct DecodedTrade {
     pub token_in: Address,
     pub token_out: Address,
     /// Input amount that entered the swap. A fee paid to a `[venue_fees]` wallet out of the input
-    /// is subtracted (see `attribution::venue`), so a re-solve is quoted the amount that reached
-    /// the pools.
+    /// is subtracted (see `apply_venue_fee`), so a re-solve is quoted the amount that reached the
+    /// pools.
     pub amount_in: U256,
     /// Gross swap output. A fee paid to a `[venue_fees]` wallet out of the output is added back
-    /// (see `attribution::venue`), so the settled amount is the full swap proceeds, comparable to
-    /// Fynd's gross output.
+    /// (see `apply_venue_fee`) unless the recorded figure already includes it, so the settled
+    /// amount is the full swap proceeds, comparable to Fynd's gross output.
     pub amount_out: U256,
     /// The on-chain enforced floor declared in the settling solver frame's own calldata (see
     /// `SolverDecoder::declared` for the solvers that declare one). A settled trade cleared
@@ -165,6 +165,73 @@ pub(crate) struct DecodedTrade {
     /// `sandwich::detect`). `None` when no bracket pair was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandwich: Option<SandwichEvidence>,
+}
+
+/// Put the recorded amounts back on the swap's own basis when a `[venue_fees]` wallet took a cut.
+///
+/// Fynd quotes the swap alone, so a venue's cut has to come out of the comparison on whichever
+/// side it was taken:
+///
+/// - **Input side**: the wallet is paid out of the amount the trader authorized, so the pools saw
+///   less than `amount_in` states. Subtracted, or Fynd is re-solved on more input than the swap had
+///   and its larger output reads as savings.
+/// - **Output side**: the trader's receipt is short of the gross output by the fee, while Fynd's
+///   quote is gross. Added back, unless the recorded output already contains it — see
+///   `output_already_gross`.
+///
+/// Runs for every trade with a fee-wallet match, whichever fingerprint produced the venue label.
+fn apply_venue_fee(
+    flow: &mut SettledSwap,
+    fee: &attribution::VenueFee,
+    declared: Option<&DeclaredSwap>,
+    transfer_ledger: &TransferLedger,
+    sender: Address,
+) {
+    match fee.side {
+        attribution::FeeSide::Input => {
+            flow.amount_in = flow
+                .amount_in
+                .saturating_sub(fee.amount);
+        }
+        attribution::FeeSide::Output => {
+            if output_already_gross(flow, fee, declared, transfer_ledger, sender) {
+                return;
+            }
+            flow.amount_out = flow
+                .amount_out
+                .saturating_add(fee.amount);
+        }
+    }
+}
+
+/// Whether the recorded `amount_out` already includes an output-side venue fee, in which case
+/// adding it back would count the venue's cut twice.
+///
+/// Two ways it can already be inside:
+///
+/// - The solver's own event stated the output outright, and those figures are the swap's gross
+///   result before any cut (`LiFi`'s `toAmount` is documented and verified as gross in
+///   `solvers::lifi`). Nothing was measured from a receipt, so there is nothing short by the fee.
+/// - The receipt that was measured belongs to the address that then paid the fee wallet out of it —
+///   a router named as the declared output recipient receives the gross amount and forwards the
+///   cut, so its receipt is already gross.
+fn output_already_gross(
+    flow: &SettledSwap,
+    fee: &attribution::VenueFee,
+    declared: Option<&DeclaredSwap>,
+    transfer_ledger: &TransferLedger,
+    sender: Address,
+) -> bool {
+    if declared.is_some_and(|declared| declared.amount_out.is_some()) {
+        return true;
+    }
+    let anchor = match declared {
+        Some(declared) => declared
+            .output_recipient
+            .unwrap_or(sender),
+        None => flow.tracked,
+    };
+    transfer_ledger.sent_by_address(anchor, flow.token_out) >= fee.amount
 }
 
 /// The terms the solver declared alongside the trade, or all-`None` for a netted record where no
@@ -355,8 +422,12 @@ impl<P: Provider> Decoder<P> {
                     .decoder
                     .venue_fingerprint(&root.input, logs)
             });
-        let venue = attribution::venue(registry, &mut flow, &transfer_ledger, tag.as_ref())
+        let fee = attribution::venue_fee(registry, &transfer_ledger, flow.token_in, flow.token_out);
+        let venue = attribution::venue(registry, &flow, tag.as_ref(), fee.as_ref())
             .unwrap_or_else(|| registry.label(entry_point));
+        if let Some(fee) = &fee {
+            apply_venue_fee(&mut flow, fee, declared.as_ref(), &transfer_ledger, sender);
+        }
 
         let (min_amount_out, declared_quote, quote_timestamp) = declared_terms(declared.as_ref());
         let decode = decoder.tier();
@@ -398,6 +469,127 @@ mod tests {
     /// 1inch v6 — a `[solvers]` entry in the ethereum address book, so a transaction into it
     /// matches on its entry point alone.
     const ONEINCH: Address = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+
+    /// Phantom's 85 bps cut of the buy token, as `attribution` reports it.
+    fn output_fee(amount: u64) -> attribution::VenueFee {
+        attribution::VenueFee {
+            venue: "phantom".to_string(),
+            side: attribution::FeeSide::Output,
+            amount: U256::from(amount),
+        }
+    }
+
+    #[test]
+    fn test_output_fee_is_added_back_to_a_netted_receipt() {
+        // The trader's receipt is short of the gross output by the fee, and Fynd's quote is gross.
+        let user = addr(1);
+        let pool = addr(0x50);
+        let phantom = addr(0x99);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+        let logs = vec![
+            make_transfer_log(token_out, pool, user, U256::from(9915)),
+            make_transfer_log(token_out, pool, phantom, U256::from(85)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let mut flow = SettledSwap {
+            tracked: user,
+            token_in,
+            amount_in: U256::from(1000),
+            token_out,
+            amount_out: U256::from(9915),
+        };
+
+        apply_venue_fee(&mut flow, &output_fee(85), None, &ledger, user);
+        assert_eq!(flow.amount_out, U256::from(10_000));
+    }
+
+    #[test]
+    fn test_output_fee_is_not_added_to_an_amount_the_solvers_event_stated() {
+        // An event states the swap's gross output (LiFi's `toAmount`), so nothing was measured
+        // from a receipt and nothing is short by the fee. Adding it would count the cut twice.
+        let user = addr(1);
+        let pool = addr(0x50);
+        let phantom = addr(0x99);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+        let logs = vec![
+            make_transfer_log(token_out, pool, user, U256::from(9915)),
+            make_transfer_log(token_out, pool, phantom, U256::from(85)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let declared = DeclaredSwap::from_event(
+            user,
+            token_in,
+            U256::from(1000),
+            token_out,
+            U256::from(10_000),
+        );
+        let mut flow = SettledSwap {
+            tracked: user,
+            token_in,
+            amount_in: U256::from(1000),
+            token_out,
+            amount_out: U256::from(10_000),
+        };
+
+        apply_venue_fee(&mut flow, &output_fee(85), Some(&declared), &ledger, user);
+        assert_eq!(flow.amount_out, U256::from(10_000));
+    }
+
+    #[test]
+    fn test_output_fee_is_not_added_when_the_declared_recipient_paid_it() {
+        // The calldata named the router as the output recipient: it received the gross 10000 and
+        // paid the fee wallet out of it, so the receipt already contains the cut.
+        let user = addr(1);
+        let pool = addr(0x50);
+        let router = addr(0x60);
+        let phantom = addr(0x99);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+        let logs = vec![
+            make_transfer_log(token_out, pool, router, U256::from(10_000)),
+            make_transfer_log(token_out, router, phantom, U256::from(85)),
+            make_transfer_log(token_out, router, user, U256::from(9915)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let declared =
+            DeclaredSwap::from_calldata(token_in, token_out, U256::from(1000), U256::from(9000))
+                .with_recipient(router);
+        let mut flow = SettledSwap {
+            tracked: user,
+            token_in,
+            amount_in: U256::from(1000),
+            token_out,
+            amount_out: U256::from(10_000),
+        };
+
+        apply_venue_fee(&mut flow, &output_fee(85), Some(&declared), &ledger, user);
+        assert_eq!(flow.amount_out, U256::from(10_000));
+    }
+
+    #[test]
+    fn test_input_fee_is_subtracted_whatever_produced_the_amount() {
+        // The pools saw 9905 of the 10000 the trader authorized, so the re-solve is quoted 9905.
+        let user = addr(1);
+        let coinbase = addr(0x99);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+        let logs = vec![make_transfer_log(token_in, user, coinbase, U256::from(95))];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let fee = attribution::VenueFee {
+            venue: "coinbase".to_string(),
+            side: attribution::FeeSide::Input,
+            amount: U256::from(95),
+        };
+        let mut flow = SettledSwap {
+            tracked: user,
+            token_in,
+            amount_in: U256::from(10_000),
+            token_out,
+            amount_out: U256::from(2000),
+        };
+
+        apply_venue_fee(&mut flow, &fee, None, &ledger, user);
+        assert_eq!(flow.amount_in, U256::from(9905));
+        assert_eq!(flow.amount_out, U256::from(2000));
+    }
 
     #[test]
     fn test_decode_columns_keep_their_wire_strings() {

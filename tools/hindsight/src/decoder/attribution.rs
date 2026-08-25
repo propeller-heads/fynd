@@ -1,7 +1,8 @@
 //! Attribution: which solver settled a decoded trade, and which venue owns its order flow.
 //!
-//! Attribution runs after decoding and only labels the record (plus the fee bookkeeping a
-//! fee-wallet match implies). Nothing here affects whether a trade decodes.
+//! Attribution runs after decoding and only labels the record — every function here reads. The
+//! fee a `[venue_fees]` match finds is reported ([`venue_fee`]) and applied by the caller, which
+//! is the one place that knows which decoder produced the amounts.
 //!
 //! The solver label comes from the first evidence tier that answers, most- to least-trusted
 //! (see `AttributionSource`). The venue label is normally the contract the trader entered
@@ -99,21 +100,14 @@ pub(crate) fn solver(
 /// own data by `SolverDecoder::venue_fingerprint`; which map a tag is looked up in follows from
 /// its variant, so this function still names no solver and no venue.
 ///
-/// A fee-wallet match also corrects the amounts onto the swap's own basis, on whichever side the
-/// wallet was paid. Fynd quotes the swap alone, so both corrections are what keep the comparison
-/// like-for-like:
-///
-/// - Output side: the wallet is paid out of the routing path, so the trader's receipt — netted or
-///   declared — is short of the gross output by exactly the fee. The fee is added back. Without
-///   this the comparison hands Fynd the venue's cut as savings.
-/// - Input side: the wallet is paid out of the amount the trader authorized, so the swap saw less
-///   than `amount_in` states. The fee is subtracted. Without this Fynd is re-solved on more input
-///   than reached the pools, which overstates its output.
+/// A fee-wallet match is one of the four, so `fee` is passed in rather than looked up here: the
+/// caller reads it once with [`venue_fee`] and also applies its correction, which is a separate
+/// job from labelling (see [`VenueFee`]).
 pub(crate) fn venue(
     registry: &Registry,
-    flow: &mut SettledSwap,
-    ledger: &TransferLedger,
+    flow: &SettledSwap,
     tag: Option<&VenueTag>,
+    fee: Option<&VenueFee>,
 ) -> Option<String> {
     if let Some(venue) = registry.venue_for_owner(flow.tracked) {
         return Some(venue.to_string());
@@ -123,12 +117,8 @@ pub(crate) fn venue(
             return Some(venue.to_string());
         }
     }
-    if let Some((venue, fee)) = fee_venue(registry, ledger, flow.token_in, flow.token_out) {
-        match fee {
-            VenueFee::Input(amount) => flow.amount_in = flow.amount_in.saturating_sub(amount),
-            VenueFee::Output(amount) => flow.amount_out = flow.amount_out.saturating_add(amount),
-        }
-        return Some(venue);
+    if let Some(fee) = fee {
+        return Some(fee.venue.clone());
     }
     if let Some(VenueTag::Integrator(name)) = tag {
         return registry
@@ -138,29 +128,44 @@ pub(crate) fn venue(
     None
 }
 
-/// Which side of the swap a venue took its fee from, with the amount.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VenueFee {
-    /// Skimmed off the input before the swap, so the settled input is smaller than the user spent.
-    Input(U256),
-    /// Taken out of the output after the swap, so the settled output is larger than the user kept.
-    Output(U256),
+/// The cut a `[venue_fees]` wallet took out of one trade: which venue owns the wallet, which side
+/// of the swap the cut came from, and how much.
+///
+/// Deliberately not applied here. Fynd quotes the swap alone, so the recorded amounts have to be
+/// put back on the swap's own basis — but whether they already are depends on which decoder
+/// produced them, which only the caller knows. Applying it inside the venue label search made the
+/// correction depend on which fingerprint won a race that has nothing to do with fees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VenueFee {
+    /// The venue whose wallet was paid — also the venue label a fee-wallet match produces.
+    pub venue: String,
+    pub side: FeeSide,
+    pub amount: U256,
 }
 
-/// The venue whose fee wallet took a cut of this trade, and which side it came from. `None` when no
-/// venue fee wallet received a non-zero amount of either swap token.
+/// Which side of the swap a venue took its fee from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeeSide {
+    /// Skimmed off the input before the swap, so the swap saw less than the trader authorized.
+    Input,
+    /// Taken out of the output after the swap, so the trader kept less than the swap produced.
+    Output,
+}
+
+/// The cut a venue's fee wallet took of this trade. `None` when no `[venue_fees]` wallet received
+/// a non-zero amount of either swap token.
 ///
 /// Both sides are checked because venues split on this: Phantom and Robinhood take the buy token,
 /// while Coinbase's Base App skims the sell token before routing. The output side is tried first —
 /// a wallet that received both tokens is being paid its cut in the token the user bought. The
 /// wallets are checked in address order, so two venues' wallets both taking a cut of one trade
 /// resolve to the same venue on every run.
-fn fee_venue(
+pub(crate) fn venue_fee(
     registry: &Registry,
     ledger: &TransferLedger,
     token_in: Address,
     token_out: Address,
-) -> Option<(String, VenueFee)> {
+) -> Option<VenueFee> {
     for (wallet, venue) in registry.venue_fees() {
         let received = ledger.received_by(&HashSet::from([*wallet]));
         let non_zero = |token: &Address| {
@@ -169,11 +174,11 @@ fn fee_venue(
                 .copied()
                 .filter(|amount| !amount.is_zero())
         };
-        if let Some(fee) = non_zero(&token_out) {
-            return Some((venue.clone(), VenueFee::Output(fee)));
+        if let Some(amount) = non_zero(&token_out) {
+            return Some(VenueFee { venue: venue.clone(), side: FeeSide::Output, amount });
         }
-        if let Some(fee) = non_zero(&token_in) {
-            return Some((venue.clone(), VenueFee::Input(fee)));
+        if let Some(amount) = non_zero(&token_in) {
+            return Some(VenueFee { venue: venue.clone(), side: FeeSide::Input, amount });
         }
     }
     None
@@ -334,17 +339,15 @@ mod tests {
         // A CoW-settled kpk trade nets to the Safe that owns the order; the venue is that Safe.
         let registry = Registry::ethereum();
         let kpk_safe = address!("0x4f2083f5fbede34c2714affb3105539775f7fe64");
-        let ledger = TransferLedger::from_transaction(&[], &[]);
-        let mut flow = SettledSwap { tracked: kpk_safe, ..swap(addr(10), 1, addr(11), 2) };
-        assert_eq!(venue(&registry, &mut flow, &ledger, None).as_deref(), Some("kpk"));
+        let flow = SettledSwap { tracked: kpk_safe, ..swap(addr(10), 1, addr(11), 2) };
+        assert_eq!(venue(&registry, &flow, None, None).as_deref(), Some("kpk"));
     }
 
     #[test]
     fn test_unknown_owner_is_not_a_venue() {
         let registry = Registry::ethereum();
-        let ledger = TransferLedger::from_transaction(&[], &[]);
-        let mut flow = SettledSwap { tracked: addr(9), ..swap(addr(10), 1, addr(11), 2) };
-        assert_eq!(venue(&registry, &mut flow, &ledger, None), None);
+        let flow = SettledSwap { tracked: addr(9), ..swap(addr(10), 1, addr(11), 2) };
+        assert_eq!(venue(&registry, &flow, None, None), None);
     }
 
     #[test]
@@ -352,23 +355,19 @@ mod tests {
         // A CoW order carrying DefiLlama's appData hash is attributed to LlamaSwap; an unregistered
         // hash is not.
         let registry = Registry::ethereum();
-        let ledger = TransferLedger::from_transaction(&[], &[]);
         let defillama = b256!("0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422");
-        let mut flow = SettledSwap { tracked: addr(1), ..swap(addr(10), 1, addr(11), 2) };
+        let flow = SettledSwap { tracked: addr(1), ..swap(addr(10), 1, addr(11), 2) };
         assert_eq!(
-            venue(&registry, &mut flow, &ledger, Some(&VenueTag::AppData(defillama))).as_deref(),
+            venue(&registry, &flow, Some(&VenueTag::AppData(defillama)), None).as_deref(),
             Some("llamaswap")
         );
-        assert_eq!(
-            venue(&registry, &mut flow, &ledger, Some(&VenueTag::AppData(B256::ZERO))),
-            None
-        );
+        assert_eq!(venue(&registry, &flow, Some(&VenueTag::AppData(B256::ZERO)), None), None);
     }
 
     #[test]
-    fn test_fee_wallet_attributes_and_grosses_fee_back() {
-        // A 0x-routed Phantom swap: the buy-token fee reaches Phantom's wallet. It must be added
-        // back so the settled output is gross (else every Phantom swap under-reports by 85 bps).
+    fn test_fee_wallet_attributes_the_venue_and_reports_the_cut() {
+        // A 0x-routed Phantom swap: the buy-token fee reaches Phantom's wallet, which both names
+        // the venue and is the cut the caller has to correct out.
         let registry = Registry::ethereum();
         let phantom = address!("0x2cffed5d56eb6a17662756ca0fdf350e732c9818");
         let user = addr(1);
@@ -381,33 +380,33 @@ mod tests {
             make_transfer_log(token_out, pool, phantom, U256::from(85)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
+        let flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
 
-        assert_eq!(venue(&registry, &mut flow, &ledger, None).as_deref(), Some("phantom"));
-        assert_eq!(flow.amount_out, U256::from(10000));
+        let fee = venue_fee(&registry, &ledger, flow.token_in, flow.token_out).unwrap();
+        assert_eq!(fee.side, FeeSide::Output);
+        assert_eq!(fee.amount, U256::from(85));
+        assert_eq!(venue(&registry, &flow, None, Some(&fee)).as_deref(), Some("phantom"));
     }
 
     #[test]
-    fn test_fee_wallet_on_declared_amounts() {
-        // The same Phantom fee leg on a declared decode: the wallet is paid from the routing
-        // path directly, so the declared recipient's receipt (9915) is short of the gross output
-        // by the fee — grossed back, exactly like a netted flow.
+    fn test_fee_is_reported_even_when_another_fingerprint_names_the_venue() {
+        // A kpk trade (owner match) that also paid a Phantom fee leg. The owner wins the label,
+        // and the cut is still reported: the correction must not depend on which fingerprint won.
         let registry = Registry::ethereum();
+        let kpk_safe = address!("0x4f2083f5fbede34c2714affb3105539775f7fe64");
         let phantom = address!("0x2cffed5d56eb6a17662756ca0fdf350e732c9818");
-        let user = addr(1);
-        let pool = addr(50);
         let token_in = addr(10);
         let token_out = addr(11);
         let logs = vec![
-            make_transfer_log(token_in, user, pool, U256::from(1000)),
-            make_transfer_log(token_out, pool, user, U256::from(9915)),
-            make_transfer_log(token_out, pool, phantom, U256::from(85)),
+            make_transfer_log(token_out, addr(50), kpk_safe, U256::from(9915)),
+            make_transfer_log(token_out, addr(50), phantom, U256::from(85)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
+        let flow = SettledSwap { tracked: kpk_safe, ..swap(token_in, 1000, token_out, 9915) };
 
-        assert_eq!(venue(&registry, &mut flow, &ledger, None).as_deref(), Some("phantom"));
-        assert_eq!(flow.amount_out, U256::from(10000));
+        let fee = venue_fee(&registry, &ledger, flow.token_in, flow.token_out).unwrap();
+        assert_eq!(fee.amount, U256::from(85));
+        assert_eq!(venue(&registry, &flow, None, Some(&fee)).as_deref(), Some("kpk"));
     }
 
     #[test]
@@ -415,24 +414,21 @@ mod tests {
         // A provider integrator tag maps to its venue, case-insensitively; an unknown tag does
         // not.
         let registry = Registry::ethereum();
-        let ledger = TransferLedger::from_transaction(&[], &[]);
-        let mut flow = SettledSwap { tracked: addr(1), ..swap(addr(10), 1, addr(11), 2) };
+        let flow = SettledSwap { tracked: addr(1), ..swap(addr(10), 1, addr(11), 2) };
         assert_eq!(
-            venue(&registry, &mut flow, &ledger, Some(&VenueTag::Integrator("Infinex".into())))
-                .as_deref(),
+            venue(&registry, &flow, Some(&VenueTag::Integrator("Infinex".into())), None).as_deref(),
             Some("infinex")
         );
         assert_eq!(
-            venue(&registry, &mut flow, &ledger, Some(&VenueTag::Integrator("somedapp".into()))),
+            venue(&registry, &flow, Some(&VenueTag::Integrator("somedapp".into())), None),
             None
         );
     }
 
     #[test]
-    fn test_fee_wallet_input_side_fee_nets_the_input_down() {
+    fn test_fee_wallet_paid_in_the_sell_token_is_an_input_fee() {
         // A LiFi-routed Coinbase Base App swap: the 0.95% cut is skimmed off the sell token, so
-        // the pools saw 9905 of the 10000 the trader authorized. The fee is subtracted, else Fynd
-        // is re-solved on 10000 and its larger output reads as savings.
+        // the cut is reported on the input side for the caller to subtract.
         let registry = Registry::builtin(Chain::Bsc).unwrap();
         let coinbase = address!("0x5aafc1f252d544f744d17a4e734afd6efc47ede4");
         let user = addr(1);
@@ -445,16 +441,16 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 10000, token_out, 2000) };
+        let flow = SettledSwap { tracked: user, ..swap(token_in, 10000, token_out, 2000) };
 
+        let fee = venue_fee(&registry, &ledger, flow.token_in, flow.token_out).unwrap();
+        assert_eq!(fee.side, FeeSide::Input);
+        assert_eq!(fee.amount, U256::from(95));
         assert_eq!(
-            venue(&registry, &mut flow, &ledger, Some(&VenueTag::Integrator("base-app".into())))
+            venue(&registry, &flow, Some(&VenueTag::Integrator("base-app".into())), Some(&fee))
                 .as_deref(),
             Some("coinbase")
         );
-        assert_eq!(flow.amount_in, U256::from(9905));
-        // The output side is untouched: this venue took nothing out of the buy token.
-        assert_eq!(flow.amount_out, U256::from(2000));
     }
 
     #[test]
@@ -471,11 +467,12 @@ mod tests {
             make_transfer_log(token_out, addr(50), phantom, U256::from(85)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
+        let flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
 
-        assert_eq!(venue(&registry, &mut flow, &ledger, None).as_deref(), Some("phantom"));
-        assert_eq!(flow.amount_out, U256::from(10000));
-        assert_eq!(flow.amount_in, U256::from(1000));
+        let fee = venue_fee(&registry, &ledger, flow.token_in, flow.token_out).unwrap();
+        assert_eq!(fee.side, FeeSide::Output);
+        assert_eq!(fee.amount, U256::from(85));
+        assert_eq!(venue(&registry, &flow, None, Some(&fee)).as_deref(), Some("phantom"));
     }
 
     #[test]
@@ -491,7 +488,8 @@ mod tests {
             make_transfer_log(token_out, pool, user, U256::from(2000)),
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
-        let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 2000) };
-        assert_eq!(venue(&registry, &mut flow, &ledger, None), None);
+        let flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 2000) };
+        assert_eq!(venue_fee(&registry, &ledger, flow.token_in, flow.token_out), None);
+        assert_eq!(venue(&registry, &flow, None, None), None);
     }
 }
