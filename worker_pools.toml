@@ -26,6 +26,16 @@ timeout_ms = 500
 # timeout_ms = 500
 # liquidity_scope = "include_exclusive"
 
+# Example: a worker pool that never routes through a protocol system. An entry names a system
+# exactly ("uniswap_v2"), or a whole family when it ends with ":" — "propammfallback:" covers
+# every venue on the PropAMMRouter. Absent = no restriction, which is the default.
+# [pools.no_pamm]
+# algorithm = "bellman_ford"
+# num_workers = 3
+# max_hops = 2
+# timeout_ms = 500
+# exclude_protocols = ["propammfallback:"]
+
 # Example: connector_tokens restricts intermediate hops to trusted, liquid tokens,
 # reducing on-chain reversion risk. Absent = all tokens reachable (default behaviour).
 # Run `fynd derive-connector-tokens --top-n 10` to generate a fresh list for your chain.

@@ -15,7 +15,7 @@ use std::{
 use num_bigint::BigUint;
 use tokio::sync::{broadcast, Notify};
 use tracing::{debug, error, info, warn};
-use tycho_simulation::tycho_core::Bytes;
+use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
 
 use crate::{
     algorithm::Algorithm,
@@ -24,8 +24,9 @@ use crate::{
         SharedDerivedDataRef,
     },
     feed::{
+        component_filter::{filter_event, is_excluded_protocol, remove_components},
         events::{MarketEvent, MarketEventHandler},
-        exclusivity::{remove_exclusive_components, scope_event},
+        exclusivity::is_exclusive,
         market_data::{MarketData, MarketDataView, StateLabel},
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
@@ -86,6 +87,9 @@ where
     pool_name: String,
     /// Which liquidity this worker ingests.
     liquidity_scope: LiquidityScope,
+    /// Protocol systems this worker never routes through. Empty for every worker pool that does
+    /// not set `exclude_protocols`.
+    exclude_protocols: Vec<String>,
     /// Uniswap V3 pools the PropAMMRouter can fall back to, kept current from market events.
     fallback_pools: FallbackPoolIndex,
     /// Fee tiers the PropAMMRouter falls back on, read from chain by `FeeTierFetcher`.
@@ -128,6 +132,7 @@ where
             worker_id,
             pool_name,
             liquidity_scope: LiquidityScope::default(),
+            exclude_protocols: Vec::new(),
             fallback_pools: FallbackPoolIndex::default(),
             fallback_fee_tiers: SharedFeeTiers::default(),
         }
@@ -143,6 +148,19 @@ where
     pub(crate) fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = scope;
         self
+    }
+
+    /// Sets the protocol systems this worker never routes through.
+    pub(crate) fn with_exclude_protocols(mut self, exclude_protocols: Vec<String>) -> Self {
+        self.exclude_protocols = exclude_protocols;
+        self
+    }
+
+    /// Whether this worker must keep `component` out of its graph: an exclusive component in a
+    /// `PublicOnly` worker pool, or a component of an excluded protocol system.
+    fn drops_component(&self, component: &ProtocolComponent) -> bool {
+        (self.liquidity_scope == LiquidityScope::PublicOnly && is_exclusive(component)) ||
+            is_excluded_protocol(&self.exclude_protocols, component)
     }
 
     /// A read view of the market the solve runs against: the overlay `label` names, else the live
@@ -174,12 +192,9 @@ where
             // read lock on market data
             let market = self.market_data.read().await;
             let topology = market.component_topology().clone(); // clone to avoid holding the lock
-            match self.liquidity_scope {
-                LiquidityScope::PublicOnly => {
-                    remove_exclusive_components(market.base_market_state(), topology)
-                }
-                LiquidityScope::IncludeExclusive => topology,
-            }
+            remove_components(market.base_market_state(), topology, &|component| {
+                self.drops_component(component)
+            })
         };
 
         self.graph_manager
@@ -195,10 +210,9 @@ where
     pub async fn process_event(&mut self, event: MarketEvent) {
         let event = {
             let market = self.market_data.read().await;
-            match self.liquidity_scope {
-                LiquidityScope::PublicOnly => scope_event(market.base_market_state(), event),
-                LiquidityScope::IncludeExclusive => event,
-            }
+            filter_event(market.base_market_state(), event, &|component| {
+                self.drops_component(component)
+            })
         };
         match event {
             MarketEvent::MarketUpdated { .. } => {
@@ -718,7 +732,10 @@ mod tests {
     use crate::{
         algorithm::{
             most_liquid::DepthAndPrice,
-            test_utils::{component, order, setup_market_weighted, token, MockProtocolSim},
+            test_utils::{
+                component, component_with_protocol, order, setup_market_weighted, token,
+                MockProtocolSim,
+            },
         },
         derived::{
             computation::DerivedComputation,
@@ -1054,6 +1071,47 @@ mod tests {
 
         // Should still timeout because notify woke us up but we're not actually ready
         assert!(result.is_err());
+    }
+
+    /// `exclude_protocols` keeps a whole protocol family out of this worker's graph, while the
+    /// worker pools that do not set it keep routing through those components.
+    #[test]
+    fn test_drops_component_by_excluded_protocol() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            MockAlgorithm::new(),
+            0,
+            "test_pool".to_string(),
+        )
+        .with_exclude_protocols(vec![PROPAMM_FALLBACK_PREFIX.to_string()]);
+
+        let pamm =
+            component_with_protocol("pamm-1", "propammfallback:fermiswap", &[token(0x01, "A")]);
+        let public = component("uni-1", &[token(0x01, "A")]);
+
+        assert!(worker.drops_component(&pamm));
+        assert!(!worker.drops_component(&public));
+    }
+
+    /// Without `exclude_protocols` the worker drops nothing on protocol grounds — the liquidity
+    /// scope stays the only reason to leave a component out.
+    #[test]
+    fn test_drops_component_without_exclusions() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            MockAlgorithm::new(),
+            0,
+            "test_pool".to_string(),
+        );
+
+        let pamm =
+            component_with_protocol("pamm-1", "propammfallback:fermiswap", &[token(0x01, "A")]);
+
+        assert!(!worker.drops_component(&pamm));
     }
 
     #[tokio::test]

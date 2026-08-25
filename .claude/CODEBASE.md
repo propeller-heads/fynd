@@ -124,7 +124,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 | File | Purpose |
 |---|---|
-| `worker_pools.toml` | Worker pool definitions: algorithm, num_workers, hop limits, timeout. Optional — binary falls back to embedded defaults if not found |
+| `worker_pools.toml` | Worker pool definitions: algorithm, num_workers, hop limits, timeout, `exclude_protocols` (protocol systems that worker pool never routes through). Optional — binary falls back to embedded defaults if not found |
 | `blocklist.toml` | Component IDs to exclude from the Tycho stream. Optional — falls back to tycho-simulation defaults if not found |
 
 ## Testing

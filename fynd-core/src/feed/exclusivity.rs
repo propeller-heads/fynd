@@ -1,24 +1,17 @@
-//! Exclusive-component classification and per-worker graph filtering.
+//! Exclusive-component classification.
 //!
 //! "Exclusive" means swappable only with off-chain authorization: such components must never
 //! enter the route a public worker pool returns, while an exclusive-access worker pool routes
 //! through them to capture the surplus they offer above the best public-market rate. Both worker
 //! pool kinds serve the same request; they differ only in which liquidity their workers may route
-//! through. Isolation is achieved by filtering each worker's local graph topology/events through
-//! `remove_exclusive_components`/`scope_event` when the worker pool's `LiquidityScope` is
-//! `PublicOnly` — the shared `MarketState` is never duplicated. Workers of
-//! `IncludeExclusive`-scoped worker pools ingest everything.
+//! through. A `PublicOnly` worker feeds this classification to
+//! [`component_filter`](super::component_filter), which keeps such a component out of its graph;
+//! workers of `IncludeExclusive`-scoped worker pools ingest everything.
 //!
 //! A component is classified from its own data via `is_exclusive`, applied generically to every
 //! ingested component.
 
-use rustc_hash::FxHashMap;
-use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
-
-use crate::{
-    feed::{events::MarketEvent, market_data::MarketState},
-    types::ComponentId,
-};
+use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
 
 /// Returns `true` when the component offers exclusive liquidity, i.e. is swappable only with
 /// off-chain authorization. Signaled by the `is_exclusive` static attribute; absence means the
@@ -27,46 +20,6 @@ pub(crate) fn is_exclusive(component: &ProtocolComponent) -> bool {
     component
         .static_attributes
         .contains_key("is_exclusive")
-}
-
-/// Removes exclusive components from a full topology map.
-pub(crate) fn remove_exclusive_components(
-    market: &MarketState,
-    topology: FxHashMap<ComponentId, Vec<Address>>,
-) -> FxHashMap<ComponentId, Vec<Address>> {
-    topology
-        .into_iter()
-        .filter(|(id, _)| {
-            market
-                .get_component(id)
-                .is_none_or(|c| !is_exclusive(c))
-        })
-        .collect()
-}
-
-/// Removes exclusive component ids from a market event's added/updated/removed lists, so an
-/// exclusive component is never ingested mid-stream.
-pub(crate) fn scope_event(market: &MarketState, event: MarketEvent) -> MarketEvent {
-    let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
-        event;
-
-    let added_components = remove_exclusive_components(market, added_components);
-    let removed_components = filter_component_ids(market, &removed_components);
-    let updated_components = filter_component_ids(market, &updated_components);
-
-    MarketEvent::MarketUpdated { added_components, removed_components, updated_components }
-}
-
-/// Keeps only the component ids that are NOT exclusive.
-fn filter_component_ids(market: &MarketState, ids: &[ComponentId]) -> Vec<ComponentId> {
-    ids.iter()
-        .filter(|id| {
-            market
-                .get_component(id)
-                .is_none_or(|c| !is_exclusive(c))
-        })
-        .cloned()
-        .collect()
 }
 
 /// Stamps the `is_exclusive` attribute onto a component's static attributes, so tests can build
@@ -81,10 +34,7 @@ pub(crate) fn mark_exclusive(component: &mut ProtocolComponent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        algorithm::test_utils::{component, token},
-        feed::{events::MarketEvent, market_data::MarketState},
-    };
+    use crate::algorithm::test_utils::{component, token};
 
     fn exclusive_component(id: &str) -> ProtocolComponent {
         let mut c = component(id, &[token(0x01, "A"), token(0x02, "B")]);
@@ -94,12 +44,6 @@ mod tests {
 
     fn public_component(id: &str) -> ProtocolComponent {
         component(id, &[token(0x01, "A"), token(0x02, "B")])
-    }
-
-    fn market_with(components: Vec<ProtocolComponent>) -> MarketState {
-        let mut market = MarketState::new();
-        market.upsert_components(components);
-        market
     }
 
     fn component_with_extension() -> ProtocolComponent {
@@ -115,35 +59,5 @@ mod tests {
     #[case::untagged_extension(component_with_extension(), false)]
     fn test_is_exclusive(#[case] component: ProtocolComponent, #[case] expected: bool) {
         assert_eq!(is_exclusive(&component), expected);
-    }
-
-    #[test]
-    fn test_remove_exclusive_components() {
-        let market = market_with(vec![public_component("pub-1"), exclusive_component("excl-1")]);
-        let topology = market.component_topology();
-
-        let filtered = remove_exclusive_components(&market, topology);
-        assert!(filtered.contains_key("pub-1"));
-        assert!(!filtered.contains_key("excl-1"));
-    }
-
-    #[test]
-    fn test_scope_event() {
-        let market = market_with(vec![public_component("pub-1"), exclusive_component("excl-1")]);
-        let event = MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter([
-                ("pub-1".to_string(), vec![]),
-                ("excl-1".to_string(), vec![]),
-            ]),
-            removed_components: vec!["pub-1".to_string(), "excl-1".to_string()],
-            updated_components: vec!["pub-1".to_string(), "excl-1".to_string()],
-        };
-
-        let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
-            scope_event(&market, event);
-        assert!(added_components.contains_key("pub-1"));
-        assert!(!added_components.contains_key("excl-1"));
-        assert_eq!(removed_components, vec!["pub-1".to_string()]);
-        assert_eq!(updated_components, vec!["pub-1".to_string()]);
     }
 }

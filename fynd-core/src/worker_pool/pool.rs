@@ -50,6 +50,8 @@ pub struct WorkerPoolConfig {
     task_queue_capacity: usize,
     /// Which liquidity this worker pool's workers ingest.
     liquidity_scope: LiquidityScope,
+    /// Protocol systems this worker pool's workers never route through.
+    exclude_protocols: Vec<String>,
     /// PropAMMRouter fee tiers, shared with the fetcher that refreshes them.
     fallback_fee_tiers: SharedFeeTiers,
 }
@@ -70,6 +72,7 @@ impl Default for WorkerPoolConfig {
             algorithm_config: AlgorithmConfig::default(),
             task_queue_capacity: 1000,
             liquidity_scope: LiquidityScope::default(),
+            exclude_protocols: Vec::new(),
             fallback_fee_tiers: SharedFeeTiers::default(),
         }
     }
@@ -122,6 +125,7 @@ impl WorkerPool {
 
         // Spawn workers
         let liquidity_scope = config.liquidity_scope;
+        let exclude_protocols = config.exclude_protocols.clone();
         let fallback_fee_tiers = config.fallback_fee_tiers.clone();
         let params = SpawnWorkersParams {
             algorithm: algorithm.clone(),
@@ -135,6 +139,7 @@ impl WorkerPool {
             derived_event_rx,
             shutdown_tx: shutdown_tx.clone(),
             liquidity_scope,
+            exclude_protocols,
             fallback_fee_tiers,
         };
         let workers = config.spawner.spawn(params)?;
@@ -270,6 +275,13 @@ impl WorkerPoolBuilder {
     /// Sets which liquidity this pool's workers ingest.
     pub fn liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.config.liquidity_scope = scope;
+        self
+    }
+
+    /// Sets the protocol systems this pool's workers never route through. An entry names a
+    /// protocol system exactly, or a whole family when it ends with `:` (`propammfallback:`).
+    pub fn exclude_protocols(mut self, exclude_protocols: Vec<String>) -> Self {
+        self.config.exclude_protocols = exclude_protocols;
         self
     }
 
