@@ -6,6 +6,7 @@ use std::{
 
 use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use fynd_core::{
     encoding::encoder::Encoder, worker_pool::pool::WorkerPool, FyndBuilder, SolverBuildError,
 };
@@ -259,9 +260,15 @@ impl FyndRPCBuilder {
                 .into()
         };
 
+        let worker_pool_health = parts
+            .worker_pools()
+            .iter()
+            .map(WorkerPool::health_handle)
+            .collect();
         let health_tracker =
             HealthTracker::new(parts.market_data().clone(), Arc::clone(parts.derived_data()))
-                .with_gas_price_stale_threshold(self.gas_price_stale_threshold);
+                .with_gas_price_stale_threshold(self.gas_price_stale_threshold)
+                .with_worker_pools(worker_pool_health);
 
         #[cfg(feature = "experimental")]
         let gas_token = {
@@ -371,12 +378,24 @@ impl FyndRPC {
         } = self;
 
         info!("HTTP server started");
+        let mut worker_failure = Box::pin(wait_for_worker_failure(&worker_pools));
 
         // Set when a monitored task exits in a way that should fail the process (non-zero exit).
         let mut fatal_error: Option<std::io::Error> = None;
 
         // Monitor server, feed, and gas price worker. If any errors, shutdown everything.
         tokio::select! {
+            biased;
+            failure = &mut worker_failure => {
+                error!(pool = %failure.pool(), algorithm = %failure.algorithm(), worker_id = failure.worker_id(), reason = ?failure.reason(), "worker pool stopped unexpectedly, shutting down solver");
+                server_handle.stop(true).await;
+                server_task.await.ok();
+                feed_handle.abort();
+                gas_price_worker_handle.abort();
+                let _ = computation_shutdown_tx.send(());
+                computation_manager_handle.abort();
+                fatal_error = Some(worker_failure_error(&failure));
+            }
             server_result = &mut server_task => {
                 // Server completed first
                 if let Err(e) = server_result {
@@ -424,16 +443,27 @@ impl FyndRPC {
             }
         }
 
+        drop(worker_failure);
         metrics_sampler_handle.abort();
         router_fee_worker_handle.abort();
         fee_tier_abort.abort();
 
         info!("shutting down worker pools");
+        let mut cleanup_worker_failure = None;
         for pool in worker_pools {
             let name = pool.name().to_owned();
             info!(name, "shutting down pool");
-            pool.shutdown();
+            let failure = pool.shutdown_with_failure();
+            if cleanup_worker_failure.is_none() {
+                cleanup_worker_failure = failure;
+            }
             info!(name, "pool shut down");
+        }
+
+        if fatal_error.is_none() {
+            fatal_error = cleanup_worker_failure
+                .as_ref()
+                .map(worker_failure_error);
         }
 
         info!("shutdown complete");
@@ -442,5 +472,147 @@ impl FyndRPC {
             Some(err) => Err(err),
             None => Ok(()),
         }
+    }
+}
+
+fn worker_failure_error(failure: &fynd_core::WorkerFailure) -> std::io::Error {
+    std::io::Error::other(format!(
+        "worker pool '{}' algorithm '{}' worker {} stopped unexpectedly: {:?}",
+        failure.pool(),
+        failure.algorithm(),
+        failure.worker_id(),
+        failure.reason()
+    ))
+}
+
+async fn wait_for_worker_failure(worker_pools: &[WorkerPool]) -> fynd_core::WorkerFailure {
+    let mut failures = futures::stream::FuturesUnordered::new();
+    for pool in worker_pools {
+        failures.push(pool.wait_for_failure());
+    }
+    while let Some(failure) = failures.next().await {
+        if let Ok(failure) = failure {
+            return failure;
+        }
+    }
+    std::future::pending().await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use actix_web::HttpServer;
+    use fynd_core::{
+        derived::DerivedData, feed::market_data::MarketData, worker_pool::pool::WorkerPoolBuilder,
+    };
+    use tokio::sync::broadcast;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_run_returns_an_error_after_injected_worker_failure() {
+        let market_data = MarketData::new_shared();
+        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
+        let (_market_tx, market_rx) = broadcast::channel(1);
+        let (_derived_tx, derived_rx) = broadcast::channel(1);
+        let (pool, _tasks) = WorkerPoolBuilder::new()
+            .name("rpc_failing_pool")
+            .with_algorithm("panic_algorithm", |_config| -> fynd_core::MostLiquidAlgorithm {
+                panic!("intentional RPC worker panic")
+            })
+            .num_workers(1)
+            .build(market_data, derived_data, market_rx, derived_rx)
+            .unwrap();
+
+        let server = HttpServer::new(actix_web::App::new)
+            .bind(("127.0.0.1", 0))
+            .unwrap()
+            .run();
+        let server_handle = server.handle();
+        let server_task = tokio::spawn(async move {
+            let _ = server.await;
+        });
+        let feed_handle = tokio::spawn(std::future::pending());
+        let gas_price_worker_handle = tokio::spawn(std::future::pending());
+        let metrics_sampler_handle = tokio::spawn(std::future::pending());
+        let router_fee_worker_handle = tokio::spawn(std::future::pending());
+        let fee_tier_handle = tokio::spawn(std::future::pending::<()>());
+        let fee_tier_abort = fee_tier_handle.abort_handle();
+        let computation_manager_handle = tokio::spawn(std::future::pending());
+        let (computation_shutdown_tx, _) = broadcast::channel(1);
+        let rpc = FyndRPC {
+            server_handle,
+            server_task,
+            worker_pools: vec![pool],
+            feed_handle,
+            gas_price_worker_handle,
+            metrics_sampler_handle,
+            router_fee_worker_handle,
+            fee_tier_abort,
+            computation_manager_handle,
+            computation_shutdown_tx,
+        };
+
+        let error = tokio::time::timeout(Duration::from_secs(1), rpc.run())
+            .await
+            .expect("RPC owner must stop after its worker fails")
+            .expect_err("worker failure must produce a non-success RPC result");
+        assert!(error
+            .to_string()
+            .contains("rpc_failing_pool"));
+    }
+
+    #[tokio::test]
+    async fn test_graceful_server_stop_does_not_become_a_worker_failure() {
+        let market_data = MarketData::new_shared();
+        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
+        let (_market_tx, market_rx) = broadcast::channel(1);
+        let (_derived_tx, derived_rx) = broadcast::channel(1);
+        let (pool, tasks) = WorkerPoolBuilder::new()
+            .name("rpc_graceful_stop_pool")
+            .num_workers(1)
+            .build(market_data, derived_data, market_rx, derived_rx)
+            .unwrap();
+
+        let server = HttpServer::new(move || {
+            actix_web::App::new().app_data(actix_web::web::Data::new(tasks.clone()))
+        })
+        .bind(("127.0.0.1", 0))
+        .unwrap()
+        .run();
+        let server_handle = server.handle();
+        let shutdown_handle = server_handle.clone();
+        let server_task = tokio::spawn(async move {
+            let _ = server.await;
+        });
+        let feed_handle = tokio::spawn(std::future::pending());
+        let gas_price_worker_handle = tokio::spawn(std::future::pending());
+        let metrics_sampler_handle = tokio::spawn(std::future::pending());
+        let router_fee_worker_handle = tokio::spawn(std::future::pending());
+        let fee_tier_handle = tokio::spawn(std::future::pending::<()>());
+        let fee_tier_abort = fee_tier_handle.abort_handle();
+        let computation_manager_handle = tokio::spawn(std::future::pending());
+        let (computation_shutdown_tx, _) = broadcast::channel(1);
+        let rpc = FyndRPC {
+            server_handle,
+            server_task,
+            worker_pools: vec![pool],
+            feed_handle,
+            gas_price_worker_handle,
+            metrics_sampler_handle,
+            router_fee_worker_handle,
+            fee_tier_abort,
+            computation_manager_handle,
+            computation_shutdown_tx,
+        };
+
+        let rpc_task = tokio::spawn(rpc.run());
+        shutdown_handle.stop(true).await;
+        let result = tokio::time::timeout(Duration::from_secs(1), rpc_task)
+            .await
+            .expect("graceful RPC shutdown must complete")
+            .expect("RPC owner task must not panic");
+        assert!(result.is_ok(), "graceful shutdown returned {result:?}");
     }
 }

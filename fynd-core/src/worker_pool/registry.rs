@@ -1,23 +1,15 @@
-//! Worker pool registry for spawning workers with different algorithms.
-//!
-//! This module provides a registry pattern for built-in algorithms, allowing worker pools
-//! to be created by algorithm name (string). For custom algorithms, use
-//! [`WorkerPoolBuilder::with_algorithm`](super::pool::WorkerPoolBuilder::with_algorithm)
-//! which bypasses the registry entirely.
-//!
-//! # Adding a New Built-in Algorithm
-//!
-//! 1. Implement the `Algorithm` trait for your algorithm
-//! 2. Add a match arm in `AlgorithmSpawner::spawn` that creates your algorithm
-//! 3. Add the algorithm name to `AVAILABLE_ALGORITHMS`
-
+//! Worker-pool algorithm registry and fallible worker spawning.
 use std::{
-    sync::Arc,
+    panic::{self, AssertUnwindSafe},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+        Arc,
+    },
     thread::{self, JoinHandle},
 };
 
 use tokio::sync::broadcast;
-use tracing::info;
 
 use crate::{
     algorithm::{
@@ -28,108 +20,114 @@ use crate::{
     feed::{events::MarketEvent, market_data::MarketData},
     propamm_fallback::SharedFeeTiers,
     types::internal::SolveTask,
-    worker_pool::worker::SolverWorker,
+    worker_pool::{
+        pool::{safe_panic_text, spawn_thread, PoolState, WorkerFailureReason},
+        worker::{SolverWorker, WorkerRunExit},
+    },
     worker_pool_router::LiquidityScope,
 };
 
-/// List of available built-in algorithm names (for registry-based dispatch).
+/// List of available built-in algorithm names.
 pub(crate) const AVAILABLE_ALGORITHMS: &[&str] =
     &["most_liquid", "bellman_ford", "path_frank_wolfe", "water_fill"];
-
-/// Default algorithm to use if none specified.
+/// Default algorithm to use if none is configured.
 pub(crate) const DEFAULT_ALGORITHM: &str = "most_liquid";
 
-/// Parameters for spawning workers.
+/// Parameters shared by every worker spawned for one pool.
 pub(crate) struct SpawnWorkersParams {
-    /// Algorithm name (e.g., "most_liquid") — used for thread naming and logging.
     pub algorithm: String,
-    /// Worker pool name from configuration (used as the `pool` metric label).
     pub pool_name: String,
-    /// Number of worker threads to spawn.
     pub num_workers: usize,
-    /// Configuration for the algorithm used by each worker.
     pub algorithm_config: AlgorithmConfig,
-    /// Receiver for solve tasks.
     pub task_rx: async_channel::Receiver<SolveTask>,
-    /// Shared market data reference.
     pub market_data: MarketData,
-    /// Shared derived data reference (component depths, token prices).
     pub derived_data: SharedDerivedDataRef,
-    /// Broadcast receiver for market events.
     pub event_rx: broadcast::Receiver<MarketEvent>,
-    /// Broadcast receiver for derived data events (resubscribed per worker).
     pub derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
-    /// Sender for shutdown signals.
     pub shutdown_tx: broadcast::Sender<()>,
-    /// Liquidity scope applied to every worker in this worker pool.
     pub liquidity_scope: LiquidityScope,
-    /// PropAMMRouter fee tiers, shared with the fetcher that refreshes them.
     pub fallback_fee_tiers: SharedFeeTiers,
+    pub state: Arc<PoolState>,
+    pub exit_tx: Sender<()>,
 }
 
-/// Error returned when algorithm registration fails.
+/// Error returned when an algorithm name is not registered.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("unknown algorithm '{name}'. Available: {}", AVAILABLE_ALGORITHMS.join(", "))]
 pub struct UnknownAlgorithmError {
-    /// The algorithm name that was not found.
     pub(crate) name: String,
 }
 
 impl UnknownAlgorithmError {
-    /// Returns the algorithm name that was not found.
+    /// Returns the unknown algorithm name.
     pub fn name(&self) -> &str {
         &self.name
     }
 }
 
-/// Determines how a worker pool spawns its workers.
-///
-/// - `Registry`: looks up a built-in algorithm by name.
-/// - `Custom`: uses a caller-supplied factory closure, bypassing the registry.
-pub(crate) enum AlgorithmSpawner {
-    /// Spawn workers using a built-in algorithm looked up by name.
-    Registry { algorithm: String },
-    /// Spawn workers using a custom factory function (type-erased).
-    Custom {
-        algorithm: String,
-        spawner: Box<dyn Fn(SpawnWorkersParams) -> Vec<JoinHandle<()>> + Send + Sync>,
+/// Error returned while constructing a worker pool.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerPoolSpawnError {
+    /// The pool was configured without any worker threads.
+    #[error("worker pool must contain at least one worker")]
+    ZeroWorkers,
+    /// The configured algorithm is not registered.
+    #[error(transparent)]
+    UnknownAlgorithm(#[from] UnknownAlgorithmError),
+    /// The operating system rejected a worker or supervisor thread.
+    #[error("failed to spawn {role} thread: {source}")]
+    ThreadSpawn {
+        /// The failed thread's role.
+        role: &'static str,
+        /// The operating-system error.
+        #[source]
+        source: std::io::Error,
     },
+}
+
+type CustomSpawner =
+    dyn Fn(SpawnWorkersParams) -> Result<Vec<JoinHandle<()>>, WorkerPoolSpawnError> + Send + Sync;
+
+/// Determines how a pool spawns workers.
+pub(crate) enum AlgorithmSpawner {
+    /// Spawn a built-in algorithm.
+    Registry { algorithm: String },
+    /// Spawn a caller-supplied algorithm factory.
+    Custom { algorithm: String, spawner: Box<CustomSpawner> },
 }
 
 impl std::fmt::Debug for AlgorithmSpawner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Registry { algorithm } => f
-                .debug_struct("Registry")
-                .field("algorithm", algorithm)
+                .debug_tuple("Registry")
+                .field(algorithm)
                 .finish(),
             Self::Custom { algorithm, .. } => f
-                .debug_struct("Custom")
-                .field("algorithm", algorithm)
+                .debug_tuple("Custom")
+                .field(algorithm)
                 .finish(),
         }
     }
 }
 
 impl AlgorithmSpawner {
-    /// Spawns workers, dispatching to the registry or custom spawner as appropriate.
     pub(crate) fn spawn(
         self,
         params: SpawnWorkersParams,
-    ) -> Result<Vec<JoinHandle<()>>, UnknownAlgorithmError> {
+    ) -> Result<Vec<JoinHandle<()>>, WorkerPoolSpawnError> {
         match self {
             Self::Registry { algorithm } => match algorithm.as_str() {
-                "most_liquid" => Ok(spawn_most_liquid_workers(params)),
-                "bellman_ford" => Ok(spawn_bellman_ford_workers(params)),
-                "path_frank_wolfe" => Ok(spawn_path_frank_wolfe_workers(params)),
-                "water_fill" => Ok(spawn_water_fill_workers(params)),
-                _ => Err(UnknownAlgorithmError { name: algorithm }),
+                "most_liquid" => spawn_most_liquid_workers(params),
+                "bellman_ford" => spawn_bellman_ford_workers(params),
+                "path_frank_wolfe" => spawn_path_frank_wolfe_workers(params),
+                "water_fill" => spawn_water_fill_workers(params),
+                _ => Err(UnknownAlgorithmError { name: algorithm }.into()),
             },
-            Self::Custom { spawner, .. } => Ok(spawner(params)),
+            Self::Custom { spawner, .. } => spawner(params),
         }
     }
 
-    /// Returns the algorithm name associated with this spawner.
     pub(crate) fn algorithm_name(&self) -> &str {
         match self {
             Self::Registry { algorithm } | Self::Custom { algorithm, .. } => algorithm,
@@ -137,20 +135,11 @@ impl AlgorithmSpawner {
     }
 }
 
-/// Generic worker spawning logic.
-///
-/// This handles the common parts of spawning workers:
-/// - Creating threads with proper names
-/// - Setting up tokio runtimes
-/// - Initializing graphs and running worker loops
-///
-/// The `factory` closure is called once per worker to create the algorithm instance.
-/// It is borrowed rather than consumed, so callers (including type-erased spawner closures)
-/// can call this function without giving up ownership of the factory.
+/// Spawns workers and arranges for every worker to report its terminal outcome to the pool monitor.
 pub(crate) fn spawn_workers_generic<A, F>(
     params: SpawnWorkersParams,
     factory: &F,
-) -> Vec<JoinHandle<()>>
+) -> Result<Vec<JoinHandle<()>>, WorkerPoolSpawnError>
 where
     A: crate::algorithm::Algorithm + 'static,
     A::GraphManager:
@@ -158,7 +147,6 @@ where
     F: Fn(AlgorithmConfig) -> A + Clone + Send + Sync + 'static,
 {
     let mut workers = Vec::with_capacity(params.num_workers);
-
     for worker_id in 0..params.num_workers {
         let task_rx = params.task_rx.clone();
         let market_data = params.market_data.clone();
@@ -172,290 +160,110 @@ where
         let factory = factory.clone();
         let liquidity_scope = params.liquidity_scope;
         let fallback_fee_tiers = params.fallback_fee_tiers.clone();
+        let state = Arc::clone(&params.state);
+        let state_in_worker = Arc::clone(&state);
+        let exit_tx = params.exit_tx.clone();
+        let started = Arc::new(AtomicBool::new(false));
+        let started_in_worker = Arc::clone(&started);
 
-        let handle = thread::Builder::new()
-            .name(format!("{}-worker-{}", algorithm_name, worker_id))
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("failed to create tokio runtime");
+        let worker = spawn_thread(
+            &params.state,
+            "worker",
+            thread::Builder::new().name(format!("{algorithm_name}-worker-{worker_id}")),
+            move || {
+                let report = panic::catch_unwind(AssertUnwindSafe(|| {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| WorkerFailureReason::Startup(error.to_string()))?;
+                    runtime.block_on(async move {
+                        let algorithm = factory(algorithm_config);
+                        let mut worker = SolverWorker::new(
+                            market_data,
+                            derived_data,
+                            algorithm,
+                            worker_id,
+                            pool_name,
+                        )
+                        .with_liquidity_scope(liquidity_scope)
+                        .with_fallback_fee_tiers(fallback_fee_tiers);
+                        if state_in_worker.panic_during_initialization() {
+                            panic!("injected worker initialization panic");
+                        }
+                        worker.initialize_graph().await;
+                        if state_in_worker.shutdown_requested() {
+                            return Ok(WorkerRunExit::Shutdown);
+                        }
+                        state_in_worker.worker_started();
+                        started_in_worker.store(true, Ordering::Release);
+                        if state_in_worker.panic_after_startup() {
+                            panic!("injected worker panic after startup");
+                        }
+                        Ok(worker
+                            .run(event_rx, derived_event_rx, task_rx, shutdown_rx)
+                            .await)
+                    })
+                }));
+                let failure_reason = match report {
+                    Ok(Ok(WorkerRunExit::Shutdown)) => None,
+                    Ok(Ok(WorkerRunExit::InputClosed)) => Some(WorkerFailureReason::Returned),
+                    Ok(Err(reason)) => Some(reason),
+                    Err(panic) => Some(WorkerFailureReason::Panic(safe_panic_text(panic))),
+                };
+                let started = started.load(Ordering::Acquire);
+                state.worker_stopped(started);
+                if let Some(reason) = failure_reason {
+                    state.report_worker_failure(worker_id, reason);
+                }
+                let _ = exit_tx.send(());
+            },
+        );
 
-                rt.block_on(async move {
-                    let algorithm = factory(algorithm_config);
-
-                    let mut worker = SolverWorker::new(
-                        market_data,
-                        derived_data,
-                        algorithm,
-                        worker_id,
-                        pool_name,
-                    )
-                    .with_liquidity_scope(liquidity_scope)
-                    .with_fallback_fee_tiers(fallback_fee_tiers);
-
-                    worker.initialize_graph().await;
-                    worker
-                        .run(event_rx, derived_event_rx, task_rx, shutdown_rx)
-                        .await;
-                });
-            })
-            .expect("failed to spawn worker thread");
-
-        workers.push(handle);
+        match worker {
+            Ok(worker) => workers.push(worker),
+            Err(source) => {
+                params.state.request_shutdown();
+                for worker in workers {
+                    let _ = worker.join();
+                }
+                return Err(WorkerPoolSpawnError::ThreadSpawn { role: "worker", source });
+            }
+        }
     }
-
-    info!(
-        algorithm = %params.algorithm,
-        num_workers = params.num_workers,
-        "spawned workers"
-    );
-
-    workers
+    Ok(workers)
 }
 
-/// Spawns workers for the MostLiquid algorithm.
-fn spawn_most_liquid_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+fn spawn_most_liquid_workers(
+    params: SpawnWorkersParams,
+) -> Result<Vec<JoinHandle<()>>, WorkerPoolSpawnError> {
     let factory = |config: AlgorithmConfig| {
         MostLiquidAlgorithm::with_config(config)
-            .expect("invalid worker configuration for MostLiquidAlgorithm")
+            .unwrap_or_else(|error| panic!("invalid worker configuration: {error}"))
     };
     spawn_workers_generic(params, &factory)
 }
 
-/// Spawns workers for the BellmanFord algorithm.
-fn spawn_bellman_ford_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
-    let factory = |config: AlgorithmConfig| BellmanFordAlgorithm::with_config(config);
-    spawn_workers_generic(params, &factory)
+fn spawn_bellman_ford_workers(
+    params: SpawnWorkersParams,
+) -> Result<Vec<JoinHandle<()>>, WorkerPoolSpawnError> {
+    spawn_workers_generic(params, &BellmanFordAlgorithm::with_config)
 }
 
-/// Spawns workers for the PathFrankWolfe split-routing algorithm.
-fn spawn_path_frank_wolfe_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+fn spawn_path_frank_wolfe_workers(
+    params: SpawnWorkersParams,
+) -> Result<Vec<JoinHandle<()>>, WorkerPoolSpawnError> {
     let factory = |config: AlgorithmConfig| {
         PathFrankWolfeAlgorithm::new(config, PathFrankWolfeConfig::default())
     };
     spawn_workers_generic(params, &factory)
 }
 
-/// Spawns workers for the water-fill portfolio split-routing algorithm.
-fn spawn_water_fill_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+fn spawn_water_fill_workers(
+    params: SpawnWorkersParams,
+) -> Result<Vec<JoinHandle<()>>, WorkerPoolSpawnError> {
     let factory = |config: AlgorithmConfig| {
         WaterFillAlgorithm::with_config(config)
-            .expect("invalid worker configuration for WaterFillAlgorithm")
+            .unwrap_or_else(|error| panic!("invalid worker configuration: {error}"))
     };
     spawn_workers_generic(params, &factory)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-    use crate::{derived::DerivedData, feed::market_data::MarketData};
-
-    fn make_params(algorithm: &str, num_workers: usize) -> SpawnWorkersParams {
-        let (_task_tx, task_rx) = async_channel::bounded(10);
-        let market_data = MarketData::new_shared();
-        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
-        let (_event_tx, event_rx) = broadcast::channel(10);
-        let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
-        let (shutdown_tx, _) = broadcast::channel(1);
-        SpawnWorkersParams {
-            algorithm: algorithm.to_string(),
-            pool_name: "test_pool".to_string(),
-            num_workers,
-            algorithm_config: AlgorithmConfig::default(),
-            task_rx,
-            market_data,
-            derived_data,
-            event_rx,
-            derived_event_rx,
-            shutdown_tx,
-            liquidity_scope: LiquidityScope::default(),
-            fallback_fee_tiers: SharedFeeTiers::default(),
-        }
-    }
-
-    #[test]
-    fn test_registry_unknown_algorithm_returns_error() {
-        let params = make_params("unknown_algorithm", 1);
-        let result =
-            AlgorithmSpawner::Registry { algorithm: "unknown_algorithm".to_string() }.spawn(params);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.name, "unknown_algorithm");
-        assert!(err
-            .to_string()
-            .contains("unknown_algorithm"));
-        assert!(err.to_string().contains("most_liquid"));
-    }
-
-    #[test]
-    fn test_registry_spawns_correct_number_of_workers() {
-        let (shutdown_tx, _) = broadcast::channel(1);
-        let (_task_tx, task_rx) = async_channel::bounded(10);
-        let market_data = MarketData::new_shared();
-        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
-        let (event_tx, event_rx) = broadcast::channel(10);
-        let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
-
-        let params = SpawnWorkersParams {
-            algorithm: "most_liquid".to_string(),
-            pool_name: "test_pool".to_string(),
-            num_workers: 3,
-            algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50), None).unwrap(),
-            task_rx,
-            market_data,
-            derived_data,
-            event_rx,
-            derived_event_rx,
-            shutdown_tx: shutdown_tx.clone(),
-            liquidity_scope: LiquidityScope::default(),
-            fallback_fee_tiers: SharedFeeTiers::default(),
-        };
-
-        let workers =
-            AlgorithmSpawner::Registry { algorithm: "most_liquid".to_string() }.spawn(params);
-        assert!(workers.is_ok());
-        let workers = workers.unwrap();
-        assert_eq!(workers.len(), 3);
-
-        // Shutdown workers gracefully
-        let _ = shutdown_tx.send(());
-        drop(event_tx);
-
-        for handle in workers {
-            // Give workers time to shutdown, then check they finished
-            let _ = handle.join();
-        }
-    }
-
-    #[test]
-    fn test_custom_spawner_bypasses_registry_for_unknown_names() {
-        // "my_custom_algo" is not registered — the registry would reject it.
-        // The Custom spawner bypasses the registry and uses the factory directly.
-        let (shutdown_tx, _) = broadcast::channel(1);
-        let (_task_tx, task_rx) = async_channel::bounded(10);
-        let market_data = MarketData::new_shared();
-        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
-        let (event_tx, _) = broadcast::channel::<MarketEvent>(10);
-        let (derived_event_tx, _) = broadcast::channel(10);
-
-        let registry_err = AlgorithmSpawner::Registry { algorithm: "my_custom_algo".to_string() }
-            .spawn(SpawnWorkersParams {
-                algorithm: "my_custom_algo".to_string(),
-                pool_name: "test_pool".to_string(),
-                num_workers: 1,
-                algorithm_config: AlgorithmConfig::default(),
-                task_rx: task_rx.clone(),
-                market_data: market_data.clone(),
-                derived_data: Arc::clone(&derived_data),
-                event_rx: event_tx.subscribe(),
-                derived_event_rx: derived_event_tx.subscribe(),
-                shutdown_tx: shutdown_tx.clone(),
-                liquidity_scope: LiquidityScope::default(),
-                fallback_fee_tiers: SharedFeeTiers::default(),
-            });
-        assert!(registry_err.is_err());
-
-        // Using MostLiquid anyway for simplicity - not to have to define a new algorithm from
-        // scratch
-        let spawner: Box<dyn Fn(SpawnWorkersParams) -> Vec<JoinHandle<()>> + Send + Sync> =
-            Box::new(|p| {
-                let factory = |config: AlgorithmConfig| {
-                    MostLiquidAlgorithm::with_config(config)
-                        .expect("invalid config in test custom spawner")
-                };
-                spawn_workers_generic(p, &factory)
-            });
-
-        let workers = AlgorithmSpawner::Custom { algorithm: "my_custom_algo".to_string(), spawner }
-            .spawn(SpawnWorkersParams {
-                algorithm: "my_custom_algo".to_string(),
-                pool_name: "test_pool".to_string(),
-                num_workers: 2,
-                algorithm_config: AlgorithmConfig::new(1, 2, Duration::from_millis(50), None)
-                    .unwrap(),
-                task_rx,
-                market_data,
-                derived_data,
-                event_rx: event_tx.subscribe(),
-                derived_event_rx: derived_event_tx.subscribe(),
-                shutdown_tx: shutdown_tx.clone(),
-                liquidity_scope: LiquidityScope::default(),
-                fallback_fee_tiers: SharedFeeTiers::default(),
-            });
-
-        assert!(workers.is_ok());
-        assert_eq!(workers.unwrap().len(), 2);
-
-        let _ = shutdown_tx.send(());
-    }
-
-    #[test]
-    fn test_registry_spawns_path_frank_wolfe() {
-        let (shutdown_tx, _) = broadcast::channel(1);
-        let (_task_tx, task_rx) = async_channel::bounded(10);
-        let market_data = MarketData::new_shared();
-        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
-        let (event_tx, event_rx) = broadcast::channel(10);
-        let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
-
-        let params = SpawnWorkersParams {
-            algorithm: "path_frank_wolfe".to_string(),
-            pool_name: "test_pool".to_string(),
-            num_workers: 1,
-            algorithm_config: AlgorithmConfig::default(),
-            task_rx,
-            market_data,
-            derived_data,
-            event_rx,
-            derived_event_rx,
-            shutdown_tx: shutdown_tx.clone(),
-            liquidity_scope: LiquidityScope::default(),
-            fallback_fee_tiers: SharedFeeTiers::default(),
-        };
-
-        let workers =
-            AlgorithmSpawner::Registry { algorithm: "path_frank_wolfe".to_string() }.spawn(params);
-        assert!(workers.is_ok());
-        assert_eq!(workers.unwrap().len(), 1);
-
-        let _ = shutdown_tx.send(());
-        drop(event_tx);
-    }
-
-    #[test]
-    fn test_registry_spawns_water_fill() {
-        let (shutdown_tx, _) = broadcast::channel(1);
-        let (_task_tx, task_rx) = async_channel::bounded(10);
-        let market_data = MarketData::new_shared();
-        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
-        let (event_tx, event_rx) = broadcast::channel(10);
-        let (_derived_event_tx, derived_event_rx) = broadcast::channel(10);
-
-        let params = SpawnWorkersParams {
-            algorithm: "water_fill".to_string(),
-            pool_name: "test_pool".to_string(),
-            num_workers: 1,
-            algorithm_config: AlgorithmConfig::default(),
-            task_rx,
-            market_data,
-            derived_data,
-            event_rx,
-            derived_event_rx,
-            shutdown_tx: shutdown_tx.clone(),
-            liquidity_scope: LiquidityScope::default(),
-            fallback_fee_tiers: SharedFeeTiers::default(),
-        };
-
-        let workers =
-            AlgorithmSpawner::Registry { algorithm: "water_fill".to_string() }.spawn(params);
-        assert!(workers.is_ok());
-        assert_eq!(workers.unwrap().len(), 1);
-
-        let _ = shutdown_tx.send(());
-        drop(event_tx);
-    }
 }

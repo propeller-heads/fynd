@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.99.11"
+    "version": "0.99.14"
   },
   "paths": {
     "/v1/health": {
@@ -30,7 +30,7 @@
             }
           },
           "503": {
-            "description": "Data stale",
+            "description": "Data, gas, derived state, or worker pool unhealthy",
             "content": {
               "application/json": {
                 "schema": {

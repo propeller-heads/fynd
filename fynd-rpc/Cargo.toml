@@ -25,6 +25,7 @@ num_cpus.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
+futures.workspace = true
 tracing.workspace = true
 tracing-actix-web.workspace = true
 metrics.workspace = true

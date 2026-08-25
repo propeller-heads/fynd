@@ -790,7 +790,7 @@ export interface operations {
                     "application/json": components["schemas"]["HealthStatus"];
                 };
             };
-            /** @description Data stale */
+            /** @description Data, gas, derived state, or worker pool unhealthy */
             503: {
                 headers: {
                     [name: string]: unknown;

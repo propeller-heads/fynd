@@ -162,7 +162,7 @@ pub(crate) async fn quote(
     tag = "health",
     responses(
         (status = 200, description = "Service healthy", body = dto::HealthStatus),
-        (status = 503, description = "Data stale", body = dto::HealthStatus),
+        (status = 503, description = "Data, gas, derived state, or worker pool unhealthy", body = dto::HealthStatus),
     )
 )]
 pub(crate) async fn health(state: web::Data<AppState>) -> HttpResponse {
@@ -180,7 +180,8 @@ pub(crate) async fn health(state: web::Data<AppState>) -> HttpResponse {
         .health_tracker()
         .gas_price_stale()
         .await;
-    let is_healthy = data_fresh && derived_data_ready && !gas_stale;
+    let is_healthy =
+        data_fresh && derived_data_ready && !gas_stale && state.health_tracker().workers_healthy();
 
     let status = dto::HealthStatus::new(
         is_healthy,

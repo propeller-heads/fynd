@@ -93,8 +93,11 @@ pub use types::{
     SolveParams, SolveResult, SurplusInfo, Swap, TaskId, Transaction, UserTransferType,
 };
 pub use worker_pool::{
-    pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},
-    registry::UnknownAlgorithmError,
+    pool::{
+        HealthHandle, WorkerFailure, WorkerFailureReason, WorkerPool, WorkerPoolBuilder,
+        WorkerPoolConfig,
+    },
+    registry::{UnknownAlgorithmError, WorkerPoolSpawnError},
     TaskQueueHandle,
 };
 pub use worker_pool_router::{

@@ -1,4 +1,4 @@
-<!-- docs-synced-at: 4a30359cea111f5590fe698357b3a707fee65ece -->
+<!-- docs-synced-at: debed9820cd0fe39b26cf23646ab0683086dd726 -->
 # Fynd Codebase Guide
 
 High-performance DeFi route-finding engine built on Tycho. Finds optimal swap routes across

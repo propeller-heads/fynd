@@ -3597,6 +3597,7 @@ version = "0.99.14"
 dependencies = [
  "actix-web",
  "anyhow",
+ "futures 0.3.32",
  "fynd-core",
  "fynd-rpc-types",
  "hex",
