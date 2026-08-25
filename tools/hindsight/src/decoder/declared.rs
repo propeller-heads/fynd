@@ -5,9 +5,9 @@
 //! terms in its calldata, in which case the settled `amount_out` is recovered as the gross amount
 //! the declared output recipient received. That one field is the only thing calldata never carries.
 //!
-//! `amount_in` needs no fee adjustment either way: an input-side venue fee left before the solver
-//! frame, so the frame's own figure is already the amount that entered the swap. No venue
-//! knowledge is needed to decode.
+//! Neither amount is fee-adjusted here: the frame's own figures are recorded as read. A fee paid
+//! to a wallet in `[venue_fees]` is corrected afterwards by `super::attribution::venue`, which is
+//! the only place that knows a fee wallet. No venue knowledge is needed to decode.
 
 use alloy::{
     primitives::{Address, U256},
@@ -409,8 +409,9 @@ mod tests {
 
     #[test]
     fn test_decode_ignores_an_input_side_fee_leg() {
-        // An input-side fee leg on the way to the solver: `amount_in` stays the frame's own
-        // figure, which is already what reached the solver.
+        // An input-side fee leg to an address no address book knows: `amount_in` stays the
+        // frame's own figure. Only a `[venue_fees]` wallet is corrected, and that happens in
+        // attribution, not here.
         let registry = Registry::ethereum();
         let sender = addr(1);
         let root = root_with_solver_frame(sender, ROUTER, FLY);

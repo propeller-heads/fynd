@@ -4,9 +4,10 @@
 //! trace (see `transfer_ledger`) — what actually moved, not what any contract or calldata
 //! declared. It needs no knowledge of any router's format, which is also its weakness: a venue fee
 //! taken out of the trade sits inside the netted amounts, since netting reads the trader's gross
-//! spend and receipt. Netted records are therefore the marked fallback tier (`decode: "netted"`),
-//! excluded from the report by default; the declared decode (see `super::declared`) is the trusted
-//! path, and its `amount_in` is already past any input-side fee.
+//! spend and receipt. A fee paid to a wallet in `[venue_fees]` is corrected out by
+//! `super::attribution::venue`; any other fee stays inside. Netted records are therefore the
+//! marked fallback tier (`decode: "netted"`), excluded from the report by default, and the
+//! declared decode (see `super::declared`) is the trusted path.
 //!
 //! Netting requires the trader to both pay and receive. When the swap's output is delivered to a
 //! different receiver, nothing nets against the trader's input and the transaction is declined —

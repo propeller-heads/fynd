@@ -131,17 +131,21 @@ and the registry fingerprints.
 ### Venue fees are not modelled
 
 A venue's fee is charged whichever solver fills the order, so it cancels out of the Fynd
-comparison and hindsight does not track it. A declared `amount_in` needs no adjustment either: an
-input-side fee is taken before the solver frame, so the frame's own figure is already what entered
-the swap.
+comparison and hindsight does not track it.
 
-One correction survives, and it is not about the fee itself. When a known fee wallet
-(`[venue_fees]`) is paid out of the routing path, the trader's receipt — netted or declared — is
-short of the swap's gross output by that amount, while Fynd's quote is gross. That amount is added
-back into `amount_out`, or the comparison would hand Fynd the venue's cut as savings.
+One correction survives, and it is not about the fee itself. Fynd quotes the swap alone, so when a
+known fee wallet (`[venue_fees]`) is paid out of the trade the recorded amounts have to be put back
+on the swap's own basis, on whichever side the wallet was paid:
 
-Netted amounts otherwise keep any fee inside them. That is part of what the netted marker warns
-about.
+- **paid in the buy token** — the trader's receipt is short of the swap's gross output by the fee,
+  so the fee is added back into `amount_out`. Without it the comparison hands Fynd the venue's cut
+  as savings.
+- **paid in the sell token** — the pools saw less than `amount_in` states, so the fee is
+  subtracted. Without it Fynd is re-solved on more input than reached the pools and its larger
+  output reads as savings.
+
+Both corrections apply on either tier, declared or netted. A fee paid to any other address stays
+inside the amounts, which is part of what the netted marker warns about.
 
 ### Venue attribution (`attribution.rs`)
 
@@ -154,10 +158,10 @@ four maps from the address book:
   Safes, surfaced from the CoW decode's owner).
 - **CoW appData tag** (`[venue_appdata]`) — the settled order committed a frontend tag
   (`appCode`) whose appData hash maps to a venue (LlamaSwap).
-- **fee wallet** (`[venue_fees]`) — a known venue fee wallet took a cut (Phantom, Robinhood).
-  On a netted flow the fee is backed out of the amounts; on a declared flow it is recorded only.
-  Wallets are checked in address order, so a trade cut by two venues' wallets resolves the same
-  way on every run.
+- **fee wallet** (`[venue_fees]`) — a known venue fee wallet took a cut (Phantom, Robinhood,
+  Coinbase's Base App). The cut is corrected out of the amounts on whichever side it was paid, on
+  either tier. Wallets are checked in address order, so a trade cut by two venues' wallets
+  resolves the same way on every run.
 - **provider integrator tag** (`[venue_integrators]`) — a provider's event carried an integrator
   string mapped to a venue (LiFi frontends), read by `solvers::lifi::integrator`.
 

@@ -81,11 +81,13 @@ pub(crate) struct DecodedTrade {
     pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
-    /// Input amount that actually entered the swap — a venue fee taken from the input (see
-    /// `venue_fee_in`) is already subtracted, so a re-solve compares like-for-like.
+    /// Input amount that entered the swap. A fee paid to a `[venue_fees]` wallet out of the input
+    /// is subtracted (see `attribution::venue`), so a re-solve is quoted the amount that reached
+    /// the pools.
     pub amount_in: U256,
-    /// Gross swap output — a venue fee taken from the output (see `venue_fee_out`) is added
-    /// back, so the settled amount is the full swap proceeds, comparable to Fynd's gross output.
+    /// Gross swap output. A fee paid to a `[venue_fees]` wallet out of the output is added back
+    /// (see `attribution::venue`), so the settled amount is the full swap proceeds, comparable to
+    /// Fynd's gross output.
     pub amount_out: U256,
     /// The on-chain enforced floor declared in the settling solver frame's own calldata (see
     /// `SolverDecoder::declared` for the solvers that declare one). A settled trade cleared
