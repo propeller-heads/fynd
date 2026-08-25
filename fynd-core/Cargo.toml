@@ -52,6 +52,7 @@ experimental = []
 
 [dev-dependencies]
 clap.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 rstest.workspace = true
 tempfile.workspace = true
 toml.workspace = true

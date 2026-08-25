@@ -184,7 +184,7 @@ Pools can use either a built-in algorithm by name (e.g., `"most_liquid"`) or a c
 Each worker:
 
 1. Initializes a graph from market topology
-2. Runs a prioritized `select!` loop: shutdown > market events > derived events > solve tasks
+2. Runs a prioritized `select!` loop: shutdown > readiness deadline > market events > derived events > readiness transitions > solve tasks
 3. Maintains a `ReadinessTracker` for derived data requirements
 4. Calls the algorithm's `find_best_route` with the local graph and shared market data
 
