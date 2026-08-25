@@ -67,7 +67,8 @@ attribute. [README.md](README.md) holds the full pipeline diagram and the two-ti
 | `veto.rs` | The shared `Veto` type, plus post-decode vetoes of non-comparable shapes (NFT purchases, mis-paired wrap trades, fee-on-transfer skims) |
 | `registry.rs` | Per-chain address book, loaded from TOML; joins each solver to its `SolverDecoder` at load |
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |
-| `solvers/` | One `SolverDecoder` per solver with code: declared swaps from calldata (`fly.rs` packed, `kyberswap.rs` ABI `swap` params, `zeroex.rs` `AllowanceHolder.exec`/`Settler.execute`, `oneinch.rs` v6 and v5 `swap`) or from logs (`okx.rs` `OrderRecord`, `cow.rs` `Trade`), plus `lifi.rs`'s bridge veto and the `venue_fingerprint` reads (`lifi.rs`'s integrator tag, `cow.rs`'s `appData` hash) |
+| `solvers/` | One `SolverDecoder` per solver with code: declared swaps from calldata (`fly.rs` packed, `kyberswap.rs` ABI `swap` params, `zeroex.rs` `AllowanceHolder.exec`/`Settler.execute`, `oneinch.rs` v6 and v5 `swap`) or from logs (`okx.rs` `OrderRecord`, `cow.rs` `Trade`, `liquidmesh.rs` an unnamed event read by
+position), plus `lifi.rs`'s bridge veto and the `venue_fingerprint` reads (`lifi.rs`'s integrator tag, `cow.rs`'s `appData` hash) |
 | `trace.rs` | Whole-block trace fetching (`debug_traceBlockByNumber`) and frame walks |
 
 `src/verify/` contains the Allium integration:
