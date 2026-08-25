@@ -12,6 +12,7 @@
 //! ```
 use std::{str::FromStr, sync::Arc, time::Duration};
 
+use futures::StreamExt;
 use num_cpus;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
@@ -53,7 +54,7 @@ use crate::{
     types::constants::native_token,
     worker_pool::{
         pool::{WorkerPool, WorkerPoolBuilder},
-        registry::UnknownAlgorithmError,
+        registry::{UnknownAlgorithmError, WorkerPoolSpawnError},
     },
     worker_pool_router::{
         config::WorkerPoolRouterConfig, ExclusiveAccess, LiquidityScope, SolverPoolHandle,
@@ -320,6 +321,9 @@ pub enum SolverBuildError {
     /// A worker pool referenced an algorithm name that is not registered.
     #[error(transparent)]
     UnknownAlgorithm(#[from] UnknownAlgorithmError),
+    /// A worker pool could not start for a reason other than an unknown algorithm.
+    #[error(transparent)]
+    WorkerPoolSpawn(WorkerPoolSpawnError),
     /// No native gas token is defined for the requested chain.
     #[error("gas token not configured for chain")]
     GasToken,
@@ -353,6 +357,15 @@ pub enum SolverBuildError {
     #[cfg(feature = "experimental")]
     #[error("step controller channel closed before controller was delivered")]
     StepControllerChannelClosed,
+}
+
+impl From<WorkerPoolSpawnError> for SolverBuildError {
+    fn from(error: WorkerPoolSpawnError) -> Self {
+        match error {
+            WorkerPoolSpawnError::UnknownAlgorithm(error) => Self::UnknownAlgorithm(error),
+            error => Self::WorkerPoolSpawn(error),
+        }
+    }
 }
 
 /// Internal worker pool entry — either a built-in algorithm (by name) or a custom one.
@@ -812,7 +825,8 @@ impl FyndBuilder {
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
                         .liquidity_scope(pool_scope)
-                        .fallback_fee_tiers(fallback_fee_tiers.clone());
+                        .fallback_fee_tiers(fallback_fee_tiers.clone())
+                        .market_event_guard(market_event_tx.clone());
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),
@@ -834,7 +848,8 @@ impl FyndBuilder {
                         .task_queue_capacity(custom.task_queue_capacity)
                         .liquidity_scope(pool_scope)
                         .fallback_fee_tiers(fallback_fee_tiers.clone());
-                    let builder = (custom.configure)(builder);
+                    let builder =
+                        (custom.configure)(builder).market_event_guard(market_event_tx.clone());
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),
@@ -1381,6 +1396,7 @@ impl Solver {
                 .algorithm_config(algo_cfg)
                 .num_workers(pool_cfg.num_workers())
                 .task_queue_capacity(pool_cfg.task_queue_capacity())
+                .market_event_guard(market_event_tx.clone())
                 .build(market_data.clone(), Arc::clone(&derived_data), pool_event_rx, derived_rx)?;
 
             solver_pool_handles.push(SolverPoolHandle::new(worker_pool.name(), task_handle));
@@ -1453,6 +1469,12 @@ impl Solver {
             router_address,
             market_event_tx,
         })
+    }
+
+    /// Waits for an unexpected worker-pool exit. A return is process-fatal; callers should stop
+    /// every sibling component and surface the error to their own supervisor.
+    pub async fn wait_for_worker_failure(&self) -> crate::WorkerFailure {
+        wait_for_worker_failure(&self.worker_pools).await
     }
 
     /// Signals all worker pools and the computation manager to stop, then aborts background tasks.
@@ -1542,6 +1564,11 @@ impl SolverParts {
         &self.worker_pools
     }
 
+    /// Waits for an unexpected worker-pool exit.
+    pub async fn wait_for_worker_failure(&self) -> crate::WorkerFailure {
+        wait_for_worker_failure(&self.worker_pools).await
+    }
+
     /// Returns a reference to the shared market data.
     pub fn market_data(&self) -> &MarketData {
         &self.market_data
@@ -1602,9 +1629,61 @@ impl SolverParts {
     }
 }
 
+async fn wait_for_worker_failure(worker_pools: &[WorkerPool]) -> crate::WorkerFailure {
+    let mut failures = futures::stream::FuturesUnordered::new();
+    for pool in worker_pools {
+        failures.push(pool.wait_for_failure());
+    }
+    while let Some(failure) = failures.next().await {
+        if let Ok(failure) = failure {
+            return failure;
+        }
+    }
+    std::future::pending().await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_standalone_owner_propagates_failure_from_one_of_multiple_pools() {
+        use std::sync::Arc;
+
+        use tokio::sync::broadcast;
+
+        use crate::derived::DerivedData;
+
+        let market_data = MarketData::new_shared();
+        let derived_data = Arc::new(tokio::sync::RwLock::new(DerivedData::new()));
+        let (market_tx, market_rx) = broadcast::channel(1);
+        let (derived_tx, derived_rx) = broadcast::channel(1);
+        let (healthy_pool, _healthy_tasks) = WorkerPoolBuilder::new()
+            .name("healthy_pool")
+            .num_workers(1)
+            .build(market_data.clone(), Arc::clone(&derived_data), market_rx, derived_rx)
+            .unwrap();
+        let (failing_pool, _failing_tasks) = WorkerPoolBuilder::new()
+            .name("failing_pool")
+            .with_algorithm("panic_algorithm", |_config| -> crate::MostLiquidAlgorithm {
+                panic!("intentional standalone owner panic")
+            })
+            .num_workers(1)
+            .build(market_data, derived_data, market_tx.subscribe(), derived_tx.subscribe())
+            .unwrap();
+        let pools = vec![healthy_pool, failing_pool];
+
+        let failure = tokio::time::timeout(Duration::from_secs(1), wait_for_worker_failure(&pools))
+            .await
+            .expect("standalone owner must receive a worker failure from either pool");
+        assert_eq!(failure.pool(), "failing_pool");
+        assert!(matches!(failure.reason(), crate::WorkerFailureReason::Panic(_)));
+
+        for pool in pools {
+            pool.shutdown();
+        }
+        drop((market_tx, derived_tx));
+    }
 
     /// An unscoped pool resolves to `PublicOnly` — exclusive components are filtered out unless
     /// a pool explicitly opts in with `IncludeExclusive`.

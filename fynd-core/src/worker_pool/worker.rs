@@ -58,6 +58,12 @@ fn record_solve_duration(pool_name: &str, solve_time: Duration) {
         .record(solve_time.as_secs_f64());
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerRunExit {
+    Shutdown,
+    InputClosed,
+}
+
 /// A solver worker instance that maintains a market graph and processes solve requests.
 pub(crate) struct SolverWorker<A>
 where
@@ -525,7 +531,8 @@ where
         mut derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
         task_rx: async_channel::Receiver<SolveTask>,
         mut shutdown_rx: broadcast::Receiver<()>,
-    ) where
+    ) -> WorkerRunExit
+    where
         A::GraphManager: EdgeWeightUpdaterWithDerived,
     {
         info!(self.worker_id, "worker started");
@@ -542,7 +549,7 @@ where
                 // Check for shutdown
                 _ = shutdown_rx.recv() => {
                     info!(self.worker_id, "worker shutting down");
-                    break;
+                    return WorkerRunExit::Shutdown;
                 }
 
                 // Process market events
@@ -553,7 +560,7 @@ where
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             info!(self.worker_id, "event receiver closed, shutting down");
-                            break;
+                            return WorkerRunExit::InputClosed;
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(
@@ -656,7 +663,7 @@ where
                         None => {
                             // Channel closed, exit
                             info!(self.worker_id, "task channel closed, exiting");
-                            break;
+                            return WorkerRunExit::InputClosed;
                         }
                     }
                 }

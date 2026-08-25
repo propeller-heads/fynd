@@ -408,16 +408,26 @@ async fn run_solver(args: cli::ServeArgs) -> Result<(), SolverError> {
         Ok::<(), SolverError>(())
     });
 
+    let solver_run = solver.run();
+    tokio::pin!(solver_run);
     select! {
-        result = solver.run() => {
+        biased;
+        result = &mut solver_run => {
             if let Err(e) = result {
                 return Err(SolverError::SolverRuntimeError(e.to_string()));
             }
         }
         result = shutdown_signal => {
-            // Shutdown signal received and server stopped
-            if let Err(e) = result {
-                return Err(SolverError::ShutdownError(e.to_string()));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(error) => return Err(SolverError::ShutdownError(error.to_string())),
+            }
+
+            // The signal task has stopped the HTTP server, but worker-failure cleanup may still be
+            // establishing the process-fatal result. Do not drop that result and return success.
+            if let Err(error) = solver_run.await {
+                return Err(SolverError::SolverRuntimeError(error.to_string()));
             }
         }
     }

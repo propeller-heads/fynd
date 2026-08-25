@@ -31,7 +31,7 @@ pub use dto::HealthStatus;
 pub use error::ApiError;
 use fynd_core::{
     derived::SharedDerivedDataRef, feed::market_data::MarketData,
-    worker_pool_router::WorkerPoolRouter,
+    worker_pool_router::WorkerPoolRouter, HealthHandle,
 };
 use handlers::configure_routes;
 #[cfg(feature = "experimental")]
@@ -115,6 +115,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
 pub(crate) struct HealthTracker {
     market_data: MarketData,
     derived_data: SharedDerivedDataRef,
+    worker_pools: Vec<HealthHandle>,
     gas_price_stale_threshold: Option<Duration>,
     created_at: Instant,
 }
@@ -125,6 +126,7 @@ impl HealthTracker {
         Self {
             market_data,
             derived_data,
+            worker_pools: Vec::new(),
             gas_price_stale_threshold: None,
             created_at: Instant::now(),
         }
@@ -134,6 +136,19 @@ impl HealthTracker {
     pub(crate) fn with_gas_price_stale_threshold(mut self, threshold: Option<Duration>) -> Self {
         self.gas_price_stale_threshold = threshold;
         self
+    }
+
+    /// Adds fail-closed health checks for every worker pool owned by this service.
+    pub(crate) fn with_worker_pools(mut self, worker_pools: Vec<HealthHandle>) -> Self {
+        self.worker_pools = worker_pools;
+        self
+    }
+
+    /// Returns whether every configured pool has every worker live.
+    pub(crate) fn workers_healthy(&self) -> bool {
+        self.worker_pools
+            .iter()
+            .all(HealthHandle::is_healthy)
     }
 
     /// Returns milliseconds since the last market data update.

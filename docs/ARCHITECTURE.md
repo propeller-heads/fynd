@@ -21,6 +21,7 @@ This modular architecture allows users to:
 ## Design Decisions
 
 * **Concurrency Model**: Hybrid async/threaded -- I/O on tokio, route finding on dedicated OS threads
+* **Worker Supervision**: Each pool joins its worker threads and treats the first unexpected exit as process-fatal, so the external supervisor can reconstruct runtime state
 * **Data Sharing**: `Arc<RwLock<>>` with write-preferring lock for MarketState (single writer, many readers)
 * **Path-Finding**: Pluggable `Algorithm` trait with associated graph types, allowing each algorithm to use its preferred graph representation
 * **Graph Management**: `GraphManager` trait with incremental updates from market events; built-in implementation uses `petgraph::StableDiGraph`
@@ -172,8 +173,12 @@ Manages dedicated OS threads for CPU-bound route finding. Each pool has:
 * A name and algorithm assignment
 * A bounded `TaskQueue` (via `async_channel`)
 * N `SolverWorker` instances on separate threads
+* A supervisor that joins every worker, records the first unexpected exit, marks the pool unhealthy, and stops sibling workers
 
 Pools can use either a built-in algorithm by name (e.g., `"most_liquid"`) or a custom `Algorithm` implementation via `WorkerPoolBuilder::with_algorithm`. Pools are configured via `worker_pools.toml` for built-in algorithms, or programmatically via the builder for custom algorithms. Multiple pools can use the same algorithm with different parameters (e.g., fast 2-hop vs deep 3-hop).
+
+Fynd treats an unexpected worker exit as a process-fatal runtime error. Intentional shutdown joins the
+same threads without reporting a failure.
 
 ***
 
