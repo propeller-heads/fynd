@@ -129,6 +129,47 @@ pub(crate) struct PoolVolumeRecord {
     pub bought_eth: f64,
 }
 
+/// One panel config's outcome on one solve. The winner alone says which config the panel
+/// picked, not how the others did — and it says nothing at all when every config comes back
+/// empty, since the tie at zero volume is broken by panel order. These records separate the
+/// three ways a config can fail to clear: it ran out of time, it converged on prices that
+/// cleared nothing, or it errored.
+#[derive(Debug, Serialize)]
+pub(crate) struct ConfigOutcomeRecord {
+    /// The config's panel label (e.g. `"/1000 two-hops mixed"`).
+    pub config: &'static str,
+    /// `"ok"` | `"error"` | `"panic"`; the amounts below are zero unless `"ok"`.
+    pub status: &'static str,
+    pub solve_ms: u64,
+    /// Whether this config's search was cut short by the shared deadline. A truncated solve
+    /// returns prices but no clearings, so it always clears nothing.
+    pub deadline_fired: bool,
+    /// The panel's own score: ETH value of everything this config's limit-order clearings
+    /// bought. The winner is the config with the most of it.
+    pub cleared_eth: f64,
+    pub orders_cleared: usize,
+    pub pool_clearings: usize,
+    /// True for the config whose result the block's order records were built from.
+    pub winner: bool,
+}
+
+/// One panel config's totals over a block's S1 solves (there is one solve per order, so a
+/// record each would multiply out to orders × configs per block).
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct ConfigTotalsRecord {
+    pub config: &'static str,
+    /// Solves this config completed, errored on, and had cut short by the deadline.
+    pub ok: usize,
+    pub failed: usize,
+    pub deadline_fired: usize,
+    /// Solves this config won.
+    pub wins: usize,
+    pub solve_ms: u64,
+    pub cleared_eth: f64,
+    pub orders_cleared: usize,
+    pub pool_clearings: usize,
+}
+
 /// One block's run summary: solve health and coverage diagnostics for the report.
 #[derive(Debug, Serialize)]
 pub(crate) struct BlockRecord {
@@ -150,8 +191,14 @@ pub(crate) struct BlockRecord {
     pub s2_deadline_fired: bool,
     /// Which run config of the parallel panel won the S2 solve.
     pub s2_winning_config: String,
+    /// Every panel config's outcome on the S2 solve, winner included — one entry per config.
+    pub s2_configs: Vec<ConfigOutcomeRecord>,
     pub s1_solve_ms_total: u64,
     pub s1_deadline_fired: usize,
+    /// Every panel config's outcome summed over the block's S1 solves: one entry per config,
+    /// with `solve_ms` and the cleared amounts totalled across the orders and `wins` counting
+    /// the solves that config won.
+    pub s1_configs: Vec<ConfigTotalsRecord>,
     /// S2's AMM legs: which pools the batch actually traded, for the CoW-share metric
     /// (order volume that cleared without touching any pool netted user-to-user).
     pub s2_pool_volumes: Vec<PoolVolumeRecord>,

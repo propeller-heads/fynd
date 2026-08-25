@@ -59,6 +59,15 @@ The winning config is recorded per block (`s2_winning_config`) and per solve in 
 results dumps. APEX itself is built with its `multithread` feature (parallel market-supply
 queries, two workers per config).
 
+**Every config's outcome is recorded, not just the winner's.** `s2_configs` carries one entry
+per config for the block's batch solve (`status`, `solve_ms`, `deadline_fired`, `cleared_eth`,
+`orders_cleared`, `pool_clearings`, `winner`); `s1_configs` carries the same fields totalled
+over the block's S1 solves, plus `ok`/`failed`/`wins` counts. This is what separates the three
+ways a config fails to clear — the deadline cut it short, it converged on prices that cleared
+nothing, or it errored — and it is the only way to read the winner label safely: when every
+config clears nothing the tie at zero volume is broken by panel order, so `s2_winning_config`
+is then just the first entry of the panel, not a preference.
+
 The solver needs a few minutes to sync before the first block; the experiment then runs
 once per block, at top-of-block state, alongside hindsight's own fynd re-solve.
 
@@ -67,7 +76,7 @@ once per block, at top-of-block state, alongside hindsight's own fynd re-solve.
 | File | Contents |
 |---|---|
 | `apex-orders.jsonl` | One record per order per run (S1, S2) per variant: settled S0 amounts, APEX outcome, inclusion status (`cleared` / `partial` / `unfilled` / `out_of_universe`), batcher-absorbed amounts, ETH valuations at the block's derived prices |
-| `apex-blocks.jsonl` | One record per block per variant: pool counts per conversion path, universe size, S1/S2 solve times, deadline flags, S2 per-pool AMM volumes |
+| `apex-blocks.jsonl` | One record per block per variant: pool counts per conversion path, universe size, S1/S2 solve times, deadline flags, S2 per-pool AMM volumes, and every panel config's outcome (`s2_configs`, `s1_configs`) |
 | `inputs/apex_input_<block>.json` | Full `ApexInputData` dump per block — replay offline with `cargo run --release --example replay_batch --features dev -- <file>` in the apex-solver repo (wrapped Tycho pools deserialize as opaque `custom` entries there) |
 | `results/apex_result_<block>_<variant>.json` | Full APEX solve output per block and variant: the S2 batch and every S1 solve — clearing prices, limit-order clearings, pool clearings with surplus/fee (18-dec scaled decimal strings) |
 
@@ -84,6 +93,25 @@ section per variant: stat tiles (S2−S1, S2−S0, fill rate, win rate, CoW pote
 realized netting, batcher inventory), per-block charts, per-order improvement
 distribution, sortable per-block / per-token-volume / per-order tables, and the
 accounting rules.
+
+## Block explorer
+
+```bash
+python3 tools/hindsight/scripts/apex_block_explorer.py ./poc-results   # writes ./poc-results/explorer/
+```
+
+One page per block, styled after the Turbine settlement explorer: summary and initial
+prices, the orders list, the S2 AMM legs, and the batch's Token Flow graph. The report's
+block numbers link here, carrying the variant they were clicked in as the URL fragment
+(`block_<N>.html#anchored`), which selects that variant's tab.
+
+The graph runs the frontend's own engine: `token_flow.js` (a port of
+propellerswap-frontend's `TokenFlow/visNetwork.ts`, copied next to the pages) on top of
+vis-network. The bundle is taken from a `propellerswap-frontend` checkout next to this
+repo or under `~/repos`, or from `$VIS_NETWORK_JS`; with none of those the pages load it
+from unpkg instead. Edge direction follows the frontend: an arrow points from the token
+its hub sells to the token it buys, so a pool arrow runs opposite the user flow it
+services.
 
 ## Reading the results
 

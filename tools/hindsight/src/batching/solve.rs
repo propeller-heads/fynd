@@ -19,8 +19,8 @@ use tracing::warn;
 use super::{
     alloy_u256, dec, orders_by_pair,
     snapshot::{scale_down_ceil, scale_down_floor, Snapshot},
-    BlockRecord, InclusionStatus, OrderRecord, PoolVolumeRecord, PreparedOrder, SolveBudget,
-    Variant,
+    BlockRecord, ConfigOutcomeRecord, ConfigTotalsRecord, InclusionStatus, OrderRecord,
+    PoolVolumeRecord, PreparedOrder, SolveBudget, Variant,
 };
 use crate::decoder::DecodedTrade;
 
@@ -70,6 +70,7 @@ fn run_variant(
     };
     let s2_result = s2_outcome.result;
     let s2_winning_config = s2_outcome.winning_config;
+    let s2_configs = s2_outcome.configs;
     let s2_clearings = clearings_by_id(&s2_result);
     for prepared in &snapshot.prepared {
         records.push(order_record(
@@ -89,6 +90,7 @@ fn run_variant(
     let s1_started = Instant::now();
     let mut s1_deadline_fired = 0usize;
     let mut s1_results = BTreeMap::new();
+    let mut s1_configs = config_totals();
     for prepared in &snapshot.prepared {
         let single = std::slice::from_ref(prepared);
         let result = solve(snapshot, single, variant, budget.s1_deadline_ms, budget.max_iterations);
@@ -101,6 +103,7 @@ fn run_variant(
                 .map(|clearing| (*clearing).clone())
         });
         if let Some(outcome) = result.as_ref() {
+            add_config_totals(&mut s1_configs, &outcome.configs);
             s1_results.insert(
                 prepared.permissive.id.clone(),
                 SolveResultJson::from_result(&outcome.result, outcome.winning_config),
@@ -141,10 +144,38 @@ fn run_variant(
         s2_solve_ms,
         s2_deadline_fired: s2_result.deadline_fired,
         s2_winning_config: s2_winning_config.to_string(),
+        s2_configs,
         s1_solve_ms_total,
         s1_deadline_fired,
+        s1_configs,
         s2_pool_volumes: pool_volumes(&s2_result, snapshot),
     })
+}
+
+/// One zeroed totals row per panel config, in panel order.
+fn config_totals() -> Vec<ConfigTotalsRecord> {
+    RUN_CONFIGS
+        .iter()
+        .map(|run_config| ConfigTotalsRecord { config: run_config.label, ..Default::default() })
+        .collect()
+}
+
+/// Fold one solve's per-config outcomes into a block's running totals. Both vectors are in
+/// panel order, so the rows line up by index.
+fn add_config_totals(totals: &mut [ConfigTotalsRecord], outcomes: &[ConfigOutcomeRecord]) {
+    for (total, outcome) in totals.iter_mut().zip(outcomes) {
+        if outcome.status == "ok" {
+            total.ok += 1;
+        } else {
+            total.failed += 1;
+        }
+        total.deadline_fired += usize::from(outcome.deadline_fired);
+        total.wins += usize::from(outcome.winner);
+        total.solve_ms += outcome.solve_ms;
+        total.cleared_eth += outcome.cleared_eth;
+        total.orders_cleared += outcome.orders_cleared;
+        total.pool_clearings += outcome.pool_clearings;
+    }
 }
 
 /// One APEX run configuration in the panel — Turbine's production mechanism: several
@@ -219,10 +250,21 @@ impl RunConfig {
     }
 }
 
-/// The winner of one solve: the result plus which run config produced it.
+/// The winner of one solve: the result, which run config produced it, and how every config in
+/// the panel did.
 struct SolveOutcome {
     result: ApexResult,
     winning_config: &'static str,
+    configs: Vec<ConfigOutcomeRecord>,
+}
+
+/// What one config's thread came back with.
+struct RunOutcome {
+    ix: usize,
+    /// `None` when the run errored or panicked.
+    result: Option<ApexResult>,
+    status: &'static str,
+    solve_ms: u64,
 }
 
 /// One APEX solve over `orders`: the full run-config panel races in parallel under one shared
@@ -237,13 +279,14 @@ fn solve(
 ) -> Option<SolveOutcome> {
     let deadline = Instant::now() + Duration::from_millis(deadline_ms);
     let limit_orders = orders_by_pair(orders, variant);
-    let results: Vec<Option<(usize, ApexResult)>> = std::thread::scope(|scope| {
+    let results: Vec<RunOutcome> = std::thread::scope(|scope| {
         let handles: Vec<_> = RUN_CONFIGS
             .iter()
             .enumerate()
             .map(|(ix, run_config)| {
                 let limit_orders = limit_orders.clone();
                 scope.spawn(move || {
+                    let started = Instant::now();
                     let outcome = catch_unwind(AssertUnwindSafe(|| {
                         apex_solver::run_apex_with_config(
                             snapshot.apex_tokens.clone(),
@@ -254,32 +297,69 @@ fn solve(
                             run_config.apex_config(deadline, max_iterations),
                         )
                     }));
-                    match outcome {
-                        Ok(Ok(result)) => Some((ix, result)),
+                    let solve_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let (result, status) = match outcome {
+                        Ok(Ok(result)) => (Some(result), "ok"),
                         Ok(Err(error)) => {
                             warn!(%error, config = run_config.label, "apex run failed");
-                            None
+                            (None, "error")
                         }
                         Err(_) => {
                             warn!(config = run_config.label, "apex run panicked");
-                            None
+                            (None, "panic")
                         }
-                    }
+                    };
+                    RunOutcome { ix, result, status, solve_ms }
                 })
             })
             .collect();
         handles
             .into_iter()
-            .map(|handle| handle.join().unwrap_or(None))
+            .enumerate()
+            .map(|(ix, handle)| {
+                handle.join().unwrap_or(RunOutcome {
+                    ix,
+                    result: None,
+                    status: "panic",
+                    solve_ms: 0,
+                })
+            })
             .collect()
     });
 
+    // Score every config, not just the winner: which of them cleared what is the only way to
+    // tell a config that found nothing from one the deadline cut off.
+    let mut configs: Vec<ConfigOutcomeRecord> = Vec::with_capacity(RUN_CONFIGS.len());
     let mut best: Option<(usize, ApexResult)> = None;
     let mut best_volume = 0.0f64;
     let mut best_count = 0usize;
-    for entry in results.into_iter().flatten() {
-        let volume = cleared_volume_eth(&entry.1, snapshot);
-        let count = entry.1.limit_order_clearings.len();
+    for run in results {
+        let label = RUN_CONFIGS[run.ix].label;
+        let Some(result) = run.result else {
+            configs.push(ConfigOutcomeRecord {
+                config: label,
+                status: run.status,
+                solve_ms: run.solve_ms,
+                deadline_fired: false,
+                cleared_eth: 0.0,
+                orders_cleared: 0,
+                pool_clearings: 0,
+                winner: false,
+            });
+            continue;
+        };
+        let volume = cleared_volume_eth(&result, snapshot);
+        let count = result.limit_order_clearings.len();
+        configs.push(ConfigOutcomeRecord {
+            config: label,
+            status: run.status,
+            solve_ms: run.solve_ms,
+            deadline_fired: result.deadline_fired,
+            cleared_eth: volume,
+            orders_cleared: count,
+            pool_clearings: result.pool_clearings.len(),
+            winner: false,
+        });
         // The volumes are sums of the same float terms, so exact ties happen only when the
         // clearings are value-identical — the count then breaks the tie.
         let better =
@@ -287,10 +367,15 @@ fn solve(
         if better {
             best_volume = volume;
             best_count = count;
-            best = Some(entry);
+            best = Some((run.ix, result));
         }
     }
-    best.map(|(ix, result)| SolveOutcome { result, winning_config: RUN_CONFIGS[ix].label })
+    let (ix, result) = best?;
+    let winning_config = RUN_CONFIGS[ix].label;
+    for outcome in &mut configs {
+        outcome.winner = outcome.config == winning_config;
+    }
+    Some(SolveOutcome { result, winning_config, configs })
 }
 
 /// ETH value of everything a result's limit-order clearings bought — the panel's winner metric
@@ -665,5 +750,58 @@ mod tests {
         let (supply, receive) = top_up(ApexU256::ZERO, ApexU256::ZERO, ApexU256::from(100u64));
         assert_eq!(supply, ApexU256::ZERO);
         assert_eq!(receive, ApexU256::ZERO);
+    }
+
+    fn outcome(
+        config: &'static str,
+        status: &'static str,
+        cleared_eth: f64,
+    ) -> ConfigOutcomeRecord {
+        ConfigOutcomeRecord {
+            config,
+            status,
+            solve_ms: 10,
+            deadline_fired: status == "ok" && cleared_eth <= 0.0,
+            cleared_eth,
+            orders_cleared: usize::from(cleared_eth > 0.0),
+            pool_clearings: 2,
+            winner: cleared_eth > 0.0,
+        }
+    }
+
+    #[test]
+    fn test_config_totals_accumulate_by_panel_position() {
+        let mut totals = config_totals();
+        assert_eq!(totals.len(), RUN_CONFIGS.len());
+        // Two S1 solves: the first config wins one and is cut off by the deadline in the other,
+        // the second errors both times.
+        let first = RUN_CONFIGS[0].label;
+        let second = RUN_CONFIGS[1].label;
+        let rest: Vec<_> = RUN_CONFIGS[2..]
+            .iter()
+            .map(|c| outcome(c.label, "ok", 0.0))
+            .collect();
+        for cleared in [1.5, 0.0] {
+            let mut solve = vec![outcome(first, "ok", cleared), outcome(second, "error", 0.0)];
+            solve.extend(
+                rest.iter()
+                    .map(|o| outcome(o.config, o.status, o.cleared_eth)),
+            );
+            add_config_totals(&mut totals, &solve);
+        }
+
+        assert_eq!(totals[0].config, first);
+        assert_eq!(totals[0].ok, 2);
+        assert_eq!(totals[0].wins, 1);
+        assert_eq!(totals[0].deadline_fired, 1);
+        assert_eq!(totals[0].solve_ms, 20);
+        assert!((totals[0].cleared_eth - 1.5).abs() < 1e-9);
+        assert_eq!(totals[0].orders_cleared, 1);
+
+        assert_eq!(totals[1].config, second);
+        assert_eq!(totals[1].ok, 0);
+        assert_eq!(totals[1].failed, 2);
+        assert_eq!(totals[1].wins, 0);
+        assert!(totals[1].cleared_eth.abs() < 1e-9);
     }
 }
