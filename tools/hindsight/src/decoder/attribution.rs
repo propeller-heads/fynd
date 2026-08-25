@@ -12,13 +12,14 @@
 use std::collections::HashSet;
 
 use alloy::{
-    primitives::{Address, B256, U256},
+    primitives::{Address, U256},
     rpc::types::trace::geth::CallFrame,
 };
 use serde::Serialize;
 
 use crate::decoder::{
     registry::Registry,
+    solvers::VenueTag,
     trace,
     transfer_ledger::{SettledSwap, TransferLedger},
 };
@@ -44,6 +45,9 @@ pub(crate) enum AttributionSource {
 pub(crate) struct Attribution {
     pub solver: String,
     pub source: AttributionSource,
+    /// The router address the label came from, for callers that need the address book's entry for
+    /// it (the venue fingerprint read). `None` on the fallback tier, which named no router.
+    pub address: Option<Address>,
 }
 
 /// Attribute the solver that settled a matched transaction.
@@ -61,27 +65,39 @@ pub(crate) fn solver(
         return Attribution {
             solver: registry.label(entry_point),
             source: AttributionSource::EntryPoint,
+            address: Some(entry_point),
         };
     }
     if let Some(found) = trace::find_solver_frame(root, registry).and_then(|frame| frame.to) {
-        return Attribution { solver: registry.label(found), source: AttributionSource::TraceMatch };
+        return Attribution {
+            solver: registry.label(found),
+            source: AttributionSource::TraceMatch,
+            address: Some(found),
+        };
     }
     if let Some(guess) = trace::largest_external_call(root, entry_point, sender, registry) {
         return Attribution {
             solver: registry.label(guess),
             source: AttributionSource::LargestCall,
+            address: Some(guess),
         };
     }
-    Attribution { solver: registry.label(entry_point), source: AttributionSource::Fallback }
+    Attribution {
+        solver: registry.label(entry_point),
+        source: AttributionSource::Fallback,
+        address: None,
+    }
 }
 
 /// The order-flow venue for a decoded flow, when a fingerprint matches — overriding the
 /// entry-point label. Every fingerprint is registry-driven; nothing here knows about a specific
 /// venue or provider.
 ///
-/// Four fingerprints, tried in order: owning trader (`[venue_owners]`), `CoW` `appData` tag
-/// (`[venue_appdata]`; the hash is extracted by the caller), fee wallet (`[venue_fees]`),
-/// provider integrator tag (`[venue_integrators]`; extracted by the caller).
+/// Four fingerprints, tried in order: owning trader (`[venue_owners]`), an order's `appData` hash
+/// (`[venue_appdata]`), fee wallet (`[venue_fees]`), a provider's integrator tag
+/// (`[venue_integrators]`). The last two arrive as one `VenueTag`, read from the settling solver's
+/// own data by `SolverDecoder::venue_fingerprint`; which map a tag is looked up in follows from
+/// its variant, so this function still names no solver and no venue.
 ///
 /// A fee-wallet match also corrects the amounts onto the swap's own basis, on whichever side the
 /// wallet was paid. Fynd quotes the swap alone, so both corrections are what keep the comparison
@@ -97,14 +113,15 @@ pub(crate) fn venue(
     registry: &Registry,
     flow: &mut SettledSwap,
     ledger: &TransferLedger,
-    integrator: Option<&str>,
-    app_data: Option<B256>,
+    tag: Option<&VenueTag>,
 ) -> Option<String> {
     if let Some(venue) = registry.venue_for_owner(flow.tracked) {
         return Some(venue.to_string());
     }
-    if let Some(venue) = app_data.and_then(|hash| registry.venue_for_appdata(hash)) {
-        return Some(venue.to_string());
+    if let Some(VenueTag::AppData(hash)) = tag {
+        if let Some(venue) = registry.venue_for_appdata(*hash) {
+            return Some(venue.to_string());
+        }
     }
     if let Some((venue, fee)) = fee_venue(registry, ledger, flow.token_in, flow.token_out) {
         match fee {
@@ -113,9 +130,12 @@ pub(crate) fn venue(
         }
         return Some(venue);
     }
-    integrator
-        .and_then(|tag| registry.venue_for_integrator(tag))
-        .map(str::to_string)
+    if let Some(VenueTag::Integrator(name)) = tag {
+        return registry
+            .venue_for_integrator(name)
+            .map(str::to_string);
+    }
+    None
 }
 
 /// Which side of the swap a venue took its fee from, with the amount.
@@ -161,7 +181,7 @@ fn fee_venue(
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{address, b256};
+    use alloy::primitives::{address, b256, B256};
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::*;
@@ -316,7 +336,7 @@ mod tests {
         let kpk_safe = address!("0x4f2083f5fbede34c2714affb3105539775f7fe64");
         let ledger = TransferLedger::from_transaction(&[], &[]);
         let mut flow = SettledSwap { tracked: kpk_safe, ..swap(addr(10), 1, addr(11), 2) };
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("kpk"));
+        assert_eq!(venue(&registry, &mut flow, &ledger, None).as_deref(), Some("kpk"));
     }
 
     #[test]
@@ -324,7 +344,7 @@ mod tests {
         let registry = Registry::ethereum();
         let ledger = TransferLedger::from_transaction(&[], &[]);
         let mut flow = SettledSwap { tracked: addr(9), ..swap(addr(10), 1, addr(11), 2) };
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, None), None);
+        assert_eq!(venue(&registry, &mut flow, &ledger, None), None);
     }
 
     #[test]
@@ -336,10 +356,13 @@ mod tests {
         let defillama = b256!("0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422");
         let mut flow = SettledSwap { tracked: addr(1), ..swap(addr(10), 1, addr(11), 2) };
         assert_eq!(
-            venue(&registry, &mut flow, &ledger, None, Some(defillama)).as_deref(),
+            venue(&registry, &mut flow, &ledger, Some(&VenueTag::AppData(defillama))).as_deref(),
             Some("llamaswap")
         );
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, Some(B256::ZERO)), None);
+        assert_eq!(
+            venue(&registry, &mut flow, &ledger, Some(&VenueTag::AppData(B256::ZERO))),
+            None
+        );
     }
 
     #[test]
@@ -360,7 +383,7 @@ mod tests {
         let ledger = TransferLedger::from_transaction(&logs, &[]);
         let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
 
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("phantom"));
+        assert_eq!(venue(&registry, &mut flow, &ledger, None).as_deref(), Some("phantom"));
         assert_eq!(flow.amount_out, U256::from(10000));
     }
 
@@ -383,7 +406,7 @@ mod tests {
         let ledger = TransferLedger::from_transaction(&logs, &[]);
         let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
 
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("phantom"));
+        assert_eq!(venue(&registry, &mut flow, &ledger, None).as_deref(), Some("phantom"));
         assert_eq!(flow.amount_out, U256::from(10000));
     }
 
@@ -395,10 +418,14 @@ mod tests {
         let ledger = TransferLedger::from_transaction(&[], &[]);
         let mut flow = SettledSwap { tracked: addr(1), ..swap(addr(10), 1, addr(11), 2) };
         assert_eq!(
-            venue(&registry, &mut flow, &ledger, Some("Infinex"), None).as_deref(),
+            venue(&registry, &mut flow, &ledger, Some(&VenueTag::Integrator("Infinex".into())))
+                .as_deref(),
             Some("infinex")
         );
-        assert_eq!(venue(&registry, &mut flow, &ledger, Some("somedapp"), None), None);
+        assert_eq!(
+            venue(&registry, &mut flow, &ledger, Some(&VenueTag::Integrator("somedapp".into()))),
+            None
+        );
     }
 
     #[test]
@@ -421,7 +448,8 @@ mod tests {
         let mut flow = SettledSwap { tracked: user, ..swap(token_in, 10000, token_out, 2000) };
 
         assert_eq!(
-            venue(&registry, &mut flow, &ledger, Some("base-app"), None).as_deref(),
+            venue(&registry, &mut flow, &ledger, Some(&VenueTag::Integrator("base-app".into())))
+                .as_deref(),
             Some("coinbase")
         );
         assert_eq!(flow.amount_in, U256::from(9905));
@@ -445,7 +473,7 @@ mod tests {
         let ledger = TransferLedger::from_transaction(&logs, &[]);
         let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
 
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, None).as_deref(), Some("phantom"));
+        assert_eq!(venue(&registry, &mut flow, &ledger, None).as_deref(), Some("phantom"));
         assert_eq!(flow.amount_out, U256::from(10000));
         assert_eq!(flow.amount_in, U256::from(1000));
     }
@@ -464,6 +492,6 @@ mod tests {
         ];
         let ledger = TransferLedger::from_transaction(&logs, &[]);
         let mut flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 2000) };
-        assert_eq!(venue(&registry, &mut flow, &ledger, None, None), None);
+        assert_eq!(venue(&registry, &mut flow, &ledger, None), None);
     }
 }

@@ -22,7 +22,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    solvers::{DeclaredSwap, SolverDecoder},
+    solvers::{DeclaredSwap, SolverDecoder, VenueTag},
     transfer_ledger::to_primitive_log,
     veto::Veto,
 };
@@ -41,6 +41,13 @@ impl SolverDecoder for Lifi {
             return Err(veto);
         }
         Ok(generic_swap(logs))
+    }
+
+    /// The integrator tag the Diamond's own swap event carries — the only fingerprint of a `LiFi`
+    /// frontend (Infinex, Robinhood's `LiFi` leg), which routes through the shared Diamond and so
+    /// has no entry point of its own.
+    fn venue_fingerprint(&self, _input: &[u8], logs: &[Log]) -> Option<VenueTag> {
+        integrator(logs).map(VenueTag::Integrator)
     }
 }
 
@@ -111,13 +118,8 @@ fn bridge_order(logs: &[Log]) -> Option<Veto> {
         .then_some(Veto::BridgeOrder)
 }
 
-/// The integrator tag a same-chain `LiFi` swap declares, from either generic-swap event. This is
-/// the only fingerprint of a `LiFi` frontend (Infinex, Robinhood's `LiFi` leg), which routes
-/// through the shared Diamond.
-///
-/// A venue fingerprint, not a claim about the trade, so venue attribution calls it directly
-/// rather than through `SolverDecoder`.
-pub(crate) fn integrator(logs: &[Log]) -> Option<String> {
+/// The integrator tag a same-chain `LiFi` swap declares, from either generic-swap event.
+fn integrator(logs: &[Log]) -> Option<String> {
     logs.iter()
         .find_map(|log| match log.topics().first() {
             Some(topic) if *topic == LiFiGenericSwapCompleted::SIGNATURE_HASH => {

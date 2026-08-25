@@ -19,7 +19,7 @@ pub(crate) mod uniswap;
 pub(crate) mod zeroex;
 
 use alloy::{
-    primitives::{Address, U256},
+    primitives::{Address, B256, U256},
     rpc::types::Log,
 };
 
@@ -174,12 +174,23 @@ impl DeclaredSwap {
     }
 }
 
+/// A venue fingerprint the settling solver's own data carries. Which venue it names is the
+/// address book's business (`[venue_integrators]`, `[venue_appdata]`); a solver only reports the
+/// raw tag it found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VenueTag {
+    /// A frontend string the solver records in its own swap event, for venues that route through
+    /// a shared router and have no entry point of their own.
+    Integrator(String),
+    /// An order's committed `appData` hash, for a batch settler whose orders name their frontend.
+    AppData(B256),
+}
+
 /// One solver's decoder: what the solver's own calldata and logs say about a trade.
 ///
-/// One method, defaulted, so a solver only writes code when its transactions expose something;
-/// most solvers need none at all. Anything else a solver can read from its own data — a veto, an
-/// integrator tag — is an ordinary function in that solver's module, called from here or from the
-/// attribution that wants it, not another row on this trait.
+/// Both methods are defaulted, so a solver only writes code when its transactions expose
+/// something; most solvers need neither. A solver's veto is not a third method — it rides on
+/// `declared`'s `Err`, because a veto is a statement about the same read.
 ///
 /// Whether the read came from calldata or from an event is not recorded on the trait: the caller
 /// only needs to know which fields arrived, which the `Option`s on [`DeclaredSwap`] already say.
@@ -194,6 +205,17 @@ pub(crate) trait SolverDecoder: Send + Sync {
     /// reads one or the other; the parameter it does not use is ignored.
     fn declared(&self, _input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
         Ok(None)
+    }
+
+    /// The venue fingerprint this solver's own data carries, when it carries one: the frontend
+    /// that built the order, which the entry point cannot name because the flow shares a router.
+    ///
+    /// `input` is the **root** transaction's calldata, not the solver frame's: a fingerprint sits
+    /// in the order the trader signed, which is what the outermost call carries. `logs` is the
+    /// whole receipt's logs. Decoding either is the solver's own guard — a transaction this
+    /// solver did not shape fails to parse and returns `None`.
+    fn venue_fingerprint(&self, _input: &[u8], _logs: &[Log]) -> Option<VenueTag> {
+        None
     }
 }
 
