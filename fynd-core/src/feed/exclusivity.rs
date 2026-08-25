@@ -4,9 +4,9 @@
 //! enter the route a public worker pool returns, while an exclusive-access worker pool routes
 //! through them to capture the surplus they offer above the best public-market rate. Both worker
 //! pool kinds serve the same request; they differ only in which liquidity their workers may route
-//! through. A `PublicOnly` worker feeds this classification to
-//! [`component_filter`](super::component_filter), which keeps such a component out of its graph;
-//! workers of `IncludeExclusive`-scoped worker pools ingest everything.
+//! through. A `PublicOnly` worker feeds this classification to `feed::component_filter`, which
+//! keeps such a component out of its graph; workers of `IncludeExclusive`-scoped worker pools
+//! ingest everything.
 //!
 //! A component is classified from its own data via `is_exclusive`, applied generically to every
 //! ingested component.

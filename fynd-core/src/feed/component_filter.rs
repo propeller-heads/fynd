@@ -1,11 +1,10 @@
 //! Per-worker component filtering: each worker ingests only the components its worker pool admits.
 //!
 //! `MarketState` is never duplicated. A worker drops what it must not route through from its own
-//! graph topology at startup and from every incoming [`MarketEvent`], so two worker pools reading
+//! graph topology at startup and from every incoming `MarketEvent`, so two worker pools reading
 //! the same market can still route through different liquidity. Today two settings feed the
-//! predicate: the worker pool's `LiquidityScope` (see
-//! [`is_exclusive`](super::exclusivity::is_exclusive)) and its `exclude_protocols` list
-//! ([`is_excluded_protocol`]).
+//! predicate: the worker pool's `LiquidityScope` (via `exclusivity::is_exclusive`) and its
+//! `exclude_protocols` list (via `is_excluded_protocol`).
 
 use rustc_hash::FxHashMap;
 use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
