@@ -179,6 +179,7 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
             "s1_delta_bps": 0.0,
             "s2_delta_bps": 0.0,
             "s3_delta_bps": 0.0,
+            "s2_surplus_eth": 0.0,
             "settled_eth": 0.0,
             "batcher_eth": 0.0,
             "statuses": defaultdict(int),
@@ -201,6 +202,7 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
             by_block_eff[r["block"]] += out_eth(r)
         for block_num, blk in per_block.items():
             settled = by_block_settled.get(block_num, 0.0)
+            blk[f"{run}_surplus_eth"] = by_block_eff[block_num] - settled
             if settled > 0:
                 blk[f"{run}_delta_bps"] = (by_block_eff[block_num] - settled) / settled * 10_000
     for blk in per_block.values():
@@ -209,6 +211,12 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
     agg["per_block"] = [per_block[k] for k in sorted(per_block)]
     agg["blocks_won"] = sum(1 for b in agg["per_block"] if b["s2_delta_bps"] > 0)
     agg["blocks_lost"] = sum(1 for b in agg["per_block"] if b["s2_delta_bps"] < 0)
+
+    # The batcher only ever settles one batch at a time, so the inventory it must hold is
+    # the largest single block's top-up total, not the run's sum.
+    peak = max(agg["per_block"], key=lambda b: b["batcher_eth"], default=None)
+    agg["batcher_peak_eth"] = peak["batcher_eth"] if peak else 0.0
+    agg["batcher_peak_block"] = peak["block"] if peak else None
 
     # Sell-token volume, overall and per block (the report's per-token view).
     token_volume: dict[tuple, dict] = {}
@@ -245,9 +253,11 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
             {
                 "block": r["block"],
                 "tx": r["tx_hash"],
-                "venue": r["venue"],
+                "venue": short_label(r["venue"]),
+                "venue_full": r["venue"],
                 "solver": r["solver"],
-                "pair": f'{r["sell_symbol"]}→{r["buy_symbol"]}',
+                "pair": f'{short_label(r["sell_symbol"])}→{short_label(r["buy_symbol"])}',
+                "pair_full": f'{r["sell_symbol"]}→{r["buy_symbol"]}',
                 "in_eth": r["amount_in_eth"],
                 "status": r["status"],
                 "s1_status": s1r["status"] if s1r else "?",
@@ -282,12 +292,28 @@ body {
 }
 h1 { font-size: 20px; margin: 0 0 4px; }\n.variant-h { margin-top: 40px; padding-top: 16px; border-top: 2px solid var(--grid); text-transform: capitalize; }
 h2 { font-size: 15px; margin: 32px 0 10px; color: var(--text-primary); }
+h1, h2 { scroll-margin-top: 14px; }
+/* Table of contents, parked in the left margin the centred page leaves free. It only fits
+   once the viewport is wide enough for it; below that the page is unchanged. */
+.toc {
+  position: fixed; top: 20px; left: 14px; width: 168px; font-size: 12px; line-height: 1.5;
+  max-height: calc(100vh - 40px); overflow-y: auto;
+}
+.toc a { display: block; padding: 1px 0; color: var(--text-muted); text-decoration: none; }
+.toc a:hover { color: var(--text-primary); }
+.toc .toc-v { margin-top: 9px; font-weight: 600; color: var(--text-secondary); text-transform: capitalize; }
+.toc .toc-s { padding-left: 10px; }
+.toc a.active { color: var(--s1); }
+.toc .toc-s.active { border-left: 2px solid var(--s1); padding-left: 8px; }
+@media (max-width: 1560px) { .toc { display: none; } }
 .sub { color: var(--text-secondary); margin-bottom: 20px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
 .tile { background: var(--surface-2); border-radius: 8px; padding: 12px 14px; }
 .tile .v { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; }
 .tile .l { color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
 .tile .d { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+.tile a { color: var(--s1); text-decoration: none; }
+.tile a:hover { text-decoration: underline; }
 .tile .def { color: var(--text-muted); font-size: 10.5px; margin-top: 6px; line-height: 1.35; border-top: 1px solid var(--grid); padding-top: 5px; }
 .pos { color: var(--good); } .neg { color: var(--bad); }
 .chart-box { background: var(--surface-2); border-radius: 8px; padding: 14px; margin-top: 8px; }
@@ -323,6 +349,9 @@ JS = """
 const $ = (s, el=document) => el.querySelector(s);
 const fmt = (x, d=2) => x == null ? '—' : x.toLocaleString('en-US', {maximumFractionDigits: d, minimumFractionDigits: 0});
 const bpsCls = x => x == null ? '' : (x >= 0 ? 'pos' : 'neg');
+// Token symbols are arbitrary on-chain strings and rows are built with innerHTML.
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const tt = $('#tooltip');
 function showTT(e, text) { tt.style.display='block'; tt.textContent=text; moveTT(e); }
 function moveTT(e) { tt.style.left = (e.clientX+14)+'px'; tt.style.top = (e.clientY+10)+'px'; }
@@ -420,6 +449,39 @@ function histogram(el, values, color) {
   barChart(el, labels, [{name:'orders', color, values:bins}], {h:180});
 }
 
+// Light up the table-of-contents entry for whichever section the reader is in: the last
+// heading to have passed the top of the viewport. A subsection also lights its variant.
+function initTocSpy() {
+  const links = [...document.querySelectorAll('.toc a')];
+  const targets = links
+    .map(a => ({a, el: document.getElementById(a.hash.slice(1))}))
+    .filter(t => t.el);
+  if (!targets.length) return;
+  const groupOf = a => a.classList.contains('toc-s')
+    ? links.find(l => l.hash === '#v-' + a.hash.slice(1).split('-')[0])
+    : null;
+  let queued = false;
+  function update() {
+    queued = false;
+    let current = targets[0];
+    for (const t of targets) if (t.el.getBoundingClientRect().top <= 100) current = t;
+    // The last section is too short to reach the trigger line, so the end of the page is it.
+    if (scrollY + innerHeight >= document.documentElement.scrollHeight - 2) {
+      current = targets[targets.length - 1];
+    }
+    links.forEach(l => l.classList.remove('active'));
+    current.a.classList.add('active');
+    groupOf(current.a)?.classList.add('active');
+  }
+  addEventListener('scroll', () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(update);
+  }, {passive: true});
+  addEventListener('resize', update);
+  update();
+}
+
 function sortable(table, data, render, defaultKey) {
   let key = defaultKey, dir = -1;
   const ths = table.querySelectorAll('th');
@@ -448,18 +510,27 @@ def esc(x):
     return html.escape(str(x))
 
 
+def short_label(text: str) -> str:
+    """An undecoded venue or token comes through as a raw address, which would stretch its
+    column across the page; show it truncated (the full value stays in the cell's title)."""
+    if text.startswith("0x") and len(text) >= 40:
+        return f"{text[:6]}…{text[-4:]}"
+    return text
+
+
 BLOCK_ROWS_JS = """
-  r => `<tr><td><a href="explorer/block_${r.block}.html">${r.block}</a></td><td>${r.orders}</td><td>${r.executed}</td><td>${r.oou}</td><td>${r.sandwiched}</td>
+  r => `<tr><td><a href="explorer/block_${r.block}.html#${name}">${r.block}</a></td><td>${r.orders}</td><td>${r.executed}</td><td>${r.oou}</td><td>${r.sandwiched}</td>
   <td>${r.pools} <span class="badge">${r.pools_split}</span></td>
   <td class="${bpsCls(r.s1_delta_bps)}">${fmt(r.s1_delta_bps)}</td>
   <td class="${bpsCls(r.s2_delta_bps)}">${fmt(r.s2_delta_bps)}</td>
   ${name === 'permissive' ? `<td class="${bpsCls(r.s3_delta_bps)}">${fmt(r.s3_delta_bps)}</td>` : ''}
+  <td class="${bpsCls(r.s2_surplus_eth)}">${fmt(r.s2_surplus_eth,6)}</td>
   <td>${fmt(r.settled_eth,3)}</td><td>${fmt(r.batcher_eth,4)}</td>
   <td>${fmt(r.s2_ms,0)}</td><td>${fmt(r.s1_ms,0)}</td><td>${r.deadline?'⚠':''}</td></tr>`
 """
 EXPLORER_ROWS_JS = """
-  r => `<tr><td><a href="explorer/block_${r.block}.html">${r.block}</a></td><td><a href="https://etherscan.io/tx/${r.tx}" target="_blank" rel="noopener" title="${r.tx}">${r.tx.slice(0,10)}…</a></td><td>${r.venue}</td>
-  <td>${r.pair}</td><td>${fmt(r.in_eth,4)}</td><td>${r.status}</td><td>${r.s1_status}</td>
+  r => `<tr><td><a href="explorer/block_${r.block}.html#${name}">${r.block}</a></td><td><a href="https://etherscan.io/tx/${r.tx}" target="_blank" rel="noopener" title="${r.tx}">${r.tx.slice(0,10)}…</a></td><td title="${esc(r.venue_full)}">${esc(r.venue)}</td>
+  <td title="${esc(r.pair_full)}">${esc(r.pair)}</td><td>${fmt(r.in_eth,4)}</td><td>${r.status}</td><td>${r.s1_status}</td>
   <td class="${bpsCls(r.s2_bps)}">${fmt(r.s2_bps)}</td>
   <td class="${bpsCls(r.s1_bps)}">${fmt(r.s1_bps)}</td>
   <td>${fmt(r.batcher_eth,4)}</td></tr>`
@@ -470,6 +541,33 @@ TOKEN_ROWS_JS = """
 """
 
 
+# Every variant's sections, as (anchor slug, heading, sidebar label). One source for both the
+# headings and the table of contents, so the two can't drift apart.
+SECTIONS = [
+    ("chart", "Per-block improvement vs settled (bps of settled output value)", "Per-block Δbps"),
+    ("hist", "Per-order S2 improvement distribution (cleared orders, bps vs settled)", "Δbps distribution"),
+    ("status", "Order status mix per block", "Status mix"),
+    ("blocks", "Blocks", "Blocks"),
+    ("tokens", "Traded volume by sell token", "Token volume"),
+    ("orders", "Order explorer (all S2 orders; S1 columns joined)", "Order explorer"),
+]
+HEADINGS = {slug: heading for slug, heading, _ in SECTIONS}
+
+
+def h2(name: str, slug: str) -> str:
+    return f'<h2 id="{name}-{slug}">{esc(HEADINGS[slug])}</h2>'
+
+
+def toc(variants: list) -> str:
+    items = ['<a class="toc-top" href="#top">Overview</a>']
+    for name, _ in variants:
+        items.append(f'<a class="toc-v" href="#v-{name}">{esc(name)}</a>')
+        items += [f'<a class="toc-s" href="#{name}-{slug}">{esc(label)}</a>'
+                  for slug, _, label in SECTIONS]
+    items.append('<a class="toc-v" href="#notes">Accounting &amp; caveats</a>')
+    return f'<nav class="toc">{"".join(items)}</nav>'
+
+
 def variant_section(name: str, agg: dict) -> str:
     """One variant's full report section; element ids are suffixed with the variant name."""
     s2d = agg["s2_delta_bps"]
@@ -478,11 +576,16 @@ def variant_section(name: str, agg: dict) -> str:
     blocks = agg["per_block"]
 
     def tile(value, label, detail="", definition=""):
+        # `value` and `detail` are markup (signed_bps spans, explorer links); both are built
+        # here from the run's own numbers, never from decoded token or venue strings.
         return (
             f'<div class="tile"><div class="v">{value}</div>'
-            f'<div class="l">{esc(label)}</div><div class="d">{esc(detail)}</div>'
+            f'<div class="l">{esc(label)}</div><div class="d">{detail}</div>'
             f'<div class="def">{esc(definition)}</div></div>'
         )
+
+    def block_link(block: int) -> str:
+        return f'<a href="explorer/block_{block}.html#{name}">{block}</a>'
 
     def pct(x):
         return f"{x*100:.1f}%"
@@ -541,9 +644,15 @@ def variant_section(name: str, agg: dict) -> str:
         ),
         tile(
             f'{agg["batcher_gross_eth"]:.4f} ETH',
-            "batcher inventory (gross sold)",
+            "total batcher inventory used",
             f'received {agg["batcher_bought_eth"]:.4f} ETH',
-            "Σ buy-token remainders the batcher supplies on partial fills (full clearing-price output minus APEX's fill), ETH-valued; in return it receives the unsold sell amounts.",
+            "Σ buy-token remainders the batcher supplies on partial fills (full clearing-price output minus APEX's fill), ETH-valued, over every block; in return it receives the unsold sell amounts.",
+        ),
+        tile(
+            f'{agg["batcher_peak_eth"]:.4f} ETH',
+            "max required batcher inventory",
+            f'block {block_link(agg["batcher_peak_block"])}' if agg["batcher_peak_block"] else "",
+            "The largest single block's top-up total: max over blocks of Σ that block's buy-token remainders, ETH-valued. Batches settle one at a time, so this is the inventory the batcher has to hold to run any block in the run.",
         ),
     ]
 
@@ -555,21 +664,21 @@ def variant_section(name: str, agg: dict) -> str:
     s3_th = '<th data-k="s3_delta_bps">S3 Δbps</th>' if name == "permissive" else ""
 
     return f"""
-<h1 class="variant-h">{esc(name)} variant</h1>
+<h1 class="variant-h" id="v-{name}">{esc(name)} variant</h1>
 <div class="tiles">{''.join(tiles)}</div>
 
-<h2>Per-block improvement vs settled (bps of settled output value)</h2>
+{h2(name, 'chart')}
 <div class="chart-box">
   <div class="legend"><span><span class="k" style="background:var(--s1)"></span>S1 vs S0 (control)</span>
   <span><span class="k" style="background:var(--s2)"></span>S2 vs S0 (batch)</span>{s3_legend}</div>
   <div id="chart-blocks-{name}"></div>
 </div>
 
-<h2>Per-order S2 improvement distribution (cleared orders, bps vs settled)</h2>
+{h2(name, 'hist')}
 <div class="chart-box"><div id="chart-hist-{name}"></div>
 <div class="note">Positive = the batch beat the settled output for that order.</div></div>
 
-<h2>Order status mix per block</h2>
+{h2(name, 'status')}
 <div class="chart-box">
   <div class="legend">
     <span><span class="k" style="background:var(--s3)"></span>cleared</span>
@@ -580,7 +689,7 @@ def variant_section(name: str, agg: dict) -> str:
   <div id="chart-status-{name}"></div>
 </div>
 
-<h2>Blocks</h2>
+{h2(name, 'blocks')}
 <div class="filters">
   <label style="font-size:13px;color:var(--text-secondary)">
     <input type="checkbox" id="f-improved-{name}"> only blocks where batching improved execution (S2 Δbps &gt; 0)
@@ -592,17 +701,19 @@ def variant_section(name: str, agg: dict) -> str:
 <div class="scroll"><table id="t-blocks-{name}"><thead><tr>
 <th data-k="block">block</th><th data-k="orders">orders</th><th data-k="executed" title="orders APEX executed in S2: fully cleared + partially filled (topped up)">executed</th><th data-k="oou">o-o-u</th><th data-k="sandwiched">sandw.</th>
 <th data-k="pools">pools (v2/v3/wrap)</th><th data-k="s1_delta_bps">S1 Δbps</th><th data-k="s2_delta_bps">S2 Δbps</th>{s3_th}
-<th data-k="settled_eth">settled ETH</th><th data-k="batcher_eth">batcher ETH</th>
+<th data-k="s2_surplus_eth" title="the block's S2 surplus over the settled outcome: Σ (effective output − settled output), ETH-valued at the block's prices">S2 surplus ETH</th>
+<th data-k="settled_eth">settled ETH</th>
+<th data-k="batcher_eth" title="ETH-valued sum of this block's batcher top-ups: the inventory the batcher has to hold to settle it">batcher ETH</th>
 <th data-k="s2_ms">S2 ms</th><th data-k="s1_ms">S1 ms</th><th data-k="deadline">deadline</th>
 </tr></thead><tbody></tbody></table></div>
 
-<h2>Traded volume by sell token</h2>
+{h2(name, 'tokens')}
 <div class="filters"><select id="vol-block-{name}"><option value="">all blocks</option></select></div>
 <div class="scroll"><table id="t-tokens-{name}"><thead><tr>
 <th data-k="symbol">sell token</th><th data-k="orders">orders</th><th data-k="eth">volume (ETH)</th>
 </tr></thead><tbody></tbody></table></div>
 
-<h2>Order explorer (all S2 orders; S1 columns joined)</h2>
+{h2(name, 'orders')}
 <div class="filters">
   <select id="f-status-{name}"><option value="">all statuses</option><option>cleared</option><option>partial</option><option>unfilled</option><option>out_of_universe</option></select>
   <input type="text" id="f-block-{name}" placeholder="block…">
@@ -639,7 +750,8 @@ def render(variants: list, out: Path) -> None:
 <style>{CSS}</style>
 <body class="viz-root">
 <div id="tooltip"></div>
-<h1>APEX batching validation — proof of concept</h1>
+{toc(variants)}
+<h1 id="top">APEX batching validation — proof of concept</h1>
 <div class="sub">Blocks {span} ·
 S0 = settled on-chain, S1 = APEX per order (control), S2 = APEX whole-block batch (treatment).
 Unfilled and out-of-universe orders count at S0; a partial fill executes fully at the clearing
@@ -650,7 +762,7 @@ minimum buy amount recovered from calldata; anchored fallback where unrecoverabl
 
 {''.join(sections)}
 
-<div class="foot">
+<div class="foot" id="notes">
 <b>Accounting & caveats.</b>
 <ul>
 <li>Gas is out of scope: every comparison is gross. Sandwiched trades are excluded before batch construction.</li>
@@ -707,12 +819,13 @@ for (const [name, d] of Object.entries(DATA)) {{
   const drawOrders = sortable($('#t-orders-'+name), () => d.explorer.filter(r =>
     (!fStatus.value || r.status === fStatus.value) &&
     (!fBlock.value || String(r.block).startsWith(fBlock.value.trim())) &&
-    (!fSearch.value || (r.pair + r.venue + r.tx).toLowerCase().includes(fSearch.value.toLowerCase()))
+    (!fSearch.value || (r.pair_full + r.venue_full + r.tx).toLowerCase().includes(fSearch.value.toLowerCase()))
   ), {EXPLORER_ROWS_JS}, 'in_eth');
   fStatus.addEventListener('change', drawOrders);
   fBlock.addEventListener('input', drawOrders);
   fSearch.addEventListener('input', drawOrders);
 }}
+initTocSpy();
 </script>
 """
     out.write_text(page)
