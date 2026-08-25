@@ -10,8 +10,6 @@
 //! recognized from registry-driven fingerprints (owner, `appData` tag, fee wallet, integrator
 //! tag).
 
-use std::collections::HashSet;
-
 use alloy::{
     primitives::{Address, U256},
     rpc::types::trace::geth::CallFrame,
@@ -167,17 +165,13 @@ pub(crate) fn venue_fee(
     token_out: Address,
 ) -> Option<VenueFee> {
     for (wallet, venue) in registry.venue_fees() {
-        let received = ledger.received_by(&HashSet::from([*wallet]));
-        let non_zero = |token: &Address| {
-            received
-                .get(token)
-                .copied()
-                .filter(|amount| !amount.is_zero())
+        let non_zero = |token: Address| {
+            Some(ledger.received_by_address(*wallet, token)).filter(|amount| !amount.is_zero())
         };
-        if let Some(amount) = non_zero(&token_out) {
+        if let Some(amount) = non_zero(token_out) {
             return Some(VenueFee { venue: venue.clone(), side: FeeSide::Output, amount });
         }
-        if let Some(amount) = non_zero(&token_in) {
+        if let Some(amount) = non_zero(token_in) {
             return Some(VenueFee { venue: venue.clone(), side: FeeSide::Input, amount });
         }
     }

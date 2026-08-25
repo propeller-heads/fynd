@@ -217,21 +217,6 @@ impl TransferLedger {
             .filter(|(_, total)| !total.is_zero())
             .collect()
     }
-
-    /// Gross total received per token by any of `recipients`, regardless of sender (native ETH
-    /// keyed by `Address::ZERO`).
-    pub(crate) fn received_by(&self, recipients: &HashSet<Address>) -> HashMap<Address, U256> {
-        let mut totals: HashMap<Address, U256> = HashMap::new();
-        if recipients.is_empty() {
-            return totals;
-        }
-        for &(token, _, to, value) in &self.transfers {
-            if recipients.contains(&to) {
-                *totals.entry(token).or_default() += value;
-            }
-        }
-        totals
-    }
 }
 
 /// A net leg is residue when its token routed between third parties and the leg is under this
@@ -653,24 +638,6 @@ mod tests {
         let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
         let participants = transfer_ledger.participants();
         assert_eq!(participants, [addr(1), addr(2), addr(3), addr(4)].into());
-    }
-
-    #[test]
-    fn test_received_by_multiple_recipients() {
-        let collector = addr(99);
-        let collectors = HashSet::from([collector]);
-        let logs = vec![
-            make_transfer_log(addr(10), addr(1), collector, U256::from(40)),
-            make_transfer_log(addr(10), addr(2), collector, U256::from(2)),
-        ];
-        let native = vec![(addr(1), collector, U256::from(7))];
-        let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
-        let totals = transfer_ledger.received_by(&collectors);
-        assert_eq!(totals.get(&addr(10)).copied(), Some(U256::from(42)));
-        assert_eq!(totals.get(&Address::ZERO).copied(), Some(U256::from(7)));
-        assert!(transfer_ledger
-            .received_by(&HashSet::new())
-            .is_empty());
     }
 
     #[test]
