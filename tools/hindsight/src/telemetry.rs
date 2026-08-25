@@ -574,7 +574,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::{AttributionSource, DecodedTrade, SandwichEvidence},
+        decoder::{AttributionSource, DecodeSource, DecodeTier, DecodedTrade, SandwichEvidence},
         resolve::{build_range, SolvedAmount},
     };
 
@@ -590,8 +590,8 @@ mod tests {
             venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
-            decode: "netted",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out,

@@ -55,6 +55,63 @@ use crate::decoder::{
     transfer_ledger::TransferLedger,
 };
 
+/// Which decoder recovered a record's settled amounts.
+///
+/// The `serde` names are the JSONL column values, so a variant can be renamed without moving the
+/// wire format or the Grafana queries that read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) enum DecodeSource {
+    /// The settling solver's calldata stated the terms; `amount_out` came from the recipient's
+    /// receipt.
+    #[serde(rename = "solver-calldata")]
+    DeclaredFromCalldata,
+    /// The settling solver's own event stated both amounts; nothing was recovered.
+    #[serde(rename = "solver-logs")]
+    DeclaredFromLogs,
+    /// Balance netting, entered through a known venue's address.
+    #[serde(rename = "venue-netting")]
+    VenueNetting,
+    /// Balance netting on the transaction sender's own flow.
+    #[serde(rename = "sender-netting")]
+    SenderNetting,
+    /// Balance netting on a trader found inside a settlement the sender only relayed.
+    #[serde(rename = "intent-netting")]
+    IntentNetting,
+}
+
+/// How far a record's amounts can be trusted — the decode tier, which follows from the decoder
+/// that produced them and is never chosen separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DecodeTier {
+    /// Read from the settling solver's own data: the trusted tier, and the report's default scope.
+    Declared,
+    /// Recovered by balance netting, which can leave an unaccounted fee inside the amounts. The
+    /// report excludes these unless `--include-netted`.
+    Netted,
+}
+
+impl DecodeSource {
+    /// The tier this decoder produces. Reading a solver's own data is declared; netting is not.
+    pub(crate) fn tier(self) -> DecodeTier {
+        match self {
+            Self::DeclaredFromCalldata | Self::DeclaredFromLogs => DecodeTier::Declared,
+            Self::VenueNetting | Self::SenderNetting | Self::IntentNetting => DecodeTier::Netted,
+        }
+    }
+}
+
+impl DecodeTier {
+    /// The JSONL column value for this tier. The report reads historical files as plain strings,
+    /// so it compares against this rather than a literal of its own.
+    pub(crate) fn wire(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Netted => "netted",
+        }
+    }
+}
+
 /// A decoded solver trade: what token went in, what came out.
 ///
 /// Native ETH is represented as `Address::ZERO`.
@@ -71,13 +128,12 @@ pub(crate) struct DecodedTrade {
     /// analysis weighs low-trust tiers (`largest_call`, fallback) differently — e.g. when judging
     /// an embedded quote.
     pub solver_source: AttributionSource,
-    /// Which decoder recovered this trade (see `decode`). Once several decoders can carry a
-    /// venue's trades this measures how often each one carries a trade the others could not.
-    pub decoder: &'static str,
-    /// How this record's amounts were read: `"declared"` (the settling solver's own calldata or
-    /// logs — the trusted tier) or `"netted"` (balance netting — a fallback whose amounts can be
-    /// off by an unaccounted fee; the report excludes these by default).
-    pub decode: &'static str,
+    /// Which decoder recovered this trade. Once several decoders can carry a venue's trades this
+    /// measures how often each one carries a trade the others could not.
+    pub decoder: DecodeSource,
+    /// The tier `decoder` produces, written to its own column so a reader need not know the
+    /// decoder-to-tier mapping. Always `decoder.tier()` — never chosen independently.
+    pub decode: DecodeTier,
     pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
@@ -303,7 +359,7 @@ impl<P: Provider> Decoder<P> {
             .unwrap_or_else(|| registry.label(entry_point));
 
         let (min_amount_out, declared_quote, quote_timestamp) = declared_terms(declared.as_ref());
-        let decode = if declared.is_some() { "declared" } else { "netted" };
+        let decode = decoder.tier();
 
         Some(DecodedTrade {
             tx_hash: receipt.transaction_hash,
@@ -342,6 +398,38 @@ mod tests {
     /// 1inch v6 — a `[solvers]` entry in the ethereum address book, so a transaction into it
     /// matches on its entry point alone.
     const ONEINCH: Address = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+
+    #[test]
+    fn test_decode_columns_keep_their_wire_strings() {
+        // These strings are the JSONL columns the Grafana dashboard and the offline report read,
+        // and historical files carry them. A variant rename must not move them, so the mapping is
+        // pinned here rather than left to the serde attributes alone.
+        let source = |value: DecodeSource| serde_json::to_string(&value).unwrap();
+        assert_eq!(source(DecodeSource::DeclaredFromCalldata), r#""solver-calldata""#);
+        assert_eq!(source(DecodeSource::DeclaredFromLogs), r#""solver-logs""#);
+        assert_eq!(source(DecodeSource::VenueNetting), r#""venue-netting""#);
+        assert_eq!(source(DecodeSource::SenderNetting), r#""sender-netting""#);
+        assert_eq!(source(DecodeSource::IntentNetting), r#""intent-netting""#);
+
+        assert_eq!(serde_json::to_string(&DecodeTier::Declared).unwrap(), r#""declared""#);
+        assert_eq!(serde_json::to_string(&DecodeTier::Netted).unwrap(), r#""netted""#);
+        // `wire` is what the report compares historical strings against, so it must agree with
+        // what serde writes.
+        assert_eq!(DecodeTier::Declared.wire(), "declared");
+        assert_eq!(DecodeTier::Netted.wire(), "netted");
+    }
+
+    #[test]
+    fn test_every_decoder_maps_to_the_tier_its_name_states() {
+        for source in [DecodeSource::DeclaredFromCalldata, DecodeSource::DeclaredFromLogs] {
+            assert_eq!(source.tier(), DecodeTier::Declared, "{source:?}");
+        }
+        for source in
+            [DecodeSource::VenueNetting, DecodeSource::SenderNetting, DecodeSource::IntentNetting]
+        {
+            assert_eq!(source.tier(), DecodeTier::Netted, "{source:?}");
+        }
+    }
 
     /// A sender-netting swap through `ONEINCH`: `sender` pays one token and is paid another.
     fn swap_receipt(hash: TxHash, sender: Address) -> AnyTransactionReceipt {

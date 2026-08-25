@@ -64,7 +64,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::{AttributionSource, DecodedTrade, Registry},
+        decoder::{AttributionSource, DecodeSource, DecodeTier, DecodedTrade, Registry},
         resolve::{build_range, jsonl::write_comparisons, Outcome, SolvedAmount},
         usd::Prices,
     };
@@ -90,8 +90,8 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
-            decode: "netted",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: weth,
             token_out: usdc,

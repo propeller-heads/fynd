@@ -20,6 +20,7 @@ use crate::decoder::{
     trace,
     transfer_ledger::{SettledSwap, TransferLedger},
     veto::Veto,
+    DecodeSource,
 };
 
 /// Decode a transaction from the settling solver's own declaration: the decoder label recorded on
@@ -41,7 +42,7 @@ pub(crate) fn declared_flow(
     logs: &[Log],
     transfer_ledger: &TransferLedger,
     sender: Address,
-) -> Result<Option<(&'static str, SettledSwap, DeclaredSwap)>, Veto> {
+) -> Result<Option<(DecodeSource, SettledSwap, DeclaredSwap)>, Veto> {
     let Some(solver_frame) = trace::find_solver_frame(root, registry) else { return Ok(None) };
     let Some(solver) = solver_frame
         .to
@@ -59,9 +60,9 @@ pub(crate) fn declared_flow(
     // bounded is recovered from the transfers. An event states both and nothing is recovered,
     // which is what the label records.
     let label = if declared.amount_out.is_some() && declared.amount_in.is_some() {
-        "solver-logs"
+        DecodeSource::DeclaredFromLogs
     } else {
-        "solver-calldata"
+        DecodeSource::DeclaredFromCalldata
     };
     let amount_out = match declared.amount_out {
         Some(amount_out) => amount_out,
