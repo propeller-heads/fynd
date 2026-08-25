@@ -1,6 +1,7 @@
 //! Computes the amount out a route delivers when its pAMM legs fall back to Uniswap V3.
 //!
-//! The encoder drops the quote when this number cannot clear `min_amount_out`.
+//! The router drops the candidate before ranking when this number cannot clear
+//! `min_amount_out`, so the order is quoted with the next-best candidate.
 //!
 //! A pAMM quote only reaches the chain in the block the maker quotes for, so simulating a pAMM
 //! route against a mined block reverts. Routing the leg through Titan's PropAMMRouter

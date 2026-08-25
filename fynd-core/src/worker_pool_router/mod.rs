@@ -351,6 +351,11 @@ impl WorkerPoolRouter {
         // so ranking uses accurate gas costs rather than naive route.total_gas().
         if let Some(encoding_options) = request.options().encoding_options() {
             refine_gas_estimates(&mut order_responses, encoding_options)?;
+            drop_pamm_quotes_below_min_amount_out(
+                &self.encoder,
+                &mut order_responses,
+                encoding_options,
+            )?;
         }
 
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
@@ -1203,6 +1208,49 @@ fn refine_gas_estimates(
     Ok(())
 }
 
+/// Marks every candidate whose pAMM legs fall back below the user's `min_amount_out` as
+/// `NoRouteFound`, so ranking skips it and the next-best candidate is quoted instead.
+///
+/// This runs before ranking for two reasons: `min_amount_out` follows the slippage and fees in
+/// `encoding_options`, which the workers solving the route do not have, and ranking collapses the
+/// candidates to one quote per order. Dropping such a candidate any later leaves the order
+/// answering "no route" while a route the user could have executed is still in the list.
+fn drop_pamm_quotes_below_min_amount_out(
+    encoder: &Encoder,
+    order_responses: &mut [OrderResponses],
+    encoding_options: &EncodingOptions,
+) -> Result<(), SolveError> {
+    for responses in order_responses {
+        for WorkerPoolQuote { worker_pool, quote, .. } in &mut responses.quotes {
+            if quote.status() != QuoteStatus::Success {
+                continue;
+            }
+            let Some(fallback) = quote
+                .route()
+                .and_then(|route| route.fallback_amount_out())
+                .cloned()
+            else {
+                continue;
+            };
+            if encoder.fallback_clears_min_amount_out(quote, encoding_options)? {
+                counter!("propamm_fallback_quotes_total", "outcome" => "kept").increment(1);
+                continue;
+            }
+            counter!("propamm_fallback_quotes_total", "outcome" => "dropped").increment(1);
+            debug!(
+                order_id = %quote.order_id(),
+                worker_pool = worker_pool.as_str(),
+                %fallback,
+                slippage = encoding_options.slippage(),
+                "dropping pAMM quote: the Uniswap V3 fallback pays less than the user's \
+                 min_amount_out"
+            );
+            quote.set_status(QuoteStatus::NoRouteFound);
+        }
+    }
+    Ok(())
+}
+
 fn derive_strategy(quote: &OrderQuote) -> Strategy {
     let Some(route) = quote.route() else { return Strategy::Single };
     let swaps = route.swaps();
@@ -1375,6 +1423,80 @@ mod tests {
         )
         .with_route(Route::new(vec![swap], tokens).expect("non-empty route"));
         SingleOrderQuote::new(quote, 5)
+    }
+
+    /// A candidate that quotes 990 out and falls back to `fallback_amount_out` — what a worker
+    /// stamps on a route with a `propammfallback:` leg.
+    fn pamm_quote(amount_out_net_gas: u64, fallback_amount_out: u64) -> OrderQuote {
+        let mut quote = make_single_quote(amount_out_net_gas)
+            .order()
+            .clone();
+        quote
+            .route_mut()
+            .expect("route")
+            .set_fallback_amount_out(BigUint::from(fallback_amount_out));
+        quote
+    }
+
+    /// The whole point of dropping before ranking: the order is answered with the next-best
+    /// candidate, not with the route that misses `min_amount_out` and a `NoRouteFound` status.
+    #[test]
+    fn test_drop_pamm_quotes_below_min_amount_out_ranks_the_next_best() {
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let mut order_responses = vec![OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![
+                worker_quote(("pamm".to_string(), pamm_quote(980, 500))),
+                worker_quote(("public".to_string(), make_single_quote(900).order().clone())),
+            ],
+            failed_solvers: vec![],
+        }];
+
+        drop_pamm_quotes_below_min_amount_out(
+            &worker_router.encoder,
+            &mut order_responses,
+            &EncodingOptions::new(0.01),
+        )
+        .expect("floor check");
+
+        assert_eq!(
+            order_responses[0].quotes[0]
+                .quote
+                .status(),
+            QuoteStatus::NoRouteFound
+        );
+
+        let ranked = worker_router.rank_quotes(&order_responses[0], &QuoteOptions::default());
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].status(), QuoteStatus::Success);
+        assert_eq!(ranked[0].amount_out_net_gas(), &BigUint::from(900u64));
+    }
+
+    /// A fallback that pays at least `min_amount_out` leaves the candidate rankable.
+    #[test]
+    fn test_drop_pamm_quotes_below_min_amount_out_keeps_a_fallback_above_it() {
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let mut order_responses = vec![OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![worker_quote(("pamm".to_string(), pamm_quote(980, 985)))],
+            failed_solvers: vec![],
+        }];
+
+        drop_pamm_quotes_below_min_amount_out(
+            &worker_router.encoder,
+            &mut order_responses,
+            &EncodingOptions::new(0.01),
+        )
+        .expect("floor check");
+
+        assert_eq!(
+            order_responses[0].quotes[0]
+                .quote
+                .status(),
+            QuoteStatus::Success
+        );
     }
 
     // Helper to create a mock worker pool that responds with a given solution
