@@ -109,12 +109,6 @@ pub mod defaults {
     /// whose read spans several accounts sits at the top of that. The budget covers that work
     /// rather than the single round trip the sentinel probe it replaced needed.
     pub const SIMULATION_LAYOUT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
-    /// Minimum time between token-price solves.
-    ///
-    /// Token prices run outside the per-block computation chain because their sell legs cost
-    /// one solve per token. Changes arriving between solves accumulate and coalesce into the
-    /// next one, so the interval bounds staleness, not coverage.
-    pub const TOKEN_PRICE_INTERVAL: Duration = Duration::from_secs(60);
 }
 
 // Internal-only defaults not shared with downstream crates.
@@ -482,10 +476,6 @@ struct BuiltComponents {
     computation_event_rx: broadcast::Receiver<MarketEvent>,
     computation_shutdown_tx: broadcast::Sender<()>,
     computation_shutdown_rx: broadcast::Receiver<()>,
-    pricing_manager: ComputationManager,
-    pricing_event_rx: broadcast::Receiver<MarketEvent>,
-    pricing_shutdown_rx: broadcast::Receiver<()>,
-    token_price_interval: Duration,
     router: WorkerPoolRouter,
     worker_pools: Vec<WorkerPool>,
     market_data: MarketData,
@@ -517,7 +507,6 @@ pub struct FyndBuilder {
     tvl_buffer_ratio: f64,
     gas_refresh_interval: Duration,
     reconnect_delay: Duration,
-    token_price_interval: Duration,
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
     router_timeout: Duration,
@@ -554,7 +543,6 @@ impl FyndBuilder {
             tvl_buffer_ratio: defaults::TVL_BUFFER_RATIO,
             gas_refresh_interval: defaults::GAS_REFRESH_INTERVAL,
             reconnect_delay: defaults::RECONNECT_DELAY,
-            token_price_interval: defaults::TOKEN_PRICE_INTERVAL,
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
@@ -620,15 +608,6 @@ impl FyndBuilder {
     /// Sets the delay before reconnecting to Tycho after a disconnection (default: 5 s).
     pub fn reconnect_delay(mut self, delay: Duration) -> Self {
         self.reconnect_delay = delay;
-        self
-    }
-
-    /// Sets the minimum time between token-price solves.
-    ///
-    /// Bounds how stale token prices may get, not which changes they cover — changes arriving
-    /// between solves coalesce into the next one.
-    pub fn token_price_interval(mut self, interval: Duration) -> Self {
-        self.token_price_interval = interval;
         self
     }
 
@@ -881,21 +860,16 @@ impl FyndBuilder {
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.
         let (computation_manager, _) =
-            ComputationManager::new(computation_config.clone(), market_data.clone())
-                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
-        let pricing_manager =
-            ComputationManager::token_pricing(&computation_config, &computation_manager)
+            ComputationManager::new(computation_config, market_data.clone())
                 .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
 
         let derived_data: SharedDerivedDataRef = computation_manager.store();
         let derived_event_tx = computation_manager.event_sender();
 
-        // Subscribe event channels before spawning (one per computation manager + one per worker
-        // pool)
+        // Subscribe event channels before spawning (one for the computation manager + one per
+        // worker pool)
         let computation_event_rx = tycho_feed.subscribe();
-        let pricing_event_rx = tycho_feed.subscribe();
         let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
-        let pricing_shutdown_rx = computation_shutdown_tx.subscribe();
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
@@ -1076,10 +1050,6 @@ impl FyndBuilder {
             computation_event_rx,
             computation_shutdown_tx,
             computation_shutdown_rx,
-            pricing_manager,
-            pricing_event_rx,
-            pricing_shutdown_rx,
-            token_price_interval: self.token_price_interval,
             router,
             worker_pools,
             market_data,
@@ -1121,17 +1091,9 @@ impl FyndBuilder {
             None => tokio::spawn(async {}),
         };
         let computation_handle = tokio::spawn(async move {
-            // Token prices solve on their own task so a slow solve never delays the per-block
-            // computations. Both loops stop on the same signal.
-            let pricing_handle = tokio::spawn(c.pricing_manager.run_throttled(
-                c.pricing_event_rx,
-                c.pricing_shutdown_rx,
-                c.token_price_interval,
-            ));
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
                 .await;
-            let _ = pricing_handle.await;
         });
 
         Ok(Solver {
@@ -1198,17 +1160,9 @@ impl FyndBuilder {
             None => tokio::spawn(async {}),
         };
         let computation_handle = tokio::spawn(async move {
-            // Token prices solve on their own task so a slow solve never delays the per-block
-            // computations. Both loops stop on the same signal.
-            let pricing_handle = tokio::spawn(c.pricing_manager.run_throttled(
-                c.pricing_event_rx,
-                c.pricing_shutdown_rx,
-                c.token_price_interval,
-            ));
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
                 .await;
-            let _ = pricing_handle.await;
         });
 
         let pending = pending_rx
@@ -1285,17 +1239,9 @@ impl FyndBuilder {
             None => tokio::spawn(async {}),
         };
         let computation_handle = tokio::spawn(async move {
-            // Token prices solve on their own task so a slow solve (one sell leg per token)
-            // never delays the per-block computations. Both loops stop on the same signal.
-            let pricing_handle = tokio::spawn(c.pricing_manager.run_throttled(
-                c.pricing_event_rx,
-                c.pricing_shutdown_rx,
-                c.token_price_interval,
-            ));
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
                 .await;
-            let _ = pricing_handle.await;
         });
 
         let controller = controller_rx
@@ -1542,30 +1488,19 @@ impl Solver {
             .with_gas_token(gas_token)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
         let (computation_manager, _) =
-            ComputationManager::new(computation_config.clone(), market_data.clone())
-                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
-        let pricing_manager =
-            ComputationManager::token_pricing(&computation_config, &computation_manager)
+            ComputationManager::new(computation_config, market_data.clone())
                 .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
 
         let derived_data: SharedDerivedDataRef = computation_manager.store();
         let derived_event_tx = computation_manager.event_sender();
 
         let computation_event_rx = feed.subscribe();
-        let pricing_event_rx = feed.subscribe();
         let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
-        let pricing_shutdown_rx = computation_shutdown_tx.subscribe();
 
         let computation_handle = tokio::spawn(async move {
-            let pricing_handle = tokio::spawn(pricing_manager.run_throttled(
-                pricing_event_rx,
-                pricing_shutdown_rx,
-                defaults::TOKEN_PRICE_INTERVAL,
-            ));
             computation_manager
                 .run(computation_event_rx, computation_shutdown_rx)
                 .await;
-            let _ = pricing_handle.await;
         });
 
         // Read once, before any worker can be asked for a route: a recording is one block, so

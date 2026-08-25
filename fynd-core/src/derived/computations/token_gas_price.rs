@@ -22,15 +22,15 @@
 //!
 //! A router already ranks paths by what they return, so pricing needs no ranking rule of its own.
 //!
-//! # Why this runs outside the per-block chain
+//! # Cost
 //!
 //! The buy side costs one relaxation however many tokens are priced. The sell side costs one
 //! solve per token: those solves are many sources into one destination, each starting from its
 //! own buy output, and slippage makes the relaxation amount-dependent, so they cannot share the
-//! buy side's single pass. Solving every token both ways does not fit in a block, so this
-//! computation is not part of the per-block chain: the manager drives it on its own throttled
-//! loop ([`run_throttled`](crate::derived::ComputationManager::run_throttled)), where a slow
-//! solve delays only token prices — which tolerate staleness — never spot prices or depths.
+//! buy side's single pass. This computation runs in the per-block chain, so a slow pass delays
+//! that block's spot prices and depths — an accepted trade-off. After the first full solve,
+//! incremental recomputation narrows each pass to the tokens whose stored routes ran through a
+//! changed component, which bounds the steady-state cost.
 
 use std::collections::{HashMap, HashSet};
 
@@ -266,8 +266,8 @@ impl TokenGasPriceComputation {
     /// The route that sells `amount` of `token` back to the gas token, or `None` when there is no
     /// route or it returns nothing.
     ///
-    /// Each call builds its own context, so the sell side costs one solve per token — the reason
-    /// this computation runs behind an interval instead of in the per-block chain.
+    /// Each call builds its own context, so the sell side costs one solve per token and
+    /// dominates this computation's cost.
     async fn sell_route(
         &self,
         router: &BellmanFordAlgorithm,
