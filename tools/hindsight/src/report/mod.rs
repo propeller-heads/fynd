@@ -17,7 +17,7 @@ use std::{
 use anyhow::{bail, Context};
 use tracing::{info, warn};
 
-use crate::report::record::Comparison;
+use crate::{decoder::DecodeTier, report::record::Comparison};
 
 /// Inputs for the `report` subcommand.
 #[derive(clap::Args)]
@@ -69,7 +69,7 @@ fn filter_netted(records: Vec<Comparison>, include_netted: bool) -> Vec<Comparis
     }
     records
         .into_iter()
-        .filter(|record| record.decode.as_deref() != Some("netted"))
+        .filter(|record| record.decode.as_deref() != Some(DecodeTier::Netted.wire()))
         .collect()
 }
 

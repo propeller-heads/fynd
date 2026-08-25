@@ -21,6 +21,7 @@ use tracing::warn;
 use crate::decoder::{
     registry::Registry,
     transfer_ledger::{SettledSwap, TransferLedger},
+    DecodeSource,
 };
 
 /// Net the trade the declared decode could not read, picking whose balances count as the trade
@@ -38,17 +39,17 @@ pub(crate) async fn fallback_flow<P: Provider>(
     transfer_ledger: &TransferLedger,
     sender: Address,
     entry_point: Address,
-) -> Option<(&'static str, SettledSwap)> {
+) -> Option<(DecodeSource, SettledSwap)> {
     if registry
         .venue_name(entry_point)
         .is_some()
     {
         return sender_flow(transfer_ledger, sender, entry_point)
-            .map(|flow| ("venue-netting", flow));
+            .map(|flow| (DecodeSource::VenueNetting, flow));
     }
     if registry.is_solver(entry_point) && !registry.is_batch_settler(entry_point) {
         return sender_flow(transfer_ledger, sender, entry_point)
-            .map(|flow| ("sender-netting", flow));
+            .map(|flow| (DecodeSource::SenderNetting, flow));
     }
     // Batch settlements and log-matched intent fills: the sender acts for the trader. A
     // frame-matched transaction through an unknown wrapper has no other trader to find, so it
@@ -57,9 +58,10 @@ pub(crate) async fn fallback_flow<P: Provider>(
         find_intent_trade(provider, transfer_ledger, &[entry_point, sender], registry, code_cache)
             .await
     {
-        return Some(("intent-netting", flow));
+        return Some((DecodeSource::IntentNetting, flow));
     }
-    sender_flow(transfer_ledger, sender, entry_point).map(|flow| ("sender-netting", flow))
+    sender_flow(transfer_ledger, sender, entry_point)
+        .map(|flow| (DecodeSource::SenderNetting, flow))
 }
 
 /// Net the sender's flow. When the sender nets nothing, fall back to the contract the transaction
@@ -217,7 +219,7 @@ mod tests {
             fallback_flow(&provider, &mut cache, &registry, &ledger, user, router)
                 .await
                 .unwrap();
-        assert_eq!(decoder, "venue-netting");
+        assert_eq!(decoder, DecodeSource::VenueNetting);
         assert_eq!(flow, SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 2000) });
     }
 
@@ -241,7 +243,7 @@ mod tests {
             fallback_flow(&provider, &mut cache, &registry, &ledger, user, oneinch)
                 .await
                 .unwrap();
-        assert_eq!(decoder, "sender-netting");
+        assert_eq!(decoder, DecodeSource::SenderNetting);
         assert_eq!(flow, SettledSwap { tracked: user, ..swap(addr(10), 1000, addr(11), 2000) });
     }
 
@@ -262,7 +264,7 @@ mod tests {
             fallback_flow(&provider, &mut cache, &registry, &inverse_swap_ledger(), addr(2), cow)
                 .await
                 .unwrap();
-        assert_eq!(decoder, "intent-netting");
+        assert_eq!(decoder, DecodeSource::IntentNetting);
         assert_eq!(flow.tracked, addr(100));
     }
 

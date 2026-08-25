@@ -279,7 +279,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::{AttributionSource, DecodedTrade, Registry, SandwichEvidence},
+        decoder::{
+            AttributionSource, DecodeSource, DecodeTier, DecodedTrade, Registry, SandwichEvidence,
+        },
         resolve::{build_range, test_support, SolvedAmount},
     };
 
@@ -332,8 +334,8 @@ mod tests {
             venue: "relay".into(),
             solver: "kyberswap".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
-            decode: "netted",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: Address::ZERO,
             token_out: Address::repeat_byte(0x22),
@@ -407,8 +409,8 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
-            decode: "netted",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: weth,
             token_out: usdc,
@@ -529,8 +531,8 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
-            decode: "netted",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),
@@ -585,8 +587,8 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
-            decode: "netted",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),

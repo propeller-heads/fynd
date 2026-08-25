@@ -21,7 +21,7 @@ use fynd_core::types::{Route, Swap};
 use serde::Serialize;
 use tycho_simulation::tycho_common::models::Address as CoreAddress;
 
-use crate::decoder::{AttributionSource, DecodedTrade, SandwichEvidence};
+use crate::decoder::{AttributionSource, DecodeSource, DecodeTier, DecodedTrade, SandwichEvidence};
 
 /// One route leg, reduced to what rendering needs. A `Swap` also carries a `ProtocolComponent`
 /// and a boxed `ProtocolSim` that a route string has no use for and that cannot be built outside
@@ -228,10 +228,10 @@ pub(crate) struct RangeComparison {
     /// The evidence tier the solver label came from (from the decoder).
     pub solver_source: AttributionSource,
     /// Which decoder recovered the settled trade.
-    pub decoder: &'static str,
-    /// How the settled amounts were read: `"declared"` (the solver's own calldata or logs) or
-    /// `"netted"` (balance netting — excluded from the report by default).
-    pub decode: &'static str,
+    pub decoder: DecodeSource,
+    /// The tier `decoder` produces — declared (the solver's own calldata or logs) or netted
+    /// (balance netting, excluded from the report by default).
+    pub decode: DecodeTier,
     pub token_in: Address,
     pub token_out: Address,
     pub amount_in: U256,
@@ -381,8 +381,8 @@ mod tests {
             venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
-            decode: "netted",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),
