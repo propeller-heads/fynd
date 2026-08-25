@@ -223,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_solver_frame_prefers_the_shallower_of_two_branches() {
+    fn test_find_solver_frame_two_branches() {
         // Two known solvers on separate branches: 1inch is a direct child, 0x sits one level down
         // inside the branch that comes first. The direct child settled the trade — the other is a
         // step inside someone else's route — so depth decides, not walk order.
@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_solver_frame_takes_the_outer_of_two_nested_solvers() {
+    fn test_find_solver_frame_nested_solvers() {
         // Stacked rather than side by side: the outer solver called the inner one, so the outer
         // one owns the trade. This shape already resolved correctly and must keep doing so.
         let registry = Registry::ethereum();
@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_solver_frame_matches_the_root_before_descending() {
+    fn test_find_solver_frame_router_at_the_root() {
         // A transaction sent straight to a router: the root is the solver frame, whatever the
         // route below it touches. This is the common case and the walk must not descend past it.
         let registry = Registry::ethereum();
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_solver_frame_skips_a_reverted_branch_for_a_deeper_live_one() {
+    fn test_find_solver_frame_reverted_branch_beside_a_live_one() {
         // A reverted frame prunes its whole subtree, so a live solver deeper in another branch is
         // still found. Breadth-first must not turn the prune into a stop.
         let registry = Registry::ethereum();

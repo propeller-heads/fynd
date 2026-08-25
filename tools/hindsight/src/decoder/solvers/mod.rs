@@ -268,7 +268,7 @@ mod tests {
     use crate::decoder::registry::Registry;
 
     #[test]
-    fn test_native_sentinel_normalizes_and_leaves_every_other_token() {
+    fn test_normalize_native() {
         assert_eq!(normalize_native(NATIVE_TOKEN_SENTINEL), Address::ZERO);
         // The sentinel is matched case-insensitively by `address!`, so the checksummed spelling
         // solvers write in their own constants is the same address.

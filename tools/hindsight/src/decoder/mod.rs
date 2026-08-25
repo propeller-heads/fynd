@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn test_output_fee_is_added_back_to_a_netted_receipt() {
+    fn test_apply_venue_fee_output_side_netted() {
         // The trader's receipt is short of the gross output by the fee, and Fynd's quote is gross.
         let user = addr(1);
         let pool = addr(0x50);
@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn test_output_fee_is_not_added_to_an_amount_the_solvers_event_stated() {
+    fn test_apply_venue_fee_output_side_event_stated() {
         // An event states the swap's gross output (LiFi's `toAmount`), so nothing was measured
         // from a receipt and nothing is short by the fee. Adding it would count the cut twice.
         let user = addr(1);
@@ -558,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn test_output_fee_is_not_added_when_the_declared_recipient_paid_it() {
+    fn test_apply_venue_fee_output_side_router_anchor() {
         // The calldata named the router as the output recipient: it received the gross 10000 and
         // paid the fee wallet out of it, so the receipt already contains the cut.
         let user = addr(1);
@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn test_input_fee_is_subtracted_whatever_produced_the_amount() {
+    fn test_apply_venue_fee_input_side() {
         // The pools saw 9905 of the 10000 the trader authorized, so the re-solve is quoted 9905.
         let user = addr(1);
         let coinbase = addr(0x99);
@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_columns_keep_their_wire_strings() {
+    fn test_decode_column_wire_strings() {
         // These strings are the JSONL columns the Grafana dashboard and the offline report read,
         // and historical files carry them. A variant rename must not move them, so the mapping is
         // pinned here rather than left to the serde attributes alone.
@@ -634,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn test_every_decoder_maps_to_the_tier_its_name_states() {
+    fn test_decode_source_tier() {
         for source in [DecodeSource::DeclaredFromCalldata, DecodeSource::DeclaredFromLogs] {
             assert_eq!(source.tier(), DecodeTier::Declared, "{source:?}");
         }
@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_venue_fingerprint_reaches_the_settling_solvers_decoder() {
+    async fn test_venue_fingerprint_on_a_venue_wrapped_entry() {
         use alloy::{
             primitives::B256,
             rpc::types::{

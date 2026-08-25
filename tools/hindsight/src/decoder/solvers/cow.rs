@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn test_calldata_that_is_not_a_settlement_has_no_app_data() {
+    fn test_venue_fingerprint_on_non_settlement_calldata() {
         // The settle decode is its own guard: another router's calldata does not parse, so a
         // transaction CoW did not shape yields no tag even though CoW's decoder was asked.
         assert!(Cow
