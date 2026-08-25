@@ -2,11 +2,11 @@
 # see it and registry.rs for what each section drives. Addresses gathered 2026-07-29.
 #
 # Accuracy note: a wrong or missing *solver* address only costs coverage (the swap fails to
-# match), but a wrong *venue fee collector* produces wrong records (the fee stays inside the
-# amounts). Every contract below was checked to be deployed on Polygon, and every venue was
-# confirmed live by its own on-chain fingerprint (2026-07-29): MetaMask and Phantom by decoded
-# swaps paying their wallets, Rabby and Relay and Robinhood by fee legs from settlement contracts,
-# Rainbow by the router's own token transfers.
+# match), but a wrong *venue fee wallet* produces wrong records: `[venue_fees]` drives both the
+# venue label and the fee correction on the amounts. Every contract below was checked to be deployed
+# on Polygon, and every venue was confirmed live by its own on-chain fingerprint (2026-07-29):
+# MetaMask and Phantom by decoded swaps paying their wallets, Rabby and Relay and Robinhood by fee
+# legs from settlement contracts, Rainbow by the router's own token transfers.
 #
 # Coinbase has no `[venues.coinbase]` section, and does not need one: both swap proxies from the
 # Ethereum book have no code on Polygon and its fee wallet received nothing, matching how those
@@ -79,9 +79,10 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0xa5e0829caced8ffdd4de3c43696c57f7d7a678ff" = "quickswap"
 "0xf5b509bb0909a69b1c207e495f687a596c168e12" = "quickswap"
 
-# Venues. Relay's Polygon contracts and fee collector are the same addresses as mainnet; its
-# routers are the Cancun-EVM deployment. Verified live: 1416 fee legs to 0xf70da978… in a
-# 10k-block sample — the heaviest Relay deployment of the chains added here.
+# Venues. Relay's Polygon contracts are the same addresses as mainnet; its routers are the
+# Cancun-EVM deployment. Verified live: 1416 fee legs to 0xf70da978… in a 10k-block sample — the
+# heaviest Relay deployment of the chains added here. The fee legs are evidence of the deployment
+# only — Relay is not in `[venue_fees]`, so its cut is not corrected.
 [venues.relay]
 entry_points = [
     "0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222",
@@ -102,12 +103,13 @@ entry_points = ["0xdb9b1e94b5b69df7e401ddbede43491141047db3"]
 # Rabby SwapProxy — same address as mainnet. Verified on-chain: 69 fee legs paid to 0xcd6b9800…
 # (mainnet fee wallet 1) in a 10k-block sample; the historical wallet 0x39041f… is unused on
 # Polygon. As on mainnet, only the proxy is an entry point — shared-router Rabby swaps are
-# recognised by the fee leg (see rabby.rs), not by tx.to.
+# labelled by the fee wallet in `[venue_fees]`, not by tx.to.
 [venues.rabby]
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
 
 # Rainbow's own router — same address as mainnet. Verified live by its own token transfers.
-# Input-side fee read from calldata; no fee collector (see rainbow.rs).
+# Its input-side fee is kept in the router, never transferred out, so it stays
+# inside `amount_in`.
 [venues.rainbow]
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
 

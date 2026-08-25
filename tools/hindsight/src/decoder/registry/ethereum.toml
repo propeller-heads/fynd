@@ -112,7 +112,7 @@ entry_points = ["0x881d40237659c251811cec9c364ef91dc08d300c"]
 [venues.rabby]
 # Rabby SwapProxy — the app-owned router `tx.to` for its Uniswap-routed swaps. Rabby also routes
 # through shared solver routers (0x, 1inch, Sushi), where `tx.to` is the solver's own contract and
-# the only Rabby fingerprint is the fee leg below; those are not keyed here (see rabby.rs).
+# only the proxy is an entry point, so those swaps are labelled by the fee wallet below.
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
 
 [venues.coinbase]
@@ -127,8 +127,8 @@ entry_points = [
 
 [venues.rainbow]
 # Rainbow's own router ("Rainbow: Router"; same address on ETH/Base/Arb/OP/Polygon). It wraps 0x
-# and takes its fee on the input side, passed as the call's feeAmount argument and kept by the
-# router — no fee transfer, so the fee is read from calldata (see rainbow.rs). No fee collector.
+# and takes its fee on the input side, keeping it in the router rather than transferring it out.
+# With no transfer there is no fee wallet to match, so the cut stays inside `amount_in`.
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
 
 [venues.definitive]

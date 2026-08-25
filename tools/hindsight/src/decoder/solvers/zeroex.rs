@@ -96,8 +96,8 @@ impl SolverDecoder for ZeroEx {
     /// the input side) and the wrapped `execute` call's `AllowedSlippage` (`buyToken`/
     /// `minAmountOut`, the output side). `minAmountOut` is passed through as-is, including a
     /// legitimate zero (Settler's per-action slippage checks can leave the top-level floor at
-    /// zero) — the intent is still worth recording, and the fillable/margin judgment already
-    /// treats a zero floor sanely (trivially fillable, no margin to compute).
+    /// zero). A zero floor costs nothing downstream: `declared::recover_output` compares the
+    /// recovered output against it, and every output clears zero.
     ///
     /// `amount` is the allowance the taker authorises, which is normally the exact input — it
     /// matched the netted `amount_in` on both audited trades. An unlimited approval passes

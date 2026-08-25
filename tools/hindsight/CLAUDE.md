@@ -144,23 +144,24 @@ vanished at N).
 ### The declared decode
 
 `declared_flow` reads `token_in`/`token_out`/`amount_in` from the settling solver frame's own
-`SwapIntent` and recovers the settled `amount_out` as the gross amount of `token_out` received by
+`DeclaredSwap` and recovers the settled `amount_out` as the gross amount of `token_out` received by
 the output recipient the same calldata declares (falling back to the transaction sender) — the
 one field calldata can never carry. Two guards protect the recipient-receipt query: the recovered
 output must clear the intent's `min_amount_out` floor, and any declared quote must sit within
 `plausible_quote`'s band of it; either failure falls through to the netting fallback. A fee paid
 to a `[venue_fees]` wallet is corrected out of both amounts by `attribution::venue`, on whichever
-side the wallet was paid; no other venue fee is modelled (see the README). See
-`.claude/plans/calldata-first-decoding.md` for the empirics behind calldata-first ordering: on a
-315-transaction Base sample, coverage rises from 60.0% (netting alone) to 91.4% (calldata-first
-union), with zero divergences across the 165 trades both paths could decode.
+side the wallet was paid; no other venue fee is modelled (see the README).
+
+Declared reads run first and netting is the marked fallback, which is what the two-tier model
+above describes.
 
 ### Key types
 
-- `DecodedTrade` — decoded on-chain trade; amounts are venue-fee-adjusted so re-solve compares
-  like-for-like. Carries `sandwich` evidence when a bracket pair was found, and `min_amount_out`,
+- `DecodedTrade` — decoded on-chain trade. A fee paid to a `[venue_fees]` wallet is corrected out
+  of the amounts so re-solve compares like-for-like; every other venue fee stays inside them.
+  Carries `sandwich` evidence when a bracket pair was found, and `min_amount_out`,
   `declared_quote`, and `quote_timestamp` (the calldata-declared terms copied off the settling
-  solver's `SwapIntent`, when one was recovered).
+  solver's `DeclaredSwap`, when one was recovered).
 - `RangeComparison` — a trade solved at top and back, plus the top route's `Slippage` between
   the two states (from its re-execution at back). All comparisons are gross of gas.
 - `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
