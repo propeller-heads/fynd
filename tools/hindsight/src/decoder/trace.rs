@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use alloy::{
     eips::BlockNumberOrTag,
@@ -80,8 +80,23 @@ fn transfers_value(call_type: &str) -> bool {
     matches!(call_type, "CALL" | "CALLCODE" | "CREATE" | "CREATE2" | "SELFDESTRUCT")
 }
 
-/// Depth-first search for the first call frame into a known solver, skipping reverted frames
-/// (and their subtrees), which settle nothing.
+/// The outermost call frame into a known solver, skipping reverted frames (and their subtrees),
+/// which settle nothing.
+///
+/// Breadth-first, so a solver that is a direct child wins over one buried deeper in an earlier
+/// branch. Depth is what decides which frame settled the trade: the outer one called the inner
+/// one, so the outer one owns the trade and the inner one is a step in its route. A depth-first
+/// walk returned whichever solver frame it reached first going down — the same frame on a single
+/// chain of calls, the wrong one when two frames sit on separate branches.
+///
+/// Live traces reach that second shape when one transaction swaps several times through the same
+/// router, each leg entering it at its own depth (seen on arbitrage contracts routing several legs
+/// through Uniswap's universal router). This is not a `[batch_settlers]` settlement, which is many
+/// signed orders in one transaction and is declined to netting instead.
+///
+/// Such a transaction has no single settling frame, so no walk order is right: only one of its
+/// legs is recorded either way, and the caller has no marker saying so. Taking the outermost at
+/// least makes the choice the documented one (see `declared::declared_flow`).
 ///
 /// The one walk serves both questions asked of a trace: *who* settled the swap (the frame's
 /// `to`, for attribution) and *what the route cost* (the frame's `gas_used`, for gas
@@ -91,18 +106,20 @@ pub(crate) fn find_solver_frame<'a>(
     frame: &'a CallFrame,
     registry: &Registry,
 ) -> Option<&'a CallFrame> {
-    if frame.error.is_some() {
-        return None;
-    }
-    if let Some(to) = frame.to {
-        if registry.is_solver(to) {
+    let mut queue = VecDeque::from([frame]);
+    while let Some(frame) = queue.pop_front() {
+        if frame.error.is_some() {
+            continue;
+        }
+        if frame
+            .to
+            .is_some_and(|to| registry.is_solver(to))
+        {
             return Some(frame);
         }
+        queue.extend(&frame.calls);
     }
-    frame
-        .calls
-        .iter()
-        .find_map(|child| find_solver_frame(child, registry))
+    None
 }
 
 /// Best guess at an unknown router: the entry point's direct child call that moved the most
@@ -191,5 +208,74 @@ mod tests {
         root.calls = vec![reverted];
 
         assert!(find_solver_frame(&root, &registry).is_none());
+    }
+
+    #[test]
+    fn test_find_solver_frame_prefers_the_shallower_of_two_branches() {
+        // Two known solvers on separate branches: 1inch is a direct child, 0x sits one level down
+        // inside the branch that comes first. The direct child settled the trade — the other is a
+        // step inside someone else's route — so depth decides, not walk order.
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let zerox = address!("0x0000000000001ff3684f28c67538d4d072c22734");
+        let venue = addr(2);
+
+        let mut first_branch = frame("CALL", venue, addr(3), 0);
+        first_branch.calls = vec![frame("CALL", addr(3), zerox, 0)];
+        let mut root = frame("CALL", addr(1), venue, 0);
+        root.calls = vec![first_branch, frame("CALL", venue, oneinch, 0)];
+
+        assert_eq!(find_solver_frame(&root, &registry).and_then(|frame| frame.to), Some(oneinch));
+    }
+
+    #[test]
+    fn test_find_solver_frame_takes_the_outer_of_two_nested_solvers() {
+        // Stacked rather than side by side: the outer solver called the inner one, so the outer
+        // one owns the trade. This shape already resolved correctly and must keep doing so.
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let zerox = address!("0x0000000000001ff3684f28c67538d4d072c22734");
+
+        let mut outer = frame("CALL", addr(2), oneinch, 0);
+        outer.calls = vec![frame("CALL", oneinch, zerox, 0)];
+        let mut root = frame("CALL", addr(1), addr(2), 0);
+        root.calls = vec![outer];
+
+        assert_eq!(find_solver_frame(&root, &registry).and_then(|frame| frame.to), Some(oneinch));
+    }
+
+    #[test]
+    fn test_find_solver_frame_matches_the_root_before_descending() {
+        // A transaction sent straight to a router: the root is the solver frame, whatever the
+        // route below it touches. This is the common case and the walk must not descend past it.
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let zerox = address!("0x0000000000001ff3684f28c67538d4d072c22734");
+
+        let mut root = frame("CALL", addr(1), oneinch, 0);
+        root.calls = vec![frame("CALL", oneinch, zerox, 0)];
+
+        assert_eq!(find_solver_frame(&root, &registry).and_then(|frame| frame.to), Some(oneinch));
+    }
+
+    #[test]
+    fn test_find_solver_frame_skips_a_reverted_branch_for_a_deeper_live_one() {
+        // A reverted frame prunes its whole subtree, so a live solver deeper in another branch is
+        // still found. Breadth-first must not turn the prune into a stop.
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let venue = addr(2);
+
+        let mut reverted = frame("CALL", venue, addr(3), 0);
+        reverted.error = Some("execution reverted".to_string());
+        reverted.calls = vec![frame("CALL", addr(3), oneinch, 0)];
+        let mut live = frame("CALL", venue, addr(4), 0);
+        live.calls = vec![frame("CALL", addr(4), oneinch, 0)];
+        let mut root = frame("CALL", addr(1), venue, 0);
+        root.calls = vec![reverted, live];
+
+        let found = find_solver_frame(&root, &registry).expect("the live branch still matches");
+        assert_eq!(found.to, Some(oneinch));
+        assert_eq!(found.from, addr(4));
     }
 }
