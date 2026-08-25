@@ -8,6 +8,7 @@
 //! onto the registry's solver entry once, at address-book load (see `decoder_for`); at trade time
 //! every lookup is by address through `Registry::solver`.
 
+pub(crate) mod butter;
 pub(crate) mod cow;
 pub(crate) mod fly;
 pub(crate) mod kyberswap;
@@ -226,6 +227,7 @@ pub(crate) trait SolverDecoder: Send + Sync {
 /// book loads (see `decoder_for`); everything after that calls the trait through the registry
 /// entry.
 const IMPLEMENTATIONS: &[(&str, &'static dyn SolverDecoder)] = &[
+    ("butter", &butter::Butter),
     ("cow", &cow::Cow),
     ("fly", &fly::Fly),
     ("kyberswap", &kyberswap::Kyberswap),
