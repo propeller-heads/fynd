@@ -9,22 +9,12 @@
 //! The same calldata names the integrator's fee recipients, which is how a frontend's cut out of
 //! the swap is recovered even though the frontend itself is not in the address book.
 
-use alloy::{
-    primitives::{Address, U256},
-    rpc::types::Log,
-    sol,
-    sol_types::SolCall,
-};
+use alloy::{primitives::U256, rpc::types::Log, sol, sol_types::SolCall};
 
 use crate::decoder::{
-    solvers::{DeclaredSwap, SolverDecoder},
+    solvers::{normalize_native, DeclaredSwap, SolverDecoder},
     veto::Veto,
 };
-
-/// `KyberSwap` represents native ETH with this sentinel address rather than the zero address —
-/// hindsight's convention — so it is normalized on the way out.
-const KYBERSWAP_NATIVE: Address =
-    alloy::primitives::address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
 
 sol! {
     /// `MetaAggregationRouterV2.swap`'s parameter shape, verified against a live reverted trade
@@ -64,14 +54,6 @@ sol! {
 }
 
 /// Native ETH is `Address::ZERO` in hindsight's convention.
-fn normalize_native(token: Address) -> Address {
-    if token == KYBERSWAP_NATIVE {
-        Address::ZERO
-    } else {
-        token
-    }
-}
-
 /// `KyberSwap`'s declared quote, scanned out of a swap frame's calldata: `AmountOut` and, when
 /// present, `Timestamp`. `Source` is not read — nothing downstream consumes it.
 ///
@@ -144,7 +126,10 @@ mod tests {
             .flatten()
     }
 
+    use alloy::primitives::Address;
+
     use super::*;
+    use crate::decoder::solvers::NATIVE_TOKEN_SENTINEL;
 
     /// The real clientData blob of tx 0xf25ceafd… (the audited Relay+KyberSwap trade).
     const BLOB: &str = "{\"Source\":\"relay\",\"AmountInUSD\":\"70329.579441\",\
@@ -225,8 +210,8 @@ mod tests {
         assert_eq!(intent.token_out, dst);
         assert_eq!(intent.amount_in, Some(U256::from(1_000_000u64)));
         assert_eq!(intent.min_amount_out, Some(U256::from(990_000u64)));
-        // No clientData quote declared: the accessor falls back to the floor.
-        assert_eq!(intent.promised_amount_out().unwrap(), U256::from(990_000u64));
+        // No clientData quote declared, so only the floor is recorded.
+        assert_eq!(intent.declared_quote, None);
         assert_eq!(intent.timestamp, None);
     }
 
@@ -244,7 +229,7 @@ mod tests {
         let dst = Address::repeat_byte(0x22);
         let intent = terms(&swap_calldata_with_terms(src, dst, 1_000_000, 990_000, BLOB)).unwrap();
         assert_eq!(intent.min_amount_out, Some(U256::from(990_000u64)));
-        assert_eq!(intent.promised_amount_out().unwrap(), U256::from(70_400_409_935u64));
+        assert_eq!(intent.declared_quote, Some(U256::from(70_400_409_935u64)));
         assert_eq!(intent.timestamp, Some(1_783_421_726));
     }
 
@@ -262,14 +247,14 @@ mod tests {
             "{\"Source\":\"relay\"}",
         ))
         .unwrap();
-        assert_eq!(intent.promised_amount_out().unwrap(), U256::from(990_000u64));
+        assert_eq!(intent.declared_quote, None);
         assert_eq!(intent.timestamp, None);
     }
 
     #[test]
     fn test_declared_normalizes_native_eth() {
         let intent = terms(&swap_calldata_with_terms(
-            KYBERSWAP_NATIVE,
+            NATIVE_TOKEN_SENTINEL,
             Address::repeat_byte(0x22),
             1_000,
             900,

@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(intent.token_out, Address::ZERO);
         assert_eq!(intent.amount_in, Some(U256::from(19_694_643u64)));
         assert_eq!(intent.min_amount_out, Some(U256::from(10_217_898_321_149_381u64)));
-        assert_eq!(intent.promised_amount_out().unwrap(), U256::from(10_321_109_415_302_405u64));
+        assert_eq!(intent.declared_quote, Some(U256::from(10_321_109_415_302_405u64)));
     }
 
     #[test]

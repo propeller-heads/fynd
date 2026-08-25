@@ -11,14 +11,14 @@
 //! like-for-like — modern `CoW` records a zero on-chain fee (it is priced into the order).
 
 use alloy::{
-    primitives::{address, Address, B256},
+    primitives::B256,
     rpc::types::Log,
     sol,
     sol_types::{SolCall, SolEvent},
 };
 
 use crate::decoder::{
-    solvers::{DeclaredSwap, SolverDecoder, VenueTag},
+    solvers::{normalize_native, DeclaredSwap, SolverDecoder, VenueTag},
     transfer_ledger::to_primitive_log,
     veto::Veto,
 };
@@ -75,9 +75,6 @@ fn venue_tag(input: &[u8]) -> Option<B256> {
     Some(trade.appData)
 }
 
-/// `CoW`'s sentinel for native ETH in buy orders, mapped to the zero address like every other flow.
-const COW_NATIVE_ETH: Address = address!("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
-
 /// `CoW`'s settlement.
 pub(crate) struct Cow;
 
@@ -122,20 +119,12 @@ fn settlement_trade(logs: &[Log]) -> Option<DeclaredSwap> {
     ))
 }
 
-fn normalize_native(token: Address) -> Address {
-    if token == COW_NATIVE_ETH {
-        Address::ZERO
-    } else {
-        token
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{address, b256, Bytes, U256};
+    use alloy::primitives::{address, b256, Address, Bytes, U256};
 
     use super::*;
-    use crate::decoder::test_utils::addr;
+    use crate::decoder::{solvers::NATIVE_TOKEN_SENTINEL, test_utils::addr};
 
     /// The Ethereum `CoW` settlement contract (a registered batch settler).
     const COW_SETTLEMENT: Address = address!("0x9008d19f58aabd9ed0d60971565aa8510560ab41");
@@ -186,9 +175,16 @@ mod tests {
 
     #[test]
     fn test_native_eth_sentinel_normalized() {
-        let flow =
-            decode(&[trade_log(COW_SETTLEMENT, addr(100), addr(10), COW_NATIVE_ETH, 1000, 5, 0)])
-                .unwrap();
+        let flow = decode(&[trade_log(
+            COW_SETTLEMENT,
+            addr(100),
+            addr(10),
+            NATIVE_TOKEN_SENTINEL,
+            1000,
+            5,
+            0,
+        )])
+        .unwrap();
         assert_eq!(flow.token_out, Address::ZERO);
     }
 

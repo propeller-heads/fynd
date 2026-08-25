@@ -12,15 +12,10 @@
 //! `fromAmount` matched the settled record exactly, and both settled outputs cleared the decoded
 //! floor and stayed under the decoded quote. One paid an ERC-20 input, the other native ETH.
 
-use alloy::{
-    primitives::{address, Address},
-    rpc::types::Log,
-    sol,
-    sol_types::SolCall,
-};
+use alloy::{rpc::types::Log, sol, sol_types::SolCall};
 
 use crate::decoder::{
-    solvers::{DeclaredSwap, SolverDecoder},
+    solvers::{normalize_native, DeclaredSwap, SolverDecoder},
     veto::Veto,
 };
 
@@ -45,17 +40,6 @@ sol! {
         bytes permit,
         bytes executorData
     ) external payable returns (uint256 receivedAmount, uint256 paraswapShare, uint256 partnerShare);
-}
-
-/// `ParaSwap`'s sentinel for native ETH, normalized to the zero address like every other flow.
-const PARASWAP_NATIVE_ETH: Address = address!("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE");
-
-fn normalize_native(token: Address) -> Address {
-    if token == PARASWAP_NATIVE_ETH {
-        Address::ZERO
-    } else {
-        token
-    }
 }
 
 /// The `ParaSwap` solver.
@@ -94,9 +78,10 @@ impl SolverDecoder for Paraswap {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::U256;
+    use alloy::primitives::{address, Address, U256};
 
     use super::*;
+    use crate::decoder::solvers::NATIVE_TOKEN_SENTINEL;
 
     /// The `swapExactAmountIn` calldata of a real settled trade (tx `0x6bb77fe6…`, block
     /// 25741801): 5,599.115792 of `0xce6170ea…` in, WETH out. The settled record netted
@@ -176,7 +161,7 @@ mod tests {
     #[test]
     fn test_native_sentinel_normalized() {
         // Live tx 0xd427bdec… paid native ETH in, which Augustus writes as 0xeeee…ee.
-        let call = call_with(PARASWAP_NATIVE_ETH, WETH, 1_000, 900, 950, Address::ZERO);
+        let call = call_with(NATIVE_TOKEN_SENTINEL, WETH, 1_000, 900, 950, Address::ZERO);
         assert_eq!(terms(&call).unwrap().token_in, Address::ZERO);
     }
 
