@@ -2,9 +2,9 @@
 # and registry.rs for what each section drives. Addresses gathered 2026-07-21.
 #
 # Accuracy note: a wrong or missing *solver* address only costs coverage (the swap fails to
-# match), but a wrong *venue fee collector* produces wrong records (the fee stays inside the
-# amounts). Every venue fee collector below was verified on-chain against live Base swaps
-# (2026-07-21), not assumed from the mainnet book.
+# match), but a wrong *venue fee wallet* produces wrong records: `[venue_fees]` drives both the
+# venue label and the fee correction on the amounts. Every `[venue_fees]` wallet below was
+# verified on-chain against live Base swaps (2026-07-21), not assumed from the mainnet book.
 
 # Wrapped-native token: WETH on Base (canonical OP-stack predeploy).
 wrapped_native = "0x4200000000000000000000000000000000000006"
@@ -56,9 +56,10 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 # (docs.fly.trade/developers/deployments)
 "0x20f6ee51340adeed01a59b0e65cb3703f3dc860c" = "fly"
 
-# Venues. Relay's Base contracts and fee collector are the same addresses as mainnet — Relay docs
-# list the Base solver/fee collector as 0xf70da978…, so its fee back-out is verified. Its routers
-# are the Cancun-EVM deployment (Base is Cancun), identical to the mainnet book.
+# Venues. Relay's Base contracts are the same addresses as mainnet — Relay docs list the Base
+# solver as 0xf70da978…, which is how the deployment was confirmed. Its routers are the Cancun-EVM
+# deployment (Base is Cancun), identical to the mainnet book. Relay is not in `[venue_fees]`, so
+# its cut is not corrected out of the amounts.
 [venues.relay]
 entry_points = [
     "0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222",
@@ -80,12 +81,12 @@ entry_points = ["0xdb9b1e94b5b69df7e401ddbede43491141047db3"]
 # a 10k-block sample were paid to 0xcd6b9800… (mainnet fee wallet 1) from the proxy and from
 # shared solver routers (1inch, 0x, KyberSwap, Uniswap); the mainnet historical wallet 0x39041f…
 # is unused on Base. As on mainnet, only the proxy is an entry point — shared-router Rabby swaps
-# are recognised by the fee leg (see rabby.rs), not by tx.to.
+# are labelled by the fee wallet in `[venue_fees]`, not by tx.to.
 [venues.rabby]
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
 
 # Rainbow's own router — same address as mainnet (Rainbow deploys it identically across chains).
-# Input-side fee read from calldata; no fee collector (see rainbow.rs).
+# Its input-side fee is kept in the router, never transferred out, so it stays inside `amount_in`.
 [venues.rainbow]
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
 
