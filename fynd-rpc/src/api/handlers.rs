@@ -231,11 +231,10 @@ const MAX_PRICES_LIMIT: usize = 1000;
 #[cfg(feature = "experimental")]
 /// GET /v1/prices - Return per-token mid prices and optional market data.
 ///
-/// Returns 503 until the first token-price solve has landed (token prices run on their own
-/// interval, not per block). Each `prices[].price` is a plain decimal string holding raw
-/// target-token units divided by raw gas-token units; consumers must normalize both tokens'
-/// decimals before using it. Use the `include` query parameter to add spot prices and/or
-/// component depths.
+/// Returns 503 until the first token-price solve has landed. Each `prices[].price` is a
+/// plain decimal string holding raw target-token units divided by raw gas-token units;
+/// consumers must normalize both tokens' decimals before using it. Use the `include` query
+/// parameter to add spot prices and/or component depths.
 ///
 /// # Query Parameters
 ///
