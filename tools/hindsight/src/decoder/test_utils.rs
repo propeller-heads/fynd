@@ -7,7 +7,7 @@ use alloy::{
     sol_types::SolEvent,
 };
 
-use crate::decoder::transfer_ledger::{NetSwap, Transfer};
+use crate::decoder::transfer_ledger::{SettledSwap, Transfer};
 
 /// The canonical Permit2 deployment, for fixtures exercising the registry's infrastructure set.
 pub(crate) const PERMIT2: Address = address!("0x000000000022d473030f116ddee9f6b43ac78ba3");
@@ -26,14 +26,16 @@ pub(crate) fn tx_hash(n: u8) -> TxHash {
     TxHash::from(bytes)
 }
 
-/// A `NetSwap` literal, for concise assertions.
+/// A `SettledSwap` literal for concise assertions, tracked on `addr(1)`. Tests that care about
+/// the trader assert `tracked` themselves.
 pub(crate) fn swap(
     token_in: Address,
     amount_in: u64,
     token_out: Address,
     amount_out: u64,
-) -> NetSwap {
-    NetSwap {
+) -> SettledSwap {
+    SettledSwap {
+        tracked: addr(1),
         token_in,
         amount_in: U256::from(amount_in),
         token_out,

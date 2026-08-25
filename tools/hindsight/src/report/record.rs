@@ -15,6 +15,12 @@ pub(crate) struct Comparison {
     pub settled_tx: String,
     pub venue: String,
     pub solver: String,
+    /// How the settled amounts were read: `"declared"` or `"netted"` (see the decoder's
+    /// `DecodedTrade`). Absent on datasets recorded before the column existed; those records were
+    /// all netted, but predate the marker, so they are kept unless `--include-netted` says
+    /// otherwise is wanted — `None` here means "no marker to filter on".
+    #[serde(default)]
+    pub decode: Option<String>,
     pub token_in: String,
     pub token_out: String,
     /// Optimistic state (N-1); the report's headline, matching the monitor's headline verdict.
@@ -26,7 +32,7 @@ pub(crate) struct Comparison {
 pub(crate) struct State {
     pub verdict: String,
     #[serde(default)]
-    pub net_bps: Option<f64>,
+    pub raw_bps: Option<f64>,
     /// Signed USD delta of Fynd's output vs the settled output — negative on a loss. Present only
     /// for a solved state.
     #[serde(default)]
@@ -58,7 +64,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::{AttributionSource, DecodedTrade, Registry},
+        decoder::{AttributionSource, DecodeSource, DecodeTier, DecodedTrade, Registry},
         resolve::{build_range, jsonl::write_comparisons, Outcome, SolvedAmount},
         usd::Prices,
     };
@@ -84,16 +90,16 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: weth,
             token_out: usdc,
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
-            venue_fee_in: None,
-            venue_fee_out: None,
-            settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         };
         // Top solved above settled → a win with a positive USD improvement.
@@ -107,7 +113,6 @@ mod tests {
         });
         let range = build_range(
             &trade,
-            &prices,
             top,
             Outcome::Unsolvable("x".into()),
             &Outcome::Unsolvable("x".into()),
@@ -123,7 +128,7 @@ mod tests {
         assert_eq!(record.solver, "1inch");
         assert_eq!(record.top.verdict, "win");
         assert!(record.top.is_scored());
-        assert!(record.top.net_bps.unwrap() > 0.0);
+        assert!(record.top.raw_bps.unwrap() > 0.0);
         assert!((record.top.improvement_usd.unwrap() - 10.0).abs() < 1e-3);
         assert_eq!(record.token_out, format!("{usdc:#x}"));
     }

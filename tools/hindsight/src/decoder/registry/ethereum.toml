@@ -42,8 +42,11 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x9008d19f58aabd9ed0d60971565aa8510560ab41" = "cow"
 # ParaSwap Augustus v6.2
 "0x6a000f20005980200259b80c5102003040001068" = "paraswap"
-# Uniswap Universal Router
+# Uniswap Universal Router v1.2, 2.0 and 2.1.1 (`execute`, selector 0x3593564c). Addresses per
+# chain from developers.uniswap.org's supported-chains table.
 "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad" = "uniswap"
+"0x66a9893cc07d91d95644aedd05d03f95e1dba8af" = "uniswap"
+"0x4c82d1fbfe28c977cbb58d8c7ff8fcf9f70a2cca" = "uniswap"
 # UniswapX Dutch order reactor (filler-initiated; found via its log)
 "0x00000011f84b9aa48e5f8aa8b9897600006289be" = "uniswapx"
 # OKX DEX Router, and OKX DEX Router 6 (per OKX docs; the former is an older deployment)
@@ -57,10 +60,22 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x1f8db310f32d48b6180ff902ec60c586128cef47" = "tycho"
 "0xfd0b31d2e955fa55e3fa641fe90e08b677188d35" = "tycho"
 "0xda892c989d07a18b5dd3f392d949f00df15c5736" = "tycho"
+# Fly (formerly Magpie) DexAggregator — same address on every chain (docs.fly.trade/developers/deployments)
+"0x20f6ee51340adeed01a59b0e65cb3703f3dc860c" = "fly"
+# ButterSwap router (`ButterRouterV31`, verified source) — same address on Ethereum and Base.
+# Settles the swaps ShapeShift routes through Butter, and is the outermost router in those traces:
+# it routes on to LiFi and Fly, whose own reads it therefore replaces, so its entry belongs with
+# `solvers/butter.rs` and not before it.
+"0xee0319cf0bca5d09333f9f6277743e8de31bd69a" = "butter"
+# LiquidMesh router — same address on Ethereum and Base. Settles Trust Wallet's swap flow: every
+# Trust Wallet swap in a 37-swap sample across both chains entered here, and none reached any other
+# registered solver. Its entry selector 0x47ee97ff is in no public 4-byte database, so these stay
+# netted until the ABI is known.
+"0x3d90f66b534dd8482b181e24655a9e8265316be9" = "liquidmesh"
 
-# Venues — platforms that initiate a trade and route it through a solver found in the
-# trace. Each section name must have a decode strategy in code (venues::Venue);
-# `entry_points` are the contracts users enter through, `fee_collectors` where its fees are sent.
+# Venues — platforms that initiate a trade and route it through a solver found in the trace. Pure
+# addresses, no code: `entry_points` are the contracts users enter through. A venue's fees are not
+# modelled; see `[venue_fees]` below for the wallets that identify a venue on a shared router.
 
 # Display names for entry points that are neither venues nor solvers — market-maker fillers,
 # solver contracts, bot routers. Label-only: these must NOT be venues or solvers, because
@@ -98,47 +113,17 @@ entry_points = [
     "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
     "0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7",
 ]
-# Relay fee collector (the Relay router takes the fee on the input side). Sole collector across a 25-tx
-# on-chain sample; fee ranges ~1–41 bps depending on Relay's fee tier.
-fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 
 [venues.metamask]
 # MetaMask Swap Router.
 entry_points = ["0x881d40237659c251811cec9c364ef91dc08d300c"]
-# MetaMask fee wallets. Both observed in a 28-tx on-chain sample (26 paid one of the two, the
-# rest were genuinely fee-free pairs); the fee is ~87.5 bps plus a gas recoup on gasless "smart
-# swaps", taken from whichever swap side is native ETH, else from a swap token directly.
-fee_collectors = [
-    "0xe3478b0bb1a5084567c319096437924948be1964",
-    "0xf326e4de8f66a0bdc0970b79e0924e33c79f1915",
-]
 
-# MetaMask's router names the solver API behind each swap in a calldata aggregatorId like
-# "oneInchV6FeeDynamic" or "okx6". Each entry maps a lowercase substring of that id to a solver
-# name used in this address book; ids that match no entry are recorded as-is.
-[venues.metamask.solver_aliases]
-oneinch = "1inch"
-zeroex = "0x"
-uniswap = "uniswap"
-okx = "okx"
-kyber = "kyberswap"
-paraswap = "paraswap"
-airswap = "airswap"
-openocean = "openocean"
-hashflow = "hashflow"
 
 [venues.rabby]
 # Rabby SwapProxy — the app-owned router `tx.to` for its Uniswap-routed swaps. Rabby also routes
 # through shared solver routers (0x, 1inch, Sushi), where `tx.to` is the solver's own contract and
-# the only Rabby fingerprint is the fee leg below; those are not keyed here (see rabby.rs).
+# only the proxy is an entry point, so those swaps are labelled by the fee wallet below.
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
-# Rabby fee wallets: a flat 0.25% of the output token. Current wallet confirmed 2026-07-17 via two
-# decoded live swaps through different venues; the historical wallet took the fee through ~Sep 2025
-# before rotating. Both are listed so trades in either window decode with the fee backed out.
-fee_collectors = [
-    "0xcd6b980029e6e6e0733ac8ec3e02be9410d09799",
-    "0x39041f1b366fe33f9a5a79de5120f2aee2577ebc",
-]
 
 [venues.coinbase]
 # Coinbase Wallet's swap proxies — the app-owned `tx.to` for its 0x-powered swaps ("aggregation is
@@ -149,15 +134,24 @@ entry_points = [
     "0x8df6084e3b84a65ab9dd2325b5422e5debd8944a",
     "0xe66b31678d6c16e9ebf358268a790b763c133750",
 ]
-# Coinbase's 0x integration fee, taken from the output token and sent to this wallet.
-fee_collectors = ["0x382ffce2287252f930e1c8dc9328dac5bf282ba1"]
 
 [venues.rainbow]
 # Rainbow's own router ("Rainbow: Router"; same address on ETH/Base/Arb/OP/Polygon). It wraps 0x
-# and takes its fee on the input side, passed as the call's feeAmount argument and kept by the
-# router — no fee transfer, so the fee is read from calldata (see rainbow.rs). No fee collector.
+# and takes its fee on the input side, keeping it in the router rather than transferring it out.
+# With no transfer there is no fee wallet to match, so the cut stays inside `amount_in`.
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
-fee_collectors = []
+
+[venues.definitive]
+# Definitive (definitive.fi) — a non-custodial trading platform that mints one segregated trading
+# vault per client per chain, all clones of the same 82-byte proxy, from its vault factory
+# `0xdef00000cc0a125ba7962e8113d3b69786851736` ("Definitive: Vault Factory"). `tx.to` is the
+# client's own vault, so every client is a separate address here and this list covers only the
+# vaults observed so far — a Definitive trade through an unlisted vault stays unmatched.
+#
+# The transaction sender is never the client: Definitive routes each fill through a rotating proxy
+# ("Performer Address") to mask order flow (docs.definitive.fi/institutions-and-funds), so the
+# sender carries no venue signal and the vault is the only fingerprint.
+entry_points = ["0x7957e5a88f0389997b352315e70ab20d77ec410a"]
 
 # Order-flow venues identified by the trader address that owns the order, not by tx.to. kpk is a
 # treasury manager whose Safes trade through CoW: tx.from is the CoW solver, so the venue is only

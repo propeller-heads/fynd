@@ -255,7 +255,7 @@ mod tests {
     use super::*;
     use crate::decoder::{
         test_utils::{addr, make_pool_log, make_transfer_log, receipt, tx_hash},
-        AttributionSource,
+        AttributionSource, DecodeSource, DecodeTier,
     };
 
     /// The victim fixture's output token, unless a test overrides it.
@@ -275,16 +275,16 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender,
             token_in: addr(59),
             token_out,
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(2_000u64),
-            venue_fee_in: None,
-            venue_fee_out: None,
-            settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         }
     }

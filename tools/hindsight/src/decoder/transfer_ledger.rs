@@ -49,10 +49,16 @@ pub(crate) fn to_primitive_log(log: &Log) -> PrimitiveLog {
     PrimitiveLog::new_unchecked(log.address(), log.topics().to_vec(), log.data().data.clone())
 }
 
-/// A netted swap: the single token (and amount) that left an address and the
-/// single token that came back. Native ETH is `Address::ZERO`.
+/// One address's trade: the single token (and amount) that left it and the single token that came
+/// back. Native ETH is `Address::ZERO`.
+///
+/// Every decode path produces one of these — netting by reading what moved, a declared read from
+/// the solver's own logs — and it is the shape the rest of the decoder works on. There is no
+/// separate "amounts without an owner" type: whose trade it is has to be known to record it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NetSwap {
+pub(crate) struct SettledSwap {
+    /// The address whose flow the trade was read from.
+    pub tracked: Address,
     pub token_in: Address,
     pub amount_in: U256,
     pub token_out: Address,
@@ -138,7 +144,7 @@ impl TransferLedger {
     /// tx `0xd01666df…` on Arbitrum fills 6,164 DAI → 3.2313 WETH to the order's receiver and
     /// pays the tracked trader 0.00009 WETH; the pair decoded as a $6k win. The output leg must
     /// therefore itself pass the residue proof — see `is_dust_output`.
-    pub(crate) fn net_swap(&self, tracked: Address) -> Option<NetSwap> {
+    pub(crate) fn net_swap(&self, tracked: Address) -> Option<SettledSwap> {
         let mut amounts_by_token: HashMap<Address, TokenAmounts> = HashMap::new();
         for &(token, from, to, value) in &self.transfers {
             let amounts = amounts_by_token
@@ -156,7 +162,7 @@ impl TransferLedger {
             }
         }
 
-        net_trade(&amounts_by_token)
+        net_trade(tracked, &amounts_by_token)
     }
 
     /// Every address that sent or received value, ordered for deterministic iteration.
@@ -169,54 +175,22 @@ impl TransferLedger {
         participants
     }
 
-    /// Gross total received per token by any of `recipients`, regardless of sender (native ETH
-    /// keyed by `Address::ZERO`).
-    pub(crate) fn received_by(&self, recipients: &HashSet<Address>) -> HashMap<Address, U256> {
-        let mut totals: HashMap<Address, U256> = HashMap::new();
-        if recipients.is_empty() {
-            return totals;
-        }
-        for &(token, _, to, value) in &self.transfers {
-            if recipients.contains(&to) {
-                *totals.entry(token).or_default() += value;
-            }
-        }
-        totals
+    /// Gross amount of `token` received by `recipient` alone, regardless of sender (native ETH is
+    /// `Address::ZERO`). Zero when the recipient received none of it.
+    pub(crate) fn received_by_address(&self, recipient: Address, token: Address) -> U256 {
+        self.transfers
+            .iter()
+            .filter(|&&(transfer_token, _, to, _)| transfer_token == token && to == recipient)
+            .fold(U256::ZERO, |total, &(_, _, _, value)| total.saturating_add(value))
     }
 
-    /// Per-token net outflow of the address group: what the group sent minus what it got back,
-    /// where positive.
-    pub(crate) fn group_net_sent(&self, group: &HashSet<Address>) -> HashMap<Address, U256> {
-        let (sent, received) = self.group_totals(group);
-        net_positive(&sent, &received)
-    }
-
-    /// Per-token net inflow of the address group: what the group received minus what it sent,
-    /// where positive.
-    pub(crate) fn group_net_received(&self, group: &HashSet<Address>) -> HashMap<Address, U256> {
-        let (sent, received) = self.group_totals(group);
-        net_positive(&received, &sent)
-    }
-
-    /// Aggregated receipts of **pure sinks** — addresses that received value but never sent any
-    /// in the transaction — as `(recipient, token, total)`. A pool or router always sends
-    /// something back, so a pure sink is a delivery endpoint (an order's recipient, a payout).
-    pub(crate) fn sink_receipts(&self) -> Vec<(Address, Address, U256)> {
-        let mut senders: HashSet<Address> = HashSet::new();
-        for &(_, from, _, _) in &self.transfers {
-            senders.insert(from);
-        }
-        let mut received: HashMap<(Address, Address), U256> = HashMap::new();
-        for &(token, _, to, value) in &self.transfers {
-            if !senders.contains(&to) {
-                *received.entry((to, token)).or_default() += value;
-            }
-        }
-        received
-            .into_iter()
-            .filter(|(_, total)| !total.is_zero())
-            .map(|((recipient, token), total)| (recipient, token, total))
-            .collect()
+    /// Gross amount of `token` sent by `sender`, regardless of recipient (native ETH is
+    /// `Address::ZERO`). Zero when the address sent none of it.
+    pub(crate) fn sent_by_address(&self, sender: Address, token: Address) -> U256 {
+        self.transfers
+            .iter()
+            .filter(|&&(transfer_token, from, _, _)| transfer_token == token && from == sender)
+            .fold(U256::ZERO, |total, &(_, _, _, value)| total.saturating_add(value))
     }
 
     /// Totals of `token` paid to pure sinks — addresses that received value in the transaction
@@ -243,54 +217,6 @@ impl TransferLedger {
             .filter(|(_, total)| !total.is_zero())
             .collect()
     }
-
-    /// Gross flow of one token through the transaction, counting every transfer of it in either
-    /// direction. The denominator of the residue test.
-    pub(crate) fn token_gross(&self, token: Address) -> U256 {
-        let mut gross = U256::ZERO;
-        for &(transferred, _, _, value) in &self.transfers {
-            if transferred == token {
-                gross = gross.saturating_add(value);
-            }
-        }
-        gross
-    }
-
-    /// Gross sent and received per token, summed across the group.
-    fn group_totals(
-        &self,
-        group: &HashSet<Address>,
-    ) -> (HashMap<Address, U256>, HashMap<Address, U256>) {
-        let mut sent: HashMap<Address, U256> = HashMap::new();
-        let mut received: HashMap<Address, U256> = HashMap::new();
-        for &(token, from, to, value) in &self.transfers {
-            if group.contains(&from) {
-                *sent.entry(token).or_default() += value;
-            }
-            if group.contains(&to) {
-                *received.entry(token).or_default() += value;
-            }
-        }
-        (sent, received)
-    }
-}
-
-/// Per-token `positive - negative` where positive, over the union of tokens.
-fn net_positive(
-    positive: &HashMap<Address, U256>,
-    negative: &HashMap<Address, U256>,
-) -> HashMap<Address, U256> {
-    let mut net: HashMap<Address, U256> = HashMap::new();
-    for (&token, &amount) in positive {
-        let offset = negative
-            .get(&token)
-            .copied()
-            .unwrap_or_default();
-        if amount > offset {
-            net.insert(token, amount - offset);
-        }
-    }
-    net
 }
 
 /// A net leg is residue when its token routed between third parties and the leg is under this
@@ -298,7 +224,10 @@ fn net_positive(
 pub(crate) const RESIDUE_GROSS_RATIO: u64 = 100;
 
 /// Net the per-token amounts into a single swap (see `TransferLedger::net_swap`).
-fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwap> {
+fn net_trade(
+    tracked: Address,
+    amounts_by_token: &HashMap<Address, TokenAmounts>,
+) -> Option<SettledSwap> {
     let mut net_sent: HashMap<Address, U256> = HashMap::new();
     let mut net_received: HashMap<Address, U256> = HashMap::new();
 
@@ -337,7 +266,7 @@ fn net_trade(amounts_by_token: &HashMap<Address, TokenAmounts>) -> Option<NetSwa
         );
         return None;
     }
-    Some(NetSwap { token_in, amount_in, token_out, amount_out })
+    Some(SettledSwap { tracked, token_in, amount_in, token_out, amount_out })
 }
 
 /// Whether the lone output leg is dust rather than the trade's output: one-directional,
@@ -418,7 +347,7 @@ mod tests {
         logs: &[Log],
         native: &[(Address, Address, U256)],
         tracked: Address,
-    ) -> Option<NetSwap> {
+    ) -> Option<SettledSwap> {
         TransferLedger::from_transaction(logs, native).net_swap(tracked)
     }
 
@@ -712,79 +641,24 @@ mod tests {
     }
 
     #[test]
-    fn test_received_by_multiple_recipients() {
-        let collector = addr(99);
-        let collectors = HashSet::from([collector]);
+    fn test_received_by_address_sums_only_the_one_recipient_and_token() {
+        let recipient = addr(7);
+        let token = addr(10);
         let logs = vec![
-            make_transfer_log(addr(10), addr(1), collector, U256::from(40)),
-            make_transfer_log(addr(10), addr(2), collector, U256::from(2)),
+            make_transfer_log(token, addr(50), recipient, U256::from(1_000)),
+            make_transfer_log(token, addr(51), recipient, U256::from(500)),
+            // Different recipient, same token: excluded.
+            make_transfer_log(token, addr(50), addr(8), U256::from(999)),
+            // Same recipient, different token: excluded.
+            make_transfer_log(addr(11), addr(50), recipient, U256::from(999)),
         ];
-        let native = vec![(addr(1), collector, U256::from(7))];
+        let native = vec![(addr(50), recipient, U256::from(999))];
         let transfer_ledger = TransferLedger::from_transaction(&logs, &native);
-        let totals = transfer_ledger.received_by(&collectors);
-        assert_eq!(totals.get(&addr(10)).copied(), Some(U256::from(42)));
-        assert_eq!(totals.get(&Address::ZERO).copied(), Some(U256::from(7)));
-        assert!(transfer_ledger
-            .received_by(&HashSet::new())
-            .is_empty());
-    }
-
-    #[test]
-    fn test_group_round_trips() {
-        // The group sends 1000 of token A and gets 300 back: net sent 700, no net receipt.
-        let group = HashSet::from([addr(99)]);
-        let logs = vec![
-            make_transfer_log(addr(10), addr(99), addr(50), U256::from(1000)),
-            make_transfer_log(addr(10), addr(50), addr(99), U256::from(300)),
-            make_transfer_log(addr(11), addr(50), addr(99), U256::from(200)),
-        ];
-        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+        assert_eq!(transfer_ledger.received_by_address(recipient, token), U256::from(1_500u64));
         assert_eq!(
-            transfer_ledger.group_net_sent(&group),
-            HashMap::from([(addr(10), U256::from(700))])
+            transfer_ledger.received_by_address(recipient, Address::ZERO),
+            U256::from(999u64)
         );
-        assert_eq!(
-            transfer_ledger.group_net_received(&group),
-            HashMap::from([(addr(11), U256::from(200))])
-        );
-    }
-
-    #[test]
-    fn test_sink_payments() {
-        // The trader pays token_a to the pool (a sender, so never a sink) and, split by the
-        // token contract, to a wallet that only accumulates. On the token_b side the pool is
-        // the source of the fee wallet's leg, while the router only forwards what it received.
-        let trader = addr(1);
-        let pool = addr(50);
-        let router = addr(2);
-        let in_fee_wallet = addr(60);
-        let out_fee_wallet = addr(61);
-        let token_a = addr(10);
-        let token_b = addr(11);
-
-        let logs = vec![
-            make_transfer_log(token_a, trader, pool, U256::from(950)),
-            make_transfer_log(token_a, trader, in_fee_wallet, U256::from(30)),
-            make_transfer_log(token_a, trader, in_fee_wallet, U256::from(20)),
-            make_transfer_log(token_b, pool, trader, U256::from(1900)),
-            make_transfer_log(token_b, pool, out_fee_wallet, U256::from(100)),
-            make_transfer_log(token_b, pool, router, U256::from(500)),
-            make_transfer_log(token_b, router, out_fee_wallet, U256::from(500)),
-        ];
-        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
-
-        assert_eq!(transfer_ledger.sink_payments(token_a), vec![(in_fee_wallet, U256::from(50))]);
-        assert_eq!(transfer_ledger.sink_payments(token_b), vec![(out_fee_wallet, U256::from(100))]);
-    }
-
-    #[test]
-    fn test_sink_receipts_when_recipient_also_sent() {
-        // The pool receives and sends (a conversion), the recipient only receives (a sink).
-        let logs = vec![
-            make_transfer_log(addr(10), addr(1), addr(50), U256::from(1000)),
-            make_transfer_log(addr(11), addr(50), addr(7), U256::from(2000)),
-        ];
-        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
-        assert_eq!(transfer_ledger.sink_receipts(), vec![(addr(7), addr(11), U256::from(2000))]);
+        assert_eq!(transfer_ledger.received_by_address(addr(200), token), U256::ZERO);
     }
 }

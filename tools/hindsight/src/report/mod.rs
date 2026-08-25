@@ -17,7 +17,7 @@ use std::{
 use anyhow::{bail, Context};
 use tracing::{info, warn};
 
-use crate::report::record::Comparison;
+use crate::{decoder::DecodeTier, report::record::Comparison};
 
 /// Inputs for the `report` subcommand.
 #[derive(clap::Args)]
@@ -33,6 +33,12 @@ pub(crate) struct ReportArgs {
     /// Only report trades from these venues (repeatable, case-insensitive). Omit for all venues.
     #[arg(long)]
     pub venue: Vec<String>,
+
+    /// Include netted records — trades whose amounts came from balance netting rather than the
+    /// solver's own calldata or logs, so an unaccounted fee can sit inside them. Excluded by
+    /// default; datasets recorded before the marker existed are always included.
+    #[arg(long)]
+    pub include_netted: bool,
 }
 
 /// Read the comparisons, aggregate them, and write the HTML report.
@@ -41,7 +47,8 @@ pub(crate) fn run(args: ReportArgs) -> anyhow::Result<()> {
     if all.is_empty() {
         bail!("no comparison records found in {}", args.comparisons_dir.display());
     }
-    let records = filter_by_venue(all, &args.venue)?;
+    let records = filter_netted(all, args.include_netted);
+    let records = filter_by_venue(records, &args.venue)?;
     let report = aggregate::build(&records);
     let filter = (!args.venue.is_empty()).then(|| args.venue.join(", "));
     let html = html::render(&report, filter.as_deref());
@@ -52,6 +59,18 @@ pub(crate) fn run(args: ReportArgs) -> anyhow::Result<()> {
         .with_context(|| format!("failed to write report to {}", output.display()))?;
     info!(records = records.len(), venue = ?args.venue, path = %output.display(), "wrote report");
     Ok(())
+}
+
+/// Drop the marked netted records unless `include_netted` asks for them. A record with no
+/// `decode` column predates the marker and is kept either way.
+fn filter_netted(records: Vec<Comparison>, include_netted: bool) -> Vec<Comparison> {
+    if include_netted {
+        return records;
+    }
+    records
+        .into_iter()
+        .filter(|record| record.decode.as_deref() != Some(DecodeTier::Netted.wire()))
+        .collect()
 }
 
 /// Keep only the records whose venue is in `venues` (case-insensitive); all records when `venues`
@@ -144,7 +163,7 @@ mod tests {
         serde_json::json!({
             "block": block, "settled_tx": format!("0x{block:064x}"),
             "venue": "relay", "solver": "1inch", "token_in": "0xaaa", "token_out": "0xbbb",
-            "top": {"verdict": verdict, "net_bps": 1.0, "improvement_usd": 1.0, "settled_value_usd": 1.0},
+            "top": {"verdict": verdict, "raw_bps": 1.0, "improvement_usd": 1.0, "settled_value_usd": 1.0},
         })
         .to_string()
     }
@@ -182,9 +201,39 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "block": 1, "settled_tx": "0x1", "venue": venue, "solver": "1inch",
             "token_in": "0xaaa", "token_out": "0xbbb",
-            "top": {"verdict": "win", "net_bps": 1.0, "improvement_usd": 1.0, "settled_value_usd": 1.0},
+            "top": {"verdict": "win", "raw_bps": 1.0, "improvement_usd": 1.0, "settled_value_usd": 1.0},
         }))
         .unwrap()
+    }
+
+    fn decode_record(decode: Option<&str>) -> Comparison {
+        let mut record = serde_json::json!({
+            "block": 1, "settled_tx": "0x1", "venue": "relay", "solver": "1inch",
+            "token_in": "0xaaa", "token_out": "0xbbb",
+            "top": {"verdict": "win", "raw_bps": 1.0, "improvement_usd": 1.0, "settled_value_usd": 1.0},
+        });
+        if let Some(decode) = decode {
+            record["decode"] = decode.into();
+        }
+        serde_json::from_value(record).unwrap()
+    }
+
+    #[test]
+    fn test_filter_netted() {
+        let records = || {
+            vec![
+                decode_record(Some("declared")),
+                decode_record(Some("netted")),
+                // Recorded before the marker existed: no column, kept either way.
+                decode_record(None),
+            ]
+        };
+        let kept = filter_netted(records(), false);
+        assert_eq!(kept.len(), 2);
+        assert!(kept
+            .iter()
+            .all(|record| record.decode.as_deref() != Some("netted")));
+        assert_eq!(filter_netted(records(), true).len(), 3);
     }
 
     #[test]

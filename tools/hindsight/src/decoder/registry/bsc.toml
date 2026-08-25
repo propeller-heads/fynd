@@ -2,11 +2,11 @@
 # see it and registry.rs for what each section drives. Addresses gathered 2026-07-29.
 #
 # Accuracy note: a wrong or missing *solver* address only costs coverage (the swap fails to
-# match), but a wrong *venue fee collector* produces wrong records (the fee stays inside the
-# amounts). Every contract below was checked to be deployed on BSC, and every venue was confirmed
-# live by its own on-chain fingerprint (2026-07-29): MetaMask by a decoded swap paying
-# 0xe3478b0b…, Rabby and Relay and Robinhood by fee legs from settlement contracts, Rainbow by the
-# router's own token transfers.
+# match), but a wrong *venue fee wallet* produces wrong records: `[venue_fees]` drives both the
+# venue label and the fee correction on the amounts. Every contract below was checked to be deployed
+# on BSC, and every venue was confirmed live by its own on-chain fingerprint (2026-07-29): MetaMask
+# by a decoded swap paying 0xe3478b0b…, Rabby and Relay and Robinhood by fee legs from settlement
+# contracts, Rainbow by the router's own token transfers.
 #
 # Coinbase has no `[venues.coinbase]` section, and does not need one: both swap proxies from the
 # Ethereum book have no code on BSC and its fee wallet received nothing, matching how those proxies
@@ -72,6 +72,8 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad" = "uniswap"
 "0xb971ef87ede563556b2ed4b1c0b0019111dd85d2" = "uniswap"
 "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24" = "uniswap"
+# Universal Router 2.1.1 (developers.uniswap.org supported-chains table)
+"0x8b844f885672f333bc0042cb669255f93a4c1e6b" = "uniswap"
 # OKX DEX routers (okxlabs/DEX-Router-EVM-V1 deployments plus OKX's own docs). Several versions
 # run concurrently; each was confirmed OKX by the BSC TokenApproveProxy and WNativeRelayer
 # addresses embedded in its bytecode.
@@ -95,9 +97,10 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x1a0a18ac4becddbd6389559687d1a73d8927e416" = "pancakeswap"
 "0x10ed43c718714eb63d5aa57b78b54704e256024e" = "pancakeswap"
 
-# Venues. Relay's BSC contracts and fee collector are the same addresses as mainnet; its routers
-# are the Cancun-EVM deployment. Verified live: 666 fee legs to 0xf70da978… in a 20k-block sample,
-# and a decoded Relay fill showed the same address funding the swap as on mainnet.
+# Venues. Relay's BSC contracts are the same addresses as mainnet; its routers are the Cancun-EVM
+# deployment. Verified live: 666 fee legs to 0xf70da978… in a 20k-block sample, and a decoded Relay
+# fill showed the same address funding the swap as on mainnet. The fee legs are evidence of the
+# deployment only — Relay is not in `[venue_fees]`, so its cut is not corrected.
 [venues.relay]
 entry_points = [
     "0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222",
@@ -106,7 +109,6 @@ entry_points = [
     "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be",
     "0x58cc3e0aa6cd7bf795832a225179ec2d848ce3e7",
 ]
-fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 
 # MetaMask Swap Router on BSC — the same proxy Base and Arbitrum use (0xdb9b1e94…). Verified
 # on-chain: a decoded swap through it paid its fee to 0xe3478b0b… (mainnet fee wallet 1); mainnet
@@ -114,32 +116,20 @@ fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 # BSC but took no traffic in the sampled window, so it is not an entry point here.
 [venues.metamask]
 entry_points = ["0xdb9b1e94b5b69df7e401ddbede43491141047db3"]
-fee_collectors = ["0xe3478b0bb1a5084567c319096437924948be1964"]
 
-[venues.metamask.solver_aliases]
-oneinch = "1inch"
-zeroex = "0x"
-uniswap = "uniswap"
-okx = "okx"
-kyber = "kyberswap"
-paraswap = "paraswap"
-airswap = "airswap"
-openocean = "openocean"
-hashflow = "hashflow"
 
 # Rabby SwapProxy — same address as mainnet. Verified on-chain: 218 fee legs paid to 0xcd6b9800…
 # (mainnet fee wallet 1) in a 20k-block sample; the historical wallet 0x39041f… is unused on BSC.
-# As on mainnet, only the proxy is an entry point — shared-router Rabby swaps are recognised by the
-# fee leg (see rabby.rs), not by tx.to.
+# As on mainnet, only the proxy is an entry point — shared-router Rabby swaps are labelled by the
+# fee wallet in `[venue_fees]`, not by tx.to.
 [venues.rabby]
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
-fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
 
 # Rainbow's own router — same address as mainnet. Verified live by its own token transfers.
-# Input-side fee read from calldata; no fee collector (see rainbow.rs).
+# Its input-side fee is kept in the router, never transferred out, so it stays
+# inside `amount_in`.
 [venues.rainbow]
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
-fee_collectors = []
 
 # Venues identified by the fee they take on a shared router. Verified on-chain: 277 fee legs to
 # Robinhood's wallet in a 20k-block sample, paid by the 0x Settler contract (so the dust-spray

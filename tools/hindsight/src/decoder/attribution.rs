@@ -1,0 +1,489 @@
+//! Attribution: which solver settled a decoded trade, and which venue owns its order flow.
+//!
+//! Attribution runs after decoding and only labels the record — every function here reads. The
+//! fee a `[venue_fees]` match finds is reported ([`venue_fee`]) and applied by the caller, which
+//! is the one place that knows which decoder produced the amounts.
+//!
+//! The solver label comes from the first evidence tier that answers, most- to least-trusted
+//! (see `AttributionSource`). The venue label is normally the contract the trader entered
+//! through (`tx.to`); some venues own the order flow without being that contract and are
+//! recognized from registry-driven fingerprints (owner, `appData` tag, fee wallet, integrator
+//! tag).
+
+use alloy::{
+    primitives::{Address, U256},
+    rpc::types::trace::geth::CallFrame,
+};
+use serde::Serialize;
+
+use crate::decoder::{
+    registry::Registry,
+    solvers::VenueTag,
+    trace,
+    transfer_ledger::{SettledSwap, TransferLedger},
+};
+
+/// The evidence tier that produced a record's solver label, most- to least-trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AttributionSource {
+    /// The entry point (`tx.to`) is itself a known solver router: the trade settled there.
+    EntryPoint,
+    /// A known solver router was called inside the trace (venue-wrapped entries).
+    TraceMatch,
+    /// No known router anywhere: best guess is the external call that moved the most native
+    /// value (an unknown router's address).
+    LargestCall,
+    /// Even the guess was indeterminate (e.g. a token→token trace where no call moves value).
+    /// The record is labeled with its entry point — typically the venue's name — flagging it
+    /// for registry expansion.
+    Fallback,
+}
+
+/// A solver label and the evidence tier it came from.
+pub(crate) struct Attribution {
+    pub solver: String,
+    pub source: AttributionSource,
+    /// The router address the label came from, for callers that need the address book's entry for
+    /// it (the venue fingerprint read). `None` on the fallback tier, which named no router.
+    pub address: Option<Address>,
+}
+
+/// Attribute the solver that settled a matched transaction.
+///
+/// Every tier reads the trace or the address book, ending at the entry-point label as the honest
+/// "don't know". A venue's own claim about which solver it routed to is not consulted: the router
+/// that settled the trade is in the trace, which is the harder fact.
+pub(crate) fn solver(
+    root: &CallFrame,
+    entry_point: Address,
+    sender: Address,
+    registry: &Registry,
+) -> Attribution {
+    if registry.is_solver(entry_point) {
+        return Attribution {
+            solver: registry.label(entry_point),
+            source: AttributionSource::EntryPoint,
+            address: Some(entry_point),
+        };
+    }
+    if let Some(found) = trace::find_solver_frame(root, registry).and_then(|frame| frame.to) {
+        return Attribution {
+            solver: registry.label(found),
+            source: AttributionSource::TraceMatch,
+            address: Some(found),
+        };
+    }
+    if let Some(guess) = trace::largest_external_call(root, entry_point, sender, registry) {
+        return Attribution {
+            solver: registry.label(guess),
+            source: AttributionSource::LargestCall,
+            address: Some(guess),
+        };
+    }
+    Attribution {
+        solver: registry.label(entry_point),
+        source: AttributionSource::Fallback,
+        address: None,
+    }
+}
+
+/// The order-flow venue for a decoded flow, when a fingerprint matches — overriding the
+/// entry-point label. Every fingerprint is registry-driven; nothing here knows about a specific
+/// venue or provider.
+///
+/// Four fingerprints, tried in order: owning trader (`[venue_owners]`), an order's `appData` hash
+/// (`[venue_appdata]`), fee wallet (`[venue_fees]`), a provider's integrator tag
+/// (`[venue_integrators]`). The last two arrive as one `VenueTag`, read from the settling solver's
+/// own data by `SolverDecoder::venue_fingerprint`; which map a tag is looked up in follows from
+/// its variant, so this function still names no solver and no venue.
+///
+/// A fee-wallet match is one of the four, so `fee` is passed in rather than looked up here: the
+/// caller reads it once with [`venue_fee`] and also applies its correction, which is a separate
+/// job from labelling (see [`VenueFee`]).
+pub(crate) fn venue(
+    registry: &Registry,
+    flow: &SettledSwap,
+    tag: Option<&VenueTag>,
+    fee: Option<&VenueFee>,
+) -> Option<String> {
+    if let Some(venue) = registry.venue_for_owner(flow.tracked) {
+        return Some(venue.to_string());
+    }
+    if let Some(VenueTag::AppData(hash)) = tag {
+        if let Some(venue) = registry.venue_for_appdata(*hash) {
+            return Some(venue.to_string());
+        }
+    }
+    if let Some(fee) = fee {
+        return Some(fee.venue.clone());
+    }
+    if let Some(VenueTag::Integrator(name)) = tag {
+        return registry
+            .venue_for_integrator(name)
+            .map(str::to_string);
+    }
+    None
+}
+
+/// The cut a `[venue_fees]` wallet took out of one trade: which venue owns the wallet, which side
+/// of the swap the cut came from, and how much.
+///
+/// Deliberately not applied here. Fynd quotes the swap alone, so the recorded amounts have to be
+/// put back on the swap's own basis — but whether they already are depends on which decoder
+/// produced them, which only the caller knows. Applying it inside the venue label search made the
+/// correction depend on which fingerprint won a race that has nothing to do with fees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VenueFee {
+    /// The venue whose wallet was paid — also the venue label a fee-wallet match produces.
+    pub venue: String,
+    pub side: FeeSide,
+    pub amount: U256,
+}
+
+/// Which side of the swap a venue took its fee from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeeSide {
+    /// Skimmed off the input before the swap, so the swap saw less than the trader authorized.
+    Input,
+    /// Taken out of the output after the swap, so the trader kept less than the swap produced.
+    Output,
+}
+
+/// The cut a venue's fee wallet took of this trade. `None` when no `[venue_fees]` wallet received
+/// a non-zero amount of either swap token.
+///
+/// Both sides are checked because venues split on this: Phantom and Robinhood take the buy token,
+/// while Coinbase's Base App skims the sell token before routing. The output side is tried first —
+/// a wallet that received both tokens is being paid its cut in the token the user bought. The
+/// wallets are checked in address order, so two venues' wallets both taking a cut of one trade
+/// resolve to the same venue on every run.
+pub(crate) fn venue_fee(
+    registry: &Registry,
+    ledger: &TransferLedger,
+    token_in: Address,
+    token_out: Address,
+) -> Option<VenueFee> {
+    for (wallet, venue) in registry.venue_fees() {
+        let non_zero = |token: Address| {
+            Some(ledger.received_by_address(*wallet, token)).filter(|amount| !amount.is_zero())
+        };
+        if let Some(amount) = non_zero(token_out) {
+            return Some(VenueFee { venue: venue.clone(), side: FeeSide::Output, amount });
+        }
+        if let Some(amount) = non_zero(token_in) {
+            return Some(VenueFee { venue: venue.clone(), side: FeeSide::Input, amount });
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::{address, b256, B256};
+    use tycho_simulation::tycho_common::models::Chain;
+
+    use super::*;
+    use crate::decoder::test_utils::{addr, frame, make_transfer_log, swap, PERMIT2};
+
+    #[test]
+    fn test_venue_wrapped_entry_reads_the_trace() {
+        // A venue-wrapped entry: the router that settled the trade is inside the trace, and that
+        // is what the record is labelled with — no venue's own claim is consulted.
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let mut root = frame("CALL", addr(1), addr(2), 0);
+        root.calls = vec![frame("CALL", addr(2), oneinch, 1000)];
+
+        let attribution = solver(&root, addr(2), addr(1), &registry);
+        assert_eq!(attribution.solver, "1inch");
+        assert_eq!(attribution.source, AttributionSource::TraceMatch);
+    }
+
+    #[test]
+    fn test_direct_swap_entry_point() {
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let root = frame("CALL", addr(1), oneinch, 0);
+
+        let attribution = solver(&root, oneinch, addr(1), &registry);
+        assert_eq!(attribution.solver, "1inch");
+        assert_eq!(attribution.source, AttributionSource::EntryPoint);
+    }
+
+    #[test]
+    fn test_relay_internal_solver() {
+        // Mirrors the real Relay tx: the client router calls 0x's AllowanceHolder.
+        // root(relay) -> [ relay (self-call), 0x AllowanceHolder (the solver) ]
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");
+        let zerox = address!("0x0000000000001ff3684f28c67538d4d072c22734");
+
+        let mut root = frame("CALL", sender, relay, 0);
+        root.calls = vec![frame("CALL", relay, relay, 0), frame("CALL", relay, zerox, 1000)];
+
+        let attribution = solver(&root, relay, sender, &registry);
+        assert_eq!(attribution.solver, "0x");
+        assert_eq!(attribution.source, AttributionSource::TraceMatch);
+    }
+
+    #[test]
+    fn test_relay_tycho_router() {
+        // Real tx 0x8b461c…: Relay ApprovalProxy -> Relay router -> Tycho router.
+        // The settling solver is Tycho even though it sits two levels deep.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let relay_proxy = address!("0xccc88a9d1b4ed6b0eaba998850414b24f1c315be");
+        let relay_router = address!("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f");
+        let tycho = address!("0x1f8db310f32d48b6180ff902ec60c586128cef47");
+
+        let mut router_call = frame("CALL", relay_proxy, relay_router, 0);
+        router_call.calls = vec![frame("CALL", relay_router, tycho, 0)];
+        let mut root = frame("CALL", sender, relay_proxy, 0);
+        root.calls = vec![router_call];
+
+        let attribution = solver(&root, relay_proxy, sender, &registry);
+        assert_eq!(attribution.solver, "tycho");
+        assert_eq!(attribution.source, AttributionSource::TraceMatch);
+    }
+
+    #[test]
+    fn test_unknown_solver_largest_external_call() {
+        // No known solver in the trace: pick the largest external call,
+        // skipping the client self-call and the refund back to the sender.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let client = addr(2);
+        let unknown_router = addr(50);
+
+        let mut root = frame("CALL", sender, client, 0);
+        root.calls = vec![
+            frame("CALL", client, client, 0),            // self-call, skipped
+            frame("CALL", client, sender, 9000),         // refund to sender, skipped
+            frame("CALL", client, addr(51), 10),         // small external call
+            frame("CALL", client, unknown_router, 5000), // largest external call
+        ];
+
+        let attribution = solver(&root, client, sender, &registry);
+        assert_eq!(attribution.solver, unknown_router.to_string());
+        assert_eq!(attribution.source, AttributionSource::LargestCall);
+    }
+
+    #[test]
+    fn test_attribution_zero_value_fallback() {
+        // Unknown solver, token->token swap: every child call moves zero value, so the guess
+        // would degenerate to the first child (the Permit2 token pull). The record is labeled
+        // with its entry point instead, marked as a fallback.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let client = addr(2);
+
+        let mut root = frame("CALL", sender, client, 0);
+        root.calls = vec![
+            frame("CALL", client, PERMIT2, 0),  // token pull
+            frame("CALL", client, addr(50), 0), // unknown solver, zero value
+        ];
+
+        let attribution = solver(&root, client, sender, &registry);
+        assert_eq!(attribution.solver, client.to_string());
+        assert_eq!(attribution.source, AttributionSource::Fallback);
+    }
+
+    #[test]
+    fn test_attribution_wrapped_native_frames() {
+        // ETH-input swap through an unknown router: the highest-value direct call is the
+        // WETH.deposit() wrapping the input. Infrastructure, not a solver — the guess must
+        // fall through to the real router call.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let client = addr(2);
+        let unknown = addr(50);
+
+        let mut root = frame("CALL", sender, client, 0);
+        root.calls = vec![
+            frame("CALL", client, registry.wrapped_native(), 9000), // wrap, skipped
+            frame("CALL", client, unknown, 100),
+        ];
+
+        let attribution = solver(&root, client, sender, &registry);
+        assert_eq!(attribution.solver, unknown.to_string());
+        assert_eq!(attribution.source, AttributionSource::LargestCall);
+    }
+
+    #[test]
+    fn test_attribution_permit2_frames() {
+        // Even when Permit2 is the highest-value direct call, it is infrastructure, not a solver.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let client = addr(2);
+        let unknown = addr(50);
+
+        let mut root = frame("CALL", sender, client, 0);
+        root.calls =
+            vec![frame("CALL", client, PERMIT2, 9000), frame("CALL", client, unknown, 100)];
+
+        let attribution = solver(&root, client, sender, &registry);
+        assert_eq!(attribution.solver, unknown.to_string());
+        assert_eq!(attribution.source, AttributionSource::LargestCall);
+    }
+
+    #[test]
+    fn test_attributes_owner_to_venue() {
+        // A CoW-settled kpk trade nets to the Safe that owns the order; the venue is that Safe.
+        let registry = Registry::ethereum();
+        let kpk_safe = address!("0x4f2083f5fbede34c2714affb3105539775f7fe64");
+        let flow = SettledSwap { tracked: kpk_safe, ..swap(addr(10), 1, addr(11), 2) };
+        assert_eq!(venue(&registry, &flow, None, None).as_deref(), Some("kpk"));
+    }
+
+    #[test]
+    fn test_unknown_owner_is_not_a_venue() {
+        let registry = Registry::ethereum();
+        let flow = SettledSwap { tracked: addr(9), ..swap(addr(10), 1, addr(11), 2) };
+        assert_eq!(venue(&registry, &flow, None, None), None);
+    }
+
+    #[test]
+    fn test_appdata_tag_attributes_venue() {
+        // A CoW order carrying DefiLlama's appData hash is attributed to LlamaSwap; an unregistered
+        // hash is not.
+        let registry = Registry::ethereum();
+        let defillama = b256!("0xf249b3db926aa5b5a1b18f3fec86b9cc99b9a8a99ad7e8034242d2838ae97422");
+        let flow = SettledSwap { tracked: addr(1), ..swap(addr(10), 1, addr(11), 2) };
+        assert_eq!(
+            venue(&registry, &flow, Some(&VenueTag::AppData(defillama)), None).as_deref(),
+            Some("llamaswap")
+        );
+        assert_eq!(venue(&registry, &flow, Some(&VenueTag::AppData(B256::ZERO)), None), None);
+    }
+
+    #[test]
+    fn test_venue_fee_output_side() {
+        // A 0x-routed Phantom swap: the buy-token fee reaches Phantom's wallet, which both names
+        // the venue and is the cut the caller has to correct out.
+        let registry = Registry::ethereum();
+        let phantom = address!("0x2cffed5d56eb6a17662756ca0fdf350e732c9818");
+        let user = addr(1);
+        let pool = addr(50);
+        let token_in = addr(10);
+        let token_out = addr(11);
+        let logs = vec![
+            make_transfer_log(token_in, user, pool, U256::from(1000)),
+            make_transfer_log(token_out, pool, user, U256::from(9915)),
+            make_transfer_log(token_out, pool, phantom, U256::from(85)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
+
+        let fee = venue_fee(&registry, &ledger, flow.token_in, flow.token_out).unwrap();
+        assert_eq!(fee.side, FeeSide::Output);
+        assert_eq!(fee.amount, U256::from(85));
+        assert_eq!(venue(&registry, &flow, None, Some(&fee)).as_deref(), Some("phantom"));
+    }
+
+    #[test]
+    fn test_venue_fee_with_an_owner_match() {
+        // A kpk trade (owner match) that also paid a Phantom fee leg. The owner wins the label,
+        // and the cut is still reported: the correction must not depend on which fingerprint won.
+        let registry = Registry::ethereum();
+        let kpk_safe = address!("0x4f2083f5fbede34c2714affb3105539775f7fe64");
+        let phantom = address!("0x2cffed5d56eb6a17662756ca0fdf350e732c9818");
+        let token_in = addr(10);
+        let token_out = addr(11);
+        let logs = vec![
+            make_transfer_log(token_out, addr(50), kpk_safe, U256::from(9915)),
+            make_transfer_log(token_out, addr(50), phantom, U256::from(85)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let flow = SettledSwap { tracked: kpk_safe, ..swap(token_in, 1000, token_out, 9915) };
+
+        let fee = venue_fee(&registry, &ledger, flow.token_in, flow.token_out).unwrap();
+        assert_eq!(fee.amount, U256::from(85));
+        assert_eq!(venue(&registry, &flow, None, Some(&fee)).as_deref(), Some("kpk"));
+    }
+
+    #[test]
+    fn test_integrator_tag_attributes_venue() {
+        // A provider integrator tag maps to its venue, case-insensitively; an unknown tag does
+        // not.
+        let registry = Registry::ethereum();
+        let flow = SettledSwap { tracked: addr(1), ..swap(addr(10), 1, addr(11), 2) };
+        assert_eq!(
+            venue(&registry, &flow, Some(&VenueTag::Integrator("Infinex".into())), None).as_deref(),
+            Some("infinex")
+        );
+        assert_eq!(
+            venue(&registry, &flow, Some(&VenueTag::Integrator("somedapp".into())), None),
+            None
+        );
+    }
+
+    #[test]
+    fn test_venue_fee_input_side() {
+        // A LiFi-routed Coinbase Base App swap: the 0.95% cut is skimmed off the sell token, so
+        // the cut is reported on the input side for the caller to subtract.
+        let registry = Registry::builtin(Chain::Bsc).unwrap();
+        let coinbase = address!("0x5aafc1f252d544f744d17a4e734afd6efc47ede4");
+        let user = addr(1);
+        let pool = addr(50);
+        let token_in = addr(10);
+        let token_out = addr(11);
+        let logs = vec![
+            make_transfer_log(token_in, user, coinbase, U256::from(95)),
+            make_transfer_log(token_in, user, pool, U256::from(9905)),
+            make_transfer_log(token_out, pool, user, U256::from(2000)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let flow = SettledSwap { tracked: user, ..swap(token_in, 10000, token_out, 2000) };
+
+        let fee = venue_fee(&registry, &ledger, flow.token_in, flow.token_out).unwrap();
+        assert_eq!(fee.side, FeeSide::Input);
+        assert_eq!(fee.amount, U256::from(95));
+        assert_eq!(
+            venue(&registry, &flow, Some(&VenueTag::Integrator("base-app".into())), Some(&fee))
+                .as_deref(),
+            Some("coinbase")
+        );
+    }
+
+    #[test]
+    fn test_venue_fee_wallet_paid_in_both_tokens() {
+        // A wallet that received both swap tokens is being paid its cut in the token the user
+        // bought; the sell-token leg is the swap's own routing, not a second fee.
+        let registry = Registry::ethereum();
+        let phantom = address!("0x2cffed5d56eb6a17662756ca0fdf350e732c9818");
+        let user = addr(1);
+        let token_in = addr(10);
+        let token_out = addr(11);
+        let logs = vec![
+            make_transfer_log(token_in, user, phantom, U256::from(7)),
+            make_transfer_log(token_out, addr(50), phantom, U256::from(85)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 9915) };
+
+        let fee = venue_fee(&registry, &ledger, flow.token_in, flow.token_out).unwrap();
+        assert_eq!(fee.side, FeeSide::Output);
+        assert_eq!(fee.amount, U256::from(85));
+        assert_eq!(venue(&registry, &flow, None, Some(&fee)).as_deref(), Some("phantom"));
+    }
+
+    #[test]
+    fn test_venue_fee_without_a_fee_transfer() {
+        // Dust to the fee wallet in a token other than the output is not this trade's fee.
+        let registry = Registry::ethereum();
+        let user = addr(1);
+        let pool = addr(50);
+        let token_in = addr(10);
+        let token_out = addr(11);
+        let logs = vec![
+            make_transfer_log(token_in, user, pool, U256::from(1000)),
+            make_transfer_log(token_out, pool, user, U256::from(2000)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let flow = SettledSwap { tracked: user, ..swap(token_in, 1000, token_out, 2000) };
+        assert_eq!(venue_fee(&registry, &ledger, flow.token_in, flow.token_out), None);
+        assert_eq!(venue(&registry, &flow, None, None), None);
+    }
+}

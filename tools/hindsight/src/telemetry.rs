@@ -30,6 +30,8 @@ const RPC_INDEX_WAIT: &str = "hindsight_rpc_index_wait_seconds";
 const SKIPPED_BLOCKS: &str = "hindsight_skipped_blocks_total";
 const FEED_REBUILDS: &str = "hindsight_feed_rebuilds_total";
 const UNTRACED_TRANSACTIONS: &str = "hindsight_untraced_transactions_total";
+const SEVERAL_LEGS: &str = "hindsight_several_legs_total";
+const VETOED_TRANSACTIONS: &str = "hindsight_vetoed_transactions_total";
 
 /// Absolute USD savings beyond which a comparison is logged with full per-trade context, so large
 /// outliers can be traced and classified (a genuinely large trade vs a token-mispricing artifact
@@ -96,11 +98,19 @@ pub(crate) fn outcome_label(verdict: Verdict) -> &'static str {
         Verdict::CoverageMiss => "coverage_miss",
         Verdict::Unsolvable => "unsolvable",
         Verdict::Sandwiched => "sandwiched",
+        Verdict::ImplausibleSettledAmount => "implausible_settled_amount",
     }
 }
 
 /// Register metric descriptions with the active recorder.
 pub(crate) fn describe() {
+    describe_trade_metrics();
+    describe_coverage_metrics();
+}
+
+/// Register descriptions for the per-trade re-solve metrics: savings, slippage, volume, and the
+/// monitor's own pacing.
+fn describe_trade_metrics() {
     describe_counter!(
         TRADES_TOTAL,
         "Re-solved trades above the dust floor, labeled by venue / solver / chain / outcome / \
@@ -176,6 +186,12 @@ pub(crate) fn describe() {
          including the head check itself. The receipts RPC trails the tycho stream that picks the \
          target, so this is a floor on the lag that no amount of solving speed removes"
     );
+}
+
+/// Register descriptions for the coverage counters: what the decoder did not record, and why.
+/// Every one of these is a trade or block missing from the aggregates, named so the gap is
+/// attributable rather than invisible.
+fn describe_coverage_metrics() {
     describe_counter!(
         SKIPPED_BLOCKS,
         "Blocks skipped because the RPC could not provide receipts (e.g. it lagged the tycho \
@@ -191,6 +207,18 @@ pub(crate) fn describe() {
         "Matched solver transactions dropped because the RPC could not trace them. Their block \
          still contributes its other trades, so this counts trades missing from the aggregates \
          rather than blocks"
+    );
+    describe_counter!(
+        VETOED_TRANSACTIONS,
+        "Matched transactions dropped by a veto, labelled by the veto that dropped them. A \
+         transaction counted here produces no record at all, so this is where coverage the \
+         decoder deliberately refuses shows up instead of vanishing"
+    );
+    describe_counter!(
+        SEVERAL_LEGS,
+        "Transactions whose declared read was declined because they entered a solver router \
+         several times: the legs are separate swaps, so one frame states a fragment of the trade. \
+         Netting still runs, so these are not all lost — they are the declared tier giving up"
     );
 }
 
@@ -268,7 +296,7 @@ pub(crate) fn record_range(
             volume_usd = volume.unwrap_or(0.0),
             settled_usd = priced(range.settled_amount_out),
             fynd_usd = priced(solved.amount_out),
-            quoted_usd = range.quote.as_ref().map_or(0.0, |quote| priced(quote.amount_out)),
+            quoted_usd = range.declared_quote.map_or(0.0, priced),
             savings_usd,
             route = %solved.solved_route.as_deref().map(render_route).unwrap_or_default(),
             "trade comparison"
@@ -311,9 +339,12 @@ fn record_state(
         .increment(1);
     }
 
-    let sandwiched = state.verdict == Verdict::Sandwiched;
+    // Neither a sandwich nor an implausible settled amount measures routing quality, so both
+    // stay out of the savings aggregates while keeping their own labelled trade count.
+    let excluded_from_savings =
+        matches!(state.verdict, Verdict::Sandwiched | Verdict::ImplausibleSettledAmount);
 
-    if above_floor && !sandwiched {
+    if above_floor && !excluded_from_savings {
         if let Some(bps) = state.deltas.raw_bps {
             histogram!(
                 SAVINGS_BPS,
@@ -332,7 +363,9 @@ fn record_state(
         return None;
     };
     let usd = prices.savings_usd(range.token_out, solved.amount_out, range.settled_amount_out)?;
-    if sandwiched {
+    if excluded_from_savings {
+        // The verdict already records why this delta is not routing quality; the outlier warning
+        // below is for deltas that claim to be.
         return Some(usd);
     }
 
@@ -463,6 +496,16 @@ pub(crate) fn record_untraced_transaction() {
     counter!(UNTRACED_TRANSACTIONS).increment(1);
 }
 
+/// Count a transaction dropped by a veto. `veto` is the `Debug` name of the variant, which is a
+/// closed set, so it is safe as a label.
+pub(crate) fn record_veto(veto: &str) {
+    counter!(VETOED_TRANSACTIONS, "veto" => veto.to_string()).increment(1);
+}
+
+pub(crate) fn record_several_legs() {
+    counter!(SEVERAL_LEGS).increment(1);
+}
+
 pub(crate) fn record_feed_rebuild() {
     counter!(FEED_REBUILDS).increment(1);
 }
@@ -562,7 +605,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::{AttributionSource, DecodedTrade, SandwichEvidence},
+        decoder::{AttributionSource, DecodeSource, DecodeTier, DecodedTrade, SandwichEvidence},
         resolve::{build_range, SolvedAmount},
     };
 
@@ -578,16 +621,16 @@ mod tests {
             venue: "relay".into(),
             solver: "tycho".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out,
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(settled),
-            venue_fee_in: None,
-            venue_fee_out: None,
-            settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         }
     }
@@ -634,7 +677,6 @@ mod tests {
         let usdc = address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         let range = build_range(
             &trade(usdc, 1_000_000_000),
-            &empty_prices(),
             solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
             solved_by("path_frank_wolfe", 1_010_000_000, 1_005_000_000),
             &Outcome::Unsolvable("x".into()),
@@ -675,7 +717,6 @@ mod tests {
         // missing sample), so it needs a label value — and it must not be blank.
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
-            &empty_prices(),
             Outcome::Unsolvable("missing token in Tycho".into()),
             Outcome::Unsolvable("missing token in Tycho".into()),
             &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
@@ -732,7 +773,6 @@ mod tests {
         // Top wins (net 1005 USDC vs 1000 settled); back loses (net 995).
         let range = build_range(
             &trade(usdc, 1_000_000_000),
-            &empty_prices(),
             solved(1_010_000_000, 1_005_000_000),
             solved(998_000_000, 995_000_000),
             &solved(998_000_000, 995_000_000),
@@ -787,7 +827,6 @@ mod tests {
         // Quoted 1000 USDC at top, re-executed to 1005 USDC at back → +50 bps, +$5 surplus.
         let range = build_range(
             &trade(usdc, 1_000_000_000),
-            &empty_prices(),
             solved(1_000_000_000, 995_000_000),
             solved(1_005_000_000, 1_000_000_000),
             &solved(1_005_000_000, 1_000_000_000),
@@ -830,7 +869,6 @@ mod tests {
         // positive-only USD surplus does not.
         let range = build_range(
             &trade(usdc, 1_000_000_000),
-            &empty_prices(),
             solved(1_000_000_000, 995_000_000),
             solved(995_000_000, 990_000_000),
             &solved(995_000_000, 990_000_000),
@@ -871,7 +909,6 @@ mod tests {
         // The fresh back solve succeeded — slippage must come from the re-execution alone.
         let range = build_range(
             &trade(usdc, 1_000_000_000),
-            &empty_prices(),
             solved(1_000_000_000, 995_000_000),
             solved(1_002_000_000, 997_000_000),
             &Outcome::Unsolvable("re-execution failed: no simulation state".into()),
@@ -920,13 +957,8 @@ mod tests {
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
         t.venue = "0xD720183DdA64a8CDb424B5c13aF73baf713521f8".to_string();
         t.solver = "0xB6F54cAed61C318027c022c47B94BAF139a99Dab".to_string();
-        let range = build_range(
-            &t,
-            &empty_prices(),
-            solved(1_100, 1_050),
-            solved(1_100, 1_050),
-            &solved(1_100, 1_050),
-        );
+        let range =
+            build_range(&t, solved(1_100, 1_050), solved(1_100, 1_050), &solved(1_100, 1_050));
 
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -953,13 +985,8 @@ mod tests {
         let mut t = trade(address!("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), 1_000);
         t.solver = "relay".to_string();
         t.solver_source = AttributionSource::Fallback;
-        let range = build_range(
-            &t,
-            &empty_prices(),
-            solved(1_100, 1_050),
-            solved(1_100, 1_050),
-            &solved(1_100, 1_050),
-        );
+        let range =
+            build_range(&t, solved(1_100, 1_050), solved(1_100, 1_050), &solved(1_100, 1_050));
 
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -988,7 +1015,6 @@ mod tests {
         t.amount_in = U256::from(1_000_000_000u64); // 1000 USDC
         let range = build_range(
             &t,
-            &empty_prices(),
             Outcome::Unsolvable("no route".into()),
             Outcome::Unsolvable("no route".into()),
             &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
@@ -1015,7 +1041,6 @@ mod tests {
     fn test_record_range_unsolvable() {
         let range = build_range(
             &trade(Address::repeat_byte(0x22), 1_000),
-            &empty_prices(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
             &Outcome::Unsolvable("x".into()),
@@ -1052,7 +1077,6 @@ mod tests {
         prices.insert(usdc, 2e-9);
         let range = build_range(
             &sandwiched,
-            &prices,
             solved(1_100_000_000, 1_090_000_000),
             solved(1_100_000_000, 1_090_000_000),
             &solved(1_100_000_000, 1_090_000_000),
@@ -1084,7 +1108,6 @@ mod tests {
         // whose bps and win count would swamp the unweighted metrics if it were recorded.
         let range = build_range(
             &trade(usdc, 1_000_000),
-            &empty_prices(),
             solved(1_005_000, 1_005_000),
             solved(1_005_000, 1_005_000),
             &solved(1_005_000, 1_005_000),
@@ -1115,7 +1138,6 @@ mod tests {
         // its count and (solved) bps still land in the metrics.
         let range = build_range(
             &trade(Address::repeat_byte(0x42), 1_000),
-            &empty_prices(),
             solved(1_100, 1_050),
             solved(1_100, 1_050),
             &solved(1_100, 1_050),

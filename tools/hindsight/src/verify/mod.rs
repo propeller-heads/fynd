@@ -405,7 +405,7 @@ mod tests {
     use alloy::primitives::U256;
 
     use super::*;
-    use crate::decoder::AttributionSource;
+    use crate::decoder::{AttributionSource, DecodeSource, DecodeTier};
 
     fn addr(n: u8) -> Address {
         let mut bytes = [0u8; 20];
@@ -421,16 +421,16 @@ mod tests {
             venue: "relay".to_string(),
             solver: solver.to_string(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: addr(1),
             token_in,
             token_out,
             amount_in: U256::from(1000),
             amount_out: U256::from(2000),
-            venue_fee_in: None,
-            venue_fee_out: None,
-            settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         }
     }

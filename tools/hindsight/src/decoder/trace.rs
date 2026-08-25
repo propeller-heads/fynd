@@ -1,32 +1,55 @@
+use std::collections::{HashMap, VecDeque};
+
 use alloy::{
+    eips::BlockNumberOrTag,
     primitives::{Address, TxHash, U256},
     providers::{ext::DebugApi, Provider},
-    rpc::types::trace::geth::{CallConfig, CallFrame, GethDebugTracingOptions, GethTrace},
+    rpc::types::trace::{
+        common::TraceResult,
+        geth::{CallConfig, CallFrame, GethDebugTracingOptions, GethTrace},
+    },
 };
 use anyhow::Context;
+use tracing::warn;
 
 use crate::decoder::registry::Registry;
 
-/// Fetch the callTracer root frame for a transaction.
+/// Fetch the callTracer root frame of every transaction in a block, keyed by transaction hash —
+/// one `debug_traceBlockByNumber` call instead of one `debug_traceTransaction` per transaction.
 ///
-/// The trace is the only place native ETH transfers and the internal
-/// solver call appear — neither emits a log.
-pub(crate) async fn fetch_trace<P: Provider>(
+/// The trace is the only place native ETH transfers and the internal solver call appear — neither
+/// emits a log. A transaction the tracer could not process is dropped from the map with a warning
+/// (its trades are lost, not the block's); a failure of the whole call is the block's error.
+pub(crate) async fn fetch_block_traces<P: Provider>(
     provider: &P,
-    tx_hash: TxHash,
-) -> anyhow::Result<CallFrame> {
+    block_number: u64,
+) -> anyhow::Result<HashMap<TxHash, CallFrame>> {
     let options = GethDebugTracingOptions::call_tracer(CallConfig::default());
-    let trace = provider
-        .debug_trace_transaction(tx_hash, options)
+    let traces = provider
+        .debug_trace_block_by_number(BlockNumberOrTag::Number(block_number), options)
         .await
         .with_context(|| {
-            format!("failed to trace {tx_hash} (does the RPC support debug_traceTransaction?)")
+            format!(
+                "failed to trace block {block_number} \
+                 (does the RPC support debug_traceBlockByNumber?)"
+            )
         })?;
 
-    let GethTrace::CallTracer(root) = trace else {
-        anyhow::bail!("expected callTracer output for {tx_hash}");
-    };
-    Ok(root)
+    let mut roots = HashMap::with_capacity(traces.len());
+    for trace in traces {
+        match trace {
+            TraceResult::Success { result: GethTrace::CallTracer(root), tx_hash: Some(hash) } => {
+                roots.insert(hash, root);
+            }
+            TraceResult::Success { result, tx_hash } => {
+                warn!(?tx_hash, ?result, "expected callTracer output in the block trace");
+            }
+            TraceResult::Error { error, tx_hash } => {
+                warn!(?tx_hash, error, "block trace failed for one transaction");
+            }
+        }
+    }
+    Ok(roots)
 }
 
 /// Walk the call frames, collecting native ETH value transfers.
@@ -57,30 +80,18 @@ fn transfers_value(call_type: &str) -> bool {
     matches!(call_type, "CALL" | "CALLCODE" | "CREATE" | "CREATE2" | "SELFDESTRUCT")
 }
 
-/// Gas consumed by the settled route inside a venue-wrapped transaction (Relay, `MetaMask`), in
-/// gas units.
+/// The outermost call frame into a known solver, skipping reverted frames (and their subtrees),
+/// which settle nothing.
 ///
-/// The venue's own gas — fee transfers, forwarding, the base transaction cost — is charged
-/// whichever router the venue picks, so like the venue fee it is excluded from the comparison. Each
-/// trace frame's `gas_used` includes its whole subtree, so the call into the solver carries the
-/// full routing cost. Prefers the first call into a known solver; falls back to the most
-/// gas-consuming direct child, since in a wrapped transaction the routing work dwarfs the
-/// bookkeeping calls. `None` when no usable frame exists — the caller then skips the gas
-/// deduction rather than guess.
-pub(crate) fn route_gas(root: &CallFrame, registry: &Registry) -> Option<U256> {
-    if let Some(frame) = find_solver_frame(root, registry) {
-        return Some(frame.gas_used);
-    }
-    root.calls
-        .iter()
-        .filter(|child| child.error.is_none())
-        .map(|child| child.gas_used)
-        .max()
-        .filter(|gas| !gas.is_zero())
-}
-
-/// Depth-first search for the first call frame into a known solver, skipping reverted frames
-/// (and their subtrees), which settle nothing.
+/// Breadth-first, so a solver that is a direct child wins over one buried deeper in an earlier
+/// branch. Depth is what decides which frame settled the trade: the outer one called the inner
+/// one, so the outer one owns the trade and the inner one is a step in its route. A depth-first
+/// walk returned whichever solver frame it reached first going down — the same frame on a single
+/// chain of calls, the wrong one when two frames sit on separate branches.
+///
+/// Only meaningful when the transaction has one leg. A transaction that entered a solver router
+/// several times independently has no single settling frame, and `declared::declared_flow` declines
+/// it on [`solver_frames`] before asking this — so the walk order decides a label, never an amount.
 ///
 /// The one walk serves both questions asked of a trace: *who* settled the swap (the frame's
 /// `to`, for attribution) and *what the route cost* (the frame's `gas_used`, for gas
@@ -90,18 +101,37 @@ pub(crate) fn find_solver_frame<'a>(
     frame: &'a CallFrame,
     registry: &Registry,
 ) -> Option<&'a CallFrame> {
-    if frame.error.is_some() {
-        return None;
-    }
-    if let Some(to) = frame.to {
-        if registry.is_solver(to) {
-            return Some(frame);
+    let mut frames = solver_frames(frame, registry);
+    frames.truncate(1);
+    frames.pop()
+}
+
+/// Every outermost call frame into a known solver: the legs of the transaction. A solver called
+/// from inside another solver's frame is a step in that solver's route, not a leg of its own, so a
+/// matched frame's subtree is not searched.
+///
+/// One leg is the normal case. Several means the transaction swapped more than once, so no single
+/// leg is the trade and `declared::declared_flow` declines to read one — an arbitrage contract
+/// routing several legs through Uniswap's universal router is the shape seen live. This is not a
+/// `[batch_settlers]` settlement, which is many signed orders in one transaction and is declined
+/// one layer up.
+pub(crate) fn solver_frames<'a>(frame: &'a CallFrame, registry: &Registry) -> Vec<&'a CallFrame> {
+    let mut found = Vec::new();
+    let mut queue = VecDeque::from([frame]);
+    while let Some(frame) = queue.pop_front() {
+        if frame.error.is_some() {
+            continue;
         }
+        if frame
+            .to
+            .is_some_and(|to| registry.is_solver(to))
+        {
+            found.push(frame);
+            continue;
+        }
+        queue.extend(&frame.calls);
     }
-    frame
-        .calls
-        .iter()
-        .find_map(|child| find_solver_frame(child, registry))
+    found
 }
 
 /// Best guess at an unknown router: the entry point's direct child call that moved the most
@@ -179,96 +209,6 @@ mod tests {
         assert_eq!(out, vec![(from, to, U256::from(1000))]);
     }
 
-    fn with_gas(mut call: CallFrame, gas_used: u64) -> CallFrame {
-        call.gas_used = U256::from(gas_used);
-        call
-    }
-
-    #[test]
-    fn test_route_gas_known_venue() {
-        // Mirrors the audited Relay tx 0xf25ceafd…: two small wrapper self-calls around the
-        // KyberSwap router call, whose frame carries the full routing cost.
-        //
-        //   relay (1,271,689 total)
-        //   ├── relay self-call        15,066
-        //   ├── kyberswap router    1,067,571   <- the route
-        //   └── relay self-call        18,802
-        let registry = Registry::ethereum();
-        let sender = addr(1);
-        let relay = addr(2);
-        let kyber = address!("0x6131b5fae19ea4f9d964eac0408e4408b66337b5");
-
-        let mut root = with_gas(frame("CALL", sender, relay, 0), 1_271_689);
-        root.calls = vec![
-            with_gas(frame("CALL", relay, relay, 0), 15_066),
-            with_gas(frame("CALL", relay, kyber, 0), 1_067_571),
-            with_gas(frame("CALL", relay, relay, 0), 18_802),
-        ];
-
-        assert_eq!(route_gas(&root, &registry), Some(U256::from(1_067_571u64)));
-    }
-
-    #[test]
-    fn test_route_gas_unknown_venue() {
-        // Unknown venue: no registry match, so the most gas-consuming child is the route.
-        let registry = Registry::ethereum();
-        let client = addr(2);
-
-        let mut root = with_gas(frame("CALL", addr(1), client, 0), 500_000);
-        root.calls = vec![
-            with_gas(frame("CALL", client, addr(50), 0), 30_000),
-            with_gas(frame("CALL", client, addr(51), 0), 400_000),
-        ];
-
-        assert_eq!(route_gas(&root, &registry), Some(U256::from(400_000u64)));
-    }
-
-    #[test]
-    fn test_route_gas_reverted_and_empty() {
-        let registry = Registry::ethereum();
-        let client = addr(2);
-
-        let mut reverted = with_gas(frame("CALL", client, addr(50), 0), 400_000);
-        reverted.error = Some("execution reverted".to_string());
-        let mut root = with_gas(frame("CALL", addr(1), client, 0), 500_000);
-        root.calls = vec![reverted];
-        assert_eq!(route_gas(&root, &registry), None);
-
-        let leaf = frame("CALL", addr(1), client, 0);
-        assert_eq!(route_gas(&leaf, &registry), None);
-    }
-
-    #[test]
-    fn test_route_gas_real_relay_kyberswap_trace() {
-        // Real callTracer output of tx 0xf25ceafd… (block 25480207, 39.67 ETH -> USDT via
-        // Relay + KyberSwap), payload fields stripped. The route's gas is the KyberSwap router
-        // frame; Relay's wrapper overhead (1,271,689 total) stays out.
-        let root: CallFrame =
-            serde_json::from_str(include_str!("fixtures/trace_relay_kyberswap_0xf25ceafd.json"))
-                .unwrap();
-        assert_eq!(root.gas_used, U256::from(1_271_689u64));
-        assert_eq!(route_gas(&root, &Registry::ethereum()), Some(U256::from(1_067_571u64)));
-    }
-
-    #[test]
-    fn test_route_gas_real_metamask_oneinch_trace() {
-        // Real callTracer output of tx 0xe815e2b5… (block 25476433, a $3.4k MetaMask swap
-        // routed via 1inch), payload fields stripped. The 1inch frame sits three levels deep:
-        //
-        //   metamask router        185,699
-        //   └── spender            180,406   <- largest child: wrapper, NOT the route
-        //       └── adapter        175,635   (delegatecall)
-        //           ├── 1inch v6   115,795   <- the route
-        //           └── fee wallet   6,329   (MetaMask's fee, correctly excluded)
-        //
-        // so the known-venue search must win over the largest-child fallback.
-        let root: CallFrame =
-            serde_json::from_str(include_str!("fixtures/trace_metamask_1inch_0xe815e2b5.json"))
-                .unwrap();
-        assert_eq!(root.gas_used, U256::from(185_699u64));
-        assert_eq!(route_gas(&root, &Registry::ethereum()), Some(U256::from(115_795u64)));
-    }
-
     #[test]
     fn test_find_solver_frame_reverted_frames() {
         let registry = Registry::ethereum();
@@ -280,5 +220,74 @@ mod tests {
         root.calls = vec![reverted];
 
         assert!(find_solver_frame(&root, &registry).is_none());
+    }
+
+    #[test]
+    fn test_find_solver_frame_two_branches() {
+        // Two known solvers on separate branches: 1inch is a direct child, 0x sits one level down
+        // inside the branch that comes first. The direct child settled the trade — the other is a
+        // step inside someone else's route — so depth decides, not walk order.
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let zerox = address!("0x0000000000001ff3684f28c67538d4d072c22734");
+        let venue = addr(2);
+
+        let mut first_branch = frame("CALL", venue, addr(3), 0);
+        first_branch.calls = vec![frame("CALL", addr(3), zerox, 0)];
+        let mut root = frame("CALL", addr(1), venue, 0);
+        root.calls = vec![first_branch, frame("CALL", venue, oneinch, 0)];
+
+        assert_eq!(find_solver_frame(&root, &registry).and_then(|frame| frame.to), Some(oneinch));
+    }
+
+    #[test]
+    fn test_find_solver_frame_nested_solvers() {
+        // Stacked rather than side by side: the outer solver called the inner one, so the outer
+        // one owns the trade. This shape already resolved correctly and must keep doing so.
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let zerox = address!("0x0000000000001ff3684f28c67538d4d072c22734");
+
+        let mut outer = frame("CALL", addr(2), oneinch, 0);
+        outer.calls = vec![frame("CALL", oneinch, zerox, 0)];
+        let mut root = frame("CALL", addr(1), addr(2), 0);
+        root.calls = vec![outer];
+
+        assert_eq!(find_solver_frame(&root, &registry).and_then(|frame| frame.to), Some(oneinch));
+    }
+
+    #[test]
+    fn test_find_solver_frame_router_at_the_root() {
+        // A transaction sent straight to a router: the root is the solver frame, whatever the
+        // route below it touches. This is the common case and the walk must not descend past it.
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let zerox = address!("0x0000000000001ff3684f28c67538d4d072c22734");
+
+        let mut root = frame("CALL", addr(1), oneinch, 0);
+        root.calls = vec![frame("CALL", oneinch, zerox, 0)];
+
+        assert_eq!(find_solver_frame(&root, &registry).and_then(|frame| frame.to), Some(oneinch));
+    }
+
+    #[test]
+    fn test_find_solver_frame_reverted_branch_beside_a_live_one() {
+        // A reverted frame prunes its whole subtree, so a live solver deeper in another branch is
+        // still found. Breadth-first must not turn the prune into a stop.
+        let registry = Registry::ethereum();
+        let oneinch = address!("0x111111125421ca6dc452d289314280a0f8842a65");
+        let venue = addr(2);
+
+        let mut reverted = frame("CALL", venue, addr(3), 0);
+        reverted.error = Some("execution reverted".to_string());
+        reverted.calls = vec![frame("CALL", addr(3), oneinch, 0)];
+        let mut live = frame("CALL", venue, addr(4), 0);
+        live.calls = vec![frame("CALL", addr(4), oneinch, 0)];
+        let mut root = frame("CALL", addr(1), venue, 0);
+        root.calls = vec![reverted, live];
+
+        let found = find_solver_frame(&root, &registry).expect("the live branch still matches");
+        assert_eq!(found.to, Some(oneinch));
+        assert_eq!(found.from, addr(4));
     }
 }

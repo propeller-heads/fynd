@@ -16,8 +16,8 @@ and takes neither.
 Built-in address books: `ethereum`, `base`, `unichain`, `arbitrum`, `bsc`, `polygon`, `robinhood`.
 Any other name needs `--registry`.
 
-- **`decode`** — Fetch block receipts, match solver transactions, trace each one, and emit decoded
-  trades (token in/out, amounts, venue, solver, gas, sandwich evidence). Accepts `--block N`,
+- **`decode`** — Fetch a block's receipts and traces (two calls), match, and emit decoded
+  trades (token in/out, amounts, venue, solver, sandwich evidence). Accepts `--block N`,
   `--range START-END` (max 1000 blocks), or defaults to the latest block. Use `--json` for
   machine-readable output.
 
@@ -45,7 +45,7 @@ Any other name needs `--registry`.
 
 | Variable | Purpose |
 |---|---|
-| `RPC_URL` | Chain JSON-RPC endpoint (must support `debug_traceTransaction`) |
+| `RPC_URL` | Chain JSON-RPC endpoint (must support `debug_traceBlockByNumber`) |
 | `ALLIUM_API_KEY` | Allium API key (`verify` only) |
 | `ALLIUM_QUERY_ID` | Saved Allium query ID (`verify` only) |
 | `HINDSIGHT_REGISTRY` | Override path for the decoder address-book TOML |
@@ -54,42 +54,61 @@ Any other name needs `--registry`.
 
 ### Decode pipeline (`src/decoder/`)
 
-Match → trace → decode → veto → record.
+Three steps per block: trace the whole block → decode each transaction from the solver's side →
+attribute. [README.md](README.md) holds the full pipeline diagram and the two-tier decode model.
 
 | File/dir | Purpose |
 |---|---|
-| `matching.rs` | Receipt-only filter: is this transaction a solver trade at all, plus match-time vetoes |
-| `decode.rs` | The `TradeDecoder` trait, the matched entity → decoders mapping, `DecodeContext`, `TraderFlow` |
-| `netting_decoders.rs` | Netting toolkit (`sender_flow`, `venue_flow`) plus the `SenderNetting` decoder |
+| `mod.rs` | The orchestrator: fetch receipts + block trace, match, decode (declared first, netting fallback), veto, attribute |
+| `declared.rs` | The declared decode: the settling solver frame's own calldata, anchored by the recipient's ledger receipt |
+| `netting.rs` | The netting fallback (marked `decode: "netted"`): the engine plus the venue/sender/intent arms picked by the entry point |
+| `attribution.rs` | Solver attribution tiers and venue fingerprints (owner, appData, fee wallet in address order, integrator tag) |
 | `transfer_ledger.rs` | Builds a transfer ledger from logs and native ETH flows |
 | `veto.rs` | The shared `Veto` type, plus post-decode vetoes of non-comparable shapes (NFT purchases, mis-paired wrap trades, fee-on-transfer skims) |
-| `registry.rs` | Per-chain address book, loaded from TOML (see below) |
+| `registry.rs` | Per-chain address book, loaded from TOML; joins each solver to its `SolverDecoder` at load |
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |
-| `venues/` | Per-venue `TradeDecoder` impls (Relay, MetaMask, Rabby), listed in `venues::decoders_for` |
-| `solvers/` | Per-solver knowledge: embedded quotes, match-time vetoes, attribution |
-| `intents/` | Intent-role decoders (solver-sent, trader-not-sender): `cow.rs` reads CoW's `Trade` event, `netting.rs` is the generic net-flow finder, `decoders_for` lists them |
-| `trace.rs` | Transaction trace fetching and processing |
+| `solvers/` | One `SolverDecoder` per solver with code: declared swaps from calldata (`fly.rs` packed, `kyberswap.rs` ABI `swap` params, `zeroex.rs` `AllowanceHolder.exec`/`Settler.execute`, `oneinch.rs` v6 and v5 `swap`) or from logs (`okx.rs` `OrderRecord`, `cow.rs` `Trade`, `butter.rs` `SwapAndCall`, `liquidmesh.rs`
+an unnamed event read by position), plus `lifi.rs`'s and `butter.rs`'s bridge vetoes and the `venue_fingerprint` reads (`lifi.rs`'s integrator tag, `cow.rs`'s `appData` hash) |
+| `trace.rs` | Whole-block trace fetching (`debug_traceBlockByNumber`) and frame walks |
 
 `src/verify/` contains the Allium integration:
 - `allium.rs` — Allium API client for the `verify` subcommand
 - `mod.rs` — Diff logic between decoded trades and Allium ground truth
 
-Three address tiers: **venue** (order-flow owner, `tx.to`), **solver** (router that settled the
-trade), **liquidity venues** (pools inside traces — not modeled here).
+Three address tiers: **venue** (order-flow owner, `tx.to` — pure data), **solver** (router that
+settled the trade — the only tier with code), **liquidity venues** (pools inside traces — not
+modeled here).
+
+### The two decode tiers
+
+Every record carries `decode: "declared" | "netted"`. Declared records (solver calldata or a
+batch settler's `Trade` log) are the trusted tier and the report's default scope. Netted records
+(balance netting) can hide an unaccounted fee inside the amounts; the report excludes them unless
+`--include-netted`.
+
+### Batch transactions are not supported
+
+A transaction that swaps several times has no single trade to record, and one record holds one
+swap. Both forms are declined rather than guessed: a transaction entering a solver router more
+than once declines its declared read (`trace::solver_frames`, counted by
+`hindsight_several_legs_total`) and falls to netting; a `[batch_settlers]` settlement of several
+orders is declined by `cow.rs` and again by netting when no single trader is found. See the
+README.
 
 ### The address book (`registry/<chain>.toml`)
 
 All chain- and protocol-specific data lives in a per-chain TOML, embedded for the seven chains
 listed above (`registry::BUILTIN_CHAINS`) and loadable via `--registry`. A book carries only the
-tiers its chain has — Unichain has no batch settlers because CoW does not settle there, and no LiFi
-or integrator tier because the Diamond is not deployed; each book's header says what was checked.
-An address also moves per chain: Robinhood Chain's LiFi Diamond, 0x Settler, OKX router and
-MetaMask router all sit at chain-specific addresses, re-derived rather than copied.
-Sections: `wrapped_native`, `infrastructure` (Permit2 etc. —
-addresses attribution and sandwich detection skip), `usd_stablecoins` (USD anchors for
-reporting), `batch_settlers`, `[solvers]` (router address → name), `[labels]` (display-only
-names), and `[venues.<name>]` (entry points, fee collectors, and — for venues that declare
-their solver in calldata — `solver_aliases`).
+tiers its chain has; each book's header says what was checked. An address also moves per chain:
+Robinhood Chain's LiFi Diamond, 0x Settler, OKX router and MetaMask router all sit at
+chain-specific addresses, re-derived rather than copied. Sections: `wrapped_native`,
+`infrastructure` (Permit2 etc.), `usd_stablecoins` (USD anchors for reporting), `batch_settlers`,
+`[solvers]` (router address → name; the name joins to a `SolverDecoder` at load), `[labels]`
+(display-only names), `[venues.<name>]` (entry points), and the venue fingerprints
+(`[venue_owners]`, `[venue_fees]`, `[venue_integrators]`, `[venue_appdata]`). A fee paid to a
+`[venue_fees]` wallet is corrected out of the amounts (`attribution::venue`): subtracted from
+`amount_in` when the wallet took the sell token, added back to `amount_out` when it took the buy
+token. Every other venue fee is left inside the amounts.
 
 ### Re-solve engine (`src/resolve/`)
 
@@ -132,12 +151,32 @@ positive-only USD histogram (`hindsight_positive_slippage_usd`) whose sum is the
 hypothetical revenue. Absent when the top was unsolved or the re-execution failed (e.g. a pool
 vanished at N).
 
+### The declared decode
+
+`declared_flow` reads `token_in`/`token_out`/`amount_in` from the settling solver frame's own
+`DeclaredSwap` and recovers the settled `amount_out` as the gross amount of `token_out` received by
+the output recipient the same calldata declares (falling back to the transaction sender) — the
+one field calldata can never carry. Two guards protect the recipient-receipt query, and they act
+differently: a recovered output below the declared `min_amount_out` floor drops the transaction
+(`Veto::OutputNotFound`) rather than falling through to netting, because once a solver has stated
+the trade, netting would answer a different question; a declared quote outside `plausible_quote`'s
+band drops only the quote and keeps the trade. Dropped transactions are counted by
+`hindsight_vetoed_transactions_total`, labelled by veto. A fee paid
+to a `[venue_fees]` wallet is corrected out of both amounts by `attribution::venue`, on whichever
+side the wallet was paid; no other venue fee is modelled (see the README).
+
+Declared reads run first and netting is the marked fallback, which is what the two-tier model
+above describes.
+
 ### Key types
 
-- `DecodedTrade` — decoded on-chain trade; amounts are venue-fee-adjusted so re-solve compares
-  like-for-like. Carries `sandwich` evidence when a bracket pair was found.
-- `RangeComparison` — a trade solved at top and back, including gas-netted settled output and
-  the top route's `Slippage` between the two states (from its re-execution at back).
+- `DecodedTrade` — decoded on-chain trade. A fee paid to a `[venue_fees]` wallet is corrected out
+  of the amounts so re-solve compares like-for-like; every other venue fee stays inside them.
+  Carries `sandwich` evidence when a bracket pair was found, and `min_amount_out`,
+  `declared_quote`, and `quote_timestamp` (the calldata-declared terms copied off the settling
+  solver's `DeclaredSwap`, when one was recovered).
+- `RangeComparison` — a trade solved at top and back, plus the top route's `Slippage` between
+  the two states (from its re-execution at back). All comparisons are gross of gas.
 - `Outcome` — `Solved`, `Partial`, or `Unsolvable`.
 - `SolvedAmount` — a solved state's amounts plus `algorithm` (which worker pool won the quote) and
   `solved_route` (the full `fynd_core::types::Route`, kept in memory to replay at back-of-block).
@@ -181,26 +220,21 @@ It surfaces three ways:
 - **JSONL**: flat `algorithm` and `route` per state, next to the nested per-hop route (which keeps
   the pools and amounts the string leaves out).
 
-## Adding a venue / solver / decoder / chain
+## Adding a solver / venue / chain
 
-- **Solver** (a router Fynd competes with): one line in the address book's `[solvers]` section is
-  enough for matching, attribution, gas isolation, and metric labels. Optional code: a
-  `SolverKnowledge` impl in `solvers/` (registered in `solvers::IMPLEMENTATIONS`) with an
-  `embedded_quote` method if its calldata declares an off-chain quote, or a `solver_veto` method
-  if some of its orders are not same-chain swaps.
-- **Venue** (a platform users enter through): a `[venues.<name>]` address-book section plus a
-  `TradeDecoder` in `venues/`, registered in the one `venues::decoders_for` arm (its `mod`
-  declaration is the only other line). Most venues are sender netting + fee back-out — call
-  `netting_decoders::venue_flow` and add only what is specific to the venue. The registry fails to load if
-  an address-book venue has no decoder.
-- **Decoder** (a new way to read a swap — calldata decoding, log parsing): a `TradeDecoder`, with
-  its extraction toolkit in `netting_decoders`/`calldata`, listed in the mapping for the entities that use
-  it. Netting is one shared engine; calldata is per-router, so a calldata decoder is a standalone
-  parser.
-- **Chain**: a new `registry/<chain>.toml` plus its entry in `registry::BUILTIN_CHAINS`, or passed
-  via `--registry`. Verify each venue's fee collector on that chain before adding it — a missing
-  collector leaves the fee inside the amounts, which is a wrong record rather than a miss. Check
-  the monitor's pacing flags (`--max-lag-blocks`) against the chain's block time. The `verify`
+- **Solver** (a router Fynd competes with): one line in the address book's `[solvers]` section
+  covers matching, attribution, and metric labels. To make its trades declared (trusted) instead
+  of netted: a `SolverDecoder` impl in `solvers/` with a `declared` method, registered as one row
+  in `solvers::IMPLEMENTATIONS`. One parse fills the whole `DeclaredSwap`, including the output
+  recipient when the calldata declares one. Return `Err(Veto)` from the same method if some of its
+  orders are not same-chain swaps. Add `venue_fingerprint` too if its own data names the frontend
+  that built the order; both methods are reached through `Registry::solver`, so adding either
+  needs no edit outside `solvers/`.
+- **Venue** (a platform users enter through): a `[venues.<name>]` address-book section — its
+  entry points. No code. A venue with no entry point of its own is identified by its fee wallet
+  (`[venue_fees]`), its `appData` hash, or its integrator tag instead.
+- **Chain**: a new `registry/<chain>.toml` plus its entry in `registry::BUILTIN_CHAINS`, or
+  passed via `--registry`. Check the monitor's pacing flags (`--max-lag-blocks`) against the chain's block time. The `verify`
   subcommand's saved Allium query is per-chain.
 
 ## Running

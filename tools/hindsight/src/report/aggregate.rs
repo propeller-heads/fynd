@@ -89,7 +89,7 @@ pub(crate) struct GroupStats {
     pub wins: usize,
     pub losses: usize,
     pub unsolved: usize,
-    pub median_net_bps: Option<f64>,
+    pub median_bps: Option<f64>,
     pub total_improvement_usd: f64,
 }
 
@@ -98,7 +98,7 @@ pub(crate) struct TradeRow {
     pub settled_tx: String,
     pub venue: String,
     pub solver: String,
-    pub net_bps: Option<f64>,
+    pub bps: Option<f64>,
     pub improvement_usd: f64,
 }
 
@@ -168,7 +168,7 @@ fn savings(records: &[Comparison]) -> Savings {
     let mut win_bps: Vec<f64> = scored
         .iter()
         .filter(|r| r.top.verdict == "win")
-        .filter_map(|r| r.top.net_bps)
+        .filter_map(|r| r.top.raw_bps)
         .collect();
     Savings {
         scored: scored.len(),
@@ -192,10 +192,10 @@ fn group_stats(records: &[Comparison], key: impl Fn(&Comparison) -> &String) -> 
     let mut stats: Vec<GroupStats> = groups
         .into_iter()
         .map(|(name, group)| {
-            let mut net_bps: Vec<f64> = group
+            let mut bps: Vec<f64> = group
                 .iter()
                 .filter(|r| r.top.is_scored() && above_dust_floor(&r.top))
-                .filter_map(|r| r.top.net_bps)
+                .filter_map(|r| r.top.raw_bps)
                 .collect();
             GroupStats {
                 name: name.clone(),
@@ -212,7 +212,7 @@ fn group_stats(records: &[Comparison], key: impl Fn(&Comparison) -> &String) -> 
                     .iter()
                     .filter(|r| !r.top.is_served())
                     .count(),
-                median_net_bps: median(&mut net_bps),
+                median_bps: median(&mut bps),
                 total_improvement_usd: group
                     .iter()
                     .filter(|r| r.top.is_scored())
@@ -260,7 +260,7 @@ fn trade_rows(records: &[Comparison], verdict: &str) -> Vec<TradeRow> {
                     settled_tx: r.settled_tx.clone(),
                     venue: r.venue.clone(),
                     solver: r.solver.clone(),
-                    net_bps: r.top.net_bps,
+                    bps: r.top.raw_bps,
                     improvement_usd: usd,
                 })
         })
@@ -327,7 +327,7 @@ mod tests {
             "token_out": "0xbbb",
             "top": {
                 "verdict": verdict,
-                "net_bps": bps,
+                "raw_bps": bps,
                 "improvement_usd": bps.map(|b| b / 10.0),
                 "settled_value_usd": 1000.0,
             },
@@ -380,7 +380,7 @@ mod tests {
             record_worth(2, "win", 9000.0, Some(0.5)),
         ];
         let groups = group_stats(&records, |r| &r.venue);
-        assert_eq!(groups[0].median_net_bps, Some(10.0));
+        assert_eq!(groups[0].median_bps, Some(10.0));
         // The verdict counts still describe every trade in the group.
         assert_eq!(groups[0].count, 2);
         assert_eq!(groups[0].wins, 2);

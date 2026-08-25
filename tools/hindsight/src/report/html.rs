@@ -223,7 +223,7 @@ fn group_section(title: &str, groups: &[GroupStats]) -> String {
             group.losses,
             group.unsolved,
             pct(group.wins, scored),
-            fmt_bps(group.median_net_bps),
+            fmt_bps(group.median_bps),
             fmt_usd(group.total_improvement_usd),
         );
     }
@@ -234,7 +234,7 @@ fn group_section(title: &str, groups: &[GroupStats]) -> String {
 fn trades_section(title: &str, trades: &[TradeRow]) -> String {
     let mut table = String::from(
         "<table><thead><tr><th>settled tx</th><th>venue</th><th>solver</th>\
-         <th>net bps</th><th>savings</th></tr></thead><tbody>",
+         <th>bps</th><th>savings</th></tr></thead><tbody>",
     );
     for trade in trades {
         let _ = write!(
@@ -244,7 +244,7 @@ fn trades_section(title: &str, trades: &[TradeRow]) -> String {
             escape(&short_hash(&trade.settled_tx)),
             escape(&trade.venue),
             escape(&trade.solver),
-            fmt_bps(trade.net_bps),
+            fmt_bps(trade.bps),
             fmt_usd(trade.improvement_usd),
         );
     }
@@ -423,12 +423,12 @@ mod tests {
             serde_json::json!({
                 "block": 1, "settled_tx": "0xabc0000000000000000000000000000000000000000000000000000000000001",
                 "venue": "relay", "solver": "1inch", "token_in": "0xaaa", "token_out": "0xbbb",
-                "top": {"verdict": "win", "net_bps": 20.0, "improvement_usd": 12.0, "settled_value_usd": 1000.0}
+                "top": {"verdict": "win", "raw_bps": 20.0, "improvement_usd": 12.0, "settled_value_usd": 1000.0}
             }),
             serde_json::json!({
                 "block": 2, "settled_tx": "0xdef0000000000000000000000000000000000000000000000000000000000002",
                 "venue": "relay", "solver": "0x", "token_in": "0xccc", "token_out": "0xddd",
-                "top": {"verdict": "unsolvable", "net_bps": null, "improvement_usd": null, "settled_value_usd": 50.0}
+                "top": {"verdict": "unsolvable", "raw_bps": null, "improvement_usd": null, "settled_value_usd": 50.0}
             }),
         ]
         .into_iter()

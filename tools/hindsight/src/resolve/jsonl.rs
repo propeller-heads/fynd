@@ -168,15 +168,14 @@ fn comparison_record(
         "solver": range.solver,
         "solver_source": range.solver_source,
         "decoder": range.decoder,
+        "decode": range.decode,
         "token_in": format!("{:#x}", range.token_in),
         "token_out": format!("{:#x}", range.token_out),
         "amount_in": range.amount_in.to_string(),
         "settled_amount_out": range.settled_amount_out.to_string(),
-        "settled_amount_out_net_gas": range.settled_amount_out_net_gas.to_string(),
-        "settled_gas_cost": range.settled_gas.map(|gas| gas.to_string()),
-        "quoted_amount_out": range.quote.as_ref().map(|q| q.amount_out.to_string()),
-        "quote_source": range.quote.as_ref().and_then(|q| q.source.clone()),
-        "quote_timestamp": range.quote.as_ref().and_then(|q| q.timestamp),
+        "min_amount_out": range.min_amount_out.map(|amount| amount.to_string()),
+        "quoted_amount_out": range.declared_quote.map(|amount| amount.to_string()),
+        "quote_timestamp": range.quote_timestamp,
         "sandwich": range.sandwich,
         "slippage": slippage,
         "top": state_record(&range.top, range, prices_top),
@@ -209,7 +208,6 @@ fn state_record(
     let fynd_value_usd = solved.and_then(|s| prices.value_usd(token_out, s.amount_out));
     serde_json::json!({
         "verdict": state.verdict,
-        "net_bps": state.deltas.net_bps,
         "raw_bps": state.deltas.raw_bps,
         "fynd_amount_out": solved.map(|s| s.amount_out.to_string()),
         "fynd_amount_out_net_gas": solved.map(|s| s.amount_out_net_gas.to_string()),
@@ -281,7 +279,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        decoder::{AttributionSource, DecodedTrade, Registry, SandwichEvidence, SolverQuote},
+        decoder::{
+            AttributionSource, DecodeSource, DecodeTier, DecodedTrade, Registry, SandwichEvidence,
+        },
         resolve::{build_range, test_support, SolvedAmount},
     };
 
@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn test_comparison_record_with_solver_quote() {
+    fn test_comparison_record_with_declared_quote() {
         let trade = DecodedTrade {
             tx_hash: TxHash::default(),
             block_number: 25_480_207,
@@ -334,25 +334,20 @@ mod tests {
             venue: "relay".into(),
             solver: "kyberswap".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: Address::ZERO,
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(69_996_280_564u64),
-            venue_fee_in: None,
-            venue_fee_out: None,
-            settled_gas: None,
-            quote: Some(SolverQuote {
-                amount_out: U256::from(70_400_409_935u64),
-                source: Some("relay".to_string()),
-                timestamp: Some(1_783_421_726),
-            }),
+            min_amount_out: Some(U256::from(69_996_280_564u64)),
+            declared_quote: Some(U256::from(70_400_409_935u64)),
+            quote_timestamp: Some(1_783_421_726),
             sandwich: None,
         };
         let range = build_range(
             &trade,
-            &empty_prices(),
             Outcome::Unsolvable("x".into()),
             Outcome::Unsolvable("x".into()),
             &Outcome::Unsolvable("x".into()),
@@ -364,7 +359,8 @@ mod tests {
                 .unwrap(),
             "70400409935"
         );
-        assert_eq!(rec.pointer("/quote_source").unwrap(), "relay");
+        assert_eq!(rec.pointer("/min_amount_out").unwrap(), "69996280564");
+        assert!(rec.pointer("/quote_source").is_none());
         assert_eq!(
             rec.pointer("/quote_timestamp")
                 .unwrap()
@@ -413,16 +409,16 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: weth,
             token_out: usdc,
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000_000_000u64), // settled 1000 USDC
-            venue_fee_in: None,
-            venue_fee_out: None,
-            settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         };
         // quote_json is already the slim projection (what order_quote_to_outcome stores).
@@ -455,7 +451,7 @@ mod tests {
             quote_json: quote,
             solved_route: Some(solved_route),
         });
-        let range = build_range(&trade, &prices, top, back.clone(), &back);
+        let range = build_range(&trade, top, back.clone(), &back);
 
         comparison_record(&range, &prices, &prices)
     }
@@ -490,7 +486,7 @@ mod tests {
             .unwrap();
         assert!((slippage_usd + 8.0).abs() < 1e-3, "slippage_usd={slippage_usd}");
         assert!(
-            rec.pointer("/back/net_bps")
+            rec.pointer("/back/raw_bps")
                 .unwrap()
                 .as_f64()
                 .unwrap() >
@@ -535,22 +531,21 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000u64),
-            venue_fee_in: None,
-            venue_fee_out: None,
-            settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         };
         // A coverage gap: Fynd could not solve at either state.
         let range = build_range(
             &trade,
-            &empty_prices(),
             Outcome::Unsolvable("missing token in Tycho".into()),
             Outcome::Unsolvable("missing token in Tycho".into()),
             &Outcome::Unsolvable("no top-of-block route to re-execute".into()),
@@ -592,16 +587,16 @@ mod tests {
             venue: "relay".into(),
             solver: "1inch".into(),
             solver_source: AttributionSource::TraceMatch,
-            decoder: "sender-netting",
+            decoder: DecodeSource::SenderNetting,
+            decode: DecodeTier::Netted,
             sender: Address::ZERO,
             token_in: Address::repeat_byte(0x11),
             token_out: Address::repeat_byte(0x22),
             amount_in: U256::from(1_000u64),
             amount_out: U256::from(1_000u64),
-            venue_fee_in: None,
-            venue_fee_out: None,
-            settled_gas: None,
-            quote: None,
+            min_amount_out: None,
+            declared_quote: None,
+            quote_timestamp: None,
             sandwich: None,
         };
         trade.sandwich = Some(SandwichEvidence {
@@ -622,8 +617,7 @@ mod tests {
                 solved_route: None,
             })
         };
-        let range =
-            build_range(&trade, &empty_prices(), solved(1_100), solved(1_050), &solved(1_050));
+        let range = build_range(&trade, solved(1_100), solved(1_050), &solved(1_050));
         let rec = comparison_record(&range, &empty_prices(), &empty_prices());
 
         assert_eq!(rec.pointer("/tx_index").unwrap(), 42);

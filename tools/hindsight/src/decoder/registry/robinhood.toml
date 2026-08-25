@@ -2,10 +2,10 @@
 # see it and registry.rs for what each section drives. Addresses gathered 2026-08-20.
 #
 # Accuracy note: a wrong or missing *solver* address only costs coverage (the swap fails to
-# match), but a wrong *venue fee collector* produces wrong records (the fee stays inside the
-# amounts). Every contract below was checked to be deployed on Robinhood Chain, and every venue was
-# confirmed live by its own on-chain fee legs in a 100k-block sample (~28 hours at 1-second blocks)
-# ending block 41578851.
+# match), but a wrong *venue fee wallet* produces wrong records: `[venue_fees]` drives both the
+# venue label and the fee correction on the amounts. Every contract below was checked to be deployed
+# on Robinhood Chain, and every venue was confirmed live by its own on-chain fee legs in a
+# 100k-block sample (~28 hours at 1-second blocks) ending block 41578851.
 #
 # Robinhood Chain is an Arbitrum Orbit (Nitro) rollup with ETH as the gas token, so several
 # contracts sit at chain-specific addresses rather than their mainnet ones. Each was re-derived
@@ -111,7 +111,7 @@ batch_settlers = []
 # Tycho (PropellerHeads) router V3 on Robinhood Chain (docs.propellerheads.xyz contract addresses)
 "0x345e48768a65ae596ac6a2aee71202753c4866f5" = "tycho"
 
-# Venues. Relay's fee collector is the same address as mainnet; of its mainnet contracts only the
+# Venues. Relay's fee wallet is the same address as mainnet; of its mainnet contracts only the
 # v3 router and the v3 approval proxy are deployed here, and they paid 193 of the 360 fee legs in
 # the sample. The rest came from Relay's Depository, which fills orders bridged in from another
 # chain rather than settling a same-chain swap, so it is not an entry point.
@@ -120,36 +120,24 @@ entry_points = [
     "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f", # RelayRouterV3
     "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be", # RelayApprovalProxyV3
 ]
-fee_collectors = ["0xf70da97812cb96acdf810712aa562db8dfa3dbef"]
 
 # MetaMask's Swap Router on this chain (see the header note). Only the second of its two mainnet fee
 # wallets is used here — 54 fee legs in the sample, all from this router; the first took nothing.
 [venues.metamask]
 entry_points = ["0xf5307745c61de69bf033edfe6a8771256275a323"]
-fee_collectors = ["0xf326e4de8f66a0bdc0970b79e0924e33c79f1915"]
-
-# The aggregator ids this router named in the sample, mapped to the solver names above. "0xV2" is
-# 0x's Settler-era id, which the mainnet book's "zeroex" substring does not catch.
-[venues.metamask.solver_aliases]
-"0xv2" = "0x"
-kyber = "kyberswap"
-uniswap = "uniswap"
-openocean = "openocean"
 
 # Rabby SwapProxy — same address as mainnet, and the only Rabby entry point: its other swaps go
 # through shared routers (the 0x Settler, 1inch, Uniswap, Fly) and are recognised by the fee leg
-# (see rabby.rs). The current fee wallet took 1452 legs in the sample; the historical wallet
+# in `[venue_fees]`. The current fee wallet took 1452 legs in the sample; the historical wallet
 # 0x39041f… took nothing.
 [venues.rabby]
 entry_points = ["0x02e5be68d46dac0b524905bff209cf47ee6db2a9"]
-fee_collectors = ["0xcd6b980029e6e6e0733ac8ec3e02be9410d09799"]
 
 # Rainbow's own router ("Rainbow: Router", same address as mainnet). It takes its fee on the input
-# side and keeps it in the router, so the fee is read from calldata (see rainbow.rs) and there is no
-# collector. Live here: 105 outgoing token transfers in the sample.
+# side and keeps it in the router, never transferring it out, so the cut stays inside `amount_in`.
+# Live here: 105 outgoing token transfers in the sample.
 [venues.rainbow]
 entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
-fee_collectors = []
 
 # Venues identified by the fee they take on a shared router. Each wallet's legs were traced to a
 # settlement contract, so the dust-spray gotcha does not apply — one unverified contract

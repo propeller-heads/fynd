@@ -1,30 +1,34 @@
 //! Decode solver trades from on-chain data.
 //!
 //! Terminology — three tiers, two of which appear in every record:
-//! - **venue** (`venues/`): the contract the user entered through (`tx.to`) — Relay, `MetaMask`.
-//!   Order-flow owners; they pick a solver and may take a fee.
-//! - **solver** (`solvers/`): the router that computed and settled the route — `KyberSwap`, 1inch,
-//!   0x. These are Fynd's competitors. Datasets recorded before run6 call this tier `aggregator` in
-//!   their column names; the two words mean the same thing.
+//! - **venue**: the contract the user entered through (`tx.to`) — Relay, `MetaMask`. Order-flow
+//!   owners; they pick a solver and may take a fee.
+//! - **solver** (`solvers/`, the only tier with code): the router that computed and settled the
+//!   route — `KyberSwap`, 1inch, 0x. These are Fynd's competitors. Datasets recorded before run6
+//!   call this tier `aggregator` in their column names; the two words mean the same thing.
 //! - **liquidity venues**: the pools and makers a route executes against (Uniswap, Curve,
 //!   prop-AMMs). Not modeled here; they only appear inside traces.
 //!
-//! The pipeline is match → trace → decode → veto → record: `matching` filters a block down to
-//! solver trades, `decode` recovers each trade's swap (picking the decoders for the matched
-//! entity), `transfer_ledger` answers all value-flow questions, `veto` rejects shapes that are not
-//! comparable trades, and `registry` is the address book behind matching.
+//! The pipeline is three steps, per block:
+//!
+//! 1. **Trace the whole block** — one `eth_getBlockReceipts` call and one
+//!    `debug_traceBlockByNumber` call.
+//! 2. **Per transaction, decode the swap from the solver's side** — the declared decode reads the
+//!    settling solver frame's own calldata (`declared`), or `CoW`'s `Trade` log for batch
+//!    settlements; `netting` is the fallback, and its records are marked (`decode: "netted"`). A
+//!    transaction with no known solver frame, venue entry, batch settler, or solver log is skipped.
+//!    `veto` rejects shapes that are not comparable trades.
+//! 3. **Attribute** — `attribution` names the solver and the venue on the record; `registry` is the
+//!    address book behind every lookup.
 
-mod decode;
-mod intents;
-mod matching;
-mod netting_decoders;
+mod attribution;
+mod declared;
+mod netting;
 mod registry;
 mod sandwich;
 mod solvers;
 mod trace;
 mod transfer_ledger;
-mod venue_attribution;
-pub(crate) mod venues;
 mod veto;
 
 #[cfg(test)]
@@ -34,26 +38,79 @@ use std::collections::HashMap;
 
 use alloy::{
     eips::BlockId,
-    network::AnyTransactionReceipt,
+    network::{AnyTransactionReceipt, ReceiptResponse},
     primitives::{Address, TxHash, U256},
     providers::Provider,
     rpc::types::trace::geth::CallFrame,
 };
 use anyhow::Context;
-use futures::stream::StreamExt;
 use tracing::{debug, warn};
 
-use crate::decoder::{
-    decode::{recover, DecodeContext, GasScope},
-    matching::MatchedSolverTrade,
-    trace::{collect_native_transfers, fetch_trace, route_gas},
-    transfer_ledger::TransferLedger,
-};
 pub(crate) use crate::decoder::{
-    registry::Registry,
-    sandwich::SandwichEvidence,
-    solvers::{attribution::AttributionSource, SolverQuote},
+    attribution::AttributionSource, registry::Registry, sandwich::SandwichEvidence,
 };
+use crate::decoder::{
+    solvers::DeclaredSwap,
+    trace::{collect_native_transfers, fetch_block_traces},
+    transfer_ledger::{SettledSwap, TransferLedger},
+};
+
+/// Which decoder recovered a record's settled amounts.
+///
+/// The `serde` names are the JSONL column values, so a variant can be renamed without moving the
+/// wire format or the Grafana queries that read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) enum DecodeSource {
+    /// The settling solver's calldata stated the terms; `amount_out` came from the recipient's
+    /// receipt.
+    #[serde(rename = "solver-calldata")]
+    DeclaredFromCalldata,
+    /// The settling solver's own event stated both amounts; nothing was recovered.
+    #[serde(rename = "solver-logs")]
+    DeclaredFromLogs,
+    /// Balance netting, entered through a known venue's address.
+    #[serde(rename = "venue-netting")]
+    VenueNetting,
+    /// Balance netting on the transaction sender's own flow.
+    #[serde(rename = "sender-netting")]
+    SenderNetting,
+    /// Balance netting on a trader found inside a settlement the sender only relayed.
+    #[serde(rename = "intent-netting")]
+    IntentNetting,
+}
+
+/// How far a record's amounts can be trusted — the decode tier, which follows from the decoder
+/// that produced them and is never chosen separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DecodeTier {
+    /// Read from the settling solver's own data: the trusted tier, and the report's default scope.
+    Declared,
+    /// Recovered by balance netting, which can leave an unaccounted fee inside the amounts. The
+    /// report excludes these unless `--include-netted`.
+    Netted,
+}
+
+impl DecodeSource {
+    /// The tier this decoder produces. Reading a solver's own data is declared; netting is not.
+    pub(crate) fn tier(self) -> DecodeTier {
+        match self {
+            Self::DeclaredFromCalldata | Self::DeclaredFromLogs => DecodeTier::Declared,
+            Self::VenueNetting | Self::SenderNetting | Self::IntentNetting => DecodeTier::Netted,
+        }
+    }
+}
+
+impl DecodeTier {
+    /// The JSONL column value for this tier. The report reads historical files as plain strings,
+    /// so it compares against this rather than a literal of its own.
+    pub(crate) fn wire(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Netted => "netted",
+        }
+    }
+}
 
 /// A decoded solver trade: what token went in, what came out.
 ///
@@ -67,55 +124,125 @@ pub(crate) struct DecodedTrade {
     pub tx_index: u64,
     pub venue: String,
     pub solver: String,
-    /// The evidence tier the solver label came from (see `solvers::attribution`). Downstream
+    /// The evidence tier the solver label came from (see `attribution`). Downstream
     /// analysis weighs low-trust tiers (`largest_call`, fallback) differently — e.g. when judging
     /// an embedded quote.
     pub solver_source: AttributionSource,
-    /// Which decoder recovered this trade (see `decode`). Once several decoders can carry a
-    /// venue's trades this measures how often each one carries a trade the others could not.
-    pub decoder: &'static str,
+    /// Which decoder recovered this trade. Once several decoders can carry a venue's trades this
+    /// measures how often each one carries a trade the others could not.
+    pub decoder: DecodeSource,
+    /// The tier `decoder` produces, written to its own column so a reader need not know the
+    /// decoder-to-tier mapping. Always `decoder.tier()` — never chosen independently.
+    pub decode: DecodeTier,
     pub sender: Address,
     pub token_in: Address,
     pub token_out: Address,
-    /// Input amount that actually entered the swap — a venue fee taken from the input (see
-    /// `venue_fee_in`) is already subtracted, so a re-solve compares like-for-like.
+    /// Input amount that entered the swap. A fee paid to a `[venue_fees]` wallet out of the input
+    /// is subtracted (see `apply_venue_fee`), so a re-solve is quoted the amount that reached the
+    /// pools.
     pub amount_in: U256,
-    /// Gross swap output — a venue fee taken from the output (see `venue_fee_out`) is added
-    /// back, so the settled amount is the full swap proceeds, comparable to Fynd's gross output.
+    /// Gross swap output. A fee paid to a `[venue_fees]` wallet out of the output is added back
+    /// (see `apply_venue_fee`) unless the recorded figure already includes it, so the settled
+    /// amount is the full swap proceeds, comparable to Fynd's gross output.
     pub amount_out: U256,
-    /// Venue fee taken from the input token before swapping (e.g. Relay's fee), in `token_in`
-    /// units. `None` when no known fee collector took a cut. Recorded for transparency; it is
-    /// already excluded from `amount_in`.
+    /// The on-chain enforced floor declared in the settling solver frame's own calldata (see
+    /// `SolverDecoder::declared` for the solvers that declare one). A settled trade cleared
+    /// this by construction; it is recorded so avoidance analysis has the same field on both
+    /// settled and reverted trades. `None` when no solver frame was found or its calldata did
+    /// not parse.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub venue_fee_in: Option<U256>,
-    /// Venue fee taken from the output token after swapping, in `token_out` units. `None` when
-    /// no known fee collector took a cut. Recorded for transparency; it is already added back into
-    /// `amount_out`.
+    pub min_amount_out: Option<U256>,
+    /// The solver's own off-chain quote, when its calldata declares one (unit-checked against
+    /// the settled amount; a quote that fails the check is dropped, keeping `min_amount_out`).
+    /// This is calldata-declared and self-reported — distinct from `amount_out`, which is what
+    /// the settlement ledger actually delivered.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub venue_fee_out: Option<U256>,
-    /// Wei cost of the gas the trader paid for the settled route (`gas_used ×
-    /// effective_gas_price`). For venue-wrapped entries (Relay, `MetaMask`) the venue's own
-    /// overhead is excluded — it is charged whichever router the venue picks, like the venue
-    /// fee. `None` when the trader did not pay the transaction's gas (intent fills, solver
-    /// rebalances) or the route's gas could not be isolated from the trace.
+    pub declared_quote: Option<U256>,
+    /// Unix timestamp of `declared_quote`, when the calldata carries one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub settled_gas: Option<U256>,
-    /// The solver's own off-chain quote for this swap, recovered from calldata (see
-    /// `solvers::embedded_quote` for the solvers that declare one). Informational — it is what
-    /// the venue compared against at decision time, as opposed to `amount_out`, which is what
-    /// execution delivered.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quote: Option<SolverQuote>,
+    pub quote_timestamp: Option<u64>,
     /// Evidence that a front-run and a back-run bracketed this trade (see
     /// `sandwich::detect`). `None` when no bracket pair was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandwich: Option<SandwichEvidence>,
 }
 
-/// Max concurrent trace requests per block. Bounds RPC load so a block
-/// with many solver trades still completes within the block time
-/// without tripping provider rate limits.
-const TRACE_CONCURRENCY: usize = 10;
+/// Put the recorded amounts back on the swap's own basis when a `[venue_fees]` wallet took a cut.
+///
+/// Fynd quotes the swap alone, so a venue's cut has to come out of the comparison on whichever
+/// side it was taken:
+///
+/// - **Input side**: the wallet is paid out of the amount the trader authorized, so the pools saw
+///   less than `amount_in` states. Subtracted, or Fynd is re-solved on more input than the swap had
+///   and its larger output reads as savings.
+/// - **Output side**: the trader's receipt is short of the gross output by the fee, while Fynd's
+///   quote is gross. Added back, unless the recorded output already contains it — see
+///   `output_already_gross`.
+///
+/// Runs for every trade with a fee-wallet match, whichever fingerprint produced the venue label.
+fn apply_venue_fee(
+    flow: &mut SettledSwap,
+    fee: &attribution::VenueFee,
+    declared: Option<&DeclaredSwap>,
+    transfer_ledger: &TransferLedger,
+    sender: Address,
+) {
+    match fee.side {
+        attribution::FeeSide::Input => {
+            flow.amount_in = flow
+                .amount_in
+                .saturating_sub(fee.amount);
+        }
+        attribution::FeeSide::Output => {
+            if output_already_gross(flow, fee, declared, transfer_ledger, sender) {
+                return;
+            }
+            flow.amount_out = flow
+                .amount_out
+                .saturating_add(fee.amount);
+        }
+    }
+}
+
+/// Whether the recorded `amount_out` already includes an output-side venue fee, in which case
+/// adding it back would count the venue's cut twice.
+///
+/// Two ways it can already be inside:
+///
+/// - The solver's own event stated the output outright, and those figures are the swap's gross
+///   result before any cut (`LiFi`'s `toAmount` is documented and verified as gross in
+///   `solvers::lifi`). Nothing was measured from a receipt, so there is nothing short by the fee.
+/// - The receipt that was measured belongs to the address that then paid the fee wallet out of it —
+///   a router named as the declared output recipient receives the gross amount and forwards the
+///   cut, so its receipt is already gross.
+fn output_already_gross(
+    flow: &SettledSwap,
+    fee: &attribution::VenueFee,
+    declared: Option<&DeclaredSwap>,
+    transfer_ledger: &TransferLedger,
+    sender: Address,
+) -> bool {
+    if declared.is_some_and(|declared| declared.amount_out.is_some()) {
+        return true;
+    }
+    let anchor = match declared {
+        Some(declared) => declared
+            .output_recipient
+            .unwrap_or(sender),
+        None => flow.tracked,
+    };
+    transfer_ledger.sent_by_address(anchor, flow.token_out) >= fee.amount
+}
+
+/// The terms the solver declared alongside the trade, or all-`None` for a netted record where no
+/// solver was read. Split out of `decode_transaction` purely to keep it under the line limit.
+fn declared_terms(declared: Option<&DeclaredSwap>) -> (Option<U256>, Option<U256>, Option<u64>) {
+    (
+        declared.and_then(|declared| declared.min_amount_out),
+        declared.and_then(|declared| declared.declared_quote),
+        declared.and_then(|declared| declared.timestamp),
+    )
+}
 
 /// Stateful trade decoder: owns the RPC provider, the chain's address
 /// registry, and the caches that are worth keeping across blocks.
@@ -147,13 +274,11 @@ impl<P: Provider> Decoder<P> {
 
     /// Decode solver trades from a block.
     ///
-    /// Fetches all receipts in one `eth_getBlockReceipts` call, then matches a
-    /// transaction two ways: its entry point (`tx.to`) is a known venue or
-    /// solver, or one of its logs was emitted by a known solver. The
-    /// second case catches filler-initiated intent fills (`UniswapX`, 1inch
-    /// limit orders) where `tx.to` is a rotating filler. Matched transactions are
-    /// traced concurrently; the trace recovers native ETH flows and attributes
-    /// the settling solver.
+    /// Fetches all receipts in one `eth_getBlockReceipts` call and all traces in one
+    /// `debug_traceBlockByNumber` call, then matches a transaction three ways: a known solver's
+    /// frame appears in its trace, its entry point (`tx.to`) is a known venue, solver, or batch
+    /// settler, or one of its logs was emitted by a known solver (filler-initiated intent fills,
+    /// where `tx.to` is a rotating filler). Everything else is skipped, never decoded.
     pub(crate) async fn decode_block(
         &mut self,
         block_number: u64,
@@ -173,55 +298,51 @@ impl<P: Provider> Decoder<P> {
             .with_context(|| format!("failed to fetch receipts for block {block_number}"))?
             .ok_or_else(|| anyhow::anyhow!("block {block_number} not found"))?;
 
-        // Paired with each receipt's position in the slice, since that position — not the
-        // transaction_index field, which the RPC may omit — is what "neighbor" means for the
-        // sandwich scan below: receipts are already in block order.
-        let matched: Vec<(usize, MatchedSolverTrade)> = receipts
-            .iter()
-            .enumerate()
-            .filter_map(|(index, receipt)| {
-                matching::select(receipt, &self.registry).map(|matched| (index, matched))
-            })
-            .collect();
+        // One debug_traceBlockByNumber call covers the block. A transaction the tracer could not
+        // process is absent from the map and costs that trade, not the block.
+        let mut roots = fetch_block_traces(&self.provider, block_number).await?;
 
-        // Per-block batch: trace every matched tx concurrently (bounded),
-        // collected in block order for deterministic output. Wall-clock cost is
-        // one receipts call plus the slowest trace wave — not the sum of every
-        // request — so a block stays well inside its block time.
-        //
-        // Failures are collected per transaction rather than aborting the wave: one transaction the
-        // RPC cannot trace costs that trade, not the whole block. Failing the block instead drops
-        // its every trade from the aggregates, and the surviving sample is selected by which
-        // transactions the RPC happened to serve.
-        let traces = futures::stream::iter(
-            matched
+        let mut trades = Vec::new();
+        // The receipt's position in the slice — not the transaction_index field, which the RPC
+        // may omit — is what "neighbor" means for the sandwich scan below: receipts are already
+        // in block order.
+        for (index, receipt) in receipts.iter().enumerate() {
+            if !receipt.status() {
+                continue;
+            }
+            let Some(entry_point) = receipt.to else { continue };
+            let known_entry = self.registry.is_known(entry_point) ||
+                self.registry
+                    .is_batch_settler(entry_point);
+            let solver_logged = receipt
+                .logs()
                 .iter()
-                .map(|(_, m)| fetch_trace(&self.provider, m.receipt.transaction_hash)),
-        )
-        .buffered(TRACE_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
+                .any(|log| self.registry.is_solver(log.address()));
 
-        let mut trades = Vec::with_capacity(matched.len());
-        for ((index, matched), trace) in matched.into_iter().zip(traces) {
-            let tx_index = matched
-                .receipt
-                .transaction_index
-                .unwrap_or(index as u64);
-            let root = match trace {
-                Ok(root) => root,
-                Err(e) => {
+            let Some(root) = roots.remove(&receipt.transaction_hash) else {
+                if known_entry || solver_logged {
                     warn!(
                         block = block_number,
-                        tx = %matched.receipt.transaction_hash,
-                        "skipping untraceable transaction: {e}"
+                        tx = %receipt.transaction_hash,
+                        "skipping transaction absent from the block trace"
                     );
                     crate::telemetry::record_untraced_transaction();
-                    continue;
                 }
+                continue;
             };
+            // Matching: a known solver frame in the trace, a known entry point, or a known
+            // solver's log. Everything else is skipped, never decoded.
+            if !known_entry &&
+                !solver_logged &&
+                trace::find_solver_frame(&root, &self.registry).is_none()
+            {
+                continue;
+            }
+            let tx_index = receipt
+                .transaction_index
+                .unwrap_or(index as u64);
             if let Some(mut trade) = self
-                .decode_transaction(matched, &root, block_number, tx_index)
+                .decode_transaction(receipt, entry_point, &root, block_number, tx_index)
                 .await
             {
                 let evidence = sandwich::detect(&receipts, index, &trade, &self.registry);
@@ -232,17 +353,17 @@ impl<P: Provider> Decoder<P> {
         Ok(trades)
     }
 
-    /// Decode one matched transaction from its trace: build the transfer ledger, run the decoders
-    /// for its entity, veto non-trades, attribute the solver, and account gas and quote.
+    /// Decode one matched transaction from its trace: build the transfer ledger, decode the swap
+    /// (declared first, netting fallback), veto non-trades, and attribute the solver and venue.
     async fn decode_transaction(
         &mut self,
-        matched: MatchedSolverTrade<'_>,
+        receipt: &AnyTransactionReceipt,
+        entry_point: Address,
         root: &CallFrame,
         block_number: u64,
         tx_index: u64,
     ) -> Option<DecodedTrade> {
         let Self { provider, registry, code_cache } = self;
-        let MatchedSolverTrade { receipt, entry_point } = matched;
         let logs = receipt.logs();
         let sender = receipt.from;
 
@@ -250,85 +371,88 @@ impl<P: Provider> Decoder<P> {
         collect_native_transfers(root, &mut native);
         let transfer_ledger = TransferLedger::from_transaction(logs, &native);
 
-        let mut ctx = DecodeContext {
-            provider,
-            registry,
-            code_cache,
-            receipt,
-            entry_point,
-            transfer_ledger: &transfer_ledger,
-            input: &root.input,
-            venue: None,
+        // The declared decode runs first: the settling solver's own data is the trusted reading.
+        // Netting is the fallback, and its records are marked. A solver that declares the
+        // transaction is not a swap at all vetoes it here, before netting gets a chance to pair
+        // its legs into a trade that never happened.
+        let read = match declared::declared_flow(root, registry, logs, &transfer_ledger, sender) {
+            Ok(read) => read,
+            Err(veto) => {
+                // Counted and logged rather than swallowed: a misparsed floor or an off-basis
+                // amount in any solver's decoder deletes real trades from here, and the operator
+                // would otherwise see only lower coverage with nothing naming the cause.
+                debug!(
+                    tx = %receipt.transaction_hash,
+                    venue = %registry.label(entry_point),
+                    ?veto,
+                    "the settling solver's own data rejected this transaction; skipping"
+                );
+                crate::telemetry::record_veto(&format!("{veto:?}"));
+                return None;
+            }
         };
-        let Some((decoder, mut flow)) = recover(&mut ctx).await else {
-            warn!(
-                tx = %receipt.transaction_hash,
-                venue = %registry.label(entry_point),
-                "no decoder recovered a trade from this transaction"
-            );
-            return None;
+        let (decoder, mut flow, declared) = if let Some((decoder, flow, declared)) = read {
+            (decoder, flow, Some(declared))
+        } else {
+            let netted = netting::fallback_flow(
+                provider,
+                code_cache,
+                registry,
+                &transfer_ledger,
+                sender,
+                entry_point,
+            )
+            .await;
+            let Some((decoder, flow)) = netted else {
+                warn!(
+                    tx = %receipt.transaction_hash,
+                    venue = %registry.label(entry_point),
+                    "no decoder recovered a trade from this transaction"
+                );
+                return None;
+            };
+            (decoder, flow, None)
         };
 
-        if let Some(veto) = veto::check(&flow, &transfer_ledger, logs, registry) {
+        // The address `amount_out` was anchored on: the payee the solver's calldata named, or the
+        // trader when it named none. The fee-on-transfer test exempts it (see `veto::check`).
+        let payee = declared
+            .as_ref()
+            .and_then(|declared| declared.output_recipient)
+            .unwrap_or(flow.tracked);
+        if let Some(veto) = veto::check(&flow, &transfer_ledger, logs, registry, payee) {
             debug!(
                 tx = %receipt.transaction_hash,
                 venue = %registry.label(entry_point),
                 ?veto,
                 "decoded flow is not a comparable trade; skipping"
             );
+            crate::telemetry::record_veto(&format!("{veto:?}"));
             return None;
         }
 
-        // A venue fingerprint (owning trader, CoW appData tag, fee wallet, or integrator tag — see
-        // `venue_attribution`) overrides the entry-point label, backing any venue fee out before
-        // the quote check reads the grossed output. The appData tag is read from a batch settler's
-        // calldata; other transactions carry none.
-        let integrator = solvers::integrator(logs);
-        let app_data = intents::venue_tag(registry, entry_point, &root.input);
-        let venue = venue_attribution::attribute(
-            registry,
-            &mut flow,
-            &transfer_ledger,
-            integrator.as_deref(),
-            app_data,
-        )
-        .unwrap_or_else(|| registry.label(entry_point));
+        let attribution = attribution::solver(root, entry_point, sender, registry);
 
-        let attribution = solvers::attribution::attribute(
-            flow.solver_override.take(),
-            root,
-            entry_point,
-            sender,
-            registry,
-        );
-
-        // A frontend routing through the solver can take a cut of the output without owning a
-        // venue section, declaring its fee recipients in the solver's own calldata. Backed out
-        // here so the settled output is gross, like Fynd's re-solve; a no-op when a venue
-        // fingerprint already accounted an output fee.
-        if let Some(fee) = solvers::declared_output_fee(
-            &attribution.solver,
-            &root.input,
-            &transfer_ledger,
-            flow.swap.token_out,
-        ) {
-            flow.gross_output_fee(fee);
+        // A venue fingerprint overrides the entry-point label (see `attribution`). Two of the four
+        // are read from the settling solver's own data, dispatched through its address-book entry
+        // so this file names no solver; the other two are pure address-book lookups.
+        let tag = attribution
+            .address
+            .and_then(|address| registry.solver(address))
+            .and_then(|solver| {
+                solver
+                    .decoder
+                    .venue_fingerprint(&root.input, logs)
+            });
+        let fee = attribution::venue_fee(registry, &transfer_ledger, flow.token_in, flow.token_out);
+        let venue = attribution::venue(registry, &flow, tag.as_ref(), fee.as_ref())
+            .unwrap_or_else(|| registry.label(entry_point));
+        if let Some(fee) = &fee {
+            apply_venue_fee(&mut flow, fee, declared.as_ref(), &transfer_ledger, sender);
         }
 
-        // Gas the trader paid for the settled route, as a wei cost. The flow's gas scope says
-        // which gas that is — see `GasScope`.
-        let settled_gas = match flow.gas_scope {
-            GasScope::WholeTransaction => Some(U256::from(receipt.gas_used)),
-            GasScope::SolverFrame => route_gas(root, registry),
-            GasScope::NotCharged => None,
-        }
-        .map(|units| units * U256::from(receipt.effective_gas_price));
-
-        // The solver's off-chain quote, when its calldata declares one. Dispatched on the
-        // attributed solver so a lookalike blob from another router cannot masquerade as a
-        // quote, and unit-checked against the settled amount (quotes are self-reported).
-        let quote = solvers::embedded_quote(&attribution.solver, &root.input, flow.swap.amount_in)
-            .filter(|quote| solvers::plausible_quote(quote, flow.swap.amount_out));
+        let (min_amount_out, declared_quote, quote_timestamp) = declared_terms(declared.as_ref());
+        let decode = decoder.tier();
 
         Some(DecodedTrade {
             tx_hash: receipt.transaction_hash,
@@ -338,15 +462,15 @@ impl<P: Provider> Decoder<P> {
             solver: attribution.solver,
             solver_source: attribution.source,
             decoder,
+            decode,
             sender: flow.tracked,
-            token_in: flow.swap.token_in,
-            token_out: flow.swap.token_out,
-            amount_in: flow.swap.amount_in,
-            amount_out: flow.swap.amount_out,
-            venue_fee_in: flow.venue_fee_in,
-            venue_fee_out: flow.venue_fee_out,
-            settled_gas,
-            quote,
+            token_in: flow.token_in,
+            token_out: flow.token_out,
+            amount_in: flow.amount_in,
+            amount_out: flow.amount_out,
+            min_amount_out,
+            declared_quote,
+            quote_timestamp,
             // The full receipts slice isn't available here (this fn only sees the one matched
             // transaction); the caller (`decode_block`) fills this in once decoding succeeds.
             sandwich: None,
@@ -368,6 +492,159 @@ mod tests {
     /// matches on its entry point alone.
     const ONEINCH: Address = address!("0x111111125421ca6dc452d289314280a0f8842a65");
 
+    /// Phantom's 85 bps cut of the buy token, as `attribution` reports it.
+    fn output_fee(amount: u64) -> attribution::VenueFee {
+        attribution::VenueFee {
+            venue: "phantom".to_string(),
+            side: attribution::FeeSide::Output,
+            amount: U256::from(amount),
+        }
+    }
+
+    #[test]
+    fn test_apply_venue_fee_output_side_netted() {
+        // The trader's receipt is short of the gross output by the fee, and Fynd's quote is gross.
+        let user = addr(1);
+        let pool = addr(0x50);
+        let phantom = addr(0x99);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+        let logs = vec![
+            make_transfer_log(token_out, pool, user, U256::from(9915)),
+            make_transfer_log(token_out, pool, phantom, U256::from(85)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let mut flow = SettledSwap {
+            tracked: user,
+            token_in,
+            amount_in: U256::from(1000),
+            token_out,
+            amount_out: U256::from(9915),
+        };
+
+        apply_venue_fee(&mut flow, &output_fee(85), None, &ledger, user);
+        assert_eq!(flow.amount_out, U256::from(10_000));
+    }
+
+    #[test]
+    fn test_apply_venue_fee_output_side_event_stated() {
+        // An event states the swap's gross output (LiFi's `toAmount`), so nothing was measured
+        // from a receipt and nothing is short by the fee. Adding it would count the cut twice.
+        let user = addr(1);
+        let pool = addr(0x50);
+        let phantom = addr(0x99);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+        let logs = vec![
+            make_transfer_log(token_out, pool, user, U256::from(9915)),
+            make_transfer_log(token_out, pool, phantom, U256::from(85)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let declared = DeclaredSwap::from_event(
+            user,
+            token_in,
+            U256::from(1000),
+            token_out,
+            U256::from(10_000),
+        );
+        let mut flow = SettledSwap {
+            tracked: user,
+            token_in,
+            amount_in: U256::from(1000),
+            token_out,
+            amount_out: U256::from(10_000),
+        };
+
+        apply_venue_fee(&mut flow, &output_fee(85), Some(&declared), &ledger, user);
+        assert_eq!(flow.amount_out, U256::from(10_000));
+    }
+
+    #[test]
+    fn test_apply_venue_fee_output_side_router_anchor() {
+        // The calldata named the router as the output recipient: it received the gross 10000 and
+        // paid the fee wallet out of it, so the receipt already contains the cut.
+        let user = addr(1);
+        let pool = addr(0x50);
+        let router = addr(0x60);
+        let phantom = addr(0x99);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+        let logs = vec![
+            make_transfer_log(token_out, pool, router, U256::from(10_000)),
+            make_transfer_log(token_out, router, phantom, U256::from(85)),
+            make_transfer_log(token_out, router, user, U256::from(9915)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let declared =
+            DeclaredSwap::from_calldata(token_in, token_out, U256::from(1000), U256::from(9000))
+                .with_recipient(router);
+        let mut flow = SettledSwap {
+            tracked: user,
+            token_in,
+            amount_in: U256::from(1000),
+            token_out,
+            amount_out: U256::from(10_000),
+        };
+
+        apply_venue_fee(&mut flow, &output_fee(85), Some(&declared), &ledger, user);
+        assert_eq!(flow.amount_out, U256::from(10_000));
+    }
+
+    #[test]
+    fn test_apply_venue_fee_input_side() {
+        // The pools saw 9905 of the 10000 the trader authorized, so the re-solve is quoted 9905.
+        let user = addr(1);
+        let coinbase = addr(0x99);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+        let logs = vec![make_transfer_log(token_in, user, coinbase, U256::from(95))];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let fee = attribution::VenueFee {
+            venue: "coinbase".to_string(),
+            side: attribution::FeeSide::Input,
+            amount: U256::from(95),
+        };
+        let mut flow = SettledSwap {
+            tracked: user,
+            token_in,
+            amount_in: U256::from(10_000),
+            token_out,
+            amount_out: U256::from(2000),
+        };
+
+        apply_venue_fee(&mut flow, &fee, None, &ledger, user);
+        assert_eq!(flow.amount_in, U256::from(9905));
+        assert_eq!(flow.amount_out, U256::from(2000));
+    }
+
+    #[test]
+    fn test_decode_column_wire_strings() {
+        // These strings are the JSONL columns the Grafana dashboard and the offline report read,
+        // and historical files carry them. A variant rename must not move them, so the mapping is
+        // pinned here rather than left to the serde attributes alone.
+        let source = |value: DecodeSource| serde_json::to_string(&value).unwrap();
+        assert_eq!(source(DecodeSource::DeclaredFromCalldata), r#""solver-calldata""#);
+        assert_eq!(source(DecodeSource::DeclaredFromLogs), r#""solver-logs""#);
+        assert_eq!(source(DecodeSource::VenueNetting), r#""venue-netting""#);
+        assert_eq!(source(DecodeSource::SenderNetting), r#""sender-netting""#);
+        assert_eq!(source(DecodeSource::IntentNetting), r#""intent-netting""#);
+
+        assert_eq!(serde_json::to_string(&DecodeTier::Declared).unwrap(), r#""declared""#);
+        assert_eq!(serde_json::to_string(&DecodeTier::Netted).unwrap(), r#""netted""#);
+        // `wire` is what the report compares historical strings against, so it must agree with
+        // what serde writes.
+        assert_eq!(DecodeTier::Declared.wire(), "declared");
+        assert_eq!(DecodeTier::Netted.wire(), "netted");
+    }
+
+    #[test]
+    fn test_decode_source_tier() {
+        for source in [DecodeSource::DeclaredFromCalldata, DecodeSource::DeclaredFromLogs] {
+            assert_eq!(source.tier(), DecodeTier::Declared, "{source:?}");
+        }
+        for source in
+            [DecodeSource::VenueNetting, DecodeSource::SenderNetting, DecodeSource::IntentNetting]
+        {
+            assert_eq!(source.tier(), DecodeTier::Netted, "{source:?}");
+        }
+    }
+
     /// A sender-netting swap through `ONEINCH`: `sender` pays one token and is paid another.
     fn swap_receipt(hash: TxHash, sender: Address) -> AnyTransactionReceipt {
         let pool = addr(0x50);
@@ -384,13 +661,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_untraceable_transaction_does_not_drop_the_block() {
+        use alloy::rpc::types::trace::{common::TraceResult, geth::GethTrace};
+
         let asserter = Asserter::new();
         asserter.push_success(&vec![
             swap_receipt(tx_hash(1), addr(1)),
             swap_receipt(tx_hash(2), addr(2)),
         ]);
-        asserter.push_failure_msg("debug_traceTransaction unavailable");
-        asserter.push_success(&frame("CALL", addr(2), ONEINCH, 0));
+        // The block trace answers in one call: the first transaction failed inside the tracer,
+        // the second traced fine.
+        asserter.push_success(&vec![
+            TraceResult::Error { error: "tracer aborted".to_string(), tx_hash: Some(tx_hash(1)) },
+            TraceResult::Success {
+                result: GethTrace::CallTracer(frame("CALL", addr(2), ONEINCH, 0)),
+                tx_hash: Some(tx_hash(2)),
+            },
+        ]);
 
         let mut decoder = Decoder::new(
             ProviderBuilder::default().connect_mocked_client(asserter),
@@ -404,5 +690,80 @@ mod tests {
         // Only the untraceable transaction is lost; before, it took the whole block with it.
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].tx_hash, tx_hash(2));
+    }
+
+    #[tokio::test]
+    async fn test_venue_fingerprint_on_a_venue_wrapped_entry() {
+        use alloy::{
+            primitives::B256,
+            rpc::types::{
+                trace::{common::TraceResult, geth::GethTrace},
+                Log,
+            },
+            sol_types::SolEvent,
+        };
+
+        use crate::decoder::solvers::lifi::LiFiGenericSwapCompleted;
+
+        // An Infinex swap through the shared LiFi Diamond: the venue is named only by the
+        // integrator tag in LiFi's own event. The fixture names LiFi because it needs concrete
+        // bytes; the decode path under test does not — it asks whatever decoder the Diamond's
+        // address-book entry carries. So this asserts the dispatch, not the parse (`lifi.rs`
+        // tests that).
+        let lifi = address!("0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae");
+        let trader = addr(1);
+        let pool = addr(0x50);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+
+        let swap_event = LiFiGenericSwapCompleted {
+            transactionId: B256::ZERO,
+            integrator: "infinex".to_string(),
+            referrer: String::new(),
+            receiver: trader,
+            fromAssetId: token_in,
+            toAssetId: token_out,
+            fromAmount: U256::from(1_000),
+            toAmount: U256::from(2_000),
+        };
+        let log_data = swap_event.encode_log_data();
+        let lifi_log = Log {
+            inner: alloy::primitives::Log::new_unchecked(
+                lifi,
+                log_data.topics().to_vec(),
+                log_data.data.clone(),
+            ),
+            ..Default::default()
+        };
+
+        let asserter = Asserter::new();
+        asserter.push_success(&vec![receipt(
+            tx_hash(1),
+            trader,
+            Some(lifi),
+            vec![
+                make_transfer_log(token_in, trader, pool, U256::from(1_000)),
+                make_transfer_log(token_out, pool, trader, U256::from(2_000)),
+                lifi_log,
+            ],
+        )]);
+        let traces: Vec<TraceResult<GethTrace, String>> = vec![TraceResult::Success {
+            result: GethTrace::CallTracer(frame("CALL", trader, lifi, 0)),
+            tx_hash: Some(tx_hash(1)),
+        }];
+        asserter.push_success(&traces);
+
+        let mut decoder = Decoder::new(
+            ProviderBuilder::default().connect_mocked_client(asserter),
+            Registry::ethereum(),
+        );
+        let trades = decoder
+            .decode_block(21_000_000)
+            .await
+            .unwrap();
+
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].solver, "lifi");
+        // Without the fingerprint dispatch this reads "lifi" — the router, not the frontend.
+        assert_eq!(trades[0].venue, "infinex");
     }
 }
