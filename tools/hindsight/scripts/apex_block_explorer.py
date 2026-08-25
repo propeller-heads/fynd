@@ -2,21 +2,25 @@
 """Generate per-block "Turbine explorer"-style pages for the APEX batching experiment.
 
 Reads a run's `apex-orders.jsonl`, `apex-blocks.jsonl`, and `inputs/apex_input_<N>.json`
-dumps, and writes one self-contained `explorer/block_<N>.html` per block into the data
-dir — the target of the block-number links in the main report.
+dumps, and writes one `explorer/block_<N>.html` per block into the data dir — the target
+of the block-number links in the main report. The pages share two scripts written
+alongside them, `token_flow.js` and `vis-network.min.js` (see copy_assets).
 
 Each page presents the block's APEX batch the way the Turbine settlement explorer
 (propellerswap-frontend `/explore`) presents a settlement: a dark carbon canvas with
 frosted summary/detail cards, an orders list per limit-price variant, the batch's AMM
-legs, and the batcher's top-ups. The palette, type, and card treatment mirror that app
-(carbon #1D2021, cloud text, cloud-100 blocks with 1px-gap dividers, aquamarine/folly
-accents, the explorer's per-protocol colors) so the two read the same.
+legs, the batcher's top-ups, and the same vis-network Token Flow graph. The palette,
+type, and card treatment mirror that app (carbon #1D2021, cloud text, cloud-100 blocks
+with 1px-gap dividers, aquamarine/folly accents, the explorer's per-protocol colors) so
+the two read the same.
 
 Usage: apex_block_explorer.py <data-dir> [...]
 """
 
 import html
 import json
+import os
+import shutil
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -53,7 +57,9 @@ CSS = """
 body {
   background: #1D2021; color: #F5F5F5; min-height: 100vh;
   font: 14px/1.45 "Geist Variable", -apple-system, "Segoe UI", Roboto, sans-serif;
-  padding: 24px; max-width: 1180px; margin-inline: auto;
+  /* Wide enough that the orders table fits beside the summary column without
+     scrolling (its natural width tops out around 1100px). */
+  padding: 24px; max-width: 1560px; margin-inline: auto;
   font-variant-numeric: tabular-nums;
 }
 a { color: #F5F5F5; text-decoration: none; }
@@ -62,7 +68,9 @@ a:hover { color: #00FFBB; }
 .top h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
 .top .back { color: rgba(245,245,245,0.64); font-size: 13px; }
 .top .ext { color: rgba(245,245,245,0.64); font-size: 13px; }
-.grid { display: grid; grid-template-columns: 340px 1fr; gap: 16px; align-items: start; }
+/* minmax(0, …) so a wide table scrolls inside .scroll instead of stretching the
+   column past the page and leaving the layout lopsided. */
+.grid { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; align-items: start; }
 @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
 .rows { display: flex; flex-direction: column; gap: 1px; border-radius: 12px; overflow: hidden; }
 .block { background: rgba(245,245,245,0.06); backdrop-filter: blur(20px); padding: 10px 12px; }
@@ -86,6 +94,15 @@ th { color: rgba(245,245,245,0.64); font-weight: 500; font-size: 12px; }
 tbody tr { border-top: 1px solid #1D2021; background: rgba(245,245,245,0.06); }
 .card { border-radius: 12px; overflow: hidden; background: rgba(245,245,245,0.03); }
 .card .heading { padding: 12px 12px 8px; }
+.ctl { float: right; font-size: 12px; font-weight: 400; color: rgba(245,245,245,0.64); cursor: pointer; }
+.flowgraph { position: relative; height: 460px; }
+/* Strip vis-network's default tooltip chrome so only the styled element shows. */
+div.vis-tooltip {
+  background: transparent !important; border: none !important; border-radius: 0 !important;
+  padding: 0 !important; box-shadow: none !important; color: inherit !important;
+  font-family: inherit !important;
+}
+div.vis-network:focus, div.vis-network canvas:focus { outline: none !important; }
 .scroll { overflow-x: auto; }
 .pill {
   display: inline-block; padding: 2px 9px; border-radius: 9999px; font-size: 11.5px;
@@ -106,6 +123,15 @@ def esc(x):
 
 def short(addr_or_hash: str, n: int = 8) -> str:
     return addr_or_hash[: n + 2] + "…" if len(addr_or_hash) > n + 4 else addr_or_hash
+
+
+def venue_cell(venue: str) -> str:
+    """An unattributed venue is the entry point's raw address; shorten it so one unknown
+    venue can't widen the whole orders table."""
+    if venue.startswith("0x") and len(venue) >= 40:
+        return (f'<a class="mono" href="https://etherscan.io/address/{esc(venue)}"'
+                f' target="_blank" rel="noopener" title="{esc(venue)}">{short(venue)}</a>')
+    return esc(venue)
 
 
 def display_symbol(symbol: str) -> str:
@@ -239,7 +265,7 @@ def orders_table(orders: list[dict], s1_by_id: dict) -> str:
             "<tr>"
             f'<td class="l"><a class="mono" href="https://etherscan.io/tx/{esc(rec["tx_hash"])}"'
             f' target="_blank" rel="noopener" title="{esc(rec["tx_hash"])}">{short(rec["tx_hash"])}</a></td>'
-            f'<td class="l">{esc(rec["venue"])}</td>'
+            f'<td class="l">{venue_cell(rec["venue"])}</td>'
             f'<td class="l">{pair}</td>'
             f'<td class="l">{status_pill(rec["status"])}</td>'
             f'<td>{fmt_amount(rec["amount_in"], rec["sell_decimals"])}</td>'
@@ -304,146 +330,84 @@ def prices_rows(meta: dict) -> str:
     )
 
 
-import math
+def token_info(address: str, meta: dict, symbols: dict) -> tuple[str, int | None]:
+    address = address.lower()
+    symbol, decimals = meta["tokens"].get(address, (None, None))
+    return display_symbol(symbols.get(address) or symbol or address), decimals
 
 
-def flow_edges(s2_orders: list[dict], pool_volumes: list[dict], meta: dict,
-               symbols: dict) -> list[dict]:
-    """The block's token flows as directed edges, sold token -> bought token.
+def flow_graph(s2_orders: list[dict], pool_volumes: list[dict], meta: dict,
+               symbols: dict) -> dict:
+    """The block's token flows in the frontend's TokenGraph shape (analyzer.types.ts).
 
-    User orders (cleared + partial incl. the batcher top-up) flow from the token the user
-    sold to the token they received; AMM legs flow from the token the batch sold into the
-    pool (the record's `bought` side) to the token the pool paid out (`sold`)."""
+    An edge points from the token its hub sells to the token it buys, the convention
+    token_flow.js renders: a user sells `sell_token` and buys `buy_token`, while a pool
+    sells what it pays out (the clearing's `sell_token`) and buys what the batch feeds
+    into it (`buy_token`) — so a pool arrow runs opposite the user flow it services."""
+    nodes: dict[str, dict] = {}
     edges = []
+
+    def node(address: str, symbol: str, decimals: int | None) -> str:
+        address = address.lower()
+        entry = nodes.setdefault(
+            address,
+            {"id": address, "address": address, "symbol": symbol, "decimals": decimals},
+        )
+        if entry["decimals"] is None:
+            entry["decimals"] = decimals
+        return address
+
     for rec in s2_orders:
         if rec["status"] not in ("cleared", "partial"):
             continue
-        out_raw = user_out_raw(rec)
-        edges.append({
-            "src": display_symbol(rec["sell_symbol"]),
-            "dst": display_symbol(rec["buy_symbol"]),
-            "kind": "order",
-            "label": rec["venue"],
-            "eth": rec["amount_in_eth"],
-            "color": "#00FFBB",
-            "tip": (f'{rec["venue"]} order {short(rec["tx_hash"])}: '
-                    f'{fmt_amount(rec["amount_in"], rec["sell_decimals"])} '
-                    f'{display_symbol(rec["sell_symbol"])} -> '
-                    f'{fmt_amount(str(out_raw), rec["buy_decimals"])} '
-                    f'{display_symbol(rec["buy_symbol"])}'
-                    + (" (incl. batcher top-up)" if rec["status"] == "partial" else "")),
-        })
-    for vol in pool_volumes:
-        proto = proto_of(vol["address"], meta)
-        src = display_symbol(symbols.get(vol["buy_token"].lower(), vol["buy_token"]))
-        dst = display_symbol(symbols.get(vol["sell_token"].lower(), vol["sell_token"]))
+        src = node(rec["sell_token"], display_symbol(rec["sell_symbol"]), rec["sell_decimals"])
+        dst = node(rec["buy_token"], display_symbol(rec["buy_symbol"]), rec["buy_decimals"])
         edges.append({
             "src": src,
             "dst": dst,
-            "kind": "pool",
-            "label": proto,
-            "eth": vol.get("bought_eth", 0.0),
-            "color": PROTO_COLORS.get(proto, UNKNOWN_COLOR),
-            "tip": (f'{proto} pool {short(vol["address"])}: batch sold '
-                    f'{fmt_eth(vol.get("bought_eth", 0.0))} ETH of {src}, received '
-                    f'{fmt_eth(vol.get("sold_eth", 0.0))} ETH of {dst}'),
+            "hub": rec["tx_hash"],
+            "kind": "user",
+            "protocol": "user",
+            "src_amount": rec["amount_in"],
+            "dst_amount": str(user_out_raw(rec)),
+            "note": f'{rec["venue"]} · {fmt_eth(rec["amount_in_eth"])} ETH in'
+                    + (" · incl. batcher top-up" if rec["status"] == "partial" else ""),
         })
-    return edges
+    for vol in pool_volumes:
+        proto = proto_of(vol["address"], meta)
+        sell_symbol, sell_decimals = token_info(vol["sell_token"], meta, symbols)
+        buy_symbol, buy_decimals = token_info(vol["buy_token"], meta, symbols)
+        edges.append({
+            "src": node(vol["sell_token"], sell_symbol, sell_decimals),
+            "dst": node(vol["buy_token"], buy_symbol, buy_decimals),
+            "hub": vol["address"],
+            "kind": "pool",
+            "protocol": proto,
+            "src_amount": vol["sold"],
+            "dst_amount": vol["bought"],
+            "note": f'paid out {fmt_eth(vol.get("sold_eth", 0.0))} ETH · '
+                    f'took in {fmt_eth(vol.get("bought_eth", 0.0))} ETH',
+        })
+    return {"nodes": list(nodes.values()), "edges": edges}
 
 
-def _bezier_point(p0, c, p1, t):
-    mt = 1 - t
-    return (mt * mt * p0[0] + 2 * mt * t * c[0] + t * t * p1[0],
-            mt * mt * p0[1] + 2 * mt * t * c[1] + t * t * p1[1])
-
-
-def flow_graph_svg(edges: list[dict]) -> str:
-    """A static token-flow graph: tokens on a circle, one labeled curved arrow per flow —
-    the frontend Token Flow tab's "tokens" layout, rendered as dependency-free inline SVG."""
-    if not edges:
-        return '<div class="note">No executed flows in this batch.</div>'
-    tokens = []
-    for e in edges:
-        for t in (e["src"], e["dst"]):
-            if t not in tokens:
-                tokens.append(t)
-    volume = {t: 0.0 for t in tokens}
-    for e in edges:
-        volume[e["src"]] += e["eth"]
-        volume[e["dst"]] += e["eth"]
-    vmax = max(volume.values()) or 1.0
-
-    n = len(tokens)
-    ring_r = max(115.0, 13.0 * n)
-    cx, cy = 390.0, ring_r + 65.0
-    width, height = 780.0, 2 * (ring_r + 65.0)
-    pos = {}
-    for i, t in enumerate(tokens):
-        a = 2 * math.pi * i / n - math.pi / 2
-        pos[t] = (cx + ring_r * math.cos(a), cy + ring_r * math.sin(a))
-    radius = {t: 13.0 + 9.0 * math.sqrt(volume[t] / vmax) for t in tokens}
-
-    # Curvature: edges sharing an unordered token pair fan out so none overlap; the two
-    # directions bow to opposite sides.
-    pair_ix = {}
-    parts = []
-    for e in sorted(edges, key=lambda x: -x["eth"]):
-        p0, p1 = pos[e["src"]], pos[e["dst"]]
-        key = tuple(sorted((e["src"], e["dst"])))
-        k = pair_ix.get(key, 0)
-        pair_ix[key] = k + 1
-        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
-        dist = math.hypot(dx, dy) or 1.0
-        # Perpendicular unit vector; flip for the reverse direction so A->B and B->A split.
-        px, py = -dy / dist, dx / dist
-        if (e["src"], e["dst"]) != key:
-            px, py = -px, -py
-        bow = 30.0 + 22.0 * k
-        c = ((p0[0] + p1[0]) / 2 + px * bow, (p0[1] + p1[1]) / 2 + py * bow)
-        # Trim endpoints to the node boundaries (approximate along chord-to-control dirs).
-        def trim(point, toward, r):
-            tx, ty = toward[0] - point[0], toward[1] - point[1]
-            d = math.hypot(tx, ty) or 1.0
-            return (point[0] + tx / d * r, point[1] + ty / d * r)
-        a0 = trim(p0, c, radius[e["src"]] + 3)
-        a1 = trim(p1, c, radius[e["dst"]] + 3)
-        # Arrowhead at the target end, aligned with the curve tangent.
-        tangx, tangy = a1[0] - c[0], a1[1] - c[1]
-        td = math.hypot(tangx, tangy) or 1.0
-        ux, uy = tangx / td, tangy / td
-        wx, wy = -uy, ux
-        tip = a1
-        base = (tip[0] - ux * 9, tip[1] - uy * 9)
-        head = (f'M{tip[0]:.1f},{tip[1]:.1f} '
-                f'L{base[0] + wx * 4:.1f},{base[1] + wy * 4:.1f} '
-                f'L{base[0] - wx * 4:.1f},{base[1] - wy * 4:.1f} Z')
-        dash = ' stroke-dasharray="7 5"' if e["kind"] == "order" else ""
-        stroke_w = 2.6 if e["kind"] == "order" else 2.0
-        mid = _bezier_point(a0, c, a1, 0.5)
-        label = f'{e["label"]} · {fmt_eth(e["eth"])}Ξ'
-        parts.append(
-            f'<g><title>{esc(e["tip"])}</title>'
-            f'<path d="M{a0[0]:.1f},{a0[1]:.1f} Q{c[0]:.1f},{c[1]:.1f} {a1[0]:.1f},{a1[1]:.1f}"'
-            f' fill="none" stroke="{e["color"]}" stroke-width="{stroke_w}"{dash} opacity="0.85"/>'
-            f'<path d="{head}" fill="{e["color"]}"/>'
-            f'<text x="{mid[0]:.1f}" y="{mid[1] - 6:.1f}" text-anchor="middle"'
-            f' font-size="10.5" fill="rgba(245,245,245,0.64)">{esc(label)}</text></g>'
+def flow_graph_card(name: str, graph: dict) -> str:
+    """The Token Flow card: a canvas token_flow.js draws into when the tab is shown."""
+    if not graph["edges"]:
+        body = '<div class="note">No executed flows in this batch.</div>'
+    else:
+        body = (
+            f'<div class="flowgraph" id="flow-{name}"></div>'
+            '<div class="note">An arrow points from the token its hub sells to the token it '
+            'buys: users (folly) sell into the batch, pools (colored by protocol) sell what '
+            'they pay out — so a pool arrow runs opposite the user flow it services. Drag, '
+            'zoom and hover for amounts.</div>'
         )
-    for t in tokens:
-        x, y = pos[t]
-        r = radius[t]
-        parts.append(
-            f'<g><title>{esc(t)}: {fmt_eth(volume[t])} ETH total flow</title>'
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" fill="rgba(245,245,245,0.14)"'
-            f' stroke="#1D2021" stroke-width="2"/>'
-            f'<text x="{x:.1f}" y="{y + r + 14:.1f}" text-anchor="middle" font-size="11.5"'
-            f' font-weight="500" fill="#F5F5F5">{esc(t)}</text></g>'
-        )
-    legend = ('<div class="note" style="padding:6px 12px 10px">dashed aquamarine = user order '
-              '(sold → bought); solid = AMM leg colored by protocol (batch sold → received). '
-              'Hover for amounts.</div>')
-    return (f'<div style="overflow-x:auto"><svg viewBox="0 0 {width:.0f} {height:.0f}"'
-            f' width="100%" style="min-width:640px">{"".join(parts)}</svg></div>' + legend)
+    return (
+        '<div class="card section"><div class="heading">Token flow'
+        f'<label class="ctl"><input type="checkbox" data-flow-amounts="{name}"> amounts</label>'
+        f'</div>{body}</div>'
+    )
 
 
 
@@ -497,6 +461,7 @@ def variant_section(name: str, s2_orders: list[dict], s1_by_id: dict, block_rec:
         for k, v in details
     )
     pool_volumes = block_rec["s2_pool_volumes"] if block_rec else []
+    graph = flow_graph(s2_orders, pool_volumes, meta, symbols)
     return f"""
 <div class="variant" id="variant-{name}">
   <div class="grid">
@@ -513,14 +478,15 @@ def variant_section(name: str, s2_orders: list[dict], s1_by_id: dict, block_rec:
       <div class="card"><div class="heading">Orders</div>{orders_table(s2_orders, s1_by_id)}</div>
       <div class="card section"><div class="heading">AMM legs (S2 pool executions)</div>
       {pools_table(pool_volumes, meta, symbols)}</div>
-      <div class="card section"><div class="heading">Token flow</div>
-      {flow_graph_svg(flow_edges(s2_orders, pool_volumes, meta, symbols))}</div>
+      {flow_graph_card(name, graph)}
     </div>
   </div>
-</div>"""
+</div>
+<script>FLOW_DATA[{json.dumps(name)}] = {json.dumps(graph)};</script>"""
 
 
-def render_block(block: int, orders: list[dict], block_recs: dict, meta: dict) -> str:
+def render_block(block: int, orders: list[dict], block_recs: dict, meta: dict,
+                 vis_src: str) -> str:
     order = {"permissive": 0, "anchored": 1, "user_limit": 2}
     variants = sorted(
         {r["variant"] for r in orders} | set(block_recs),
@@ -541,7 +507,7 @@ def render_block(block: int, orders: list[dict], block_recs: dict, meta: dict) -
         sections.append(variant_section(name, s2, s1_by_id, block_recs.get(name), meta, symbols))
         tabs.append(
             f'<button data-v="{name}" class="{"active" if i == 0 else ""}"'
-            f' onclick="show(\'{name}\', this)">{esc(name)}</button>'
+            f' onclick="location.hash = \'{name}\'; show(\'{name}\')">{esc(name)}</button>'
         )
     tab_html = f'<div class="tabs">{"".join(tabs)}</div>' if len(variants) > 1 else ""
 
@@ -550,6 +516,9 @@ def render_block(block: int, orders: list[dict], block_recs: dict, meta: dict) -
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>APEX batch {block}</title>
 <style>{CSS}</style>
+<script src="{vis_src}"></script>
+<script src="token_flow.js"></script>
+<script>const FLOW_DATA = {{}}, FLOWS = {{}};</script>
 <body>
 <div class="top">
   <a class="back" href="../report.html">← report</a>
@@ -559,15 +528,54 @@ def render_block(block: int, orders: list[dict], block_recs: dict, meta: dict) -
 {tab_html}
 {"".join(sections)}
 <script>
-function show(name, btn) {{
+function show(name) {{
   document.querySelectorAll('.variant').forEach(el => el.style.display = 'none');
   document.getElementById('variant-' + name).style.display = '';
-  document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.v === name));
+  initFlow(name);
 }}
-document.querySelectorAll('.variant').forEach((el, i) => {{ if (i > 0) el.style.display = 'none'; }});
+// vis-network measures its container to lay the graph out, so a variant's graph is
+// only built once its tab is on screen.
+function initFlow(name) {{
+  const el = document.getElementById('flow-' + name);
+  if (!el || FLOWS[name]) return;
+  const flow = renderTokenFlow(el, FLOW_DATA[name]);
+  FLOWS[name] = flow;
+  const amounts = document.querySelector('[data-flow-amounts="' + name + '"]');
+  if (amounts) amounts.addEventListener('change', () => flow.setAmounts(amounts.checked));
+}}
+// The report links here with the variant it was clicked in as the fragment.
+function showRequested() {{
+  const wanted = decodeURIComponent(location.hash.slice(1));
+  const first = document.querySelector('.variant').id.slice('variant-'.length);
+  show(document.getElementById('variant-' + wanted) ? wanted : first);
+}}
+window.addEventListener('hashchange', showRequested);
+showRequested();
 </script>
 """
+
+
+def copy_assets(out_dir: Path) -> str:
+    """Put the graph's scripts next to the pages, and return the vis-network script src.
+
+    vis-network itself isn't vendored here: it is taken from a propellerswap-frontend
+    checkout so the pages stay pinned to the same version the frontend renders with,
+    and falls back to the CDN when that checkout isn't around."""
+    shutil.copyfile(Path(__file__).with_name("token_flow.js"), out_dir / "token_flow.js")
+
+    bundle = "vis-network/standalone/umd/vis-network.min.js"
+    candidates = [Path(p) for p in (os.environ.get("VIS_NETWORK_JS"),) if p]
+    candidates += [
+        repo / "propellerswap-frontend" / "node_modules" / bundle
+        for repo in (Path(__file__).resolve().parents[3].parent, Path.home() / "repos")
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            shutil.copyfile(candidate, out_dir / "vis-network.min.js")
+            return "vis-network.min.js"
+    print(f"{out_dir}: no local vis-network bundle found, pages will load it from the CDN")
+    return f"https://unpkg.com/{bundle.replace('/', '@10.1.0/', 1)}"
 
 
 def generate(data_dir: Path) -> int:
@@ -578,6 +586,7 @@ def generate(data_dir: Path) -> int:
         return 0
     out_dir = data_dir / "explorer"
     out_dir.mkdir(exist_ok=True)
+    vis_src = copy_assets(out_dir)
 
     orders_by_block = defaultdict(list)
     for rec in orders:
@@ -589,7 +598,9 @@ def generate(data_dir: Path) -> int:
     all_blocks = set(orders_by_block) | set(recs_by_block)
     for block in all_blocks:
         meta = load_input_dump(data_dir, block)
-        page = render_block(block, orders_by_block.get(block, []), recs_by_block.get(block, {}), meta)
+        page = render_block(
+            block, orders_by_block.get(block, []), recs_by_block.get(block, {}), meta, vis_src
+        )
         (out_dir / f"block_{block}.html").write_text(page)
     return len(all_blocks)
 
