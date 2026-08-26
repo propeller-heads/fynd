@@ -2420,13 +2420,18 @@ mod tests {
         assert!(msg.contains("ethereum"), "error should list supported slugs: {msg}");
     }
 
-    #[test]
-    fn build_quote_only_derives_chain_id_from_chain() {
+    #[rstest::rstest]
+    #[case::base("base", 8453)]
+    #[case::robinhood("robinhood", 4663)]
+    fn build_quote_only_derives_chain_id_from_chain(
+        #[case] chain: &str,
+        #[case] expected_chain_id: u64,
+    ) {
         let client = FyndClientBuilder::new("http://localhost:8080")
-            .with_chain("robinhood")
+            .with_chain(chain)
             .build_quote_only()
             .expect("build_quote_only should succeed");
-        assert_eq!(client.chain_id, 4663);
+        assert_eq!(client.chain_id, expected_chain_id);
     }
 
     #[test]

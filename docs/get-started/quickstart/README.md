@@ -87,9 +87,7 @@ docker run \
   ghcr.io/propeller-heads/fynd serve --chain base
 ```
 
-These chains ship with built-in Tycho and RPC endpoints (names are case-insensitive): `ethereum`, `base`, `unichain`, `bsc`, `arbitrum`, `polygon`. For any other chain, also pass `--tycho-url` and `--rpc-url` explicitly.
-
-Robinhood Chain is supported as `robinhood`; pass `--tycho-url` and `--rpc-url` explicitly.
+Supported chain names are case-insensitive: `ethereum`, `base`, `unichain`, `bsc`, `arbitrum`, `polygon`, `robinhood`. The first six ship with built-in Tycho and RPC endpoints. For Robinhood Chain, pass `--tycho-url` and `--rpc-url` explicitly.
 
 Your client must target the same chain. If you use the TypeScript client (Step 1), set `chainId` and the viem chain to match the server:
 
