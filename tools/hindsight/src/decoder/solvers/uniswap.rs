@@ -40,9 +40,11 @@
 //! What is declined, measured over live traffic (40 Universal Router trades on Ethereum blocks
 //! 25741800-25741815, carrying 28 v4 swaps between them):
 //!
-//! - **More than one swap in the stream**, counting v2, v3 and v4 together. A split route has no
-//!   single command that is the trade, and a route can begin in v3 and finish in v4 — one sampled
-//!   trade did, where reading only its v3 leg reported the wrong `token_out`.
+//! - **Legs that do not add up to one trade.** A stream can carry several swap commands, and two
+//!   arrangements of them are one trade: a split, where every leg trades the same pair, and a
+//!   chain, where each leg's output is the next leg's input (a route beginning in v3 and finishing
+//!   in v4 — 3 of 20 sampled streams). `aggregate` reads those two and declines the rest. Reading
+//!   only one leg of either reported the wrong `token_out` or a fraction of the input.
 //! - **A route that ends in the token it started from.** Two of the four sampled multi-hop v4 swaps
 //!   were USDC to USDC. That is a bot cycling a pool, not a trade a re-solve can price.
 //! - **A swap whose input the calldata cannot name**: an `UNWRAP_WETH` before the swap means the
@@ -67,7 +69,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    solvers::{DeclaredSwap, SolverDecoder},
+    solvers::{swap_router_02, DeclaredSwap, SolverDecoder},
     veto::Veto,
 };
 
@@ -110,6 +112,10 @@ const V3_HOP: usize = ADDRESS_LEN + 3;
 /// at run time to the caller and to itself. Neither is an address whose receipt can be read.
 const MSG_SENDER: u64 = 1;
 const ADDRESS_THIS: u64 = 2;
+
+/// `Constants.CONTRACT_BALANCE` — an amount meaning "whatever the router is holding", which states
+/// no amount at all. A leg carrying it cannot contribute to a sum.
+const CONTRACT_BALANCE: U256 = U256::from_limbs([0, 0, 0, 1 << 63]);
 
 /// Which side of the trade a swap command's calldata fixes. The other side is only bounded, and
 /// the two swap the meaning of a params struct's named currency and of its two amounts.
@@ -227,7 +233,7 @@ fn dynamic_at(input: &[u8], index: usize) -> Option<&[u8]> {
 
 /// The first and last token of a packed v3 path: `token (fee token)+`. A path shorter than one hop
 /// is malformed.
-fn v3_path_ends(path: &[u8]) -> Option<(Address, Address)> {
+pub(super) fn v3_path_ends(path: &[u8]) -> Option<(Address, Address)> {
     if path.len() < V3_HOP + ADDRESS_LEN || !(path.len() - ADDRESS_LEN).is_multiple_of(V3_HOP) {
         return None;
     }
@@ -380,7 +386,7 @@ fn read_v4_swap(command_input: &[u8]) -> Option<Swap> {
 /// A recipient that names an address whose receipt can be read, or `None` for the router's
 /// sentinels — the caller then anchors on the transaction sender, which is where the router's
 /// `SWEEP`/`UNWRAP_WETH` sends the output.
-fn readable_recipient(raw: Address) -> Option<Address> {
+pub(super) fn readable_recipient(raw: Address) -> Option<Address> {
     let sentinel = raw.into_word().into();
     let sentinel = U256::from_be_bytes::<32>(sentinel);
     if sentinel == U256::from(MSG_SENDER) || sentinel == U256::from(ADDRESS_THIS) {
@@ -477,12 +483,84 @@ struct Stream {
     payout: Option<Payout>,
 }
 
-/// Walk an `execute` command stream for its one swap and the commands around it.
+/// The trade a stream's swap legs add up to, or `None` when they do not add up to one.
 ///
-/// `None` when the stream carries no swap, or more than one: a route split across commands has no
-/// single one that is the trade, whichever pool versions they name.
+/// Two shapes do, and both were sampled live on Ethereum: a **split**, where every leg trades the
+/// same pair and the amounts divide the trade between them, and a **chain**, where each leg's
+/// output is the next leg's input — a route that begins in one pool version and finishes in
+/// another. Everything else declines, as the whole stream used to.
+///
+/// Only exact-input legs are aggregated. An exact-output leg fixes the far side, so a multi-leg
+/// exact-output stream states its terms the other way round and has not been measured; those keep
+/// falling to netting.
+///
+/// A split's legs are summed and its floors added: each leg enforces its own, so the trade's floor
+/// is their total. A chain reads the first leg's input and the last leg's floor, and never reads
+/// the middle legs' amounts — those are the router's running balance, not the trader's terms.
+fn aggregate(mut legs: Vec<Swap>) -> Option<Swap> {
+    if legs.len() <= 1 {
+        return legs.pop();
+    }
+    let mut amounts = Vec::with_capacity(legs.len());
+    for leg in &legs {
+        match leg.amounts {
+            // `CONTRACT_BALANCE` states no amount, so no sum over it is the trade's input.
+            Amounts::ExactIn { amount_in, min_amount_out }
+                if !amount_in.is_zero() && amount_in < CONTRACT_BALANCE =>
+            {
+                amounts.push((amount_in, min_amount_out));
+            }
+            Amounts::ExactIn { .. } | Amounts::ExactOut { .. } => return None,
+        }
+    }
+    let first = legs.first()?;
+    let last = legs.last()?;
+    let pair = (first.token_in, first.token_out);
+    if legs
+        .iter()
+        .all(|leg| (leg.token_in, leg.token_out) == pair)
+    {
+        let mut amount_in = U256::ZERO;
+        let mut min_amount_out = U256::ZERO;
+        for (leg_in, leg_floor) in amounts {
+            amount_in = amount_in.checked_add(leg_in)?;
+            min_amount_out = min_amount_out.checked_add(leg_floor)?;
+        }
+        // One recipient across the legs is the trader; two are not one trade's payout.
+        let recipient = first.recipient.filter(|named| {
+            legs.iter()
+                .all(|leg| leg.recipient == Some(*named))
+        });
+        return Some(Swap {
+            token_in: pair.0,
+            token_out: pair.1,
+            amounts: Amounts::ExactIn { amount_in, min_amount_out },
+            recipient,
+        });
+    }
+    if legs
+        .windows(2)
+        .all(|pair| pair[0].token_out == pair[1].token_in)
+    {
+        return Some(Swap {
+            token_in: first.token_in,
+            token_out: last.token_out,
+            amounts: Amounts::ExactIn {
+                amount_in: amounts.first()?.0,
+                min_amount_out: amounts.last()?.1,
+            },
+            recipient: last.recipient,
+        });
+    }
+    None
+}
+
+/// Walk an `execute` command stream for its swap legs and the commands around them.
+///
+/// `None` when the stream carries no swap, or carries legs that do not add up to one trade — see
+/// [`aggregate`].
 fn read_stream(commands: &[u8], inputs: &[alloy::primitives::Bytes]) -> Option<Stream> {
-    let mut swap = None;
+    let mut legs: Vec<Swap> = Vec::new();
     let mut wrapped_before = false;
     let mut unwrapped_before = false;
     let mut unwrapped_after = false;
@@ -490,20 +568,20 @@ fn read_stream(commands: &[u8], inputs: &[alloy::primitives::Bytes]) -> Option<S
     for (command, command_input) in commands.iter().zip(inputs.iter()) {
         let read = match command & COMMAND_TYPE_MASK {
             WRAP_ETH => {
-                wrapped_before |= swap.is_none();
+                wrapped_before |= legs.is_empty();
                 continue;
             }
             UNWRAP_WETH => {
-                if swap.is_some() {
+                if legs.is_empty() {
+                    unwrapped_before = true;
+                } else {
                     unwrapped_after = true;
                     payout = payout.or_else(|| read_unwrap(command_input));
-                } else {
-                    unwrapped_before = true;
                 }
                 continue;
             }
             SWEEP => {
-                if swap.is_some() {
+                if !legs.is_empty() {
                     payout = payout.or_else(|| read_sweep(command_input));
                 }
                 continue;
@@ -513,12 +591,15 @@ fn read_stream(commands: &[u8], inputs: &[alloy::primitives::Bytes]) -> Option<S
             V2_SWAP_EXACT_OUT) => read_swap(command, command_input),
             _ => continue,
         };
-        if swap.is_some() {
-            return None;
-        }
-        swap = Some(read?);
+        legs.push(read?);
     }
-    Some(Stream { swap: swap?, wrapped_before, unwrapped_before, unwrapped_after, payout })
+    Some(Stream {
+        swap: aggregate(legs)?,
+        wrapped_before,
+        unwrapped_before,
+        unwrapped_after,
+        payout,
+    })
 }
 
 impl SolverDecoder for Uniswap {
@@ -533,8 +614,12 @@ impl SolverDecoder for Uniswap {
     ///
     /// Declines a stream carrying more than one swap, or a path that ends in the token it started
     /// from — see the module docs for why neither can be priced.
-    fn declared(&self, input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
-        let Some((commands, inputs)) = command_stream(input) else { return Ok(None) };
+    fn declared(&self, input: &[u8], logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
+        let Some((commands, inputs)) = command_stream(input) else {
+            // The same address-book name covers `SwapRouter02`, whose entries are a different
+            // shape entirely — and the larger share of the flow on Base.
+            return Ok(swap_router_02::declared(input, logs));
+        };
         let Some(stream) = read_stream(&commands, &inputs) else { return Ok(None) };
         let swap = stream.swap;
         if swap.amounts.is_zero() {
@@ -1314,18 +1399,36 @@ mod tests {
     }
 
     #[test]
-    fn test_v3_and_v4_in_one_stream_declined() {
-        // A route can start in v3 and finish in v4, so neither leg alone is the trade.
-        let trader = address!("0x000000000000000000000000000000000000dead");
+    fn test_v3_then_v4_chain_reads_end_to_end() {
+        // A route that starts in v3 and finishes in v4: the trade is the first leg's input and the
+        // last leg's output, and the middle token is not the trader's.
+        let dai = address!("0x6b175474e89094c44da98b954eedeac495271d0f");
         let call = execute_call(
             &[V3_SWAP_EXACT_IN, V4_SWAP],
             vec![
-                v3_input(trader, 100, 1, &[USDC, WETH]),
+                v3_input(Address::with_last_byte(2), 100, 1, &[USDC, WETH]),
                 v4_input(
                     &[V4_SWAP_EXACT_IN_SINGLE, V4_TAKE_ALL],
-                    vec![v4_exact_in_single(WETH, USDC, true, 100, 1), Bytes::default()],
+                    vec![v4_exact_in_single(WETH, dai, true, 100, 7), Bytes::default()],
                 ),
             ],
+        );
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.token_in, USDC);
+        assert_eq!(declared.token_out, dai);
+        // The first leg's input is what the trader paid; the last leg's floor is the trade's.
+        assert_eq!(declared.amount_in, Some(U256::from(100u64)));
+        assert_eq!(declared.min_amount_out, Some(U256::from(7u64)));
+    }
+
+    #[test]
+    fn test_chain_that_does_not_link_declines() {
+        // Two legs whose tokens neither match nor link: not one trade.
+        let trader = address!("0x000000000000000000000000000000000000dead");
+        let dai = address!("0x6b175474e89094c44da98b954eedeac495271d0f");
+        let call = execute_call(
+            &[V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN],
+            vec![v3_input(trader, 100, 1, &[USDC, WETH]), v3_input(trader, 100, 1, &[dai, USDC])],
         );
         assert!(terms(&call).is_none());
     }
@@ -1341,11 +1444,80 @@ mod tests {
     }
 
     #[test]
-    fn test_split_route_declined() {
+    fn test_split_route_sums_its_legs() {
+        // Two legs of one pair: the trade is their total, and each leg's floor adds up too.
         let trader = address!("0x000000000000000000000000000000000000dead");
         let call = execute_call(
             &[V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN],
-            vec![v3_input(trader, 60, 1, &[USDC, WETH]), v3_input(trader, 40, 1, &[USDC, WETH])],
+            vec![v3_input(trader, 60, 3, &[USDC, WETH]), v3_input(trader, 40, 2, &[USDC, WETH])],
+        );
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.token_in, USDC);
+        assert_eq!(declared.token_out, WETH);
+        assert_eq!(declared.amount_in, Some(U256::from(100u64)));
+        assert_eq!(declared.min_amount_out, Some(U256::from(5u64)));
+        assert_eq!(declared.output_recipient, Some(trader));
+    }
+
+    #[test]
+    fn test_split_route_across_pool_versions_sums_its_legs() {
+        // The same pair split between a v3 pool and a v4 pool.
+        let trader = address!("0x000000000000000000000000000000000000dead");
+        let call = execute_call(
+            &[V3_SWAP_EXACT_IN, V4_SWAP],
+            vec![
+                v3_input(trader, 60, 3, &[USDC, WETH]),
+                v4_input(
+                    &[V4_SWAP_EXACT_IN_SINGLE, V4_TAKE_ALL],
+                    vec![v4_exact_in_single(USDC, WETH, true, 40, 2), Bytes::default()],
+                ),
+            ],
+        );
+        let declared = terms(&call).unwrap();
+        assert_eq!(declared.amount_in, Some(U256::from(100u64)));
+        assert_eq!(declared.min_amount_out, Some(U256::from(5u64)));
+    }
+
+    #[test]
+    fn test_split_legs_paying_two_recipients_name_neither() {
+        // Two payees are not one trade's payout, so no recipient is claimed and the caller falls
+        // back to the transaction sender.
+        let trader = address!("0x000000000000000000000000000000000000dead");
+        let other = address!("0x00000000000000000000000000000000000000ff");
+        let call = execute_call(
+            &[V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN],
+            vec![v3_input(trader, 60, 3, &[USDC, WETH]), v3_input(other, 40, 2, &[USDC, WETH])],
+        );
+        assert_eq!(terms(&call).unwrap().output_recipient, None);
+    }
+
+    #[test]
+    fn test_split_leg_using_the_router_balance_declines() {
+        // `CONTRACT_BALANCE` states no amount, so the legs cannot be summed.
+        use alloy::sol_types::SolValue;
+        let trader = address!("0x000000000000000000000000000000000000dead");
+        let balance: Bytes =
+            (trader, CONTRACT_BALANCE, U256::from(1u64), v3_path(&[USDC, WETH]), true)
+                .abi_encode_params()
+                .into();
+        let call = execute_call(
+            &[V3_SWAP_EXACT_IN, V3_SWAP_EXACT_IN],
+            vec![v3_input(trader, 60, 3, &[USDC, WETH]), balance],
+        );
+        assert!(terms(&call).is_none());
+    }
+
+    #[test]
+    fn test_multi_leg_exact_output_stream_declines() {
+        // An exact-output leg fixes the far side, so a multi-leg exact-output stream states its
+        // terms the other way round and is not aggregated.
+        let trader = address!("0x000000000000000000000000000000000000dead");
+        let call = execute_call(
+            &[V3_SWAP_EXACT_OUT, V3_SWAP_EXACT_OUT],
+            vec![
+                v3_input(trader, 60, 100, &[WETH, USDC]),
+                v3_input(trader, 40, 100, &[WETH, USDC]),
+            ],
         );
         assert!(terms(&call).is_none());
     }

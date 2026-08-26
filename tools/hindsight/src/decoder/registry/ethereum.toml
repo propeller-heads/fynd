@@ -10,7 +10,18 @@ wrapped_native = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 # an unknown swap's settling venue from on-chain activity; without this list those guesses would
 # name these infrastructure contracts instead of the real venue. The wrapped-native token above is skipped the
 # same way.
-infrastructure = ["0x000000000022d473030f116ddee9f6b43ac78ba3"] # Permit2
+infrastructure = [
+    "0x000000000022d473030f116ddee9f6b43ac78ba3", # Permit2
+    # MetaMask's Swaps Spender. The Swap Router hands it the trader's tokens and it delegates to a
+    # closed-source adapter, so it settles nothing itself — but it is the child call the router
+    # funds, which is what `largest_external_call` picks. 80 records in one day carried its raw
+    # address as their solver; skipping it leaves them labelled `metamask`, the venue they already
+    # carry, instead of a name no `SolverDecoder` will ever back.
+    "0x74de5d4fcbf63e00296fd95d33236b9794016631",
+    # Relay's swap executor, on the same footing: 91 records in one day, every one inside a Relay
+    # transaction and already labelled with `relay` as its venue.
+    "0x4296339b4ff8e67f07de40d97a49a680f2598e0f",
+]
 
 # Batch-settlement venues where `tx.to` is the settlement contract and the transaction sender is
 # a solver, not the trader (CoW Protocol Settlement).
@@ -69,8 +80,9 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0xee0319cf0bca5d09333f9f6277743e8de31bd69a" = "butter"
 # LiquidMesh router — same address on Ethereum and Base. Settles Trust Wallet's swap flow: every
 # Trust Wallet swap in a 37-swap sample across both chains entered here, and none reached any other
-# registered solver. Its entry selector 0x47ee97ff is in no public 4-byte database, so these stay
-# netted until the ABI is known.
+# registered solver. It settles Binance Wallet's flow as well, which is the larger share, so the
+# entry point rather than this name is what tells the two apart. Its entry selector 0x47ee97ff is
+# in no public 4-byte database; `solvers/liquidmesh.rs` reads the router's own event instead.
 "0x3d90f66b534dd8482b181e24655a9e8265316be9" = "liquidmesh"
 
 # Venues — platforms that initiate a trade and route it through a solver found in the trace. Pure
@@ -103,6 +115,13 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x81463b0f960f247f704377661ec81c1fd65b5128" = "mev-bot"
 # Pendle Router V4 (Etherscan name tag) — a protocol router, not a solver.
 "0x888888888889758f76e7103c6cbf23abbf58f946" = "pendle"
+
+[venues.binance]
+# Binance's DEX Router ("Binance: DEX Router", same address on Ethereum, Base, BSC and OP). It is
+# `tx.to` for Binance Wallet's swaps and routes on to LiquidMesh and LiFi. Over one production day
+# it entered 1,088 Ethereum and 2,036 Base records, all of which carried the raw address as their
+# venue.
+entry_points = ["0xb300000b72deaeb607a12d5f54773d1c19c7028d"]
 
 [venues.debridge]
 # deBridge's swap entry proxy: relayer-sent, gasless. Their DLN cross-chain orders enter here
@@ -183,6 +202,18 @@ entry_points = ["0x7957e5a88f0389997b352315e70ab20d77ec410a"]
 # Settler. Unlike Phantom's and Robinhood's, this 0.95% cut is skimmed off the SELL token before
 # routing, so it is netted out of the input rather than added to the output.
 "0x5aafc1f252d544f744d17a4e734afd6efc47ede4" = "coinbase"
+# Trust Wallet: 0.7% buy-token fee on its LiquidMesh routes. The router's swap event states the
+# output already net of this cut, so without this entry Fynd's gross output beat the settled one by
+# the fee on every such trade — measured over one prod day, the 158 fee-carrying LiquidMesh records
+# had a median win of 68.5 bps against 3.5 bps for the same solver's other order flow.
+"0x73691cee20db22f55a6fd0d5948ab00e0fb973b1" = "trustwallet"
+# ShapeShift: fee receiver for the swaps it routes through the Butter router. ShapeShift is a
+# meta-aggregator with no universal address, so this wallet covers its Butter flow only; its 0x,
+# CoW and Relay routes carry no on-chain fingerprint.
+"0xf5aa59151be6515c4ca68a0282cf68b3ea4846fc" = "shapeshift"
+# Vultisig: app-wide fee wallet. Its swaps settle through 1inch, KyberSwap and LiFi, all shared
+# routers, so the fee leg is the only fingerprint the vault flow carries.
+"0x8e247a480449c84a5fdd25974a8501f3efa4abb9" = "vultisig"
 
 # Venues identified by the integrator tag a provider records in its swap event. LiFi frontends
 # route through the shared LiFi Diamond, so the integrator string in LiFiGenericSwapCompleted /

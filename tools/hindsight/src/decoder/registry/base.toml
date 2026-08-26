@@ -59,14 +59,20 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 # swaps ShapeShift routes through Butter; it is the outermost router in those traces, so its entry
 # belongs with `solvers/butter.rs` and not before it.
 "0xee0319cf0bca5d09333f9f6277743e8de31bd69a" = "butter"
-# LiquidMesh router — same address as mainnet. Settles Trust Wallet's swap flow; its entry selector
-# 0x47ee97ff is in no public 4-byte database, so these stay netted until the ABI is known.
+# LiquidMesh router — same address as mainnet. Settles Trust Wallet's and Binance Wallet's swap
+# flow; its entry selector 0x47ee97ff is in no public 4-byte database, so
+# `solvers/liquidmesh.rs` reads the router's own event instead.
 "0x3d90f66b534dd8482b181e24655a9e8265316be9" = "liquidmesh"
 
 # Venues. Relay's Base contracts are the same addresses as mainnet — Relay docs list the Base
 # solver as 0xf70da978…, which is how the deployment was confirmed. Its routers are the Cancun-EVM
 # deployment (Base is Cancun), identical to the mainnet book. Relay is not in `[venue_fees]`, so
 # its cut is not corrected out of the amounts.
+# Binance's DEX Router — the same address as mainnet, and the entry point for the larger share of
+# this chain's LiquidMesh flow.
+[venues.binance]
+entry_points = ["0xb300000b72deaeb607a12d5f54773d1c19c7028d"]
+
 [venues.relay]
 entry_points = [
     "0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222",
@@ -105,6 +111,14 @@ entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
 # Fynd's savings on that flow.
 [venue_fees]
 "0x5aafc1f252d544f744d17a4e734afd6efc47ede4" = "coinbase"
+# Trust Wallet's 0.7% buy-token fee on its LiquidMesh routes, and ShapeShift's Butter fee receiver
+# — both the same wallet as on Ethereum, since both routers are deployed at one address per chain.
+# The LiquidMesh swap event states the output net of Trust Wallet's cut, so backing it out is what
+# stops the fee from reading as a Fynd win.
+"0x73691cee20db22f55a6fd0d5948ab00e0fb973b1" = "trustwallet"
+"0xf5aa59151be6515c4ca68a0282cf68b3ea4846fc" = "shapeshift"
+# Vultisig's app-wide fee wallet, its only fingerprint on the shared routers it settles through.
+"0x8e247a480449c84a5fdd25974a8501f3efa4abb9" = "vultisig"
 
 # LiFi frontends identified by the integrator tag in the LiFi swap event (Infinex's volume is
 # heavier on Base than on mainnet). Keys are lowercase. `base-app` is Coinbase's Base App, kept

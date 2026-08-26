@@ -67,7 +67,7 @@ attribute. [README.md](README.md) holds the full pipeline diagram and the two-ti
 | `veto.rs` | The shared `Veto` type, plus post-decode vetoes of non-comparable shapes (NFT purchases, mis-paired wrap trades, fee-on-transfer skims) |
 | `registry.rs` | Per-chain address book, loaded from TOML; joins each solver to its `SolverDecoder` at load |
 | `sandwich.rs` | Flags trades bracketed by a front/back attacker pair (see the design spec) |
-| `solvers/` | One `SolverDecoder` per solver with code: declared swaps from calldata (`fly.rs` packed, `kyberswap.rs` ABI `swap` params, `zeroex.rs` `AllowanceHolder.exec`/`Settler.execute`, `oneinch.rs` v6 and v5 `swap`) or from logs (`okx.rs` `OrderRecord`, `cow.rs` `Trade`, `butter.rs` `SwapAndCall`, `liquidmesh.rs`
+| `solvers/` | One `SolverDecoder` per solver with code: declared swaps from calldata (`fly.rs` packed, `kyberswap.rs` ABI `swap` params, `zeroex.rs` `AllowanceHolder.exec`/`Settler.execute` plus a bare entry's first action, `oneinch.rs` v6 and v5 `swap`, `uniswap.rs` the Universal Router command stream, `swap_router_02.rs` `SwapRouter02`'s v3/v2 entries and `multicall`) or from logs (`okx.rs` `OrderRecord`, `cow.rs` `Trade`, `butter.rs` `SwapAndCall`, `liquidmesh.rs`
 an unnamed event read by position), plus `lifi.rs`'s and `butter.rs`'s bridge vetoes and the `venue_fingerprint` reads (`lifi.rs`'s integrator tag, `cow.rs`'s `appData` hash) |
 | `trace.rs` | Whole-block trace fetching (`debug_traceBlockByNumber`) and frame walks |
 
@@ -94,6 +94,10 @@ than once declines its declared read (`trace::solver_frames`, counted by
 `hindsight_several_legs_total`) and falls to netting; a `[batch_settlers]` settlement of several
 orders is declined by `cow.rs` and again by netting when no single trader is found. See the
 README.
+
+Several *legs of one trade* inside a single router call are a different thing and are read:
+`uniswap.rs`'s `aggregate` adds up a Universal Router stream's swap commands when they form a
+split (every leg the same pair) or a chain (each leg's output the next leg's input).
 
 ### The address book (`registry/<chain>.toml`)
 
@@ -136,9 +140,11 @@ self-contained HTML file.
 Each trade produces a `top` result (optimistic, solved fresh at state N-1) and a `back` result
 (pessimistic: solved fresh at state N, after the block's swaps moved the pools). The headline
 `verdict` is top-of-block. Possible verdicts: `Win`, `Loss`, `CoverageMiss` (Fynd
-filled <50% of the settled size — `MIN_FILL_RATIO = 0.5`), `Unsolvable`, and `Sandwiched` (a
+filled <50% of the settled size — `MIN_FILL_RATIO = 0.5`), `Unsolvable`, `Sandwiched` (a
 solved comparison whose settled output was moved by MEV — excluded from the savings aggregates;
-unsolved states keep their coverage verdicts).
+unsolved states keep their coverage verdicts), and `ImplausibleSettledAmount` (Fynd's output is
+more than `MAX_WIN_RATIO = 3.0` times the settled one, so the settled amount is not the trade's
+real output — it outranks `Sandwiched` and is excluded from the aggregates too).
 
 ### Slippage model
 
