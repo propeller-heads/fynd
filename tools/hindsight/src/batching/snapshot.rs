@@ -14,7 +14,7 @@ use tracing::warn;
 use tycho_simulation::tycho_common::models::token::Token as TychoToken;
 
 use super::{
-    apex_addr, apex_u256, experiment_tokens, hub_tokens, pools, pools::PoolCounts, PreparedOrder,
+    apex_addr, apex_u256, fold_native, hub_tokens, pools, pools::PoolCounts, PreparedOrder,
 };
 use crate::decoder::DecodedTrade;
 
@@ -76,7 +76,7 @@ pub(crate) fn build_snapshot(
             excluded_sandwiched += 1;
             continue;
         }
-        let (sell, buy) = experiment_tokens(trade);
+        let (sell, buy) = fold_native(trade.token_in, trade.token_out);
         candidates.push(sell);
         candidates.push(buy);
     }
@@ -160,7 +160,7 @@ fn prepare_orders(
         if trade.sandwich.is_some() {
             continue;
         }
-        let (sell, buy) = experiment_tokens(trade);
+        let (sell, buy) = fold_native(trade.token_in, trade.token_out);
         if sell == buy || trade.amount_in.is_zero() {
             excluded += 1;
             continue;

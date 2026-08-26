@@ -388,6 +388,35 @@ impl ApexPool for TychoApexPool {
     }
 }
 
+/// Rebuild a wrapped pool from its dumped payload, so a captured batch re-solves against the
+/// same pool set the live snapshot had. apex-solver carries these through as opaque JSON — only
+/// this module knows the shape, and only hindsight has the `ProtocolSim` implementations. The
+/// concrete state type round-trips because `ProtocolSim` is a `#[typetag::serde]` trait.
+pub(crate) fn rebuild_wrapped(
+    custom: &apex_solver::serialization::CustomPoolJson,
+) -> anyhow::Result<Pool> {
+    let payload: CustomPoolPayload = serde_json::from_value(custom.data.clone())
+        .map_err(|e| anyhow::anyhow!("wrapped pool {}: bad payload: {e}", custom.id))?;
+    let state: Box<dyn ProtocolSim> = serde_json::from_value(payload.state).map_err(|e| {
+        anyhow::anyhow!("wrapped pool {}: state did not round-trip: {e}", custom.id)
+    })?;
+
+    let mut tokens = HashMap::with_capacity(payload.tokens.len());
+    for token in payload.tokens {
+        let address = alloy_from_bytes(&token.address)
+            .ok_or_else(|| anyhow::anyhow!("wrapped pool {}: bad token address", custom.id))?;
+        tokens.insert(apex_addr(address), token);
+    }
+    // `Address::from(&str)` is the same conversion the dump's ids were written with, view
+    // index included.
+    let address = ApexAddress::from(custom.id.as_str());
+    let token_0 = ApexAddress::from(custom.token0.as_str());
+    let token_1 = ApexAddress::from(custom.token1.as_str());
+
+    let wrapper = TychoApexPool { protocol: payload.protocol, tokens, pool: Arc::from(state) };
+    Ok(Pool::Apex(PoolMetadata { address, token_0, token_1 }, Arc::new(wrapper)))
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -482,5 +511,56 @@ mod tests {
     fn test_fee_and_spacing_unmapped_tier_wraps() {
         assert_eq!(fee_and_spacing("Medium"), Some((3000, 60)));
         assert_eq!(fee_and_spacing("MediumHigh"), None);
+    }
+
+    /// A dumped wrapped pool can be rebuilt from its snapshot payload, so an input dump is a
+    /// complete record of the batch and every solve over it can be deferred off the live path.
+    /// `ProtocolSim` is a `#[typetag::serde]` trait, so the concrete state type round-trips.
+    #[test]
+    fn test_wrapped_pool_round_trips_through_its_snapshot() {
+        let weth = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+        let usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+        let weth_apex = apex_addr(weth.parse().unwrap());
+        let usdc_apex = apex_addr(usdc.parse().unwrap());
+        let pool = TychoApexPool {
+            protocol: "uniswap_v2".to_string(),
+            tokens: HashMap::from([
+                (weth_apex, tycho_token(weth, "WETH", 18)),
+                (usdc_apex, tycho_token(usdc, "USDC", 6)),
+            ]),
+            pool: Arc::new(UniswapV2State::new(
+                U256::from(4_000_000u64) * U256::from(10u64).pow(U256::from(6)),
+                U256::from(1_000u64) * U256::from(10u64).pow(U256::from(18)),
+            )),
+        };
+        let one_weth_scaled = ApexU256::from(10u64).pow(ApexU256::from(18));
+        let before = pool.get_amount_out(weth_apex, usdc_apex, one_weth_scaled, ApexU256::ZERO);
+
+        let snapshot = pool
+            .to_snapshot_json()
+            .expect("wrapped pool must serialize");
+        let payload: CustomPoolPayload =
+            serde_json::from_value(snapshot).expect("payload must deserialize");
+        let state: Box<dyn ProtocolSim> =
+            serde_json::from_value(payload.state).expect("ProtocolSim must round-trip");
+        let rebuilt = TychoApexPool {
+            protocol: payload.protocol,
+            tokens: payload
+                .tokens
+                .into_iter()
+                .map(|token| {
+                    let address =
+                        alloy_from_bytes(&token.address).expect("dumped token address is 20 bytes");
+                    (apex_addr(address), token)
+                })
+                .collect(),
+            pool: Arc::from(state),
+        };
+
+        assert_eq!(rebuilt.protocol, "uniswap_v2");
+        assert_eq!(
+            rebuilt.get_amount_out(weth_apex, usdc_apex, one_weth_scaled, ApexU256::ZERO),
+            before,
+        );
     }
 }

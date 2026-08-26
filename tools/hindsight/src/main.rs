@@ -41,6 +41,9 @@ enum Command {
     Monitor(MonitorArgs),
     /// Render an offline HTML report from a monitor run's comparison JSONL.
     Report(ReportArgs),
+    /// Solve a capture directory's queued blocks through APEX (the batching experiment's
+    /// offline half; `monitor --apex-batching-dir` fills the queue).
+    ApexSolve(crate::batching::ReplayArgs),
 }
 
 /// Chain selection shared by every subcommand: which chain to operate on and how to reach it.
@@ -161,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Verify(args) => run_verify(args).await,
         Command::Monitor(args) => resolve::monitor::run(args).await,
         Command::Report(args) => report::run(args),
+        Command::ApexSolve(args) => batching::replay_dir(&args),
     };
 
     // Log the failure before returning it: the fmt subscriber above writes to stdout, whereas a

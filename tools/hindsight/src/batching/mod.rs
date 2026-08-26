@@ -13,6 +13,7 @@
 //! missing liquidity source, receiving the unsold remainder and supplying the buy-token
 //! remainder (recorded as `batcher_bought`/`batcher_sold`).
 
+mod dump;
 mod pools;
 mod snapshot;
 mod solve;
@@ -24,13 +25,51 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alloy::primitives::Address as AlloyAddress;
+use alloy::primitives::{Address as AlloyAddress, TxHash, U256 as AlloyU256};
 use apex_solver::{core::LimitOrder, types::U256 as ApexU256};
 use fynd_core::Solver;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+pub(crate) use self::dump::{replay_dir, ReplayArgs};
 use crate::decoder::DecodedTrade;
+
+/// The trade fields the experiment actually uses, split out from the decoder's `DecodedTrade`
+/// so a dumped batch can be re-solved later without reconstructing a full decode (which needs
+/// the RPC, the traces and the address book). Everything a record carries about the settled
+/// swap comes from here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BatchTrade {
+    pub tx_hash: TxHash,
+    pub tx_index: u64,
+    pub sender: AlloyAddress,
+    pub venue: String,
+    pub solver: String,
+    /// `Address::ZERO` for native ETH, folded to WETH by `experiment_tokens`.
+    pub token_in: AlloyAddress,
+    pub token_out: AlloyAddress,
+    pub amount_in: AlloyU256,
+    pub amount_out: AlloyU256,
+    /// The user's signed minimum output, when the decoder recovered it from calldata.
+    pub min_amount_out: Option<AlloyU256>,
+}
+
+impl From<&DecodedTrade> for BatchTrade {
+    fn from(trade: &DecodedTrade) -> Self {
+        Self {
+            tx_hash: trade.tx_hash,
+            tx_index: trade.tx_index,
+            sender: trade.sender,
+            venue: trade.venue.clone(),
+            solver: trade.solver.clone(),
+            token_in: trade.token_in,
+            token_out: trade.token_out,
+            amount_in: trade.amount_in,
+            amount_out: trade.amount_out,
+            min_amount_out: trade.min_amount_out,
+        }
+    }
+}
 
 /// Mainnet hub tokens (Turbine's set): always added to the token universe so the solver can
 /// route through liquid intermediaries the block's trades may not touch directly.
@@ -193,6 +232,9 @@ pub(crate) struct BlockRecord {
     pub s2_winning_config: String,
     /// Every panel config's outcome on the S2 solve, winner included — one entry per config.
     pub s2_configs: Vec<ConfigOutcomeRecord>,
+    /// Wall-clock time the block's S1 solves took together. They run concurrently, so this is
+    /// the span they occupied, not the sum of their solve times — `s1_configs[].solve_ms` adds
+    /// those up.
     pub s1_solve_ms_total: u64,
     pub s1_deadline_fired: usize,
     /// Every panel config's outcome summed over the block's S1 solves: one entry per config,
@@ -262,43 +304,89 @@ pub(crate) struct SolveBudget {
     pub s2_deadline_ms: u64,
     /// Override for APEX's price-search iteration cap.
     pub max_iterations: Option<u32>,
+    /// How many of a variant's S1 order-solves may run at once. S2 solves always run alone —
+    /// one batch at a time with the machine to itself — so that the S2 deadline means the same
+    /// thing it would in production. S1 is only a baseline, so it may fan out.
+    pub s1_workers: usize,
 }
 
-/// The experiment driver: owns the output files and processes one block at a time at
-/// top-of-block state, before the monitor advances the solver.
-pub(crate) struct BatchingEngine {
+/// Appends order and block records to a run directory's JSONL files. Shared by the capture
+/// path (when it solves inline) and by `apex-solve`, so both produce byte-identical output.
+pub(crate) struct RecordWriter {
     orders_out: BufWriter<File>,
     blocks_out: BufWriter<File>,
+}
+
+impl RecordWriter {
+    pub fn new(dir: &Path) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let open = |name: &str| -> anyhow::Result<BufWriter<File>> {
+            Ok(BufWriter::new(
+                File::options()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join(name))?,
+            ))
+        };
+        Ok(Self { orders_out: open("apex-orders.jsonl")?, blocks_out: open("apex-blocks.jsonl")? })
+    }
+
+    pub fn write(
+        &mut self,
+        records: &[OrderRecord],
+        block_records: &[BlockRecord],
+    ) -> anyhow::Result<()> {
+        for record in records {
+            serde_json::to_writer(&mut self.orders_out, record)?;
+            self.orders_out.write_all(b"\n")?;
+        }
+        for block_record in block_records {
+            serde_json::to_writer(&mut self.blocks_out, block_record)?;
+            self.blocks_out.write_all(b"\n")?;
+            info!(
+                block = block_record.block,
+                variant = block_record.variant,
+                orders = block_record.orders_in,
+                out_of_universe = block_record.out_of_universe,
+                s2_ms = block_record.s2_solve_ms,
+                s1_ms = block_record.s1_solve_ms_total,
+                "apex batching: block processed"
+            );
+            if block_record.s2_deadline_fired {
+                warn!(
+                    block = block_record.block,
+                    variant = block_record.variant,
+                    "apex batching: S2 deadline fired; batch result is partial"
+                );
+            }
+        }
+        self.orders_out.flush()?;
+        self.blocks_out.flush()?;
+        Ok(())
+    }
+}
+
+/// The experiment's live half: snapshots each block at top-of-block state and writes it to the
+/// capture directory. Solving is a separate process (`hindsight apex-solve`) reading the same
+/// directory as a queue, because the snapshot is the only part that has to happen live and it
+/// costs a fraction of a second, while solving costs ~50x a block time.
+pub(crate) struct BatchingEngine {
     inputs_dir: PathBuf,
-    results_dir: PathBuf,
-    budget: SolveBudget,
+    blocks_captured: u64,
 }
 
 impl BatchingEngine {
-    pub fn new(dir: &Path, budget: SolveBudget) -> anyhow::Result<Self> {
+    pub fn new(dir: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let inputs_dir = dir.join("inputs");
         std::fs::create_dir_all(&inputs_dir)?;
-        let results_dir = dir.join("results");
-        std::fs::create_dir_all(&results_dir)?;
-        let orders_out = BufWriter::new(
-            File::options()
-                .create(true)
-                .append(true)
-                .open(dir.join("apex-orders.jsonl"))?,
-        );
-        let blocks_out = BufWriter::new(
-            File::options()
-                .create(true)
-                .append(true)
-                .open(dir.join("apex-blocks.jsonl"))?,
-        );
-        Ok(Self { orders_out, blocks_out, inputs_dir, results_dir, budget })
+        std::fs::create_dir_all(dir.join("results"))?;
+        Ok(Self { inputs_dir, blocks_captured: 0 })
     }
 
-    /// Run the experiment on one block's settled trades. Must be called while the solver still
-    /// holds top-of-block state N-1 (before the monitor's `advance`). Errors are the caller's to
-    /// log-and-continue: a failed block must not kill the monitor session.
+    /// Capture one block. Must be called while the solver still holds top-of-block state N-1
+    /// (before the monitor's `advance`). Errors are the caller's to log-and-continue: a failed
+    /// block must not kill the monitor session.
     pub async fn process_block(
         &mut self,
         block: u64,
@@ -308,8 +396,7 @@ impl BatchingEngine {
         let market = solver.market_data();
         let derived = solver.derived_data();
 
-        // Snapshot everything the solve needs while holding the locks, then release them —
-        // the APEX runs below are CPU-bound and must not block the feed's writers.
+        // Snapshot everything a solve needs while holding the locks, then release them.
         let snapshot = {
             let market_guard = market.read().await;
             let derived_guard = derived.read().await;
@@ -320,45 +407,20 @@ impl BatchingEngine {
             snapshot::build_snapshot(state, token_prices, trades)
         };
 
-        let mut records: Vec<OrderRecord> = Vec::new();
-        let block_records = tokio::task::block_in_place(|| {
-            solve::run_block(
-                block,
-                trades,
-                &snapshot,
-                self.budget,
-                &self.inputs_dir,
-                &self.results_dir,
-                &mut records,
-            )
-        })?;
-
-        for record in &records {
-            serde_json::to_writer(&mut self.orders_out, record)?;
-            self.orders_out.write_all(b"\n")?;
-        }
-        for block_record in &block_records {
-            serde_json::to_writer(&mut self.blocks_out, block_record)?;
-            self.blocks_out.write_all(b"\n")?;
-            info!(
-                block,
-                variant = block_record.variant,
-                orders = block_record.orders_in,
-                out_of_universe = block_record.out_of_universe,
-                s2_ms = block_record.s2_solve_ms,
-                s1_ms = block_record.s1_solve_ms_total,
-                "apex batching: block processed"
-            );
-            if block_record.s2_deadline_fired {
-                warn!(
-                    block,
-                    variant = block_record.variant,
-                    "apex batching: S2 deadline fired; batch result is partial"
-                );
-            }
-        }
-        self.orders_out.flush()?;
-        self.blocks_out.flush()?;
+        let batch_trades: Vec<BatchTrade> = trades
+            .iter()
+            .map(BatchTrade::from)
+            .collect();
+        let dump = dump::BatchDump::capture(block, &batch_trades, &snapshot);
+        dump::write_dump(&dump, &self.inputs_dir)?;
+        self.blocks_captured += 1;
+        info!(
+            block,
+            orders = snapshot.prepared.len(),
+            out_of_universe = snapshot.out_of_universe.len(),
+            captured_total = self.blocks_captured,
+            "apex batching: block captured"
+        );
         Ok(())
     }
 }
@@ -381,12 +443,20 @@ pub(crate) fn alloy_from_bytes(bytes: &[u8]) -> Option<AlloyAddress> {
 
 /// The trade's tokens as they enter the experiment: native ETH (zero address) is folded into
 /// WETH on both legs, matching the WETH-quoted pool universe.
-pub(crate) fn experiment_tokens(trade: &DecodedTrade) -> (AlloyAddress, AlloyAddress) {
+pub(crate) fn experiment_tokens(trade: &BatchTrade) -> (AlloyAddress, AlloyAddress) {
+    fold_native(trade.token_in, trade.token_out)
+}
+
+/// Same fold, for callers that hold the raw decode rather than a `BatchTrade`.
+pub(crate) fn fold_native(
+    token_in: AlloyAddress,
+    token_out: AlloyAddress,
+) -> (AlloyAddress, AlloyAddress) {
     let weth: AlloyAddress = WETH
         .parse()
         .expect("static WETH address");
     let fold = |token: AlloyAddress| if token == AlloyAddress::ZERO { weth } else { token };
-    (fold(trade.token_in), fold(trade.token_out))
+    (fold(token_in), fold(token_out))
 }
 
 /// The hub-token set as alloy addresses.

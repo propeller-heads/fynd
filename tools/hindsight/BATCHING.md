@@ -17,23 +17,42 @@ amount. Gas is out of scope. The full experiment design lives in
 
 Requirements: a mainnet RPC with `debug_traceTransaction`, and a Tycho API key.
 
+The experiment runs as **two processes sharing one directory**. Capturing a block costs under a
+second, so it keeps pace with the chain; solving it costs ~50x a block time, so it runs
+separately and finishes later. Earlier cycles did both on the live path and fell behind —
+cycle4 covered 36% of its block range as a result.
+
 ```bash
 cargo build --release -p hindsight
 
-RPC_URL=https://... \
-TYCHO_API_KEY=... \
+# A — capture. Snapshots each block at top-of-block state into ./poc-results/inputs/.
+RPC_URL=https://... TYCHO_API_KEY=... \
 ./target/release/hindsight monitor \
   --tycho-url tycho-beta.propellerheads.xyz \   # bare host — the client adds the scheme
   --min-tvl 30 \
-  --max-blocks 40 \                              # omit to run until Ctrl-C / SIGINT
-  --max-lag-blocks 10000 \                       # solves are slow; don't rebuild on lag
+  --max-lag-blocks 10000 \
   --apex-batching-dir ./poc-results
+
+# B — solve. Drains that directory as a queue; run it in parallel or afterwards.
+./target/release/hindsight apex-solve ./poc-results \
+  --s2-deadline-ms 6000 --s1-deadline-ms 6000 --s1-workers 4 --follow
 ```
 
-Optional knobs: `--apex-s1-deadline-ms` (default 500, per order),
-`--apex-s2-deadline-ms` (default 3000, per batch), and `--apex-max-iterations`
-(lifts APEX's price-search iteration cap, default 1000; the deadlines still bound
-wall-clock time). The default protocol set is
+`--follow` keeps B polling for new dumps while A is still running; without it B exits once the
+queue is empty. B is resumable and idempotent: it reads `apex-blocks.jsonl` on startup and
+skips blocks that already have records, so it can be stopped and restarted freely, and a
+directory can be re-solved later with different settings by pointing it at a fresh output copy.
+
+**Solve ordering matters.** The three variants run one after another, and a variant's S2 batch
+solve runs alone on the machine: S2 is the production simulation, and a wall-clock deadline only
+means what it would mean in production if the solve has the CPU it would have there. S1 is only
+a baseline, so its per-order solves fan out `--s1-workers` wide — never overlapping an S2 solve,
+so they cannot disturb the S2 measurement.
+
+Optional knobs on B: `--s1-deadline-ms` (default 6000, per order), `--s2-deadline-ms`
+(default 6000, per batch), `--s1-workers` (default 4), and `--max-iterations` (lifts APEX's
+price-search iteration cap, default 3000; the deadlines still bound wall-clock time).
+The default protocol set is
 `native_onchain`; pass `--protocols all_onchain` to also stream VM-simulated protocols
 (Curve, Balancer, …) at the cost of a much heavier feed and slower solves (wrapped pools
 sit in APEX's hot loop — raise the deadlines, e.g. 800/6000).
@@ -68,8 +87,8 @@ nothing, or it errored — and it is the only way to read the winner label safel
 config clears nothing the tie at zero volume is broken by panel order, so `s2_winning_config`
 is then just the first entry of the panel, not a preference.
 
-The solver needs a few minutes to sync before the first block; the experiment then runs
-once per block, at top-of-block state, alongside hindsight's own fynd re-solve.
+The solver needs a few minutes to sync before the first block; capture then runs once per
+block, at top-of-block state, alongside hindsight's own fynd re-solve.
 
 ## Outputs (in `--apex-batching-dir`)
 
@@ -77,7 +96,7 @@ once per block, at top-of-block state, alongside hindsight's own fynd re-solve.
 |---|---|
 | `apex-orders.jsonl` | One record per order per run (S1, S2) per variant: settled S0 amounts, APEX outcome, inclusion status (`cleared` / `partial` / `unfilled` / `out_of_universe`), batcher-absorbed amounts, ETH valuations at the block's derived prices |
 | `apex-blocks.jsonl` | One record per block per variant: pool counts per conversion path, universe size, S1/S2 solve times, deadline flags, S2 per-pool AMM volumes, and every panel config's outcome (`s2_configs`, `s1_configs`) |
-| `inputs/apex_input_<block>.json` | Full `ApexInputData` dump per block — replay offline with `cargo run --release --example replay_batch --features dev -- <file>` in the apex-solver repo (wrapped Tycho pools deserialize as opaque `custom` entries there) |
+| `inputs/apex_batch_<block>.json` | One captured block: the `ApexInputData` (tokens, prices, pools), all three variants' limits, the settled-trade fields records are built from, and token metadata. Everything a solve needs — `hindsight apex-solve` rebuilds the snapshot from it, wrapped Tycho pools included |
 | `results/apex_result_<block>_<variant>.json` | Full APEX solve output per block and variant: the S2 batch and every S1 solve — clearing prices, limit-order clearings, pool clearings with surplus/fee (18-dec scaled decimal strings) |
 
 Appending is safe: rerunning with the same directory extends the JSONL files.

@@ -123,24 +123,14 @@ pub(crate) struct MonitorArgs {
     #[arg(long)]
     pub comparisons_dir: Option<std::path::PathBuf>,
 
-    /// Run the APEX batching-validation experiment on each block's settled trades (at
-    /// top-of-block state, alongside the fynd re-solve) and write its JSONL records and
-    /// per-block `ApexInputData` dumps into this directory
+    /// Capture each block's settled trades for the APEX batching-validation experiment: snapshot
+    /// the market at top-of-block state (alongside the fynd re-solve) and write one replayable
+    /// dump per block into this directory's `inputs/`. Capture costs well under a second per
+    /// block, so it keeps pace with the chain; solving the queue is a separate, much slower
+    /// process — run `hindsight apex-solve <dir>` against the same directory, in parallel or
+    /// afterwards
     #[arg(long)]
     pub apex_batching_dir: Option<std::path::PathBuf>,
-
-    /// Per-order deadline for the experiment's S1 (single-order) solves, in milliseconds
-    #[arg(long, default_value_t = 500)]
-    pub apex_s1_deadline_ms: u64,
-
-    /// Whole-batch deadline for the experiment's S2 solve, in milliseconds
-    #[arg(long, default_value_t = 3000)]
-    pub apex_s2_deadline_ms: u64,
-
-    /// Iteration cap for APEX's price search (its default is 1000; the deadline still
-    /// bounds wall-clock time)
-    #[arg(long)]
-    pub apex_max_iterations: Option<u32>,
 }
 
 /// Drives the in-process solver, stepping the chain one block per `SteppingSolver::advance`.
@@ -718,15 +708,11 @@ fn build_apex_batching(
     let Some(dir) = cfg.apex_batching_dir.as_ref() else {
         return Ok(None);
     };
-    let engine = crate::batching::BatchingEngine::new(
-        dir,
-        crate::batching::SolveBudget {
-            s1_deadline_ms: cfg.apex_s1_deadline_ms,
-            s2_deadline_ms: cfg.apex_s2_deadline_ms,
-            max_iterations: cfg.apex_max_iterations,
-        },
-    )?;
-    info!(dir = %dir.display(), "apex batching experiment enabled");
+    let engine = crate::batching::BatchingEngine::new(dir)?;
+    info!(
+        dir = %dir.display(),
+        "apex batching capture enabled; solve the queue with `hindsight apex-solve`"
+    );
     Ok(Some(engine))
 }
 
@@ -882,9 +868,6 @@ mod tests {
             max_lag_blocks: Some(100),
             comparisons_dir: None,
             apex_batching_dir: None,
-            apex_s1_deadline_ms: 500,
-            apex_s2_deadline_ms: 3000,
-            apex_max_iterations: None,
         })
         .await
         .expect("monitor should process one block without error");

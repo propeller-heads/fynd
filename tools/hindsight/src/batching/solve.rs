@@ -5,12 +5,12 @@ use std::{
     collections::{BTreeMap, HashMap},
     panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
+    sync::{Condvar, Mutex},
     time::{Duration, Instant},
 };
 
 use apex_solver::{
     core::{ApexConfig, ApexResult, LimitOrderClearing},
-    serialization::ApexInputData,
     types::U256 as ApexU256,
 };
 use serde::Serialize;
@@ -19,24 +19,26 @@ use tracing::warn;
 use super::{
     alloy_u256, dec, orders_by_pair,
     snapshot::{scale_down_ceil, scale_down_floor, Snapshot},
-    BlockRecord, ConfigOutcomeRecord, ConfigTotalsRecord, InclusionStatus, OrderRecord,
+    BatchTrade, BlockRecord, ConfigOutcomeRecord, ConfigTotalsRecord, InclusionStatus, OrderRecord,
     PoolVolumeRecord, PreparedOrder, SolveBudget, Variant,
 };
-use crate::decoder::DecodedTrade;
 
-/// Run S1 and S2 for both limit-price variants on the block's snapshot, appending one record
-/// per order per run per variant to `records`. Returns one block record per variant.
+/// Solve one captured block: every limit-price variant, S1 and S2, appending one record per
+/// order per run per variant to `records`. Returns one block record per variant.
+///
+/// The variants run **one after another**, and a variant's S2 batch solve runs alone. That is
+/// deliberate: S2 is the production simulation, and its wall-clock deadline only means what it
+/// would mean in production if the solve has the machine to itself. S1 is a baseline, so its
+/// per-order solves fan out (`budget.s1_workers`) while no S2 solve is running.
 pub(crate) fn run_block(
     block: u64,
-    trades: &[DecodedTrade],
+    trades: &[BatchTrade],
     snapshot: &Snapshot,
     budget: SolveBudget,
-    inputs_dir: &Path,
     results_dir: &Path,
     records: &mut Vec<OrderRecord>,
 ) -> anyhow::Result<Vec<BlockRecord>> {
-    dump_input(block, snapshot, inputs_dir);
-    let mut block_records = Vec::with_capacity(2);
+    let mut block_records = Vec::with_capacity(3);
     for variant in [Variant::Permissive, Variant::Anchored, Variant::UserLimit] {
         block_records.push(run_variant(
             block,
@@ -54,13 +56,13 @@ pub(crate) fn run_block(
 fn run_variant(
     block: u64,
     variant: Variant,
-    trades: &[DecodedTrade],
+    trades: &[BatchTrade],
     snapshot: &Snapshot,
     budget: SolveBudget,
     results_dir: &Path,
     records: &mut Vec<OrderRecord>,
 ) -> anyhow::Result<BlockRecord> {
-    // S2: the whole block as one batch.
+    // S2: the whole block as one batch, alone on the machine.
     let s2_started = Instant::now();
     let s2_result =
         solve(snapshot, &snapshot.prepared, variant, budget.s2_deadline_ms, budget.max_iterations);
@@ -88,13 +90,19 @@ fn run_variant(
 
     // S1: each order alone against the same snapshot — same solver, same pools, no batching.
     let s1_started = Instant::now();
+    let s1_outcomes = solve_each_order(snapshot, variant, budget);
+    let s1_solve_ms_total = u64::try_from(s1_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    // Folded in order, so the tallies and the records don't depend on which solve finished first.
     let mut s1_deadline_fired = 0usize;
     let mut s1_results = BTreeMap::new();
     let mut s1_configs = config_totals();
-    for prepared in &snapshot.prepared {
-        let single = std::slice::from_ref(prepared);
-        let result = solve(snapshot, single, variant, budget.s1_deadline_ms, budget.max_iterations);
-        let clearing = result.as_ref().and_then(|outcome| {
+    for (prepared, outcome) in snapshot
+        .prepared
+        .iter()
+        .zip(&s1_outcomes)
+    {
+        let clearing = outcome.as_ref().and_then(|outcome| {
             if outcome.result.deadline_fired {
                 s1_deadline_fired += 1;
             }
@@ -102,7 +110,7 @@ fn run_variant(
                 .get(prepared.permissive.id.as_str())
                 .map(|clearing| (*clearing).clone())
         });
-        if let Some(outcome) = result.as_ref() {
+        if let Some(outcome) = outcome.as_ref() {
             add_config_totals(&mut s1_configs, &outcome.configs);
             s1_results.insert(
                 prepared.permissive.id.clone(),
@@ -119,7 +127,6 @@ fn run_variant(
             clearing.as_ref(),
         ));
     }
-    let s1_solve_ms_total = u64::try_from(s1_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     dump_results(block, variant, &s2_result, s2_winning_config, s1_results, results_dir);
 
     // Out-of-universe trades get a record per run so the analysis can count them at S0.
@@ -175,6 +182,89 @@ fn add_config_totals(totals: &mut [ConfigTotalsRecord], outcomes: &[ConfigOutcom
         total.cleared_eth += outcome.cleared_eth;
         total.orders_cleared += outcome.orders_cleared;
         total.pool_clearings += outcome.pool_clearings;
+    }
+}
+
+/// Solve every order on its own, in parallel — the orders don't interact, so nothing forces
+/// them to run one after another. Each waits for a gate slot, and its deadline starts once it
+/// holds one, so a queued solve is not charged for the wait. Results come back in order.
+/// No S2 solve runs while this does, so the fan-out cannot disturb the S2 measurement.
+fn solve_each_order(
+    snapshot: &Snapshot,
+    variant: Variant,
+    budget: SolveBudget,
+) -> Vec<Option<SolveOutcome>> {
+    let gate = SolveGate::new(budget.s1_workers);
+    let gate = &gate;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = snapshot
+            .prepared
+            .iter()
+            .map(|prepared| {
+                scope.spawn(move || {
+                    let _slot = gate.acquire();
+                    solve(
+                        snapshot,
+                        std::slice::from_ref(prepared),
+                        variant,
+                        budget.s1_deadline_ms,
+                        budget.max_iterations,
+                    )
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or(None))
+            .collect()
+    })
+}
+
+/// Caps how many of a variant's S1 order-solves run at once. A solve is not a single-threaded
+/// unit of work: it races the whole config panel, each config with its own market-supply
+/// workers, so it already spreads across the machine. Because APEX stops at a wall-clock
+/// deadline rather than an iteration count, contention costs search depth, not just wall time:
+/// a starved solve truncates and clears nothing at all.
+struct SolveGate {
+    permits: Mutex<usize>,
+    released: Condvar,
+}
+
+impl SolveGate {
+    fn new(permits: usize) -> Self {
+        Self { permits: Mutex::new(permits.max(1)), released: Condvar::new() }
+    }
+
+    /// Blocks until a slot frees up. The slot is held until the returned guard drops.
+    fn acquire(&self) -> SolveSlot<'_> {
+        let mut permits = self
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *permits == 0 {
+            permits = self
+                .released
+                .wait(permits)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *permits -= 1;
+        SolveSlot { gate: self }
+    }
+}
+
+struct SolveSlot<'a> {
+    gate: &'a SolveGate,
+}
+
+impl Drop for SolveSlot<'_> {
+    fn drop(&mut self) {
+        let mut permits = self
+            .gate
+            .permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *permits += 1;
+        self.gate.released.notify_one();
     }
 }
 
@@ -405,7 +495,7 @@ fn order_record(
     block: u64,
     run: &'static str,
     variant: Variant,
-    trades: &[DecodedTrade],
+    trades: &[BatchTrade],
     snapshot: &Snapshot,
     prepared: &PreparedOrder,
     clearing: Option<&LimitOrderClearing>,
@@ -525,7 +615,7 @@ fn out_of_universe_record(
     block: u64,
     run: &'static str,
     variant: Variant,
-    trade: &DecodedTrade,
+    trade: &BatchTrade,
     snapshot: &Snapshot,
 ) -> OrderRecord {
     let (sell, buy) = super::experiment_tokens(trade);
@@ -705,29 +795,6 @@ fn dump_results(
         .and_then(|f| serde_json::to_writer(f, &file).map_err(anyhow::Error::from));
     if let Err(error) = outcome {
         warn!(%error, path = %path.display(), "failed to dump apex results");
-    }
-}
-
-/// Persist the block's full APEX input for offline replay and debugging. A dump failure is
-/// logged, not fatal — the live records are the experiment's primary output.
-fn dump_input(block: u64, snapshot: &Snapshot, inputs_dir: &Path) {
-    let input = ApexInputData {
-        batch_id: block,
-        tokens: snapshot.apex_tokens.clone(),
-        initial_prices: snapshot.initial_prices.clone(),
-        limit_orders: orders_by_pair(&snapshot.prepared, Variant::Permissive),
-        market_orders: HashMap::new(),
-        // The serializer emits `Pool::Apex` entries itself (as `"type": "custom"`, via
-        // `ApexPool::to_snapshot_json`), so the full pool set goes in as-is.
-        pools: snapshot.pools.clone(),
-        custom_pools: Vec::new(),
-    };
-    let path = inputs_dir.join(format!("apex_input_{block}.json"));
-    let result = std::fs::File::create(&path)
-        .map_err(anyhow::Error::from)
-        .and_then(|file| serde_json::to_writer(file, &input).map_err(anyhow::Error::from));
-    if let Err(error) = result {
-        warn!(%error, path = %path.display(), "failed to dump apex input");
     }
 }
 
