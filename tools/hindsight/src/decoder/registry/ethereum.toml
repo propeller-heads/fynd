@@ -10,7 +10,18 @@ wrapped_native = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 # an unknown swap's settling venue from on-chain activity; without this list those guesses would
 # name these infrastructure contracts instead of the real venue. The wrapped-native token above is skipped the
 # same way.
-infrastructure = ["0x000000000022d473030f116ddee9f6b43ac78ba3"] # Permit2
+infrastructure = [
+    "0x000000000022d473030f116ddee9f6b43ac78ba3", # Permit2
+    # MetaMask's Swaps Spender. The Swap Router hands it the trader's tokens and it delegates to a
+    # closed-source adapter, so it settles nothing itself — but it is the child call the router
+    # funds, which is what `largest_external_call` picks. 80 records in one day carried its raw
+    # address as their solver; skipping it leaves them labelled `metamask`, the venue they already
+    # carry, instead of a name no `SolverDecoder` will ever back.
+    "0x74de5d4fcbf63e00296fd95d33236b9794016631",
+    # Relay's swap executor, on the same footing: 91 records in one day, every one inside a Relay
+    # transaction and already labelled with `relay` as its venue.
+    "0x4296339b4ff8e67f07de40d97a49a680f2598e0f",
+]
 
 # Batch-settlement venues where `tx.to` is the settlement contract and the transaction sender is
 # a solver, not the trader (CoW Protocol Settlement).
