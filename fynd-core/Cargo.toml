@@ -29,6 +29,7 @@ async-channel.workspace = true
 async-trait.workspace = true
 itertools.workspace = true
 uuid.workspace = true
+rand.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

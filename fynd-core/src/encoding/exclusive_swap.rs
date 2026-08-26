@@ -16,7 +16,7 @@
 //! `>= 0.338.0`). All byte layouts and the EIP-712 digest are mirrored from the Ekubo contracts.
 
 use std::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -37,14 +37,18 @@ const DEFAULT_DEADLINE_WINDOW_SECS: u32 = 120;
 
 /// Produces controller-signed `user_data` payloads for exclusive swaps.
 ///
-/// Holds the controller key, the chain id (bound into the EIP-712 domain), a monotonic nonce
-/// source, and the deadline window. Construct it from the environment with
-/// [`ExclusiveSwapSigner::from_env`]; when the key variable is unset the encoder simply leaves
-/// exclusive legs unsigned.
+/// Holds the controller key, the chain id (bound into the EIP-712 domain), the nonce source, and
+/// the deadline window. Construct it from the environment with [`ExclusiveSwapSigner::from_env`];
+/// when the key variable is unset the encoder simply leaves exclusive legs unsigned.
+///
+/// The extension rejects a nonce it has already seen, so a nonce is `nonce_prefix` (drawn once per
+/// process) in the high 32 bits and `nonce_counter` (payloads signed in this process) in the low
+/// 32. A restart or a second replica draws its own prefix instead of resigning a spent range.
 pub struct ExclusiveSwapSigner {
     signer: PrivateKeySigner,
     chain_id: u64,
-    nonce: AtomicU64,
+    nonce_prefix: u32,
+    nonce_counter: AtomicU32,
     deadline_window_secs: u32,
 }
 
@@ -52,9 +56,8 @@ impl ExclusiveSwapSigner {
     /// Builds a signer from the `EXCLUSIVE_SWAP_CONTROLLER_KEY` env var: `Ok(None)` when unset
     /// (signing disabled), an error when set but invalid.
     ///
-    /// The nonce is seeded from wall-clock seconds so it stays ahead of already-consumed on-chain
-    /// nonces across restarts without persistence. This holds only below ~1 signature/second;
-    /// higher throughput or multiple replicas need a per-process offset or persisted nonces.
+    /// The nonce prefix is random, so no state has to persist across restarts and replicas need no
+    /// coordination.
     pub fn from_env(chain_id: u64) -> Result<Option<Self>, SolveError> {
         let Ok(key) = std::env::var(ENV_CONTROLLER_KEY) else {
             return Ok(None);
@@ -64,20 +67,45 @@ impl ExclusiveSwapSigner {
             .map_err(|e| {
                 SolveError::FailedEncoding(format!("invalid {ENV_CONTROLLER_KEY}: {e}"))
             })?;
-        Ok(Some(Self::new(signer, chain_id, now_unix_secs(), DEFAULT_DEADLINE_WINDOW_SECS)))
+        Ok(Some(Self::new(signer, chain_id, rand::random(), DEFAULT_DEADLINE_WINDOW_SECS)))
     }
 
     /// Creates a signer from explicit parts.
     ///
-    /// `nonce_seed` is the first nonce handed out; `deadline_window_secs` is added to the
-    /// signing-time timestamp to form each payload's deadline.
+    /// `nonce_prefix` is the high 32 bits of every nonce handed out; `deadline_window_secs` is
+    /// added to the signing-time timestamp to form each payload's deadline.
     pub fn new(
         signer: PrivateKeySigner,
         chain_id: u64,
-        nonce_seed: u64,
+        nonce_prefix: u32,
         deadline_window_secs: u32,
     ) -> Self {
-        Self { signer, chain_id, nonce: AtomicU64::new(nonce_seed), deadline_window_secs }
+        Self {
+            signer,
+            chain_id,
+            nonce_prefix,
+            nonce_counter: AtomicU32::new(0),
+            deadline_window_secs,
+        }
+    }
+
+    /// Hands out the next unused nonce: `nonce_prefix` in the high 32 bits, the counter in the low
+    /// 32.
+    ///
+    /// # Errors
+    /// Errors from the 2³²-th payload on. Wrapping the counter would resign a spent nonce, so the
+    /// signer stops instead and a restart draws a fresh prefix.
+    fn next_nonce(&self) -> Result<u64, SolveError> {
+        let counter = self
+            .nonce_counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |counter| counter.checked_add(1))
+            .map_err(|_| {
+                SolveError::FailedEncoding(
+                    "exclusive swap nonce counter is exhausted; restart to draw a new prefix"
+                        .to_string(),
+                )
+            })?;
+        Ok((u64::from(self.nonce_prefix) << 32) | u64::from(counter))
     }
 
     /// Builds the signed `user_data` for one exclusive swap leg.
@@ -91,7 +119,8 @@ impl ExclusiveSwapSigner {
     ///
     /// # Errors
     /// Errors if the leg lacks a committed amount, the component is missing Ekubo pool attributes,
-    /// a token address exceeds 32 bytes, the deadline overflows `u32`, or signing fails.
+    /// a token address exceeds 32 bytes, the deadline overflows `u32`, the nonce counter is
+    /// exhausted, or signing fails.
     pub fn build_user_data(&self, swap: &Swap) -> Result<Bytes, SolveError> {
         let committed = swap
             .committed_amount_out()
@@ -102,9 +131,7 @@ impl ExclusiveSwapSigner {
             })?;
 
         let fee = derive_fee_q32(swap.amount_out(), committed);
-        let nonce = self
-            .nonce
-            .fetch_add(1, Ordering::Relaxed);
+        let nonce = self.next_nonce()?;
         let deadline = now_unix_secs().saturating_add(u64::from(self.deadline_window_secs));
         let deadline = u32::try_from(deadline).map_err(|_| {
             SolveError::FailedEncoding("signed swap deadline overflows u32".to_string())
@@ -513,15 +540,71 @@ mod tests {
             .is_err());
     }
 
+    /// Reads the nonce out of a `user_data` payload: it lives in meta bits [191..128] = meta bytes
+    /// [8..16], and meta starts after the fee(8) prefix.
+    fn payload_nonce(user_data: &Bytes) -> u64 {
+        u64::from_be_bytes(
+            user_data.as_ref()[16..24]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
     #[test]
     fn test_nonce_increments_per_payload() {
-        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, 0, 120);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, 7, 120);
         let swap = signed_swap(Some(990_000));
 
         let first = signer.build_user_data(&swap).unwrap();
         let second = signer.build_user_data(&swap).unwrap();
-        // Nonce lives in meta bits [191..128] = meta bytes [8..16]; meta starts after the fee(8)
-        // prefix, so that is user_data bytes [16..24]. A fresh nonce changes the payload.
-        assert_ne!(first.as_ref()[16..24], second.as_ref()[16..24]);
+
+        assert_eq!(payload_nonce(&first), 7 << 32);
+        assert_eq!(payload_nonce(&second), (7 << 32) + 1);
+    }
+
+    #[test]
+    fn test_nonce_ranges_disjoint_across_prefixes() {
+        let key: PrivateKeySigner = CONTROLLER_KEY.parse().unwrap();
+        let swap = signed_swap(Some(990_000));
+        // Two processes (a restart, or a second replica) each draw their own prefix.
+        let first = ExclusiveSwapSigner::new(key.clone(), 42, 1, 120);
+        let second = ExclusiveSwapSigner::new(key, 42, 2, 120);
+
+        let mut nonces = Vec::new();
+        for _ in 0..4 {
+            nonces.push(payload_nonce(&first.build_user_data(&swap).unwrap()));
+            nonces.push(payload_nonce(&second.build_user_data(&swap).unwrap()));
+        }
+
+        let unique: std::collections::HashSet<u64> = nonces.iter().copied().collect();
+        assert_eq!(unique.len(), nonces.len());
+    }
+
+    #[test]
+    fn test_nonce_avoids_reserved_sentinel() {
+        // The extension never consumes `u64::MAX` — a payload carrying it stays replayable until
+        // its deadline. The counter stops one short of `u32::MAX`, so even the widest prefix
+        // cannot compose that value.
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, u32::MAX, 120);
+        let swap = signed_swap(Some(990_000));
+        signer
+            .nonce_counter
+            .store(u32::MAX - 1, Ordering::Relaxed);
+
+        assert_eq!(payload_nonce(&signer.build_user_data(&swap).unwrap()), u64::MAX - 1);
+        assert!(signer.build_user_data(&swap).is_err());
+    }
+
+    #[test]
+    fn test_exhausted_nonce_counter() {
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, 1, 120);
+        let swap = signed_swap(Some(990_000));
+        signer
+            .nonce_counter
+            .store(u32::MAX, Ordering::Relaxed);
+
+        // The counter must stop rather than wrap onto nonces this prefix already spent.
+        assert!(signer.build_user_data(&swap).is_err());
+        assert!(signer.build_user_data(&swap).is_err());
     }
 }
