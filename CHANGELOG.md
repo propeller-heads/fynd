@@ -1,4 +1,16 @@
 
+## [0.99.17](https://github.com/propeller-heads/fynd/compare/0.99.16...0.99.17) (2026-08-26)
+
+### Features
+
+* add Robinhood to hosted API support ([54e06b8](https://github.com/propeller-heads/fynd/commit/54e06b858de3cd69eab76032964644a0cf7a00f4))
+
+### Bug Fixes
+
+* draw exclusive swap nonces from a random per-process prefix ([3398945](https://github.com/propeller-heads/fynd/commit/3398945417529c37f5215bbb60ec6550598da6c5))
+* address PR #466 review comments ([299a8fb](https://github.com/propeller-heads/fynd/commit/299a8fbd26a7f2d6de07e7200f9b843d31228458))
+
+
 
 ## [0.99.15](https://github.com/propeller-heads/fynd/compare/0.99.14...0.99.15) (2026-08-25)
 
