@@ -104,6 +104,11 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 # Pendle Router V4 (Etherscan name tag) — a protocol router, not a solver.
 "0x888888888889758f76e7103c6cbf23abbf58f946" = "pendle"
 
+[venues.debridge]
+# deBridge's swap entry proxy: relayer-sent, gasless. Their DLN cross-chain orders enter here
+# too, and carry no same-chain output.
+entry_points = ["0xb7b10db9c7b978c48340994cb48829c4b3617b2f"]
+
 [venues.relay]
 # Relay routers (v2 / v2.1 / v3, Cancun) and approval proxies.
 entry_points = [
