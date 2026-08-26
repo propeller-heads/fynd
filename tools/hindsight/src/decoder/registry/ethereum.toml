@@ -69,8 +69,9 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0xee0319cf0bca5d09333f9f6277743e8de31bd69a" = "butter"
 # LiquidMesh router — same address on Ethereum and Base. Settles Trust Wallet's swap flow: every
 # Trust Wallet swap in a 37-swap sample across both chains entered here, and none reached any other
-# registered solver. Its entry selector 0x47ee97ff is in no public 4-byte database, so these stay
-# netted until the ABI is known.
+# registered solver. It settles Binance Wallet's flow as well, which is the larger share, so the
+# entry point rather than this name is what tells the two apart. Its entry selector 0x47ee97ff is
+# in no public 4-byte database; `solvers/liquidmesh.rs` reads the router's own event instead.
 "0x3d90f66b534dd8482b181e24655a9e8265316be9" = "liquidmesh"
 
 # Venues — platforms that initiate a trade and route it through a solver found in the trace. Pure

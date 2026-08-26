@@ -1,8 +1,13 @@
 //! `LiquidMesh` log extraction.
 //!
-//! `LiquidMesh` settles Trust Wallet's swap flow and states each settled trade in one event: both
-//! tokens, the trader, the amount that entered the swap, and the amount returned. Nothing is left
-//! to recover from the ledger, the same shape as OKX's `OrderRecord`.
+//! `LiquidMesh` states each settled trade in one event: both tokens, the trader, the amount the
+//! trader paid, and the amount the trader received. Nothing is left to recover from the ledger,
+//! the same shape as OKX's `OrderRecord`.
+//!
+//! It settles more than one client's order flow. Trust Wallet's enters through the router
+//! directly; Binance Wallet's enters through `0xb300000b72DEAEb607a12d5f54773D1C19c7028d`, and
+//! over one production day was 3,124 of 4,746 records. The solver name alone therefore names no
+//! client — the venue does.
 //!
 //! The event is read by position rather than declared with `sol!`, which every other log read
 //! here uses. The router is a proxy whose implementation is verified nowhere we checked
@@ -13,10 +18,14 @@
 //!
 //! The layout was recovered over 37 swaps across Ethereum and Base: word 3 was the transaction
 //! sender in all 37, and word 5 was exactly the amount that address received of word 2's token in
-//! all 37. Word 4 is the input after `LiquidMesh`'s own fee — the amount that reached the pools,
-//! which is the basis a re-solve needs. The fee itself is stated in a second event, paid to Trust
-//! Wallet's fee wallet in the 32 of those swaps that carried one, and is not read here: a venue
-//! fee is not modelled unless the address book lists the wallet.
+//! all 37. Word 4 is the full amount the trader paid, gross of every fee.
+//!
+//! Word 5 is **net of the venue's fee**, which is what makes the fee matter here. Verified on
+//! Ethereum: the trader sent 39,270 DAI, the router took in 39,272.36 USDT, paid 274.906517 USDT
+//! (0.700%) to Trust Wallet's fee wallet and 38,997.453165 USDT to the trader, and the event
+//! states 38,997.453165. Comparing that against a re-solve of the full input would hand Fynd the
+//! fee as a win, so the wallet is listed in `[venue_fees]` and `attribution::venue` adds the cut
+//! back onto the output. A client whose wallet is not listed keeps its fee inside word 5.
 //!
 //! Word 0 is an identifier that also appears in the fee event, and is not read.
 
