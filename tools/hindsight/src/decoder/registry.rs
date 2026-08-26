@@ -80,6 +80,10 @@ struct AddressBook {
     /// committed into an order (`LlamaSwap`). Absent in books with no appData-identified venues.
     #[serde(default)]
     venue_appdata: HashMap<B256, String>,
+    /// Liquid intermediaries the batching experiment always adds to its token universe, so the
+    /// solver can route through them even when the block's own trades don't touch them.
+    #[serde(default)]
+    hub_tokens: Vec<Address>,
 }
 
 /// A venue's address-book section on one chain: the contracts users enter through, the
@@ -143,6 +147,8 @@ pub(crate) struct Registry {
     usd_stablecoins: Vec<(Address, u32)>,
     /// Venue address sets, keyed by the venue name from the address book.
     venues: HashMap<String, VenueAddresses>,
+    /// Liquid intermediaries the batching experiment adds to every block's token universe.
+    hub_tokens: Vec<Address>,
     /// Trader address → order-flow venue name, for venues identified by who owns the order
     /// rather than by the entry point (e.g. kpk's Safes settling through `CoW`).
     venue_owners: HashMap<Address, String>,
@@ -246,6 +252,7 @@ impl Registry {
                 .map(|(tag, venue)| (tag.to_lowercase(), venue))
                 .collect(),
             venue_appdata: book.venue_appdata,
+            hub_tokens: book.hub_tokens,
         })
     }
 
@@ -278,6 +285,12 @@ impl Registry {
     /// single swap even when it happens to net to one token on each side.
     pub(crate) fn is_batch_settler(&self, address: Address) -> bool {
         self.batch_settlers.contains(&address)
+    }
+
+    /// Liquid intermediaries the batching experiment routes through (see `batching`). Empty
+    /// on a chain whose book has not declared any.
+    pub(crate) fn hub_tokens(&self) -> &[Address] {
+        &self.hub_tokens
     }
 
     pub(crate) fn wrapped_native(&self) -> Address {

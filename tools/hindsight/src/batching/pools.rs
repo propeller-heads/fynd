@@ -36,6 +36,7 @@ use tycho_simulation::{
 use super::{
     alloy_from_bytes, apex_addr,
     snapshot::{scale_down_floor, scale_up},
+    ChainTokens,
 };
 
 /// Protocols whose state converts to APEX's native V2 pool.
@@ -60,12 +61,13 @@ pub(crate) struct PoolCounts {
 pub(crate) fn build_pools(
     state: &MarketState,
     universe: &HashMap<AlloyAddress, TychoToken>,
+    chain: &ChainTokens,
 ) -> (Vec<Pool>, PoolCounts) {
     let mut pools = Vec::new();
     let mut counts = PoolCounts::default();
 
     for (component_id, token_addresses) in state.component_topology() {
-        let views = pair_views(state, &token_addresses, universe);
+        let views = pair_views(state, &token_addresses, universe, chain);
         if views.is_empty() {
             counts.skipped += 1;
             continue;
@@ -141,10 +143,9 @@ fn pair_views(
     state: &MarketState,
     addresses: &[tycho_simulation::tycho_common::models::Address],
     universe: &HashMap<AlloyAddress, TychoToken>,
+    chain: &ChainTokens,
 ) -> Vec<PairView> {
-    let weth: AlloyAddress = super::WETH
-        .parse()
-        .expect("static WETH address");
+    let weth = chain.wrapped_native;
     let mut mapped: Vec<(AlloyAddress, TychoToken)> = Vec::with_capacity(addresses.len());
     for address in addresses {
         let Some(alloy) = alloy_from_bytes(address.as_ref()) else {

@@ -516,7 +516,10 @@ pub(crate) async fn run(cfg: MonitorArgs) -> anyhow::Result<()> {
         None => None,
     };
 
-    let mut apex_batching = build_apex_batching(&cfg)?;
+    // The experiment's token universe is chain-specific (wrapped-native fold, hub tokens), so
+    // it comes from the same address book the decoder uses rather than mainnet constants.
+    let mut apex_batching =
+        build_apex_batching(&cfg, crate::batching::ChainTokens::from_registry(decoder.registry()))?;
 
     let mut totals = Totals::default();
     let pacing = Pacing::for_chain(chain, cfg.max_lag_blocks);
@@ -704,11 +707,12 @@ async fn run_session<P: Provider>(
 /// Build the APEX batching engine when the experiment is enabled via `--apex-batching-dir`.
 fn build_apex_batching(
     cfg: &MonitorArgs,
+    chain: crate::batching::ChainTokens,
 ) -> anyhow::Result<Option<crate::batching::BatchingEngine>> {
     let Some(dir) = cfg.apex_batching_dir.as_ref() else {
         return Ok(None);
     };
-    let engine = crate::batching::BatchingEngine::new(dir)?;
+    let engine = crate::batching::BatchingEngine::new(dir, chain)?;
     info!(
         dir = %dir.display(),
         "apex batching capture enabled; solve the queue with `hindsight apex-solve`"

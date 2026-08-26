@@ -36,7 +36,7 @@ use tracing::{info, warn};
 use super::{
     orders_by_pair, pools,
     snapshot::{Snapshot, TokenMeta},
-    solve, BatchTrade, PreparedOrder, SolveBudget, Variant,
+    solve, BatchTrade, ChainTokens, PreparedOrder, SolveBudget, Variant,
 };
 
 /// One captured block: the solver input plus everything else `run_block` needs.
@@ -53,6 +53,21 @@ pub(crate) struct BatchDump {
     pub excluded_sandwiched: usize,
     pub pool_counts: PoolCountsJson,
     pub token_meta: HashMap<AlloyAddress, TokenMetaJson>,
+    /// The chain's wrapped-native and hub addresses, so a re-solve folds native ETH the same
+    /// way the capture did. Absent in dumps captured before this was recorded; those are all
+    /// Ethereum, so they fall back to mainnet WETH.
+    #[serde(default = "ethereum_chain_tokens")]
+    pub chain: ChainTokens,
+}
+
+/// The fold a pre-`chain` dump was captured with: every such dump is from Ethereum mainnet.
+fn ethereum_chain_tokens() -> ChainTokens {
+    ChainTokens {
+        wrapped_native: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            .parse()
+            .expect("static mainnet WETH address"),
+        hubs: Vec::new(),
+    }
 }
 
 /// The limits a prepared order carries beyond the permissive one already in `input`. Joined
@@ -94,7 +109,12 @@ fn parse_apex(text: &str) -> anyhow::Result<ApexU256> {
 }
 
 impl BatchDump {
-    pub fn capture(block: u64, trades: &[BatchTrade], snapshot: &Snapshot) -> Self {
+    pub fn capture(
+        block: u64,
+        trades: &[BatchTrade],
+        snapshot: &Snapshot,
+        chain: &ChainTokens,
+    ) -> Self {
         let orders = snapshot
             .prepared
             .iter()
@@ -165,13 +185,16 @@ impl BatchDump {
                     )
                 })
                 .collect(),
+            chain: chain.clone(),
         }
     }
 
     /// Rebuild the snapshot this dump was taken from. Wrapped pools are reconstructed from their
     /// opaque payloads, so the pool set matches the live one rather than the V2/V3 subset
     /// apex-solver can parse on its own.
-    pub fn into_snapshot(mut self) -> anyhow::Result<(u64, Vec<BatchTrade>, Snapshot)> {
+    pub fn into_snapshot(
+        mut self,
+    ) -> anyhow::Result<(u64, Vec<BatchTrade>, Snapshot, ChainTokens)> {
         let mut pools = std::mem::take(&mut self.input.pools);
         for custom in std::mem::take(&mut self.input.custom_pools) {
             pools.push(pools::rebuild_wrapped(&custom)?);
@@ -248,7 +271,7 @@ impl BatchDump {
                 })
                 .collect(),
         };
-        Ok((self.block, std::mem::take(&mut self.trades), snapshot))
+        Ok((self.block, std::mem::take(&mut self.trades), snapshot, self.chain.clone()))
     }
 }
 
@@ -355,10 +378,10 @@ fn solve_one(
 ) -> anyhow::Result<usize> {
     let text = std::fs::read_to_string(path)?;
     let dump: BatchDump = serde_json::from_str(&text)?;
-    let (block, trades, snapshot) = dump.into_snapshot()?;
+    let (block, trades, snapshot, chain) = dump.into_snapshot()?;
     let mut records = Vec::new();
     let block_records =
-        solve::run_block(block, &trades, &snapshot, budget, results_dir, &mut records)?;
+        solve::run_block(block, &trades, &snapshot, &chain, budget, results_dir, &mut records)?;
     let count = records.len();
     writer.write(&records, &block_records)?;
     Ok(count)

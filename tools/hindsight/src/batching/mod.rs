@@ -71,22 +71,43 @@ impl From<&DecodedTrade> for BatchTrade {
     }
 }
 
-/// Mainnet hub tokens (Turbine's set): always added to the token universe so the solver can
-/// route through liquid intermediaries the block's trades may not touch directly.
-const HUB_TOKENS: [&str; 7] = [
-    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599", // WBTC
-    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // USDC
-    "0xdac17f958d2ee523a2206206994597c13d831ec7", // USDT
-    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // WETH
-    "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9", // AAVE
-    "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984", // UNI
-    "0x6b175474e89094c44da98b954eedeac495271d0f", // DAI
-];
+/// The chain-specific token addresses the experiment needs, read from the chain's address book.
+///
+/// These used to be mainnet constants, which any other chain would have mishandled silently:
+/// hub tokens that don't exist there are dropped from the universe, and a wrapped-native
+/// address from the wrong chain sends every native-ETH trade out of universe and skips every
+/// native-ETH pool. Captured into each dump so a re-solve folds tokens the same way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ChainTokens {
+    /// Stands in for native ETH: decoded trades use `Address::ZERO` for raw-ETH legs, but the
+    /// routers wrap anyway and the indexed pools quote the wrapped token.
+    pub wrapped_native: AlloyAddress,
+    /// Liquid intermediaries always added to the token universe, so the solver can route
+    /// through them even when the block's own trades don't touch them.
+    pub hubs: Vec<AlloyAddress>,
+}
 
-/// WETH stands in for native ETH: decoded trades use `Address::ZERO` for raw-ETH legs, but the
-/// routers wrap anyway and the indexed pools quote WETH. Pools keyed on the zero address
-/// (e.g. native Uniswap V4 pools) are excluded from the universe instead.
-const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+impl ChainTokens {
+    pub fn from_registry(registry: &crate::decoder::Registry) -> Self {
+        Self { wrapped_native: registry.wrapped_native(), hubs: registry.hub_tokens().to_vec() }
+    }
+
+    /// Native ETH folded onto the wrapped token, both sides of a trade.
+    pub fn fold(
+        &self,
+        token_in: AlloyAddress,
+        token_out: AlloyAddress,
+    ) -> (AlloyAddress, AlloyAddress) {
+        let fold = |token: AlloyAddress| {
+            if token == AlloyAddress::ZERO {
+                self.wrapped_native
+            } else {
+                token
+            }
+        };
+        (fold(token_in), fold(token_out))
+    }
+}
 
 /// Whether an order got batched, and if not, where it fell out of the pipeline. Uncleared
 /// orders count at S0 in the analysis (they would have executed standalone).
@@ -373,15 +394,16 @@ impl RecordWriter {
 pub(crate) struct BatchingEngine {
     inputs_dir: PathBuf,
     blocks_captured: u64,
+    chain: ChainTokens,
 }
 
 impl BatchingEngine {
-    pub fn new(dir: &Path) -> anyhow::Result<Self> {
+    pub fn new(dir: &Path, chain: ChainTokens) -> anyhow::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let inputs_dir = dir.join("inputs");
         std::fs::create_dir_all(&inputs_dir)?;
         std::fs::create_dir_all(dir.join("results"))?;
-        Ok(Self { inputs_dir, blocks_captured: 0 })
+        Ok(Self { inputs_dir, blocks_captured: 0, chain })
     }
 
     /// Capture one block. Must be called while the solver still holds top-of-block state N-1
@@ -404,14 +426,14 @@ impl BatchingEngine {
             let Some(token_prices) = derived_guard.token_prices() else {
                 anyhow::bail!("derived token prices not ready yet; skipping block");
             };
-            snapshot::build_snapshot(state, token_prices, trades)
+            snapshot::build_snapshot(state, token_prices, trades, &self.chain)
         };
 
         let batch_trades: Vec<BatchTrade> = trades
             .iter()
             .map(BatchTrade::from)
             .collect();
-        let dump = dump::BatchDump::capture(block, &batch_trades, &snapshot);
+        let dump = dump::BatchDump::capture(block, &batch_trades, &snapshot, &self.chain);
         dump::write_dump(&dump, &self.inputs_dir)?;
         self.blocks_captured += 1;
         info!(
@@ -443,29 +465,11 @@ pub(crate) fn alloy_from_bytes(bytes: &[u8]) -> Option<AlloyAddress> {
 
 /// The trade's tokens as they enter the experiment: native ETH (zero address) is folded into
 /// WETH on both legs, matching the WETH-quoted pool universe.
-pub(crate) fn experiment_tokens(trade: &BatchTrade) -> (AlloyAddress, AlloyAddress) {
-    fold_native(trade.token_in, trade.token_out)
-}
-
-/// Same fold, for callers that hold the raw decode rather than a `BatchTrade`.
-pub(crate) fn fold_native(
-    token_in: AlloyAddress,
-    token_out: AlloyAddress,
+pub(crate) fn experiment_tokens(
+    chain: &ChainTokens,
+    trade: &BatchTrade,
 ) -> (AlloyAddress, AlloyAddress) {
-    let weth: AlloyAddress = WETH
-        .parse()
-        .expect("static WETH address");
-    let fold = |token: AlloyAddress| if token == AlloyAddress::ZERO { weth } else { token };
-    (fold(token_in), fold(token_out))
-}
-
-/// The hub-token set as alloy addresses.
-pub(crate) fn hub_tokens() -> Vec<AlloyAddress> {
-    let mut hubs = Vec::with_capacity(HUB_TOKENS.len());
-    for hub in HUB_TOKENS {
-        hubs.push(hub.parse().expect("static hub address"));
-    }
-    hubs
+    chain.fold(trade.token_in, trade.token_out)
 }
 
 /// Convert an alloy `U256` to an apex `U256` (different ruint instantiations, byte-identical).

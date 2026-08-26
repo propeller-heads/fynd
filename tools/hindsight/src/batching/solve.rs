@@ -19,8 +19,8 @@ use tracing::warn;
 use super::{
     alloy_u256, dec, orders_by_pair,
     snapshot::{scale_down_ceil, scale_down_floor, Snapshot},
-    BatchTrade, BlockRecord, ConfigOutcomeRecord, ConfigTotalsRecord, InclusionStatus, OrderRecord,
-    PoolVolumeRecord, PreparedOrder, SolveBudget, Variant,
+    BatchTrade, BlockRecord, ChainTokens, ConfigOutcomeRecord, ConfigTotalsRecord, InclusionStatus,
+    OrderRecord, PoolVolumeRecord, PreparedOrder, SolveBudget, Variant,
 };
 
 /// Solve one captured block: every limit-price variant, S1 and S2, appending one record per
@@ -34,34 +34,35 @@ pub(crate) fn run_block(
     block: u64,
     trades: &[BatchTrade],
     snapshot: &Snapshot,
+    chain: &ChainTokens,
     budget: SolveBudget,
     results_dir: &Path,
     records: &mut Vec<OrderRecord>,
 ) -> anyhow::Result<Vec<BlockRecord>> {
+    let ctx = BlockContext { block, trades, snapshot, chain, budget, results_dir };
     let mut block_records = Vec::with_capacity(3);
     for variant in [Variant::Permissive, Variant::Anchored, Variant::UserLimit] {
-        block_records.push(run_variant(
-            block,
-            variant,
-            trades,
-            snapshot,
-            budget,
-            results_dir,
-            records,
-        )?);
+        block_records.push(run_variant(&ctx, variant, records)?);
     }
     Ok(block_records)
 }
 
-fn run_variant(
+/// Everything one block's solves read, grouped so the per-variant call stays legible.
+struct BlockContext<'a> {
     block: u64,
-    variant: Variant,
-    trades: &[BatchTrade],
-    snapshot: &Snapshot,
+    trades: &'a [BatchTrade],
+    snapshot: &'a Snapshot,
+    chain: &'a ChainTokens,
     budget: SolveBudget,
-    results_dir: &Path,
+    results_dir: &'a Path,
+}
+
+fn run_variant(
+    ctx: &BlockContext<'_>,
+    variant: Variant,
     records: &mut Vec<OrderRecord>,
 ) -> anyhow::Result<BlockRecord> {
+    let BlockContext { block, trades, snapshot, chain, budget, results_dir } = *ctx;
     // S2: the whole block as one batch, alone on the machine.
     let s2_started = Instant::now();
     let s2_result =
@@ -132,7 +133,14 @@ fn run_variant(
     // Out-of-universe trades get a record per run so the analysis can count them at S0.
     for &trade_ix in &snapshot.out_of_universe {
         for run in ["s1", "s2"] {
-            records.push(out_of_universe_record(block, run, variant, &trades[trade_ix], snapshot));
+            records.push(out_of_universe_record(
+                block,
+                run,
+                variant,
+                &trades[trade_ix],
+                snapshot,
+                chain,
+            ));
         }
     }
 
@@ -617,8 +625,9 @@ fn out_of_universe_record(
     variant: Variant,
     trade: &BatchTrade,
     snapshot: &Snapshot,
+    chain: &ChainTokens,
 ) -> OrderRecord {
-    let (sell, buy) = super::experiment_tokens(trade);
+    let (sell, buy) = super::experiment_tokens(chain, trade);
     let sell_meta = snapshot.meta(sell);
     let buy_meta = snapshot.meta(buy);
     OrderRecord {

@@ -13,9 +13,7 @@ use fynd_core::{derived::TokenGasPrices, feed::market_data::MarketState};
 use tracing::warn;
 use tycho_simulation::tycho_common::models::token::Token as TychoToken;
 
-use super::{
-    apex_addr, apex_u256, fold_native, hub_tokens, pools, pools::PoolCounts, PreparedOrder,
-};
+use super::{apex_addr, apex_u256, pools, pools::PoolCounts, ChainTokens, PreparedOrder};
 use crate::decoder::DecodedTrade;
 
 /// APEX seeds unpriced tokens at 1e8 (`ApexConfig::starting_price`); Turbine anchors its price
@@ -67,16 +65,17 @@ pub(crate) fn build_snapshot(
     state: &MarketState,
     token_prices: &TokenGasPrices,
     trades: &[DecodedTrade],
+    chain: &ChainTokens,
 ) -> Snapshot {
     // Candidate universe: tokens the block's non-sandwiched trades touch, plus the hubs.
     let mut excluded_sandwiched = 0usize;
-    let mut candidates: Vec<AlloyAddress> = hub_tokens();
+    let mut candidates: Vec<AlloyAddress> = chain.hubs.clone();
     for trade in trades {
         if trade.sandwich.is_some() {
             excluded_sandwiched += 1;
             continue;
         }
-        let (sell, buy) = fold_native(trade.token_in, trade.token_out);
+        let (sell, buy) = chain.fold(trade.token_in, trade.token_out);
         candidates.push(sell);
         candidates.push(buy);
     }
@@ -128,9 +127,9 @@ pub(crate) fn build_snapshot(
         ));
     }
 
-    let (pools, pool_counts) = pools::build_pools(state, &universe);
+    let (pools, pool_counts) = pools::build_pools(state, &universe, chain);
 
-    let (prepared, out_of_universe, more_excluded) = prepare_orders(trades, &universe);
+    let (prepared, out_of_universe, more_excluded) = prepare_orders(trades, &universe, chain);
     let excluded_sandwiched = excluded_sandwiched + more_excluded;
 
     Snapshot {
@@ -152,6 +151,7 @@ pub(crate) fn build_snapshot(
 fn prepare_orders(
     trades: &[DecodedTrade],
     universe: &HashMap<AlloyAddress, TychoToken>,
+    chain: &ChainTokens,
 ) -> (Vec<PreparedOrder>, Vec<usize>, usize) {
     let mut prepared = Vec::new();
     let mut out_of_universe = Vec::new();
@@ -160,7 +160,7 @@ fn prepare_orders(
         if trade.sandwich.is_some() {
             continue;
         }
-        let (sell, buy) = fold_native(trade.token_in, trade.token_out);
+        let (sell, buy) = chain.fold(trade.token_in, trade.token_out);
         if sell == buy || trade.amount_in.is_zero() {
             excluded += 1;
             continue;

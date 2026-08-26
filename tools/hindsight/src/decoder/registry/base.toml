@@ -15,6 +15,18 @@ infrastructure = ["0x000000000022d473030f116ddee9f6b43ac78ba3"] # Permit2
 # CoW Protocol Settlement — same address on every chain.
 batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 
+# Liquid intermediaries for the batching experiment's token universe — Base's counterpart to
+# the mainnet hub set. Every symbol/decimals pair below was read on-chain (2026-08-26); a wrong
+# address here is silent, since an unknown token is simply dropped from the universe.
+hub_tokens = [
+  "0x4200000000000000000000000000000000000006", # WETH (OP-stack predeploy)
+  "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", # USDC (native, Circle)
+  "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca", # USDbC (bridged)
+  "0x50c5725949a6f0c72e6c4a641f24049a917db0cb", # DAI
+  "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf", # cbBTC
+  "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22", # cbETH
+]
+
 # Stablecoins anchoring the native token to USD (address = decimals).
 [usd_stablecoins]
 "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" = 6  # USDC (native, Circle)

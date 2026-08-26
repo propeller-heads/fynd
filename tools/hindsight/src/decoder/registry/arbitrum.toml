@@ -25,6 +25,18 @@ infrastructure = ["0x000000000022d473030f116ddee9f6b43ac78ba3"] # Permit2
 # 20k-block sample, 2026-07-29).
 batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 
+# Liquid intermediaries for the batching experiment's token universe — Arbitrum's counterpart
+# to the mainnet hub set. Every symbol/decimals pair below was read on-chain (2026-08-26); a
+# wrong address here is silent, since an unknown token is simply dropped from the universe.
+hub_tokens = [
+  "0x82af49447d8a07e3bd95bd0d56f35241523fbab1", # WETH
+  "0xaf88d065e77c8cc2239327c5edb3a432268e5831", # USDC (native, Circle)
+  "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8", # USDC.e (bridged)
+  "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1", # DAI
+  "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f", # WBTC
+  "0x912ce59144191c1204e64559fe8253a0e49e6548", # ARB
+]
+
 # Stablecoins anchoring the native token to USD (address = decimals).
 [usd_stablecoins]
 "0xaf88d065e77c8cc2239327c5edb3a432268e5831" = 6  # USDC (native, Circle)
