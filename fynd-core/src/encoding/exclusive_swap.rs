@@ -581,6 +581,21 @@ mod tests {
     }
 
     #[test]
+    fn test_nonce_avoids_reserved_sentinel() {
+        // The extension never consumes `u64::MAX` — a payload carrying it stays replayable until
+        // its deadline. The counter stops one short of `u32::MAX`, so even the widest prefix
+        // cannot compose that value.
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, u32::MAX, 120);
+        let swap = signed_swap(Some(990_000));
+        signer
+            .nonce_counter
+            .store(u32::MAX - 1, Ordering::Relaxed);
+
+        assert_eq!(payload_nonce(&signer.build_user_data(&swap).unwrap()), u64::MAX - 1);
+        assert!(signer.build_user_data(&swap).is_err());
+    }
+
+    #[test]
     fn test_exhausted_nonce_counter() {
         let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, 1, 120);
         let swap = signed_swap(Some(990_000));
