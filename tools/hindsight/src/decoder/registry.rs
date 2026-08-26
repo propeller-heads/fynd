@@ -514,6 +514,34 @@ mod tests {
     }
 
     #[test]
+    fn test_client_fee_wallets_on_ethereum_and_base() {
+        // Trust Wallet, ShapeShift and Vultisig route through shared routers on both chains and
+        // use one fee wallet per venue across them, so a wallet listed on one book only would
+        // leave that chain's trades unlabelled and its fee inside the amounts.
+        let wallets = [
+            (address!("0x73691cee20db22f55a6fd0d5948ab00e0fb973b1"), "trustwallet"),
+            (address!("0xf5aa59151be6515c4ca68a0282cf68b3ea4846fc"), "shapeshift"),
+            (address!("0x8e247a480449c84a5fdd25974a8501f3efa4abb9"), "vultisig"),
+        ];
+        for chain in [Chain::Ethereum, Chain::Base] {
+            let registry = Registry::builtin(chain).unwrap();
+            for (wallet, venue) in wallets {
+                assert!(
+                    registry.is_fee_collector(wallet),
+                    "{chain} does not know {wallet} as a fee wallet"
+                );
+                assert_eq!(
+                    registry
+                        .venue_fees()
+                        .get(&wallet)
+                        .map(String::as_str),
+                    Some(venue)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_label_known_and_unknown() {
         let registry = Registry::ethereum();
         let relay = address!("0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222");

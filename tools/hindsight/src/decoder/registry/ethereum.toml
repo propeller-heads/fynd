@@ -183,6 +183,18 @@ entry_points = ["0x7957e5a88f0389997b352315e70ab20d77ec410a"]
 # Settler. Unlike Phantom's and Robinhood's, this 0.95% cut is skimmed off the SELL token before
 # routing, so it is netted out of the input rather than added to the output.
 "0x5aafc1f252d544f744d17a4e734afd6efc47ede4" = "coinbase"
+# Trust Wallet: 0.7% buy-token fee on its LiquidMesh routes. The router's swap event states the
+# output already net of this cut, so without this entry Fynd's gross output beat the settled one by
+# the fee on every such trade — measured over one prod day, the 158 fee-carrying LiquidMesh records
+# had a median win of 68.5 bps against 3.5 bps for the same solver's other order flow.
+"0x73691cee20db22f55a6fd0d5948ab00e0fb973b1" = "trustwallet"
+# ShapeShift: fee receiver for the swaps it routes through the Butter router. ShapeShift is a
+# meta-aggregator with no universal address, so this wallet covers its Butter flow only; its 0x,
+# CoW and Relay routes carry no on-chain fingerprint.
+"0xf5aa59151be6515c4ca68a0282cf68b3ea4846fc" = "shapeshift"
+# Vultisig: app-wide fee wallet. Its swaps settle through 1inch, KyberSwap and LiFi, all shared
+# routers, so the fee leg is the only fingerprint the vault flow carries.
+"0x8e247a480449c84a5fdd25974a8501f3efa4abb9" = "vultisig"
 
 # Venues identified by the integrator tag a provider records in its swap event. LiFi frontends
 # route through the shared LiFi Diamond, so the integrator string in LiFiGenericSwapCompleted /

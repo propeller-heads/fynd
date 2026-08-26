@@ -105,6 +105,14 @@ entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
 # Fynd's savings on that flow.
 [venue_fees]
 "0x5aafc1f252d544f744d17a4e734afd6efc47ede4" = "coinbase"
+# Trust Wallet's 0.7% buy-token fee on its LiquidMesh routes, and ShapeShift's Butter fee receiver
+# — both the same wallet as on Ethereum, since both routers are deployed at one address per chain.
+# The LiquidMesh swap event states the output net of Trust Wallet's cut, so backing it out is what
+# stops the fee from reading as a Fynd win.
+"0x73691cee20db22f55a6fd0d5948ab00e0fb973b1" = "trustwallet"
+"0xf5aa59151be6515c4ca68a0282cf68b3ea4846fc" = "shapeshift"
+# Vultisig's app-wide fee wallet, its only fingerprint on the shared routers it settles through.
+"0x8e247a480449c84a5fdd25974a8501f3efa4abb9" = "vultisig"
 
 # LiFi frontends identified by the integrator tag in the LiFi swap event (Infinex's volume is
 # heavier on Base than on mainnet). Keys are lowercase. `base-app` is Coinbase's Base App, kept
