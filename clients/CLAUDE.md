@@ -55,9 +55,9 @@ FyndClientBuilder::new("https://fynd-api.propellerheads.xyz")
 ```
 
 Both are opt-in; omitting them keeps the unauthenticated, unprefixed paths that self-hosted
-Fynd serves. `with_chain` accepts `ethereum`, `base`, `arbitrum`, `bsc`, `polygon`, `unichain`
-and rejects anything else at build time. It also determines the `chain_id` used for signing
-when building via `build_quote_only` (no RPC node to ask); `build` cross-checks the slug
+Fynd serves. `with_chain` accepts `ethereum`, `base`, `arbitrum`, `bsc`, `polygon`, `unichain`,
+`robinhood` and rejects anything else at build time. It also determines the `chain_id` used for
+signing when building via `build_quote_only` (no RPC node to ask); `build` cross-checks the slug
 against the chain the RPC node reports and errors on a mismatch.
 
 **`FyndClient`**

@@ -97,7 +97,7 @@ Notes:
 
 * **TLS** — hosted endpoints use TLS; a local or plain-HTTP Tycho does not. Add `--disable-tls` when your endpoint is not served over TLS.
 * **API key** — the self-hosted indexer's RPC key is its `AUTH_API_KEY` (default `local-dev-key`). Pass it with `--tycho-api-key` / `TYCHO_API_KEY` if your deployment sets one.
-* **Built-in chains** — Fynd's built-in chains are `ethereum`, `base`, `unichain`, `arbitrum`, `polygon`, `bsc`, `starknet`, `zksync`. Self-hosting Tycho for one of these works out of the box.
+* **Built-in chains** — Fynd's built-in chains are `ethereum`, `base`, `unichain`, `arbitrum`, `polygon`, `bsc`, `robinhood`, `starknet`, `zksync`. Self-hosting Tycho for one of these works out of the box.
 
 #### Custom chains
 

@@ -7,7 +7,7 @@
 
 * [Overview](README.md)
 * [Quickstart](get-started/quickstart/README.md)
-* [Hosted Fynd API (Beta)](get-started/hosted-api.md)
+* [Hosted Fynd API](get-started/hosted-api.md)
 
 ## Guides
 
