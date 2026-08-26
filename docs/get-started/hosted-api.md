@@ -19,7 +19,7 @@ layout:
     visible: true
 ---
 
-# Hosted Fynd API (Beta)
+# Hosted Fynd API
 
 {% hint style="warning" %}
 **Beta.** The hosted Fynd API is in beta. Limits, supported chains, and the surface area may change as we scale the service. There is no SLA during beta — status and incidents are posted in [our Telegram group](https://t.me/+B4CNQwv7dgIyYTJl). For production workloads with strict uptime or throughput requirements, see [Scaling beyond the hosted tiers](#scaling-beyond-the-hosted-tiers).
@@ -475,12 +475,13 @@ Each chain is served from its own Fynd backend behind the shared gateway. Send t
 | BNB Smart Chain | `bsc` | 56 | BNB |
 | Polygon | `polygon` | 137 | POL |
 | Unichain | `unichain` | 130 | ETH |
+| Robinhood Chain | `robinhood` | 4663 | ETH |
 
 A request to `/v1/{chain}/…` for a chain that isn't configured returns `404` with `{"error": "unknown_chain", ...}`.
 
 ### Native token swaps
 
-Use the zero address (`0x0000000000000000000000000000000000000000`) as `token_in` or `token_out` to swap the chain's native gas token (ETH on Ethereum/Base/Arbitrum/Unichain, BNB on BSC, POL on Polygon). Native-token `token_in` skips the approval step — the router wraps native gas for you.
+Use the zero address (`0x0000000000000000000000000000000000000000`) as `token_in` or `token_out` to swap the chain's native gas token (ETH on Ethereum/Base/Arbitrum/Unichain/Robinhood Chain, BNB on BSC, POL on Polygon). Native-token `token_in` skips the approval step — the router wraps native gas for you.
 
 ## API key limits by tier
 

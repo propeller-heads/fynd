@@ -363,13 +363,14 @@ mod erc20 {
 // ============================================================================
 
 /// Chain slugs accepted by the hosted Fynd gateway, paired with their EVM chain ID.
-const SUPPORTED_CHAINS: [(&str, u64); 6] = [
+const SUPPORTED_CHAINS: [(&str, u64); 7] = [
     ("ethereum", 1),
     ("base", 8453),
     ("arbitrum", 42161),
     ("bsc", 56),
     ("polygon", 137),
     ("unichain", 130),
+    ("robinhood", 4663),
 ];
 
 /// Resolve a chain slug to its EVM chain ID.
@@ -458,10 +459,10 @@ impl FyndClientBuilder {
 
     /// Route requests through the hosted gateway's per-chain paths, e.g. `/v1/base/quote`.
     ///
-    /// Accepts `ethereum`, `base`, `arbitrum`, `bsc`, `polygon`, or `unichain`; an unknown
-    /// slug fails at [`build`](Self::build) / [`build_quote_only`](Self::build_quote_only)
-    /// time. When unset, requests go to `{base_url}/v1/…` without a chain segment, which is
-    /// what self-hosted Fynd expects.
+    /// Accepts `ethereum`, `base`, `arbitrum`, `bsc`, `polygon`, `unichain`, or `robinhood`; an
+    /// unknown slug fails at [`build`](Self::build) / [`build_quote_only`](Self::build_quote_only)
+    /// time. When unset, requests go to `{base_url}/v1/…` without a chain segment, which is what
+    /// self-hosted Fynd expects.
     pub fn with_chain(mut self, chain: impl Into<String>) -> Self {
         self.hosted.chain = Some(chain.into());
         self
@@ -2406,6 +2407,7 @@ mod tests {
         assert_eq!(chain_id_for_slug("bsc").unwrap(), 56);
         assert_eq!(chain_id_for_slug("polygon").unwrap(), 137);
         assert_eq!(chain_id_for_slug("unichain").unwrap(), 130);
+        assert_eq!(chain_id_for_slug("robinhood").unwrap(), 4663);
     }
 
     #[test]
@@ -2418,13 +2420,18 @@ mod tests {
         assert!(msg.contains("ethereum"), "error should list supported slugs: {msg}");
     }
 
-    #[test]
-    fn build_quote_only_derives_chain_id_from_chain() {
+    #[rstest::rstest]
+    #[case::base("base", 8453)]
+    #[case::robinhood("robinhood", 4663)]
+    fn build_quote_only_derives_chain_id_from_chain(
+        #[case] chain: &str,
+        #[case] expected_chain_id: u64,
+    ) {
         let client = FyndClientBuilder::new("http://localhost:8080")
-            .with_chain("base")
+            .with_chain(chain)
             .build_quote_only()
             .expect("build_quote_only should succeed");
-        assert_eq!(client.chain_id, 8453);
+        assert_eq!(client.chain_id, expected_chain_id);
     }
 
     #[test]
