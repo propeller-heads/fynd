@@ -3546,6 +3546,7 @@ dependencies = [
  "num-traits",
  "num_cpus",
  "petgraph",
+ "rand 0.9.4",
  "reqwest 0.12.28",
  "rstest",
  "rustc-hash",
