@@ -18,7 +18,9 @@ tycho-simulation = { workspace = true }
 # Shared tooling (BPS comparison math, FyndAggregator wrapper)
 fynd-tools-common = { workspace = true }
 # APEX batch solver, driven per block by the batching-validation experiment (see `src/batching/`)
-apex-solver = { path = "../../../apex-solver", features = ["serde", "multithread"] }
+# Pinned by revision: the batching experiment's numbers are only comparable across runs
+# if the solver is identical, and apex-solver has no released version to track.
+apex-solver = { git = "ssh://git@github.com/propeller-heads/apex-solver.git", rev = "dfb79d49f8e415d4e4a37ac21b09f9818cbf8958", features = ["serde", "multithread"] }
 num-bigint = { workspace = true }
 
 # Async runtime

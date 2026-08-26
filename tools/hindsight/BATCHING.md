@@ -1,8 +1,9 @@
 # APEX batching-validation experiment
 
 Validates the idea of batching one Ethereum block's swaps through the APEX batch solver
-(`apex-solver`, a path dependency at `../../../apex-solver`). Per block, the settled trades
-hindsight decodes are re-solved two ways against the same top-of-block market state:
+(`apex-solver`, pinned by revision in `tools/hindsight/Cargo.toml` — bump that rev to move to a
+newer solver, and re-run rather than mixing results across revisions). Per block, the settled
+trades hindsight decodes are re-solved two ways against the same top-of-block market state:
 
 - **S1** — one order per solve (control: same solver and pools, no batching)
 - **S2** — the whole block as one batch (treatment)
