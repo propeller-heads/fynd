@@ -80,16 +80,22 @@ pub(crate) enum Verdict {
 /// The most output Fynd can produce against a settled trade before the settled amount itself is
 /// the thing that must be wrong.
 ///
-/// A real routing edge is a few percent, occasionally tens of percent on a thin pair. Above two
-/// orders of magnitude the comparison is not measuring routing: netting has paired the trade's
-/// input with a dust receipt, so the settled output belongs to a different trade or to no trade.
-/// Seen live on Ethereum: 3,555.90 USDC in, paired with 0.00000063 ETH out, reported as a
-/// $3,555.81 win because Fynd correctly quoted 1.44 ETH.
+/// A real routing edge is a few percent, occasionally tens of percent on a thin pair. Past a small
+/// multiple the comparison is not measuring routing: netting has paired the trade's input with a
+/// dust receipt, so the settled output belongs to a different trade or to no trade. Seen live on
+/// Ethereum: 3,555.90 USDC in, paired with 0.00000063 ETH out, reported as a $3,555.81 win because
+/// Fynd correctly quoted 1.44 ETH.
 ///
-/// Measured over one staging day (2,527 solved-and-settled Ethereum records): the largest genuine
-/// win was 2.66x and the smallest broken one 1,472,381x, so anything in that gap separates them.
-/// 100x leaves both sides a wide margin.
-const MAX_WIN_RATIO: f64 = 100.0;
+/// The ceiling was first set at 100x from one staging day (2,527 solved-and-settled Ethereum
+/// records), where the largest genuine win was 2.66x and the smallest broken one 1,472,381x. A
+/// full production day across Ethereum and Base then landed 103 wins in the gap, every one of them
+/// claiming more than the trade's whole notional and none above 99.3x — so the broken records are
+/// not two orders of magnitude out, and 100x let all of them through.
+///
+/// 3x is where the two populations separate in that day: of 55,826 scored wins, every win above 2x
+/// claimed more than the trade's notional, so nothing above the ceiling is a win worth keeping,
+/// and the largest genuine win yet measured (2.66x) stays under it.
+const MAX_WIN_RATIO: f64 = 3.0;
 
 /// Whether Fynd's output is too far above the settled output for the settled amount to be real.
 ///
@@ -181,16 +187,24 @@ mod tests {
 
     #[test]
     fn test_largest_real_win_is_not_implausible() {
-        // The largest genuine win in the same staging day was 2.66x, far under the ceiling.
+        // The largest genuine win yet measured is 2.66x, and it has to stay under the ceiling.
         let outcome = solved(266, 266);
         assert!(!implausible_settled_amount(&outcome, U256::from(100u64)));
     }
 
     #[test]
     fn test_ratio_either_side_of_the_ceiling() {
-        // 100x is allowed; past it the settled amount is the thing that must be wrong.
-        assert!(!implausible_settled_amount(&solved(100, 100), U256::from(1u64)));
-        assert!(implausible_settled_amount(&solved(101, 101), U256::from(1u64)));
+        // 3x is allowed; past it the settled amount is the thing that must be wrong.
+        assert!(!implausible_settled_amount(&solved(300, 300), U256::from(100u64)));
+        assert!(implausible_settled_amount(&solved(301, 301), U256::from(100u64)));
+    }
+
+    #[test]
+    fn test_win_that_exceeds_the_trades_notional() {
+        // The shape the 100x ceiling let through: a production record whose settled side was
+        // 13.43 USDC and whose quote was 44.7x that, claiming $587 of savings on a $13 trade.
+        let outcome = solved(600_310_000, 600_310_000);
+        assert!(implausible_settled_amount(&outcome, U256::from(13_430_000u64)));
     }
 
     #[test]

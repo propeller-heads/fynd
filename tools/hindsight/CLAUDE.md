@@ -136,9 +136,11 @@ self-contained HTML file.
 Each trade produces a `top` result (optimistic, solved fresh at state N-1) and a `back` result
 (pessimistic: solved fresh at state N, after the block's swaps moved the pools). The headline
 `verdict` is top-of-block. Possible verdicts: `Win`, `Loss`, `CoverageMiss` (Fynd
-filled <50% of the settled size — `MIN_FILL_RATIO = 0.5`), `Unsolvable`, and `Sandwiched` (a
+filled <50% of the settled size — `MIN_FILL_RATIO = 0.5`), `Unsolvable`, `Sandwiched` (a
 solved comparison whose settled output was moved by MEV — excluded from the savings aggregates;
-unsolved states keep their coverage verdicts).
+unsolved states keep their coverage verdicts), and `ImplausibleSettledAmount` (Fynd's output is
+more than `MAX_WIN_RATIO = 3.0` times the settled one, so the settled amount is not the trade's
+real output — it outranks `Sandwiched` and is excluded from the aggregates too).
 
 ### Slippage model
 
