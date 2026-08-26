@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Generate per-block "Turbine explorer"-style pages for the APEX batching experiment.
 
-Reads a run's `apex-orders.jsonl`, `apex-blocks.jsonl`, and `inputs/apex_input_<N>.json`
-dumps, and writes one `explorer/block_<N>.html` per block into the data dir — the target
+Reads a run's `apex-orders.jsonl`, `apex-blocks.jsonl`, and `inputs/apex_batch_<N>.json`
+dumps (or the flat `apex_input_<N>.json` that cycles up to cycle5 wrote), and writes one
+`explorer/block_<N>.html` per block into the data dir — the target
 of the block-number links in the main report. The pages share two scripts written
 alongside them, `token_flow.js` and `vis-network.min.js` (see copy_assets).
 
@@ -117,6 +118,11 @@ div.vis-network:focus, div.vis-network canvas:focus { outline: none !important; 
 """
 
 
+# Tab order, matching the report's section order: anchored first as the headline variant,
+# permissive last as the degenerate limit≈0 bound. Also decides the default tab.
+VARIANT_ORDER = ("anchored", "user_limit", "permissive")
+
+
 def esc(x):
     return html.escape(str(x))
 
@@ -188,18 +194,57 @@ def delta_bps(rec: dict) -> float | None:
     return (user_out_raw(rec) - settled) / settled * 10_000
 
 
+
+def order_limits(input_dump: dict, prepared: list) -> dict:
+    """Each order's minimum acceptable output per variant, in APEX's 18-decimal scale.
+
+    A limit price maps the scaled sell amount to the scaled buy amount, so the limit amount is
+    `numerator x sell / denominator` — one atom for permissive (the order may always fill), the
+    settled output for anchored, and the user's signed minimum for user_limit."""
+    limits: dict[str, dict] = {}
+    for book in input_dump.get("orderbooks", []):
+        for order in book.get("orders", []):
+            price = order.get("price", {})
+            sell = int(order.get("sellAmount", 0))
+            num, den = int(price.get("numerator", 0)), int(price.get("denominator", 1))
+            limits.setdefault(order["id"], {})["permissive"] = num * sell // den if den else 0
+    for order in prepared:
+        sell = int(order.get("scaled_sell", 0))
+        entry = limits.setdefault(order["id"], {})
+        for variant, key in (("anchored", "anchored_price"), ("user_limit", "user_limit_price")):
+            num, den = (int(x) for x in order.get(key, ["0", "1"]))
+            entry[variant] = num * sell // den if den else 0
+    return limits
+
+
+def limit_amount(meta: dict, order_id: str, variant: str, decimals: int) -> int | None:
+    """The order's limit in raw buy-token units, or None when the dump predates it."""
+    scaled = meta["limits"].get(order_id, {}).get(variant)
+    if scaled is None:
+        return None
+    return scaled // 10 ** max(0, 18 - decimals)
+
+
 def load_input_dump(data_dir: Path, block: int) -> dict:
-    """Pool → protocol / token metadata from the block's ApexInputData dump, tolerant of a
-    missing file. Wrapped multi-token pools get synthetic addresses whose last byte varies,
-    so pool lookups also try a 19-byte prefix match."""
-    path = data_dir / "inputs" / f"apex_input_{block}.json"
-    meta = {"pool_proto": {}, "pool_proto_prefix": {}, "tokens": {}, "prices": {}}
+    """Pool → protocol / token metadata and per-order limits from the block's captured dump,
+    tolerant of a missing file. Wrapped multi-token pools get synthetic addresses whose last
+    byte varies, so pool lookups also try a 19-byte prefix match.
+
+    Two dump layouts exist: `apex_batch_<N>.json` (current — the solver input nested under
+    `input`, alongside the other variants' limits), and the flat `apex_input_<N>.json` that
+    cycles up to cycle5 wrote, which carries only the permissive orders."""
+    meta = {"pool_proto": {}, "pool_proto_prefix": {}, "tokens": {}, "prices": {}, "limits": {}}
+    batch_path = data_dir / "inputs" / f"apex_batch_{block}.json"
+    legacy_path = data_dir / "inputs" / f"apex_input_{block}.json"
+    path = batch_path if batch_path.exists() else legacy_path
     if not path.exists():
         return meta
     try:
-        dump = json.loads(path.read_text())
+        raw = json.loads(path.read_text())
     except json.JSONDecodeError:
         return meta
+    dump = raw.get("input", raw)
+    meta["limits"] = order_limits(dump, raw.get("orders", []))
     for token in dump.get("tokens", []):
         meta["tokens"][token["address"].lower()] = (token["symbol"], token["decimals"])
     for address, price in dump.get("initialPrices", {}).items():
@@ -238,7 +283,7 @@ def bps_cell(bps: float | None) -> str:
     return f'<td class="{cls}">{bps:+.2f}</td>'
 
 
-def orders_table(orders: list[dict], s1_by_id: dict) -> str:
+def orders_table(name: str, orders: list[dict], s1_by_id: dict, meta: dict) -> str:
     if not orders:
         return '<div class="note">No decoded solver trades in this block.</div>'
     rows = []
@@ -248,6 +293,12 @@ def orders_table(orders: list[dict], s1_by_id: dict) -> str:
             f'{esc(display_symbol(rec["buy_symbol"]))}'
         )
         settled = fmt_amount(rec["settled_amount_out"], rec["buy_decimals"])
+        limit_raw = limit_amount(meta, rec["order_id"], name, rec["buy_decimals"])
+        limit = (
+            f'<td title="{limit_raw}">{fmt_amount(str(limit_raw), rec["buy_decimals"])}</td>'
+            if limit_raw is not None
+            else '<td class="muted">—</td>'
+        )
         batch_out = user_out_raw(rec)
         batch = (
             fmt_amount(str(batch_out), rec["buy_decimals"])
@@ -269,6 +320,7 @@ def orders_table(orders: list[dict], s1_by_id: dict) -> str:
             f'<td class="l">{pair}</td>'
             f'<td class="l">{status_pill(rec["status"])}</td>'
             f'<td>{fmt_amount(rec["amount_in"], rec["sell_decimals"])}</td>'
+            f"{limit}"
             f"<td>{settled}</td>"
             f"<td>{batch}</td>"
             f"{bps_cell(delta_bps(rec))}"
@@ -279,7 +331,11 @@ def orders_table(orders: list[dict], s1_by_id: dict) -> str:
     return (
         '<div class="scroll"><table><thead><tr>'
         '<th class="l">tx</th><th class="l">venue</th><th class="l">pair</th><th class="l">status</th>'
-        "<th>amount in</th><th>settled out (S0)</th><th>batch out (S2)</th>"
+        "<th>amount in</th>"
+        '<th title="the minimum output this order requires: one atom for permissive (it may'
+        ' always fill), the settled output for anchored, the user\'s signed minimum for'
+        ' user_limit">limit amount</th>'
+        "<th>settled out (S0)</th><th>batch out (S2)</th>"
         '<th title="batch execution vs settled output">Δ bps</th>'
         '<th class="l">S1 status</th><th class="l">batcher top-up</th>'
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
@@ -475,7 +531,7 @@ def variant_section(name: str, s2_orders: list[dict], s1_by_id: dict, block_rec:
       {prices_rows(meta)}
     </div>
     <div>
-      <div class="card"><div class="heading">Orders</div>{orders_table(s2_orders, s1_by_id)}</div>
+      <div class="card"><div class="heading">Orders</div>{orders_table(name, s2_orders, s1_by_id, meta)}</div>
       <div class="card section"><div class="heading">AMM legs (S2 pool executions)</div>
       {pools_table(pool_volumes, meta, symbols)}</div>
       {flow_graph_card(name, graph)}
@@ -487,10 +543,9 @@ def variant_section(name: str, s2_orders: list[dict], s1_by_id: dict, block_rec:
 
 def render_block(block: int, orders: list[dict], block_recs: dict, meta: dict,
                  vis_src: str) -> str:
-    order = {"permissive": 0, "anchored": 1, "user_limit": 2}
     variants = sorted(
         {r["variant"] for r in orders} | set(block_recs),
-        key=lambda v: order.get(v, 9),
+        key=lambda v: VARIANT_ORDER.index(v) if v in VARIANT_ORDER else len(VARIANT_ORDER),
     )
     symbols = {}
     for rec in orders:

@@ -79,6 +79,13 @@ def s3_out_eth(rec: dict) -> float:
     return rec["settled_amount_out_eth"]
 
 
+def percentile(sorted_values: list[float], p: float) -> float:
+    """Nearest-rank percentile of an already-sorted list."""
+    if not sorted_values:
+        return 0.0
+    return sorted_values[min(len(sorted_values) - 1, int(len(sorted_values) * p))]
+
+
 def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
     runs = {"s1": [r for r in orders if r["run"] == "s1"], "s2": [r for r in orders if r["run"] == "s2"]}
     agg: dict = {"blocks": blocks}
@@ -109,6 +116,8 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
     imps = [order_improvement_bps(r) for r in s2]
     imps = [i for i in imps if i is not None]
     agg["improvements_bps"] = imps
+    s1_imps = [order_improvement_bps(r) for r in runs["s1"]]
+    agg["s1_improvements_bps"] = [i for i in s1_imps if i is not None]
     in_universe = sum(1 for r in s2 if r["status"] != "out_of_universe")
     agg["in_universe"] = in_universe
     wins = sum(1 for i in imps if i > 0)
@@ -212,6 +221,25 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
     agg["blocks_won"] = sum(1 for b in agg["per_block"] if b["s2_delta_bps"] > 0)
     agg["blocks_lost"] = sum(1 for b in agg["per_block"] if b["s2_delta_bps"] < 0)
 
+    # Per-block inventory demand. Most blocks need none at all, so the distribution is
+    # zero-inflated and very long-tailed — the spread matters more than any single figure.
+    batcher_blocks = sorted(b["batcher_eth"] for b in agg["per_block"])
+    agg["batcher_median_eth"] = statistics.median(batcher_blocks) if batcher_blocks else 0.0
+    agg["batcher_mean_eth"] = statistics.fmean(batcher_blocks) if batcher_blocks else 0.0
+    agg["batcher_p05_eth"] = percentile(batcher_blocks, 0.05)
+    agg["batcher_p95_eth"] = percentile(batcher_blocks, 0.95)
+    agg["batcher_blocks_none"] = sum(1 for x in batcher_blocks if x == 0.0)
+
+    # The same distribution with the zero mass dropped: what a block that actually needs
+    # inventory needs. The all-blocks median sits at zero whenever most blocks need none, so
+    # this is the one that describes the demand rather than its frequency.
+    used = [x for x in batcher_blocks if x > 0.0]
+    agg["batcher_used_blocks"] = len(used)
+    agg["batcher_used_median_eth"] = statistics.median(used) if used else 0.0
+    agg["batcher_used_mean_eth"] = statistics.fmean(used) if used else 0.0
+    agg["batcher_used_p05_eth"] = percentile(used, 0.05)
+    agg["batcher_used_p95_eth"] = percentile(used, 0.95)
+
     # The batcher only ever settles one batch at a time, so the inventory it must hold is
     # the largest single block's top-up total, not the run's sum.
     peak = max(agg["per_block"], key=lambda b: b["batcher_eth"], default=None)
@@ -308,6 +336,11 @@ h1, h2 { scroll-margin-top: 14px; }
 @media (max-width: 1560px) { .toc { display: none; } }
 .sub { color: var(--text-secondary); margin-bottom: 20px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+/* Each metric is a pair: the headline figure over every block, and the same figure over the
+   blocks that are actually batches. The main tile stretches so the companions line up along
+   the bottom of the row instead of hanging at ragged heights. */
+.tile-pair { display: flex; flex-direction: column; gap: 3px; }
+.tile-pair > .tile:not(.sub) { flex: 1; }
 .tile { background: var(--surface-2); border-radius: 8px; padding: 12px 14px; }
 .tile .v { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; }
 .tile .l { color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
@@ -315,6 +348,9 @@ h1, h2 { scroll-margin-top: 14px; }
 .tile a { color: var(--s1); text-decoration: none; }
 .tile a:hover { text-decoration: underline; }
 .tile .def { color: var(--text-muted); font-size: 10.5px; margin-top: 6px; line-height: 1.35; border-top: 1px solid var(--grid); padding-top: 5px; }
+.tile.sub { padding: 7px 14px 8px; }
+.tile.sub .v { font-size: 15px; font-weight: 600; }
+.tile.sub .l { font-size: 10.5px; margin-top: 0; }
 .pos { color: var(--good); } .neg { color: var(--bad); }
 .chart-box { background: var(--surface-2); border-radius: 8px; padding: 14px; margin-top: 8px; }
 .legend { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; flex-wrap: wrap; }
@@ -482,6 +518,96 @@ function initTocSpy() {
   update();
 }
 
+// Symmetric-log scale: linear inside +/-LIN, logarithmic beyond, and it takes zero and
+// negatives. Both axes here span ~8 orders of magnitude with most blocks sitting at the
+// origin, so a linear scatter would be a single dot in one corner and a smudge at (0,0).
+const LIN = 1e-6;
+const symlog = v => Math.sign(v) * Math.log10(1 + Math.abs(v) / LIN);
+
+// Decade ticks either side of zero, out to whatever the data reaches.
+function symlogTicks(maxAbs, signed) {
+  const top = Math.ceil(Math.log10(Math.max(maxAbs, LIN * 10) / LIN));
+  const mags = [];
+  for (let k = 0; k <= top; k += Math.max(1, Math.round(top / 4))) mags.push(LIN * 10 ** k);
+  const ticks = [0];
+  for (const m of mags) { ticks.push(m); if (signed) ticks.push(-m); }
+  return ticks;
+}
+
+const fmtEth = v => {
+  if (v === 0) return '0';
+  const a = Math.abs(v);
+  if (a >= 1) return (v > 0 ? '' : '−') + a.toLocaleString('en-US', {maximumFractionDigits: 0});
+  return (v > 0 ? '' : '−') + a.toExponential(0).replace('e-', 'e−');
+};
+
+/** points: [{x, y, block}] — one per block. */
+function scatter(el, points, opts = {}) {
+  const W = el.clientWidth || 1100, H = opts.h || 340;
+  const padL = 64, padB = 40, padT = 12, padR = 14;
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '100%');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  if (!points.length) { el.textContent = 'No blocks to plot.'; return; }
+
+  // x is signed (surplus can be negative), y is not (batcher inventory is a magnitude). The
+  // two sides of x are scaled independently: anchored has almost no negative surplus, and a
+  // symmetric axis would spend half the plot on empty space.
+  const negX = Math.max(0, -Math.min(...points.map(p => p.x)));
+  const posX = Math.max(0, Math.max(...points.map(p => p.x)));
+  const maxY = Math.max(...points.map(p => p.y), LIN * 10);
+  const spanNeg = symlog(negX), spanPos = symlog(posX);
+  const spanX = Math.max(spanNeg + spanPos, symlog(LIN * 10));
+  const spanY = symlog(maxY);
+  const px = v => padL + (W - padL - padR) * (symlog(v) + spanNeg) / spanX;
+  const py = v => H - padB - (H - padT - padB) * symlog(v) / spanY;
+
+  const line = (x1, y1, x2, y2, strong) => {
+    const l = document.createElementNS(ns, 'line');
+    l.setAttribute('x1', x1); l.setAttribute('y1', y1);
+    l.setAttribute('x2', x2); l.setAttribute('y2', y2);
+    l.setAttribute('stroke', strong ? 'var(--text-muted)' : 'var(--grid)');
+    l.setAttribute('stroke-width', '1');
+    svg.appendChild(l);
+  };
+  const label = (x, y, text, anchor) => {
+    const t = document.createElementNS(ns, 'text');
+    t.setAttribute('x', x); t.setAttribute('y', y); t.setAttribute('text-anchor', anchor);
+    t.setAttribute('font-size', '10');
+    t.textContent = text;
+    svg.appendChild(t);
+  };
+
+  for (const v of symlogTicks(maxY, false)) {
+    if (v > maxY) continue;
+    line(padL, py(v), W - padR, py(v), v === 0);
+    label(padL - 6, py(v) + 4, fmtEth(v), 'end');
+  }
+  for (const v of symlogTicks(Math.max(negX, posX), true)) {
+    if (v > posX || -v > negX) continue;
+    line(px(v), padT, px(v), H - padB, v === 0);
+    label(px(v), H - padB + 14, fmtEth(v), 'middle');
+  }
+  label((padL + W - padR) / 2, H - 6, opts.xLabel || '', 'middle');
+
+  for (const p of points) {
+    const c = document.createElementNS(ns, 'circle');
+    c.setAttribute('cx', px(p.x).toFixed(1));
+    c.setAttribute('cy', py(p.y).toFixed(1));
+    c.setAttribute('r', '3');
+    c.setAttribute('fill', p.x >= 0 ? 'var(--s3)' : 'var(--bad)');
+    c.setAttribute('fill-opacity', '0.55');
+    c.style.cursor = 'pointer';
+    c.addEventListener('mousemove', e => showTT(e,
+      `block ${p.block}\nS2 surplus: ${p.x >= 0 ? '+' : ''}${p.x.toPrecision(3)} ETH\nbatcher: ${p.y.toPrecision(3)} ETH`));
+    c.addEventListener('mouseleave', hideTT);
+    c.addEventListener('click', () => window.open(p.href, '_blank', 'noopener'));
+    svg.appendChild(c);
+  }
+  el.appendChild(svg);
+}
+
 function sortable(table, data, render, defaultKey) {
   let key = defaultKey, dir = -1;
   const ths = table.querySelectorAll('th');
@@ -506,6 +632,12 @@ function sortable(table, data, render, defaultKey) {
 """
 
 
+# Section order, headline variant first: anchored is the one that answers "would batching have
+# beaten reality", user_limit relaxes its limits to the user's real tolerance, and permissive is
+# the degenerate limit≈0 bound that reads last.
+VARIANT_ORDER = ("anchored", "user_limit", "permissive")
+
+
 def esc(x):
     return html.escape(str(x))
 
@@ -519,7 +651,7 @@ def short_label(text: str) -> str:
 
 
 BLOCK_ROWS_JS = """
-  r => `<tr><td><a href="explorer/block_${r.block}.html#${name}">${r.block}</a></td><td>${r.orders}</td><td>${r.executed}</td><td>${r.oou}</td><td>${r.sandwiched}</td>
+  r => `<tr><td><a href="explorer/block_${r.block}.html#${name}" target="_blank" rel="noopener">${r.block}</a></td><td>${r.orders}</td><td>${r.executed}</td><td>${r.oou}</td><td>${r.sandwiched}</td>
   <td>${r.pools} <span class="badge">${r.pools_split}</span></td>
   <td class="${bpsCls(r.s1_delta_bps)}">${fmt(r.s1_delta_bps)}</td>
   <td class="${bpsCls(r.s2_delta_bps)}">${fmt(r.s2_delta_bps)}</td>
@@ -529,7 +661,7 @@ BLOCK_ROWS_JS = """
   <td>${fmt(r.s2_ms,0)}</td><td>${fmt(r.s1_ms,0)}</td><td>${r.deadline?'⚠':''}</td></tr>`
 """
 EXPLORER_ROWS_JS = """
-  r => `<tr><td><a href="explorer/block_${r.block}.html#${name}">${r.block}</a></td><td><a href="https://etherscan.io/tx/${r.tx}" target="_blank" rel="noopener" title="${r.tx}">${r.tx.slice(0,10)}…</a></td><td title="${esc(r.venue_full)}">${esc(r.venue)}</td>
+  r => `<tr><td><a href="explorer/block_${r.block}.html#${name}" target="_blank" rel="noopener">${r.block}</a></td><td><a href="https://etherscan.io/tx/${r.tx}" target="_blank" rel="noopener" title="${r.tx}">${r.tx.slice(0,10)}…</a></td><td title="${esc(r.venue_full)}">${esc(r.venue)}</td>
   <td title="${esc(r.pair_full)}">${esc(r.pair)}</td><td>${fmt(r.in_eth,4)}</td><td>${r.status}</td><td>${r.s1_status}</td>
   <td class="${bpsCls(r.s2_bps)}">${fmt(r.s2_bps)}</td>
   <td class="${bpsCls(r.s1_bps)}">${fmt(r.s1_bps)}</td>
@@ -544,14 +676,22 @@ TOKEN_ROWS_JS = """
 # Every variant's sections, as (anchor slug, heading, sidebar label). One source for both the
 # headings and the table of contents, so the two can't drift apart.
 SECTIONS = [
-    ("chart", "Per-block improvement vs settled (bps of settled output value)", "Per-block Δbps"),
-    ("hist", "Per-order S2 improvement distribution (cleared orders, bps vs settled)", "Δbps distribution"),
+    ("s1hist", "Per-order S1 improvement distribution (cleared orders, bps vs settled)", "S1 Δbps distribution"),
+    ("hist", "Per-order S2 improvement distribution (cleared orders, bps vs settled)", "S2 Δbps distribution"),
     ("status", "Order status mix per block", "Status mix"),
     ("blocks", "Blocks", "Blocks"),
+    ("scatter", "Batcher inventory vs surplus, per block", "Batcher vs surplus"),
     ("tokens", "Traded volume by sell token", "Token volume"),
     ("orders", "Order explorer (all S2 orders; S1 columns joined)", "Order explorer"),
 ]
 HEADINGS = {slug: heading for slug, heading, _ in SECTIONS}
+
+# One bar per block, so past this many blocks the per-block status chart is a solid smear.
+MAX_STATUS_CHART_BLOCKS = 100
+
+
+def sections_for(n_blocks: int) -> list:
+    return [s for s in SECTIONS if s[0] != "status" or n_blocks <= MAX_STATUS_CHART_BLOCKS]
 
 
 def h2(name: str, slug: str) -> str:
@@ -560,32 +700,64 @@ def h2(name: str, slug: str) -> str:
 
 def toc(variants: list) -> str:
     items = ['<a class="toc-top" href="#top">Overview</a>']
-    for name, _ in variants:
+    for name, agg, _sub in variants:
         items.append(f'<a class="toc-v" href="#v-{name}">{esc(name)}</a>')
         items += [f'<a class="toc-s" href="#{name}-{slug}">{esc(label)}</a>'
-                  for slug, _, label in SECTIONS]
+                  for slug, _, label in sections_for(len(agg["per_block"]))]
     items.append('<a class="toc-v" href="#notes">Accounting &amp; caveats</a>')
     return f'<nav class="toc">{"".join(items)}</nav>'
 
 
-def variant_section(name: str, agg: dict) -> str:
-    """One variant's full report section; element ids are suffixed with the variant name."""
-    s2d = agg["s2_delta_bps"]
-    s1d = agg["s1_delta_bps"]
+def batched_blocks(orders: list[dict]) -> set:
+    """Blocks where S2 executed two or more orders — the ones that are actually batches.
+
+    Everywhere else the clearing involves at most one order, so it is what that order would
+    have got on its own; only here can orders net against each other."""
+    counts: dict[int, int] = defaultdict(int)
+    for r in orders:
+        if r["run"] == "s2" and r["status"] in ("cleared", "partial"):
+            counts[r["block"]] += 1
+    return {block for block, n in counts.items() if n >= 2}
+
+
+def variant_section(name: str, agg: dict, sub: dict | None) -> str:
+    """One variant's full report section; element ids are suffixed with the variant name.
+
+    `sub` is the same aggregate recomputed over the batched blocks only (see
+    `batched_blocks`); every tile carries it as a smaller companion figure."""
     st = agg["statuses"]
     blocks = agg["per_block"]
 
-    def tile(value, label, detail="", definition=""):
-        # `value` and `detail` are markup (signed_bps spans, explorer links); both are built
-        # here from the run's own numbers, never from decoded token or venue strings.
+    # The companion figures all share one qualifier, so only the first tile spells it out;
+    # the rest would just repeat it a dozen times down the row.
+    labelled = []
+
+    def tile(fmt, label, detail="", definition=""):
+        """`fmt` renders one metric from an aggregate, so the main tile and its companion are
+        the same computation over different block sets and cannot drift apart."""
+        companion = ""
+        if sub:
+            caption = (
+                '<div class="l">counting only blocks with 2+ executed orders in S2</div>'
+                if not labelled
+                else ""
+            )
+            labelled.append(True)
+            companion = (
+                f'<div class="tile sub" title="counting only blocks with 2+ executed orders'
+                f' in S2"><div class="v">{fmt(sub)}</div>{caption}</div>'
+            )
+        # Values and details are markup (signed_bps spans, explorer links); all are built here
+        # from the run's own numbers, never from decoded token or venue strings.
         return (
-            f'<div class="tile"><div class="v">{value}</div>'
+            f'<div class="tile-pair"><div class="tile"><div class="v">{fmt(agg)}</div>'
             f'<div class="l">{esc(label)}</div><div class="d">{detail}</div>'
-            f'<div class="def">{esc(definition)}</div></div>'
+            f'<div class="def">{esc(definition)}</div></div>{companion}</div>'
         )
 
     def block_link(block: int) -> str:
-        return f'<a href="explorer/block_{block}.html#{name}">{block}</a>'
+        return (f'<a href="explorer/block_{block}.html#{name}"'
+                f' target="_blank" rel="noopener">{block}</a>')
 
     def pct(x):
         return f"{x*100:.1f}%"
@@ -594,62 +766,85 @@ def variant_section(name: str, agg: dict) -> str:
         cls = "pos" if x >= 0 else "neg"
         return f'<span class="{cls}">{x:+.2f} bps</span>'
 
+    def eth(key):
+        return lambda a: f'{a[key]:.4f} ETH'
+
     tiles = [
         tile(
-            len(blocks),
+            lambda a: len(a["per_block"]),
             "blocks processed",
             definition="Blocks whose settled trades completed both APEX runs.",
         ),
         tile(
-            agg["orders_total"],
+            lambda a: a["orders_total"],
             "orders total",
             f'= {agg["in_universe"]} in-universe + {st.get("out_of_universe",0)} out-of-universe',
             "One order per decoded, non-sandwiched settled swap; the total INCLUDES the out-of-universe ones. Out-of-universe = a trade token has no derived price; those never enter APEX and count at S0.",
         ),
         tile(
-            signed_bps(s2d),
+            lambda a: signed_bps(a["s2_delta_bps"]),
             "S2 vs S0 (batch vs settled)",
             f'{agg["s2_delta_eth"]:+.4f} ETH on {agg["s2_settled_eth"]:.2f} ETH',
             "(Σ effective output − Σ settled output) ÷ Σ settled output, ETH-valued at block prices, over all orders. Unfilled/out-of-universe orders count at S0; partial fills count at the full clearing-price execution (batcher-topped-up).",
         ),
         tile(
-            signed_bps(s1d),
+            lambda a: signed_bps(a["s1_delta_bps"]),
             "S1 vs S0 (per-order control)",
             f'{agg["s1_delta_eth"]:+.4f} ETH',
             "Same formula as S2 vs S0, but each order solved alone against the same pool snapshot.",
         ),
         tile(
-            signed_bps(s2d - s1d),
+            lambda a: signed_bps(a["s2_delta_bps"] - a["s1_delta_bps"]),
             "S2 − S1 (batching effect)",
             "primary metric",
             "Difference of the two deltas above: what batching adds over the same solver run per order.",
         ),
         tile(
-            signed_bps(agg["s3_delta_bps"]),
+            lambda a: signed_bps(a["s3_delta_bps"]),
             "S3 vs S0 (per-order best of S2/S0)",
             f'{agg["s3_delta_eth"]:+.4f} ETH',
             "Unrealistic upper bound: per order, the better of the S2 permissive execution and the settled outcome — a cherry-pick that is NOT an executable batch (removing the losing orders would change the clearing).",
         ) if name == "permissive" else "",
         tile(
-            pct(agg["win_rate"]),
+            lambda a: pct(a["win_rate"]),
             "per-order improve rate (S2)",
             f'{agg["wins"]} improved, median {agg["median_improvement_bps"]:+.2f} bps among executed',
             "S2 orders executed (cleared, or partial with batcher top-up) above their settled output ÷ all in-universe orders.",
         ),
         tile(
-            pct(agg["blocks_won"] / max(1, len(blocks))),
+            lambda a: pct(a["blocks_won"] / max(1, len(a["per_block"]))),
             "per-block improve rate (S2)",
             f'{agg["blocks_won"]} improved, {agg["blocks_lost"]} worsened, {len(blocks)-agg["blocks_won"]-agg["blocks_lost"]} unchanged',
             "Blocks whose S2 effective output total (ETH-valued, uncleared orders at S0) exceeds their settled total ÷ blocks processed.",
         ),
         tile(
-            f'{agg["batcher_gross_eth"]:.4f} ETH',
+            eth("batcher_gross_eth"),
             "total batcher inventory used",
             f'received {agg["batcher_bought_eth"]:.4f} ETH',
             "Σ buy-token remainders the batcher supplies on partial fills (full clearing-price output minus APEX's fill), ETH-valued, over every block; in return it receives the unsold sell amounts.",
         ),
         tile(
-            f'{agg["batcher_peak_eth"]:.4f} ETH',
+            eth("batcher_median_eth"),
+            "median required batcher inventory",
+            f'p05 {agg["batcher_p05_eth"]:.4f} · mean {agg["batcher_mean_eth"]:.4f} · '
+            f'p95 {agg["batcher_p95_eth"]:.4f} ETH',
+            "Median over blocks of that block's top-up total. The distribution is zero-inflated — "
+            f'{agg["batcher_blocks_none"]} of {len(blocks)} blocks need no inventory at all, so the '
+            "median sits at zero whenever that is over half — and long-tailed, so the mean can "
+            "exceed p95. Read it against the max below.",
+        ),
+        tile(
+            eth("batcher_used_median_eth"),
+            "median required batcher inventory in blocks with partial fills",
+            f'p05 {agg["batcher_used_p05_eth"]:.4f} · mean {agg["batcher_used_mean_eth"]:.4f} · '
+            f'p95 {agg["batcher_used_p95_eth"]:.4f} ETH',
+            f'The same per-block figure as the tile before it, over only the '
+            f'{agg["batcher_used_blocks"]} blocks with a partial fill — the zero mass dropped. '
+            "This is what a block that needs inventory actually needs; the tile before it mixes "
+            "that with how often none is needed at all.",
+        ),
+        tile(
+            eth("batcher_peak_eth"),
             "max required batcher inventory",
             f'block {block_link(agg["batcher_peak_block"])}' if agg["batcher_peak_block"] else "",
             "The largest single block's top-up total: max over blocks of Σ that block's buy-token remainders, ETH-valued. Batches settle one at a time, so this is the inventory the batcher has to hold to run any block in the run.",
@@ -662,22 +857,7 @@ def variant_section(name: str, agg: dict) -> str:
         else ""
     )
     s3_th = '<th data-k="s3_delta_bps">S3 Δbps</th>' if name == "permissive" else ""
-
-    return f"""
-<h1 class="variant-h" id="v-{name}">{esc(name)} variant</h1>
-<div class="tiles">{''.join(tiles)}</div>
-
-{h2(name, 'chart')}
-<div class="chart-box">
-  <div class="legend"><span><span class="k" style="background:var(--s1)"></span>S1 vs S0 (control)</span>
-  <span><span class="k" style="background:var(--s2)"></span>S2 vs S0 (batch)</span>{s3_legend}</div>
-  <div id="chart-blocks-{name}"></div>
-</div>
-
-{h2(name, 'hist')}
-<div class="chart-box"><div id="chart-hist-{name}"></div>
-<div class="note">Positive = the batch beat the settled output for that order.</div></div>
-
+    status_chart = f"""
 {h2(name, 'status')}
 <div class="chart-box">
   <div class="legend">
@@ -688,14 +868,31 @@ def variant_section(name: str, agg: dict) -> str:
   </div>
   <div id="chart-status-{name}"></div>
 </div>
+""" if len(blocks) <= MAX_STATUS_CHART_BLOCKS else ""
 
+    return f"""
+<h1 class="variant-h" id="v-{name}">{esc(name)} variant</h1>
+<div class="tiles">{''.join(tiles)}</div>
+
+{h2(name, 's1hist')}
+<div class="chart-box"><div id="chart-s1hist-{name}"></div>
+<div class="note">The control: each order solved alone against the same pools. Positive = that
+single-order solve beat the settled output.</div></div>
+
+{h2(name, 'hist')}
+<div class="chart-box"><div id="chart-hist-{name}"></div>
+<div class="note">Positive = the batch beat the settled output for that order.</div></div>
+{status_chart}
 {h2(name, 'blocks')}
 <div class="filters">
   <label style="font-size:13px;color:var(--text-secondary)">
-    <input type="checkbox" id="f-improved-{name}"> only blocks where batching improved execution (S2 Δbps &gt; 0)
+    <input type="checkbox" id="f-executed-{name}"> only blocks with 2+ executed orders
   </label>
   <label style="font-size:13px;color:var(--text-secondary)">
     <input type="checkbox" id="f-amm-{name}"> only blocks where the clearing includes AMMs
+  </label>
+  <label style="font-size:13px;color:var(--text-secondary)">
+    <input type="checkbox" id="f-nopartial-{name}"> only blocks with no partial fills
   </label>
 </div>
 <div class="scroll"><table id="t-blocks-{name}"><thead><tr>
@@ -706,6 +903,19 @@ def variant_section(name: str, agg: dict) -> str:
 <th data-k="batcher_eth" title="ETH-valued sum of this block's batcher top-ups: the inventory the batcher has to hold to settle it">batcher ETH</th>
 <th data-k="s2_ms">S2 ms</th><th data-k="s1_ms">S1 ms</th><th data-k="deadline">deadline</th>
 </tr></thead><tbody></tbody></table></div>
+
+{h2(name, 'scatter')}
+<div class="chart-box">
+  <div class="legend">
+    <span><span class="k" style="background:var(--s3)"></span>surplus ≥ 0</span>
+    <span><span class="k" style="background:var(--bad)"></span>surplus &lt; 0</span>
+  </div>
+  <div id="chart-scatter-{name}"></div>
+  <div class="note">One point per block: how much buy-token inventory the batcher had to supply
+  (y) against what the batch gained over the settled outcome (x). Both axes are symmetric-log —
+  linear inside ±1e−6 ETH, logarithmic beyond — because most blocks sit at the origin while a
+  few span hundreds of ETH. Click a point to open that block.</div>
+</div>
 
 {h2(name, 'tokens')}
 <div class="filters"><select id="vol-block-{name}"><option value="">all blocks</option></select></div>
@@ -732,11 +942,12 @@ def variant_section(name: str, agg: dict) -> str:
 def render(variants: list, out: Path) -> None:
     sections = []
     data = {}
-    for name, agg in variants:
-        sections.append(variant_section(name, agg))
+    for name, agg, sub in variants:
+        sections.append(variant_section(name, agg, sub))
         data[name] = {
             "per_block": agg["per_block"],
             "improvements": agg["improvements_bps"],
+            "s1_improvements": agg["s1_improvements_bps"],
             "explorer": agg["explorer"],
             "token_volumes": agg["token_volumes"],
         }
@@ -779,30 +990,33 @@ minimum buy amount recovered from calldata; anchored fallback where unrecoverabl
 const DATA = {data_json};
 {JS}
 for (const [name, d] of Object.entries(DATA)) {{
-  const improvementSeries = [
-    {{name:'S1 vs S0', color:'var(--s1)', values: d.per_block.map(b=>b.s1_delta_bps)}},
-    {{name:'S2 vs S0', color:'var(--s2)', values: d.per_block.map(b=>b.s2_delta_bps)}},
-  ];
-  if (name === 'permissive') {{
-    improvementSeries.push(
-      {{name:'S3 vs S0', color:'var(--s3)', values: d.per_block.map(b=>b.s3_delta_bps)}});
-  }}
-  barChart($('#chart-blocks-'+name), d.per_block.map(b=>String(b.block)), improvementSeries);
+  histogram($('#chart-s1hist-'+name), d.s1_improvements, 'var(--s2)');
+  scatter($('#chart-scatter-'+name), d.per_block.map(b => ({{
+    x: b.s2_surplus_eth, y: b.batcher_eth, block: b.block,
+    href: 'explorer/block_' + b.block + '.html#' + name,
+  }})), {{xLabel: 'S2 surplus (ETH)  →'}});
   histogram($('#chart-hist-'+name), d.improvements, 'var(--s1)');
-  barChart($('#chart-status-'+name), d.per_block.map(b=>String(b.block)), [
-    {{name:'cleared', color:'var(--s3)', values: d.per_block.map(b=>b.statuses.cleared||0)}},
-    {{name:'partial', color:'var(--s1)', values: d.per_block.map(b=>b.statuses.partial||0)}},
-    {{name:'unfilled', color:'var(--s2)', values: d.per_block.map(b=>b.statuses.unfilled||0)}},
-    {{name:'out of universe', color:'var(--bad)', values: d.per_block.map(b=>b.statuses.out_of_universe||0)}},
-  ], {{stacked:true}});
+  // Dropped past MAX_STATUS_CHART_BLOCKS: one bar per block stops being readable.
+  if ($('#chart-status-'+name)) {{
+    barChart($('#chart-status-'+name), d.per_block.map(b=>String(b.block)), [
+      {{name:'cleared', color:'var(--s3)', values: d.per_block.map(b=>b.statuses.cleared||0)}},
+      {{name:'partial', color:'var(--s1)', values: d.per_block.map(b=>b.statuses.partial||0)}},
+      {{name:'unfilled', color:'var(--s2)', values: d.per_block.map(b=>b.statuses.unfilled||0)}},
+      {{name:'out of universe', color:'var(--bad)', values: d.per_block.map(b=>b.statuses.out_of_universe||0)}},
+    ], {{stacked:true}});
+  }}
 
-  const fImproved = $('#f-improved-'+name), fAmm = $('#f-amm-'+name);
+  // A block where only one order executed is not a batch — its clearing is what that order
+  // would have got alone, so 2+ is where batching can actually do something.
+  const fExecuted = $('#f-executed-'+name), fAmm = $('#f-amm-'+name);
+  // Every executed order cleared in full, so the block needed no batcher inventory at all.
+  const fNoPartial = $('#f-nopartial-'+name);
   const drawBlocks = sortable($('#t-blocks-'+name), () => d.per_block.filter(b =>
-    (!fImproved.checked || b.s2_delta_bps > 0) &&
-    (!fAmm.checked || b.amm_legs > 0)
+    (!fExecuted.checked || b.executed >= 2) &&
+    (!fAmm.checked || b.amm_legs > 0) &&
+    (!fNoPartial.checked || !(b.statuses.partial > 0))
   ), {BLOCK_ROWS_JS}, 'block');
-  fImproved.addEventListener('change', drawBlocks);
-  fAmm.addEventListener('change', drawBlocks);
+  for (const f of [fExecuted, fAmm, fNoPartial]) f.addEventListener('change', drawBlocks);
 
   const volSel = $('#vol-block-'+name);
   d.per_block.forEach(b => {{ const o=document.createElement('option'); o.textContent=b.block; volSel.appendChild(o); }});
@@ -846,16 +1060,20 @@ def main() -> None:
     for b in blocks:
         b.setdefault("variant", "permissive")
     variants = []
-    for v in ("permissive", "anchored", "user_limit"):
+    for v in VARIANT_ORDER:
         ov = [r for r in orders if r.get("variant", "permissive") == v]
         bv = [b for b in blocks if b["variant"] == v]
         if ov and bv:
-            variants.append((v, aggregate(ov, bv)))
+            batched = batched_blocks(ov)
+            ov_sub = [r for r in ov if r["block"] in batched]
+            bv_sub = [b for b in bv if b["block"] in batched]
+            sub = aggregate(ov_sub, bv_sub) if ov_sub and bv_sub else None
+            variants.append((v, aggregate(ov, bv), sub))
 
     out = args.out or (args.dir / "report.html")
     render(variants, out)
 
-    for name, agg in variants:
+    for name, agg, sub in variants:
         print(f"[{name}] blocks: {len(agg['blocks'])}  orders: {agg['orders_total']}")
         s3_note = f"   S3 vs S0: {agg['s3_delta_bps']:+.2f} bps" if name == "permissive" else ""
         print(f"[{name}] S1 vs S0: {agg['s1_delta_bps']:+.2f} bps   S2 vs S0: {agg['s2_delta_bps']:+.2f} bps   S2-S1: {agg['s2_delta_bps']-agg['s1_delta_bps']:+.2f} bps{s3_note}")
