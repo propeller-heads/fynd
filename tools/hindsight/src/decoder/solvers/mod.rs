@@ -17,6 +17,7 @@ pub(crate) mod liquidmesh;
 pub(crate) mod okx;
 pub(crate) mod oneinch;
 pub(crate) mod paraswap;
+pub(crate) mod swap_router_02;
 pub(crate) mod uniswap;
 pub(crate) mod zeroex;
 

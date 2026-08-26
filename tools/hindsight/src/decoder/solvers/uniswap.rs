@@ -67,7 +67,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    solvers::{DeclaredSwap, SolverDecoder},
+    solvers::{swap_router_02, DeclaredSwap, SolverDecoder},
     veto::Veto,
 };
 
@@ -227,7 +227,7 @@ fn dynamic_at(input: &[u8], index: usize) -> Option<&[u8]> {
 
 /// The first and last token of a packed v3 path: `token (fee token)+`. A path shorter than one hop
 /// is malformed.
-fn v3_path_ends(path: &[u8]) -> Option<(Address, Address)> {
+pub(super) fn v3_path_ends(path: &[u8]) -> Option<(Address, Address)> {
     if path.len() < V3_HOP + ADDRESS_LEN || !(path.len() - ADDRESS_LEN).is_multiple_of(V3_HOP) {
         return None;
     }
@@ -380,7 +380,7 @@ fn read_v4_swap(command_input: &[u8]) -> Option<Swap> {
 /// A recipient that names an address whose receipt can be read, or `None` for the router's
 /// sentinels — the caller then anchors on the transaction sender, which is where the router's
 /// `SWEEP`/`UNWRAP_WETH` sends the output.
-fn readable_recipient(raw: Address) -> Option<Address> {
+pub(super) fn readable_recipient(raw: Address) -> Option<Address> {
     let sentinel = raw.into_word().into();
     let sentinel = U256::from_be_bytes::<32>(sentinel);
     if sentinel == U256::from(MSG_SENDER) || sentinel == U256::from(ADDRESS_THIS) {
@@ -533,8 +533,12 @@ impl SolverDecoder for Uniswap {
     ///
     /// Declines a stream carrying more than one swap, or a path that ends in the token it started
     /// from — see the module docs for why neither can be priced.
-    fn declared(&self, input: &[u8], _logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
-        let Some((commands, inputs)) = command_stream(input) else { return Ok(None) };
+    fn declared(&self, input: &[u8], logs: &[Log]) -> Result<Option<DeclaredSwap>, Veto> {
+        let Some((commands, inputs)) = command_stream(input) else {
+            // The same address-book name covers `SwapRouter02`, whose entries are a different
+            // shape entirely — and the larger share of the flow on Base.
+            return Ok(swap_router_02::declared(input, logs));
+        };
         let Some(stream) = read_stream(&commands, &inputs) else { return Ok(None) };
         let swap = stream.swap;
         if swap.amounts.is_zero() {
