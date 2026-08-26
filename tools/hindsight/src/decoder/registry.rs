@@ -514,6 +514,21 @@ mod tests {
     }
 
     #[test]
+    fn test_binance_router_is_a_venue_on_ethereum_and_base() {
+        // The router is deployed at one address per chain and enters LiquidMesh's flow on both, so
+        // a book missing it labels those records with the raw address.
+        let router = address!("0xb300000b72deaeb607a12d5f54773d1c19c7028d");
+        for chain in [Chain::Ethereum, Chain::Base] {
+            let registry = Registry::builtin(chain).unwrap();
+            assert_eq!(
+                registry.venue_name(router),
+                Some("binance"),
+                "{chain} does not name {router}"
+            );
+        }
+    }
+
+    #[test]
     fn test_client_fee_wallets_on_ethereum_and_base() {
         // Trust Wallet, ShapeShift and Vultisig route through shared routers on both chains and
         // use one fee wallet per venue across them, so a wallet listed on one book only would

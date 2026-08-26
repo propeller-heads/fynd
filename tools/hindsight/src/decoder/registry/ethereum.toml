@@ -105,6 +105,13 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 # Pendle Router V4 (Etherscan name tag) — a protocol router, not a solver.
 "0x888888888889758f76e7103c6cbf23abbf58f946" = "pendle"
 
+[venues.binance]
+# Binance's DEX Router ("Binance: DEX Router", same address on Ethereum, Base, BSC and OP). It is
+# `tx.to` for Binance Wallet's swaps and routes on to LiquidMesh and LiFi. Over one production day
+# it entered 1,088 Ethereum and 2,036 Base records, all of which carried the raw address as their
+# venue.
+entry_points = ["0xb300000b72deaeb607a12d5f54773d1c19c7028d"]
+
 [venues.debridge]
 # deBridge's swap entry proxy: relayer-sent, gasless. Their DLN cross-chain orders enter here
 # too, and carry no same-chain output.
