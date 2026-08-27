@@ -74,6 +74,16 @@ pub(crate) struct DeclaredSwap {
     pub declared_quote: Option<U256>,
     /// Unix timestamp of `declared_quote`. Only `KyberSwap`'s `clientData` exposes one.
     pub timestamp: Option<u64>,
+    /// Whether `amount_in` is already the amount that reached the pools, so an input-side venue
+    /// fee must not be subtracted from it a second time. Set by a reader whose source states the
+    /// swap's own input while the venue charges its cut to the trader separately, on top —
+    /// `LiquidMesh`'s event does. Read by `decoder::apply_venue_fee`.
+    pub input_is_swap_basis: bool,
+    /// Whether `amount_out` is the trader's receipt rather than the route's gross output, so an
+    /// output-side venue fee has to be added back even though the source stated an amount. Set by
+    /// a reader whose event reports what the trader received (`LiquidMesh`); `LiFi`'s `toAmount`
+    /// is the gross output and leaves this false. Read by `decoder::apply_venue_fee`.
+    pub output_is_trader_receipt: bool,
 }
 
 impl DeclaredSwap {
@@ -98,6 +108,8 @@ impl DeclaredSwap {
             output_recipient: None,
             declared_quote: None,
             timestamp: None,
+            input_is_swap_basis: false,
+            output_is_trader_receipt: false,
         }
     }
 
@@ -121,6 +133,8 @@ impl DeclaredSwap {
             output_recipient: None,
             declared_quote: None,
             timestamp: None,
+            input_is_swap_basis: false,
+            output_is_trader_receipt: false,
         }
     }
 
@@ -145,12 +159,27 @@ impl DeclaredSwap {
             output_recipient: None,
             declared_quote: None,
             timestamp: None,
+            input_is_swap_basis: false,
+            output_is_trader_receipt: false,
         }
     }
 
     /// Attach the output recipient the same calldata declares.
     pub(crate) fn with_recipient(mut self, output_recipient: Address) -> Self {
         self.output_recipient = Some(output_recipient);
+        self
+    }
+
+    /// Mark `amount_in` as the amount that reached the pools, so an input-side venue fee is not
+    /// subtracted from it again.
+    pub(crate) fn with_input_as_swap_basis(mut self) -> Self {
+        self.input_is_swap_basis = true;
+        self
+    }
+
+    /// Mark `amount_out` as the trader's receipt, so an output-side venue fee is added back to it.
+    pub(crate) fn with_output_as_trader_receipt(mut self) -> Self {
+        self.output_is_trader_receipt = true;
         self
     }
 
