@@ -32,13 +32,12 @@
 //! incremental recomputation narrows each pass to the tokens whose stored routes ran through a
 //! changed component, which bounds the steady-state cost.
 
-use std::collections::{HashMap, HashSet};
-
 use async_trait::async_trait;
 use num_bigint::BigUint;
 #[cfg(test)]
 use num_traits::ToPrimitive;
 use num_traits::Zero;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, Span};
 use tycho_simulation::{
     tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
@@ -122,9 +121,9 @@ impl TokenGasPriceComputation {
     async fn solve_token_prices(
         &self,
         market: &MarketData,
-        filter_tokens: Option<&HashSet<Address>>,
+        filter_tokens: Option<&FxHashSet<Address>>,
     ) -> Result<
-        (HashMap<Address, (Price, HashSet<ComponentId>)>, u64, Vec<FailedItem>),
+        (FxHashMap<Address, (Price, FxHashSet<ComponentId>)>, u64, Vec<FailedItem>),
         ComputationError,
     > {
         let (topology, block) = {
@@ -155,7 +154,7 @@ impl TokenGasPriceComputation {
             .buy_routes(&router, graph, market, &wanted)
             .await?;
 
-        let mut prices = HashMap::new();
+        let mut prices = FxHashMap::default();
         let mut failed_items = Vec::new();
         for token in wanted {
             match self
@@ -182,10 +181,10 @@ impl TokenGasPriceComputation {
         router: &BellmanFordAlgorithm,
         graph: &RouterGraph,
         market: &MarketData,
-        wanted: &HashSet<Address>,
-    ) -> Result<HashMap<Address, Route>, ComputationError> {
+        wanted: &FxHashSet<Address>,
+    ) -> Result<FxHashMap<Address, Route>, ComputationError> {
         let Some(probe_destination) = wanted.iter().next() else {
-            return Ok(HashMap::new());
+            return Ok(FxHashMap::default());
         };
         let order = Order::new(
             self.gas_token.clone(),
@@ -199,7 +198,7 @@ impl TokenGasPriceComputation {
             .await
         else {
             // No subgraph around the gas token means nothing is priceable this block.
-            return Ok(HashMap::new());
+            return Ok(FxHashMap::default());
         };
         Ok(router.find_routes_from_source(&ctx, &order, FindRouteOptions::default()))
     }
@@ -207,9 +206,9 @@ impl TokenGasPriceComputation {
     /// Every token in the graph but the gas token, narrowed to `filter_tokens` when given.
     fn tokens_to_price(
         &self,
-        topology: &HashMap<ComponentId, Vec<Address>>,
-        filter_tokens: Option<&HashSet<Address>>,
-    ) -> HashSet<Address> {
+        topology: &FxHashMap<ComponentId, Vec<Address>>,
+        filter_tokens: Option<&FxHashSet<Address>>,
+    ) -> FxHashSet<Address> {
         topology
             .values()
             .flatten()
@@ -233,13 +232,13 @@ impl TokenGasPriceComputation {
         market: &MarketData,
         token: &Address,
         buy: Option<&Route>,
-    ) -> Result<(Price, HashSet<ComponentId>), FailedItemError> {
+    ) -> Result<(Price, FxHashSet<ComponentId>), FailedItemError> {
         let buy = buy.ok_or(FailedItemError::UnreachableFromGasToken)?;
         let buy_out = route_output(buy, token);
         if buy_out.is_zero() {
             return Err(FailedItemError::UnreachableFromGasToken);
         }
-        let mut components: HashSet<ComponentId> = buy
+        let mut components: FxHashSet<ComponentId> = buy
             .swaps()
             .iter()
             .map(|swap| swap.component_id().to_string())
@@ -318,7 +317,7 @@ impl TokenGasPriceComputation {
         };
 
         let changed_components = changed.all_changed_ids();
-        let tokens_to_recompute: HashSet<Address> = existing_deps
+        let tokens_to_recompute: FxHashSet<Address> = existing_deps
             .iter()
             .filter(|(_, entry)| {
                 !entry
@@ -387,8 +386,8 @@ impl TokenGasPriceComputation {
             .solve_token_prices(market, None)
             .await?;
 
-        let mut token_prices_with_deps = TokenPricesWithDeps::new();
-        let mut token_prices = TokenGasPrices::new();
+        let mut token_prices_with_deps = TokenPricesWithDeps::default();
+        let mut token_prices = TokenGasPrices::default();
         for (token, (price, path_components)) in solved {
             token_prices_with_deps
                 .insert(token.clone(), TokenPriceEntry { price: price.clone(), path_components });
@@ -402,7 +401,10 @@ impl TokenGasPriceComputation {
         };
         token_prices_with_deps.insert(
             self.gas_token.clone(),
-            TokenPriceEntry { price: gas_token_price.clone(), path_components: HashSet::new() },
+            TokenPriceEntry {
+                price: gas_token_price.clone(),
+                path_components: FxHashSet::default(),
+            },
         );
         token_prices.insert(self.gas_token.clone(), gas_token_price);
 

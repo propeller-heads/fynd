@@ -276,10 +276,10 @@ impl BellmanFordAlgorithm {
         ctx: &BellmanFordContext,
         order: &Order,
         opts: FindRouteOptions,
-    ) -> HashMap<Address, Route> {
+    ) -> FxHashMap<Address, Route> {
         let spfa = self.run_spfa(ctx, order, &opts.overrides, Instant::now());
 
-        let mut routes = HashMap::new();
+        let mut routes = FxHashMap::default();
         for (idx, amount) in spfa.amount.iter().enumerate() {
             if amount.is_zero() || idx == ctx.token_in_node.index() {
                 continue;
