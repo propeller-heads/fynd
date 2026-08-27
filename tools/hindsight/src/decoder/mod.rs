@@ -189,6 +189,9 @@ fn apply_venue_fee(
 ) {
     match fee.side {
         attribution::FeeSide::Input => {
+            if input_already_swap_basis(declared) {
+                return;
+            }
             flow.amount_in = flow
                 .amount_in
                 .saturating_sub(fee.amount);
@@ -222,8 +225,12 @@ fn output_already_gross(
     transfer_ledger: &TransferLedger,
     sender: Address,
 ) -> bool {
-    if declared.is_some_and(|declared| declared.amount_out.is_some()) {
-        return true;
+    if let Some(declared) = declared {
+        if declared.amount_out.is_some() {
+            // A reader that states the trader's receipt rather than the route's output leaves the
+            // fee outside the figure, so it still has to be added back.
+            return !declared.output_is_trader_receipt;
+        }
     }
     let anchor = match declared {
         Some(declared) => declared
@@ -232,6 +239,22 @@ fn output_already_gross(
         None => flow.tracked,
     };
     transfer_ledger.sent_by_address(anchor, flow.token_out) >= fee.amount
+}
+
+/// Whether the recorded `amount_in` is already the amount that reached the pools, in which case
+/// subtracting an input-side venue fee would take the venue's cut off the swap twice.
+///
+/// A venue can charge its cut *beside* the swap rather than out of it: `LiquidMesh` forwards the
+/// trader's whole payment to the pools and the trader pays Trust Wallet's 0.7% in a separate
+/// transfer, so the event's input is the swap's basis already. Verified on Ethereum
+/// (`0x526fb82e…`): the trader sent 300,570,650 to the router, the router sent all 300,570,650 on
+/// to the pool, and the 2,118,826 fee left the trader's own balance separately. Subtracting it
+/// quoted Fynd on 298,451,824 and scored the shortfall as a 70 bps loss.
+///
+/// A netted record has no declared read, so its `amount_in` is the trader's gross payment and the
+/// fee does come out of it.
+fn input_already_swap_basis(declared: Option<&DeclaredSwap>) -> bool {
+    declared.is_some_and(|declared| declared.input_is_swap_basis)
 }
 
 /// The terms the solver declared alongside the trade, or all-`None` for a netted record where no
@@ -555,6 +578,121 @@ mod tests {
 
         apply_venue_fee(&mut flow, &output_fee(85), Some(&declared), &ledger, user);
         assert_eq!(flow.amount_out, U256::from(10_000));
+    }
+
+    /// Trust Wallet's 0.7% cut, as `attribution` reports it on either side.
+    fn trustwallet_fee(side: attribution::FeeSide, amount: u128) -> attribution::VenueFee {
+        attribution::VenueFee { venue: "trustwallet".to_string(), side, amount: U256::from(amount) }
+    }
+
+    #[test]
+    fn test_apply_venue_fee_output_side_event_states_the_trader_receipt() {
+        // Ethereum `0xffd1ec54…`: LiquidMesh's event states 66,424,676 USDT — what the trader
+        // received — while the fee wallet took 468,250 of the 66,892,926 gross. An event-stated
+        // output is normally left alone, but this one is a receipt, so the cut is added back.
+        let user = addr(1);
+        let router = addr(0x60);
+        let wallet = addr(0x99);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+        let logs = vec![
+            make_transfer_log(token_out, router, user, U256::from(66_424_676u64)),
+            make_transfer_log(token_out, router, wallet, U256::from(468_250u64)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let declared = DeclaredSwap::from_event(
+            user,
+            token_in,
+            U256::from(26_796_517_999_700_000u64),
+            token_out,
+            U256::from(66_424_676u64),
+        )
+        .with_output_as_trader_receipt();
+        let mut flow = SettledSwap {
+            tracked: user,
+            token_in,
+            amount_in: U256::from(26_796_517_999_700_000u64),
+            token_out,
+            amount_out: U256::from(66_424_676u64),
+        };
+
+        apply_venue_fee(
+            &mut flow,
+            &trustwallet_fee(attribution::FeeSide::Output, 468_250),
+            Some(&declared),
+            &ledger,
+            user,
+        );
+        assert_eq!(flow.amount_out, U256::from(66_892_926u64));
+    }
+
+    #[test]
+    fn test_apply_venue_fee_input_side_beside_the_swap() {
+        // Ethereum `0x526fb82e…`: the trader sent 300,570,650 to the router, the router forwarded
+        // all of it to the pool, and the 2,118,826 fee left the trader's balance separately. The
+        // event's input is the swap's basis, so subtracting the cut would quote Fynd on less input
+        // than the swap had — which read as a 70 bps loss in production.
+        let user = addr(1);
+        let router = addr(0x60);
+        let pool = addr(0x50);
+        let wallet = addr(0x99);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+        let logs = vec![
+            make_transfer_log(token_in, user, wallet, U256::from(2_118_826u64)),
+            make_transfer_log(token_in, user, router, U256::from(300_570_650u64)),
+            make_transfer_log(token_in, router, pool, U256::from(300_570_650u64)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &[]);
+        let declared = DeclaredSwap::from_event(
+            user,
+            token_in,
+            U256::from(300_570_650u64),
+            token_out,
+            U256::from(8_099u64),
+        )
+        .with_input_as_swap_basis();
+        let mut flow = SettledSwap {
+            tracked: user,
+            token_in,
+            amount_in: U256::from(300_570_650u64),
+            token_out,
+            amount_out: U256::from(8_099u64),
+        };
+
+        apply_venue_fee(
+            &mut flow,
+            &trustwallet_fee(attribution::FeeSide::Input, 2_118_826),
+            Some(&declared),
+            &ledger,
+            user,
+        );
+        assert_eq!(flow.amount_in, U256::from(300_570_650u64));
+    }
+
+    #[test]
+    fn test_apply_venue_fee_input_side_out_of_the_authorized_amount() {
+        // The default, unchanged: a reader whose input is the trader's gross payment (0x's
+        // `AllowanceHolder` amount) still has the cut taken off it.
+        let user = addr(1);
+        let (token_in, token_out) = (addr(0xaa), addr(0xbb));
+        let ledger = TransferLedger::from_transaction(&[], &[]);
+        let declared =
+            DeclaredSwap::from_calldata(token_in, token_out, U256::from(1_000u64), U256::ZERO);
+        let mut flow = SettledSwap {
+            tracked: user,
+            token_in,
+            amount_in: U256::from(1_000u64),
+            token_out,
+            amount_out: U256::from(9_000u64),
+        };
+
+        apply_venue_fee(
+            &mut flow,
+            &trustwallet_fee(attribution::FeeSide::Input, 7),
+            Some(&declared),
+            &ledger,
+            user,
+        );
+        assert_eq!(flow.amount_in, U256::from(993u64));
     }
 
     #[test]

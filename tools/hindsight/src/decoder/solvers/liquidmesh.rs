@@ -18,14 +18,23 @@
 //!
 //! The layout was recovered over 37 swaps across Ethereum and Base: word 3 was the transaction
 //! sender in all 37, and word 5 was exactly the amount that address received of word 2's token in
-//! all 37. Word 4 is the full amount the trader paid, gross of every fee.
+//! all 37. Word 4 is the amount that entered the swap.
 //!
-//! Word 5 is **net of the venue's fee**, which is what makes the fee matter here. Verified on
-//! Ethereum: the trader sent 39,270 DAI, the router took in 39,272.36 USDT, paid 274.906517 USDT
-//! (0.700%) to Trust Wallet's fee wallet and 38,997.453165 USDT to the trader, and the event
-//! states 38,997.453165. Comparing that against a re-solve of the full input would hand Fynd the
-//! fee as a win, so the wallet is listed in `[venue_fees]` and `attribution::venue` adds the cut
-//! back onto the output. A client whose wallet is not listed keeps its fee inside word 5.
+//! The two words sit on **different bases**, and a venue fee has to be handled per side because
+//! of it. Verified on Ethereum, one transaction per side:
+//!
+//! - **Word 5 is the trader's receipt, net of an output-side fee.** `0xffd1ec54…`: the trader
+//!   received 66,424,676 USDT, the fee wallet 468,250 (0.700% of the 66,892,926 gross), and the
+//!   event states 66,424,676. The fee has to be added back or Fynd's gross quote beats the receipt
+//!   by the fee — so this read is marked `with_output_as_trader_receipt`.
+//! - **Word 4 is the swap's own input, and an input-side fee sits beside the swap, not inside it.**
+//!   `0x526fb82e…`: the trader sent 300,570,650 to the router, the router forwarded all 300,570,650
+//!   to the pool, and the 2,118,826 fee (0.705%) left the trader's balance in its own transfer.
+//!   Subtracting it would quote Fynd on less input than the swap had, so this read is marked
+//!   `with_input_as_swap_basis`.
+//!
+//! Both marks only matter once the venue's wallet is in `[venue_fees]`; a client whose wallet is
+//! not listed keeps its cut inside word 5 either way.
 //!
 //! Word 0 is an identifier that also appears in the fee event, and is not read.
 
@@ -86,13 +95,18 @@ impl SolverDecoder for LiquidMesh {
         if amount_in.is_zero() || amount_out.is_zero() {
             return Ok(None);
         }
-        Ok(Some(DeclaredSwap::from_event(
-            address_at(data, TRADER_WORD),
-            normalize_native(address_at(data, TOKEN_IN_WORD)),
-            amount_in,
-            normalize_native(address_at(data, TOKEN_OUT_WORD)),
-            amount_out,
-        )))
+        Ok(Some(
+            DeclaredSwap::from_event(
+                address_at(data, TRADER_WORD),
+                normalize_native(address_at(data, TOKEN_IN_WORD)),
+                amount_in,
+                normalize_native(address_at(data, TOKEN_OUT_WORD)),
+                amount_out,
+            )
+            // The two words sit on different bases — see the module docs.
+            .with_input_as_swap_basis()
+            .with_output_as_trader_receipt(),
+        ))
     }
 }
 
