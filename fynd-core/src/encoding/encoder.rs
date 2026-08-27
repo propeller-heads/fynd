@@ -171,7 +171,12 @@ impl Encoder {
                     .build()
             })
             .transpose()?;
-        let exclusive_swap_signer = ExclusiveSwapSigner::from_env(chain.id())?;
+        // Without a router address there is no locker to authorize, and `encode` already fails on
+        // this chain, so an exclusive leg could not be encoded either way.
+        let exclusive_swap_signer = match &router_address {
+            Some(router) => ExclusiveSwapSigner::from_env(chain.id(), router)?,
+            None => None,
+        };
         Ok(Self {
             tycho_encoder,
             chain,
@@ -965,6 +970,7 @@ mod tests {
 
     const CONTROLLER_KEY: &str =
         "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const LOCKER: alloy::primitives::Address = alloy::primitives::Address::repeat_byte(0x77);
 
     fn ekubo_signed_swap(committed: Option<u64>) -> crate::types::Swap {
         let token_in = make_address(0x11);
@@ -1008,7 +1014,7 @@ mod tests {
     fn test_stamp_exclusive_swaps(#[case] committed: Option<u64>, #[case] signed: bool) {
         let quote =
             make_order_quote(990_000).with_route(single_swap_route(ekubo_signed_swap(committed)));
-        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
 
         let solution =
             Encoder::stamp_exclusive_swaps(Solution::try_from(&quote).unwrap(), &quote, &signer)
