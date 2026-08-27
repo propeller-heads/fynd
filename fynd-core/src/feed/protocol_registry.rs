@@ -318,11 +318,8 @@ pub(crate) fn register_exchanges(
                 );
             }
             "uniswap_v4" => {
-                builder = builder.exchange::<UniswapV4State>(
-                    "uniswap_v4",
-                    tvl_filter.clone(),
-                    Some(uniswap_v4_hook_filter),
-                );
+                builder =
+                    builder.exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None);
             }
             "ekubo_v2" => {
                 builder = builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None);

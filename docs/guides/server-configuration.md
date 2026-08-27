@@ -246,7 +246,7 @@ components = [
 ```
 
 Uniswap V4 pools are also filtered by hook contract: `BLOCKED_UNISWAP_V4_HOOKS` in
-`fynd-core/src/feed/protocol_registry.rs` drops every `uniswap_v4` / `uniswap_v4_hooks` component
+`fynd-core/src/feed/protocol_registry.rs` drops every `uniswap_v4_hooks` component
 whose `hooks` static attribute matches a listed address, regardless of pool ID.
 
 ## Logging and monitoring
