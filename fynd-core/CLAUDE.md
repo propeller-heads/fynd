@@ -185,3 +185,8 @@ Encoding a committed leg is protocol-specific: `encoding/exclusive_swap.rs` is E
 an EIP-712 authorization with `EXCLUSIVE_SWAP_CONTROLLER_KEY` and packs it, plus a derived Q32 fee,
 into the `SignedExclusiveSwap` extension's `user_data`. Encoding an exclusive leg without that env
 var fails.
+
+The authorization names the Tycho router (the address `Encoder` resolves for the chain) as its
+authorized locker, and the extension accepts no other caller. Authorizing every locker
+(`Address::ZERO`) would let a third party that reads the signed bytes execute the swap from its own
+contract and spend the nonce, which reverts the original transaction with `NonceAlreadyUsed`.

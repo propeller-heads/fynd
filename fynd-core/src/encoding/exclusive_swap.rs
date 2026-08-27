@@ -30,7 +30,7 @@ use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes}
 use crate::{SolveError, Swap};
 
 /// Environment variable holding the pool controller's private key (hex, with or without `0x`).
-const ENV_CONTROLLER_KEY: &str = "EXCLUSIVE_SWAP_CONTROLLER_KEY";
+pub(crate) const ENV_CONTROLLER_KEY: &str = "EXCLUSIVE_SWAP_CONTROLLER_KEY";
 
 /// Default validity window for a signed quote, in seconds. Well under the extension's 30-day cap.
 const DEFAULT_DEADLINE_WINDOW_SECS: u32 = 120;
@@ -50,15 +50,18 @@ pub struct ExclusiveSwapSigner {
     nonce_prefix: u32,
     nonce_counter: AtomicU32,
     deadline_window_secs: u32,
+    authorized_locker: Address,
 }
 
 impl ExclusiveSwapSigner {
     /// Builds a signer from the `EXCLUSIVE_SWAP_CONTROLLER_KEY` env var: `Ok(None)` when unset
     /// (signing disabled), an error when set but invalid.
     ///
+    /// `router_address` becomes the payload's authorized locker — see [`Self::new`].
+    ///
     /// The nonce prefix is random, so no state has to persist across restarts and replicas need no
     /// coordination.
-    pub fn from_env(chain_id: u64) -> Result<Option<Self>, SolveError> {
+    pub fn from_env(chain_id: u64, router_address: &Bytes) -> Result<Option<Self>, SolveError> {
         let Ok(key) = std::env::var(ENV_CONTROLLER_KEY) else {
             return Ok(None);
         };
@@ -67,18 +70,25 @@ impl ExclusiveSwapSigner {
             .map_err(|e| {
                 SolveError::FailedEncoding(format!("invalid {ENV_CONTROLLER_KEY}: {e}"))
             })?;
-        Ok(Some(Self::new(signer, chain_id, rand::random(), DEFAULT_DEADLINE_WINDOW_SECS)))
+        let locker = crate::rpc::to_address(router_address, "router address")
+            .map_err(SolveError::FailedEncoding)?;
+        Ok(Some(Self::new(signer, chain_id, rand::random(), DEFAULT_DEADLINE_WINDOW_SECS, locker)))
     }
 
     /// Creates a signer from explicit parts.
     ///
     /// `nonce_prefix` is the high 32 bits of every nonce handed out; `deadline_window_secs` is
     /// added to the signing-time timestamp to form each payload's deadline.
+    ///
+    /// `authorized_locker` is the only address the extension lets execute the payload. It must be
+    /// the contract that takes the Ekubo lock — the Tycho router. `Address::ZERO` would authorize
+    /// every locker, which makes the signed bytes usable by whoever reads them out of the mempool.
     pub fn new(
         signer: PrivateKeySigner,
         chain_id: u64,
         nonce_prefix: u32,
         deadline_window_secs: u32,
+        authorized_locker: Address,
     ) -> Self {
         Self {
             signer,
@@ -86,7 +96,14 @@ impl ExclusiveSwapSigner {
             nonce_prefix,
             nonce_counter: AtomicU32::new(0),
             deadline_window_secs,
+            authorized_locker,
         }
+    }
+
+    /// The locker every payload from this signer authorizes.
+    #[cfg(test)]
+    pub(crate) fn authorized_locker(&self) -> Address {
+        self.authorized_locker
     }
 
     /// Hands out the next unused nonce: `nonce_prefix` in the high 32 bits, the counter in the low
@@ -137,9 +154,9 @@ impl ExclusiveSwapSigner {
             SolveError::FailedEncoding("signed swap deadline overflows u32".to_string())
         })?;
 
-        // No authorized locker: address(0) leaves the swap usable by any locker (see the
-        // extension's `isAuthorized`), matching the reference wiring.
-        let meta = signed_swap_meta(deadline, fee, nonce, Address::ZERO);
+        // The extension's `isAuthorized` accepts only this locker, so a third party that lifts the
+        // signed bytes cannot execute them through its own contract.
+        let meta = signed_swap_meta(deadline, fee, nonce, self.authorized_locker);
         let min_balance_update = min_balance_update_accept_any();
 
         let component = swap.protocol_component();
@@ -337,6 +354,8 @@ mod tests {
         "0x1111111111111111111111111111111111111111111111111111111111111111";
     // SignedExclusiveSwap extension placeholder used by the tycho reference PR.
     const EXTENSION: &str = "0x5519ed5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+    // Stands in for the Tycho router, the only locker allowed to execute a payload.
+    const LOCKER: Address = Address::repeat_byte(0x77);
 
     // Reimplements the extension's `computeFee` (ceil(amount * fee / 2^64)) to check the taker is
     // never charged more than the surplus.
@@ -502,7 +521,7 @@ mod tests {
 
     #[test]
     fn test_build_user_data_layout() {
-        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
         let swap = signed_swap(Some(990_000));
 
         let user_data = signer.build_user_data(&swap).unwrap();
@@ -534,7 +553,7 @@ mod tests {
 
     #[test]
     fn test_build_user_data_requires_committed_amount() {
-        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
         assert!(signer
             .build_user_data(&signed_swap(None))
             .is_err());
@@ -552,7 +571,7 @@ mod tests {
 
     #[test]
     fn test_nonce_increments_per_payload() {
-        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, 7, 120);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, 7, 120, LOCKER);
         let swap = signed_swap(Some(990_000));
 
         let first = signer.build_user_data(&swap).unwrap();
@@ -567,8 +586,8 @@ mod tests {
         let key: PrivateKeySigner = CONTROLLER_KEY.parse().unwrap();
         let swap = signed_swap(Some(990_000));
         // Two processes (a restart, or a second replica) each draw their own prefix.
-        let first = ExclusiveSwapSigner::new(key.clone(), 42, 1, 120);
-        let second = ExclusiveSwapSigner::new(key, 42, 2, 120);
+        let first = ExclusiveSwapSigner::new(key.clone(), 42, 1, 120, LOCKER);
+        let second = ExclusiveSwapSigner::new(key, 42, 2, 120, LOCKER);
 
         let mut nonces = Vec::new();
         for _ in 0..4 {
@@ -581,11 +600,25 @@ mod tests {
     }
 
     #[test]
+    fn test_payload_binds_authorized_locker() {
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
+
+        let user_data = signer
+            .build_user_data(&signed_swap(Some(990_000)))
+            .unwrap();
+
+        // meta starts after the fee(8) prefix; its low 128 bits carry the locker's last 16 bytes.
+        let meta = B256::from_slice(&user_data.as_ref()[8..40]);
+        assert_eq!(&meta.as_slice()[16..32], &LOCKER.as_slice()[4..20]);
+    }
+
+    #[test]
     fn test_nonce_avoids_reserved_sentinel() {
         // The extension never consumes `u64::MAX` — a payload carrying it stays replayable until
         // its deadline. The counter stops one short of `u32::MAX`, so even the widest prefix
         // cannot compose that value.
-        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, u32::MAX, 120);
+        let signer =
+            ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, u32::MAX, 120, LOCKER);
         let swap = signed_swap(Some(990_000));
         signer
             .nonce_counter
@@ -597,7 +630,7 @@ mod tests {
 
     #[test]
     fn test_exhausted_nonce_counter() {
-        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, 1, 120);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, 1, 120, LOCKER);
         let swap = signed_swap(Some(990_000));
         signer
             .nonce_counter
