@@ -37,7 +37,7 @@ use tycho_simulation::{
         },
         stream::RFQStreamBuilder,
     },
-    tycho_client::feed::component_tracker::ComponentFilter,
+    tycho_client::feed::{component_tracker::ComponentFilter, synchronizer::ComponentWithState},
     tycho_common::models::token::Token,
     tycho_core::Bytes,
 };
@@ -73,6 +73,34 @@ const RFQ_PREFIX: &str = "rfq:";
 /// Marks a `--protocols` entry that drops a protocol system from the list rather than adding one,
 /// e.g. `exclude:vm:fermiswap`.
 pub const EXCLUDE_PREFIX: &str = "exclude:";
+
+/// Uniswap V4 hook contracts whose pools are dropped from the stream.
+///
+/// Compared against the component's `hooks` static attribute, so one entry covers every pool
+/// the hook is attached to; V4 component IDs are pool IDs, which the component blocklist would
+/// need one at a time.
+const BLOCKED_UNISWAP_V4_HOOKS: &[&str] = &["0x051c99a4583a7137833ad048af442909426d00c4"];
+
+/// Keeps a Uniswap V4 component unless its hook is in [`BLOCKED_UNISWAP_V4_HOOKS`].
+fn uniswap_v4_hook_filter(component: &ComponentWithState) -> bool {
+    let Some(hook) = component
+        .component
+        .static_attributes
+        .get("hooks")
+    else {
+        return true;
+    };
+    let hook = hook.to_string();
+    if BLOCKED_UNISWAP_V4_HOOKS.contains(&hook.as_str()) {
+        info!(
+            component_id = %component.component.id,
+            hook,
+            "dropping Uniswap V4 component with blocked hook"
+        );
+        return false;
+    }
+    true
+}
 
 /// The only chain the Titan pAMM price level stream serves.
 ///
@@ -275,8 +303,11 @@ pub(crate) fn register_exchanges(
                 );
             }
             "uniswap_v4" => {
-                builder =
-                    builder.exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None);
+                builder = builder.exchange::<UniswapV4State>(
+                    "uniswap_v4",
+                    tvl_filter.clone(),
+                    Some(uniswap_v4_hook_filter),
+                );
             }
             "ekubo_v2" => {
                 builder = builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None);
@@ -296,7 +327,7 @@ pub(crate) fn register_exchanges(
                 builder = builder.exchange::<UniswapV4State>(
                     "uniswap_v4_hooks",
                     tvl_filter.clone(),
-                    None,
+                    Some(uniswap_v4_hook_filter),
                 );
             }
             "vm:maverick_v2" => {
@@ -507,6 +538,43 @@ mod tests {
     use tycho_simulation::price_level_stream::config::PRICE_LEVEL_STREAM_FAMILY;
 
     use super::*;
+
+    fn uniswap_v4_component(hook: Option<&str>) -> ComponentWithState {
+        let mut static_attributes = HashMap::new();
+        if let Some(hook) = hook {
+            static_attributes.insert("hooks".to_string(), Bytes::from(hook));
+        }
+        ComponentWithState {
+            state: tycho_simulation::tycho_common::models::protocol::ProtocolComponentState {
+                component_id: "0xpool".to_string(),
+                attributes: HashMap::new(),
+                balances: HashMap::new(),
+            },
+            component: tycho_simulation::tycho_common::models::protocol::ProtocolComponent {
+                id: "0xpool".to_string(),
+                protocol_system: "uniswap_v4_hooks".to_string(),
+                protocol_type_name: "uniswap_v4_pool".to_string(),
+                chain: Chain::Ethereum,
+                tokens: vec![],
+                static_attributes,
+                contract_addresses: vec![],
+                change: Default::default(),
+                creation_tx: Bytes::default(),
+                created_at: Default::default(),
+            },
+            component_tvl: None,
+            entrypoints: vec![],
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::blocked_hook(Some("0x051c99a4583a7137833ad048af442909426d00c4"), false)]
+    #[case::blocked_hook_uppercase(Some("0x051C99A4583A7137833AD048AF442909426D00C4"), false)]
+    #[case::other_hook(Some("0x0000000000000000000000000000000000000001"), true)]
+    #[case::no_hook(None, true)]
+    fn test_uniswap_v4_hook_filter(#[case] hook: Option<&str>, #[case] kept: bool) {
+        assert_eq!(uniswap_v4_hook_filter(&uniswap_v4_component(hook)), kept);
+    }
 
     fn register(entries: &[&str]) -> Result<ProtocolStreamBuilder, DataFeedError> {
         register_exchanges(
