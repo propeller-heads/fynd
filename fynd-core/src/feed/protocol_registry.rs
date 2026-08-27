@@ -79,7 +79,22 @@ pub const EXCLUDE_PREFIX: &str = "exclude:";
 /// Compared against the component's `hooks` static attribute, so one entry covers every pool
 /// the hook is attached to; V4 component IDs are pool IDs, which the component blocklist would
 /// need one at a time.
-const BLOCKED_UNISWAP_V4_HOOKS: &[&str] = &["0x051c99a4583a7137833ad048af442909426d00c4"];
+///
+/// All entries so far are one family of dynamic-fee hooks: `owner()` returns
+/// `0x80390a818c9390ea6190160bd7fddff2cdbdc0ab` and each exposes the same
+/// `getFeeConfig()` / `gasThreshold()` interface, with bytecode that grows from deployment to
+/// deployment. Listed in first-pool block order.
+const BLOCKED_UNISWAP_V4_HOOKS: &[&str] = &[
+    "0x051c99a4583a7137833ad048af442909426d00c4",
+    "0xfa439315b015a4c283ded9815a4af6cef0b90880",
+    "0x1b3b249ee8afdfdc7af0f06a0765de1a49cf80c4",
+    "0x74a7fd29718c6d0124011116d05e62090eff4880",
+    "0xe502d9798d60d4302e46786ff9fbfb548266c880",
+    "0x32514d03d9f73383ad43c6257ad7f4d4588640c4",
+    "0xaebe208bb46e005321b3ea9ade08dc57b90cc0c4",
+    "0x1e000786dc0a1c80eef758b485e90c7193d9c0c4",
+    "0xbf1a0a8608593db7580044b6501fefb310c280c4",
+];
 
 /// Keeps a Uniswap V4 component unless its hook is in [`BLOCKED_UNISWAP_V4_HOOKS`].
 fn uniswap_v4_hook_filter(component: &ComponentWithState) -> bool {
@@ -570,6 +585,7 @@ mod tests {
     #[rstest::rstest]
     #[case::blocked_hook(Some("0x051c99a4583a7137833ad048af442909426d00c4"), false)]
     #[case::blocked_hook_uppercase(Some("0x051C99A4583A7137833AD048AF442909426D00C4"), false)]
+    #[case::blocked_hook_latest(Some("0xbf1a0a8608593db7580044b6501fefb310c280c4"), false)]
     #[case::other_hook(Some("0x0000000000000000000000000000000000000001"), true)]
     #[case::no_hook(None, true)]
     fn test_uniswap_v4_hook_filter(#[case] hook: Option<&str>, #[case] kept: bool) {
