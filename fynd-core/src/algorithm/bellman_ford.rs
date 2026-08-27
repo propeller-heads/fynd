@@ -49,7 +49,7 @@ use crate::{
         types::{SpotPrices, TokenGasPrices},
         SharedDerivedDataRef,
     },
-    feed::market_data::{MarketData, MarketState, StateLabel},
+    feed::market_data::{MarketData, MarketDataView, MarketState, StateLabel},
     graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route, RouteResult, Swap},
 };
@@ -67,13 +67,15 @@ type Subgraph<'a> = (
 
 /// Everything needed to call `find_single_route` repeatedly without redoing setup.
 ///
-/// Built once by `build_context`, which acquires the market and derived locks and snapshots all
-/// relevant states. `find_single_route` uses this snapshot directly — no lock re-acquisition — so
-/// all route evaluations within one order see a consistent view of the same block's component
-/// states.
+/// Built once by `build_context` or `build_context_from_source`, which acquire the market and
+/// derived locks and snapshot all relevant states. The solve entry points use this snapshot
+/// directly — no lock re-acquisition — so all route evaluations within one order see a consistent
+/// view of the same block's component states.
 pub(crate) struct BellmanFordContext {
     pub(crate) token_in_node: NodeIndex,
-    pub(crate) token_out_node: NodeIndex,
+    /// Absent when the context was built from a source alone (`build_context_from_source`);
+    /// such a context serves `find_routes_from_source` but not `find_single_route`.
+    pub(crate) token_out_node: Option<NodeIndex>,
     pub(crate) adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
     pub(crate) token_map: FxHashMap<NodeIndex, Arc<Token>>,
     pub(crate) market_data: MarketState,
@@ -194,18 +196,74 @@ impl BellmanFordAlgorithm {
             });
         }
 
-        // Bounded from both ends, so the adjacency and component set cover only what could carry a
-        // route rather than everything within reach of the source.
-        let (adj, token_nodes, component_ids) =
-            Self::get_subgraph(graph, token_in_node, token_out_node, self.max_hops).ok_or_else(
-                || AlgorithmError::NoPath {
+        let subgraph =
+            Self::get_subgraph(graph, token_in_node, Some(token_out_node), self.max_hops).ok_or(
+                AlgorithmError::NoPath {
                     from: order.token_in().clone(),
                     to: order.token_out().clone(),
                     reason: NoPathReason::NoGraphPath,
                 },
             )?;
-
         let market_view = paths::read_market(&market, label).await?;
+        Ok(self.snapshot_context(
+            graph,
+            market_view,
+            subgraph,
+            (token_in_node, Some(token_out_node)),
+            (token_prices, spot_prices),
+        ))
+    }
+
+    /// A context whose subgraph is bounded only by `max_hops` around `token_in` — no destination
+    /// prunes it. For callers that read every relaxed node ([`find_routes_from_source`]); it
+    /// cannot serve [`find_single_route`], which needs a destination.
+    ///
+    /// Reads the market unlabeled and no derived data: the one caller is token pricing, which
+    /// fills the derived data everyone else reads. `None` when `token_in` is not in the graph or
+    /// nothing is reachable from it.
+    ///
+    /// [`find_routes_from_source`]: Self::find_routes_from_source
+    /// [`find_single_route`]: Self::find_single_route
+    pub(crate) async fn build_context_from_source(
+        &self,
+        graph: &StableDiGraph<()>,
+        market: MarketData,
+        token_in: &Address,
+    ) -> Option<BellmanFordContext> {
+        let token_in_node = graph
+            .node_indices()
+            .find(|&n| &graph[n] == token_in)?;
+        let subgraph = Self::get_subgraph(graph, token_in_node, None, self.max_hops)?;
+        let market_view = market.read().await;
+        Some(self.snapshot_context(
+            graph,
+            market_view,
+            subgraph,
+            (token_in_node, None),
+            (None, None),
+        ))
+    }
+
+    /// Snapshots everything a solve reads from the market — tokens, component states, gas price,
+    /// and scoring inputs — for a subgraph the caller has already walked.
+    ///
+    /// The caller walks the subgraph *before* acquiring `market_view`: the walk needs only the
+    /// graph, and holding the read guard through it would queue the feed's writer — and every
+    /// quote's read behind that writer. `endpoints` must be the pair the subgraph was walked
+    /// with; the destination, when present, is carried for
+    /// [`find_single_route`](Self::find_single_route)'s readout.
+    fn snapshot_context(
+        &self,
+        graph: &StableDiGraph<()>,
+        market_view: MarketDataView<'_>,
+        subgraph: Subgraph<'_>,
+        endpoints: (NodeIndex, Option<NodeIndex>),
+        derived: (Option<TokenGasPrices>, Option<SpotPrices>),
+    ) -> BellmanFordContext {
+        let (token_in_node, token_out_node) = endpoints;
+        let (token_prices, spot_prices) = derived;
+        let (adj, token_nodes, component_ids) = subgraph;
+
         let token_map: FxHashMap<NodeIndex, Arc<Token>> = token_nodes
             .iter()
             .filter_map(|&node| {
@@ -247,7 +305,7 @@ impl BellmanFordAlgorithm {
             "subgraph extracted"
         );
 
-        Ok(BellmanFordContext {
+        BellmanFordContext {
             token_in_node,
             token_out_node,
             adj,
@@ -259,7 +317,7 @@ impl BellmanFordAlgorithm {
             node_address,
             max_idx,
             scoring,
-        })
+        }
     }
 
     /// Every token the source reaches, with the route to it and what that route returns, from one
@@ -268,16 +326,18 @@ impl BellmanFordAlgorithm {
     /// [`find_single_route`](Self::find_single_route) runs the same pass and reads one node out of
     /// it. The relaxation fills the best amount at every node, so a caller that wants all of them —
     /// pricing every token against the gas token, say — pays for one pass rather than one per
-    /// destination. `ctx` must be built from the source token; `ctx.token_out_node` is not read.
+    /// destination. Build `ctx` with
+    /// [`build_context_from_source`](Self::build_context_from_source), so that no destination
+    /// prunes its subgraph.
     ///
     /// Tokens the source cannot reach, and those whose route cannot be rebuilt, are absent.
     pub(crate) fn find_routes_from_source(
         &self,
         ctx: &BellmanFordContext,
-        order: &Order,
+        amount_in: &BigUint,
         opts: FindRouteOptions,
     ) -> FxHashMap<Address, Route> {
-        let spfa = self.run_spfa(ctx, order, &opts.overrides, Instant::now());
+        let spfa = self.run_spfa(ctx, amount_in, &opts.overrides, Instant::now());
 
         let mut routes = FxHashMap::default();
         for (idx, amount) in spfa.amount.iter().enumerate() {
@@ -318,9 +378,15 @@ impl BellmanFordAlgorithm {
     ) -> Result<RouteResult, AlgorithmError> {
         let start = Instant::now();
 
-        let spfa = self.run_spfa(ctx, order, &opts.overrides, start);
+        let Some(token_out_node) = ctx.token_out_node else {
+            return Err(AlgorithmError::Other(
+                "find_single_route needs a context built with a destination".to_string(),
+            ));
+        };
 
-        let out_idx = ctx.token_out_node.index();
+        let spfa = self.run_spfa(ctx, order.amount(), &opts.overrides, start);
+
+        let out_idx = token_out_node.index();
         if spfa.amount[out_idx].is_zero() {
             // Dust (a hop's input below its own gas) -> AmountTooSmall; everything else
             // (unreachable, filtered, sim error incl. too-large, missing state, timeout)
@@ -341,7 +407,7 @@ impl BellmanFordAlgorithm {
         // (no re-simulation needed since forbid-revisits guarantees relaxation
         // amounts match sequential execution).
         let path_edges =
-            Self::reconstruct_path(ctx.token_out_node, ctx.token_in_node, &spfa.predecessor)?;
+            Self::reconstruct_path(token_out_node, ctx.token_in_node, &spfa.predecessor)?;
 
         let route =
             Self::build_route(ctx, &path_edges, &spfa.amount, &spfa.edge_gas, &opts.overrides)?;
@@ -385,7 +451,7 @@ impl BellmanFordAlgorithm {
     fn run_spfa(
         &self,
         ctx: &BellmanFordContext,
-        order: &Order,
+        amount_in: &BigUint,
         overrides: &MarketOverrides,
         start: Instant,
     ) -> SPFAResult {
@@ -397,7 +463,7 @@ impl BellmanFordAlgorithm {
         let mut edge_gas: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
         let mut cumul_gas: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
 
-        amount[ctx.token_in_node.index()] = order.amount().clone();
+        amount[ctx.token_in_node.index()] = amount_in.clone();
 
         // Track cumulative spot price product from token_in for fallback gas estimation.
         // spot_product[v] = product of spot prices along the path from token_in to v.
@@ -448,7 +514,7 @@ impl BellmanFordAlgorithm {
 
                     // Skip disallowed connector tokens. Endpoints (token_in / token_out) are
                     // always permitted regardless of the allowlist.
-                    if !self.connector_allows(ctx, order, *v) {
+                    if !self.connector_allows(ctx, *v) {
                         continue;
                     }
 
@@ -562,12 +628,12 @@ impl BellmanFordAlgorithm {
 
     /// Whether the connector-token allowlist permits routing *into* node `v`.
     /// Endpoints (token_in / token_out) are always permitted. No allowlist => all allowed.
-    fn connector_allows(&self, ctx: &BellmanFordContext, order: &Order, v: NodeIndex) -> bool {
+    fn connector_allows(&self, ctx: &BellmanFordContext, v: NodeIndex) -> bool {
         let (Some(tokens), Some(v_addr)) = (&self.connector_tokens, ctx.node_address.get(&v))
         else {
             return true;
         };
-        v_addr == order.token_in() || v_addr == order.token_out() || tokens.contains(v_addr)
+        v == ctx.token_in_node || ctx.token_out_node == Some(v) || tokens.contains(v_addr)
     }
 
     /// Constructs a [`Route`] from a reconstructed path and SPFA output arrays.
@@ -782,30 +848,32 @@ impl BellmanFordAlgorithm {
         Ok(path)
     }
 
-    /// Extracts the part of the graph that can carry a route from `token_in_node` to
-    /// `token_out_node` in at most `max_hops`.
+    /// Extracts the part of the graph that can carry a route from `token_in` to `token_out` in at
+    /// most `max_hops` — or, without a destination, everything within `max_hops` of `token_in`.
     ///
     /// Returns `(adjacency_list, token_nodes, component_ids)`, or `None` when no edge qualifies.
     /// The caller says what an empty subgraph means for it.
     ///
-    /// Both ends bound the walk. A token reached in `d` hops is only worth keeping if the
-    /// destination is still `max_hops - d` hops away or nearer, and the same holds edge by edge.
-    /// The distances used are the shortest ones, so nothing that could appear on a route of legal
-    /// length is discarded.
+    /// With a destination, both ends bound the walk. A token reached in `d` hops is only worth
+    /// keeping if the destination is still `max_hops - d` hops away or nearer, and the same holds
+    /// edge by edge. The distances used are the shortest ones, so nothing that could appear on a
+    /// route of legal length is discarded.
     ///
     /// Expanding from the source alone reaches most of the market. Every component it reaches gets
     /// copied by the caller's `extract_subset`, held for the solve, and simulated during
-    /// relaxation, so bounding the walk bounds all three.
+    /// relaxation, so bounding the walk bounds all three. Only a caller that reads every relaxed
+    /// node (`find_routes_from_source`) should pass `None` — it needs that full reach.
     pub(crate) fn get_subgraph<'a>(
         graph: &'a StableDiGraph<()>,
         token_in: NodeIndex,
-        token_out: NodeIndex,
+        token_out: Option<NodeIndex>,
         max_hops: usize,
     ) -> Option<Subgraph<'a>> {
         // Walked from the destination along outgoing edges, not incoming ones. Every pool in this
         // graph is entered as a pair of opposite edges, so the two walks cover the same tokens and
         // the outgoing one needs no reversed index.
-        let hops_to_token_out = Self::get_hops_to_reach(graph, token_out, max_hops);
+        let hops_to_token_out =
+            token_out.map(|token_out| Self::get_hops_to_reach(graph, token_out, max_hops));
 
         let mut adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = FxHashMap::default();
         let mut token_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
@@ -824,15 +892,18 @@ impl BellmanFordAlgorithm {
             for edge in graph.edges(node) {
                 let next_token = edge.target();
 
-                // Taking this edge spends one hop; the rest have to be enough to finish the route.
-                let Some(&hops_left) = hops_to_token_out.get(&next_token) else {
-                    // token_out is not reachable from next_token within the hop budget.
-                    continue;
-                };
+                if let Some(hops_to_token_out) = &hops_to_token_out {
+                    // Taking this edge spends one hop; the rest have to be enough to finish the
+                    // route.
+                    let Some(&hops_left) = hops_to_token_out.get(&next_token) else {
+                        // token_out is not reachable from next_token within the hop budget.
+                        continue;
+                    };
 
-                if depth_walked + 1 + hops_left > max_hops {
-                    // Finishing the route from next_token would take more hops than are left.
-                    continue;
+                    if depth_walked + 1 + hops_left > max_hops {
+                        // Finishing the route from next_token would take more hops than are left.
+                        continue;
+                    }
                 }
 
                 let component_id = &edge.weight().component_id;
@@ -1087,7 +1158,7 @@ mod tests {
         let (adj, _, component_ids) = BellmanFordAlgorithm::get_subgraph(
             graph,
             node(&token_a.address),
-            node(&token_c.address),
+            Some(node(&token_c.address)),
             2,
         )
         .unwrap();
@@ -1155,7 +1226,7 @@ mod tests {
         let (_, token_nodes, component_ids) = BellmanFordAlgorithm::get_subgraph(
             graph,
             node(&token_a.address),
-            node(&token_c.address),
+            Some(node(&token_c.address)),
             2,
         )
         .unwrap();
@@ -1176,6 +1247,48 @@ mod tests {
         assert!(
             !token_nodes.contains(&node(&token_d.address)),
             "a token no legal route reaches must not be kept"
+        );
+    }
+
+    /// Without a destination, `max_hops` from the source is the only bound on the walk.
+    ///
+    /// ```text
+    ///   G --[gb]-- B --[bc]-- C --[cd]-- D      D is three hops out, budget is two
+    /// ```
+    #[test]
+    fn test_get_subgraph_without_destination_stops_at_max_hops() {
+        let token_g = token(0x01, "G");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+
+        let (_, manager) = setup_market_bf(vec![
+            ("component_gb", &token_g, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(2.0)),
+        ]);
+        let graph = manager.graph();
+        let node = |address: &Address| {
+            graph
+                .node_indices()
+                .find(|&n| &graph[n] == address)
+                .expect("token in graph")
+        };
+        let (_, token_nodes, component_ids) =
+            BellmanFordAlgorithm::get_subgraph(graph, node(&token_g.address), None, 2).unwrap();
+
+        let kept = |id: &str| {
+            component_ids
+                .iter()
+                .any(|component_id| *component_id == id)
+        };
+
+        assert!(kept("component_gb"), "the first hop is within budget");
+        assert!(kept("component_bc"), "the second hop spends the budget exactly");
+        assert!(!kept("component_cd"), "an edge past the hop budget must not be kept");
+        assert!(
+            !token_nodes.contains(&node(&token_d.address)),
+            "a token past the hop budget must not be kept"
         );
     }
 
@@ -1393,6 +1506,55 @@ mod tests {
             result,
             Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn test_find_routes_from_source_covers_branches_off_any_pair() {
+        // G->A and G->B->C: B and C sit on no G->A path, so a subgraph pruned toward any
+        // single destination would drop them. The from-source context must keep them all.
+        let token_g = token(0x01, "G");
+        let token_a = token(0x02, "A");
+        let token_b = token(0x03, "B");
+        let token_c = token(0x04, "C");
+
+        let (market, manager) = setup_market_bf(vec![
+            ("component_ga", &token_g, &token_a, MockProtocolSim::new(2.0)),
+            ("component_gb", &token_g, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+
+        let algo = bf_algorithm(3, 1000);
+        let ctx = algo
+            .build_context_from_source(manager.graph(), market, &token_g.address)
+            .await
+            .expect("gas token has outgoing edges");
+        let routes =
+            algo.find_routes_from_source(&ctx, &BigUint::from(100u64), FindRouteOptions::default());
+
+        let reached: FxHashSet<Address> = routes.keys().cloned().collect();
+        let expected: FxHashSet<Address> = [&token_a, &token_b, &token_c]
+            .into_iter()
+            .map(|t| t.address.clone())
+            .collect();
+        assert_eq!(reached, expected);
+    }
+
+    #[tokio::test]
+    async fn test_find_single_route_rejects_a_context_built_without_destination() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, manager) =
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+
+        let algo = bf_algorithm(3, 1000);
+        let ctx = algo
+            .build_context_from_source(manager.graph(), market, &token_a.address)
+            .await
+            .expect("source has outgoing edges");
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let result = algo.find_single_route(&ctx, &ord, FindRouteOptions::default());
+        assert!(matches!(result, Err(AlgorithmError::Other(_))));
     }
 
     #[tokio::test]

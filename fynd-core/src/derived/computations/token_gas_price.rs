@@ -146,13 +146,16 @@ impl TokenGasPriceComputation {
         let router = BellmanFordAlgorithm::with_config(config);
 
         let wanted = self.tokens_to_price(&topology, filter_tokens);
+        if wanted.is_empty() {
+            return Ok((FxHashMap::default(), block, Vec::new()));
+        }
         let graph = graph_manager.graph();
 
         // One relaxation from the gas token yields the buy route for every token it reaches, so the
         // buy side costs a single pass however many tokens are priced.
         let buys = self
-            .buy_routes(&router, graph, market, &wanted)
-            .await?;
+            .buy_routes(&router, graph, market)
+            .await;
 
         let mut prices = FxHashMap::default();
         let mut failed_items = Vec::new();
@@ -173,34 +176,22 @@ impl TokenGasPriceComputation {
 
     /// The buy route to every token the gas token reaches, from one relaxation.
     ///
-    /// The context is built from the gas token, so its subgraph is everything within `max_hops` of
-    /// it. `probe_destination` only satisfies the order's shape — the returned routes cover every
-    /// destination, not that one.
+    /// The context is bounded only by `max_hops` around the gas token — no destination prunes
+    /// its subgraph — so the routes cover every reachable token.
     async fn buy_routes(
         &self,
         router: &BellmanFordAlgorithm,
         graph: &RouterGraph,
         market: &MarketData,
-        wanted: &FxHashSet<Address>,
-    ) -> Result<FxHashMap<Address, Route>, ComputationError> {
-        let Some(probe_destination) = wanted.iter().next() else {
-            return Ok(FxHashMap::default());
-        };
-        let order = Order::new(
-            self.gas_token.clone(),
-            probe_destination.clone(),
-            self.simulation_amount.clone(),
-            OrderSide::Sell,
-            Address::zero(20),
-        );
-        let Ok(ctx) = router
-            .build_context(graph, market.clone(), None, None, &order)
+    ) -> FxHashMap<Address, Route> {
+        let Some(ctx) = router
+            .build_context_from_source(graph, market.clone(), &self.gas_token)
             .await
         else {
             // No subgraph around the gas token means nothing is priceable this block.
-            return Ok(FxHashMap::default());
+            return FxHashMap::default();
         };
-        Ok(router.find_routes_from_source(&ctx, &order, FindRouteOptions::default()))
+        router.find_routes_from_source(&ctx, &self.simulation_amount, FindRouteOptions::default())
     }
 
     /// Every token in the graph but the gas token, narrowed to `filter_tokens` when given.
