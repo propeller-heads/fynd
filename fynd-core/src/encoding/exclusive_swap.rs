@@ -33,7 +33,7 @@ use crate::{SolveError, Swap};
 const ENV_CONTROLLER_KEY: &str = "EXCLUSIVE_SWAP_CONTROLLER_KEY";
 
 /// Default validity window for a signed quote, in seconds. Well under the extension's 30-day cap.
-const DEFAULT_DEADLINE_WINDOW_SECS: u32 = 120;
+const DEFAULT_DEADLINE_WINDOW_SECS: u32 = 600;
 
 /// Produces controller-signed `user_data` payloads for exclusive swaps.
 ///
