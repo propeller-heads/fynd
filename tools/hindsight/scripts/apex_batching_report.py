@@ -18,6 +18,7 @@ Accounting (matches the experiment plan):
 """
 
 import argparse
+import datetime
 import html
 import json
 import statistics
@@ -939,7 +940,30 @@ single-order solve beat the settled output.</div></div>
 """
 
 
-def render(variants: list, out: Path) -> None:
+def capture_window(data_dir: Path, blocks: list[int]) -> str:
+    """When the run's first and last block were captured, and how long that took.
+
+    Records carry no timestamp, so this reads the mtime of each block's input dump. Capture
+    happens live at top-of-block, so a dump is written as its block is seen. Returns an empty
+    string when the dumps are gone or have been copied (which resets mtimes)."""
+    stamps = []
+    for block in (blocks[0], blocks[-1]):
+        for name in (f"apex_batch_{block}.json", f"apex_input_{block}.json"):
+            path = data_dir / "inputs" / name
+            if path.exists():
+                stamps.append(datetime.datetime.fromtimestamp(path.stat().st_mtime, datetime.UTC))
+                break
+    if len(stamps) != 2 or stamps[1] <= stamps[0]:
+        return ""
+    hours = (stamps[1] - stamps[0]).total_seconds() / 3600
+    length = f"{hours:.1f} h" if hours >= 1 else f"{hours * 60:.0f} min"
+    # Spell out the end date too when the run crossed midnight, so an overnight window does
+    # not read as if it ran backwards.
+    end = f"{stamps[1]:%H:%M}" if stamps[0].date() == stamps[1].date() else f"{stamps[1]:%m-%d %H:%M}"
+    return f", captured over {length} ({stamps[0]:%Y-%m-%d %H:%M}–{end} UTC)"
+
+
+def render(variants: list, out: Path, data_dir: Path) -> None:
     sections = []
     data = {}
     for name, agg, sub in variants:
@@ -953,7 +977,13 @@ def render(variants: list, out: Path) -> None:
         }
     data_json = json.dumps(data, default=str)
     first = variants[0][1]["per_block"] if variants else []
-    span = f"{first[0]['block']}–{first[-1]['block']}" if first else "—"
+    numbers = [b["block"] for b in first]
+    span = (
+        f"{len(numbers):,} blocks, {numbers[0]}–{numbers[-1]}"
+        f"{capture_window(data_dir, numbers)}"
+        if numbers
+        else "no blocks"
+    )
 
     page = f"""<!doctype html>
 <meta charset="utf-8">
@@ -963,7 +993,7 @@ def render(variants: list, out: Path) -> None:
 <div id="tooltip"></div>
 {toc(variants)}
 <h1 id="top">APEX batching validation — proof of concept</h1>
-<div class="sub">Blocks {span} ·
+<div class="sub">{span} ·
 S0 = settled on-chain, S1 = APEX per order (control), S2 = APEX whole-block batch (treatment).
 Unfilled and out-of-universe orders count at S0; a partial fill executes fully at the clearing
 price, with the batcher supplying the buy-token remainder as the missing liquidity source.
@@ -1071,7 +1101,7 @@ def main() -> None:
             variants.append((v, aggregate(ov, bv), sub))
 
     out = args.out or (args.dir / "report.html")
-    render(variants, out)
+    render(variants, out, args.dir)
 
     for name, agg, sub in variants:
         print(f"[{name}] blocks: {len(agg['blocks'])}  orders: {agg['orders_total']}")

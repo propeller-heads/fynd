@@ -22,6 +22,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use alloy::primitives::Address as AlloyAddress;
@@ -328,6 +329,16 @@ pub(crate) struct ReplayArgs {
     pub poll_secs: u64,
 }
 
+/// A duration as a short human string: `4.2s`, `7m12s`, `3h04m`.
+fn human(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    match secs {
+        0..=59 => format!("{:.1}s", d.as_secs_f64()),
+        60..=3599 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
 /// Solve every dump in `args.dir` that has no records yet, oldest block first.
 pub(crate) fn replay_dir(args: &ReplayArgs) -> anyhow::Result<()> {
     let inputs_dir = args.dir.join("inputs");
@@ -353,12 +364,30 @@ pub(crate) fn replay_dir(args: &ReplayArgs) -> anyhow::Result<()> {
             std::thread::sleep(std::time::Duration::from_secs(args.poll_secs));
             continue;
         }
-        info!(pending = queue.len(), "apex-solve: draining queue");
-        for (block, path) in queue {
+        let total = queue.len();
+        info!(pending = total, "apex-solve: draining queue");
+        let started = Instant::now();
+        for (position, (block, path)) in queue.into_iter().enumerate() {
             match solve_one(&path, budget, &results_dir, &mut writer) {
                 Ok(orders) => {
                     done.insert(block);
-                    info!(block, orders, remaining_unknown = true, "apex-solve: block solved");
+                    let finished = u32::try_from(position + 1).unwrap_or(u32::MAX);
+                    let left =
+                        u32::try_from(total.saturating_sub(position + 1)).unwrap_or(u32::MAX);
+                    let elapsed = started.elapsed();
+                    // Rate over the whole drain so far, which is steadier than a per-block
+                    // figure; solve times vary by an order of magnitude block to block.
+                    let per_block = elapsed / finished;
+                    let remaining = per_block * left;
+                    info!(
+                        block,
+                        orders,
+                        progress = %format!("{finished}/{total} ({}%)", u64::from(finished) * 100 / total as u64),
+                        elapsed = %human(elapsed),
+                        per_block = %human(per_block),
+                        eta = %human(remaining),
+                        "apex-solve: block solved"
+                    );
                 }
                 Err(error) => {
                     // A block that cannot be solved must not stop the queue; it stays out of
@@ -367,6 +396,11 @@ pub(crate) fn replay_dir(args: &ReplayArgs) -> anyhow::Result<()> {
                 }
             }
         }
+        info!(
+            blocks = total,
+            took = %human(started.elapsed()),
+            "apex-solve: queue drained"
+        );
     }
 }
 
