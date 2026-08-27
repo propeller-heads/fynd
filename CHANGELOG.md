@@ -1,4 +1,14 @@
 
+## [0.99.18](https://github.com/propeller-heads/fynd/compare/0.99.17...0.99.18) (2026-08-27)
+
+### Bug Fixes
+
+* **feed:** apply the hook filter to uniswap_v4_hooks only ([f9e9199](https://github.com/propeller-heads/fynd/commit/f9e91999b06a234aa705c72fb3551611920033db))
+* **feed:** drop Uniswap V4 pools using hook 0x051c99a4 ([37929eb](https://github.com/propeller-heads/fynd/commit/37929eb7b70657fce0e5c33941025356bfc46d27))
+* bind exclusive swap signatures to the Tycho router as locker ([2bfc2bc](https://github.com/propeller-heads/fynd/commit/2bfc2bc93ac9e7f1df77056e51b80005e6216cd6))
+* **feed:** block the eight sibling hooks of 0x051c99a4 ([6cc37bc](https://github.com/propeller-heads/fynd/commit/6cc37bc5d718aa4f5721044e163769e5df6ae631))
+
+
 ## [0.99.17](https://github.com/propeller-heads/fynd/compare/0.99.16...0.99.17) (2026-08-26)
 
 ### Features
