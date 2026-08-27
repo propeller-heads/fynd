@@ -30,7 +30,7 @@ use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes}
 use crate::{SolveError, Swap};
 
 /// Environment variable holding the pool controller's private key (hex, with or without `0x`).
-const ENV_CONTROLLER_KEY: &str = "EXCLUSIVE_SWAP_CONTROLLER_KEY";
+pub(crate) const ENV_CONTROLLER_KEY: &str = "EXCLUSIVE_SWAP_CONTROLLER_KEY";
 
 /// Default validity window for a signed quote, in seconds. Well under the extension's 30-day cap.
 const DEFAULT_DEADLINE_WINDOW_SECS: u32 = 120;
@@ -98,6 +98,12 @@ impl ExclusiveSwapSigner {
             deadline_window_secs,
             authorized_locker,
         }
+    }
+
+    /// The locker every payload from this signer authorizes.
+    #[cfg(test)]
+    pub(crate) fn authorized_locker(&self) -> Address {
+        self.authorized_locker
     }
 
     /// Hands out the next unused nonce: `nonce_prefix` in the high 32 bits, the counter in the low

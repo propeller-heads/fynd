@@ -1044,6 +1044,24 @@ mod tests {
     }
 
     #[test]
+    fn test_encoder_authorizes_the_router_as_locker() {
+        // nextest runs each test in its own process, so setting the key here affects no other test.
+        std::env::set_var(crate::encoding::exclusive_swap::ENV_CONTROLLER_KEY, CONTROLLER_KEY);
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(None)
+            .unwrap();
+
+        let encoder = Encoder::new(Chain::Ethereum, registry).unwrap();
+
+        let signer = encoder
+            .exclusive_swap_signer
+            .as_ref()
+            .expect("controller key is set, so the signer must exist");
+        let router = get_router_address(&Chain::Ethereum).unwrap();
+        assert_eq!(signer.authorized_locker(), bytes_to_address(router).unwrap());
+    }
+
+    #[test]
     fn test_try_from_multi_hop_uses_boundary_swap_tokens() {
         let quote = make_order_quote(990).with_route(make_route_with_tokens(&[
             (make_address(0x01), make_address(0x02)),
