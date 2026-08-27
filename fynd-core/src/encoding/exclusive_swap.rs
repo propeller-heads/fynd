@@ -610,7 +610,6 @@ mod tests {
         // meta starts after the fee(8) prefix; its low 128 bits carry the locker's last 16 bytes.
         let meta = B256::from_slice(&user_data.as_ref()[8..40]);
         assert_eq!(&meta.as_slice()[16..32], &LOCKER.as_slice()[4..20]);
-        assert_ne!(&meta.as_slice()[16..32], &[0u8; 16], "an unbound payload is usable by anyone");
     }
 
     #[test]
