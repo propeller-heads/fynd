@@ -47,7 +47,7 @@ use alloy::{
 };
 
 use crate::decoder::{
-    solvers::{normalize_native, DeclaredSwap, SolverDecoder},
+    solvers::{normalize_native, DeclaredSwap, SolverDecoder, VenueTag},
     veto::Veto,
 };
 
@@ -115,6 +115,14 @@ const NATIVE_FIRST_ACTION: [u8; 4] = [0xbd, 0x01, 0xc2, 0x26];
 const WORD: usize = 32;
 const ADDRESS_LEN: usize = 20;
 
+/// Where a frontend's app tag sits inside `execute`'s `zidAndAffiliate` word.
+///
+/// The word is `zid(12) ‖ affiliate(20)`: the zid is 0x's own per-order id, and the affiliate is
+/// the address a fee would be paid to. A frontend that takes no fee has no address to name there,
+/// so it writes a short tag into the top of that slot and leaves the rest zero. Matcha Meta's tag
+/// is `0x637071`, the same on Ethereum and Base.
+const APP_TAG: std::ops::Range<usize> = 12..15;
+
 /// The 32-byte word at `index` of an action's arguments.
 fn word(body: &[u8], index: usize) -> Option<U256> {
     body.get(index * WORD..(index + 1) * WORD)
@@ -167,6 +175,14 @@ fn decode_execute(input: &[u8]) -> Option<SettlerTerms> {
     })
 }
 
+/// Settler's `execute` terms, whether the call arrived wrapped in `AllowanceHolder.exec` or bare.
+fn settler_call(input: &[u8]) -> Option<executeCall> {
+    match execCall::abi_decode(input) {
+        Ok(wrapper) => executeCall::abi_decode(&wrapper.data).ok(),
+        Err(_) => executeCall::abi_decode(input).ok(),
+    }
+}
+
 pub(crate) struct ZeroEx;
 
 impl SolverDecoder for ZeroEx {
@@ -212,6 +228,23 @@ impl SolverDecoder for ZeroEx {
             None => intent,
         }))
     }
+
+    /// The app tag the frontend that built the order wrote into `zidAndAffiliate` (see
+    /// [`APP_TAG`]), as `0x`-prefixed hex for the address book to name.
+    ///
+    /// An all-zero slot is the ordinary case — most order flow names no affiliate — and reports no
+    /// tag rather than a tag of zeros. A tag the book does not list leaves the venue to the entry
+    /// point, so an unrecognised frontend costs nothing.
+    fn venue_fingerprint(&self, input: &[u8], _logs: &[Log]) -> Option<VenueTag> {
+        let tag = settler_call(input)?
+            .zidAndAffiliate
+            .get(APP_TAG)?
+            .to_vec();
+        if tag.iter().all(|byte| *byte == 0) {
+            return None;
+        }
+        Some(VenueTag::Integrator(format!("0x{}", alloy::hex::encode(tag))))
+    }
 }
 
 #[cfg(test)]
@@ -243,6 +276,14 @@ mod tests {
     /// `test_classify_revert_cause_real_zeroex_slippage`, which shares this transaction).
     fn reverted_input() -> Vec<u8> {
         let text = include_str!("fixtures/zeroex_reverted_input.txt").trim();
+        alloy::hex::decode(text.strip_prefix("0x").unwrap_or(text)).unwrap()
+    }
+
+    /// The `AllowanceHolder.exec` calldata of a real Matcha Meta trade on Ethereum (tx
+    /// `0xf73afa0b5e56e05689ae239dd588a81df40a9c5f8e51403b5fe1753ec9897483`), whose
+    /// `zidAndAffiliate` carries the app tag `0x637071` after a 12-byte zid.
+    fn matcha_meta_input() -> Vec<u8> {
+        let text = include_str!("fixtures/zeroex_matcha_meta_input.txt").trim();
         alloy::hex::decode(text.strip_prefix("0x").unwrap_or(text)).unwrap()
     }
 
@@ -282,6 +323,49 @@ mod tests {
     fn test_real_reverted_output_recipient() {
         let intent = terms(&reverted_input()).unwrap();
         assert_eq!(intent.output_recipient, Some(RELAY_ROUTER));
+    }
+
+    #[test]
+    fn test_real_matcha_meta_app_tag() {
+        assert_eq!(
+            ZeroEx.venue_fingerprint(&matcha_meta_input(), &[]),
+            Some(VenueTag::Integrator("0x637071".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_app_tag_absent_on_untagged_order_flow() {
+        // The same entry, from a frontend that names no affiliate: the slot is zeros, and a tag of
+        // zeros would be read as a venue fingerprint that no order actually carries.
+        assert_eq!(ZeroEx.venue_fingerprint(&settled_input(), &[]), None);
+    }
+
+    #[test]
+    fn test_app_tag_read_from_a_bare_settler_entry() {
+        // Matcha's own routes arrive wrapped, but the tag sits in `execute`, so a bare entry
+        // carries it just as well and must be read there too.
+        let mut call = executeCall::abi_decode(
+            &execCall::abi_decode(&matcha_meta_input())
+                .unwrap()
+                .data,
+        )
+        .unwrap();
+        let bare = executeCall::abi_encode(&call);
+        assert_eq!(
+            ZeroEx.venue_fingerprint(&bare, &[]),
+            Some(VenueTag::Integrator("0x637071".to_string()))
+        );
+        // Clearing the slot clears the fingerprint, which pins the read to those three bytes.
+        call.zidAndAffiliate = alloy::primitives::B256::ZERO;
+        assert_eq!(ZeroEx.venue_fingerprint(&executeCall::abi_encode(&call), &[]), None);
+    }
+
+    #[test]
+    fn test_matcha_meta_trade_still_decodes_its_terms() {
+        // The tag names the venue; it must not disturb the swap the same calldata declares.
+        let intent = terms(&matcha_meta_input()).unwrap();
+        assert_eq!(intent.amount_in, Some(U256::from(515_770_866_377_205_479u64)));
+        assert_eq!(intent.token_out, Address::ZERO); // native ETH out, normalized
     }
 
     #[test]

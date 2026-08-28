@@ -212,8 +212,9 @@ pub(crate) fn normalize_native(token: Address) -> Address {
 /// raw tag it found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VenueTag {
-    /// A frontend string the solver records in its own swap event, for venues that route through
-    /// a shared router and have no entry point of their own.
+    /// A frontend tag the solver records in its own data, for venues that route through a shared
+    /// router and have no entry point of their own: `LiFi`'s integrator string in its swap event,
+    /// or the app tag 0x Settler carries in calldata, rendered as `0x`-prefixed hex.
     Integrator(String),
     /// An order's committed `appData` hash, for a batch settler whose orders name their frontend.
     AppData(B256),
