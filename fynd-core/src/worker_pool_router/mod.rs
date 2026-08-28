@@ -31,7 +31,7 @@ use std::{
 };
 
 pub use allocation::ExclusiveAccess;
-use allocation::{allocate, Allocation, OrderClass};
+use allocation::{allocate, validate_pool_allowlist, Allocation, OrderClass};
 use comparison_log::{log_quote_comparison, solver_error_label};
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -424,9 +424,12 @@ impl WorkerPoolRouter {
         // trade size joins `OrderClass` they will differ.
         let class = OrderClass::new(access);
         let pool_allowlist = request.options().worker_pools();
+        if let Some(allowlist) = pool_allowlist {
+            validate_pool_allowlist(&self.solver_pools, allowlist)?;
+        }
         let mut allocations: Vec<Allocation<'_>> = Vec::with_capacity(request.orders().len());
         for _order in request.orders() {
-            allocations.push(allocate(&self.solver_pools, class, pool_allowlist)?);
+            allocations.push(allocate(&self.solver_pools, class, pool_allowlist));
         }
 
         if allocations

@@ -102,7 +102,7 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
 3. Selects best by `amount_out_net_gas` → optional `Encoder` → `Quote`
 
 Steps 0-2 are exposed as the public `WorkerPoolRouter::solve`, returning every order's ranked
-candidates as `RankedQuotes`; step 3 splits into the public `encode_quotes` and `finalize`
+candidates as `RankedQuotes`; step 3 splits into the public `encode_quotes` and `finalize_quote`
 functions, for embedders that need more than the single best route per order.
 
 ## Non-Tycho Liquidity Sources

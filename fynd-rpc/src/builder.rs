@@ -219,7 +219,8 @@ impl FyndRPCBuilder {
     /// cannot add or shadow a route outside `/v1`. A route it adds for a path and method that
     /// fynd also serves shadows the default; everything else (remaining endpoints, error
     /// handlers, docs, 404) is unchanged. Shadowing a default route does not change the OpenAPI
-    /// spec served at `/docs/`. For example:
+    /// spec served at `/docs/`. Calling this more than once replaces the earlier configurator
+    /// rather than combining them — the last call wins. For example:
     ///
     /// ```no_run
     /// use std::collections::HashMap;

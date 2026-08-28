@@ -115,44 +115,52 @@ impl<'a> Allocation<'a> {
     }
 }
 
+/// Validates a request's worker pool allowlist against the full worker pool configuration.
+///
+/// Request-level, not per-order: the allowlist is a property of the request, so call this once
+/// before allocating any order rather than once per order. An empty allowlist is rejected rather
+/// than silently resolving to no worker pools — omit it to reach every worker pool that serves
+/// the request. An unknown name fails loudly instead of silently routing through nothing.
+pub(crate) fn validate_pool_allowlist(
+    worker_pools: &[SolverPoolHandle],
+    allowlist: &[String],
+) -> Result<(), SolveError> {
+    if allowlist.is_empty() {
+        return Err(SolveError::Internal(
+            "worker pool allowlist is empty; omit it to use every pool that serves the request"
+                .to_string(),
+        ));
+    }
+    let unknown: Vec<&str> = allowlist
+        .iter()
+        .map(String::as_str)
+        .filter(|name| {
+            !worker_pools
+                .iter()
+                .any(|pool| pool.name() == *name)
+        })
+        .collect();
+    if !unknown.is_empty() {
+        let configured: Vec<&str> = worker_pools
+            .iter()
+            .map(SolverPoolHandle::name)
+            .collect();
+        warn!(?configured, ?unknown, "worker pool allowlist names unknown pool(s)");
+        return Err(SolveError::Internal(format!("unknown worker pool(s) {unknown:?}")));
+    }
+    Ok(())
+}
+
 /// Selects the worker pools that serve `class`, preserving configuration order.
 ///
-/// `pool_allowlist` further restricts the selection to the named worker pools. It is validated
-/// against the full configuration, not the class-filtered set, so a typo fails loudly instead of
-/// silently routing through nothing. An empty allowlist is rejected rather than silently
-/// resolving to no worker pools — omit it to reach every worker pool that serves the request.
+/// `pool_allowlist` further restricts the selection to the named worker pools. Callers must
+/// validate it with [`validate_pool_allowlist`] first — this is a pure filter and does not
+/// re-check the names.
 pub(crate) fn allocate<'a>(
     worker_pools: &'a [SolverPoolHandle],
     class: OrderClass,
     pool_allowlist: Option<&[String]>,
-) -> Result<Allocation<'a>, SolveError> {
-    if let Some(allowlist) = pool_allowlist {
-        if allowlist.is_empty() {
-            return Err(SolveError::Internal(
-                "worker pool allowlist is empty; omit it to use every pool that serves the \
-                 request"
-                    .to_string(),
-            ));
-        }
-        let unknown: Vec<&str> = allowlist
-            .iter()
-            .map(String::as_str)
-            .filter(|name| {
-                !worker_pools
-                    .iter()
-                    .any(|pool| pool.name() == *name)
-            })
-            .collect();
-        if !unknown.is_empty() {
-            let configured: Vec<&str> = worker_pools
-                .iter()
-                .map(SolverPoolHandle::name)
-                .collect();
-            warn!(?configured, ?unknown, "worker pool allowlist names unknown pool(s)");
-            return Err(SolveError::Internal(format!("unknown worker pool(s) {unknown:?}")));
-        }
-    }
-
+) -> Allocation<'a> {
     let worker_pools: Vec<&SolverPoolHandle> = worker_pools
         .iter()
         .filter(|worker_pool| worker_pool.serves(class))
@@ -173,7 +181,7 @@ pub(crate) fn allocate<'a>(
         .values()
         .any(|scope| *scope == LiquidityScope::IncludeExclusive);
 
-    Ok(Allocation { worker_pools, scopes, exclusive_routing_active })
+    Allocation { worker_pools, scopes, exclusive_routing_active }
 }
 
 #[cfg(test)]
@@ -224,8 +232,7 @@ mod tests {
     #[test]
     fn test_allocate_without_allowlist_keeps_every_serving_pool() {
         let pools = [handle("a"), handle("b")];
-        let allocation =
-            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), None).expect("allocates");
+        let allocation = allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), None);
         assert_eq!(names(&allocation), vec!["a", "b"]);
     }
 
@@ -234,17 +241,15 @@ mod tests {
         let pools = [handle("a"), handle("b"), handle("c")];
         let allowlist = ["c".to_string(), "a".to_string()];
         let allocation =
-            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist))
-                .expect("allocates");
+            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist));
         assert_eq!(names(&allocation), vec!["a", "c"]);
     }
 
     #[test]
-    fn test_allocate_allowlist_unknown_pool_is_an_error() {
+    fn test_validate_pool_allowlist_unknown_pool_is_an_error() {
         let pools = [handle("a")];
         let allowlist = ["a".to_string(), "nope".to_string()];
-        let Err(err) = allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist))
-        else {
+        let Err(err) = validate_pool_allowlist(&pools, &allowlist) else {
             panic!("expected an error for an unknown pool name");
         };
         let SolveError::Internal(message) = err else { panic!("expected Internal, got {err:?}") };
@@ -254,11 +259,10 @@ mod tests {
     }
 
     #[test]
-    fn test_allocate_empty_allowlist_is_an_error() {
+    fn test_validate_pool_allowlist_empty_is_an_error() {
         let pools = [handle("a")];
         let allowlist: [String; 0] = [];
-        let Err(err) = allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist))
-        else {
+        let Err(err) = validate_pool_allowlist(&pools, &allowlist) else {
             panic!("expected an error for an empty allowlist");
         };
         let SolveError::Internal(message) = err else { panic!("expected Internal, got {err:?}") };
@@ -273,8 +277,7 @@ mod tests {
         ];
         let allowlist = ["exclusive".to_string()];
         let allocation =
-            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist))
-                .expect("allocates");
+            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist));
         assert!(allocation.is_empty());
     }
 }

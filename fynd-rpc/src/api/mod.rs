@@ -42,11 +42,12 @@ use utoipa::OpenApi;
 use crate::api::error::ErrorResponse;
 
 /// Adds caller routes to the `/v1` scope ahead of the defaults. Paths are relative to `/v1`
-/// (e.g. `"/quote"`) — an override can only add or shadow routes under `/v1`, not register a
-/// route outside it. A caller route for a path+method fynd also serves wins; every other
-/// default stays, and shadowing a default route does not change the OpenAPI spec served at
-/// `/docs/`. Actix registers one resource per `Scope::route` call with the method guard on the
-/// resource, so a non-matching method or path falls through to the defaults.
+/// (e.g. `"/quote"`) — the closure owns the whole `/v1` [`actix_web::Scope`], so it may add
+/// routes, shadow a default route for the same path and method (first registration wins), or
+/// attach middleware or a `default_service` to the scope; it cannot register a route outside
+/// `/v1`. Shadowing a default route does not change the OpenAPI spec served at `/docs/`. Actix
+/// registers one resource per `Scope::route` call with the method guard on the resource, so a
+/// non-matching method or path falls through to the defaults.
 pub type RouteConfigurator =
     Arc<dyn Fn(actix_web::Scope, &AppState) -> actix_web::Scope + Send + Sync>;
 
