@@ -48,6 +48,10 @@ struct ReplayOptions {
 /// `exclusive_access` is not a body field either: a harness re-sends it as the
 /// `x-exclusive-access` header. An outcome that depended on `price_guard` may
 /// not reproduce on replay.
+///
+/// The serialized JSON shape is a log format, not a stable API, and may change between
+/// releases.
+#[must_use]
 #[derive(Debug, Serialize)]
 pub struct ReplayRequest {
     orders: Vec<ReplayOrder>,
@@ -86,6 +90,7 @@ impl ReplayRequest {
     }
 
     /// Serializes the capture to the replay-log JSON string.
+    #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "<unserializable>".to_string())
     }
@@ -243,7 +248,7 @@ pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome
 }
 
 /// Threshold in milliseconds above which a successful solve is logged as slow.
-pub const SLOW_SOLVE_THRESHOLD_MS: u64 = 200;
+pub(crate) const SLOW_SOLVE_THRESHOLD_MS: u64 = 200;
 
 /// Emits a `slow_solve` warning when a successful solve exceeds the threshold.
 ///

@@ -142,31 +142,37 @@ impl QuoteOptions {
     }
 
     /// Returns the timeout in milliseconds.
+    #[must_use]
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
     }
 
     /// Returns the minimum number of solver responses.
+    #[must_use]
     pub fn min_responses(&self) -> Option<usize> {
         self.min_responses
     }
 
     /// Returns the maximum gas cost constraint.
+    #[must_use]
     pub fn max_gas(&self) -> Option<&BigUint> {
         self.max_gas.as_ref()
     }
 
     /// Returns the encoding options.
+    #[must_use]
     pub fn encoding_options(&self) -> Option<&EncodingOptions> {
         self.encoding_options.as_ref()
     }
 
     /// Returns the overlay label, if one was set.
+    #[must_use]
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.state_label.as_ref()
     }
 
     /// Returns the worker-pool allowlist, if one was set.
+    #[must_use]
     pub fn worker_pools(&self) -> Option<&[String]> {
         self.worker_pools.as_deref()
     }
@@ -525,7 +531,14 @@ pub struct Quote {
 
 impl Quote {
     /// Assembles a quote from per-order results, a total gas estimate and the solve time.
-    pub fn new(orders: Vec<OrderQuote>, total_gas_estimate: BigUint, solve_time_ms: u64) -> Self {
+    ///
+    /// Crate-internal: [`finalize_quote`](crate::finalize_quote) is the public way to build a
+    /// `Quote`; it keeps `total_gas_estimate` equal to the sum of the per-order gas estimates.
+    pub(crate) fn new(
+        orders: Vec<OrderQuote>,
+        total_gas_estimate: BigUint,
+        solve_time_ms: u64,
+    ) -> Self {
         Self { orders, total_gas_estimate, solve_time_ms }
     }
 

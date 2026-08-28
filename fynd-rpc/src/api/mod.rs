@@ -251,26 +251,31 @@ impl AppState {
     }
 
     /// Returns the worker pool router used to solve quotes.
+    #[must_use]
     pub fn worker_router(&self) -> &Arc<WorkerPoolRouter> {
         &self.worker_router
     }
 
     /// Returns the health tracker backing `GET /v1/health`.
+    #[must_use]
     pub fn health_tracker(&self) -> &HealthTracker {
         &self.health_tracker
     }
 
     /// Returns the chain ID this instance serves quotes for.
+    #[must_use]
     pub fn chain_id(&self) -> u64 {
         self.chain_id
     }
 
     /// Returns the Tycho Router address, if configured.
+    #[must_use]
     pub fn router_address(&self) -> Option<&Bytes> {
         self.router_address.as_ref()
     }
 
     /// Returns the Permit2 contract address.
+    #[must_use]
     pub fn permit2_address(&self) -> &Bytes {
         &self.permit2_address
     }

@@ -564,6 +564,7 @@ impl WorkerPoolRouter {
     }
 
     /// The encoder this router uses for [`Self::quote`].
+    #[must_use]
     pub fn encoder(&self) -> &Encoder {
         &self.encoder
     }
