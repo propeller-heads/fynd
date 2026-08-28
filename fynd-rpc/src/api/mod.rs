@@ -41,6 +41,13 @@ use utoipa::OpenApi;
 
 use crate::api::error::ErrorResponse;
 
+/// Adds caller routes to the `/v1` scope ahead of the defaults. Paths are relative to `/v1`
+/// (e.g. `"/quote"`). A caller route for a path+method fynd also serves wins; every other
+/// default stays. Actix registers one resource per `Scope::route` call with the method guard on
+/// the resource, so a non-matching method or path falls through to the defaults.
+pub type RouteConfigurator =
+    Arc<dyn Fn(actix_web::Scope, &AppState) -> actix_web::Scope + Send + Sync>;
+
 /// OpenAPI documentation bundle for the stable Fynd RPC endpoints.
 #[derive(OpenApi)]
 #[openapi(
@@ -278,16 +285,18 @@ pub(crate) fn configure_error_handlers(cfg: &mut web::ServiceConfig) {
 /// Configures the Actix Web application with routes and state.
 ///
 /// `hosted_swagger_url` names the hosted gateway the `/docs/hosted/` UI points at; when it is
-/// `None` that UI is not served.
+/// `None` that UI is not served. `route_overrides`, when set, adds its routes to the `/v1` scope
+/// ahead of the defaults; see [`RouteConfigurator`].
 pub(crate) fn configure_app(
     cfg: &mut web::ServiceConfig,
     state: AppState,
     hosted_swagger_url: Option<String>,
+    route_overrides: Option<&RouteConfigurator>,
 ) {
     cfg.configure(configure_error_handlers)
-        .app_data(web::Data::new(state))
-        .configure(configure_routes)
-        .configure(|cfg| docs::configure_docs(cfg, hosted_swagger_url.as_deref()))
+        .app_data(web::Data::new(state.clone()));
+    configure_routes(cfg, &state, route_overrides);
+    cfg.configure(|cfg| docs::configure_docs(cfg, hosted_swagger_url.as_deref()))
         .default_service(web::to(|| async {
             let body = ErrorResponse::new("not found".into(), "NOT_FOUND".into());
             HttpResponse::NotFound().json(body)
@@ -312,5 +321,134 @@ mod openapi_tests {
             let ext = &spec["paths"][path]["get"]["x-experimental"];
             assert_eq!(ext, true, "x-experimental extension must be true on {path}");
         }
+    }
+}
+
+#[cfg(test)]
+mod configure_app_tests {
+    use std::sync::Arc;
+
+    use actix_web::{test, web, App, HttpResponse};
+    use fynd_core::{
+        derived::SharedDerivedDataRef,
+        encoding::encoder::Encoder,
+        feed::market_data::MarketData,
+        worker_pool_router::{config::WorkerPoolRouterConfig, WorkerPoolRouter},
+    };
+    use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
+    use tycho_simulation::tycho_common::{models::Chain, Bytes};
+
+    use super::*;
+
+    fn test_state() -> AppState {
+        let market_data: MarketData = MarketData::new_shared();
+        let derived_data: SharedDerivedDataRef =
+            Arc::new(tokio::sync::RwLock::new(Default::default()));
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(None)
+            .expect("default encoders");
+        let encoder = Encoder::new(Chain::Ethereum, registry).expect("encoder");
+        let router = WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), encoder);
+        let health_tracker = HealthTracker::new(market_data.clone(), Arc::clone(&derived_data));
+        AppState::new(
+            router,
+            health_tracker,
+            1,
+            None,
+            Bytes::from(hex::decode("000000000022D473030F116dDEE9F6B43aC78BA3").unwrap()),
+            #[cfg(feature = "experimental")]
+            derived_data,
+            #[cfg(feature = "experimental")]
+            tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
+            #[cfg(feature = "experimental")]
+            market_data,
+        )
+    }
+
+    async fn override_info(_state: web::Data<AppState>) -> HttpResponse {
+        HttpResponse::Ok().body("overridden")
+    }
+
+    #[actix_web::test]
+    async fn test_route_override_shadows_default_and_keeps_others() {
+        let overrides: RouteConfigurator =
+            Arc::new(|scope, _state| scope.route("/info", web::get().to(override_info)));
+        let app = test::init_service(
+            App::new().configure(|cfg| configure_app(cfg, test_state(), None, Some(&overrides))),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/info")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(test::read_body(resp).await, "overridden");
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/health")
+                .to_request(),
+        )
+        .await;
+        // No market data yet → default handler answers 503 with its JSON body.
+        assert_eq!(resp.status(), 503);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert!(body.get("healthy").is_some(), "{body}");
+    }
+
+    #[actix_web::test]
+    async fn test_route_override_falls_through_for_other_methods() {
+        // The override only adds a POST handler for `/info`; GET /v1/info is a path+method
+        // pair the override doesn't touch, so it must still resolve to the default handler.
+        let overrides: RouteConfigurator =
+            Arc::new(|scope, _state| scope.route("/info", web::post().to(override_info)));
+        let app = test::init_service(
+            App::new().configure(|cfg| configure_app(cfg, test_state(), None, Some(&overrides))),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/v1/info")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(test::read_body(resp).await, "overridden");
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/info")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["chain_id"], 1);
+    }
+
+    #[actix_web::test]
+    async fn test_no_override_serves_default_info() {
+        let app = test::init_service(
+            App::new().configure(|cfg| configure_app(cfg, test_state(), None, None)),
+        )
+        .await;
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/info")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["chain_id"], 1);
     }
 }

@@ -14,7 +14,7 @@ use tracing::{error, info};
 use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Chain};
 
 use crate::{
-    api::{configure_app, AppState, HealthTracker},
+    api::{configure_app, AppState, HealthTracker, RouteConfigurator},
     config::{defaults, PoolConfig},
 };
 
@@ -31,6 +31,8 @@ pub struct FyndRPCBuilder {
     /// Hosted gateway URL advertised by the `/docs/hosted/` Swagger UI. Unset by default, which
     /// leaves that UI unregistered.
     hosted_swagger_url: Option<String>,
+    /// Caller routes registered before the defaults; see [`Self::configure_routes`].
+    route_overrides: Option<RouteConfigurator>,
 }
 
 impl FyndRPCBuilder {
@@ -71,6 +73,7 @@ impl FyndRPCBuilder {
             http_port: defaults::HTTP_PORT,
             gas_price_stale_threshold: None,
             hosted_swagger_url: None,
+            route_overrides: None,
         })
     }
 
@@ -209,6 +212,26 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Registers routes ahead of the built-in ones.
+    ///
+    /// `f` runs once per Actix worker with the shared [`AppState`], adding routes to the `/v1`
+    /// scope before the defaults. Paths are relative to `/v1` (e.g. `"/quote"`). A route it adds
+    /// for a path and method that fynd also serves shadows the default; everything else
+    /// (remaining endpoints, error handlers, docs, 404) is unchanged. For example:
+    ///
+    /// ```ignore
+    /// builder.configure_routes(|scope, _state| {
+    ///     scope.route("/quote", web::post().to(my_quote))
+    /// });
+    /// ```
+    pub fn configure_routes<F>(mut self, f: F) -> Self
+    where
+        F: Fn(actix_web::Scope, &AppState) -> actix_web::Scope + Send + Sync + 'static,
+    {
+        self.route_overrides = Some(Arc::new(f));
+        self
+    }
+
     /// Enables or disables the price guard.
     ///
     /// When enabled, default providers are auto-registered if none were added
@@ -300,13 +323,21 @@ impl FyndRPCBuilder {
         );
 
         let hosted_swagger_url = self.hosted_swagger_url;
+        let route_overrides = self.route_overrides;
         let server = HttpServer::new(move || {
             App::new()
                 .wrap(tracing_actix_web::TracingLogger::default())
                 .wrap(actix_web::middleware::from_fn(
                     crate::api::middleware::http_metrics_middleware,
                 ))
-                .configure(|cfg| configure_app(cfg, app_state.clone(), hosted_swagger_url.clone()))
+                .configure(|cfg| {
+                    configure_app(
+                        cfg,
+                        app_state.clone(),
+                        hosted_swagger_url.clone(),
+                        route_overrides.as_ref(),
+                    )
+                })
         })
         .bind((self.http_host.as_str(), self.http_port))
         .context("failed to bind HTTP server")?

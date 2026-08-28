@@ -5,7 +5,7 @@ use tracing::instrument;
 #[cfg(feature = "experimental")]
 use tracing::{debug, info, warn};
 
-use super::{dto, ApiError, AppState};
+use super::{dto, ApiError, AppState, RouteConfigurator};
 #[cfg(feature = "experimental")]
 use crate::api::prices::{
     price_to_decimal_string, ComponentDepthEntry, ComputationBlocks, IncludeField, PricesQuery,
@@ -22,9 +22,20 @@ use crate::api::{
     },
 };
 
-/// Configures API routes under /v1 namespace.
-pub(crate) fn configure_routes(cfg: &mut web::ServiceConfig) {
-    let scope = web::scope("/v1")
+/// Configures API routes under the `/v1` namespace.
+///
+/// `overrides`, when set, adds its routes to the scope before the defaults below, so a route it
+/// registers for the same path and method wins; see [`RouteConfigurator`].
+pub(crate) fn configure_routes(
+    cfg: &mut web::ServiceConfig,
+    state: &AppState,
+    overrides: Option<&RouteConfigurator>,
+) {
+    let mut scope = web::scope("/v1");
+    if let Some(overrides) = overrides {
+        scope = overrides(scope, state);
+    }
+    let scope = scope
         .route("/quote", web::post().to(quote))
         .route("/health", web::get().to(health))
         .route("/info", web::get().to(info));
