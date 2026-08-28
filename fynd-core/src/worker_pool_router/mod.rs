@@ -273,6 +273,16 @@ impl RankedQuotes {
     ///
     /// Returns `Err(SolveError::Internal)` if any inner list is empty.
     pub fn new(per_order: Vec<Vec<OrderQuote>>) -> Result<Self, SolveError> {
+        Self::started_at(per_order, Instant::now())
+    }
+
+    /// Wraps already-ranked candidates with an explicit start time, rejecting empty inner lists.
+    ///
+    /// Every `RankedQuotes` is built here, so the non-empty invariant holds for every instance
+    /// and [`Self::into_best`] cannot hit an empty list. [`WorkerPoolRouter::solve`] feeds it
+    /// `rank_quotes` output, which always yields at least a `NoRouteFound`/`Timeout` placeholder
+    /// per order, so the error path is unreachable there but stays checked rather than assumed.
+    fn started_at(per_order: Vec<Vec<OrderQuote>>, started: Instant) -> Result<Self, SolveError> {
         for (index, candidates) in per_order.iter().enumerate() {
             if candidates.is_empty() {
                 return Err(SolveError::Internal(format!(
@@ -282,23 +292,7 @@ impl RankedQuotes {
                 )));
             }
         }
-        Ok(Self::started_at(per_order, Instant::now()))
-    }
-
-    /// Wraps already-ranked candidates with an explicit start time.
-    ///
-    /// Infallible: the only caller, [`WorkerPoolRouter::solve`], builds `per_order` from
-    /// `rank_quotes`, which always yields at least a `NoRouteFound`/`Timeout` placeholder per
-    /// order, so the empty-list case [`Self::new`] rejects cannot occur here. The debug assertion
-    /// guards against a future regression of that guarantee.
-    fn started_at(per_order: Vec<Vec<OrderQuote>>, started: Instant) -> Self {
-        debug_assert!(
-            per_order
-                .iter()
-                .all(|candidates| !candidates.is_empty()),
-            "RankedQuotes invariant violated: every order must have at least one candidate"
-        );
-        Self { per_order, started }
+        Ok(Self { per_order, started })
     }
 
     /// Ranked candidates per order, best first.
@@ -318,7 +312,8 @@ impl RankedQuotes {
     pub fn into_best(self) -> Vec<OrderQuote> {
         self.per_order
             .into_iter()
-            .map(|mut candidates| candidates.swap_remove(0)) // O(1); discarded order is irrelevant.
+            // Cannot panic: `started_at` rejects empty lists, and it is the only constructor.
+            .map(|mut candidates| candidates.swap_remove(0))
             .collect()
     }
 
@@ -532,7 +527,7 @@ impl WorkerPoolRouter {
             _ => ranked_quotes,
         };
 
-        Ok(RankedQuotes::started_at(ranked_per_order, start))
+        RankedQuotes::started_at(ranked_per_order, start)
     }
 
     /// Returns a quote by fanning out to the worker pools that serve the request.

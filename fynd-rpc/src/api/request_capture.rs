@@ -1,10 +1,10 @@
 //! Builds the routing-essential representation of a quote request for the
 //! replay-capture log emitted by the `/v1/quote` handler.
 
-use fynd_core::{ExclusiveAccess, NoPathReason, QuoteStatus, SolveError};
-use fynd_rpc_types::{Address, OrderSide, QuoteRequest};
+use fynd_core::{ExclusiveAccess, NoPathReason, OrderSide, QuoteRequest, QuoteStatus, SolveError};
 use serde::Serialize;
 use tracing::{info, warn};
+use tycho_simulation::tycho_common::models::Address;
 
 /// Routing-essential view of a single order, serialized into the replay log.
 ///
@@ -60,7 +60,7 @@ pub struct ReplayRequest {
 }
 
 impl ReplayRequest {
-    /// Extracts the owned routing-essential capture from `request`. Cheap — a
+    /// Extracts the owned routing-essential capture from the validated `request`. Cheap — a
     /// few address clones and no JSON — so it is safe to run on the quote hot
     /// path; the serialization cost is deferred to [`ReplayRequest::to_json`],
     /// which the handler only calls off the response path.
@@ -104,8 +104,12 @@ impl ReplayRequest {
 /// Serializes `request` down to the routing-essential fields, as a JSON string.
 /// Convenience wrapper over [`ReplayRequest::capture`] + [`ReplayRequest::to_json`].
 #[cfg(test)]
-pub(crate) fn replay_json(request: &QuoteRequest, access: ExclusiveAccess) -> String {
-    ReplayRequest::capture(request, access).to_json()
+pub(crate) fn replay_json(
+    request: fynd_rpc_types::QuoteRequest,
+    access: ExclusiveAccess,
+) -> String {
+    let request: QuoteRequest = request.into();
+    ReplayRequest::capture(&request, access).to_json()
 }
 
 /// Stable snake_case code for a per-order [`QuoteStatus`], matching the wire
@@ -337,7 +341,7 @@ mod tests {
 
     #[test]
     fn replay_json_captures_only_routing_fields() {
-        let json = replay_json(&request_with_signatures(), ExclusiveAccess::Denied);
+        let json = replay_json(request_with_signatures(), ExclusiveAccess::Denied);
         // No encoding data or signatures.
         assert!(!json.contains("encoding_options"), "json was: {json}");
         assert!(!json.contains("signature"), "json was: {json}");
@@ -356,7 +360,7 @@ mod tests {
 
     #[test]
     fn replay_json_keeps_routing_essentials_and_options() {
-        let json = replay_json(&request_with_signatures(), ExclusiveAccess::Denied);
+        let json = replay_json(request_with_signatures(), ExclusiveAccess::Denied);
         let value: Value = serde_json::from_str(&json).unwrap();
         let order = &value["orders"][0];
         assert_eq!(order["token_in"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
@@ -372,7 +376,7 @@ mod tests {
     #[test]
     fn replay_json_output_keys_are_allowlisted() {
         let req = request_with_signatures();
-        let json = replay_json(&req, ExclusiveAccess::Denied);
+        let json = replay_json(req, ExclusiveAccess::Denied);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let top_level: std::collections::BTreeSet<&str> = value
@@ -428,7 +432,7 @@ mod tests {
         #[case] access: ExclusiveAccess,
         #[case] expected: bool,
     ) {
-        let json = replay_json(&request_with_signatures(), access);
+        let json = replay_json(request_with_signatures(), access);
         let value: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["exclusive_access"], expected, "json was: {json}");
     }

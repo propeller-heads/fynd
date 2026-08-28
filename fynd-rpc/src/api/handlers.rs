@@ -78,8 +78,8 @@ pub async fn quote(
     http_request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     let access = exclusive_access::from_headers(http_request.headers());
-    let capture = ReplayRequest::capture(&request, access);
     let core_request = validate_quote_request(request.into_inner())?;
+    let capture = ReplayRequest::capture(&core_request, access);
 
     let result = state
         .worker_router()
@@ -93,9 +93,9 @@ pub async fn quote(
 
 /// Validates a wire-format quote request and converts it to the core type.
 ///
-/// Rejects requests without orders and orders that fail [`fynd_core::Order::validate`].
-/// Conversion consumes the wire request, so take a [`ReplayRequest::capture`] first if the
-/// outcome should be logged with [`log_quote_outcome`].
+/// Rejects requests without orders and orders that fail [`fynd_core::Order::validate`]. Take a
+/// [`ReplayRequest::capture`] of the returned request if the outcome should be logged with
+/// [`log_quote_outcome`].
 pub fn validate_quote_request(
     request: dto::QuoteRequest,
 ) -> Result<fynd_core::QuoteRequest, ApiError> {
