@@ -120,12 +120,16 @@ entry_points = ["0x00000000009726632680fb29d3f7a9734e3010e2"]
 # Vultisig's app-wide fee wallet, its only fingerprint on the shared routers it settles through.
 "0x8e247a480449c84a5fdd25974a8501f3efa4abb9" = "vultisig"
 
-# LiFi frontends identified by the integrator tag in the LiFi swap event (Infinex's volume is
-# heavier on Base than on mainnet). Keys are lowercase. `base-app` is Coinbase's Base App, kept
-# alongside its fee wallet above so its LiFi leg still attributes if the fee is ever waived.
+# Venues identified by the tag a provider records in its own data: the integrator string in the
+# LiFi swap event (Infinex's volume is heavier on Base than on mainnet), or 0x's app tag in
+# calldata, as hex. Keys are lowercase. `base-app` is Coinbase's Base App, kept alongside its fee
+# wallet above so its LiFi leg still attributes if the fee is ever waived.
 [venue_integrators]
 "infinex" = "infinex"
 "base-app" = "coinbase"
+# Matcha Meta writes the same app tag on Base as on mainnet, into the affiliate half of 0x
+# Settler's `zidAndAffiliate` word. Confirmed on a Base route that enters through AllowanceHolder.
+"0x637071" = "matchameta"
 
 # Venues identified by the appData hash a CoW order carries (appCode names the frontend). CoW
 # settles on Base too, and the hash is the same across chains. Keyed by the 32-byte appData hash.

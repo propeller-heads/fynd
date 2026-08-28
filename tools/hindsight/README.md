@@ -123,7 +123,8 @@ enum VenueTag {
 Two methods, one per question the decoder asks a solver. `declared` answers "what does this
 solver say this transaction traded?", and a solver's parse fills the whole `DeclaredSwap` in one
 pass, including the recipient. `venue_fingerprint` answers "does this solver's data name the
-frontend that built the order?" — LiFi's integrator tag, CoW's `appData` hash. A solver's veto is
+frontend that built the order?" — LiFi's integrator tag, CoW's `appData` hash, the app tag 0x
+Settler carries in `zidAndAffiliate`. A solver's veto is
 not a third method: it rides on `declared`'s `Err`, because a veto is a statement about the same
 read.
 
@@ -186,8 +187,10 @@ four maps from the address book:
   Coinbase's Base App). `venue_fee` reports the cut and the caller corrects it out of the amounts
   (see above); every function in `attribution.rs` only reads. Wallets are checked in address
   order, so a trade cut by two venues' wallets resolves the same way on every run.
-- **provider integrator tag** (`[venue_integrators]`) — a provider's event carried an integrator
-  string mapped to a venue (LiFi frontends), read through `SolverDecoder::venue_fingerprint`.
+- **provider integrator tag** (`[venue_integrators]`) — the provider's own data carried a tag
+  mapped to a venue, read through `SolverDecoder::venue_fingerprint`: an integrator string in a
+  LiFi event, or the hex app tag a frontend writes into 0x Settler's `zidAndAffiliate` word
+  (Matcha Meta).
 
 The solver label comes from its own evidence tiers, most- to least-trusted: the entry point
 itself, the outermost solver frame in the trace, the largest external call (a guess, for unknown
