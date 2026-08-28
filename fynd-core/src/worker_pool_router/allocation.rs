@@ -126,7 +126,7 @@ pub(crate) fn validate_pool_allowlist(
     allowlist: &[String],
 ) -> Result<(), SolveError> {
     if allowlist.is_empty() {
-        return Err(SolveError::Internal(
+        return Err(SolveError::InvalidWorkerPools(
             "worker pool allowlist is empty; omit it to use every pool that serves the request"
                 .to_string(),
         ));
@@ -146,7 +146,7 @@ pub(crate) fn validate_pool_allowlist(
             .map(SolverPoolHandle::name)
             .collect();
         warn!(?configured, ?unknown, "worker pool allowlist names unknown pool(s)");
-        return Err(SolveError::Internal(format!("unknown worker pool(s) {unknown:?}")));
+        return Err(SolveError::InvalidWorkerPools(format!("unknown worker pool(s) {unknown:?}")));
     }
     Ok(())
 }
@@ -252,7 +252,9 @@ mod tests {
         let Err(err) = validate_pool_allowlist(&pools, &allowlist) else {
             panic!("expected an error for an unknown pool name");
         };
-        let SolveError::Internal(message) = err else { panic!("expected Internal, got {err:?}") };
+        let SolveError::InvalidWorkerPools(message) = err else {
+            panic!("expected InvalidWorkerPools, got {err:?}")
+        };
         assert!(message.contains("nope"), "{message}");
         // The configured pool list is logged, not returned to the caller — see M2.
         assert!(!message.contains("\"a\""), "{message}");
@@ -265,7 +267,9 @@ mod tests {
         let Err(err) = validate_pool_allowlist(&pools, &allowlist) else {
             panic!("expected an error for an empty allowlist");
         };
-        let SolveError::Internal(message) = err else { panic!("expected Internal, got {err:?}") };
+        let SolveError::InvalidWorkerPools(message) = err else {
+            panic!("expected InvalidWorkerPools, got {err:?}")
+        };
         assert!(message.contains("empty"), "{message}");
     }
 

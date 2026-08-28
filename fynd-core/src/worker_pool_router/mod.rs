@@ -1288,6 +1288,7 @@ fn cause_tier(error: &SolveError) -> u8 {
         SolveError::Timeout { .. } |
         SolveError::QueueFull |
         SolveError::Internal(_) |
+        SolveError::InvalidWorkerPools(_) |
         SolveError::InvalidOrder(_) |
         SolveError::FailedEncoding(_) |
         SolveError::EncodingUnavailable(_) |
@@ -1840,7 +1841,7 @@ mod tests {
             .quote(request, ExclusiveAccess::Denied)
             .await;
 
-        assert!(matches!(result, Err(SolveError::Internal(_))), "{result:?}");
+        assert!(matches!(result, Err(SolveError::InvalidWorkerPools(_))), "{result:?}");
         worker.abort();
     }
 
