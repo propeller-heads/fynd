@@ -1,4 +1,28 @@
 
+## [0.99.20](https://github.com/propeller-heads/fynd/compare/0.99.18...0.99.20) (2026-08-28)
+
+### Features
+
+* raise tycho lower bound to 0.370.0 ([d329e3a](https://github.com/propeller-heads/fynd/commit/d329e3a5d07d59025012998ae31a4920c3765fc6))
+* **core:** add SolveError::InvalidWorkerPools for allowlist errors ([ab89495](https://github.com/propeller-heads/fynd/commit/ab89495233783fac5f6d1d285c56aa126ae64757))
+* **core:** reject empty pool allowlists and rename finalize_quote ([95e3a42](https://github.com/propeller-heads/fynd/commit/95e3a4271ddcf68b631b362b08cc2d32b2fb76bb))
+* **core:** expose solve, encode_quotes and finalize stages of the router ([38625b5](https://github.com/propeller-heads/fynd/commit/38625b5b0d6638578998cd3962b4421b1d719738))
+* **core:** allow requests to restrict solving to named worker pools ([c80cdbe](https://github.com/propeller-heads/fynd/commit/c80cdbefec307894f032b6ac8e44db2af6db811e))
+* **propamm:** name the pAMM components with no fallback pool ([3b48f69](https://github.com/propeller-heads/fynd/commit/3b48f69493ce1402ccee43c114f9688bac9151b2))
+* **rpc:** expose the quote pipeline stages and app state for embedders ([0190e01](https://github.com/propeller-heads/fynd/commit/0190e017881559728d20b42bae812a1933be32df))
+* **rpc:** add configure_routes hook to register overriding routes ([4b7291b](https://github.com/propeller-heads/fynd/commit/4b7291b998e4ec724d1f35bb2e3bb7634cdc9341))
+
+### Bug Fixes
+
+* validate before capturing and reject empty rankings everywhere ([a1a4049](https://github.com/propeller-heads/fynd/commit/a1a40498ccc6e1e3134e22800177e4ba8564c996))
+* **core:** validate the worker pool allowlist once per request ([f050787](https://github.com/propeller-heads/fynd/commit/f05078712431745a9bc6fa40e6e220924510bf32))
+* **core:** make RankedQuotes::new fallible instead of panicking ([8e92179](https://github.com/propeller-heads/fynd/commit/8e92179c4119fc95caa1bf839201f432ededcbd5))
+* leave a pAMM out of the graph when its fallback cannot be priced ([d35d618](https://github.com/propeller-heads/fynd/commit/d35d618d81ef85bd3f36e0e15249c0860b8c5b64))
+* **rpc:** restrict RequestOutcome and is_failure to crate-internal use ([d355097](https://github.com/propeller-heads/fynd/commit/d3550974a3dd6a776c8422824fdfc52e6d9b77c7))
+* **rpc:** derive num_orders from capture in log_quote_outcome ([f2fdf67](https://github.com/propeller-heads/fynd/commit/f2fdf67eb91ea615291ec2b0e3047f4e48811912))
+* **rpc:** harden RequestOutcome and document route override limits ([6a8277d](https://github.com/propeller-heads/fynd/commit/6a8277d0a948b50d9734d15979741581f8936e15))
+
+
 ## [0.99.19](https://github.com/propeller-heads/fynd/compare/0.99.18...0.99.19) (2026-08-28)
 
 ### Features
