@@ -35,6 +35,32 @@ pub fn has_pamm_leg(route: &Route) -> bool {
     })
 }
 
+/// Whether `component` is a pAMM with no Uniswap V3 pool to fall back on.
+///
+/// A `propammfallback:` leg only reaches the chain through its fallback, so a component whose fee
+/// tier has no pool in this market can never produce a quotable route. Returns `false` for any
+/// other protocol system, and for a component that does not name exactly two tokens: the fallback
+/// resolves per leg from the swap's own pair, so a wider component is left to
+/// [`fallback_amount_out`].
+pub fn lacks_fallback_pool(
+    component: &tycho_simulation::tycho_common::models::protocol::ProtocolComponent,
+    fee_tiers: &FeeTiers,
+    index: &FallbackPoolIndex,
+) -> bool {
+    if !component
+        .protocol_system
+        .starts_with(PROPAMM_FALLBACK_PREFIX)
+    {
+        return false;
+    }
+    let [token_a, token_b] = component.tokens.as_slice() else {
+        return false;
+    };
+    index
+        .pool_for(token_a, token_b, fee_tiers.resolved_tier(token_a, token_b))
+        .is_none()
+}
+
 /// Replays `route` with every `propammfallback:` leg pointing at its Uniswap V3 fallback pool.
 ///
 /// Uses `replay_route`, so split fractions and shared-pool depletion behave exactly as they do for
@@ -622,6 +648,43 @@ mod tests {
                 fee_tier: DEFAULT_TIER,
             }
         );
+    }
+
+    /// The pair-level rule the graph filter uses: a pAMM is only admitted when this market holds
+    /// the Uniswap V3 pool its resolved fee tier names.
+    #[test]
+    fn test_lacks_fallback_pool_follows_the_resolved_tier() {
+        let market = market_with_fallback_pool(DEFAULT_TIER);
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
+        let index = FallbackPoolIndex::build(&view);
+        let pamm = util::component_with_protocol(
+            PAMM_COMPONENT,
+            &format!("{PROPAMM_FALLBACK_PREFIX}fermiswap"),
+            &[util::token(1, "WETH"), util::token(2, "USDC")],
+        );
+
+        assert!(!lacks_fallback_pool(&pamm, &FeeTiers::new(DEFAULT_TIER), &index));
+        // Same pool, a tier the router does not resolve to: nothing to fall back on.
+        assert!(lacks_fallback_pool(&pamm, &FeeTiers::new(DEFAULT_TIER + 1), &index));
+    }
+
+    /// Only `propammfallback:` components are judged. Everything else routes on its own terms.
+    #[test]
+    fn test_lacks_fallback_pool_ignores_other_protocols() {
+        let market = market_with_fallback_pool(DEFAULT_TIER);
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
+        let index = FallbackPoolIndex::build(&view);
+        let uniswap = util::component_with_protocol(
+            "0xuni",
+            "uniswap_v3",
+            &[util::token(3, "DAI"), util::token(4, "WBTC")],
+        );
+
+        assert!(!lacks_fallback_pool(&uniswap, &FeeTiers::new(DEFAULT_TIER), &index));
     }
 
     /// A split route prices through `replay_route`, so both legs of the split are counted.
