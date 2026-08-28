@@ -1,7 +1,8 @@
 //! HTTP API layer: endpoint handlers, OpenAPI docs, and shared application state.
 
 /// OpenAPI spec construction and Swagger UI registration.
-mod docs;
+/// OpenAPI document construction and the [`OpenApiConfigurator`](docs::OpenApiConfigurator) hook.
+pub mod docs;
 /// Re-exports of wire-format DTO types from `fynd-rpc-types`.
 pub mod dto;
 /// [`ApiError`] type with HTTP status code mapping.
@@ -45,7 +46,8 @@ use crate::api::error::ErrorResponse;
 /// (e.g. `"/quote"`) — the closure owns the whole `/v1` [`actix_web::Scope`], so it may add
 /// routes, shadow a default route for the same path and method (first registration wins), or
 /// attach middleware or a `default_service` to the scope; it cannot register a route outside
-/// `/v1`. Shadowing a default route does not change the OpenAPI spec served at `/docs/`. Actix
+/// `/v1`. Shadowing a default route does not change the OpenAPI spec served at `/docs/`; pair it
+/// with an [`OpenApiConfigurator`](docs::OpenApiConfigurator) to describe the replacement. Actix
 /// registers one resource per `Scope::route` call with the method guard on the resource, so a
 /// non-matching method or path falls through to the defaults.
 pub type RouteConfigurator =
@@ -299,21 +301,25 @@ pub(crate) fn configure_error_handlers(cfg: &mut web::ServiceConfig) {
 ///
 /// `hosted_swagger_url` names the hosted gateway the `/docs/hosted/` UI points at; when it is
 /// `None` that UI is not served. `route_overrides`, when set, adds its routes to the `/v1` scope
-/// ahead of the defaults; see [`RouteConfigurator`].
+/// ahead of the defaults; see [`RouteConfigurator`]. `openapi_overrides`, when set, rewrites the
+/// OpenAPI document before it is served; see [`OpenApiConfigurator`](docs::OpenApiConfigurator).
 pub(crate) fn configure_app(
     cfg: &mut web::ServiceConfig,
     state: AppState,
     hosted_swagger_url: Option<String>,
     route_overrides: Option<&RouteConfigurator>,
+    openapi_overrides: Option<&docs::OpenApiConfigurator>,
 ) {
     cfg.configure(configure_error_handlers)
         .app_data(web::Data::new(state.clone()));
     configure_routes(cfg, &state, route_overrides);
-    cfg.configure(|cfg| docs::configure_docs(cfg, hosted_swagger_url.as_deref()))
-        .default_service(web::to(|| async {
-            let body = ErrorResponse::new("not found".into(), "NOT_FOUND".into());
-            HttpResponse::NotFound().json(body)
-        }));
+    cfg.configure(|cfg| {
+        docs::configure_docs(cfg, hosted_swagger_url.as_deref(), openapi_overrides)
+    })
+    .default_service(web::to(|| async {
+        let body = ErrorResponse::new("not found".into(), "NOT_FOUND".into());
+        HttpResponse::NotFound().json(body)
+    }));
 }
 
 #[cfg(all(test, feature = "experimental"))]
@@ -391,7 +397,8 @@ mod configure_app_tests {
         let overrides: RouteConfigurator =
             Arc::new(|scope, _state| scope.route("/info", web::get().to(override_info)));
         let app = test::init_service(
-            App::new().configure(|cfg| configure_app(cfg, test_state(), None, Some(&overrides))),
+            App::new()
+                .configure(|cfg| configure_app(cfg, test_state(), None, Some(&overrides), None)),
         )
         .await;
 
@@ -425,7 +432,8 @@ mod configure_app_tests {
         let overrides: RouteConfigurator =
             Arc::new(|scope, _state| scope.route("/info", web::post().to(override_info)));
         let app = test::init_service(
-            App::new().configure(|cfg| configure_app(cfg, test_state(), None, Some(&overrides))),
+            App::new()
+                .configure(|cfg| configure_app(cfg, test_state(), None, Some(&overrides), None)),
         )
         .await;
 
@@ -457,7 +465,8 @@ mod configure_app_tests {
         let overrides: RouteConfigurator =
             Arc::new(|scope, _state| scope.route("/custom", web::get().to(custom_route)));
         let app = test::init_service(
-            App::new().configure(|cfg| configure_app(cfg, test_state(), None, Some(&overrides))),
+            App::new()
+                .configure(|cfg| configure_app(cfg, test_state(), None, Some(&overrides), None)),
         )
         .await;
 
@@ -486,7 +495,7 @@ mod configure_app_tests {
     #[actix_web::test]
     async fn test_no_override_serves_default_info() {
         let app = test::init_service(
-            App::new().configure(|cfg| configure_app(cfg, test_state(), None, None)),
+            App::new().configure(|cfg| configure_app(cfg, test_state(), None, None, None)),
         )
         .await;
         let resp = test::call_service(
