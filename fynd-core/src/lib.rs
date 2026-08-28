@@ -98,6 +98,6 @@ pub use worker_pool::{
     TaskQueueHandle,
 };
 pub use worker_pool_router::{
-    config::WorkerPoolRouterConfig, encode_quotes, finalize, ExclusiveAccess, LiquidityScope,
+    config::WorkerPoolRouterConfig, encode_quotes, finalize_quote, ExclusiveAccess, LiquidityScope,
     RankedQuotes, SolverPoolHandle, WorkerPoolRouter,
 };

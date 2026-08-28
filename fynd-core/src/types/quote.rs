@@ -66,6 +66,7 @@ impl QuoteRequest {
     }
 
     /// Replaces the solving options, keeping the orders.
+    #[must_use]
     pub fn with_options(mut self, options: QuoteOptions) -> Self {
         self.options = options;
         self

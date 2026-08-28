@@ -16,6 +16,7 @@
 //! one: a field on [`OrderClass`], a matching condition in [`SolverPoolHandle::serves`].
 
 use rustc_hash::FxHashMap;
+use tracing::warn;
 
 use super::{LiquidityScope, SolverPoolHandle};
 use crate::SolveError;
@@ -118,13 +119,21 @@ impl<'a> Allocation<'a> {
 ///
 /// `pool_allowlist` further restricts the selection to the named worker pools. It is validated
 /// against the full configuration, not the class-filtered set, so a typo fails loudly instead of
-/// silently routing through nothing.
+/// silently routing through nothing. An empty allowlist is rejected rather than silently
+/// resolving to no worker pools — omit it to reach every worker pool that serves the request.
 pub(crate) fn allocate<'a>(
     worker_pools: &'a [SolverPoolHandle],
     class: OrderClass,
     pool_allowlist: Option<&[String]>,
 ) -> Result<Allocation<'a>, SolveError> {
     if let Some(allowlist) = pool_allowlist {
+        if allowlist.is_empty() {
+            return Err(SolveError::Internal(
+                "worker pool allowlist is empty; omit it to use every pool that serves the \
+                 request"
+                    .to_string(),
+            ));
+        }
         let unknown: Vec<&str> = allowlist
             .iter()
             .map(String::as_str)
@@ -139,9 +148,8 @@ pub(crate) fn allocate<'a>(
                 .iter()
                 .map(SolverPoolHandle::name)
                 .collect();
-            return Err(SolveError::Internal(format!(
-                "unknown worker pool(s) {unknown:?}; configured: {configured:?}"
-            )));
+            warn!(?configured, ?unknown, "worker pool allowlist names unknown pool(s)");
+            return Err(SolveError::Internal(format!("unknown worker pool(s) {unknown:?}")));
         }
     }
 
@@ -241,7 +249,20 @@ mod tests {
         };
         let SolveError::Internal(message) = err else { panic!("expected Internal, got {err:?}") };
         assert!(message.contains("nope"), "{message}");
-        assert!(message.contains("\"a\""), "{message}");
+        // The configured pool list is logged, not returned to the caller — see M2.
+        assert!(!message.contains("\"a\""), "{message}");
+    }
+
+    #[test]
+    fn test_allocate_empty_allowlist_is_an_error() {
+        let pools = [handle("a")];
+        let allowlist: [String; 0] = [];
+        let Err(err) = allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist))
+        else {
+            panic!("expected an error for an empty allowlist");
+        };
+        let SolveError::Internal(message) = err else { panic!("expected Internal, got {err:?}") };
+        assert!(message.contains("empty"), "{message}");
     }
 
     #[test]

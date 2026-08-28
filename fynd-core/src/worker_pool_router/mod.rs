@@ -252,7 +252,9 @@ pub struct WorkerPoolRouter {
 /// [`WorkerPoolRouter::solve`].
 ///
 /// One inner list per request order, in request order, best candidate first. An order with no
-/// route yields a single `NoRouteFound`/`Timeout` placeholder, so every list is non-empty.
+/// route yields a single `NoRouteFound`/`Timeout` placeholder, so every list is non-empty. When
+/// the request enables the price guard, `PriceGuard::validate` has already picked the winner, so
+/// every list holds exactly that one candidate.
 #[must_use]
 #[derive(Debug)]
 pub struct RankedQuotes {
@@ -292,7 +294,7 @@ impl RankedQuotes {
         best
     }
 
-    /// When solving started; pass its elapsed time to [`finalize`] after encoding.
+    /// When solving started; pass its elapsed time to [`finalize_quote`] after encoding.
     pub fn started(&self) -> Instant {
         self.started
     }
@@ -322,7 +324,7 @@ pub async fn encode_quotes(
 }
 
 /// Builds the final [`Quote`]: sums the per-order gas estimates and stamps the solve time.
-pub fn finalize(order_quotes: Vec<OrderQuote>, solve_time_ms: u64) -> Quote {
+pub fn finalize_quote(order_quotes: Vec<OrderQuote>, solve_time_ms: u64) -> Quote {
     let total_gas_estimate = order_quotes
         .iter()
         .map(|o| o.gas_estimate())
@@ -360,7 +362,9 @@ impl WorkerPoolRouter {
     /// fan-out, gas refinement, pAMM floor check, ranking, exclusive-surplus overlay, comparison
     /// logging and price-guard validation. Callers that need more than the single best route per
     /// order — or want to encode with a different [`Encoder`] — build on this and finish with
-    /// [`encode_quotes`] and [`finalize`].
+    /// [`encode_quotes`] and [`finalize_quote`]. With the price guard enabled, every order's list
+    /// in the returned [`RankedQuotes`] holds exactly one candidate — the guard has already picked
+    /// the winner.
     pub async fn solve(
         &self,
         request: &QuoteRequest,
@@ -529,7 +533,7 @@ impl WorkerPoolRouter {
         if let Some(encoding_options) = request.options().encoding_options() {
             order_quotes = encode_quotes(&self.encoder, order_quotes, encoding_options).await?;
         }
-        Ok(finalize(order_quotes, started.elapsed().as_millis() as u64))
+        Ok(finalize_quote(order_quotes, started.elapsed().as_millis() as u64))
     }
 
     /// The encoder this router uses for [`Self::quote`].
@@ -1713,7 +1717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_solve_then_finalize_matches_quote() {
+    async fn test_solve_then_finalize_quote_matches_quote() {
         let (pool_a, worker_a) = create_mock_worker_pool("pool_a", Ok(make_single_quote(800)), 0);
         let (pool_b, worker_b) = create_mock_worker_pool("pool_b", Ok(make_single_quote(950)), 0);
         // Wait for both responses so both candidates land in the ranking (default
@@ -1731,7 +1735,7 @@ mod tests {
         assert_eq!(*ranked.per_order()[0][0].amount_out_net_gas(), BigUint::from(950u64));
         assert_eq!(*ranked.per_order()[0][1].amount_out_net_gas(), BigUint::from(800u64));
 
-        let staged = finalize(ranked.into_best(), 7);
+        let staged = finalize_quote(ranked.into_best(), 7);
         let direct = worker_router
             .quote(request, ExclusiveAccess::Denied)
             .await

@@ -599,7 +599,7 @@ mod tests {
 
         #[test]
         fn test_quote_response_serializes_quote() {
-            let quote = fynd_core::worker_pool_router::finalize(vec![], 3);
+            let quote = fynd_core::worker_pool_router::finalize_quote(vec![], 3);
             let response = quote_response(quote);
             assert_eq!(response.status(), 200);
         }
