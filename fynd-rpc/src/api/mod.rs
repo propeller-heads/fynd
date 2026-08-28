@@ -7,7 +7,7 @@ pub mod dto;
 /// [`ApiError`] type with HTTP status code mapping.
 pub mod error;
 /// Resolves the caller's access to exclusive liquidity from the request headers.
-pub(crate) mod exclusive_access;
+pub mod exclusive_access;
 /// Request handlers for `/v1/quote`, `/v1/health`, and `/v1/info`.
 pub mod handlers;
 /// HTTP metrics middleware recording request duration and per-client usage.
@@ -16,7 +16,7 @@ pub(crate) mod middleware;
 /// Response types and handler for `GET /v1/prices` (experimental).
 pub mod prices;
 /// Builds re-issuable, signature-free representation of a quote request for replay logging.
-pub(crate) mod request_capture;
+pub mod request_capture;
 #[cfg(feature = "experimental")]
 /// Response types and helpers for `GET /v1/tokens` (experimental).
 pub mod tokens;
@@ -119,7 +119,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
 /// Reads the last update timestamp from MarketState to determine how fresh the market data is,
 /// and checks derived data overall readiness.
 #[derive(Clone)]
-pub(crate) struct HealthTracker {
+pub struct HealthTracker {
     market_data: MarketData,
     derived_data: SharedDerivedDataRef,
     gas_price_stale_threshold: Option<Duration>,
@@ -144,7 +144,7 @@ impl HealthTracker {
     }
 
     /// Returns milliseconds since the last market data update.
-    pub(crate) async fn age_ms(&self) -> u64 {
+    pub async fn age_ms(&self) -> u64 {
         let data = self.market_data.read().await;
         match data.last_updated() {
             Some(block_info) => {
@@ -161,7 +161,7 @@ impl HealthTracker {
     }
 
     /// Returns milliseconds since the last gas price update, if available.
-    pub(crate) async fn gas_price_age_ms(&self) -> Option<u64> {
+    pub async fn gas_price_age_ms(&self) -> Option<u64> {
         let data = self.market_data.read().await;
         let gas_price = data.gas_price()?;
         let now_ms = SystemTime::now()
@@ -178,7 +178,7 @@ impl HealthTracker {
     ///
     /// During startup (before `threshold` has elapsed), a missing gas price is not
     /// considered stale — the first fetch may not have completed yet.
-    pub(crate) async fn gas_price_stale(&self) -> bool {
+    pub async fn gas_price_stale(&self) -> bool {
         let Some(threshold) = self.gas_price_stale_threshold else { return false };
         match self.gas_price_age_ms().await {
             Some(age_ms) => age_ms > threshold.as_millis() as u64,
@@ -191,7 +191,7 @@ impl HealthTracker {
     /// This checks overall readiness (has any computation cycle completed), not per-block
     /// freshness. Algorithms that require fresh derived data are ready to receive orders but
     /// will wait for per-block recomputation before solving.
-    pub(crate) async fn derived_data_ready(&self) -> bool {
+    pub async fn derived_data_ready(&self) -> bool {
         self.derived_data
             .read()
             .await
@@ -247,23 +247,28 @@ impl AppState {
         }
     }
 
-    pub(crate) fn worker_router(&self) -> &Arc<WorkerPoolRouter> {
+    /// Returns the worker pool router used to solve quotes.
+    pub fn worker_router(&self) -> &Arc<WorkerPoolRouter> {
         &self.worker_router
     }
 
-    pub(crate) fn health_tracker(&self) -> &HealthTracker {
+    /// Returns the health tracker backing `GET /v1/health`.
+    pub fn health_tracker(&self) -> &HealthTracker {
         &self.health_tracker
     }
 
-    pub(crate) fn chain_id(&self) -> u64 {
+    /// Returns the chain ID this instance serves quotes for.
+    pub fn chain_id(&self) -> u64 {
         self.chain_id
     }
 
-    pub(crate) fn router_address(&self) -> Option<&Bytes> {
+    /// Returns the Tycho Router address, if configured.
+    pub fn router_address(&self) -> Option<&Bytes> {
         self.router_address.as_ref()
     }
 
-    pub(crate) fn permit2_address(&self) -> &Bytes {
+    /// Returns the Permit2 contract address.
+    pub fn permit2_address(&self) -> &Bytes {
         &self.permit2_address
     }
 }

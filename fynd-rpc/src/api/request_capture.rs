@@ -12,7 +12,7 @@ use tracing::{info, warn};
 /// present. The server-generated `id`, the routing-irrelevant `sender` /
 /// `receiver` (also PII we keep out of logs), and all encoding data are
 /// omitted — nothing is copied implicitly, so no DTO field can leak.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct ReplayOrder {
     token_in: Address,
     token_out: Address,
@@ -21,7 +21,7 @@ struct ReplayOrder {
 }
 
 /// Routing-essential view of the request-level solve options.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct ReplayOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_ms: Option<u64>,
@@ -48,8 +48,8 @@ struct ReplayOptions {
 /// `exclusive_access` is not a body field either: a harness re-sends it as the
 /// `x-exclusive-access` header. An outcome that depended on `price_guard` may
 /// not reproduce on replay.
-#[derive(Serialize)]
-pub(crate) struct ReplayRequest {
+#[derive(Debug, Serialize)]
+pub struct ReplayRequest {
     orders: Vec<ReplayOrder>,
     options: ReplayOptions,
     exclusive_access: bool,
@@ -60,7 +60,7 @@ impl ReplayRequest {
     /// few address clones and no JSON — so it is safe to run on the quote hot
     /// path; the serialization cost is deferred to [`ReplayRequest::to_json`],
     /// which the handler only calls off the response path.
-    pub(crate) fn capture(request: &QuoteRequest, access: ExclusiveAccess) -> Self {
+    pub fn capture(request: &QuoteRequest, access: ExclusiveAccess) -> Self {
         let orders = request
             .orders()
             .iter()
@@ -86,7 +86,7 @@ impl ReplayRequest {
     }
 
     /// Serializes the capture to the replay-log JSON string.
-    pub(crate) fn to_json(&self) -> String {
+    pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "<unserializable>".to_string())
     }
 }
@@ -162,18 +162,18 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
 ///
 /// Both variants log one `failure_reasons` entry per order, so a breakdown by
 /// reason counts order slots without branching on the outcome.
-pub(crate) enum RequestOutcome {
+pub enum RequestOutcome {
     /// Solve returned a quote; per-order status codes in request order.
     Solved {
         /// Total orchestration time reported by the router.
         solve_time_ms: u64,
-        /// One [`quote_status_code`] per order, in request order.
+        /// One `quote_status_code` per order, in request order.
         order_statuses: Vec<&'static str>,
-        /// One [`failure_reason_slug`] per order, aligned with `order_statuses`
+        /// One `failure_reason_slug` per order, aligned with `order_statuses`
         /// (`""` for successful orders).
         failure_reasons: Vec<&'static str>,
     },
-    /// Solve failed; carries the [`crate::api::error::solve_error_code`].
+    /// Solve failed; carries the crate-internal solve-error code.
     ///
     /// The request-level error applies to every order, so the derived
     /// `http/<code>` reason is repeated `num_orders` times in the log line. No
@@ -188,7 +188,7 @@ impl RequestOutcome {
     /// Whether this outcome represents a failed quote: a solver error, or a
     /// solve in which at least one order did not succeed. Successful quotes
     /// (every order `success`) are not logged.
-    pub(crate) fn is_failure(&self) -> bool {
+    pub fn is_failure(&self) -> bool {
         match self {
             RequestOutcome::Failed { .. } => true,
             RequestOutcome::Solved { order_statuses, .. } => order_statuses
@@ -235,7 +235,7 @@ pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome
 }
 
 /// Threshold in milliseconds above which a successful solve is logged as slow.
-pub(crate) const SLOW_SOLVE_THRESHOLD_MS: u64 = 200;
+pub const SLOW_SOLVE_THRESHOLD_MS: u64 = 200;
 
 /// Emits a `slow_solve` warning when a successful solve exceeds the threshold.
 ///

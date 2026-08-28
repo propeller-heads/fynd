@@ -1,6 +1,7 @@
 //! HTTP request handlers for the solver API.
 
 use actix_web::{web, HttpRequest, HttpResponse};
+use fynd_core::{ExclusiveAccess, SolveError};
 use tracing::instrument;
 #[cfg(feature = "experimental")]
 use tracing::{debug, info, warn};
@@ -18,7 +19,7 @@ use crate::api::{
     exclusive_access,
     request_capture::{
         self, failure_reason_slug, log_request_capture, log_slow_solve, quote_status_code,
-        RequestOutcome,
+        ReplayRequest, RequestOutcome,
     },
 };
 
@@ -71,41 +72,56 @@ pub(crate) fn configure_routes(
     )
 )]
 #[instrument(skip(state, request, http_request), fields(num_orders = request.orders().len()))]
-pub(crate) async fn quote(
+pub async fn quote(
     state: web::Data<AppState>,
     request: web::Json<dto::QuoteRequest>,
     http_request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     let access = exclusive_access::from_headers(http_request.headers());
-    let dto_request = request.into_inner();
-
-    // Validate request
-    if dto_request.orders().is_empty() {
-        return Err(ApiError::BadRequest("no orders provided".to_string()));
-    }
-
-    // Capture a re-issuable, signature-free copy of the request BEFORE the core
-    // conversion consumes `dto_request`. This is cheap (no serialization); the
-    // JSON encoding is deferred to the failure-only task below.
-    let num_orders = dto_request.orders().len();
-    let replay_capture = request_capture::ReplayRequest::capture(&dto_request, access);
-
-    // Convert DTO to core types
-    let core_request: fynd_core::QuoteRequest = dto_request.into();
-
-    // Validate orders (unchanged from the original handler).
-    for order in core_request.orders() {
-        if let Err(e) = order.validate() {
-            return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id(), e)));
-        }
-    }
+    let (core_request, capture) = validate_quote_request(request.into_inner(), access)?;
+    let num_orders = core_request.orders().len();
 
     let result = state
         .worker_router()
         .quote(core_request, access)
         .await;
+    log_quote_outcome(num_orders, capture, &result);
 
-    let outcome = match &result {
+    Ok(quote_response(result?))
+}
+
+/// Validates a wire-format quote request and converts it to the core type.
+///
+/// Rejects requests without orders and orders that fail [`fynd_core::Order::validate`]. The
+/// returned [`ReplayRequest`] is a signature-free copy taken before conversion, for
+/// [`log_quote_outcome`].
+pub fn validate_quote_request(
+    request: dto::QuoteRequest,
+    access: ExclusiveAccess,
+) -> Result<(fynd_core::QuoteRequest, ReplayRequest), ApiError> {
+    if request.orders().is_empty() {
+        return Err(ApiError::BadRequest("no orders provided".to_string()));
+    }
+    let capture = ReplayRequest::capture(&request, access);
+    let core_request: fynd_core::QuoteRequest = request.into();
+    for order in core_request.orders() {
+        if let Err(e) = order.validate() {
+            return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id(), e)));
+        }
+    }
+    Ok((core_request, capture))
+}
+
+/// Emits the failure-capture and slow-solve log lines for a finished quote.
+///
+/// Serialization happens on a detached task carrying the current span, so it never adds latency
+/// to the response. Successful, fast quotes log nothing (see [`RequestOutcome::is_failure`]).
+pub fn log_quote_outcome(
+    num_orders: usize,
+    capture: ReplayRequest,
+    result: &Result<fynd_core::Quote, SolveError>,
+) {
+    let outcome = match result {
         Ok(core_quote) => RequestOutcome::Solved {
             solve_time_ms: core_quote.solve_time_ms(),
             order_statuses: core_quote
@@ -123,12 +139,6 @@ pub(crate) async fn quote(
         },
         Err(error) => RequestOutcome::Failed { code: solve_error_code(error) },
     };
-    // Only failed quotes get a capture line (successful quotes are the common
-    // case and would dominate log volume; see RequestOutcome::is_failure), and
-    // successful solves above the slow threshold get a slow_solve line. Both
-    // are emitted from a detached task so serialization never adds latency to
-    // the response; the current tracing span is carried over so the lines keep
-    // their request context.
     let slow_solve_time_ms = match &outcome {
         RequestOutcome::Solved { solve_time_ms, .. }
             if *solve_time_ms > request_capture::SLOW_SOLVE_THRESHOLD_MS =>
@@ -137,31 +147,32 @@ pub(crate) async fn quote(
         }
         RequestOutcome::Solved { .. } | RequestOutcome::Failed { .. } => None,
     };
-    if outcome.is_failure() || slow_solve_time_ms.is_some() {
-        let span = tracing::Span::current();
-        actix_web::rt::spawn(async move {
-            span.in_scope(|| {
-                let replay_json = replay_capture.to_json();
-                if outcome.is_failure() {
-                    log_request_capture(num_orders, &replay_json, &outcome);
-                }
-                if let Some(solve_time_ms) = slow_solve_time_ms {
-                    log_slow_solve(
-                        solve_time_ms,
-                        num_orders,
-                        request_capture::SLOW_SOLVE_THRESHOLD_MS,
-                        &replay_json,
-                    );
-                }
-            });
-        });
+    if !outcome.is_failure() && slow_solve_time_ms.is_none() {
+        return;
     }
+    let span = tracing::Span::current();
+    actix_web::rt::spawn(async move {
+        span.in_scope(|| {
+            let replay_json = capture.to_json();
+            if outcome.is_failure() {
+                log_request_capture(num_orders, &replay_json, &outcome);
+            }
+            if let Some(solve_time_ms) = slow_solve_time_ms {
+                log_slow_solve(
+                    solve_time_ms,
+                    num_orders,
+                    request_capture::SLOW_SOLVE_THRESHOLD_MS,
+                    &replay_json,
+                );
+            }
+        });
+    });
+}
 
-    let core_quote = result?;
-
+/// Serializes a core quote as the `200 OK` wire response.
+pub fn quote_response(core_quote: fynd_core::Quote) -> HttpResponse {
     let dto_quote: dto::Quote = core_quote.into();
-
-    Ok(HttpResponse::Ok().json(dto_quote))
+    HttpResponse::Ok().json(dto_quote)
 }
 
 /// GET /v1/health - Health check endpoint.
@@ -176,7 +187,7 @@ pub(crate) async fn quote(
         (status = 503, description = "Data stale", body = dto::HealthStatus),
     )
 )]
-pub(crate) async fn health(state: web::Data<AppState>) -> HttpResponse {
+pub async fn health(state: web::Data<AppState>) -> HttpResponse {
     let age_ms = state.health_tracker().age_ms().await;
     let data_fresh = age_ms < 60_000; // Healthy if data less than 60s old
     let derived_data_ready = state
@@ -217,7 +228,7 @@ pub(crate) async fn health(state: web::Data<AppState>) -> HttpResponse {
         (status = 200, description = "Instance info", body = dto::InstanceInfo),
     )
 )]
-pub(crate) async fn info(state: web::Data<AppState>) -> HttpResponse {
+pub async fn info(state: web::Data<AppState>) -> HttpResponse {
     let body = dto::InstanceInfo::builder(
         state.chain_id(),
         state
@@ -531,6 +542,68 @@ mod tests {
     #[cfg(feature = "experimental")]
     use crate::api::tokens::{GraphTokenEntry, TokensCache};
     use crate::api::{dto::QuoteRequest, AppState, HealthTracker};
+
+    // Nested so it doesn't inherit this module's unqualified `test` import above (actix-web
+    // exports both a `test` module and a `#[test]` attribute macro at that path; the import
+    // shadows the standard library's `#[test]`, which then rejects these non-async fns). See
+    // the identical note in `docs.rs`.
+    mod quote_pipeline {
+        use fynd_core::ExclusiveAccess;
+
+        use crate::api::{
+            dto,
+            handlers::{quote_response, validate_quote_request},
+            ApiError,
+        };
+
+        fn dto_request(orders: Vec<dto::Order>) -> dto::QuoteRequest {
+            serde_json::from_value(serde_json::json!({
+                "orders": orders,
+                "options": {}
+            }))
+            .expect("valid request json")
+        }
+
+        fn dto_order() -> dto::Order {
+            serde_json::from_value(serde_json::json!({
+                "token_in": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                "token_out": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "amount": "1000000000000000000",
+                "side": "sell",
+                "sender": "0x000000000000000000000000000000000000dEaD"
+            }))
+            .expect("valid order json")
+        }
+
+        #[test]
+        fn test_validate_quote_request_rejects_empty_orders() {
+            let err = validate_quote_request(dto_request(vec![]), ExclusiveAccess::Denied)
+                .expect_err("empty orders");
+            assert!(matches!(err, ApiError::BadRequest(_)), "{err:?}");
+        }
+
+        #[test]
+        fn test_validate_quote_request_converts_and_captures() {
+            let (core_request, capture) =
+                validate_quote_request(dto_request(vec![dto_order()]), ExclusiveAccess::Granted)
+                    .expect("valid");
+            assert_eq!(core_request.orders().len(), 1);
+            assert!(
+                capture
+                    .to_json()
+                    .contains("\"exclusive_access\""),
+                "{}",
+                capture.to_json()
+            );
+        }
+
+        #[test]
+        fn test_quote_response_serializes_quote() {
+            let quote = fynd_core::worker_pool_router::finalize(vec![], 3);
+            let response = quote_response(quote);
+            assert_eq!(response.status(), 200);
+        }
+    }
 
     /// Minimal handler that mirrors the real quote handler's JSON extraction.
     /// The body deserialization error happens before this is called.
