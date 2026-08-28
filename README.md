@@ -1,6 +1,6 @@
 # Fynd
 
-A high-performance DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho). Finds optimal swap
+A high-performance DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho) -- finds optimal swap
 routes across multiple DeFi protocols in real-time.
 
 ## Features
