@@ -348,6 +348,7 @@ async fn setup_solver(args: &cli::ServeArgs) -> Result<fynd_rpc::builder::FyndRP
 
     builder = builder.blocklist(blocklist);
     builder = builder.partial_blocks(args.partial_blocks);
+    builder = builder.stream_timeout_secs(args.stream_timeout_secs);
     builder = builder.price_guard_enabled(args.enable_price_guard);
     if let Some(watermark) = &args.calldata_watermark {
         builder = builder.calldata_watermark(watermark.as_bytes());

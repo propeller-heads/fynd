@@ -56,6 +56,10 @@ pub(crate) struct TychoFeedConfig {
     /// finalization, reducing effective latency at the cost of processing more frequent,
     /// smaller updates.
     pub(crate) partial_blocks: bool,
+    /// Override for the Tycho stream timeout in seconds. When unset, tycho-client derives it
+    /// from the chain's block time (3x block time for custom-registry chains), which can be too
+    /// tight for indexers that pause during catch-up bursts.
+    pub(crate) stream_timeout_secs: Option<u64>,
 }
 
 impl TychoFeedConfig {
@@ -80,6 +84,7 @@ impl TychoFeedConfig {
             reconnect_delay: Duration::from_secs(5),
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
+            stream_timeout_secs: None,
         }
     }
 
@@ -110,6 +115,11 @@ impl TychoFeedConfig {
 
     pub(crate) fn partial_blocks(mut self, enabled: bool) -> Self {
         self.partial_blocks = enabled;
+        self
+    }
+
+    pub(crate) fn stream_timeout_secs(mut self, timeout_secs: Option<u64>) -> Self {
+        self.stream_timeout_secs = timeout_secs;
         self
     }
 }

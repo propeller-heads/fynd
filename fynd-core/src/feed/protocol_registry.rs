@@ -411,6 +411,17 @@ pub(crate) fn register_exchanges(
                 builder =
                     builder.exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None);
             }
+            "blazeswap_v2" => {
+                builder =
+                    builder.exchange::<UniswapV2State>("blazeswap_v2", tvl_filter.clone(), None);
+            }
+            "sparkdex_v3" => {
+                builder =
+                    builder.exchange::<UniswapV3State>("sparkdex_v3", tvl_filter.clone(), None);
+            }
+            "enosys_v3" => {
+                builder = builder.exchange::<UniswapV3State>("enosys_v3", tvl_filter.clone(), None);
+            }
             "lunarbase" => {
                 builder = builder.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
             }
