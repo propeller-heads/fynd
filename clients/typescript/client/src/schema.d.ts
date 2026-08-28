@@ -478,6 +478,13 @@ export interface components {
              */
             price_impact_bps?: number | null;
             route?: null | components["schemas"]["Route"];
+            /**
+             * @description Routing algorithm that produced this quote.
+             *
+             *     Absent on a quote no solver produced, such as a no-route placeholder.
+             * @example bellman_ford
+             */
+            solver?: string | null;
             /** @description Status indicating whether a route was found. */
             status: components["schemas"]["QuoteStatus"];
             transaction?: null | components["schemas"]["Transaction"];

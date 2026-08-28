@@ -851,6 +851,12 @@ pub struct OrderQuote {
     /// Fee breakdown (populated when encoding options are provided).
     #[serde(skip_serializing_if = "Option::is_none")]
     fee_breakdown: Option<FeeBreakdown>,
+    /// Routing algorithm that produced this quote.
+    ///
+    /// Absent on a quote no solver produced, such as a no-route placeholder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = "bellman_ford"))]
+    solver: Option<String>,
 }
 
 impl OrderQuote {
@@ -892,6 +898,11 @@ impl OrderQuote {
     /// Amount out minus gas cost in output token terms.
     pub fn amount_out_net_gas(&self) -> &BigUint {
         &self.amount_out_net_gas
+    }
+
+    /// Routing algorithm that produced this quote.
+    pub fn solver(&self) -> Option<&str> {
+        self.solver.as_deref()
     }
 
     /// Block at which this quote was computed.
@@ -1806,6 +1817,7 @@ mod conversions {
                 .fee_breakdown()
                 .cloned()
                 .map(Into::into);
+            let solver = (!core.algorithm().is_empty()).then(|| core.algorithm().to_string());
             let route = core.into_route().map(Into::into);
             Self {
                 order_id,
@@ -1820,6 +1832,7 @@ mod conversions {
                 gas_price,
                 transaction,
                 fee_breakdown,
+                solver,
             }
         }
     }

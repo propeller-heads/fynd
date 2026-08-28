@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.99.11"
+    "version": "0.99.18"
   },
   "paths": {
     "/v1/health": {
@@ -799,6 +799,14 @@
                 "description": "The route to execute, if a valid route was found."
               }
             ]
+          },
+          "solver": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Routing algorithm that produced this quote.\n\nAbsent on a quote no solver produced, such as a no-route placeholder.",
+            "example": "bellman_ford"
           },
           "status": {
             "$ref": "#/components/schemas/QuoteStatus",

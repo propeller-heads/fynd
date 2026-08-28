@@ -84,6 +84,7 @@ export function fromWireQuote(
         ? fromWireTransaction(orderSolution.transaction)
         : undefined;
     const priceImpactBps = orderSolution.price_impact_bps ?? undefined;
+    const solver = orderSolution.solver ?? undefined;
     const feeBreakdown = orderSolution.fee_breakdown != null
         ? fromWireFeeBreakdown(orderSolution.fee_breakdown)
         : undefined;
@@ -101,6 +102,7 @@ export function fromWireQuote(
         ...(route !== undefined ? {route} : {}),
         ...(transaction !== undefined ? {transaction} : {}),
         ...(priceImpactBps !== undefined ? {priceImpactBps} : {}),
+        ...(solver !== undefined ? {solver} : {}),
         ...(feeBreakdown !== undefined ? {feeBreakdown} : {}),
     };
 }
