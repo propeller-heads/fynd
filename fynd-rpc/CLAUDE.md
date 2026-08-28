@@ -22,7 +22,7 @@ infrastructure.
 
 | Endpoint | Handler | Description |
 |---|---|---|
-| `POST /v1/quote` | `handlers::quote` | Submit orders, receive optimal routes. The `x-exclusive-access: true` request header (set by the authenticating proxy, never by the caller) allocates exclusive-access worker pools to the request; any other value or none restricts it to public pools. Only meaningful when the server is unreachable except through that proxy. Composed of the public `validate_quote_request` / `log_quote_outcome` helpers, for embedders writing their own variant |
+| `POST /v1/quote` | `handlers::quote` | Submit orders, receive optimal routes. The `x-exclusive-access: true` request header (set by the authenticating proxy, never by the caller) allocates exclusive-access worker pools to the request; any other value or none restricts it to public pools. Only meaningful when the server is unreachable except through that proxy. Composed of the public `validate_quote_request` / `ReplayRequest::capture` / `log_quote_outcome` helpers, for embedders writing their own variant |
 | `GET /v1/health` | `handlers::health` | Health check (data freshness, derived data readiness, gas-price staleness, solver pool count). Returns 503 when market data is stale, derived data is not ready, or the gas price is stale |
 | `GET /v1/info` | `handlers::info` | Static metadata about this Fynd instance (version, chain, spender address) |
 | `GET /v1/prices` | `handlers::get_prices` | Token prices, spot prices, component depths (experimental feature only) |

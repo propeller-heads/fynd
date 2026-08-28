@@ -1,7 +1,7 @@
 //! HTTP request handlers for the solver API.
 
 use actix_web::{web, HttpRequest, HttpResponse};
-use fynd_core::{ExclusiveAccess, SolveError};
+use fynd_core::SolveError;
 use tracing::instrument;
 #[cfg(feature = "experimental")]
 use tracing::{debug, info, warn};
@@ -78,7 +78,8 @@ pub async fn quote(
     http_request: HttpRequest,
 ) -> Result<HttpResponse, ApiError> {
     let access = exclusive_access::from_headers(http_request.headers());
-    let (core_request, capture) = validate_quote_request(request.into_inner(), access)?;
+    let capture = ReplayRequest::capture(&request, access);
+    let core_request = validate_quote_request(request.into_inner())?;
 
     let result = state
         .worker_router()
@@ -92,24 +93,22 @@ pub async fn quote(
 
 /// Validates a wire-format quote request and converts it to the core type.
 ///
-/// Rejects requests without orders and orders that fail [`fynd_core::Order::validate`]. The
-/// returned [`ReplayRequest`] is a signature-free copy taken before conversion, for
-/// [`log_quote_outcome`].
+/// Rejects requests without orders and orders that fail [`fynd_core::Order::validate`].
+/// Conversion consumes the wire request, so take a [`ReplayRequest::capture`] first if the
+/// outcome should be logged with [`log_quote_outcome`].
 pub fn validate_quote_request(
     request: dto::QuoteRequest,
-    access: ExclusiveAccess,
-) -> Result<(fynd_core::QuoteRequest, ReplayRequest), ApiError> {
+) -> Result<fynd_core::QuoteRequest, ApiError> {
     if request.orders().is_empty() {
         return Err(ApiError::BadRequest("no orders provided".to_string()));
     }
-    let capture = ReplayRequest::capture(&request, access);
     let core_request: fynd_core::QuoteRequest = request.into();
     for order in core_request.orders() {
         if let Err(e) = order.validate() {
             return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id(), e)));
         }
     }
-    Ok((core_request, capture))
+    Ok(core_request)
 }
 
 /// Emits the failure-capture and slow-solve log lines for a finished quote.
@@ -544,7 +543,6 @@ mod tests {
     // shadows the standard library's `#[test]`, which then rejects these non-async fns). See
     // the identical note in `docs.rs`.
     mod quote_pipeline {
-        use fynd_core::ExclusiveAccess;
 
         use crate::api::{dto, handlers::validate_quote_request, ApiError};
 
@@ -569,24 +567,15 @@ mod tests {
 
         #[test]
         fn test_validate_quote_request_rejects_empty_orders() {
-            let err = validate_quote_request(dto_request(vec![]), ExclusiveAccess::Denied)
-                .expect_err("empty orders");
+            let err = validate_quote_request(dto_request(vec![])).expect_err("empty orders");
             assert!(matches!(err, ApiError::BadRequest(_)), "{err:?}");
         }
 
         #[test]
-        fn test_validate_quote_request_converts_and_captures() {
-            let (core_request, capture) =
-                validate_quote_request(dto_request(vec![dto_order()]), ExclusiveAccess::Granted)
-                    .expect("valid");
+        fn test_validate_quote_request_converts_valid_orders() {
+            let core_request =
+                validate_quote_request(dto_request(vec![dto_order()])).expect("valid");
             assert_eq!(core_request.orders().len(), 1);
-            assert!(
-                capture
-                    .to_json()
-                    .contains("\"exclusive_access\""),
-                "{}",
-                capture.to_json()
-            );
         }
     }
 

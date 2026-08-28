@@ -36,8 +36,8 @@
 //! compiling version of this example.
 //!
 //! A custom handler can reuse the stock request/response plumbing —
-//! [`api::handlers::validate_quote_request`] and [`api::handlers::log_quote_outcome`] — and the
-//! solving stages
+//! [`api::handlers::validate_quote_request`], [`api::request_capture::ReplayRequest::capture`]
+//! and [`api::handlers::log_quote_outcome`] — and the solving stages
 //! [`fynd_core::WorkerPoolRouter::solve`], [`fynd_core::encode_quotes`], and
 //! [`fynd_core::finalize_quote`] that the default `/v1/quote` handler is composed of.
 
