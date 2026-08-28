@@ -48,6 +48,7 @@ pub(crate) fn solve_error_code(err: &SolveError) -> &'static str {
         SolveError::MarketDataStale { .. } => "STALE_DATA",
         SolveError::InvalidOrder(_) => "INVALID_ORDER",
         SolveError::Internal(_) => "INTERNAL_ERROR",
+        SolveError::InvalidWorkerPools(_) => "INVALID_WORKER_POOLS",
         SolveError::NotReady(_) => "NOT_READY",
         SolveError::ComputationFailed(_) => "COMPUTATION_FAILED",
         SolveError::FailedEncoding(_) => "FAILED_ENCODING",

@@ -31,7 +31,7 @@ use std::{
 };
 
 pub use allocation::ExclusiveAccess;
-use allocation::{allocate, Allocation, OrderClass};
+use allocation::{allocate, validate_pool_allowlist, Allocation, OrderClass};
 use comparison_log::{log_quote_comparison, solver_error_label};
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -248,6 +248,109 @@ pub struct WorkerPoolRouter {
     price_guard: Option<PriceGuard>,
 }
 
+/// Ranked, unencoded candidates for every order of a request — the output of
+/// [`WorkerPoolRouter::solve`].
+///
+/// One inner list per request order, in request order, best candidate first. An order with no
+/// route yields a single `NoRouteFound`/`Timeout` placeholder, so every list is non-empty. When
+/// the request enables the price guard, `PriceGuard::validate` has already picked the winner, so
+/// every list holds exactly that one candidate.
+#[must_use]
+#[derive(Debug)]
+pub struct RankedQuotes {
+    per_order: Vec<Vec<OrderQuote>>,
+    started: Instant,
+}
+
+impl RankedQuotes {
+    /// Wraps already-ranked candidates and starts the solve clock now.
+    ///
+    /// Every inner list must be non-empty — an order without a route is represented by a
+    /// non-`Success` `OrderQuote` (e.g. `QuoteStatus::NoRouteFound`), not by an empty list, per
+    /// the invariant documented on this struct.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SolveError::Internal)` if any inner list is empty.
+    pub fn new(per_order: Vec<Vec<OrderQuote>>) -> Result<Self, SolveError> {
+        Self::started_at(per_order, Instant::now())
+    }
+
+    /// Wraps already-ranked candidates with an explicit start time, rejecting empty inner lists.
+    ///
+    /// Every `RankedQuotes` is built here, so the non-empty invariant holds for every instance
+    /// and [`Self::into_best`] cannot hit an empty list. [`WorkerPoolRouter::solve`] feeds it
+    /// `rank_quotes` output, which always yields at least a `NoRouteFound`/`Timeout` placeholder
+    /// per order, so the error path is unreachable there but stays checked rather than assumed.
+    fn started_at(per_order: Vec<Vec<OrderQuote>>, started: Instant) -> Result<Self, SolveError> {
+        for (index, candidates) in per_order.iter().enumerate() {
+            if candidates.is_empty() {
+                return Err(SolveError::Internal(format!(
+                    "order {index} has no candidates: represent an order without a quote by a \
+                     non-Success OrderQuote (e.g. QuoteStatus::NoRouteFound), which is how the \
+                     response reports it"
+                )));
+            }
+        }
+        Ok(Self { per_order, started })
+    }
+
+    /// Ranked candidates per order, best first.
+    #[must_use]
+    pub fn per_order(&self) -> &[Vec<OrderQuote>] {
+        &self.per_order
+    }
+
+    /// Consumes the ranking, returning the candidates per order.
+    #[must_use]
+    pub fn into_per_order(self) -> Vec<Vec<OrderQuote>> {
+        self.per_order
+    }
+
+    /// Consumes the ranking, keeping only the best candidate of every order.
+    #[must_use]
+    pub fn into_best(self) -> Vec<OrderQuote> {
+        self.per_order
+            .into_iter()
+            // Cannot panic: `started_at` rejects empty lists, and it is the only constructor.
+            .map(|mut candidates| candidates.swap_remove(0))
+            .collect()
+    }
+
+    /// When solving started; pass its elapsed time to [`finalize_quote`] after encoding.
+    #[must_use]
+    pub fn started(&self) -> Instant {
+        self.started
+    }
+}
+
+/// Encodes successful order quotes into router calldata, recording the encoding metrics the
+/// HTTP service reports.
+pub async fn encode_quotes(
+    encoder: &Encoder,
+    order_quotes: Vec<OrderQuote>,
+    encoding_options: &EncodingOptions,
+) -> Result<Vec<OrderQuote>, SolveError> {
+    let encode_start = Instant::now();
+    let encoded = encoder
+        .encode(order_quotes, encoding_options.clone())
+        .await;
+    histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
+    if encoded.is_err() {
+        counter!("encoding_failures_total").increment(1);
+    }
+    encoded
+}
+
+/// Builds the final [`Quote`]: sums the per-order gas estimates and stamps the solve time.
+pub fn finalize_quote(order_quotes: Vec<OrderQuote>, solve_time_ms: u64) -> Quote {
+    let total_gas_estimate = order_quotes
+        .iter()
+        .map(|o| o.gas_estimate())
+        .fold(BigUint::ZERO, |acc, g| acc + g);
+    Quote::new(order_quotes, total_gas_estimate, solve_time_ms)
+}
+
 impl WorkerPoolRouter {
     /// Creates a new WorkerPoolRouter with the given solver pools, config, and encoder.
     pub fn new(
@@ -272,25 +375,20 @@ impl WorkerPoolRouter {
         self.solver_pools.len()
     }
 
-    /// Returns a quote by fanning out to the worker pools that serve the request.
+    /// Fans the request out to its worker pools and returns every order's ranked candidates.
     ///
-    /// For each order in the request:
-    /// 1. Allocates the worker pools that serve it (see the `allocation` module)
-    /// 2. Sends the order to those worker pools in parallel
-    /// 3. Waits for responses with timeout
-    /// 4. Selects the best quote based on `amount_out_net_gas`
-    /// 5. If `encoding_options` are set on the request, encodes winning solutions into on-chain
-    ///    transactions
-    ///
-    /// `access` is the caller's access to exclusive liquidity, resolved at the trust
-    /// boundary. With [`ExclusiveAccess::Denied`] no exclusive-access worker pool is allocated, so
-    /// such worker pools do no work for the request and the quote is built from public liquidity
-    /// alone.
-    pub async fn quote(
+    /// Performs everything [`Self::quote`] does except encoding and final assembly: allocation,
+    /// fan-out, gas refinement, pAMM floor check, ranking, exclusive-surplus overlay, comparison
+    /// logging and price-guard validation. Callers that need more than the single best route per
+    /// order — or want to encode with a different [`Encoder`] — build on this and finish with
+    /// [`encode_quotes`] and [`finalize_quote`]. With the price guard enabled, every order's list
+    /// in the returned [`RankedQuotes`] holds exactly one candidate — the guard has already picked
+    /// the winner.
+    pub async fn solve(
         &self,
-        request: QuoteRequest,
+        request: &QuoteRequest,
         access: ExclusiveAccess,
-    ) -> Result<Quote, SolveError> {
+    ) -> Result<RankedQuotes, SolveError> {
         let start = Instant::now();
         let deadline = start + self.effective_timeout(request.options());
         let min_responses = request
@@ -320,11 +418,14 @@ impl WorkerPoolRouter {
         // not of the request. Today every order in a request classifies identically; once
         // trade size joins `OrderClass` they will differ.
         let class = OrderClass::new(access);
-        let allocations: Vec<Allocation<'_>> = request
-            .orders()
-            .iter()
-            .map(|_| allocate(&self.solver_pools, class))
-            .collect();
+        let pool_allowlist = request.options().worker_pools();
+        if let Some(allowlist) = pool_allowlist {
+            validate_pool_allowlist(&self.solver_pools, allowlist)?;
+        }
+        let mut allocations: Vec<Allocation<'_>> = Vec::with_capacity(request.orders().len());
+        for _order in request.orders() {
+            allocations.push(allocate(&self.solver_pools, class, pool_allowlist));
+        }
 
         if allocations
             .iter()
@@ -404,51 +505,63 @@ impl WorkerPoolRouter {
             .map(|e| e.price_guard())
             .filter(|c| c.enabled());
 
-        let mut order_quotes: Vec<OrderQuote> = match (&self.price_guard, price_guard_config) {
+        // `PriceGuard::validate` keeps only the winning candidate per order, since it has
+        // already chosen among the ranked candidates. Wrap each in a one-element `Vec` so both
+        // match arms share the `Vec<Vec<OrderQuote>>` shape `RankedQuotes` expects.
+        let ranked_per_order: Vec<Vec<OrderQuote>> = match (&self.price_guard, price_guard_config) {
             (Some(guard), Some(config)) => guard
                 .validate(ranked_quotes, config)
                 .map_err(|e| {
                     warn!(error = %e, "price guard validation error");
                     SolveError::Internal(e.to_string())
-                })?,
+                })?
+                .into_iter()
+                .map(|order_quote| vec![order_quote])
+                .collect(),
             (None, Some(_)) => {
                 return Err(SolveError::Internal(
                     "price guard config provided but price guard is not enabled on this server"
                         .to_string(),
                 ));
             }
-            _ => ranked_quotes
-                .into_iter()
-                .filter_map(|candidates| candidates.into_iter().next())
-                .collect(),
+            _ => ranked_quotes,
         };
 
-        // Encode solutions if encoding_options is set
+        RankedQuotes::started_at(ranked_per_order, start)
+    }
+
+    /// Returns a quote by fanning out to the worker pools that serve the request.
+    ///
+    /// For each order in the request:
+    /// 1. Allocates the worker pools that serve it (see the `allocation` module)
+    /// 2. Sends the order to those worker pools in parallel
+    /// 3. Waits for responses with timeout
+    /// 4. Selects the best quote based on `amount_out_net_gas`
+    /// 5. If `encoding_options` are set on the request, encodes winning solutions into on-chain
+    ///    transactions
+    ///
+    /// `access` is the caller's access to exclusive liquidity, resolved at the trust
+    /// boundary. With [`ExclusiveAccess::Denied`] no exclusive-access worker pool is allocated, so
+    /// such worker pools do no work for the request and the quote is built from public liquidity
+    /// alone.
+    pub async fn quote(
+        &self,
+        request: QuoteRequest,
+        access: ExclusiveAccess,
+    ) -> Result<Quote, SolveError> {
+        let ranked = self.solve(&request, access).await?;
+        let started = ranked.started();
+        let mut order_quotes = ranked.into_best();
         if let Some(encoding_options) = request.options().encoding_options() {
-            let encode_start = Instant::now();
-            let encoded = self
-                .encoder
-                .encode(order_quotes, encoding_options.clone())
-                .await;
-            histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
-            order_quotes = match encoded {
-                Ok(quotes) => quotes,
-                Err(e) => {
-                    counter!("encoding_failures_total").increment(1);
-                    return Err(e);
-                }
-            };
+            order_quotes = encode_quotes(&self.encoder, order_quotes, encoding_options).await?;
         }
+        Ok(finalize_quote(order_quotes, started.elapsed().as_millis() as u64))
+    }
 
-        // Calculate totals
-        let total_gas_estimate = order_quotes
-            .iter()
-            .map(|o| o.gas_estimate())
-            .fold(BigUint::ZERO, |acc, g| acc + g);
-
-        let solve_time_ms = start.elapsed().as_millis() as u64;
-
-        Ok(Quote::new(order_quotes, total_gas_estimate, solve_time_ms))
+    /// The encoder this router uses for [`Self::quote`].
+    #[must_use]
+    pub fn encoder(&self) -> &Encoder {
+        &self.encoder
     }
 
     /// Solves a single order by fanning out to the worker pools allocated to it.
@@ -1171,6 +1284,7 @@ fn cause_tier(error: &SolveError) -> u8 {
         SolveError::Timeout { .. } |
         SolveError::QueueFull |
         SolveError::Internal(_) |
+        SolveError::InvalidWorkerPools(_) |
         SolveError::InvalidOrder(_) |
         SolveError::FailedEncoding(_) |
         SolveError::EncodingUnavailable(_) |
@@ -1624,6 +1738,107 @@ mod tests {
         drop(worker_router);
         worker_a.abort();
         worker_b.abort();
+    }
+
+    #[tokio::test]
+    async fn test_solve_then_finalize_quote_matches_quote() {
+        let (pool_a, worker_a) = create_mock_worker_pool("pool_a", Ok(make_single_quote(800)), 0);
+        let (pool_b, worker_b) = create_mock_worker_pool("pool_b", Ok(make_single_quote(950)), 0);
+        // Wait for both responses so both candidates land in the ranking (default
+        // `min_responses` of 1 would race and could drop whichever pool answers second).
+        let config = WorkerPoolRouterConfig::default().with_min_responses(2);
+        let worker_router = WorkerPoolRouter::new(vec![pool_a, pool_b], config, default_encoder());
+        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
+
+        let ranked = worker_router
+            .solve(&request, ExclusiveAccess::Denied)
+            .await
+            .expect("solve");
+        assert_eq!(ranked.per_order().len(), 1);
+        assert_eq!(ranked.per_order()[0].len(), 2, "both candidates are kept, best first");
+        assert_eq!(*ranked.per_order()[0][0].amount_out_net_gas(), BigUint::from(950u64));
+        assert_eq!(*ranked.per_order()[0][1].amount_out_net_gas(), BigUint::from(800u64));
+
+        let staged = finalize_quote(ranked.into_best(), 7);
+        let direct = worker_router
+            .quote(request, ExclusiveAccess::Denied)
+            .await
+            .expect("quote");
+
+        assert_eq!(staged.orders().len(), direct.orders().len());
+        assert_eq!(
+            staged.orders()[0].amount_out_net_gas(),
+            direct.orders()[0].amount_out_net_gas()
+        );
+        assert_eq!(staged.total_gas_estimate(), direct.total_gas_estimate());
+        assert_eq!(staged.solve_time_ms(), 7);
+        worker_a.abort();
+        worker_b.abort();
+    }
+
+    #[test]
+    fn test_ranked_quotes_into_best_takes_first_of_each_order() {
+        let ranked = RankedQuotes::new(vec![
+            vec![make_single_quote(950).order().clone(), make_single_quote(800).order().clone()],
+            vec![make_single_quote(600).order().clone()],
+        ])
+        .expect("both orders have candidates");
+        let best = ranked.into_best();
+        assert_eq!(best.len(), 2);
+        assert_eq!(*best[0].amount_out_net_gas(), BigUint::from(950u64));
+        assert_eq!(*best[1].amount_out_net_gas(), BigUint::from(600u64));
+    }
+
+    #[test]
+    fn test_ranked_quotes_new_rejects_empty_order() {
+        let err = RankedQuotes::new(vec![vec![make_single_quote(950).order().clone()], vec![]])
+            .expect_err("order 1 has no candidates");
+        let SolveError::Internal(message) = err else {
+            panic!("expected SolveError::Internal, got {err:?}")
+        };
+        assert!(message.contains("order 1 has no candidates"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_router_worker_pool_allowlist_skips_other_pools() {
+        let (pool_a, worker_a, received_a) =
+            create_counting_mock_worker_pool("pool_a", Ok(make_single_quote(950)), 0);
+        let (pool_b, worker_b, received_b) =
+            create_counting_mock_worker_pool("pool_b", Ok(make_single_quote(800)), 0);
+        let worker_router = WorkerPoolRouter::new(
+            vec![pool_a, pool_b],
+            WorkerPoolRouterConfig::default(),
+            default_encoder(),
+        );
+        let options = QuoteOptions::default().with_worker_pools(vec!["pool_b".to_string()]);
+        let request = QuoteRequest::new(vec![make_order()], options);
+
+        let quote = worker_router
+            .quote(request, ExclusiveAccess::Denied)
+            .await
+            .expect("quote");
+
+        assert_eq!(*quote.orders()[0].amount_out_net_gas(), BigUint::from(800u64));
+        assert_eq!(received_a.load(Ordering::SeqCst), 0);
+        assert_eq!(received_b.load(Ordering::SeqCst), 1);
+        worker_a.abort();
+        worker_b.abort();
+    }
+
+    #[tokio::test]
+    async fn test_router_worker_pool_allowlist_unknown_name_fails() {
+        let (pool, worker) = create_mock_worker_pool("pool_a", Ok(make_single_quote(950)), 0);
+        let worker_router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
+        let options = QuoteOptions::default().with_worker_pools(vec!["missing".to_string()]);
+        let request = QuoteRequest::new(vec![make_order()], options);
+
+        let result = worker_router
+            .quote(request, ExclusiveAccess::Denied)
+            .await;
+
+        assert!(matches!(result, Err(SolveError::InvalidWorkerPools(_))), "{result:?}");
+        worker.abort();
     }
 
     #[tokio::test]

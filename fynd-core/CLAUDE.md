@@ -95,10 +95,15 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
 **Solving** (`Solver::quote(request)`):
 
 0. `WorkerPoolRouter` allocates the pools serving each order — today an exclusive-access pool is
-   allocated only to a request granted exclusive access
+   allocated only to a request granted exclusive access; `QuoteOptions::with_worker_pools` further
+   restricts allocation to a named subset
 1. `WorkerPoolRouter` fans out to the allocated pools in parallel
 2. Each pool dispatches to a `SolverWorker` → `Algorithm::find_best_route` → `RouteResult`
 3. Selects best by `amount_out_net_gas` → optional `Encoder` → `Quote`
+
+Steps 0-2 are exposed as the public `WorkerPoolRouter::solve`, returning every order's ranked
+candidates as `RankedQuotes`; step 3 splits into the public `encode_quotes` and `finalize_quote`
+functions, for embedders that need more than the single best route per order.
 
 ## Non-Tycho Liquidity Sources
 
