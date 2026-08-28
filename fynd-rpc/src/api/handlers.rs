@@ -87,7 +87,8 @@ pub async fn quote(
         .await;
     log_quote_outcome(num_orders, capture, &result);
 
-    Ok(quote_response(result?))
+    let dto_quote: dto::Quote = result?.into();
+    Ok(HttpResponse::Ok().json(dto_quote))
 }
 
 /// Validates a wire-format quote request and converts it to the core type.
@@ -167,12 +168,6 @@ pub fn log_quote_outcome(
             }
         });
     });
-}
-
-/// Serializes a core quote as the `200 OK` wire response.
-pub fn quote_response(core_quote: fynd_core::Quote) -> HttpResponse {
-    let dto_quote: dto::Quote = core_quote.into();
-    HttpResponse::Ok().json(dto_quote)
 }
 
 /// GET /v1/health - Health check endpoint.
@@ -550,11 +545,7 @@ mod tests {
     mod quote_pipeline {
         use fynd_core::ExclusiveAccess;
 
-        use crate::api::{
-            dto,
-            handlers::{quote_response, validate_quote_request},
-            ApiError,
-        };
+        use crate::api::{dto, handlers::validate_quote_request, ApiError};
 
         fn dto_request(orders: Vec<dto::Order>) -> dto::QuoteRequest {
             serde_json::from_value(serde_json::json!({
@@ -595,13 +586,6 @@ mod tests {
                 "{}",
                 capture.to_json()
             );
-        }
-
-        #[test]
-        fn test_quote_response_serializes_quote() {
-            let quote = fynd_core::worker_pool_router::finalize_quote(vec![], 3);
-            let response = quote_response(quote);
-            assert_eq!(response.status(), 200);
         }
     }
 
