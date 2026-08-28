@@ -22,7 +22,7 @@ infrastructure.
 
 | Endpoint | Handler | Description |
 |---|---|---|
-| `POST /v1/quote` | `handlers::quote` | Submit orders, receive optimal routes. The `x-exclusive-access: true` request header (set by the authenticating proxy, never by the caller) allocates exclusive-access worker pools to the request; any other value or none restricts it to public pools. Only meaningful when the server is unreachable except through that proxy |
+| `POST /v1/quote` | `handlers::quote` | Submit orders, receive optimal routes. The `x-exclusive-access: true` request header (set by the authenticating proxy, never by the caller) allocates exclusive-access worker pools to the request; any other value or none restricts it to public pools. Only meaningful when the server is unreachable except through that proxy. Composed of the public `validate_quote_request` / `log_quote_outcome` / `quote_response` helpers, for embedders writing their own variant |
 | `GET /v1/health` | `handlers::health` | Health check (data freshness, derived data readiness, gas-price staleness, solver pool count). Returns 503 when market data is stale, derived data is not ready, or the gas price is stale |
 | `GET /v1/info` | `handlers::info` | Static metadata about this Fynd instance (version, chain, spender address) |
 | `GET /v1/prices` | `handlers::get_prices` | Token prices, spot prices, component depths (experimental feature only) |
@@ -60,6 +60,8 @@ annotations live in one place.
 - `http_host` / `http_port` (defaults: `0.0.0.0:3000`)
 - `gas_price_stale_threshold` (health returns 503 when exceeded)
 - `price_guard_enabled(bool)` (delegates to `FyndBuilder`; default `false`)
+- `configure_routes(f)` registers a caller's routes inside the `/v1` scope ahead of the defaults, so
+  a binary embedding `fynd-rpc` (e.g. the hosted service) can shadow one endpoint and keep the rest
 
 The builder calls `FyndBuilder::build()` → `Solver::into_parts()` → wraps the router in
 `AppState` → starts an Actix `HttpServer`.

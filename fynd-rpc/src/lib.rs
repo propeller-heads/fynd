@@ -14,6 +14,23 @@
 //! | `POST /v1/quote` | Request an optimal swap route |
 //! | `GET /v1/health` | Data freshness and solver readiness |
 //! | `GET /v1/info` | Static instance metadata (chain ID, contract addresses) |
+//!
+//! ## Embedding and overriding endpoints
+//!
+//! Binaries that embed `fynd-rpc` can replace one endpoint while keeping the rest via
+//! [`FyndRPCBuilder::configure_routes`](builder::FyndRPCBuilder::configure_routes):
+//!
+//! ```ignore
+//! builder.configure_routes(|scope, _state| {
+//!     scope.route("/quote", web::post().to(my_quote))
+//! });
+//! ```
+//!
+//! A custom handler can reuse the stock request/response plumbing —
+//! [`api::handlers::validate_quote_request`], [`api::handlers::log_quote_outcome`], and
+//! [`api::handlers::quote_response`] — and the solving stages
+//! [`fynd_core::WorkerPoolRouter::solve`], [`fynd_core::encode_quotes`], and
+//! [`fynd_core::finalize`] that the default `/v1/quote` handler is composed of.
 
 /// HTTP endpoint handlers, OpenAPI docs, and shared application state.
 pub mod api;
