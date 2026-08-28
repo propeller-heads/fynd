@@ -523,11 +523,8 @@ pub struct Quote {
 }
 
 impl Quote {
-    pub(crate) fn new(
-        orders: Vec<OrderQuote>,
-        total_gas_estimate: BigUint,
-        solve_time_ms: u64,
-    ) -> Self {
+    /// Assembles a quote from per-order results, a total gas estimate and the solve time.
+    pub fn new(orders: Vec<OrderQuote>, total_gas_estimate: BigUint, solve_time_ms: u64) -> Self {
         Self { orders, total_gas_estimate, solve_time_ms }
     }
 
