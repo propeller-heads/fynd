@@ -42,9 +42,11 @@ use utoipa::OpenApi;
 use crate::api::error::ErrorResponse;
 
 /// Adds caller routes to the `/v1` scope ahead of the defaults. Paths are relative to `/v1`
-/// (e.g. `"/quote"`). A caller route for a path+method fynd also serves wins; every other
-/// default stays. Actix registers one resource per `Scope::route` call with the method guard on
-/// the resource, so a non-matching method or path falls through to the defaults.
+/// (e.g. `"/quote"`) — an override can only add or shadow routes under `/v1`, not register a
+/// route outside it. A caller route for a path+method fynd also serves wins; every other
+/// default stays, and shadowing a default route does not change the OpenAPI spec served at
+/// `/docs/`. Actix registers one resource per `Scope::route` call with the method guard on the
+/// resource, so a non-matching method or path falls through to the defaults.
 pub type RouteConfigurator =
     Arc<dyn Fn(actix_web::Scope, &AppState) -> actix_web::Scope + Send + Sync>;
 
@@ -374,6 +376,10 @@ mod configure_app_tests {
         HttpResponse::Ok().body("overridden")
     }
 
+    async fn custom_route(_state: web::Data<AppState>) -> HttpResponse {
+        HttpResponse::Ok().body("custom")
+    }
+
     #[actix_web::test]
     async fn test_route_override_shadows_default_and_keeps_others() {
         let overrides: RouteConfigurator =
@@ -426,6 +432,38 @@ mod configure_app_tests {
         .await;
         assert_eq!(resp.status(), 200);
         assert_eq!(test::read_body(resp).await, "overridden");
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/info")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["chain_id"], 1);
+    }
+
+    #[actix_web::test]
+    async fn test_route_override_adds_new_path() {
+        // A path the defaults never serve; the override adds it outright rather than shadowing.
+        let overrides: RouteConfigurator =
+            Arc::new(|scope, _state| scope.route("/custom", web::get().to(custom_route)));
+        let app = test::init_service(
+            App::new().configure(|cfg| configure_app(cfg, test_state(), None, Some(&overrides))),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/custom")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(test::read_body(resp).await, "custom");
 
         let resp = test::call_service(
             &app,

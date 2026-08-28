@@ -162,8 +162,10 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
 ///
 /// Both variants log one `failure_reasons` entry per order, so a breakdown by
 /// reason counts order slots without branching on the outcome.
+#[non_exhaustive]
 pub enum RequestOutcome {
     /// Solve returned a quote; per-order status codes in request order.
+    #[non_exhaustive]
     Solved {
         /// Total orchestration time reported by the router.
         solve_time_ms: u64,
@@ -178,6 +180,7 @@ pub enum RequestOutcome {
     /// The request-level error applies to every order, so the derived
     /// `http/<code>` reason is repeated `num_orders` times in the log line. No
     /// `order_statuses` are logged: the solver produced no per-order results.
+    #[non_exhaustive]
     Failed {
         /// Stable error code (e.g. `TIMEOUT`, `QUEUE_FULL`).
         code: &'static str,
