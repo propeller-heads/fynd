@@ -320,11 +320,11 @@ impl WorkerPoolRouter {
         // not of the request. Today every order in a request classifies identically; once
         // trade size joins `OrderClass` they will differ.
         let class = OrderClass::new(access);
-        let allocations: Vec<Allocation<'_>> = request
-            .orders()
-            .iter()
-            .map(|_| allocate(&self.solver_pools, class))
-            .collect();
+        let pool_allowlist = request.options().worker_pools();
+        let mut allocations: Vec<Allocation<'_>> = Vec::with_capacity(request.orders().len());
+        for _order in request.orders() {
+            allocations.push(allocate(&self.solver_pools, class, pool_allowlist)?);
+        }
 
         if allocations
             .iter()
@@ -1624,6 +1624,48 @@ mod tests {
         drop(worker_router);
         worker_a.abort();
         worker_b.abort();
+    }
+
+    #[tokio::test]
+    async fn test_router_worker_pool_allowlist_skips_other_pools() {
+        let (pool_a, worker_a, received_a) =
+            create_counting_mock_worker_pool("pool_a", Ok(make_single_quote(950)), 0);
+        let (pool_b, worker_b, received_b) =
+            create_counting_mock_worker_pool("pool_b", Ok(make_single_quote(800)), 0);
+        let worker_router = WorkerPoolRouter::new(
+            vec![pool_a, pool_b],
+            WorkerPoolRouterConfig::default(),
+            default_encoder(),
+        );
+        let options = QuoteOptions::default().with_worker_pools(vec!["pool_b".to_string()]);
+        let request = QuoteRequest::new(vec![make_order()], options);
+
+        let quote = worker_router
+            .quote(request, ExclusiveAccess::Denied)
+            .await
+            .expect("quote");
+
+        assert_eq!(*quote.orders()[0].amount_out_net_gas(), BigUint::from(800u64));
+        assert_eq!(received_a.load(Ordering::SeqCst), 0);
+        assert_eq!(received_b.load(Ordering::SeqCst), 1);
+        worker_a.abort();
+        worker_b.abort();
+    }
+
+    #[tokio::test]
+    async fn test_router_worker_pool_allowlist_unknown_name_fails() {
+        let (pool, worker) = create_mock_worker_pool("pool_a", Ok(make_single_quote(950)), 0);
+        let worker_router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
+        let options = QuoteOptions::default().with_worker_pools(vec!["missing".to_string()]);
+        let request = QuoteRequest::new(vec![make_order()], options);
+
+        let result = worker_router
+            .quote(request, ExclusiveAccess::Denied)
+            .await;
+
+        assert!(matches!(result, Err(SolveError::Internal(_))), "{result:?}");
+        worker.abort();
     }
 
     #[tokio::test]

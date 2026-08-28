@@ -18,6 +18,7 @@
 use rustc_hash::FxHashMap;
 
 use super::{LiquidityScope, SolverPoolHandle};
+use crate::SolveError;
 
 /// Whether a single request may route through exclusive liquidity.
 ///
@@ -114,10 +115,46 @@ impl<'a> Allocation<'a> {
 }
 
 /// Selects the worker pools that serve `class`, preserving configuration order.
-pub(crate) fn allocate(worker_pools: &[SolverPoolHandle], class: OrderClass) -> Allocation<'_> {
+///
+/// `pool_allowlist` further restricts the selection to the named worker pools. It is validated
+/// against the full configuration, not the class-filtered set, so a typo fails loudly instead of
+/// silently routing through nothing.
+pub(crate) fn allocate<'a>(
+    worker_pools: &'a [SolverPoolHandle],
+    class: OrderClass,
+    pool_allowlist: Option<&[String]>,
+) -> Result<Allocation<'a>, SolveError> {
+    if let Some(allowlist) = pool_allowlist {
+        let unknown: Vec<&str> = allowlist
+            .iter()
+            .map(String::as_str)
+            .filter(|name| {
+                !worker_pools
+                    .iter()
+                    .any(|pool| pool.name() == *name)
+            })
+            .collect();
+        if !unknown.is_empty() {
+            let configured: Vec<&str> = worker_pools
+                .iter()
+                .map(SolverPoolHandle::name)
+                .collect();
+            return Err(SolveError::Internal(format!(
+                "unknown worker pool(s) {unknown:?}; configured: {configured:?}"
+            )));
+        }
+    }
+
     let worker_pools: Vec<&SolverPoolHandle> = worker_pools
         .iter()
         .filter(|worker_pool| worker_pool.serves(class))
+        .filter(|worker_pool| {
+            pool_allowlist.is_none_or(|allowlist| {
+                allowlist
+                    .iter()
+                    .any(|n| n == worker_pool.name())
+            })
+        })
         .collect();
 
     let scopes: FxHashMap<String, LiquidityScope> = worker_pools
@@ -128,7 +165,7 @@ pub(crate) fn allocate(worker_pools: &[SolverPoolHandle], class: OrderClass) -> 
         .values()
         .any(|scope| *scope == LiquidityScope::IncludeExclusive);
 
-    Allocation { worker_pools, scopes, exclusive_routing_active }
+    Ok(Allocation { worker_pools, scopes, exclusive_routing_active })
 }
 
 #[cfg(test)]
@@ -136,7 +173,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::worker_pool::TaskQueueHandle;
+    use crate::{worker_pool::TaskQueueHandle, SolveError};
 
     #[rstest]
     #[case::public_scope_denied(LiquidityScope::PublicOnly, ExclusiveAccess::Denied, true)]
@@ -161,5 +198,62 @@ mod tests {
             .with_liquidity_scope(scope);
 
         assert_eq!(worker_pool.serves(OrderClass::new(access)), expected);
+    }
+
+    fn handle(name: &str) -> SolverPoolHandle {
+        let (tx, _rx) = async_channel::bounded(1);
+        SolverPoolHandle::new(name, TaskQueueHandle::from_sender(tx))
+    }
+
+    fn names<'a>(allocation: &Allocation<'a>) -> Vec<&'a str> {
+        allocation
+            .worker_pools()
+            .iter()
+            .map(|pool| pool.name())
+            .collect()
+    }
+
+    #[test]
+    fn test_allocate_without_allowlist_keeps_every_serving_pool() {
+        let pools = [handle("a"), handle("b")];
+        let allocation =
+            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), None).expect("allocates");
+        assert_eq!(names(&allocation), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_allocate_allowlist_selects_subset_in_configuration_order() {
+        let pools = [handle("a"), handle("b"), handle("c")];
+        let allowlist = ["c".to_string(), "a".to_string()];
+        let allocation =
+            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist))
+                .expect("allocates");
+        assert_eq!(names(&allocation), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn test_allocate_allowlist_unknown_pool_is_an_error() {
+        let pools = [handle("a")];
+        let allowlist = ["a".to_string(), "nope".to_string()];
+        let Err(err) = allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist))
+        else {
+            panic!("expected an error for an unknown pool name");
+        };
+        let SolveError::Internal(message) = err else { panic!("expected Internal, got {err:?}") };
+        assert!(message.contains("nope"), "{message}");
+        assert!(message.contains("\"a\""), "{message}");
+    }
+
+    #[test]
+    fn test_allocate_allowlist_cannot_reach_exclusive_pool_without_access() {
+        let pools = [
+            handle("public"),
+            handle("exclusive").with_liquidity_scope(LiquidityScope::IncludeExclusive),
+        ];
+        let allowlist = ["exclusive".to_string()];
+        let allocation =
+            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist))
+                .expect("allocates");
+        assert!(allocation.is_empty());
     }
 }

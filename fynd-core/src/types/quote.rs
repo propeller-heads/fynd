@@ -64,6 +64,12 @@ impl QuoteRequest {
     pub fn options(&self) -> &QuoteOptions {
         &self.options
     }
+
+    /// Replaces the solving options, keeping the orders.
+    pub fn with_options(mut self, options: QuoteOptions) -> Self {
+        self.options = options;
+        self
+    }
 }
 
 /// Options to customize the solving behavior.
@@ -91,6 +97,10 @@ pub struct QuoteOptions {
     /// Skipped during JSON serialization — only meaningful when calling Fynd as a Rust library.
     #[serde(skip)]
     state_label: Option<StateLabel>,
+    /// Restrict solving to these named worker pools (as configured in `worker_pools.toml`).
+    /// `None` uses every pool that serves the request. Library-only: never on the wire.
+    #[serde(skip)]
+    worker_pools: Option<Vec<String>>,
 }
 
 impl QuoteOptions {
@@ -124,6 +134,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Restricts solving to the named worker pools. Unknown names fail the request.
+    pub fn with_worker_pools(mut self, pools: Vec<String>) -> Self {
+        self.worker_pools = Some(pools);
+        self
+    }
+
     /// Returns the timeout in milliseconds.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -147,6 +163,11 @@ impl QuoteOptions {
     /// Returns the overlay label, if one was set.
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.state_label.as_ref()
+    }
+
+    /// Returns the worker-pool allowlist, if one was set.
+    pub fn worker_pools(&self) -> Option<&[String]> {
+        self.worker_pools.as_deref()
     }
 }
 
