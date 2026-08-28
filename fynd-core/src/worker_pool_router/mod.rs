@@ -647,6 +647,7 @@ impl WorkerPoolRouter {
             let best = valid_quotes[0];
             counter!("worker_router_best_quote_pool", "pool" => best.worker_pool.clone())
                 .increment(1);
+            record_won_volume(best);
             debug!(
                 order_id = %best.quote.order_id(),
                 number_of_candidates = valid_quotes.len(),
@@ -874,6 +875,31 @@ fn to_gas_token_amount(quote: &OrderQuote, amount: &BigUint) -> Option<BigUint> 
         return None;
     }
     Some(amount * gas_cost_wei / gas_cost_out)
+}
+
+/// Records the volume a winning quote settled, in whole gas tokens, by pool and algorithm.
+///
+/// Counting wins alone hides size: a solver can win few orders and still settle most of the flow,
+/// or the reverse. Output-token base units do not add up across tokens, so the amount is converted
+/// to the gas token first, the same way `record_gas_token_amount` does it. A quote the conversion
+/// cannot price increments `worker_router_unpriced_won_volume_total` rather than counting as zero,
+/// which would read as a solver that won nothing.
+fn record_won_volume(best: &WorkerPoolQuote) {
+    let pool = best.worker_pool.clone();
+    let algorithm = best.quote.algorithm().to_string();
+    let volume = to_gas_token_amount(&best.quote, best.quote.amount_out())
+        .and_then(|amount| amount.to_f64());
+    let Some(volume) = volume else {
+        counter!(
+            "worker_router_unpriced_won_volume_total",
+            "pool" => pool,
+            "algorithm" => algorithm
+        )
+        .increment(1);
+        return;
+    };
+    gauge!("worker_router_won_volume_gas_token", "pool" => pool, "algorithm" => algorithm)
+        .increment(volume / WEI_PER_GAS_TOKEN);
 }
 
 /// Records an output-token `amount` under `metric`, in whole gas tokens.
