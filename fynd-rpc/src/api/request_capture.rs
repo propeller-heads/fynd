@@ -89,6 +89,11 @@ impl ReplayRequest {
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "<unserializable>".to_string())
     }
+
+    /// Number of orders in the captured request.
+    pub(crate) fn num_orders(&self) -> usize {
+        self.orders.len()
+    }
 }
 
 /// Serializes `request` down to the routing-essential fields, as a JSON string.

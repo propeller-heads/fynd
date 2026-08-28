@@ -79,13 +79,12 @@ pub async fn quote(
 ) -> Result<HttpResponse, ApiError> {
     let access = exclusive_access::from_headers(http_request.headers());
     let (core_request, capture) = validate_quote_request(request.into_inner(), access)?;
-    let num_orders = core_request.orders().len();
 
     let result = state
         .worker_router()
         .quote(core_request, access)
         .await;
-    log_quote_outcome(num_orders, capture, &result);
+    log_quote_outcome(capture, &result);
 
     let dto_quote: dto::Quote = result?.into();
     Ok(HttpResponse::Ok().json(dto_quote))
@@ -117,11 +116,13 @@ pub fn validate_quote_request(
 ///
 /// Serialization happens on a detached task carrying the current span, so it never adds latency
 /// to the response. Successful, fast quotes log nothing (see [`RequestOutcome::is_failure`]).
-pub fn log_quote_outcome(
-    num_orders: usize,
-    capture: ReplayRequest,
-    result: &Result<fynd_core::Quote, SolveError>,
-) {
+///
+/// # Panics
+///
+/// Spawns the detached task with [`actix_web::rt::spawn`], which panics when called outside a
+/// running Actix system. Callers must invoke this from an Actix worker (i.e. inside a handler).
+pub fn log_quote_outcome(capture: ReplayRequest, result: &Result<fynd_core::Quote, SolveError>) {
+    let num_orders = capture.num_orders();
     let outcome = match result {
         Ok(core_quote) => RequestOutcome::Solved {
             solve_time_ms: core_quote.solve_time_ms(),
