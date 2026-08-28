@@ -115,7 +115,7 @@ pub fn validate_quote_request(
 /// Emits the failure-capture and slow-solve log lines for a finished quote.
 ///
 /// Serialization happens on a detached task carrying the current span, so it never adds latency
-/// to the response. Successful, fast quotes log nothing (see [`RequestOutcome::is_failure`]).
+/// to the response. Successful, fast quotes log nothing (see `RequestOutcome::is_failure`).
 ///
 /// # Panics
 ///

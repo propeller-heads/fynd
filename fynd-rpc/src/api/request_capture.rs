@@ -168,7 +168,7 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
 /// Both variants log one `failure_reasons` entry per order, so a breakdown by
 /// reason counts order slots without branching on the outcome.
 #[non_exhaustive]
-pub enum RequestOutcome {
+pub(crate) enum RequestOutcome {
     /// Solve returned a quote; per-order status codes in request order.
     #[non_exhaustive]
     Solved {
@@ -196,7 +196,7 @@ impl RequestOutcome {
     /// Whether this outcome represents a failed quote: a solver error, or a
     /// solve in which at least one order did not succeed. Successful quotes
     /// (every order `success`) are not logged.
-    pub fn is_failure(&self) -> bool {
+    pub(crate) fn is_failure(&self) -> bool {
         match self {
             RequestOutcome::Failed { .. } => true,
             RequestOutcome::Solved { order_statuses, .. } => order_statuses
