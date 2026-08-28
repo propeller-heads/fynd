@@ -264,44 +264,68 @@ pub struct RankedQuotes {
 
 impl RankedQuotes {
     /// Wraps already-ranked candidates and starts the solve clock now.
-    pub fn new(per_order: Vec<Vec<OrderQuote>>) -> Self {
-        Self { per_order, started: Instant::now() }
+    ///
+    /// Every inner list must be non-empty — an order without a route is represented by a
+    /// non-`Success` `OrderQuote` (e.g. `QuoteStatus::NoRouteFound`), not by an empty list, per
+    /// the invariant documented on this struct.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SolveError::Internal)` if any inner list is empty.
+    pub fn new(per_order: Vec<Vec<OrderQuote>>) -> Result<Self, SolveError> {
+        for (index, candidates) in per_order.iter().enumerate() {
+            if candidates.is_empty() {
+                return Err(SolveError::Internal(format!(
+                    "order {index} has no candidates: represent an order without a quote by a \
+                     non-Success OrderQuote (e.g. QuoteStatus::NoRouteFound), which is how the \
+                     response reports it"
+                )));
+            }
+        }
+        Ok(Self::started_at(per_order, Instant::now()))
     }
 
+    /// Wraps already-ranked candidates with an explicit start time.
+    ///
+    /// Infallible: the only caller, [`WorkerPoolRouter::solve`], builds `per_order` from
+    /// `rank_quotes`, which always yields at least a `NoRouteFound`/`Timeout` placeholder per
+    /// order, so the empty-list case [`Self::new`] rejects cannot occur here. The debug assertion
+    /// guards against a future regression of that guarantee.
     fn started_at(per_order: Vec<Vec<OrderQuote>>, started: Instant) -> Self {
+        debug_assert!(
+            per_order
+                .iter()
+                .all(|candidates| !candidates.is_empty()),
+            "RankedQuotes invariant violated: every order must have at least one candidate"
+        );
         Self { per_order, started }
     }
 
     /// Ranked candidates per order, best first.
+    #[must_use]
     pub fn per_order(&self) -> &[Vec<OrderQuote>] {
         &self.per_order
     }
 
     /// Consumes the ranking, returning the candidates per order.
+    #[must_use]
     pub fn into_per_order(self) -> Vec<Vec<OrderQuote>> {
         self.per_order
     }
 
     /// Consumes the ranking, keeping only the best candidate of every order.
+    #[must_use]
     pub fn into_best(self) -> Vec<OrderQuote> {
-        let mut best = Vec::with_capacity(self.per_order.len());
-        for mut candidates in self.per_order {
-            if !candidates.is_empty() {
-                // O(1); order among the discarded remainder is irrelevant.
-                best.push(candidates.swap_remove(0));
-            }
-        }
-        best
+        self.per_order
+            .into_iter()
+            .map(|mut candidates| candidates.swap_remove(0)) // O(1); discarded order is irrelevant.
+            .collect()
     }
 
     /// When solving started; pass its elapsed time to [`finalize_quote`] after encoding.
+    #[must_use]
     pub fn started(&self) -> Instant {
         self.started
-    }
-
-    /// Milliseconds since solving started.
-    pub fn elapsed_ms(&self) -> u64 {
-        self.started.elapsed().as_millis() as u64
     }
 }
 
@@ -1757,11 +1781,22 @@ mod tests {
         let ranked = RankedQuotes::new(vec![
             vec![make_single_quote(950).order().clone(), make_single_quote(800).order().clone()],
             vec![make_single_quote(600).order().clone()],
-        ]);
+        ])
+        .expect("both orders have candidates");
         let best = ranked.into_best();
         assert_eq!(best.len(), 2);
         assert_eq!(*best[0].amount_out_net_gas(), BigUint::from(950u64));
         assert_eq!(*best[1].amount_out_net_gas(), BigUint::from(600u64));
+    }
+
+    #[test]
+    fn test_ranked_quotes_new_rejects_empty_order() {
+        let err = RankedQuotes::new(vec![vec![make_single_quote(950).order().clone()], vec![]])
+            .expect_err("order 1 has no candidates");
+        let SolveError::Internal(message) = err else {
+            panic!("expected SolveError::Internal, got {err:?}")
+        };
+        assert!(message.contains("order 1 has no candidates"), "{message}");
     }
 
     #[tokio::test]
