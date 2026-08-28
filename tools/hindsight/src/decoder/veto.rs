@@ -24,6 +24,11 @@ use crate::decoder::{
 /// A transaction rejected as not a comparable trade, by the shape that disqualified it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Veto {
+    /// The trade's input and output are the same token: a resolver or arbitrage contract routed
+    /// a token through a solver and back into itself. There is no price to compare — a re-solve
+    /// of X→X is either unsolvable or returns the input — and the settled amount reads as the
+    /// input plus the return, so every such record is a loss of about half.
+    SameToken,
     /// The trader received an NFT: the netted token flow is the payment side of a purchase
     /// (e.g. an NFT sweep through Relay + Seaport), and the real consideration is invisible to
     /// ERC-20 netting — recording it would pair the payment with the change as a swap that never
@@ -90,6 +95,9 @@ pub(crate) fn check(
     registry: &Registry,
     payee: Address,
 ) -> Option<Veto> {
+    if flow.token_in == flow.token_out {
+        return Some(Veto::SameToken);
+    }
     if received_nft(logs, flow.tracked) {
         return Some(Veto::NftPurchase);
     }
@@ -209,6 +217,20 @@ mod tests {
 
     use super::*;
     use crate::decoder::test_utils::{addr, make_nft_transfer_log, make_transfer_log, swap};
+
+    #[test]
+    fn test_check_same_token() {
+        // A resolver's USDC→…→USDC arbitrage read from a solver's calldata: the same token on
+        // both sides, and nothing for a re-solve to compare against.
+        let token = addr(10);
+        let round_trip = swap(token, 1_000, token, 2_000);
+        let transfer_ledger = TransferLedger::from_transaction(&[], &[]);
+
+        assert_eq!(
+            check(&round_trip, &transfer_ledger, &[], &Registry::ethereum(), addr(1)),
+            Some(Veto::SameToken)
+        );
+    }
 
     #[test]
     fn test_received_nft_erc721() {

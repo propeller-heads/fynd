@@ -218,7 +218,7 @@ against Allium.
 | Add a venue | A `[venues.<name>]` section in the address book — its entry points. No code | The venue's trades still decode when a known solver's frame or log is inside, but the venue label falls back to the raw entry address |
 | Attribute a new venue (owner / appData tag / fee wallet / integrator tag) | The matching address-book map (`[venue_owners]` / `[venue_appdata]` / `[venue_fees]` / `[venue_integrators]`) | The venue's trades are attributed to the underlying router or settler, not the venue |
 | Read a tag from a *new* solver's own data | A `venue_fingerprint` on its `SolverDecoder`, returning the `VenueTag` variant its data carries | The tag is never read, so venues sharing that solver's router fall back to its label |
-| Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |
+| Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap, a same-token round trip) | A check in `veto.rs` | Records that are not trades enter the comparison |
 | Support a new chain | A `registry/<chain>.toml` address book, an entry in `registry::BUILTIN_CHAINS` | The chain has no built-in book and must be passed via `--registry` |
 
 ### Re-solve monitor (`src/resolve/`)
