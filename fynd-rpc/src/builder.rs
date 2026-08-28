@@ -215,14 +215,35 @@ impl FyndRPCBuilder {
     /// Registers routes ahead of the built-in ones.
     ///
     /// `f` runs once per Actix worker with the shared [`AppState`], adding routes to the `/v1`
-    /// scope before the defaults. Paths are relative to `/v1` (e.g. `"/quote"`). A route it adds
-    /// for a path and method that fynd also serves shadows the default; everything else
-    /// (remaining endpoints, error handlers, docs, 404) is unchanged. For example:
+    /// scope before the defaults. Paths are relative to `/v1` (e.g. `"/quote"`) — an override
+    /// cannot add or shadow a route outside `/v1`. A route it adds for a path and method that
+    /// fynd also serves shadows the default; everything else (remaining endpoints, error
+    /// handlers, docs, 404) is unchanged. Shadowing a default route does not change the OpenAPI
+    /// spec served at `/docs/`. For example:
     ///
-    /// ```ignore
-    /// builder.configure_routes(|scope, _state| {
+    /// ```no_run
+    /// use std::collections::HashMap;
+    ///
+    /// use actix_web::web;
+    /// use fynd_rpc::builder::FyndRPCBuilder;
+    /// use tycho_simulation::tycho_common::models::Chain;
+    ///
+    /// async fn my_quote() -> actix_web::HttpResponse {
+    ///     actix_web::HttpResponse::Ok().finish()
+    /// }
+    ///
+    /// let builder = FyndRPCBuilder::new(
+    ///     Chain::Ethereum,
+    ///     HashMap::new(),
+    ///     "https://tycho.example".to_string(),
+    ///     "https://rpc.example".to_string(),
+    ///     vec![],
+    /// )
+    /// .unwrap();
+    /// let builder = builder.configure_routes(|scope, _state| {
     ///     scope.route("/quote", web::post().to(my_quote))
     /// });
+    /// # let _ = builder;
     /// ```
     pub fn configure_routes<F>(mut self, f: F) -> Self
     where

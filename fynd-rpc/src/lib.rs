@@ -4,6 +4,10 @@
 //! Wraps [fynd-core](fynd_core) with Actix Web to expose swap-routing as a REST service.
 //! Use [`FyndRPCBuilder`](builder::FyndRPCBuilder) to assemble and start the server.
 //!
+//! [`RouteConfigurator`](api::RouteConfigurator) and the handlers put actix-web types in this
+//! crate's public API, so an actix-web major bump is a breaking change for `fynd-rpc`; the
+//! [`actix_web`] crate is re-exported here so embedders can rely on the same type identity.
+//!
 //! For documentation and configuration guides see **<https://docs.fynd.xyz/>**.
 //! For the full API reference see **<https://docs.fynd.xyz/reference/api>**.
 //!
@@ -18,19 +22,24 @@
 //! ## Embedding and overriding endpoints
 //!
 //! Binaries that embed `fynd-rpc` can replace one endpoint while keeping the rest via
-//! [`FyndRPCBuilder::configure_routes`](builder::FyndRPCBuilder::configure_routes):
+//! [`FyndRPCBuilder::configure_routes`](builder::FyndRPCBuilder::configure_routes). Overrides can
+//! only add or shadow routes under `/v1`, and shadowing a default route does not change the
+//! OpenAPI spec served at `/docs/`:
 //!
-//! ```ignore
+//! ```text
 //! builder.configure_routes(|scope, _state| {
 //!     scope.route("/quote", web::post().to(my_quote))
 //! });
 //! ```
 //!
+//! See [`FyndRPCBuilder::configure_routes`](builder::FyndRPCBuilder::configure_routes) for a
+//! compiling version of this example.
+//!
 //! A custom handler can reuse the stock request/response plumbing —
 //! [`api::handlers::validate_quote_request`], [`api::handlers::log_quote_outcome`], and
 //! [`api::handlers::quote_response`] — and the solving stages
 //! [`fynd_core::WorkerPoolRouter::solve`], [`fynd_core::encode_quotes`], and
-//! [`fynd_core::finalize`] that the default `/v1/quote` handler is composed of.
+//! [`fynd_core::finalize_quote`] that the default `/v1/quote` handler is composed of.
 
 /// HTTP endpoint handlers, OpenAPI docs, and shared application state.
 pub mod api;
@@ -44,6 +53,9 @@ pub mod protocols;
 // Re-export parse_chain so tools that depend on fynd-rpc (not fynd-core) can use it.
 use std::path::Path;
 
+/// Re-exported: [`RouteConfigurator`](api::RouteConfigurator) and the handlers use actix-web
+/// types; an actix-web major bump is a breaking change for this crate.
+pub use actix_web;
 pub use fynd_core::types::parse_chain;
 
 /// Installs the process-global custom-chain registry from a `chains.yaml` file.
