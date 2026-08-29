@@ -1,4 +1,11 @@
 
+## [0.99.21](https://github.com/propeller-heads/fynd/compare/0.99.20...0.99.21) (2026-08-29)
+
+### Features
+
+* raise tycho floor to 0.370.2 for Angstrom filter fix ([f0a7a9c](https://github.com/propeller-heads/fynd/commit/f0a7a9c3a5ef534f6e4eec3b13016147e0fd4574))
+
+
 ## [0.99.20](https://github.com/propeller-heads/fynd/compare/0.99.18...0.99.20) (2026-08-28)
 
 ### Features
