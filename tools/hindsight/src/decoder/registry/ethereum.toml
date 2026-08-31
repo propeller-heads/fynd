@@ -215,12 +215,18 @@ entry_points = ["0x7957e5a88f0389997b352315e70ab20d77ec410a"]
 # routers, so the fee leg is the only fingerprint the vault flow carries.
 "0x8e247a480449c84a5fdd25974a8501f3efa4abb9" = "vultisig"
 
-# Venues identified by the integrator tag a provider records in its swap event. LiFi frontends
-# route through the shared LiFi Diamond, so the integrator string in LiFiGenericSwapCompleted /
-# LiFiSwappedGeneric is the only fingerprint. Keys are lowercase (matched case-insensitively).
+# Venues identified by the tag a provider records in its own data. LiFi frontends route through
+# the shared LiFi Diamond, so the integrator string in LiFiGenericSwapCompleted /
+# LiFiSwappedGeneric is the only fingerprint. 0x carries its tag in calldata instead, as hex.
+# Keys are lowercase (matched case-insensitively).
 [venue_integrators]
 "infinex" = "infinex"
 "robinhood" = "robinhood"
+# Matcha Meta: a wrapper that picks a provider per order, so it owns no router, takes no fee, and
+# has no address of its own to match. Its one fingerprint is the app tag it writes into the
+# affiliate half of 0x Settler's `zidAndAffiliate` word, read by `solvers/zeroex.rs`. Confirmed on
+# a 0x-routed and a Nordstern-routed trade, both of which settle through Settler.
+"0x637071" = "matchameta"
 # Coinbase's Base App, kept alongside its fee wallet above so its LiFi leg still attributes if the
 # fee is ever waived.
 "base-app" = "coinbase"

@@ -123,7 +123,8 @@ enum VenueTag {
 Two methods, one per question the decoder asks a solver. `declared` answers "what does this
 solver say this transaction traded?", and a solver's parse fills the whole `DeclaredSwap` in one
 pass, including the recipient. `venue_fingerprint` answers "does this solver's data name the
-frontend that built the order?" — LiFi's integrator tag, CoW's `appData` hash. A solver's veto is
+frontend that built the order?" — LiFi's integrator tag, CoW's `appData` hash, the app tag 0x
+Settler carries in `zidAndAffiliate`. A solver's veto is
 not a third method: it rides on `declared`'s `Err`, because a veto is a statement about the same
 read.
 
@@ -186,8 +187,10 @@ four maps from the address book:
   Coinbase's Base App). `venue_fee` reports the cut and the caller corrects it out of the amounts
   (see above); every function in `attribution.rs` only reads. Wallets are checked in address
   order, so a trade cut by two venues' wallets resolves the same way on every run.
-- **provider integrator tag** (`[venue_integrators]`) — a provider's event carried an integrator
-  string mapped to a venue (LiFi frontends), read through `SolverDecoder::venue_fingerprint`.
+- **provider integrator tag** (`[venue_integrators]`) — the provider's own data carried a tag
+  mapped to a venue, read through `SolverDecoder::venue_fingerprint`: an integrator string in a
+  LiFi event, or the hex app tag a frontend writes into 0x Settler's `zidAndAffiliate` word
+  (Matcha Meta).
 
 The solver label comes from its own evidence tiers, most- to least-trusted: the entry point
 itself, the outermost solver frame in the trace, the largest external call (a guess, for unknown
@@ -215,7 +218,7 @@ against Allium.
 | Add a venue | A `[venues.<name>]` section in the address book — its entry points. No code | The venue's trades still decode when a known solver's frame or log is inside, but the venue label falls back to the raw entry address |
 | Attribute a new venue (owner / appData tag / fee wallet / integrator tag) | The matching address-book map (`[venue_owners]` / `[venue_appdata]` / `[venue_fees]` / `[venue_integrators]`) | The venue's trades are attributed to the underlying router or settler, not the venue |
 | Read a tag from a *new* solver's own data | A `venue_fingerprint` on its `SolverDecoder`, returning the `VenueTag` variant its data carries | The tag is never read, so venues sharing that solver's router fall back to its label |
-| Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap) | A check in `veto.rs` | Records that are not trades enter the comparison |
+| Reject decodes that are not real trades (an NFT purchase's payment leg, a mis-paired wrap, a same-token round trip) | A check in `veto.rs` | Records that are not trades enter the comparison |
 | Support a new chain | A `registry/<chain>.toml` address book, an entry in `registry::BUILTIN_CHAINS` | The chain has no built-in book and must be passed via `--registry` |
 
 ### Re-solve monitor (`src/resolve/`)

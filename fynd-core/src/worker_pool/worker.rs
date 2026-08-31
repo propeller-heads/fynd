@@ -31,7 +31,8 @@ use crate::{
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     propamm_fallback::{
-        fallback_amount_out, has_pamm_leg, FallbackAmountOut, FallbackPoolIndex, SharedFeeTiers,
+        fallback_amount_out, has_pamm_leg, lacks_fallback_pool, FallbackAmountOut,
+        FallbackPoolIndex, FeeTiers, SharedFeeTiers,
     },
     types::internal::SolveTask,
     worker_pool_router::LiquidityScope,
@@ -81,6 +82,12 @@ where
     ready_notify: Arc<Notify>,
     /// Whether the graph has been initialized.
     initialized: bool,
+    /// Whether the fee tiers were known when the graph was last built.
+    ///
+    /// `FeeTierFetcher` runs as its own task, so a worker usually builds its first graph before
+    /// the tiers arrive and admits every pAMM. This records that, so the graph can be rebuilt once
+    /// the tiers land and the pAMMs without a fallback pool can be left out.
+    built_with_fee_tiers: bool,
     /// Worker identifier (for logging).
     worker_id: usize,
     /// Worker pool name (used as the `pool` metric label).
@@ -129,6 +136,7 @@ where
             readiness_tracker: ReadinessTracker::new(requirements),
             ready_notify: Arc::new(Notify::new()),
             initialized: false,
+            built_with_fee_tiers: false,
             worker_id,
             pool_name,
             liquidity_scope: LiquidityScope::default(),
@@ -158,9 +166,34 @@ where
 
     /// Whether this worker must keep `component` out of its graph: an exclusive component in a
     /// `PublicOnly` worker pool, or a component of an excluded protocol system.
+    ///
+    /// Holds for the life of the worker, which is what lets it filter state updates and removals
+    /// as well as additions.
     fn drops_component(&self, component: &ProtocolComponent) -> bool {
         (self.liquidity_scope == LiquidityScope::PublicOnly && is_exclusive(component)) ||
             is_excluded_protocol(&self.exclude_protocols, component)
+    }
+
+    /// Whether this worker must leave `component` out when it builds its graph.
+    ///
+    /// [`drops_component`](Self::drops_component) plus a pAMM whose fallback pool this market does
+    /// not hold. That leg can never produce a quotable route, so leaving it out lets the algorithm
+    /// route around it instead of assembling a route the worker then discards whole.
+    ///
+    /// Only used when building the graph. The fee tiers and the fallback pools both change over
+    /// time, so this answer expires; applying it to a state update or a removal would freeze a
+    /// component's price or strand it in the graph. [`fallback_amount_out`] stays authoritative
+    /// and catches every case this misses.
+    ///
+    /// `fee_tiers` is read once per build rather than per component: `snapshot` copies the map.
+    fn drops_component_on_build(
+        &self,
+        component: &ProtocolComponent,
+        fee_tiers: Option<&FeeTiers>,
+    ) -> bool {
+        self.drops_component(component) ||
+            fee_tiers
+                .is_some_and(|tiers| lacks_fallback_pool(component, tiers, &self.fallback_pools))
     }
 
     /// A read view of the market the solve runs against: the overlay `label` names, else the live
@@ -189,20 +222,23 @@ where
     /// Gets the market topology from MarketState and uses it to build the graph.
     pub async fn initialize_graph(&mut self) {
         let topology = {
-            // read lock on market data
+            // One read: the index and the topology must describe the same market, or a pAMM whose
+            // fallback pool arrived between two reads is left out for the life of the worker.
             let market = self.market_data.read().await;
+            self.fallback_pools = FallbackPoolIndex::build(&market);
             let topology = market.component_topology().clone(); // clone to avoid holding the lock
+            let fee_tiers = self.fallback_fee_tiers.snapshot();
             remove_components(market.base_market_state(), topology, &|component| {
-                self.drops_component(component)
+                self.drops_component_on_build(component, fee_tiers.as_ref())
             })
         };
 
         self.graph_manager
             .initialize_graph(&topology);
-        {
-            let market = self.market_data.read().await;
-            self.fallback_pools = FallbackPoolIndex::build(&market);
-        }
+        self.built_with_fee_tiers = self
+            .fallback_fee_tiers
+            .snapshot()
+            .is_some();
         self.initialized = true;
     }
 
@@ -220,6 +256,15 @@ where
                     let market = self.market_data.read().await;
                     self.fallback_pools
                         .apply_event(&market, &event);
+                }
+                if !self.built_with_fee_tiers &&
+                    self.fallback_fee_tiers
+                        .snapshot()
+                        .is_some()
+                {
+                    // The first graph was built without the tiers, so it admitted every pAMM.
+                    // Rebuild once now that the router's tiers are known.
+                    self.initialize_graph().await;
                 }
                 if let Err(e) = self
                     .graph_manager
@@ -1093,6 +1138,68 @@ mod tests {
 
         assert!(worker.drops_component(&pamm));
         assert!(!worker.drops_component(&public));
+    }
+
+    /// The pAMM rule applies when the graph is built and nowhere else. `drops_component` also
+    /// filters state updates and removals, and a component dropped there would keep a frozen price
+    /// and could never leave the graph.
+    #[test]
+    fn test_drops_component_on_build_pamm_without_fallback_pool() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            MockAlgorithm::new(),
+            0,
+            "test_pool".to_string(),
+        );
+        let fee_tiers = FeeTiers::new(3000);
+        let pamm = component_with_protocol(
+            "pamm-1",
+            "propammfallback:fermiswap",
+            &[token(0x01, "A"), token(0x02, "B")],
+        );
+
+        assert!(worker.drops_component_on_build(&pamm, Some(&fee_tiers)));
+        assert!(!worker.drops_component(&pamm));
+    }
+
+    /// The fee tiers arrive on their own task, so the first graph is usually built without them.
+    /// Admitting every pAMM then is what leaves the post-assembly check to catch them.
+    #[test]
+    fn test_drops_component_on_build_pamm_before_fee_tiers() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            MockAlgorithm::new(),
+            0,
+            "test_pool".to_string(),
+        );
+
+        let pamm = component_with_protocol(
+            "pamm-1",
+            "propammfallback:fermiswap",
+            &[token(0x01, "A"), token(0x02, "B")],
+        );
+        assert!(!worker.drops_component_on_build(&pamm, None));
+    }
+
+    /// An excluded protocol stays excluded when the graph is built, not just when events arrive.
+    #[test]
+    fn test_drops_component_on_build_excluded_protocol() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            MockAlgorithm::new(),
+            0,
+            "test_pool".to_string(),
+        )
+        .with_exclude_protocols(vec!["uniswap_v3".to_string()]);
+
+        let excluded = component_with_protocol("uni-1", "uniswap_v3", &[token(0x01, "A")]);
+        assert!(worker.drops_component_on_build(&excluded, None));
     }
 
     /// Without `exclude_protocols` the worker drops nothing on protocol grounds — the liquidity

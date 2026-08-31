@@ -12,7 +12,7 @@ const EXCLUSIVE_ACCESS_HEADER: &str = "x-exclusive-access";
 /// values deny it. Fynd does not authenticate callers itself, so this header is only meaningful
 /// when the server is unreachable except through that proxy — otherwise a caller can set it
 /// themselves.
-pub(crate) fn from_headers(headers: &HeaderMap) -> ExclusiveAccess {
+pub fn from_headers(headers: &HeaderMap) -> ExclusiveAccess {
     let granted = headers
         .get(EXCLUSIVE_ACCESS_HEADER)
         .and_then(|value| value.to_str().ok())

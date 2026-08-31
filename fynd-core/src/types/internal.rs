@@ -125,6 +125,10 @@ pub enum SolveError {
     #[error("internal error: {0}")]
     Internal(String),
 
+    /// The request's worker pool allowlist is invalid: empty, or names an unknown worker pool.
+    #[error("invalid worker pool allowlist: {0}")]
+    InvalidWorkerPools(String),
+
     /// No workers are ready to solve.
     #[error("no workers ready: {0}")]
     NotReady(String),

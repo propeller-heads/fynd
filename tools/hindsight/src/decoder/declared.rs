@@ -104,8 +104,13 @@ pub(crate) fn declared_flow(
 }
 
 /// Recover a settled `amount_out` the solver's data did not state: the gross amount the declared
-/// recipient received (a solver that declares none delivers to the caller, so the transaction
-/// sender is the fallback anchor).
+/// recipient received from third parties (a solver that declares none delivers to the caller, so
+/// the transaction sender is the fallback anchor).
+///
+/// Third parties only, because a recipient that is a contract can receive the output token a
+/// second time in the same transaction — a transfer to itself, a vault returning what it was
+/// forwarded, a pool it repaid — and summing every receipt then states about twice what the swap
+/// paid. See `TransferLedger::received_from_third_parties`.
 ///
 /// `None` when the recipient received none of the token, or less than the floor the same calldata
 /// enforces — a settled trade cleared its floor by construction, so a smaller receipt means the
@@ -119,7 +124,7 @@ fn recover_output(
     let recipient = declared
         .output_recipient
         .unwrap_or(sender);
-    let amount_out = transfer_ledger.received_by_address(recipient, declared.token_out);
+    let amount_out = transfer_ledger.received_from_third_parties(recipient, declared.token_out);
     if amount_out.is_zero() ||
         amount_out <
             declared
@@ -337,6 +342,29 @@ mod tests {
             declared_flow(&root, &registry, &[], &ledger, sender).err(),
             Some(Veto::OutputNotFound)
         );
+    }
+
+    #[test]
+    fn test_decode_output_receipt_counts_a_pass_through_recipient_once() {
+        // The router — the declared recipient — forwards the output to a vault, which returns
+        // most of it in the same transaction. The round trip is not the swap's payout, so the
+        // settled output is the single receipt from the pool.
+        let registry = Registry::ethereum();
+        let sender = addr(1);
+        let vault = addr(60);
+        let root = root_with_solver_frame(sender, ROUTER, FLY);
+        let logs = vec![make_transfer_log(TOKEN_IN, sender, ROUTER, U256::from(AMOUNT_IN))];
+        let native = vec![
+            (addr(50), ROUTER, U256::from(MIN_AMOUNT_OUT + 1_000)),
+            (ROUTER, vault, U256::from(MIN_AMOUNT_OUT + 1_000)),
+            (vault, ROUTER, U256::from(MIN_AMOUNT_OUT + 900)),
+        ];
+        let ledger = TransferLedger::from_transaction(&logs, &native);
+
+        let (_, flow, _) = declared_flow(&root, &registry, &[], &ledger, sender)
+            .unwrap()
+            .unwrap();
+        assert_eq!(flow.amount_out, U256::from(MIN_AMOUNT_OUT + 1_000));
     }
 
     /// An exact-output read: the output is fixed at 500, the input bounded at 1,000.

@@ -3148,7 +3148,7 @@ dependencies = [
 
 [[package]]
 name = "erc20-overrides"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3449,7 +3449,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
 name = "fynd"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "actix-web",
  "alloy",
@@ -3486,7 +3486,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-benchmark"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3510,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-client"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "alloy",
  "bytes",
@@ -3529,7 +3529,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-core"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "alloy",
  "async-channel",
@@ -3570,7 +3570,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-gas-audit"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3595,7 +3595,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3627,7 +3627,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc-types"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "bytes",
  "fynd-core",
@@ -3643,7 +3643,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-swap-cli"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3660,7 +3660,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-test-fixtures"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "anyhow",
  "fynd-core",
@@ -3678,7 +3678,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-tools-common"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3928,7 +3928,7 @@ dependencies = [
 
 [[package]]
 name = "hindsight"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "actix-web",
  "alloy",
@@ -5920,7 +5920,7 @@ dependencies = [
 
 [[package]]
 name = "record-market"
-version = "0.99.18"
+version = "0.99.22"
 dependencies = [
  "anyhow",
  "clap",
@@ -7928,9 +7928,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.363.0"
+version = "0.370.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "495509ca2849ab944e9a44b9be8c6a02762e810881193c7589bfb35490a9ac13"
+checksum = "b9a9fe8c760d4ace61f2b5d865e42e8caf7723651b3d1a5a3968061015090e18"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7958,9 +7958,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.363.0"
+version = "0.370.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cac008f37ad8c90010f345ddcba1645dc5e5a49bb9a1bd92ccdb6fe6e1adaf24"
+checksum = "bbefd9172c3e946814a2c1a6091bcc65ee06a8bbd2da8857bd6d8a64ebff541f"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -7987,9 +7987,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.363.0"
+version = "0.370.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adefb46182ff889f10037f4d1180a8c977b69cdfda729b1f120efb4070870aa2"
+checksum = "c8064b80d05cf3f91efd39eedd1823ff502690bb848a9ef147c4f264f70e270c"
 dependencies = [
  "alloy",
  "async-trait",
@@ -8009,9 +8009,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.363.0"
+version = "0.370.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "749df85a0645dd7e2df6147caed3d9134a58d913df4c5267c7fbfac2b4b05246"
+checksum = "32b9c019df25a51c23852514ebbe8ee737bbaa19c9044ee6804c44100629cf31"
 dependencies = [
  "alloy",
  "chrono",
@@ -8031,9 +8031,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.363.0"
+version = "0.370.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad7dd495bc9260ec898d25cc0d1ff758a128b0ad89aec9985fbe8621dee443db"
+checksum = "d02198292d4694cadbc08ed61356320875f9a75d11cd94c30d4ca463756a5229"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -8060,6 +8060,7 @@ dependencies = [
  "revm",
  "revm-inspectors",
  "ruint",
+ "rustc-hash",
  "serde",
  "serde_json",
  "strum_macros",

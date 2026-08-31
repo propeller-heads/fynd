@@ -203,6 +203,7 @@ pub(super) fn solver_error_label(error: &SolveError) -> &'static str {
         SolveError::InsufficientLiquidity { .. } => "insufficient_liquidity",
         SolveError::QueueFull => "queue_full",
         SolveError::Internal(_) => "internal",
+        SolveError::InvalidWorkerPools(_) => "invalid_worker_pools",
         SolveError::PriceCheckFailed { .. } => "price_check_failed",
         SolveError::AlgorithmError(_) => "algorithm_error",
         SolveError::MarketDataStale { .. } => "market_data_stale",

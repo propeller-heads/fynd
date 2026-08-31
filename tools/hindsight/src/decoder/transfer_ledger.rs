@@ -184,6 +184,31 @@ impl TransferLedger {
             .fold(U256::ZERO, |total, &(_, _, _, value)| total.saturating_add(value))
     }
 
+    /// Gross amount of `token` that `recipient` received from addresses it did not itself pay
+    /// that token in this transaction (native ETH is `Address::ZERO`). Self-transfers and round
+    /// trips — a downstream contract returning what the recipient forwarded, a pool the recipient
+    /// repaid — are left out, so a pass-through recipient's receipt counts its swap output once.
+    /// Zero when nothing qualifies.
+    pub(crate) fn received_from_third_parties(&self, recipient: Address, token: Address) -> U256 {
+        let mut paid_by_recipient: HashSet<Address> = HashSet::new();
+        for &(transferred, from, to, _) in &self.transfers {
+            if transferred == token && from == recipient {
+                paid_by_recipient.insert(to);
+            }
+        }
+        let mut total = U256::ZERO;
+        for &(transferred, from, to, value) in &self.transfers {
+            if transferred == token &&
+                to == recipient &&
+                from != recipient &&
+                !paid_by_recipient.contains(&from)
+            {
+                total = total.saturating_add(value);
+            }
+        }
+        total
+    }
+
     /// Gross amount of `token` sent by `sender`, regardless of recipient (native ETH is
     /// `Address::ZERO`). Zero when the address sent none of it.
     pub(crate) fn sent_by_address(&self, sender: Address, token: Address) -> U256 {
@@ -660,5 +685,35 @@ mod tests {
             U256::from(999u64)
         );
         assert_eq!(transfer_ledger.received_by_address(addr(200), token), U256::ZERO);
+    }
+
+    #[test]
+    fn test_received_from_third_parties_excludes_self_transfers_and_round_trips() {
+        let recipient = addr(7);
+        let token = addr(10);
+        let vault = addr(60);
+        let pool = addr(61);
+        let logs = vec![
+            // The swap's own payout.
+            make_transfer_log(token, addr(50), recipient, U256::from(1_000)),
+            // A transfer to itself.
+            make_transfer_log(token, recipient, recipient, U256::from(900)),
+            // Forwarded to a vault, which returns most of it.
+            make_transfer_log(token, recipient, vault, U256::from(1_000)),
+            make_transfer_log(token, vault, recipient, U256::from(990)),
+            // A pool that paid the recipient earlier in the transaction and was repaid: excluded
+            // regardless of the order the two legs appear in.
+            make_transfer_log(token, pool, recipient, U256::from(4_585)),
+            make_transfer_log(token, recipient, pool, U256::from(3_932)),
+            // Same recipient, different token: excluded.
+            make_transfer_log(addr(11), addr(50), recipient, U256::from(999)),
+        ];
+        let transfer_ledger = TransferLedger::from_transaction(&logs, &[]);
+        assert_eq!(
+            transfer_ledger.received_from_third_parties(recipient, token),
+            U256::from(1_000u64)
+        );
+        assert_eq!(transfer_ledger.received_by_address(recipient, token), U256::from(7_475u64));
+        assert_eq!(transfer_ledger.received_from_third_parties(addr(200), token), U256::ZERO);
     }
 }

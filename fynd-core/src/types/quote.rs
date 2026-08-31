@@ -64,6 +64,13 @@ impl QuoteRequest {
     pub fn options(&self) -> &QuoteOptions {
         &self.options
     }
+
+    /// Replaces the solving options, keeping the orders.
+    #[must_use]
+    pub fn with_options(mut self, options: QuoteOptions) -> Self {
+        self.options = options;
+        self
+    }
 }
 
 /// Options to customize the solving behavior.
@@ -91,6 +98,10 @@ pub struct QuoteOptions {
     /// Skipped during JSON serialization — only meaningful when calling Fynd as a Rust library.
     #[serde(skip)]
     state_label: Option<StateLabel>,
+    /// Restrict solving to these named worker pools (as configured in `worker_pools.toml`).
+    /// `None` uses every pool that serves the request. Library-only: never on the wire.
+    #[serde(skip)]
+    worker_pools: Option<Vec<String>>,
 }
 
 impl QuoteOptions {
@@ -124,29 +135,46 @@ impl QuoteOptions {
         self
     }
 
+    /// Restricts solving to the named worker pools. Unknown names fail the request.
+    pub fn with_worker_pools(mut self, pools: Vec<String>) -> Self {
+        self.worker_pools = Some(pools);
+        self
+    }
+
     /// Returns the timeout in milliseconds.
+    #[must_use]
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
     }
 
     /// Returns the minimum number of solver responses.
+    #[must_use]
     pub fn min_responses(&self) -> Option<usize> {
         self.min_responses
     }
 
     /// Returns the maximum gas cost constraint.
+    #[must_use]
     pub fn max_gas(&self) -> Option<&BigUint> {
         self.max_gas.as_ref()
     }
 
     /// Returns the encoding options.
+    #[must_use]
     pub fn encoding_options(&self) -> Option<&EncodingOptions> {
         self.encoding_options.as_ref()
     }
 
     /// Returns the overlay label, if one was set.
+    #[must_use]
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.state_label.as_ref()
+    }
+
+    /// Returns the worker-pool allowlist, if one was set.
+    #[must_use]
+    pub fn worker_pools(&self) -> Option<&[String]> {
+        self.worker_pools.as_deref()
     }
 }
 
@@ -502,6 +530,10 @@ pub struct Quote {
 }
 
 impl Quote {
+    /// Assembles a quote from per-order results, a total gas estimate and the solve time.
+    ///
+    /// Crate-internal: [`finalize_quote`](crate::finalize_quote) is the public way to build a
+    /// `Quote`; it keeps `total_gas_estimate` equal to the sum of the per-order gas estimates.
     pub(crate) fn new(
         orders: Vec<OrderQuote>,
         total_gas_estimate: BigUint,

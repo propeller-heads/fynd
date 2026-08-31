@@ -1,10 +1,10 @@
 //! Builds the routing-essential representation of a quote request for the
 //! replay-capture log emitted by the `/v1/quote` handler.
 
-use fynd_core::{ExclusiveAccess, NoPathReason, QuoteStatus, SolveError};
-use fynd_rpc_types::{Address, OrderSide, QuoteRequest};
+use fynd_core::{ExclusiveAccess, NoPathReason, OrderSide, QuoteRequest, QuoteStatus, SolveError};
 use serde::Serialize;
 use tracing::{info, warn};
+use tycho_simulation::tycho_common::models::Address;
 
 /// Routing-essential view of a single order, serialized into the replay log.
 ///
@@ -12,7 +12,7 @@ use tracing::{info, warn};
 /// present. The server-generated `id`, the routing-irrelevant `sender` /
 /// `receiver` (also PII we keep out of logs), and all encoding data are
 /// omitted — nothing is copied implicitly, so no DTO field can leak.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct ReplayOrder {
     token_in: Address,
     token_out: Address,
@@ -21,7 +21,7 @@ struct ReplayOrder {
 }
 
 /// Routing-essential view of the request-level solve options.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct ReplayOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_ms: Option<u64>,
@@ -48,19 +48,23 @@ struct ReplayOptions {
 /// `exclusive_access` is not a body field either: a harness re-sends it as the
 /// `x-exclusive-access` header. An outcome that depended on `price_guard` may
 /// not reproduce on replay.
-#[derive(Serialize)]
-pub(crate) struct ReplayRequest {
+///
+/// The serialized JSON shape is a log format, not a stable API, and may change between
+/// releases.
+#[must_use]
+#[derive(Debug, Serialize)]
+pub struct ReplayRequest {
     orders: Vec<ReplayOrder>,
     options: ReplayOptions,
     exclusive_access: bool,
 }
 
 impl ReplayRequest {
-    /// Extracts the owned routing-essential capture from `request`. Cheap — a
+    /// Extracts the owned routing-essential capture from the validated `request`. Cheap — a
     /// few address clones and no JSON — so it is safe to run on the quote hot
     /// path; the serialization cost is deferred to [`ReplayRequest::to_json`],
     /// which the handler only calls off the response path.
-    pub(crate) fn capture(request: &QuoteRequest, access: ExclusiveAccess) -> Self {
+    pub fn capture(request: &QuoteRequest, access: ExclusiveAccess) -> Self {
         let orders = request
             .orders()
             .iter()
@@ -86,16 +90,26 @@ impl ReplayRequest {
     }
 
     /// Serializes the capture to the replay-log JSON string.
-    pub(crate) fn to_json(&self) -> String {
+    #[must_use]
+    pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "<unserializable>".to_string())
+    }
+
+    /// Number of orders in the captured request.
+    pub(crate) fn num_orders(&self) -> usize {
+        self.orders.len()
     }
 }
 
 /// Serializes `request` down to the routing-essential fields, as a JSON string.
 /// Convenience wrapper over [`ReplayRequest::capture`] + [`ReplayRequest::to_json`].
 #[cfg(test)]
-pub(crate) fn replay_json(request: &QuoteRequest, access: ExclusiveAccess) -> String {
-    ReplayRequest::capture(request, access).to_json()
+pub(crate) fn replay_json(
+    request: fynd_rpc_types::QuoteRequest,
+    access: ExclusiveAccess,
+) -> String {
+    let request: QuoteRequest = request.into();
+    ReplayRequest::capture(&request, access).to_json()
 }
 
 /// Stable snake_case code for a per-order [`QuoteStatus`], matching the wire
@@ -162,22 +176,25 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
 ///
 /// Both variants log one `failure_reasons` entry per order, so a breakdown by
 /// reason counts order slots without branching on the outcome.
+#[non_exhaustive]
 pub(crate) enum RequestOutcome {
     /// Solve returned a quote; per-order status codes in request order.
+    #[non_exhaustive]
     Solved {
         /// Total orchestration time reported by the router.
         solve_time_ms: u64,
-        /// One [`quote_status_code`] per order, in request order.
+        /// One `quote_status_code` per order, in request order.
         order_statuses: Vec<&'static str>,
-        /// One [`failure_reason_slug`] per order, aligned with `order_statuses`
+        /// One `failure_reason_slug` per order, aligned with `order_statuses`
         /// (`""` for successful orders).
         failure_reasons: Vec<&'static str>,
     },
-    /// Solve failed; carries the [`crate::api::error::solve_error_code`].
+    /// Solve failed; carries the crate-internal solve-error code.
     ///
     /// The request-level error applies to every order, so the derived
     /// `http/<code>` reason is repeated `num_orders` times in the log line. No
     /// `order_statuses` are logged: the solver produced no per-order results.
+    #[non_exhaustive]
     Failed {
         /// Stable error code (e.g. `TIMEOUT`, `QUEUE_FULL`).
         code: &'static str,
@@ -324,7 +341,7 @@ mod tests {
 
     #[test]
     fn replay_json_captures_only_routing_fields() {
-        let json = replay_json(&request_with_signatures(), ExclusiveAccess::Denied);
+        let json = replay_json(request_with_signatures(), ExclusiveAccess::Denied);
         // No encoding data or signatures.
         assert!(!json.contains("encoding_options"), "json was: {json}");
         assert!(!json.contains("signature"), "json was: {json}");
@@ -343,7 +360,7 @@ mod tests {
 
     #[test]
     fn replay_json_keeps_routing_essentials_and_options() {
-        let json = replay_json(&request_with_signatures(), ExclusiveAccess::Denied);
+        let json = replay_json(request_with_signatures(), ExclusiveAccess::Denied);
         let value: Value = serde_json::from_str(&json).unwrap();
         let order = &value["orders"][0];
         assert_eq!(order["token_in"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
@@ -359,7 +376,7 @@ mod tests {
     #[test]
     fn replay_json_output_keys_are_allowlisted() {
         let req = request_with_signatures();
-        let json = replay_json(&req, ExclusiveAccess::Denied);
+        let json = replay_json(req, ExclusiveAccess::Denied);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let top_level: std::collections::BTreeSet<&str> = value
@@ -415,7 +432,7 @@ mod tests {
         #[case] access: ExclusiveAccess,
         #[case] expected: bool,
     ) {
-        let json = replay_json(&request_with_signatures(), access);
+        let json = replay_json(request_with_signatures(), access);
         let value: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["exclusive_access"], expected, "json was: {json}");
     }
