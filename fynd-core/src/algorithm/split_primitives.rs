@@ -694,6 +694,243 @@ fn build_in_degree(hops_by_token: &FxHashMap<Bytes, Vec<SplitSwap>>) -> FxHashMa
     in_degree
 }
 
+/// Each path's own money, and how far along its hops it has travelled.
+///
+/// The two vectors are indexed together by path, which is why they live behind one type: a path's
+/// amount and its position are meaningless apart. Tracking them is what stops an intermediate token
+/// being pooled and re-divided by the paths' shares of the *order* — see [`execute_split_plan`].
+struct PathLedger {
+    amount_in: Vec<BigUint>,
+    next_hop_ix: Vec<usize>,
+}
+
+impl PathLedger {
+    /// Starts each path on the amount its allocation carries.
+    ///
+    /// The amounts come from the allocations rather than being re-derived from their fractions:
+    /// the caller has already decided what each path carries, and a fraction is an `f64`. They set
+    /// the proportions only — every swap amount is divided out of the balance actually standing at
+    /// its token — so they are not required to sum to the order exactly.
+    ///
+    /// # Errors
+    ///
+    /// [`AlgorithmError::Other`] when every path carries nothing. That describes no split at all,
+    /// and guessing an allocation for it would misprice the quote it produces.
+    fn new(paths: &[PathAllocation]) -> Result<Self, AlgorithmError> {
+        let amount_in: Vec<BigUint> = paths
+            .iter()
+            .map(|path| path.amount_in.clone())
+            .collect();
+        if amount_in.iter().all(BigUint::is_zero) {
+            return Err(AlgorithmError::Other(
+                "cannot divide the order across these paths: every path carries a zero amount"
+                    .to_string(),
+            ));
+        }
+        Ok(Self { next_hop_ix: vec![0; paths.len()], amount_in })
+    }
+
+    /// Which paths are standing at `token`, grouped by the swap each is about to make.
+    ///
+    /// Every path that passes through the token has arrived: the token is only released once every
+    /// hop producing it has run.
+    fn standing_at(
+        &self,
+        paths: &[PathAllocation],
+        token: &Bytes,
+    ) -> FxHashMap<HopKey, Vec<usize>> {
+        let mut by_hop: FxHashMap<HopKey, Vec<usize>> = FxHashMap::default();
+        for (path_ix, path) in paths.iter().enumerate() {
+            let Some(hop) = path.hops.get(self.next_hop_ix[path_ix]) else {
+                continue;
+            };
+            if hop.descriptor.token_in.address == *token {
+                by_hop
+                    .entry(hop_key(&hop.descriptor))
+                    .or_default()
+                    .push(path_ix);
+            }
+        }
+        by_hop
+    }
+
+    /// What the paths feeding one swap carry between them.
+    fn fed_amounts(&self, fed: &[usize]) -> Vec<BigUint> {
+        fed.iter()
+            .map(|&path_ix| self.amount_in[path_ix].clone())
+            .collect()
+    }
+
+    /// Divides `total` between the paths that fed a swap, in proportion to what each put in.
+    fn rescale(&mut self, fed: &[usize], total: &BigUint) {
+        let fed_amounts = self.fed_amounts(fed);
+        for (&path_ix, share) in fed
+            .iter()
+            .zip(share_output(total, &fed_amounts))
+        {
+            self.amount_in[path_ix] = share;
+        }
+    }
+
+    /// Moves the paths that fed a swap on to their next hop.
+    fn advance(&mut self, fed: &[usize]) {
+        for &path_ix in fed {
+            self.next_hop_ix[path_ix] += 1;
+        }
+    }
+}
+
+/// What stands at each token as the plan executes.
+struct TokenBalances(FxHashMap<Bytes, BigUint>);
+
+impl TokenBalances {
+    fn starting(token: &Bytes, amount: &BigUint) -> Self {
+        Self(FxHashMap::from_iter([(token.clone(), amount.clone())]))
+    }
+
+    /// What stands at `token`, which is nothing for a token nothing has produced.
+    fn at(&self, token: &Bytes) -> BigUint {
+        self.0
+            .get(token)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Takes what a swap spends out of its input token.
+    ///
+    /// Without this a path ending back on the token it started from would count the order's own
+    /// input as output, because [`evaluate_total_output`] reads the balance standing at each
+    /// terminal token.
+    ///
+    /// # Errors
+    ///
+    /// [`AlgorithmError::Other`] when the swap spends more than stands at the token. The traversal
+    /// releases a token only once every hop producing it has run, so that means the plan disagrees
+    /// with itself.
+    fn spend(
+        &mut self,
+        token: &Token,
+        component_id: &ComponentId,
+        amount: &BigUint,
+    ) -> Result<(), AlgorithmError> {
+        let standing = self
+            .0
+            .entry(token.address.clone())
+            .or_default();
+        if *standing < *amount {
+            return Err(AlgorithmError::Other(format!(
+                "the swap through {component_id} spends {amount} {}, more than the {standing} \
+                 standing at it",
+                token.symbol,
+            )));
+        }
+        *standing -= amount;
+        Ok(())
+    }
+
+    fn credit(&mut self, token: &Bytes, amount: &BigUint) {
+        *self.0.entry(token.clone()).or_default() += amount;
+    }
+
+    fn into_inner(self) -> FxHashMap<Bytes, BigUint> {
+        self.0
+    }
+}
+
+/// Sizes one token's merged swaps from the amounts the paths standing at it carry, and pairs each
+/// with the paths that feed it.
+///
+/// # Errors
+///
+/// [`AlgorithmError::Other`] when a merged swap has no path standing at it. Every merged swap was
+/// built from the hops of these paths, and a token is only released once every hop producing it has
+/// run, so one of them is standing here. No feeder means the traversal is broken, and a zero-amount
+/// swap in the route would hide that.
+fn amounts_for_branch(
+    branch: Vec<SplitSwap>,
+    standing: &FxHashMap<HopKey, Vec<usize>>,
+    ledger: &PathLedger,
+    total: &BigUint,
+) -> Result<Vec<(SplitSwap, Vec<usize>)>, AlgorithmError> {
+    let sized: Vec<SplitSwap> = branch
+        .into_iter()
+        .map(|mut split_swap| {
+            let fed = standing
+                .get(&hop_key(&split_swap.hop))
+                .ok_or_else(|| {
+                    AlgorithmError::Other(format!(
+                        "no path feeds the swap through {} at this point in the plan",
+                        split_swap.hop.component_id,
+                    ))
+                })?;
+            split_swap.amount_in = ledger
+                .fed_amounts(fed)
+                .into_iter()
+                .sum();
+            Ok(split_swap)
+        })
+        .collect::<Result<_, AlgorithmError>>()?;
+
+    // Paired after the sort, so each swap keeps the feeders it was sized from.
+    Ok(splits_from_amounts(sized, total)
+        .into_iter()
+        .map(|split_swap| {
+            let fed = standing
+                .get(&hop_key(&split_swap.hop))
+                .cloned()
+                .unwrap_or_default();
+            (split_swap, fed)
+        })
+        .collect())
+}
+
+/// Simulates one merged swap against the freshest state the plan holds for its component.
+///
+/// Returns the executed swap and the component state it left behind.
+///
+/// # Errors
+///
+/// [`AlgorithmError::DataNotFound`] when no state can be found for the component, and
+/// [`AlgorithmError::SimulationFailed`] when the component refuses the swap.
+fn run_merged_swap(
+    swap: SplitSwap,
+    market: &MarketState,
+    base_overrides: &MarketOverrides,
+    post_swap: &MarketOverrides,
+) -> Result<(SimulatedSplitSwap, Box<dyn ProtocolSim>), AlgorithmError> {
+    let sim = post_swap
+        .get(&swap.hop.component_id)
+        .or_else(|| base_overrides.get(&swap.hop.component_id))
+        .or_else(|| market.get_simulation_state(&swap.hop.component_id))
+        .ok_or_else(|| AlgorithmError::DataNotFound {
+            kind: "simulation state",
+            id: Some(swap.hop.component_id.clone()),
+        })?;
+
+    let result = sim
+        .get_amount_out_metered(
+            &swap.hop.component_id,
+            SPLIT_PLAN_STAGE,
+            swap.amount_in.clone(),
+            &swap.hop.token_in,
+            &swap.hop.token_out,
+        )
+        .map_err(|e| AlgorithmError::SimulationFailed {
+            component_id: swap.hop.component_id.clone(),
+            error: e.to_string(),
+        })?;
+
+    let executed = SimulatedSplitSwap {
+        hop: swap.hop,
+        split: swap.split,
+        amount_in: swap.amount_in,
+        amount_out: result.amount,
+        gas: result.gas,
+        pre_swap_state: sim.clone_box(),
+    };
+    Ok((executed, result.new_state))
+}
+
 /// Simulates a split route from start token to outputs and returns the outcome.
 ///
 /// Swaps run in dependency order, so a token is only traded once every hop producing it has run,
@@ -722,203 +959,58 @@ fn execute_split_plan(
 
     let mut hops_by_token = merge_shared_hops(paths)?;
     let mut in_degree = build_in_degree(&hops_by_token);
-    let mut ready = VecDeque::new();
-    ready.push_back(start_token.clone());
+    let mut ready = VecDeque::from([start_token.clone()]);
 
-    let mut available: FxHashMap<Bytes, BigUint> = FxHashMap::default();
-    available.insert(start_token.clone(), start_amount.clone());
-
-    // Each path's own money, and how far along its hops it has travelled. Tracking this is what
-    // stops an intermediate token being pooled and re-divided by the paths' *input* shares — see
-    // the note on `execute_split_plan`.
-    //
-    // The amounts come from the allocations rather than being re-derived from their fractions: the
-    // caller has already decided what each path carries, and a fraction is an `f64`. They set the
-    // proportions only — every swap amount below is divided out of the balance actually standing at
-    // its token — so they are not required to sum to `start_amount` exactly.
-    let mut path_amount_in: Vec<BigUint> = paths
-        .iter()
-        .map(|path| path.amount_in.clone())
-        .collect();
-    // Loud rather than silent: a path set carrying nothing describes no split at all, and guessing
-    // an allocation for it would misprice the quote it produces.
-    if path_amount_in
-        .iter()
-        .all(BigUint::is_zero)
-    {
-        return Err(AlgorithmError::Other(
-            "cannot divide the order across these paths: every path carries a zero amount"
-                .to_string(),
-        ));
-    }
-    let mut next_hop_ix: Vec<usize> = vec![0; paths.len()];
-
+    let mut ledger = PathLedger::new(paths)?;
+    let mut balances = TokenBalances::starting(start_token, start_amount);
     let mut swaps = Vec::new();
     let mut post_swap = MarketOverrides::empty();
     let mut total_gas: u64 = 0;
 
     while let Some(token_addr) = ready.pop_front() {
-        let Some(branch_collection) = hops_by_token.remove(&token_addr) else {
+        let Some(branch) = hops_by_token.remove(&token_addr) else {
             continue;
         };
-        let total = available
-            .get(&token_addr)
-            .cloned()
-            .unwrap_or_default();
-
-        // Which paths are standing at this token, and on which swap. Every path that passes
-        // through it has arrived: the token is only released once every hop producing it has run.
-        let mut path_ixs_by_hop: FxHashMap<HopKey, Vec<usize>> = FxHashMap::default();
-        for (path_ix, path) in paths.iter().enumerate() {
-            let Some(hop) = path.hops.get(next_hop_ix[path_ix]) else {
-                continue;
-            };
-            if hop.descriptor.token_in.address == token_addr {
-                path_ixs_by_hop
-                    .entry(hop_key(&hop.descriptor))
-                    .or_default()
-                    .push(path_ix);
-            }
-        }
-
-        let mut hop_amounts: Vec<SplitSwap> = branch_collection
-            .into_iter()
-            .map(|mut split_swap| {
-                // Every merged swap was built from the hops of these paths, and a token is only
-                // released once every hop producing it has run, so one of them is standing here.
-                // No feeder means the traversal is broken, and a zero-amount swap in the route
-                // would hide that.
-                let fed_path_ixs = path_ixs_by_hop
-                    .get(&hop_key(&split_swap.hop))
-                    .ok_or_else(|| {
-                        AlgorithmError::Other(format!(
-                            "no path feeds the swap through {} at this point in the plan",
-                            split_swap.hop.component_id,
-                        ))
-                    })?;
-                split_swap.amount_in = fed_path_ixs
-                    .iter()
-                    .map(|&path_ix| path_amount_in[path_ix].clone())
-                    .sum();
-                Ok(split_swap)
-            })
-            .collect::<Result<_, AlgorithmError>>()?;
-        hop_amounts = splits_from_amounts(hop_amounts, &total);
-
-        // Which paths feed each swap, answered once for the two passes below. Asking again costs
-        // a key, and a key costs a copy of the component id.
-        let fed_path_ixs_by_swap: Vec<&[usize]> = hop_amounts
-            .iter()
-            .map(|split_swap| {
-                path_ixs_by_hop
-                    .get(&hop_key(&split_swap.hop))
-                    .map_or(&[][..], Vec::as_slice)
-            })
-            .collect();
+        let standing = ledger.standing_at(paths, &token_addr);
+        let sized = amounts_for_branch(branch, &standing, &ledger, &balances.at(&token_addr))?;
 
         // The executed amount can differ by a wei from what the paths standing here asked for,
         // because it came back through the encoder's own fraction arithmetic. Re-attribute it so
         // their amounts add up to what is really being swapped.
-        for (split_swap, fed_path_ixs) in hop_amounts
-            .iter()
-            .zip(&fed_path_ixs_by_swap)
-        {
-            if fed_path_ixs.is_empty() {
-                continue;
-            }
-            let fed_amounts: Vec<BigUint> = fed_path_ixs
-                .iter()
-                .map(|&path_ix| path_amount_in[path_ix].clone())
-                .collect();
-            for (&path_ix, share) in fed_path_ixs
-                .iter()
-                .zip(share_output(&split_swap.amount_in, &fed_amounts))
-            {
-                path_amount_in[path_ix] = share;
-            }
+        for (split_swap, fed) in &sized {
+            ledger.rescale(fed, &split_swap.amount_in);
         }
 
-        for (split_swap, fed_path_ixs) in hop_amounts
-            .into_iter()
-            .zip(&fed_path_ixs_by_swap)
-        {
-            let sim = post_swap
-                .get(&split_swap.hop.component_id)
-                .or_else(|| base_overrides.get(&split_swap.hop.component_id))
-                .or_else(|| market.get_simulation_state(&split_swap.hop.component_id))
-                .ok_or_else(|| AlgorithmError::DataNotFound {
-                    kind: "simulation state",
-                    id: Some(split_swap.hop.component_id.clone()),
-                })?;
+        for (split_swap, fed) in sized {
+            let token_in = split_swap.hop.token_in.clone();
+            let token_out = split_swap.hop.token_out.address.clone();
+            let component_id = split_swap.hop.component_id.clone();
 
-            let result = sim
-                .get_amount_out_metered(
-                    &split_swap.hop.component_id,
-                    SPLIT_PLAN_STAGE,
-                    split_swap.amount_in.clone(),
-                    &split_swap.hop.token_in,
-                    &split_swap.hop.token_out,
-                )
-                .map_err(|e| AlgorithmError::SimulationFailed {
-                    component_id: split_swap.hop.component_id.clone(),
-                    error: e.to_string(),
-                })?;
-
-            // What the swap spends leaves the balance at its input token. Without this a path
-            // ending back on the token it started from would count the order's own input as
-            // output, because `evaluate_total_output` reads the balance standing at each terminal
-            // token.
-            let standing = available
-                .entry(split_swap.hop.token_in.address.clone())
-                .or_default();
-            if *standing < split_swap.amount_in {
-                return Err(AlgorithmError::Other(format!(
-                    "the swap through {} spends {} {}, more than the {standing} standing at it",
-                    split_swap.hop.component_id,
-                    split_swap.amount_in,
-                    split_swap.hop.token_in.symbol,
-                )));
-            }
-            *standing -= &split_swap.amount_in;
-
-            let out_addr = split_swap.hop.token_out.address.clone();
-            *available
-                .entry(out_addr.clone())
-                .or_default() += &result.amount;
+            balances.spend(&token_in, &component_id, &split_swap.amount_in)?;
+            let (executed, new_state) =
+                run_merged_swap(split_swap, market, base_overrides, &post_swap)?;
+            balances.credit(&token_out, &executed.amount_out);
 
             // Hand the output back to the paths that fed this swap, in proportion to what each put
             // in, and move them to their next hop. A path's amount stays its own rather than being
             // pooled at the token and re-divided by shares that describe the order.
-            if !fed_path_ixs.is_empty() {
-                let fed_amounts: Vec<BigUint> = fed_path_ixs
-                    .iter()
-                    .map(|&path_ix| path_amount_in[path_ix].clone())
-                    .collect();
-                for (&path_ix, share) in fed_path_ixs
-                    .iter()
-                    .zip(share_output(&result.amount, &fed_amounts))
-                {
-                    path_amount_in[path_ix] = share;
-                    next_hop_ix[path_ix] += 1;
-                }
-            }
-            total_gas = total_gas.saturating_add(result.gas.to_u64().unwrap_or(u64::MAX));
+            ledger.rescale(&fed, &executed.amount_out);
+            ledger.advance(&fed);
 
-            swaps.push(SimulatedSplitSwap {
-                hop: split_swap.hop.clone(),
-                split: split_swap.split,
-                amount_in: split_swap.amount_in,
-                amount_out: result.amount,
-                gas: result.gas,
-                pre_swap_state: sim.clone_box(),
-            });
-            post_swap = post_swap.with_override(split_swap.hop.component_id, result.new_state);
+            total_gas = total_gas.saturating_add(
+                executed
+                    .gas
+                    .to_u64()
+                    .unwrap_or(u64::MAX),
+            );
+            swaps.push(executed);
+            post_swap = post_swap.with_override(component_id, new_state);
 
             // Decrement in-degree; enqueue when all inflows are ready.
-            if let Some(deg) = in_degree.get_mut(&out_addr) {
+            if let Some(deg) = in_degree.get_mut(&token_out) {
                 *deg = deg.saturating_sub(1);
                 if *deg == 0 {
-                    ready.push_back(out_addr);
+                    ready.push_back(token_out);
                 }
             }
         }
@@ -935,7 +1027,7 @@ fn execute_split_plan(
         )));
     }
 
-    Ok(SplitExecution { swaps, available, post_swap, total_gas })
+    Ok(SplitExecution { swaps, available: balances.into_inner(), post_swap, total_gas })
 }
 
 /// Turns the parallel paths/fractions the line search works in into the
