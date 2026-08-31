@@ -13,11 +13,18 @@ use tycho_simulation::tycho_common::{
     Bytes,
 };
 
+use super::{sim_meter, sim_meter::MeteredProtocolSim};
 use crate::{
-    algorithm::{sim_guard::GuardedProtocolSim, AlgorithmError},
+    algorithm::AlgorithmError,
     feed::market_data::MarketState,
     types::{ComponentId, Order, Route, Swap},
 };
+
+/// The stage every swap [`simulate_path`] makes is booked under.
+const SIMULATE_PATH_STAGE: sim_meter::StageLabel = "simulate_path";
+
+/// The stage every swap [`execute_split_plan`] makes is booked under.
+const SPLIT_PLAN_STAGE: sim_meter::StageLabel = "execute_split_plan";
 
 #[derive(Clone)]
 pub(crate) struct HopDescriptor {
@@ -406,8 +413,8 @@ pub(crate) fn compute_marginal_price_product(
 ///
 /// For each hop, the path's own post-swap states are checked first, then
 /// `overrides`, then the live market state. Returns the final output amount,
-/// marginal price product (spot prices at the state each hop executed
-/// against), per-hop results, and the post-swap component states.
+/// per-hop results, the post-swap component states, and the marginal price product, the spot
+/// prices at the state each hop executed against.
 pub(crate) fn simulate_path(
     hops: &[HopDescriptor],
     amount_in: &BigUint,
@@ -444,7 +451,13 @@ pub(crate) fn simulate_path(
         marginal_price_product *= price;
 
         let result = sim
-            .get_amount_out_guarded(current_amount, &hop.token_in, &hop.token_out)
+            .get_amount_out_metered(
+                &hop.component_id,
+                SIMULATE_PATH_STAGE,
+                current_amount,
+                &hop.token_in,
+                &hop.token_out,
+            )
             .map_err(|e| AlgorithmError::SimulationFailed {
                 component_id: hop.component_id.clone(),
                 error: e.to_string(),
@@ -500,6 +513,13 @@ pub(crate) fn build_post_swap_overrides(
     .post_swap)
 }
 
+/// What makes two paths' hops the same on-chain swap: one pool, taken in one direction.
+type HopKey = (ComponentId, Bytes, Bytes);
+
+fn hop_key(hop: &HopDescriptor) -> HopKey {
+    (hop.component_id.clone(), hop.token_in.address.clone(), hop.token_out.address.clone())
+}
+
 struct SplitSwap {
     hop: HopDescriptor,
     split: f64,
@@ -525,12 +545,11 @@ struct SplitExecution {
 }
 
 /// Merge shared hops across paths, summing their flow fractions, and return
-/// them collected by `token_in` (sorted by fraction descending within each
+/// them collected by `token_in` (sorted by amount descending within each
 /// branch collection).
 fn merge_shared_hops(
     paths: &[PathAllocation],
 ) -> Result<FxHashMap<Bytes, Vec<SplitSwap>>, AlgorithmError> {
-    type HopKey = (ComponentId, Bytes, Bytes);
     let mut hops: FxHashMap<HopKey, SplitSwap> = FxHashMap::default();
 
     for path in paths {
@@ -541,20 +560,17 @@ fn merge_shared_hops(
                 desc.token_in.address.clone(),
                 desc.token_out.address.clone(),
             );
-            hops.entry(key)
-                .and_modify(|h| {
-                    h.split += path.flow_fraction;
-                })
-                .or_insert(SplitSwap {
-                    hop: HopDescriptor::new(
-                        desc.component_id.clone(),
-                        desc.token_in.clone(),
-                        desc.token_out.clone(),
-                    ),
-                    split: path.flow_fraction,
-                    // Set later by assign_splits_and_amounts.
-                    amount_in: BigUint::ZERO,
-                });
+            hops.entry(key).or_insert(SplitSwap {
+                hop: HopDescriptor::new(
+                    desc.component_id.clone(),
+                    desc.token_in.clone(),
+                    desc.token_out.clone(),
+                ),
+                // Both set by `splits_from_amounts`, from the amounts the paths standing at this
+                // token actually carry.
+                split: 0.0,
+                amount_in: BigUint::ZERO,
+            });
         }
     }
 
@@ -565,16 +581,13 @@ fn merge_shared_hops(
             .or_default()
             .push(swap);
     }
+    // Only for determinism: `splits_from_amounts` re-sorts each collection by the amount its swap
+    // carries, and this decides the order of swaps carrying equal amounts.
     for branch_collection in branch_collections.values_mut() {
         branch_collection.sort_by(|a, b| {
-            b.split
-                .partial_cmp(&a.split)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    a.hop
-                        .component_id
-                        .cmp(&b.hop.component_id)
-                })
+            a.hop
+                .component_id
+                .cmp(&b.hop.component_id)
                 .then_with(|| {
                     a.hop
                         .token_in
@@ -592,28 +605,76 @@ fn merge_shared_hops(
     Ok(branch_collections)
 }
 
-/// Normalize fractions within a branch collection, convert them to input amounts, and
-/// assign final split values using the tycho-execution remainder convention
-/// (last hop gets `split = 0.0`).
-fn assign_splits_and_amounts(
-    mut hops: Vec<SplitSwap>,
-    total_available: &BigUint,
-) -> Vec<SplitSwap> {
-    let len = hops.len();
-    let fraction_total: f64 = hops.iter().map(|h| h.split).sum();
+/// Turns the amounts the execution wants into the fractions the encoder carries — and then back
+/// into the amounts the encoder will actually produce.
+///
+/// On chain a split swap does not carry an amount. It carries the share of the balance held in its
+/// input token that it should take, and the last swap of a group takes whatever is left, which is
+/// what `split = 0.0` means. The fractions therefore come from the amounts the execution
+/// attributed to each path.
+///
+/// The round trip back through [`fractions_to_amounts`] is not redundant. A fraction is an `f64`
+/// and the amounts are integers, so the amount a fraction produces is not exactly the amount it
+/// came from. `replay_route` derives its amounts from the fractions, so the execution has to as
+/// well, or the two disagree on what the same route pays.
+///
+/// It does not make the quote exact against the chain. `tycho-execution` encodes the share as a
+/// `uint24`, so what the router divides by is the fraction rounded to one part in 2^24 — about
+/// `6e-8` of the branch, which the `split = 0.0` swap absorbs for the whole group.
+fn splits_from_amounts(mut hops: Vec<SplitSwap>, total_available: &BigUint) -> Vec<SplitSwap> {
+    // Largest first, so the remainder convention lands on the smallest share, as it did when the
+    // order came from the paths' summed flow fractions. The sort also fixes the order the swaps
+    // execute in, and swaps sharing a pool deplete it for each other, so reversing it would move
+    // the quoted output rather than only moving the rounding remainder.
+    hops.sort_by(|left, right| right.amount_in.cmp(&left.amount_in));
 
-    let normalized: Vec<f64> = hops
+    let last = hops.len().saturating_sub(1);
+    let fractions: Vec<f64> = hops
         .iter()
-        .map(|h| h.split / fraction_total)
+        .enumerate()
+        .map(|(ix, swap)| if ix == last { 0.0 } else { share_of(&swap.amount_in, total_available) })
         .collect();
-    let amounts = fractions_to_amounts(total_available, &normalized)
-        .unwrap_or_else(|_| vec![total_available.clone()]);
 
-    for (i, (swap, amount)) in hops.iter_mut().zip(amounts).enumerate() {
+    let amounts = fractions_to_amounts(total_available, &fractions)
+        .unwrap_or_else(|_| vec![total_available.clone()]);
+    for ((swap, split), amount) in hops
+        .iter_mut()
+        .zip(fractions)
+        .zip(amounts)
+    {
+        swap.split = split;
         swap.amount_in = amount;
-        swap.split = if i == len - 1 { 0.0 } else { normalized[i] };
     }
     hops
+}
+
+/// What share of `total` the `part` is, or zero when there is nothing to divide by.
+fn share_of(part: &BigUint, total: &BigUint) -> f64 {
+    match (part.to_f64(), total.to_f64()) {
+        (Some(part), Some(total)) if total > 0.0 => part / total,
+        _ => 0.0,
+    }
+}
+
+/// Divides `output` between the paths that fed a swap, in proportion to what each put in.
+///
+/// One pool swapped once pays one amount, and each path's share of it is its share of the input —
+/// that is what the on-chain swap does, and there is nothing else it could mean. The last path
+/// takes the rounding remainder so the shares add back to `output` exactly.
+fn share_output(output: &BigUint, fed_amounts: &[BigUint]) -> Vec<BigUint> {
+    let total: BigUint = fed_amounts.iter().sum();
+    if total.is_zero() {
+        return vec![BigUint::ZERO; fed_amounts.len()];
+    }
+    let mut shares: Vec<BigUint> = fed_amounts
+        .iter()
+        .map(|fed| output * fed / &total)
+        .collect();
+    let assigned: BigUint = shares.iter().sum();
+    if let Some(last) = shares.last_mut() {
+        *last += output - assigned;
+    }
+    shares
 }
 
 /// Counts, per token, how many swaps produce it, so the traversal only swaps a
@@ -635,11 +696,14 @@ fn build_in_degree(hops_by_token: &FxHashMap<Bytes, Vec<SplitSwap>>) -> FxHashMa
 
 /// Simulates a split route from start token to outputs and returns the outcome.
 ///
-/// Swaps run in dependency order, so each token is fully pooled from all its
-/// inflows before being re-split downstream, and every swap sees the component state
-/// left by the swaps before it — so paths sharing a component no longer each assume
-/// fresh liquidity. This one pass backs scoring, candidate discovery, and route
-/// assembly, so all three agree on the same executable route. Round-trips that
+/// Swaps run in dependency order, so a token is only traded once every hop producing it has run,
+/// and every swap sees the component state left by the swaps before it — so paths sharing a
+/// component no longer each assume fresh liquidity.
+///
+/// A token is *not* pooled and re-divided. Each path keeps its own amount through its own hops, and
+/// a swap several paths share divides its output between them in proportion to what each put in,
+/// which is what the single on-chain swap does. This one pass backs scoring, candidate discovery,
+/// and route assembly, so all three agree on the same executable route. Round-trips that
 /// end on the input token are supported.
 ///
 /// Errors if a path revisits an intermediate token, a component cannot be simulated,
@@ -663,6 +727,31 @@ fn execute_split_plan(
     let mut available: FxHashMap<Bytes, BigUint> = FxHashMap::default();
     available.insert(start_token.clone(), start_amount.clone());
 
+    // Each path's own money, and how far along its hops it has travelled. Tracking this is what
+    // stops an intermediate token being pooled and re-divided by the paths' *input* shares — see
+    // the note on `execute_split_plan`.
+    //
+    // The amounts come from the allocations rather than being re-derived from their fractions: the
+    // caller has already decided what each path carries, and a fraction is an `f64`. They set the
+    // proportions only — every swap amount below is divided out of the balance actually standing at
+    // its token — so they are not required to sum to `start_amount` exactly.
+    let mut path_amount_in: Vec<BigUint> = paths
+        .iter()
+        .map(|path| path.amount_in.clone())
+        .collect();
+    // Loud rather than silent: a path set carrying nothing describes no split at all, and guessing
+    // an allocation for it would misprice the quote it produces.
+    if path_amount_in
+        .iter()
+        .all(BigUint::is_zero)
+    {
+        return Err(AlgorithmError::Other(
+            "cannot divide the order across these paths: every path carries a zero amount"
+                .to_string(),
+        ));
+    }
+    let mut next_hop_ix: Vec<usize> = vec![0; paths.len()];
+
     let mut swaps = Vec::new();
     let mut post_swap = MarketOverrides::empty();
     let mut total_gas: u64 = 0;
@@ -676,7 +765,82 @@ fn execute_split_plan(
             .cloned()
             .unwrap_or_default();
 
-        for split_swap in assign_splits_and_amounts(branch_collection, &total) {
+        // Which paths are standing at this token, and on which swap. Every path that passes
+        // through it has arrived: the token is only released once every hop producing it has run.
+        let mut path_ixs_by_hop: FxHashMap<HopKey, Vec<usize>> = FxHashMap::default();
+        for (path_ix, path) in paths.iter().enumerate() {
+            let Some(hop) = path.hops.get(next_hop_ix[path_ix]) else {
+                continue;
+            };
+            if hop.descriptor.token_in.address == token_addr {
+                path_ixs_by_hop
+                    .entry(hop_key(&hop.descriptor))
+                    .or_default()
+                    .push(path_ix);
+            }
+        }
+
+        let mut hop_amounts: Vec<SplitSwap> = branch_collection
+            .into_iter()
+            .map(|mut split_swap| {
+                // Every merged swap was built from the hops of these paths, and a token is only
+                // released once every hop producing it has run, so one of them is standing here.
+                // No feeder means the traversal is broken, and a zero-amount swap in the route
+                // would hide that.
+                let fed_path_ixs = path_ixs_by_hop
+                    .get(&hop_key(&split_swap.hop))
+                    .ok_or_else(|| {
+                        AlgorithmError::Other(format!(
+                            "no path feeds the swap through {} at this point in the plan",
+                            split_swap.hop.component_id,
+                        ))
+                    })?;
+                split_swap.amount_in = fed_path_ixs
+                    .iter()
+                    .map(|&path_ix| path_amount_in[path_ix].clone())
+                    .sum();
+                Ok(split_swap)
+            })
+            .collect::<Result<_, AlgorithmError>>()?;
+        hop_amounts = splits_from_amounts(hop_amounts, &total);
+
+        // Which paths feed each swap, answered once for the two passes below. Asking again costs
+        // a key, and a key costs a copy of the component id.
+        let fed_path_ixs_by_swap: Vec<&[usize]> = hop_amounts
+            .iter()
+            .map(|split_swap| {
+                path_ixs_by_hop
+                    .get(&hop_key(&split_swap.hop))
+                    .map_or(&[][..], Vec::as_slice)
+            })
+            .collect();
+
+        // The executed amount can differ by a wei from what the paths standing here asked for,
+        // because it came back through the encoder's own fraction arithmetic. Re-attribute it so
+        // their amounts add up to what is really being swapped.
+        for (split_swap, fed_path_ixs) in hop_amounts
+            .iter()
+            .zip(&fed_path_ixs_by_swap)
+        {
+            if fed_path_ixs.is_empty() {
+                continue;
+            }
+            let fed_amounts: Vec<BigUint> = fed_path_ixs
+                .iter()
+                .map(|&path_ix| path_amount_in[path_ix].clone())
+                .collect();
+            for (&path_ix, share) in fed_path_ixs
+                .iter()
+                .zip(share_output(&split_swap.amount_in, &fed_amounts))
+            {
+                path_amount_in[path_ix] = share;
+            }
+        }
+
+        for (split_swap, fed_path_ixs) in hop_amounts
+            .into_iter()
+            .zip(&fed_path_ixs_by_swap)
+        {
             let sim = post_swap
                 .get(&split_swap.hop.component_id)
                 .or_else(|| base_overrides.get(&split_swap.hop.component_id))
@@ -687,7 +851,9 @@ fn execute_split_plan(
                 })?;
 
             let result = sim
-                .get_amount_out_guarded(
+                .get_amount_out_metered(
+                    &split_swap.hop.component_id,
+                    SPLIT_PLAN_STAGE,
                     split_swap.amount_in.clone(),
                     &split_swap.hop.token_in,
                     &split_swap.hop.token_out,
@@ -701,6 +867,23 @@ fn execute_split_plan(
             *available
                 .entry(out_addr.clone())
                 .or_default() += &result.amount;
+
+            // Hand the output back to the paths that fed this swap, in proportion to what each put
+            // in, and move them to their next hop. A path's amount stays its own rather than being
+            // pooled at the token and re-divided by shares that describe the order.
+            if !fed_path_ixs.is_empty() {
+                let fed_amounts: Vec<BigUint> = fed_path_ixs
+                    .iter()
+                    .map(|&path_ix| path_amount_in[path_ix].clone())
+                    .collect();
+                for (&path_ix, share) in fed_path_ixs
+                    .iter()
+                    .zip(share_output(&result.amount, &fed_amounts))
+                {
+                    path_amount_in[path_ix] = share;
+                    next_hop_ix[path_ix] += 1;
+                }
+            }
             total_gas = total_gas.saturating_add(result.gas.to_u64().unwrap_or(u64::MAX));
 
             swaps.push(SimulatedSplitSwap {
@@ -836,7 +1019,7 @@ pub(crate) fn evaluate_total_output(
 /// Paths may share component hops (same `component_id`, `token_in`, `token_out`).
 /// When they do, this function emits one combined swap rather than duplicates.
 /// Within each branch collection of swaps sharing a `token_in`, the tycho-execution
-/// remainder convention is applied: sorted by fraction descending, all but the
+/// remainder convention is applied: sorted by amount descending, all but the
 /// last receive their explicit split fraction, while the last gets
 /// `split = 0.0` (meaning "use all remaining balance").
 ///
@@ -1507,7 +1690,7 @@ mod tests {
 
         let hops_b = [
             HopDescriptor::new("tricomponent".to_string(), token_a.clone(), token_b.clone()),
-            HopDescriptor::new("component_bd".to_string(), token_b, token_d.clone()),
+            HopDescriptor::new("component_bd".to_string(), token_b.clone(), token_d.clone()),
         ];
         let hops_c = [
             HopDescriptor::new("tricomponent".to_string(), token_a.clone(), token_c.clone()),
@@ -1730,68 +1913,128 @@ mod tests {
 
         let hops_by_token = merge_shared_hops(&paths).unwrap();
 
-        // Branch collection at A: one merged hop (P1, fraction = 0.6 + 0.4 = 1.0).
+        // Branch collection at A: both paths cross P1 on the same pair, so it merges to one swap.
         let branch_collection_a = &hops_by_token[&token_a.address];
         assert_eq!(branch_collection_a.len(), 1);
         assert_eq!(branch_collection_a[0].hop.component_id, "P1");
-        assert!((branch_collection_a[0].split - 1.0).abs() < f64::EPSILON);
 
-        // Branch collection at B: two hops (P2 and P3), sorted descending by fraction.
+        // Branch collection at B: two swaps, ordered by component id so equal amounts do not
+        // reorder between runs. The split each carries is `splits_from_amounts`' to set.
         let branch_collection_b = &hops_by_token[&token_b.address];
-        assert_eq!(branch_collection_b.len(), 2);
-        assert_eq!(branch_collection_b[0].hop.component_id, "P2");
-        assert!((branch_collection_b[0].split - 0.6).abs() < f64::EPSILON);
-        assert_eq!(branch_collection_b[1].hop.component_id, "P3");
-        assert!((branch_collection_b[1].split - 0.4).abs() < f64::EPSILON);
+        let at_b: Vec<&str> = branch_collection_b
+            .iter()
+            .map(|swap| swap.hop.component_id.as_str())
+            .collect();
+        assert_eq!(at_b, vec!["P2", "P3"]);
+        assert!(
+            branch_collection_b
+                .iter()
+                .chain(branch_collection_a)
+                .all(|swap| swap.split == 0.0),
+            "merging assigns no split; the amounts standing at the token decide it"
+        );
     }
 
     #[test]
-    fn test_assign_splits_and_amounts_splits_and_amounts() {
+    fn test_splits_from_amounts_derives_fractions_from_the_amounts() {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
 
         let branch_collection = vec![
             SplitSwap {
                 hop: HopDescriptor::new("component1".to_string(), token_a.clone(), token_b.clone()),
-                split: 0.7,
-                amount_in: BigUint::ZERO,
+                // Stale, and deliberately inconsistent with the amounts: the fractions are derived
+                // from what the execution assigned, not from what a caller once guessed.
+                split: 0.1,
+                amount_in: BigUint::from(700u64),
             },
             SplitSwap {
                 hop: HopDescriptor::new("component2".to_string(), token_a.clone(), token_b.clone()),
-                split: 0.3,
-                amount_in: BigUint::ZERO,
+                split: 0.9,
+                amount_in: BigUint::from(300u64),
             },
         ];
 
-        let result = assign_splits_and_amounts(branch_collection, &BigUint::from(1000u64));
+        let result = splits_from_amounts(branch_collection, &BigUint::from(1000u64));
 
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].split, 0.7);
         assert_eq!(result[0].amount_in, BigUint::from(700u64));
+        assert!((result[0].split - 0.7).abs() < 1e-9);
+        // The last swap takes whatever is left, which on chain is what `split = 0.0` means.
+        assert_eq!(result[1].amount_in, BigUint::from(300u64));
+        assert_eq!(result[1].split, 0.0);
+    }
+
+    /// The sort is what decides which swap carries the remainder, so it has to be exercised by
+    /// input that is not already in the order it produces.
+    #[test]
+    fn test_splits_from_amounts_sorts_by_amount_before_assigning_the_remainder() {
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+
+        let branch_collection = vec![
+            SplitSwap {
+                hop: HopDescriptor::new("small".to_string(), token_a.clone(), token_b.clone()),
+                split: 0.0,
+                amount_in: BigUint::from(300u64),
+            },
+            SplitSwap {
+                hop: HopDescriptor::new("large".to_string(), token_a.clone(), token_b.clone()),
+                split: 0.0,
+                amount_in: BigUint::from(700u64),
+            },
+        ];
+
+        let result = splits_from_amounts(branch_collection, &BigUint::from(1000u64));
+
+        let order: Vec<&str> = result
+            .iter()
+            .map(|swap| swap.hop.component_id.as_str())
+            .collect();
+        assert_eq!(order, vec!["large", "small"], "the ascending input is sorted largest first");
+        assert!((result[0].split - 0.7).abs() < 1e-9);
+        // The smallest runs last and takes what is left, which on chain is what `split = 0.0` asks
+        // the router for.
         assert_eq!(result[1].split, 0.0);
         assert_eq!(result[1].amount_in, BigUint::from(300u64));
     }
 
     #[test]
-    fn test_assign_splits_and_amounts_single_hop() {
-        // A single hop receives the entire amount with split = 0.0.
-        //
-        //  1000 -- component1 (split=0.0) --> B
+    fn test_splits_from_amounts_single_hop() {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
 
+        let total = BigUint::from(1000u64);
         let branch_collection = vec![SplitSwap {
             hop: HopDescriptor::new("component1".to_string(), token_a, token_b),
             split: 1.0,
-            amount_in: BigUint::ZERO,
+            amount_in: total.clone(),
         }];
 
-        let total = BigUint::from(1000u64);
-        let result = assign_splits_and_amounts(branch_collection, &total);
+        let result = splits_from_amounts(branch_collection, &total);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].split, 0.0);
         assert_eq!(result[0].amount_in, total);
+    }
+
+    #[test]
+    fn test_share_output_divides_by_what_each_path_put_in() {
+        let shares =
+            share_output(&BigUint::from(1000u64), &[BigUint::from(300u64), BigUint::from(100u64)]);
+
+        assert_eq!(shares, vec![BigUint::from(750u64), BigUint::from(250u64)]);
+    }
+
+    /// The shares add back to the output exactly, whatever the division leaves over.
+    #[test]
+    fn test_share_output_gives_the_remainder_to_the_last_path() {
+        let output = BigUint::from(1000u64);
+        let shares =
+            share_output(&output, &[BigUint::from(1u64), BigUint::from(1u64), BigUint::from(1u64)]);
+
+        assert_eq!(shares.iter().sum::<BigUint>(), output);
+        assert_eq!(shares[2], BigUint::from(334u64));
     }
 
     // ==================== build_split_route Tests ====================
@@ -2373,8 +2616,11 @@ mod tests {
             "component_a must receive all USDC from both direct and USDT-detour paths"
         );
 
-        // Component B is merged (paths 1+3): DAI in from both = fraction 0.7
-        // Component C has only path 2: DAI in = fraction 0.3
+        // The DAI split follows what each path *brought to DAI*, not what share of the order it
+        // started with. Paths 1 and 3 feed component_b and path 2 feeds component_c, and the DAI
+        // they arrive with is 600 / 600 / 1200 — because path 3 reached USDC through a better pair
+        // of hops (WETH→USDT at 3.0 then USDT→USDC at 1.0) than paths 1 and 2 (WETH→USDC at 2.0).
+        // So component_b takes 1800 of the 2400 DAI and component_c takes 600.
         let component_b_swap = swaps
             .iter()
             .find(|s| s.component_id() == "component_b")
@@ -2384,17 +2630,16 @@ mod tests {
             .find(|s| s.component_id() == "component_c")
             .expect("component_c swap must exist");
 
-        // Total DAI = 2400. Component B gets 0.7 fraction, Component C gets the
-        // remainder. Amounts are simulated from the emitted route, not summed
-        // from path-local fixtures.
+        assert_eq!(*component_b_swap.amount_in(), BigUint::from(1800u64));
         assert_eq!(
             *component_b_swap.amount_out(),
-            BigUint::from(8400u64),
+            BigUint::from(9000u64),
             "component_b amount_out should be simulated from emitted amount_in"
         );
+        assert_eq!(*component_c_swap.amount_in(), BigUint::from(600u64));
         assert_eq!(
             *component_c_swap.amount_out(),
-            BigUint::from(2880u64),
+            BigUint::from(2400u64),
             "component_c amount_out should be simulated from remainder amount_in"
         );
 
