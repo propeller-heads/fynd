@@ -885,20 +885,20 @@ fn to_gas_token_amount(quote: &OrderQuote, amount: &BigUint) -> Option<BigUint> 
 /// cannot price increments `worker_router_unpriced_won_volume_total` rather than counting as zero,
 /// which would read as a solver that won nothing.
 fn record_won_volume(best: &WorkerPoolQuote) {
-    let pool = best.worker_pool.clone();
+    let worker_pool = best.worker_pool.clone();
     let algorithm = best.quote.algorithm().to_string();
     let volume = to_gas_token_amount(&best.quote, best.quote.amount_out())
         .and_then(|amount| amount.to_f64());
     let Some(volume) = volume else {
         counter!(
             "worker_router_unpriced_won_volume_total",
-            "pool" => pool,
+            "pool" => worker_pool,
             "algorithm" => algorithm
         )
         .increment(1);
         return;
     };
-    gauge!("worker_router_won_volume_gas_token", "pool" => pool, "algorithm" => algorithm)
+    gauge!("worker_router_won_volume_gas_token", "pool" => worker_pool, "algorithm" => algorithm)
         .increment(volume / WEI_PER_GAS_TOKEN);
 }
 
