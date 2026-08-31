@@ -67,14 +67,13 @@ type Subgraph<'a> = (
 
 /// Everything needed to call `find_single_route` repeatedly without redoing setup.
 ///
-/// Built once by `build_context` or `build_context_from_source`, which acquire the market and
-/// derived locks and snapshot all relevant states. The solve entry points use this snapshot
-/// directly — no lock re-acquisition — so all route evaluations within one order see a consistent
-/// view of the same block's component states.
+/// Holds a snapshot of market and derived state taken under lock at build time. Solves read the
+/// snapshot without re-acquiring any lock, so all route evaluations within one order see a
+/// consistent view of the same block's component states.
 pub(crate) struct BellmanFordContext {
     pub(crate) token_in_node: NodeIndex,
-    /// Absent when the context was built from a source alone (`build_context_from_source`);
-    /// such a context serves `find_routes_from_source` but not `find_single_route`.
+    /// Absent when the context was built from a source token only, with no destination; such
+    /// a context serves `find_routes_from_source_token` but not `find_single_route`.
     pub(crate) token_out_node: Option<NodeIndex>,
     pub(crate) adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
     pub(crate) token_map: FxHashMap<NodeIndex, Arc<Token>>,
@@ -215,16 +214,11 @@ impl BellmanFordAlgorithm {
     }
 
     /// A context whose subgraph is bounded only by `max_hops` around `token_in` — no destination
-    /// prunes it. For callers that read every relaxed node ([`find_routes_from_source`]); it
-    /// cannot serve [`find_single_route`], which needs a destination.
+    /// prunes it. Having no destination, it cannot serve `find_single_route`.
     ///
-    /// Reads the market unlabeled and no derived data: the one caller is token pricing, which
-    /// fills the derived data everyone else reads. `None` when `token_in` is not in the graph or
-    /// nothing is reachable from it.
-    ///
-    /// [`find_routes_from_source`]: Self::find_routes_from_source
-    /// [`find_single_route`]: Self::find_single_route
-    pub(crate) async fn build_context_from_source(
+    /// Reads the market unlabeled and no derived data. `None` when `token_in` is not in the
+    /// graph or nothing is reachable from it.
+    pub(crate) async fn build_context_from_source_token(
         &self,
         graph: &StableDiGraph<()>,
         market: MarketData,
@@ -320,18 +314,16 @@ impl BellmanFordAlgorithm {
         }
     }
 
-    /// Every token the source reaches, with the route to it and what that route returns, from one
-    /// relaxation.
+    /// Every token the source token reaches, with the route to it and what that route returns, from
+    /// one relaxation.
     ///
-    /// [`find_single_route`](Self::find_single_route) runs the same pass and reads one node out of
-    /// it. The relaxation fills the best amount at every node, so a caller that wants all of them —
-    /// pricing every token against the gas token, say — pays for one pass rather than one per
-    /// destination. Build `ctx` with
-    /// [`build_context_from_source`](Self::build_context_from_source), so that no destination
-    /// prunes its subgraph.
+    /// The relaxation fills the best amount at every node, so reading all of them costs one pass
+    /// rather than one per destination. Build `ctx` with
+    /// [`build_context_from_source_token`](Self::build_context_from_source_token), so that no
+    /// destination prunes its subgraph.
     ///
-    /// Tokens the source cannot reach, and those whose route cannot be rebuilt, are absent.
-    pub(crate) fn find_routes_from_source(
+    /// Tokens the source token cannot reach, and those whose route cannot be rebuilt, are absent.
+    pub(crate) fn find_routes_from_source_token(
         &self,
         ctx: &BellmanFordContext,
         amount_in: &BigUint,
@@ -862,7 +854,7 @@ impl BellmanFordAlgorithm {
     /// Expanding from the source alone reaches most of the market. Every component it reaches gets
     /// copied by the caller's `extract_subset`, held for the solve, and simulated during
     /// relaxation, so bounding the walk bounds all three. Only a caller that reads every relaxed
-    /// node (`find_routes_from_source`) should pass `None` — it needs that full reach.
+    /// node (`find_routes_from_source_token`) should pass `None` — it needs that full reach.
     pub(crate) fn get_subgraph<'a>(
         graph: &'a StableDiGraph<()>,
         token_in: NodeIndex,
@@ -1509,7 +1501,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_find_routes_from_source_covers_branches_off_any_pair() {
+    async fn test_find_routes_from_source_token_covers_branches_off_any_pair() {
         // G->A and G->B->C: B and C sit on no G->A path, so a subgraph pruned toward any
         // single destination would drop them. The from-source context must keep them all.
         let token_g = token(0x01, "G");
@@ -1525,11 +1517,14 @@ mod tests {
 
         let algo = bf_algorithm(3, 1000);
         let ctx = algo
-            .build_context_from_source(manager.graph(), market, &token_g.address)
+            .build_context_from_source_token(manager.graph(), market, &token_g.address)
             .await
             .expect("gas token has outgoing edges");
-        let routes =
-            algo.find_routes_from_source(&ctx, &BigUint::from(100u64), FindRouteOptions::default());
+        let routes = algo.find_routes_from_source_token(
+            &ctx,
+            &BigUint::from(100u64),
+            FindRouteOptions::default(),
+        );
 
         let reached: FxHashSet<Address> = routes.keys().cloned().collect();
         let expected: FxHashSet<Address> = [&token_a, &token_b, &token_c]
@@ -1548,7 +1543,7 @@ mod tests {
 
         let algo = bf_algorithm(3, 1000);
         let ctx = algo
-            .build_context_from_source(manager.graph(), market, &token_a.address)
+            .build_context_from_source_token(manager.graph(), market, &token_a.address)
             .await
             .expect("source has outgoing edges");
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
