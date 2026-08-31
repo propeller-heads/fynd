@@ -1,36 +1,30 @@
-//! Computes token prices relative to a gas token (e.g., ETH) with the same router that answers
-//! quotes.
+//! Computes token prices relative to a gas token (e.g., ETH).
+//!
+//! Runs once per block, in the background chain of derived computations — never on the quoting
+//! path. Quotes read whatever the last completed run stored, so prices lag the chain head by at
+//! most the block or two a run is in flight. A token missing a price is not an error: consumers
+//! treat it as "gas converts to zero", so quoting such a token still works, just gas-blind.
 //!
 //! # Algorithm
 //!
-//! One relaxation from the gas token yields the best buy route to every token it reaches. Each
-//! bought token is then sold back with its own solve, and the price is the mean of what the two
-//! routes imply:
+//! Routes are found with the same Bellman-Ford algorithm the solvers use to answer quotes, so a
+//! price reflects what a trade would actually get, slippage and fees included. Each token is bought
+//! with a fixed amount of gas token and sold back, and its price is the mean of the buy price and
+//! the sell price. The mean includes the round-trip cost, so prices are comparable across tokens (a
+//! token that is expensive to exit prices lower).
 //!
-//! - `buy_price` = `buy_out / simulation_amount`
-//! - `sell_price` = `buy_out / sell_out`
-//! - price = `(buy_price + sell_price) / 2`, held as an exact fraction
-//!
-//! The mean includes the round-trip cost, so prices are comparable across tokens (a token that
-//! is expensive to exit prices lower). A token missing either route is unpriced: consumers treat
-//! a missing price as "gas converts to zero", so quoting such a token still works, just
-//! gas-blind.
-//!
-//! The router runs with gas-aware scoring off. Off is what keeps this non-circular: gas-aware
+//! The algorithm runs with gas-aware scoring off. Off is what keeps this non-circular: gas-aware
 //! scoring converts a route's gas into output-token terms, which needs the prices this computation
 //! produces. Nothing here reads derived data, so token prices depend on no other computation.
 //!
-//! A router already ranks paths by what they return, so pricing needs no ranking rule of its own.
-//!
 //! # Cost
 //!
-//! The buy side costs one relaxation however many tokens are priced. The sell side costs one
-//! solve per token: those solves are many sources into one destination, each starting from its
-//! own buy output, and slippage makes the relaxation amount-dependent, so they cannot share the
-//! buy side's single pass. This computation runs in the per-block chain, so a slow pass delays
-//! that block's spot prices and depths — an accepted trade-off. After the first full solve,
-//! incremental recomputation narrows each pass to the tokens whose stored routes ran through a
-//! changed component, which bounds the steady-state cost.
+//! Buying is cheap: one pass over the graph finds the buy route to every token at once. Selling
+//! dominates: each token needs its own solve, because each sell starts from a different amount
+//! and slippage makes routes amount-dependent. A slow pass delays that block's spot prices and
+//! depths — an accepted trade-off. After the first full solve, recomputation is incremental:
+//! only tokens whose stored routes ran through a changed component are re-solved, which bounds
+//! the steady-state cost.
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
@@ -60,8 +54,8 @@ use crate::{
     types::{ComponentId, Order, OrderSide, Route, Swap},
 };
 
-/// The graph the router walks.
-type RouterGraph = <BellmanFordAlgorithm as Algorithm>::GraphType;
+/// The graph the algorithm walks.
+type AlgorithmGraph = <BellmanFordAlgorithm as Algorithm>::GraphType;
 
 /// What a route delivers in `token_out`, summed over the swaps that end there so a split route
 /// reports its whole output rather than one leg's.
@@ -79,7 +73,7 @@ fn route_output(route: &Route, token_out: &Address) -> BigUint {
 pub struct TokenGasPriceComputation {
     /// The gas token address (e.g., ETH).
     gas_token: Address,
-    /// Longest path the router may use.
+    /// Longest route the algorithm may build.
     max_hops: usize,
     /// Amount of gas token to buy with (affects slippage).
     simulation_amount: BigUint,
@@ -102,7 +96,7 @@ impl TokenGasPriceComputation {
         Self { gas_token, max_hops, simulation_amount }
     }
 
-    /// Sets the longest path the router may use.
+    /// Sets the longest route the algorithm may build.
     pub fn with_max_hops(self, max_hops: usize) -> Self {
         Self { max_hops, ..self }
     }
@@ -143,7 +137,7 @@ impl TokenGasPriceComputation {
             AlgorithmConfig::new(1, self.max_hops, AlgorithmConfig::default().timeout(), None)
                 .map_err(|error| ComputationError::InvalidConfiguration(error.to_string()))?
                 .with_gas_aware(false);
-        let router = BellmanFordAlgorithm::with_config(config);
+        let algorithm = BellmanFordAlgorithm::with_config(config);
 
         let wanted = self.tokens_to_price(&topology, filter_tokens);
         if wanted.is_empty() {
@@ -154,14 +148,14 @@ impl TokenGasPriceComputation {
         // One relaxation from the gas token yields the buy route for every token it reaches, so the
         // buy side costs a single pass however many tokens are priced.
         let buys = self
-            .buy_routes(&router, graph, market)
+            .buy_routes(&algorithm, graph, market)
             .await;
 
         let mut prices = FxHashMap::default();
         let mut failed_items = Vec::new();
         for token in wanted {
             match self
-                .price_token(&router, graph, market, &token, buys.get(&token))
+                .price_token(&algorithm, graph, market, &token, buys.get(&token))
                 .await
             {
                 Ok(priced) => {
@@ -180,18 +174,22 @@ impl TokenGasPriceComputation {
     /// its subgraph — so the routes cover every reachable token.
     async fn buy_routes(
         &self,
-        router: &BellmanFordAlgorithm,
-        graph: &RouterGraph,
+        algorithm: &BellmanFordAlgorithm,
+        graph: &AlgorithmGraph,
         market: &MarketData,
     ) -> FxHashMap<Address, Route> {
-        let Some(ctx) = router
-            .build_context_from_source(graph, market.clone(), &self.gas_token)
+        let Some(ctx) = algorithm
+            .build_context_from_source_token(graph, market.clone(), &self.gas_token)
             .await
         else {
             // No subgraph around the gas token means nothing is priceable this block.
             return FxHashMap::default();
         };
-        router.find_routes_from_source(&ctx, &self.simulation_amount, FindRouteOptions::default())
+        algorithm.find_routes_from_source_token(
+            &ctx,
+            &self.simulation_amount,
+            FindRouteOptions::default(),
+        )
     }
 
     /// Every token in the graph but the gas token, narrowed to `filter_tokens` when given.
@@ -209,17 +207,15 @@ impl TokenGasPriceComputation {
             .collect()
     }
 
-    /// Prices one token as the mean of what its buy and sell routes imply.
+    /// Prices one token as the mean of its buy price and its sell price, kept as an exact
+    /// fraction.
     ///
-    /// With `buy_price = buy_out / simulation_amount` and `sell_price = buy_out / sell_out`,
-    /// the mean is `buy_out * (simulation_amount + sell_out)` over
-    /// `2 * simulation_amount * sell_out`, kept as an exact fraction. A token missing either
-    /// route is an error, not a price: a buy rate alone would flatter a token that is expensive
-    /// to exit, and prices must stay comparable across tokens.
+    /// A token missing either route is an error, not a price: a buy rate alone would flatter a
+    /// token that is expensive to exit, and prices must stay comparable across tokens.
     async fn price_token(
         &self,
-        router: &BellmanFordAlgorithm,
-        graph: &RouterGraph,
+        algorithm: &BellmanFordAlgorithm,
+        graph: &AlgorithmGraph,
         market: &MarketData,
         token: &Address,
         buy: Option<&Route>,
@@ -236,7 +232,7 @@ impl TokenGasPriceComputation {
             .collect();
 
         let sell = self
-            .sell_route(router, graph, market, token, buy_out.clone())
+            .sell_route(algorithm, graph, market, token, buy_out.clone())
             .await
             .ok_or(FailedItemError::NoSellRoute)?;
         let sell_out = route_output(&sell, &self.gas_token);
@@ -260,8 +256,8 @@ impl TokenGasPriceComputation {
     /// dominates this computation's cost.
     async fn sell_route(
         &self,
-        router: &BellmanFordAlgorithm,
-        graph: &RouterGraph,
+        algorithm: &BellmanFordAlgorithm,
+        graph: &AlgorithmGraph,
         market: &MarketData,
         token: &Address,
         amount: BigUint,
@@ -276,9 +272,9 @@ impl TokenGasPriceComputation {
             OrderSide::Sell,
             Address::zero(20),
         );
-        // Derived data is deliberately withheld: gas-blind, the router does not need it, and this
+        // Derived data is deliberately withheld: gas-blind, the solve does not need it, and this
         // computation is the one filling the part of it that would be read.
-        let route = router
+        let route = algorithm
             .find_best_route(graph, market.clone(), None, None, &order)
             .await
             .ok()?
@@ -418,7 +414,7 @@ impl DerivedComputation for TokenGasPriceComputation {
     const ID: ComputationId = "token_prices";
 
     fn requirements(&self) -> ComputationRequirements {
-        // The router runs gas-blind and reads no derived data, so nothing has to precede this.
+        // Reads no derived data, so no other computation has to precede this one.
         ComputationRequirements::none()
     }
 
@@ -482,7 +478,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prices_a_token_from_its_round_trip() {
+    async fn test_price_via_direct_pool() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -499,7 +495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_price_is_the_mean_of_buy_and_sell() {
+    async fn test_price_with_pool_fee() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -518,7 +514,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prices_a_token_the_router_reaches_only_through_a_hop() {
+    async fn test_price_via_multi_hop_route() {
         let eth = token(0, "ETH");
         let mid = token(2, "MID");
         let target = token(3, "TARGET");
@@ -538,7 +534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_leaves_a_token_unpriced_when_the_router_finds_no_route() {
+    async fn test_unreachable_token() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
         let island = token(4, "ISLAND");

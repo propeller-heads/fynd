@@ -212,7 +212,7 @@ impl ComputationManager {
         manager.register(
             TokenGasPriceComputation::default()
                 .with_max_hops(config.max_hop)
-                .with_gas_token(config.gas_token.clone()),
+                .with_gas_token(config.gas_token),
         )?;
         manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
         Ok((manager, event_rx))
