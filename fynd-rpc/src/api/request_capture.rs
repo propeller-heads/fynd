@@ -1,7 +1,10 @@
 //! Builds the routing-essential representation of a quote request for the
 //! replay-capture log emitted by the `/v1/quote` handler.
 
-use fynd_core::{ExclusiveAccess, NoPathReason, OrderSide, QuoteRequest, QuoteStatus, SolveError};
+use fynd_core::{
+    types::RouteRejection, ExclusiveAccess, NoPathReason, OrderSide, QuoteRequest, QuoteStatus,
+    SolveError,
+};
 use serde::Serialize;
 use tracing::{info, warn};
 use tycho_simulation::tycho_common::models::Address;
@@ -156,6 +159,12 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
             Some(NoPathReason::NoScorablePaths) => "graph/no_scorable_paths",
             Some(NoPathReason::AmountTooSmall) => "graph/amount_too_small",
             Some(_) | None => "graph/other",
+        },
+        SolveError::RouteRejected { reason, .. } => match reason {
+            RouteRejection::PammFeeTiersUnread => "route/pamm_fee_tiers_unread",
+            RouteRejection::PammFallbackPoolMissing => "route/pamm_fallback_pool_missing",
+            RouteRejection::PammFallbackUnpriceable => "route/pamm_fallback_unpriceable",
+            _ => "route/other",
         },
         SolveError::InsufficientLiquidity { .. } => "graph/insufficient_liquidity",
         SolveError::MaxGasExceeded => "request/max_gas_exceeded",
@@ -528,6 +537,13 @@ mod tests {
             "graph/amount_too_small"
         );
         assert_eq!(failure_reason_slug(s, Some(&SolveError::no_route_found("o"))), "graph/other");
+        assert_eq!(
+            failure_reason_slug(
+                s,
+                Some(&SolveError::route_rejected("o", RouteRejection::PammFeeTiersUnread))
+            ),
+            "route/pamm_fee_tiers_unread"
+        );
         assert_eq!(
             failure_reason_slug(
                 s,

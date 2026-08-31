@@ -328,6 +328,9 @@ pub enum NoPathReason {
     /// latches on any explored edge, so a usable path to the destination may
     /// not have existed.
     AmountTooSmall,
+    /// The algorithm returned a route the worker could not read an output token from, because it
+    /// carries no swaps. A fault in the algorithm rather than a fact about the market.
+    RouteMissingSwaps,
 }
 
 /// Constructors for the variants that carry fields.
@@ -374,6 +377,7 @@ impl std::fmt::Display for NoPathReason {
             Self::NoGraphPath => write!(f, "no connecting path in graph"),
             Self::NoScorablePaths => write!(f, "no paths with valid scores"),
             Self::AmountTooSmall => write!(f, "amount too small to route"),
+            Self::RouteMissingSwaps => write!(f, "the route carries no swaps"),
         }
     }
 }

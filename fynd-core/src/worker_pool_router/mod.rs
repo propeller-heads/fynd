@@ -1254,10 +1254,11 @@ fn is_native_wrap(swap: &Swap, chain: Chain) -> bool {
         (*token_in == wrapped.address && *token_out == native.address)
 }
 
-/// Shared-graph facts beat path-specific reasons (most specific first:
-/// amount-too-small, no-scorable-paths, no-graph-path), which beat liquidity,
-/// data, algorithm, and infrastructure errors; the first error wins within a
-/// tier.
+/// Shared-graph facts beat path-specific reasons (most specific first: amount-too-small and a
+/// rejected route, then no-scorable-paths, then no-graph-path), which beat liquidity, then data,
+/// then algorithm faults — `RouteMissingSwaps` among them, since an algorithm returning an empty
+/// route has said nothing about the market — then infrastructure errors. The first error wins
+/// within a tier.
 fn aggregate_no_route_cause(failed_solvers: &[(String, SolveError)]) -> Option<SolveError> {
     failed_solvers
         .iter()
@@ -1274,7 +1275,13 @@ fn cause_tier(error: &SolveError) -> u8 {
             NoPathReason::AmountTooSmall => 1,
             NoPathReason::NoScorablePaths => 2,
             NoPathReason::NoGraphPath => 3,
+            // An algorithm that returned a route with no swaps has said nothing about the market,
+            // so it must not outrank a pool that did. Ranked with the other algorithm faults.
+            NoPathReason::RouteMissingSwaps => 4,
         },
+        // A rejected route says the market had a route and this deployment could not price it,
+        // which is more specific than "no path" and worth surfacing over it.
+        SolveError::RouteRejected { .. } => 1,
         SolveError::InsufficientLiquidity { .. } | SolveError::MaxGasExceeded => 2,
         SolveError::MissingData(_) |
         SolveError::MarketDataStale { .. } |

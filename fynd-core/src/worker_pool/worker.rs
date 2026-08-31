@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
 
 use crate::{
-    algorithm::Algorithm,
+    algorithm::{Algorithm, NoPathReason},
     derived::{
         computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
@@ -34,7 +34,7 @@ use crate::{
         fallback_amount_out, has_pamm_leg, lacks_fallback_pool, FallbackAmountOut,
         FallbackPoolIndex, FeeTiers, SharedFeeTiers,
     },
-    types::internal::SolveTask,
+    types::internal::{RouteRejection, SolveTask},
     worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
@@ -388,7 +388,10 @@ where
                             order_id = %order.id(),
                             "dropping pAMM route: the router's fee tiers are not read yet"
                         );
-                        return Err(SolveError::no_route_found(order.id()));
+                        return Err(SolveError::route_rejected(
+                            order.id(),
+                            RouteRejection::PammFeeTiersUnread,
+                        ));
                     };
                     // The same view the algorithm solved against, so the fallback is priced on the
                     // requested overlay rather than the base state.
@@ -399,14 +402,31 @@ where
                         FallbackAmountOut::AmountOut(amount) => {
                             route.set_fallback_amount_out(amount)
                         }
-                        FallbackAmountOut::NoFallbackPool { component_id, fee_tier } => {
+                        FallbackAmountOut::NoFallbackPool {
+                            component_id,
+                            fee_tier,
+                            token_in,
+                            token_out,
+                        } => {
+                            // An empty list is a pair the market holds no Uniswap V3 pool for at
+                            // all, which is a different finding from holding one at a tier the
+                            // router does not resolve to.
+                            let tiers_in_market = self
+                                .fallback_pools
+                                .tiers_for(&token_in, &token_out);
                             debug!(
                                 order_id = %order.id(),
                                 %component_id,
                                 fee_tier,
+                                token_in = %token_in,
+                                token_out = %token_out,
+                                tiers_in_market = ?tiers_in_market,
                                 "dropping pAMM route: no Uniswap V3 pool at the router's fee tier"
                             );
-                            return Err(SolveError::no_route_found(order.id()));
+                            return Err(SolveError::route_rejected(
+                                order.id(),
+                                RouteRejection::PammFallbackPoolMissing,
+                            ));
                         }
                         FallbackAmountOut::NotPriceable { reason } => {
                             debug!(
@@ -414,7 +434,10 @@ where
                                 %reason,
                                 "dropping pAMM route: the Uniswap V3 fallback could not be simulated"
                             );
-                            return Err(SolveError::no_route_found(order.id()));
+                            return Err(SolveError::route_rejected(
+                                order.id(),
+                                RouteRejection::PammFallbackUnpriceable,
+                            ));
                         }
                     }
                 }
@@ -443,7 +466,10 @@ where
                             order_id = %order.id(),
                             "route missing swaps for sell order"
                         );
-                        SolveError::no_route_found(order.id())
+                        SolveError::no_route_found_with_reason(
+                            order.id(),
+                            NoPathReason::RouteMissingSwaps,
+                        )
                     })?;
                     route
                         .swaps()
@@ -999,7 +1025,13 @@ mod tests {
         let result = quote_pamm_route(fee_tiers).await;
 
         assert!(
-            matches!(result, Err(SolveError::NoRouteFound { .. })),
+            matches!(
+                result,
+                Err(SolveError::RouteRejected {
+                    reason: RouteRejection::PammFallbackPoolMissing,
+                    ..
+                })
+            ),
             "expected the unbacked pAMM route to be dropped, got {result:?}"
         );
     }
@@ -1011,7 +1043,10 @@ mod tests {
         let result = quote_pamm_route(SharedFeeTiers::default()).await;
 
         assert!(
-            matches!(result, Err(SolveError::NoRouteFound { .. })),
+            matches!(
+                result,
+                Err(SolveError::RouteRejected { reason: RouteRejection::PammFeeTiersUnread, .. })
+            ),
             "expected the pAMM route to be dropped, got {result:?}"
         );
     }
