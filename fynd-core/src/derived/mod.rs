@@ -57,7 +57,8 @@ mod manager;
 mod registry;
 mod store;
 pub(crate) mod tracker;
-pub(crate) mod types;
+/// Derived values an algorithm reads: token gas prices, pool depths, spot prices.
+pub mod types;
 
 // Only export the public API: manager, config, store, shared reference type, and the
 // map aliases the store getters already expose in their signatures

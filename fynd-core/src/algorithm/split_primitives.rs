@@ -27,19 +27,25 @@ const SIMULATE_PATH_STAGE: sim_meter::StageLabel = "simulate_path";
 const SPLIT_PLAN_STAGE: sim_meter::StageLabel = "execute_split_plan";
 
 #[derive(Clone)]
-pub(crate) struct HopDescriptor {
-    pub(crate) component_id: ComponentId,
-    pub(crate) token_in: Token,
-    pub(crate) token_out: Token,
+/// One leg of a path: the pool, and the direction it trades.
+pub struct HopDescriptor {
+    /// The pool this hop goes through.
+    pub component_id: ComponentId,
+    /// Token going in.
+    pub token_in: Token,
+    /// Token coming out.
+    pub token_out: Token,
 }
 
 impl HopDescriptor {
-    pub(crate) fn new(component_id: ComponentId, token_in: Token, token_out: Token) -> Self {
+    /// A hop through `component_id`, trading `token_in` for `token_out`.
+    pub fn new(component_id: ComponentId, token_in: Token, token_out: Token) -> Self {
         Self { component_id, token_in, token_out }
     }
 
     #[cfg(test)]
-    pub(crate) fn with_amounts(self, amount_out: BigUint, gas: BigUint) -> SimulatedHop {
+    /// This hop paired with what it paid, for a test that builds an allocation by hand.
+    pub fn with_amounts(self, amount_out: BigUint, gas: BigUint) -> SimulatedHop {
         SimulatedHop { descriptor: self, amount_out, gas }
     }
 }
@@ -48,10 +54,13 @@ impl HopDescriptor {
 /// [`PathAllocation::hops`] where the solving algorithm has already
 /// computed per-hop outputs and gas.
 #[derive(Clone)]
-pub(crate) struct SimulatedHop {
-    pub(crate) descriptor: HopDescriptor,
-    pub(crate) amount_out: BigUint,
-    pub(crate) gas: BigUint,
+pub struct SimulatedHop {
+    /// The hop this simulated.
+    pub descriptor: HopDescriptor,
+    /// What the pool paid out.
+    pub amount_out: BigUint,
+    /// What the swap costs in gas units.
+    pub gas: BigUint,
 }
 
 /// A fully-simulated path allocation.
@@ -59,15 +68,18 @@ pub(crate) struct SimulatedHop {
 /// One path in the current split solution, with the fraction of total `amount_in`
 /// currently allocated to it. All fractions across allocations sum to 1.0.
 #[derive(Clone)]
-pub(crate) struct PathAllocation {
-    pub(crate) hops: Vec<SimulatedHop>,
+pub struct PathAllocation {
+    /// The path's hops, in order.
+    pub hops: Vec<SimulatedHop>,
     /// Fraction of total input on this path (0 < f <= 1).
-    pub(crate) flow_fraction: f64,
-    pub(crate) amount_in: BigUint,
-    pub(crate) amount_out: BigUint,
+    pub flow_fraction: f64,
+    /// What this path carries into its first hop.
+    pub amount_in: BigUint,
+    /// What its last hop paid out.
+    pub amount_out: BigUint,
     /// Product of marginal prices along all hops at the time this allocation was
     /// last simulated.
-    pub(crate) marginal_price_product: f64,
+    pub marginal_price_product: f64,
 }
 
 impl PathAllocation {
@@ -76,7 +88,7 @@ impl PathAllocation {
     /// A token appearing more than once means `merge_shared_hops` would
     /// incorrectly collapse distinct hops into one. The only exception is
     /// a round-trip where the final output equals the first input.
-    pub(crate) fn validate_token_cycles(&self) -> Result<(), AlgorithmError> {
+    pub fn validate_token_cycles(&self) -> Result<(), AlgorithmError> {
         if self.hops.is_empty() {
             return Err(AlgorithmError::Other("path has no hops".to_string()));
         }
@@ -101,27 +113,31 @@ impl PathAllocation {
 }
 
 /// Output of simulating one path at a given input amount.
-pub(crate) struct SimResult {
-    pub(crate) amount_out: BigUint,
-    pub(crate) marginal_price_product: f64,
+pub struct SimResult {
+    /// What the last hop paid out.
+    pub amount_out: BigUint,
+    /// Spot prices multiplied along the path, at the state each hop executed against.
+    pub marginal_price_product: f64,
     /// Per-hop `(amount_out, gas)` in path order.
-    pub(crate) hop_results: Vec<(BigUint, BigUint)>,
+    pub hop_results: Vec<(BigUint, BigUint)>,
     /// Per-hop post-swap component states in path order. Apply these as overrides
     /// before simulating another path so shared components see depleted reserves.
-    pub(crate) post_swap_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
+    pub post_swap_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
 }
 
 /// Component state overrides for passing degraded states to `find_single_route`.
 #[derive(Default)]
-pub(crate) struct MarketOverrides(FxHashMap<ComponentId, Box<dyn ProtocolSim>>);
+pub struct MarketOverrides(FxHashMap<ComponentId, Box<dyn ProtocolSim>>);
 
 impl MarketOverrides {
-    pub(crate) fn empty() -> Self {
+    /// No overrides: every component is read from the market.
+    #[must_use]
+    pub fn empty() -> Self {
         Self::default()
     }
 
     /// Insert a degraded component state as an override.
-    pub(crate) fn with_override(mut self, id: ComponentId, sim: Box<dyn ProtocolSim>) -> Self {
+    pub fn with_override(mut self, id: ComponentId, sim: Box<dyn ProtocolSim>) -> Self {
         self.0.insert(id, sim);
         self
     }
@@ -136,12 +152,7 @@ impl MarketOverrides {
     ///
     /// Multiple calls for the same component accumulate pairs. If the ID has no
     /// override entry, this is a no-op.
-    pub(crate) fn with_zero_gas(
-        mut self,
-        id: ComponentId,
-        token_in: Bytes,
-        token_out: Bytes,
-    ) -> Self {
+    pub fn with_zero_gas(mut self, id: ComponentId, token_in: Bytes, token_out: Bytes) -> Self {
         if let Some(sim) = self.0.remove(&id) {
             // If already wrapped, add the new pair to the existing set.
             let wrapped = if let Some(selective) = sim
@@ -164,7 +175,9 @@ impl MarketOverrides {
         self
     }
 
-    pub(crate) fn get(&self, id: &ComponentId) -> Option<&dyn ProtocolSim> {
+    /// The overridden state for `id`, if one was set.
+    #[must_use]
+    pub fn get(&self, id: &ComponentId) -> Option<&dyn ProtocolSim> {
         self.0.get(id).map(|b| b.as_ref())
     }
 
@@ -172,7 +185,7 @@ impl MarketOverrides {
     ///
     /// The building counterpart to [`MarketOverrides::with_override`], for the passes that fill an
     /// overlay chunk by chunk rather than declaring one up front.
-    pub(crate) fn insert(&mut self, id: ComponentId, sim: Box<dyn ProtocolSim>) {
+    pub fn insert(&mut self, id: ComponentId, sim: Box<dyn ProtocolSim>) {
         self.0.insert(id, sim);
     }
 }
@@ -265,7 +278,7 @@ impl ProtocolSim for SelectiveZeroGasSim {
 ///
 /// Assumes `f` is roughly unimodal (has one maximum). `max_evals` controls the
 /// number of function evaluations (higher = more precise but slower).
-pub(crate) fn golden_section_search(
+pub fn golden_section_search(
     mut f: impl FnMut(f64) -> f64,
     mut lo: f64,
     mut hi: f64,
@@ -307,7 +320,7 @@ pub(crate) fn golden_section_search(
 ///
 /// Both values always sum exactly to `total` — no tokens lost to rounding.
 /// `fraction` is clamped to `[0.0, 1.0]` before use.
-pub(crate) fn split_amount(total: &BigUint, fraction: f64) -> (BigUint, BigUint) {
+pub fn split_amount(total: &BigUint, fraction: f64) -> (BigUint, BigUint) {
     let clamped = fraction.clamp(0.0, 1.0);
     // Scale fraction to fixed-point with 18 decimal digits of precision.
     let scale: u64 = 1_000_000_000_000_000_000;
@@ -319,11 +332,14 @@ pub(crate) fn split_amount(total: &BigUint, fraction: f64) -> (BigUint, BigUint)
 
 /// Errors from split-routing math utilities.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
-pub(crate) enum SplitMathError {
+pub enum SplitMathError {
+    /// No fractions were given.
     #[error("fractions slice must not be empty")]
     EmptyFractions,
+    /// Every fraction was zero, so there is nothing to divide by.
     #[error("all fractions are zero, cannot normalize")]
     AllZeroFractions,
+    /// A fraction was negative.
     #[error("fractions must not be negative")]
     NegativeFraction,
 }
@@ -334,7 +350,7 @@ pub(crate) enum SplitMathError {
 ///
 /// Returns [`SplitMathError::EmptyFractions`] if the slice is empty, or
 /// [`SplitMathError::AllZeroFractions`] if every element is zero.
-pub(crate) fn normalize_fractions(fractions: &mut [f64]) -> Result<(), SplitMathError> {
+pub fn normalize_fractions(fractions: &mut [f64]) -> Result<(), SplitMathError> {
     if fractions.is_empty() {
         return Err(SplitMathError::EmptyFractions);
     }
@@ -359,7 +375,7 @@ pub(crate) fn normalize_fractions(fractions: &mut [f64]) -> Result<(), SplitMath
 /// # Errors
 ///
 /// Returns [`SplitMathError::EmptyFractions`] if `fractions` is empty.
-pub(crate) fn fractions_to_amounts(
+pub fn fractions_to_amounts(
     total: &BigUint,
     fractions: &[f64],
 ) -> Result<Vec<BigUint>, SplitMathError> {
@@ -383,7 +399,7 @@ pub(crate) fn fractions_to_amounts(
 
 /// Product of spot prices along a path — approximates the exchange rate at
 /// near-zero input.
-pub(crate) fn compute_marginal_price_product(
+pub fn compute_marginal_price_product(
     hops: &[HopDescriptor],
     market: &MarketState,
     overrides: &MarketOverrides,
@@ -415,7 +431,7 @@ pub(crate) fn compute_marginal_price_product(
 /// `overrides`, then the live market state. Returns the final output amount,
 /// per-hop results, the post-swap component states, and the marginal price product, the spot
 /// prices at the state each hop executed against.
-pub(crate) fn simulate_path(
+pub fn simulate_path(
     hops: &[HopDescriptor],
     amount_in: &BigUint,
     market: &MarketState,
@@ -489,7 +505,7 @@ pub(crate) fn simulate_path(
 ///
 /// Swaps are simulated in the same topological order as the final route, so
 /// candidate discovery sees the exact state the executable split leaves behind.
-pub(crate) fn build_post_swap_overrides(
+pub fn build_post_swap_overrides(
     paths: &[PathAllocation],
     market: &MarketState,
 ) -> Result<MarketOverrides, AlgorithmError> {
@@ -1083,7 +1099,7 @@ fn allocations_from_descriptors(
 ///
 /// Uses the same merged topological execution plan as `build_split_route`, so
 /// the optimiser scores the route that will actually be emitted.
-pub(crate) fn evaluate_total_output(
+pub fn evaluate_total_output(
     paths: &[&[HopDescriptor]],
     fractions: &[f64],
     total_amount: &BigUint,
@@ -1172,7 +1188,7 @@ pub(crate) fn evaluate_total_output(
 ///
 /// The DAI→PEPE split between Component B and Component C must wait until all DAI
 /// has been produced (from both paths through the merged Component A swap).
-pub(crate) fn build_split_route(
+pub fn build_split_route(
     paths: &[PathAllocation],
     market: &MarketState,
     order: &Order,
