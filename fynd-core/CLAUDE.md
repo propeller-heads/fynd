@@ -155,7 +155,7 @@ code runs, and the flows above are complete. Skip this section unless a task nam
 Exclusive components must first be admitted to the stream. `feed/protocol_registry.rs` parses each
 `--protocols` entry into a `ProtocolSpec { system, exclusive }` (`Display` renders it back to the
 entry form): the `exclusive:` prefix (e.g. `exclusive:ekubo_v3`) selects the protocol's
-exclusive-inclusive filter — for Ekubo V3,
+exclusive-liquidity stream variant — for Ekubo V3,
 `ekubo_v3_extension_filter_with_signed_exclusive_swap` instead of the default
 `ekubo_v3_extension_filter`, which drops SignedExclusiveSwap pools. The private
 `EXCLUSIVE_CAPABLE_PROTOCOLS` is the single source of truth for which protocols accept the prefix;
