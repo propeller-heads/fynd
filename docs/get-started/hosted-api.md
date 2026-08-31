@@ -179,6 +179,7 @@ The response contains the route, the expected `amount_out`, gas estimate, and th
       "amount_out_net_gas": "1842418197",
       "gas_estimate": "141239",
       "price_impact_bps": 0,
+      "algorithm": "bellman_ford",
       "block": { "number": 25560140, "hash": "0x7144c8a53f70cf4875864b085055423493671536f494826c7bc62cdd60171013", "timestamp": 1784384351 },
       "gas_price": "78012237",
       "transaction": null
@@ -201,6 +202,7 @@ The response contains the route, the expected `amount_out`, gas estimate, and th
 | `gas_estimate` | Gas units the swap will consume. |
 | `gas_price` | Gas price (wei) used for the `amount_out_net_gas` calculation. |
 | `price_impact_bps` | Price impact of the swap in basis points (100 bps = 1%). |
+| `algorithm` | Routing algorithm that produced this quote. Absent when no algorithm produced one, such as on a no-route response. The set of names can change between releases; treat it as a label, not an API. |
 | `route.swaps[].component_id` | Internal ID for the liquidity venue used (pool/curve/vault). Not directly an on-chain address. |
 | `route.swaps[].protocol` | Protocol name. The `vm:` prefix denotes a virtual-machine venue. See [supported protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols). |
 | `route.swaps[].split` | Fraction of the input amount routed through this swap. `"0"` means "the remainder of the input" (the last leg of a split group), not 0%. A single-swap route shows `split: "0"`. |
