@@ -78,12 +78,12 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
     }
 
     let chain = parse_chain(&args.chain).context("invalid chain")?;
-    let tycho_url = crate::resolve_tycho_url(&args.chain, args.tycho_url.as_deref())
+    let tycho_url = crate::serve::resolve_tycho_url(&args.chain, args.tycho_url.as_deref())
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let rpc_url = crate::resolve_rpc_url(&args.chain, args.rpc_url.as_deref())
+    let rpc_url = crate::serve::resolve_rpc_url(&args.chain, args.rpc_url.as_deref())
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let protocols = crate::resolve_protocols(
+    let protocols = fynd_rpc::protocols::resolve_protocols(
         &tycho_url,
         args.tycho_api_key.as_deref(),
         !args.disable_tls,

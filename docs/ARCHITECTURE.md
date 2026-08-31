@@ -280,9 +280,11 @@ Background worker that fetches gas prices from the RPC node. Signaled by TychoFe
 
 ### 13. CLI Binary
 
-**Crate:** `fynd` **Location:** `src/main.rs` and `src/cli.rs`
+**Crate:** `fynd` **Location:** `src/main.rs`, `src/cli.rs` and `src/serve.rs`
 
 Command-line application that parses CLI arguments, sets up observability (tracing, metrics), and uses `FyndRPCBuilder` to run the complete routing service.
+
+`main.rs` only dispatches; the work lives in `serve.rs` as a library, so a binary embedding Fynd can reuse this command line with its own algorithms registered rather than reimplementing it. `run_solver` owns the runtime, the tracing subscriber and the metrics recorder; `serve` is the entry point for a caller that already owns those.
 
 ***
 
