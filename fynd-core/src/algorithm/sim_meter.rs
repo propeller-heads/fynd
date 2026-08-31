@@ -44,7 +44,7 @@ use crate::{feed::market_data::MarketState, types::ComponentId};
 ///
 /// A plain label rather than an algorithm's own stage type: an algorithm names its stages, this
 /// module only groups by what it is told.
-pub(crate) type StageLabel = &'static str;
+pub type StageLabel = &'static str;
 
 /// The swaps one component was asked for over a solve. Only some of them reached it — the rest
 /// were answered from an amount it had already been asked, so they carry no call and no time.
@@ -112,7 +112,7 @@ fn with_counts(
 
 /// Discards whatever the last solve on this thread left behind, so counts never run together.
 #[cfg(feature = "swap-metrics")]
-pub(crate) fn start_solve() {
+pub fn start_solve() {
     SOLVE_SWAPS.with_borrow_mut(FxHashMap::clear);
 }
 
@@ -130,19 +130,19 @@ fn record_call(component_id: &ComponentId, stage: StageLabel, call_time: Duratio
 
 /// Records a swap the cache answered, so no call was made.
 #[cfg(feature = "swap-metrics")]
-pub(crate) fn record_cache_hit(component_id: &ComponentId, stage: StageLabel) {
+pub fn record_cache_hit(component_id: &ComponentId, stage: StageLabel) {
     with_counts(component_id, stage, |counts| counts.cache_hits += 1);
 }
 
 /// Records a swap answered by reading across two nearby amounts, so no call was made.
 #[cfg(feature = "swap-metrics")]
-pub(crate) fn record_interpolation(component_id: &ComponentId, stage: StageLabel) {
+pub fn record_interpolation(component_id: &ComponentId, stage: StageLabel) {
     with_counts(component_id, stage, |counts| counts.interpolated += 1);
 }
 
 /// Records a swap refused on the strength of a smaller amount the pool already refused.
 #[cfg(feature = "swap-metrics")]
-pub(crate) fn record_refusal_without_calling(component_id: &ComponentId, stage: StageLabel) {
+pub fn record_refusal_without_calling(component_id: &ComponentId, stage: StageLabel) {
     with_counts(component_id, stage, |counts| counts.refused_without_calling += 1);
 }
 
@@ -153,7 +153,7 @@ pub(crate) fn record_refusal_without_calling(component_id: &ComponentId, stage: 
 /// The counters always go out. The two lines are only built when debug logging is on, since
 /// formatting them walks every protocol and every stage on a path that runs once per solve.
 #[cfg(feature = "swap-metrics")]
-pub(crate) fn report(algorithm: &str, market: &MarketState, solve_time_ms: impl FnOnce() -> u64) {
+pub fn report(algorithm: &str, market: &MarketState, solve_time_ms: impl FnOnce() -> u64) {
     let solve_time_ms = solve_time_ms();
     SOLVE_SWAPS.with_borrow(|swaps| report_swaps(algorithm, swaps, market, solve_time_ms));
 }
@@ -258,37 +258,32 @@ fn report_swaps(
 /// Recording is compiled out. The arguments are taken so the call sites read the same in either
 /// build; the optimiser drops them.
 #[cfg(not(feature = "swap-metrics"))]
-pub(crate) fn start_solve() {}
+pub fn start_solve() {}
 
 /// Recording is compiled out. See [`start_solve`].
 #[cfg(not(feature = "swap-metrics"))]
-pub(crate) fn record_cache_hit(_component_id: &ComponentId, _stage: StageLabel) {}
+pub fn record_cache_hit(_component_id: &ComponentId, _stage: StageLabel) {}
 
 /// Recording is compiled out. See [`start_solve`].
 #[cfg(not(feature = "swap-metrics"))]
-pub(crate) fn record_interpolation(_component_id: &ComponentId, _stage: StageLabel) {}
+pub fn record_interpolation(_component_id: &ComponentId, _stage: StageLabel) {}
 
 /// Recording is compiled out. See [`start_solve`].
 #[cfg(not(feature = "swap-metrics"))]
-pub(crate) fn record_refusal_without_calling(_component_id: &ComponentId, _stage: StageLabel) {}
+pub fn record_refusal_without_calling(_component_id: &ComponentId, _stage: StageLabel) {}
 
 /// There is nothing to report without `swap-metrics`.
 ///
 /// The solve time is taken as a closure so the clock is never read in this build: an argument
 /// would be evaluated at the call site even though nothing here uses it.
 #[cfg(not(feature = "swap-metrics"))]
-pub(crate) fn report(
-    _algorithm: &str,
-    _market: &MarketState,
-    _solve_time_ms: impl FnOnce() -> u64,
-) {
-}
+pub fn report(_algorithm: &str, _market: &MarketState, _solve_time_ms: impl FnOnce() -> u64) {}
 
 /// Extension trait adding metered, panic-guarded simulation calls to every [`ProtocolSim`].
 ///
 /// Wraps [`GuardedProtocolSim::get_amount_out_guarded`] and books the call against the component
 /// that served it, which the guard alone cannot do — it sees only the state and the two tokens.
-pub(crate) trait MeteredProtocolSim {
+pub trait MeteredProtocolSim {
     /// Calls the panic-guarded `get_amount_out` and records it against `component_id` and `stage`.
     fn get_amount_out_metered(
         &self,

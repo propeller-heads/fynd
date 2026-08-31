@@ -26,7 +26,8 @@ pub(crate) const INLINE_TOKENS: usize = 5;
 
 /// Edges held without allocating. A path's edges are its tokens less one, and an edge is a leg of
 /// a route, so this sizes per-leg buffers too.
-pub(crate) const INLINE_EDGES: usize = INLINE_TOKENS - 1;
+/// Edges a path holds inline before it spills to the heap. One fewer than its tokens.
+pub const INLINE_EDGES: usize = INLINE_TOKENS - 1;
 
 /// A route with a pool chosen for every leg.
 ///
