@@ -238,7 +238,7 @@ fn order_quote_to_quote(
             swaps_hash,
         )
     });
-    Ok(Quote::new(
+    let mut quote = Quote::new(
         order_quote.order_id().to_string(),
         status,
         BackendKind::Fynd,
@@ -253,7 +253,11 @@ fn order_quote_to_quote(
         receiver,
         transaction,
         fee_breakdown,
-    ))
+    );
+    quote.algorithm = order_quote
+        .algorithm()
+        .map(str::to_string);
+    Ok(quote)
 }
 
 impl From<dto::Transaction> for Transaction {
@@ -592,6 +596,28 @@ mod tests {
         // token_out and receiver are left empty until populated by quote()
         assert!(quote.token_out().is_empty());
         assert!(quote.receiver().is_empty());
+        // The sample response omits the field, as a no-route placeholder does.
+        assert_eq!(quote.algorithm(), None);
+    }
+
+    #[test]
+    fn quote_from_dto_algorithm() {
+        let ds: dto::OrderQuote = serde_json::from_str(
+            r#"{
+            "order_id": "test-order-id",
+            "status": "success",
+            "amount_in": "1000",
+            "amount_out": "999",
+            "gas_estimate": "100000",
+            "amount_out_net_gas": "998",
+            "algorithm": "bellman_ford",
+            "block": {"number": 21000000, "hash": "0xdeadbeef", "timestamp": 1730000000}
+        }"#,
+        )
+        .expect("valid order quote JSON");
+
+        let quote = order_quote_to_quote(ds, Bytes::new(), Bytes::new()).unwrap();
+        assert_eq!(quote.algorithm(), Some("bellman_ford"));
     }
 
     // -----------------------------------------------------------------------
