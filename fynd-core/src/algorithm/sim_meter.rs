@@ -5,8 +5,11 @@
 //! records what was asked of which component, so a solve can say where its time went.
 //!
 //! Callers go through [`MeteredProtocolSim::get_amount_out_metered`], which wraps the panic guard
-//! in [`super::sim_guard`] rather than replacing it. Only `water_fill` calls it; the other
-//! algorithms take the bare guard, so nothing outside a water-fill solve is counted.
+//! in [`super::sim_guard`] rather than replacing it. Counting and reporting are one decision: an
+//! algorithm that does not bracket its solve with [`start_solve`] and [`report`] must not meter
+//! either, or the counts pile up on the worker thread unread. `water_fill` and
+//! `path_frank_wolfe` both bracket, which is why the shared split code they run through meters;
+//! everything else takes the bare guard.
 //!
 //! Counts live in a thread-local for the duration of a solve, which a worker runs start to finish
 //! on one thread. Recording therefore needs nothing passed down to it, and the default build —
@@ -150,13 +153,14 @@ pub(crate) fn record_refusal_without_calling(component_id: &ComponentId, stage: 
 /// The counters always go out. The two lines are only built when debug logging is on, since
 /// formatting them walks every protocol and every stage on a path that runs once per solve.
 #[cfg(feature = "swap-metrics")]
-pub(crate) fn report(market: &MarketState, solve_time_ms: impl FnOnce() -> u64) {
+pub(crate) fn report(algorithm: &str, market: &MarketState, solve_time_ms: impl FnOnce() -> u64) {
     let solve_time_ms = solve_time_ms();
-    SOLVE_SWAPS.with_borrow(|swaps| report_swaps(swaps, market, solve_time_ms));
+    SOLVE_SWAPS.with_borrow(|swaps| report_swaps(algorithm, swaps, market, solve_time_ms));
 }
 
 #[cfg(feature = "swap-metrics")]
 fn report_swaps(
+    algorithm: &str,
     swaps: &FxHashMap<(ComponentId, StageLabel), ComponentSwaps>,
     market: &MarketState,
     solve_time_ms: u64,
@@ -177,15 +181,15 @@ fn report_swaps(
         .sort_unstable_by_key(|(protocol, counts)| (Reverse(counts.call_time), *protocol));
 
     for (protocol, counts) in &costliest_first {
-        counter!("water_fill.get_amount_out_calls", "protocol" => protocol.to_string())
+        counter!(format!("{algorithm}.get_amount_out_calls"), "protocol" => protocol.to_string())
             .increment(counts.calls);
-        counter!("water_fill.failed_calls", "protocol" => protocol.to_string())
+        counter!(format!("{algorithm}.failed_calls"), "protocol" => protocol.to_string())
             .increment(counts.failed);
-        counter!("water_fill.cache_hits", "protocol" => protocol.to_string())
+        counter!(format!("{algorithm}.cache_hits"), "protocol" => protocol.to_string())
             .increment(counts.cache_hits);
-        counter!("water_fill.interpolated_swaps", "protocol" => protocol.to_string())
+        counter!(format!("{algorithm}.interpolated_swaps"), "protocol" => protocol.to_string())
             .increment(counts.interpolated);
-        counter!("water_fill.refused_without_calling", "protocol" => protocol.to_string())
+        counter!(format!("{algorithm}.refused_without_calling"), "protocol" => protocol.to_string())
             .increment(counts.refused_without_calling);
     }
 
@@ -220,7 +224,7 @@ fn report_swaps(
         })
         .collect::<Vec<_>>()
         .join(" | ");
-    debug!(solve_time_ms, "water-fill simulation by stage: {per_stage}");
+    debug!(solve_time_ms, "{algorithm} simulation by stage: {per_stage}");
 
     let per_protocol = costliest_first
         .iter()
@@ -247,7 +251,7 @@ fn report_swaps(
         interpolated = totals.interpolated,
         refused_without_calling = totals.refused_without_calling,
         call_time_ms = totals.call_time.as_secs_f64() * 1000.0,
-        "water-fill simulation cost: {per_protocol}",
+        "{algorithm} simulation cost: {per_protocol}",
     );
 }
 
@@ -273,7 +277,12 @@ pub(crate) fn record_refusal_without_calling(_component_id: &ComponentId, _stage
 /// The solve time is taken as a closure so the clock is never read in this build: an argument
 /// would be evaluated at the call site even though nothing here uses it.
 #[cfg(not(feature = "swap-metrics"))]
-pub(crate) fn report(_market: &MarketState, _solve_time_ms: impl FnOnce() -> u64) {}
+pub(crate) fn report(
+    _algorithm: &str,
+    _market: &MarketState,
+    _solve_time_ms: impl FnOnce() -> u64,
+) {
+}
 
 /// Extension trait adding metered, panic-guarded simulation calls to every [`ProtocolSim`].
 ///
@@ -401,6 +410,6 @@ mod tests {
             });
             assert!(protocol.eq(["unknown"]));
         });
-        report(&market, || 1);
+        report("test", &market, || 1);
     }
 }
