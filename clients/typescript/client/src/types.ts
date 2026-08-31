@@ -164,7 +164,7 @@ export interface Quote {
   /** Price impact in basis points (1 bp = 0.01%). */
   priceImpactBps?: number;
   /** Routing algorithm that produced this quote. */
-  solver?: string;
+  algorithm?: string;
   block: BlockInfo;
   /** Output token address from the original order; used internally for settlement parsing. */
   tokenOut: Address;
