@@ -882,8 +882,8 @@ fn to_gas_token_amount(quote: &OrderQuote, amount: &BigUint) -> Option<BigUint> 
 /// Counting wins alone hides size: a solver can win few orders and still settle most of the flow,
 /// or the reverse. Output-token base units do not add up across tokens, so the amount is converted
 /// to the gas token first, the same way `record_gas_token_amount` does it. A quote the conversion
-/// cannot price increments `worker_router_unpriced_won_volume_total` rather than counting as zero,
-/// which would read as a solver that won nothing.
+/// cannot price counts under `worker_router_unpriced_won_quotes_total` rather than recording zero
+/// volume, which would read as a solver that won nothing.
 fn record_won_volume(best: &WorkerPoolQuote) {
     let worker_pool = best.worker_pool.clone();
     let algorithm = best.quote.algorithm().to_string();
@@ -891,7 +891,7 @@ fn record_won_volume(best: &WorkerPoolQuote) {
         .and_then(|amount| amount.to_f64());
     let Some(volume) = volume else {
         counter!(
-            "worker_router_unpriced_won_volume_total",
+            "worker_router_unpriced_won_quotes_total",
             "pool" => worker_pool,
             "algorithm" => algorithm
         )
