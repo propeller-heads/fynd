@@ -24,6 +24,7 @@
 pub mod bellman_ford;
 pub mod most_liquid;
 pub mod path_frank_wolfe;
+pub(crate) mod path_scoring;
 pub(crate) mod paths;
 pub mod registry;
 pub(crate) mod sim_guard;
