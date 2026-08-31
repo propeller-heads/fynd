@@ -854,7 +854,6 @@ impl FyndBuilder {
                     let builder = self
                         .algorithms
                         .configure(&algorithm, named)?;
-
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),
@@ -1336,6 +1335,29 @@ impl Solver {
         pools: std::collections::HashMap<String, PoolConfig>,
         gas_price_wei: Option<num_bigint::BigUint>,
     ) -> Result<Self, SolverBuildError> {
+        Self::from_recording_with(chain, updates, pools, gas_price_wei, &AlgorithmRegistry::new())
+            .await
+    }
+
+    /// [`from_recording`](Self::from_recording), with algorithms the caller brought.
+    ///
+    /// A pool naming an algorithm in `algorithms` is served by it; every other pool falls back to
+    /// the built-in of that name. This is what lets a benchmark or a profiler run an algorithm
+    /// that lives outside this crate.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`from_recording`](Self::from_recording).
+    ///
+    /// Requires the `test-utils` feature.
+    #[cfg(feature = "test-utils")]
+    pub async fn from_recording_with(
+        chain: Chain,
+        updates: Vec<tycho_simulation::protocol::models::Update>,
+        pools: std::collections::HashMap<String, PoolConfig>,
+        gas_price_wei: Option<num_bigint::BigUint>,
+        algorithms: &AlgorithmRegistry,
+    ) -> Result<Self, SolverBuildError> {
         if pools.is_empty() {
             return Err(SolverBuildError::NoPools);
         }
@@ -1417,12 +1439,13 @@ impl Solver {
             let pool_event_rx = feed.subscribe();
             let derived_rx = derived_event_tx.subscribe();
 
-            let (worker_pool, task_handle) = WorkerPoolBuilder::new()
+            let named = WorkerPoolBuilder::new()
                 .name(name.clone())
-                .algorithm(pool_cfg.algorithm().to_string())
                 .algorithm_config(algo_cfg)
                 .num_workers(pool_cfg.num_workers())
-                .task_queue_capacity(pool_cfg.task_queue_capacity())
+                .task_queue_capacity(pool_cfg.task_queue_capacity());
+            let (worker_pool, task_handle) = algorithms
+                .configure(pool_cfg.algorithm(), named)?
                 .build(market_data.clone(), Arc::clone(&derived_data), pool_event_rx, derived_rx)?;
 
             solver_pool_handles.push(SolverPoolHandle::new(worker_pool.name(), task_handle));
