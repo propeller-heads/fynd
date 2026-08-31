@@ -645,8 +645,12 @@ impl WorkerPoolRouter {
         if !valid_quotes.is_empty() {
             counter!("worker_router_orders_total", "status" => "success").increment(1);
             let best = valid_quotes[0];
-            counter!("worker_router_best_quote_pool", "pool" => best.worker_pool.clone())
-                .increment(1);
+            counter!(
+                "worker_router_best_quote_pool",
+                "pool" => best.worker_pool.clone(),
+                "algorithm" => best.quote.algorithm().to_string()
+            )
+            .increment(1);
             record_won_volume(best);
             debug!(
                 order_id = %best.quote.order_id(),
