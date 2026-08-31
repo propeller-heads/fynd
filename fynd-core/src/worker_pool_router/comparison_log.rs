@@ -200,6 +200,7 @@ pub(super) fn solver_error_label(error: &SolveError) -> &'static str {
     match error {
         SolveError::Timeout { .. } => "timeout",
         SolveError::NoRouteFound { .. } => "no_route",
+        SolveError::RouteRejected { .. } => "route_rejected",
         SolveError::InsufficientLiquidity { .. } => "insufficient_liquidity",
         SolveError::QueueFull => "queue_full",
         SolveError::Internal(_) => "internal",

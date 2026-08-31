@@ -41,6 +41,9 @@ pub enum ApiError {
 pub(crate) fn solve_error_code(err: &SolveError) -> &'static str {
     match err {
         SolveError::NoRouteFound { .. } => "NO_ROUTE_FOUND",
+        // A rejected route is still "we could not give you a route": the wire code stays the one
+        // integrators already branch on, and the reason says which kind it was.
+        SolveError::RouteRejected { .. } => "NO_ROUTE_FOUND",
         SolveError::InsufficientLiquidity { .. } => "INSUFFICIENT_LIQUIDITY",
         SolveError::Timeout { .. } => "TIMEOUT",
         SolveError::QueueFull => "QUEUE_FULL",
@@ -133,6 +136,20 @@ mod tests {
     async fn test_no_route_found() {
         let (status, body) =
             json_body(ApiError::SolveFailed(SolveError::no_route_found("order-1"))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "NO_ROUTE_FOUND");
+    }
+
+    /// A rejected route is a route the deployment could not price, not a server fault: it keeps
+    /// the wire code integrators already branch on.
+    #[actix_web::test]
+    async fn test_route_rejected_reports_no_route_found() {
+        let (status, body) = json_body(ApiError::SolveFailed(SolveError::route_rejected(
+            "order-1",
+            fynd_core::types::RouteRejection::PammFeeTiersUnread,
+        )))
+        .await;
+
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["code"], "NO_ROUTE_FOUND");
     }

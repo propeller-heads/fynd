@@ -69,6 +69,39 @@ impl SolveTask {
     }
 }
 
+/// Why a route the algorithm found was rejected before it could be quoted.
+///
+/// Separate from [`NoPathReason`], which says what the graph search found. These are facts about
+/// this deployment: the market held a route and the worker could not put a price on it.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteRejection {
+    /// The route has a `propammfallback:` leg, and the PropAMMRouter's fee tiers have not been
+    /// read yet. Transient: the tiers arrive on a timer, and a solve before the first read drops
+    /// every pAMM route.
+    PammFeeTiersUnread,
+    /// The route has a `propammfallback:` leg whose fee tier has no Uniswap V3 pool to fall back
+    /// on, so the amount the leg would deliver on a fallback cannot be known.
+    PammFallbackPoolMissing,
+    /// The route has a `propammfallback:` leg whose Uniswap V3 fallback exists but could not be
+    /// simulated.
+    PammFallbackUnpriceable,
+}
+
+impl std::fmt::Display for RouteRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PammFeeTiersUnread => write!(f, "pAMM route dropped: fee tiers not read yet"),
+            Self::PammFallbackPoolMissing => {
+                write!(f, "pAMM route dropped: no Uniswap V3 pool at the fee tier")
+            }
+            Self::PammFallbackUnpriceable => {
+                write!(f, "pAMM route dropped: the Uniswap V3 fallback could not be simulated")
+            }
+        }
+    }
+}
+
 /// Errors that can occur during solving.
 #[non_exhaustive]
 #[derive(Debug, Clone, thiserror::Error)]
@@ -81,6 +114,16 @@ pub enum SolveError {
         order_id: String,
         /// Why no route was found, when the algorithm reported it.
         reason: Option<NoPathReason>,
+    },
+
+    /// A route was found and then rejected before it could be quoted.
+    #[non_exhaustive]
+    #[error("route rejected for order {order_id}: {reason}")]
+    RouteRejected {
+        /// ID of the order whose route was rejected.
+        order_id: String,
+        /// Why the route was rejected.
+        reason: RouteRejection,
     },
 
     /// Insufficient liquidity for the requested amount.
@@ -181,6 +224,11 @@ impl SolveError {
     /// Creates a [`SolveError::NoRouteFound`] for the given order ID.
     pub fn no_route_found(order_id: impl Into<String>) -> Self {
         Self::NoRouteFound { order_id: order_id.into(), reason: None }
+    }
+
+    /// Creates a [`SolveError::RouteRejected`] for a route this deployment could not price.
+    pub fn route_rejected(order_id: impl Into<String>, reason: RouteRejection) -> Self {
+        Self::RouteRejected { order_id: order_id.into(), reason }
     }
 
     /// Creates a [`SolveError::NoRouteFound`] carrying the algorithm's [`NoPathReason`].
