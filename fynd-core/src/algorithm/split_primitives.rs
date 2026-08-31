@@ -706,8 +706,9 @@ fn build_in_degree(hops_by_token: &FxHashMap<Bytes, Vec<SplitSwap>>) -> FxHashMa
 /// and route assembly, so all three agree on the same executable route. Round-trips that
 /// end on the input token are supported.
 ///
-/// Errors if a path revisits an intermediate token, a component cannot be simulated,
-/// or the merged swaps cannot be ordered (a genuine dependency cycle).
+/// Errors if a path revisits an intermediate token, a component cannot be simulated, the merged
+/// swaps cannot be ordered (a genuine dependency cycle), every path carries a zero amount, or a
+/// merged swap has no path standing at it when its token is released.
 fn execute_split_plan(
     paths: &[PathAllocation],
     market: &MarketState,
@@ -862,6 +863,23 @@ fn execute_split_plan(
                     component_id: split_swap.hop.component_id.clone(),
                     error: e.to_string(),
                 })?;
+
+            // What the swap spends leaves the balance at its input token. Without this a path
+            // ending back on the token it started from would count the order's own input as
+            // output, because `evaluate_total_output` reads the balance standing at each terminal
+            // token.
+            let standing = available
+                .entry(split_swap.hop.token_in.address.clone())
+                .or_default();
+            if *standing < split_swap.amount_in {
+                return Err(AlgorithmError::Other(format!(
+                    "the swap through {} spends {} {}, more than the {standing} standing at it",
+                    split_swap.hop.component_id,
+                    split_swap.amount_in,
+                    split_swap.hop.token_in.symbol,
+                )));
+            }
+            *standing -= &split_swap.amount_in;
 
             let out_addr = split_swap.hop.token_out.address.clone();
             *available
@@ -1997,6 +2015,70 @@ mod tests {
         // the router for.
         assert_eq!(result[1].split, 0.0);
         assert_eq!(result[1].amount_in, BigUint::from(300u64));
+    }
+
+    /// A path that ends on the token it started from must be scored on what it produced, not on
+    /// the order's own input still standing at that token.
+    #[test]
+    fn test_execute_split_plan_does_not_count_the_input_as_output() {
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let market = make_market(vec![
+            ("there", vec![token_a.clone(), token_b.clone()], Box::new(MockProtocolSim::new(2.0))),
+            ("back", vec![token_b.clone(), token_a.clone()], Box::new(MockProtocolSim::new(1.0))),
+        ]);
+
+        let hops: Vec<HopDescriptor> = vec![
+            HopDescriptor::new("there".to_string(), token_a.clone(), token_b.clone()),
+            HopDescriptor::new("back".to_string(), token_b, token_a.clone()),
+        ];
+        let (total_out, _) = evaluate_total_output(
+            &[&hops],
+            &[1.0],
+            &BigUint::from(1000u64),
+            &market,
+            &MarketOverrides::empty(),
+        )
+        .expect("the round trip simulates");
+
+        // 1000 A buys 2000 B, which buys 2000 A back. The 1000 that was spent is gone.
+        assert_eq!(total_out, BigUint::from(2000u64), "the order's own input is not output");
+    }
+
+    /// A path set carrying nothing describes no split, and guessing an allocation for it would
+    /// misprice the quote.
+    #[test]
+    fn test_execute_split_plan_rejects_paths_that_carry_nothing() {
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let market = make_market(vec![(
+            "component1",
+            vec![token_a.clone(), token_b.clone()],
+            Box::new(MockProtocolSim::new(2.0)),
+        )]);
+        let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+        let paths = vec![PathAllocation {
+            hops: vec![SimulatedHop {
+                descriptor: HopDescriptor::new("component1".to_string(), token_a, token_b),
+                amount_out: BigUint::ZERO,
+                gas: BigUint::from(50_000u64),
+            }],
+            flow_fraction: 0.0,
+            amount_in: BigUint::ZERO,
+            amount_out: BigUint::ZERO,
+            marginal_price_product: 0.0,
+        }];
+
+        let error = build_split_route(&paths, &market, &ord)
+            .expect_err("a path carrying nothing cannot be divided");
+
+        assert!(
+            error
+                .to_string()
+                .contains("every path carries a zero amount"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
