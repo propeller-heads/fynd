@@ -84,6 +84,7 @@ members = [
     "tools/benchmark",
     "tools/common",
     "tools/erc20-overrides",
+    "tools/exclusive-pool-pnl",
     "tools/fynd-swap-cli",
     "tools/fynd-gas-audit",
     "tools/hindsight",

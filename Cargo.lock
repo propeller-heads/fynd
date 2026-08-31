@@ -3196,6 +3196,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "exclusive-pool-pnl"
+version = "0.99.12"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "chrono",
+ "clap",
+ "futures 0.3.32",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
