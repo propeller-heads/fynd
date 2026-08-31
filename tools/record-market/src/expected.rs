@@ -23,7 +23,7 @@ pub async fn generate_expected_outputs(
         .gas_price_as_biguint();
     let pools = fynd_test_fixtures::parse_pools_toml(pools_toml)?;
 
-    let solver = Solver::from_recording(chain, recording.updates, pools, gas_price)
+    let solver = Solver::from_recording(chain, recording.updates, pools, gas_price, None)
         .await
         .map_err(|e| anyhow::anyhow!("failed to build solver from recording: {e}"))?;
 
