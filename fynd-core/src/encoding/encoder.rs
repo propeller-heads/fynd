@@ -48,7 +48,7 @@ const BPS_DENOMINATOR: u64 = 10_000;
 ///   no router deployed there — encoding is then unavailable and `encode()` fails clearly.
 /// * `router_fees` - Router fee configuration, refreshed from chain by a background fetcher.
 pub struct Encoder {
-    tycho_encoder: Option<Box<dyn TychoEncoder>>,
+    tycho_encoder: Option<Arc<dyn TychoEncoder>>,
     chain: Chain,
     router_address: Option<Bytes>,
     router_fees: SharedRouterFees,
@@ -169,6 +169,8 @@ impl Encoder {
                     .chain(chain)
                     .swap_encoder_registry(swap_encoder_registry)
                     .build()
+                    // Shared so the encode can move to a blocking thread.
+                    .map(|encoder| Arc::from(encoder) as Arc<dyn TychoEncoder>)
             })
             .transpose()?;
         // Without a router address there is no locker to authorize, and `encode` already fails on
@@ -307,7 +309,16 @@ impl Encoder {
             .iter()
             .map(|(_, s, _, _)| s.clone())
             .collect();
-        let encoded_solutions = tycho_encoder.encode_solutions(solutions)?;
+        // `encode_solutions` blocks. An RFQ swap fetches its signed quote over the network and
+        // waits for it, so on the runtime this would park a worker for a whole round trip, and
+        // every task sharing that worker -- the market feed included -- waits with it.
+        let encoder = Arc::clone(tycho_encoder);
+        let encoded_solutions =
+            tokio::task::spawn_blocking(move || encoder.encode_solutions(solutions))
+                .await
+                .map_err(|e| {
+                    SolveError::FailedEncoding(format!("the encoding task failed: {e}"))
+                })??;
 
         for (encoded_solution, (idx, solution, fee_breakdown, fee_rates)) in encoded_solutions
             .into_iter()
@@ -879,7 +890,7 @@ mod tests {
             rustc_hash::FxHashMap::default(),
         ));
         Encoder {
-            tycho_encoder: Some(Box::new(MockTychoEncoder)),
+            tycho_encoder: Some(Arc::new(MockTychoEncoder)),
             chain,
             router_address: Some(Bytes::from([0u8; 20].as_ref())),
             router_fees,
@@ -1073,6 +1084,21 @@ mod tests {
         assert_eq!(*solution.token_in(), Bytes::from(make_address(0x01).as_ref()));
         assert_eq!(*solution.token_out(), Bytes::from(make_address(0x03).as_ref()));
         assert_eq!(solution.swaps().len(), 2);
+    }
+
+    /// The encode has to leave the runtime thread free while it waits. `spawn_blocking` does;
+    /// `block_in_place` would panic here, because a single-threaded runtime has no other worker to
+    /// move the remaining tasks to.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_encode_does_not_block_the_runtime_thread() {
+        let encoder = mock_encoder(Chain::Ethereum);
+
+        let encoded = encoder
+            .encode(vec![], EncodingOptions::new(0.01))
+            .await
+            .expect("encoding an empty batch is not an error");
+
+        assert!(encoded.is_empty());
     }
 
     #[tokio::test]
