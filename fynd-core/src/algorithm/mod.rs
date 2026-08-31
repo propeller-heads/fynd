@@ -16,12 +16,16 @@
 //! **Built-in:** To add an algorithm to the built-in registry:
 //! 1. Create a new module with your algorithm implementation
 //! 2. Implement the `Algorithm` trait
-//! 3. Register it in `registry.rs`
+//! 3. Register it in `worker_pool/registry.rs`
+//!
+//! **From outside this crate:** implement the trait and bring it in with
+//! [`AlgorithmRegistry`](crate::algorithm::registry::AlgorithmRegistry); no change here is needed.
 
 pub mod bellman_ford;
 pub mod most_liquid;
 pub mod path_frank_wolfe;
 pub(crate) mod paths;
+pub mod registry;
 pub(crate) mod sim_guard;
 pub(crate) mod sim_meter;
 pub(crate) mod split_primitives;
@@ -38,6 +42,7 @@ use std::time::Duration;
 pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 pub use path_frank_wolfe::PathFrankWolfeAlgorithm;
+pub use registry::{AlgorithmRegistry, RegisterAlgorithmError};
 use rustc_hash::FxHashSet;
 use tycho_simulation::tycho_core::models::Address;
 pub use water_fill::WaterFillAlgorithm;
@@ -410,7 +415,6 @@ mod tests {
             AlgorithmError::InvalidConfiguration { .. }
         ));
     }
-    use super::*;
 
     #[test]
     fn test_connector_tokens_default_is_none() {

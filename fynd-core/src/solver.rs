@@ -32,7 +32,7 @@ use tycho_simulation::{
 };
 
 use crate::{
-    algorithm::{AlgorithmConfig, AlgorithmError},
+    algorithm::{AlgorithmConfig, AlgorithmError, AlgorithmRegistry},
     derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
     encoding::{encoder::Encoder, fee_fetcher::RouterFeeFetcher, router_fees::SharedRouterFees},
     feed::{
@@ -443,6 +443,8 @@ struct BuiltComponents {
 /// computation manager, one or more worker pools, encoder, and router.
 #[must_use = "a builder does nothing until .build() is called"]
 pub struct FyndBuilder {
+    /// Algorithms the caller brought, served when a pool names one.
+    algorithms: AlgorithmRegistry,
     chain: Chain,
     tycho_url: String,
     rpc_url: String,
@@ -477,6 +479,7 @@ impl FyndBuilder {
         min_tvl: f64,
     ) -> Self {
         Self {
+            algorithms: AlgorithmRegistry::new(),
             chain,
             tycho_url: tycho_url.into(),
             rpc_url: rpc_url.into(),
@@ -641,6 +644,16 @@ impl FyndBuilder {
                 liquidity_scope: None,
                 configure,
             }));
+        self
+    }
+
+    /// Serves any pool whose configured algorithm name `algorithms` holds.
+    ///
+    /// A pool configuration names an algorithm; only the built-ins are known by name here. This
+    /// hands the builder the ones the caller brought, so a deployment can run an algorithm that
+    /// lives outside this crate without changing how its pools are configured.
+    pub fn with_algorithms(mut self, algorithms: AlgorithmRegistry) -> Self {
+        self.algorithms = algorithms;
         self
     }
 
@@ -830,15 +843,18 @@ impl FyndBuilder {
                     if let Some(tokens) = connector_tokens {
                         algo_cfg = algo_cfg.with_connector_tokens(tokens);
                     }
-                    let builder = WorkerPoolBuilder::new()
+                    let named = WorkerPoolBuilder::new()
                         .name(name)
-                        .algorithm(algorithm)
                         .algorithm_config(algo_cfg)
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
                         .liquidity_scope(pool_scope)
                         .exclude_protocols(exclude_protocols)
                         .fallback_fee_tiers(fallback_fee_tiers.clone());
+                    let builder = self
+                        .algorithms
+                        .configure(&algorithm, named)?;
+
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),

@@ -215,6 +215,12 @@ impl WorkerPoolBuilder {
         Self { config: WorkerPoolConfig::default() }
     }
 
+    /// Whether this pool will run an algorithm a caller registered.
+    #[cfg(test)]
+    pub(crate) fn serves_custom_algorithm(&self) -> bool {
+        self.config.spawner.is_custom()
+    }
+
     /// Sets the worker pool name.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.config.name = name.into();

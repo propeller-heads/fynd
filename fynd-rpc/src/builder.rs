@@ -77,6 +77,16 @@ impl FyndRPCBuilder {
         })
     }
 
+    /// Serves any pool whose configured algorithm name `algorithms` holds.
+    ///
+    /// See [`FyndBuilder::with_algorithms`](fynd_core::FyndBuilder::with_algorithms).
+    pub fn with_algorithms(mut self, algorithms: fynd_core::AlgorithmRegistry) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .with_algorithms(algorithms);
+        self
+    }
+
     /// Sets the HTTP host (default: "0.0.0.0").
     pub fn http_host(mut self, host: String) -> Self {
         self.http_host = host;
