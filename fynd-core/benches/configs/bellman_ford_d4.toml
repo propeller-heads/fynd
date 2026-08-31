@@ -1,2 +1,0 @@
-algorithm = "bellman_ford"
-max_hops = 4

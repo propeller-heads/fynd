@@ -318,27 +318,80 @@ fn recording_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/market_recording.json.zst")
 }
 
-/// Builds the pool config for one bench config: the file's fields, with the run-level ones forced.
+/// Builds the worker pools for one bench config: the file's fields, with the run-level ones forced.
 ///
 /// `num_workers` and `task_queue_capacity` belong to the run rather than the algorithm — every
 /// config has to be compared under the same concurrency. `timeout_ms` is only filled in when the
 /// file is silent, so a config can deliberately ask for a different budget.
-pub fn pool_configs(
+///
+/// A config asking for exclusive liquidity gets two worker pools rather than one; see
+/// [`build_public_twin`].
+pub fn worker_pool_configs(
     config: &BenchConfig,
     workers: usize,
     timeout_ms: u64,
 ) -> HashMap<String, PoolConfig> {
     let mut fields = config.worker_pool_fields.clone();
-    fields.insert("num_workers".to_string(), toml::Value::Integer(workers as i64));
     fields.insert("task_queue_capacity".to_string(), toml::Value::Integer(10_000));
     fields
         .entry("timeout_ms".to_string())
         .or_insert_with(|| toml::Value::Integer(timeout_ms as i64));
 
-    let pool: PoolConfig = toml::Value::Table(fields)
-        .try_into()
-        .unwrap_or_else(|error| panic!("config {} is not a valid pool: {error}", config.label));
-    HashMap::from([("bench".to_string(), pool)])
+    let build = |mut fields: toml::map::Map<String, toml::Value>, workers: usize| -> PoolConfig {
+        fields.insert("num_workers".to_string(), toml::Value::Integer(workers as i64));
+        toml::Value::Table(fields)
+            .try_into()
+            .unwrap_or_else(|error| panic!("config {} is not a valid pool: {error}", config.label))
+    };
+
+    match build_public_twin(&fields) {
+        // The twin splits the run's worker budget rather than adding to it, so a config carrying
+        // one is compared on the same threads as every other. An odd budget gives the exclusive
+        // pool the extra worker, and one worker each is the floor.
+        Some(public) => {
+            let public_workers = (workers / 2).max(1);
+            HashMap::from([
+                ("bench".to_string(), build(fields, (workers - public_workers).max(1))),
+                ("bench_public".to_string(), build(public, public_workers)),
+            ])
+        }
+        None => HashMap::from([("bench".to_string(), build(fields, workers))]),
+    }
+}
+
+/// The public worker pool that has to run alongside a config asking for exclusive liquidity, or
+/// `None` for every other config.
+///
+/// Two reasons it exists. A solver whose every pool includes exclusive liquidity fails to build:
+/// exclusive pools only serve requests granted access, so there would be no pool left to serve
+/// anyone else, and none to establish the public output the exclusive candidate has to beat. And
+/// the twin is what makes the run's surplus figure readable — it runs the same algorithm with the
+/// same bounds, so the only thing separating the two pools is the liquidity they may route
+/// through, and any extra output is the exclusive components' doing rather than the algorithm's.
+///
+/// The two pools split the run's worker budget between them, so the config's solve times stay
+/// comparable with the configs that build one pool.
+fn build_public_twin(fields: &toml::Table) -> Option<toml::Table> {
+    if fields
+        .get("liquidity_scope")
+        .and_then(toml::Value::as_str)? !=
+        "include_exclusive"
+    {
+        return None;
+    }
+    let mut public = fields.clone();
+    // Absent is public: `PoolConfig::liquidity_scope` defaults to `PublicOnly`.
+    public.remove("liquidity_scope");
+    Some(public)
+}
+
+/// Whether the process was started by a test runner asking what tests this target holds.
+///
+/// A test runner builds every target and asks each one to list its tests. Both benchmarks parse
+/// their own options and hold no tests, so they answer with an empty list rather than failing on an
+/// argument `clap` does not know.
+pub fn asked_for_the_test_list() -> bool {
+    std::env::args().any(|argument| argument == "--list")
 }
 
 /// Which market a run solves against, as asked for on the command line.
@@ -500,6 +553,9 @@ pub struct Market {
     /// capture. Used only when `--gas-price-gwei` is absent, and reported either way. `None` when
     /// the fixture carried none, or no `--rpc-url` was given.
     pub market_gas_price: Option<BigUint>,
+    /// The node the market was captured through, so a solver built on it can read the
+    /// PropAMMRouter's fee tiers. `None` for a fixture, which holds no pAMM component.
+    pub rpc_url: Option<String>,
     pub updates: Vec<Update>,
     pub source: MarketSource,
 }
@@ -512,6 +568,7 @@ pub fn load_market() -> Market {
         market_gas_price: recording
             .metadata
             .gas_price_as_biguint(),
+        rpc_url: None,
         source: MarketSource::Offline {
             recorded_at_secs: recording.metadata.recorded_at_secs,
             chain_name: recording.metadata.chain.clone(),
@@ -555,6 +612,16 @@ pub struct ProtocolCount {
     pub components: usize,
     /// Of those, the ones carrying a simulation state.
     pub with_state: usize,
+    /// The components swappable only with off-chain authorization, sorted. Only a worker pool with
+    /// `liquidity_scope = "include_exclusive"` may route through them, and they only reach the
+    /// market at all when the protocol was streamed with the `exclusive:` prefix — so an empty
+    /// list here is why an exclusive config scores exactly like its public twin.
+    ///
+    /// Printed because nothing downstream marks a route as having used exclusive liquidity: the
+    /// surplus a config wins over its public twin is internal to the router. These are the ids to
+    /// look for in `routes.jsonl`'s `component_id` fields to find the solutions that routed
+    /// through one.
+    pub exclusive_ids: Vec<String>,
 }
 
 /// Pools per protocol, and how many of them can actually be simulated.
@@ -566,10 +633,19 @@ pub struct ProtocolCount {
 pub fn protocol_breakdown(updates: &[Update]) -> Vec<ProtocolCount> {
     let mut protocol_of: HashMap<&str, &str> = HashMap::new();
     let mut has_state: HashSet<&str> = HashSet::new();
+    let mut is_exclusive: HashSet<&str> = HashSet::new();
 
     for update in updates {
         for (id, component) in &update.new_pairs {
             protocol_of.insert(id.as_str(), component.protocol_system.as_str());
+            // The same attribute `feed::exclusivity::is_exclusive` classifies on, read here
+            // straight off the component so the count cannot drift from what the workers see.
+            if component
+                .static_attributes
+                .contains_key("is_exclusive")
+            {
+                is_exclusive.insert(id.as_str());
+            }
         }
         for id in update.states.keys() {
             has_state.insert(id.as_str());
@@ -580,20 +656,32 @@ pub fn protocol_breakdown(updates: &[Update]) -> Vec<ProtocolCount> {
     }
 
     let mut totals: HashMap<&str, (usize, usize)> = HashMap::new();
+    let mut exclusive_of: HashMap<&str, Vec<&str>> = HashMap::new();
     for (id, protocol) in &protocol_of {
         let entry = totals.entry(protocol).or_insert((0, 0));
         entry.0 += 1;
         if has_state.contains(id) {
             entry.1 += 1;
         }
+        if is_exclusive.contains(id) {
+            exclusive_of
+                .entry(protocol)
+                .or_default()
+                .push(id);
+        }
     }
 
     let mut counts: Vec<ProtocolCount> = totals
         .into_iter()
-        .map(|(protocol, (components, with_state))| ProtocolCount {
-            protocol: protocol.to_string(),
-            components,
-            with_state,
+        .map(|(protocol, (components, with_state))| {
+            let mut exclusive_ids: Vec<String> = exclusive_of
+                .remove(protocol)
+                .unwrap_or_default()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            exclusive_ids.sort();
+            ProtocolCount { protocol: protocol.to_string(), components, with_state, exclusive_ids }
         })
         .collect();
     // Biggest first, then by name so equal sizes do not reorder between runs.
@@ -611,14 +699,38 @@ pub fn print_protocol_breakdown(counts: &[ProtocolCount]) {
         .iter()
         .fold((0, 0), |(c, s), row| (c + row.components, s + row.with_state));
 
+    let exclusive: usize = counts
+        .iter()
+        .map(|row| row.exclusive_ids.len())
+        .sum();
+
     println!();
-    header_line("market graph", format!("{components} pools, {with_state} simulatable"));
-    println!("    {:<24}{:>10}{:>12}", "protocol", "pools", "simulatable");
+    header_line(
+        "market graph",
+        format!("{components} pools, {with_state} simulatable, {exclusive} exclusive"),
+    );
+    println!("    {:<24}{:>10}{:>12}{:>12}", "protocol", "pools", "simulatable", "exclusive");
     for row in counts {
         // The zero is the whole point of the column, so it is called out on the row it happens on
         // rather than summarised again underneath.
         let flag = if row.with_state == 0 { "  <- none usable, cannot be routed" } else { "" };
-        println!("    {:<24}{:>10}{:>12}{}", row.protocol, row.components, row.with_state, flag);
+        println!(
+            "    {:<24}{:>10}{:>12}{:>12}{}",
+            row.protocol,
+            row.components,
+            row.with_state,
+            row.exclusive_ids.len(),
+            flag
+        );
+    }
+
+    // Nothing downstream marks a solution as having used exclusive liquidity, so the ids are the
+    // only way to find those routes: grep them in `routes.jsonl`'s `component_id` fields.
+    for row in counts
+        .iter()
+        .filter(|row| !row.exclusive_ids.is_empty())
+    {
+        header_line("exclusive in", format!("{}: {}", row.protocol, row.exclusive_ids.join(", ")));
     }
 }
 
@@ -644,8 +756,9 @@ pub async fn build_solver(
     let solver = Solver::from_recording(
         market.chain,
         market.updates.clone(),
-        pool_configs(config, workers, timeout_ms),
+        worker_pool_configs(config, workers, timeout_ms),
         Some(gas_price_wei(gas_price_gwei)),
+        market.rpc_url.as_deref(),
     )
     .await
     .map_err(|error| error.to_string())?;

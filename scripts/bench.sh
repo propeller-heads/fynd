@@ -20,7 +20,7 @@
 #
 # Examples:
 #   ./scripts/bench.sh --name baseline --orders 2000
-#   ./scripts/bench.sh --name water-only --orders 400 --configs water_fill_d3
+#   ./scripts/bench.sh --name water-only --orders 400 --configs WF_d3
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

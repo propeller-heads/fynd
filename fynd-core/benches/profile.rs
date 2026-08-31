@@ -8,9 +8,9 @@
 //! different block, and so a different market.
 //!
 //! ```text
-//! ./scripts/profile.sh --config water_fill_d3 --order 2073
-//! ./scripts/profile.sh --config water_fill_d3 --orders 200 --repeats 3
-//! ./scripts/profile.sh --config water_fill_d3 --orders 200 --no-record   # timings only
+//! ./scripts/profile.sh --config WF_d3 --order 2073
+//! ./scripts/profile.sh --config WF_d3 --orders 200 --repeats 3
+//! ./scripts/profile.sh --config WF_d3 --orders 200 --no-record   # timings only
 //! ```
 //!
 //! # Reading the flamegraph
@@ -42,7 +42,7 @@ use common::{
     available_configs, block_components, build_market, build_solver, exclude_requested_protocols,
     format_micros, load_bench_config, load_blocked_tokens, print_protocol_breakdown,
     protocol_breakdown, resolved_gas_price_gwei, symbol_table, timings_of, token_label,
-    trades::{load_trade_orders, recorded_tokens, TradeOrder},
+    trades::{load_trade_orders, recorded_tokens, OrderFlags, OrderSelection, TradeOrder},
     LiveFlags, MarketSource,
 };
 use futures::stream::StreamExt;
@@ -60,13 +60,14 @@ struct Args {
     config: String,
 
     /// One order, by id or by its leading index — `2073` and `2073_00000000_ae7ab965` both work.
-    /// Takes precedence over `--orders`.
+    /// Takes precedence over the order-selection flags.
     #[arg(long)]
     order: Option<String>,
 
-    /// Orders to run, from the top of the dataset. Ignored when `--order` is given.
-    #[arg(long, default_value_t = 100)]
-    orders: usize,
+    /// Which orders to run: `--orders`, `--tail` or `--random`. All are ignored when `--order`
+    /// names one.
+    #[command(flatten)]
+    order_flags: OrderFlags,
 
     /// Passes over the chosen orders. More passes, same work — the way to make a short run
     /// produce enough samples to read.
@@ -113,6 +114,10 @@ struct Args {
     logs: bool,
 }
 
+/// Orders profiled when `--orders` says nothing else. Fewer than a benchmark run: a profile is
+/// read one flamegraph at a time.
+const DEFAULT_ORDERS: usize = 100;
+
 /// Slowest solves listed at the end, so the next run can aim at one with `--order`.
 const SLOWEST_SHOWN: usize = 10;
 
@@ -151,17 +156,15 @@ async fn solve(solver: &Solver, order: &TradeOrder) -> Solve {
     Solve { order_id: order.id.clone(), elapsed_us, solved, swaps }
 }
 
-/// Orders to run: one named order, or the first `order_count` of the dataset.
+/// Orders to run: one named order, or whichever slice `selection` asks for.
 fn select_orders(
-    orders: Vec<TradeOrder>,
+    mut orders: Vec<TradeOrder>,
     wanted: Option<&str>,
-    order_count: usize,
+    selection: OrderSelection,
 ) -> Vec<TradeOrder> {
     let Some(wanted) = wanted else {
-        return orders
-            .into_iter()
-            .take(order_count)
-            .collect();
+        selection.narrow(&mut orders);
+        return orders;
     };
     // `2073` matches `2073_00000000_ae7ab965`; the full id matches itself
     let picked: Vec<TradeOrder> = orders
@@ -179,6 +182,10 @@ fn select_orders(
 
 #[tokio::main]
 async fn main() {
+    if common::asked_for_the_test_list() {
+        return;
+    }
+
     let args = Args::parse();
     common::init_logging(args.logs);
 
@@ -207,9 +214,12 @@ async fn main() {
         .trades
         .unwrap_or_else(common::default_trades_path);
     // The whole dataset is loaded so `--order` can find any id, then narrowed.
-    let (all, summary) =
-        load_trade_orders(&trades, &known_tokens, 0).unwrap_or_else(|error| panic!("{error}"));
-    let orders = select_orders(all, args.order.as_deref(), args.orders);
+    let (all, summary) = load_trade_orders(&trades, &known_tokens, OrderSelection::All)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let selection = args
+        .order_flags
+        .selection(DEFAULT_ORDERS);
+    let orders = select_orders(all, args.order.as_deref(), selection);
     let repeats = args.repeats.max(1);
     let jobs = args.jobs.max(1);
     // More workers than cores costs setup time and memory without adding throughput.
@@ -226,7 +236,11 @@ async fn main() {
 
     println!("\n=== profile: {} ===", config.label);
     println!("  algorithm          {} @ {} hops", config.algorithm, config.max_hops);
-    println!("  orders             {} x {repeats} pass(es)", orders.len());
+    let picked = match args.order {
+        Some(_) => "by id".to_string(),
+        None => selection.label(),
+    };
+    println!("  orders             {} ({picked}) x {repeats} pass(es)", orders.len());
     if orders.len() <= 5 {
         for order in &orders {
             println!("                     {} ({})", order.id, pair_of(order));

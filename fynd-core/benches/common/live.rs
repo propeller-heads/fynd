@@ -12,17 +12,22 @@
 
 use std::{
     collections::HashMap,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use fynd_core::feed::protocol_registry::{
     matches_streamed_system, open_price_level_stream_for_recording,
-    register_exchanges_for_recording,
+    register_exchanges_for_recording, ProtocolSpec,
 };
 use num_bigint::BigUint;
+use tokio::sync::watch;
 use tokio_stream::StreamExt;
 use tycho_simulation::{
-    evm::stream::ProtocolStreamBuilder,
+    evm::{
+        override_stream::{titan::TitanProvider, OverrideSnapshot, StateOverrideProvider},
+        stream::ProtocolStreamBuilder,
+    },
     protocol::models::Update,
     tycho_client::{
         feed::component_tracker::ComponentFilter,
@@ -38,6 +43,91 @@ use tycho_simulation::{
 };
 
 use super::{header_line, Market, MarketSource};
+
+/// Serves one snapshot of pAMM overrides, forever.
+///
+/// The built-in Titan provider keeps a WebSocket open and every pool reads the freshest snapshot on
+/// every simulation, which is right for a live solver and wrong for a benchmark: prices drift over
+/// the minutes a run takes, so two configs price the same pool differently and the comparison
+/// between them stops meaning anything. Registering this instead pins one reading for the run.
+///
+/// Holds the sender so the channel stays open; pools only ever borrow the value.
+struct FrozenOverrides {
+    _sender: watch::Sender<OverrideSnapshot>,
+    receiver: watch::Receiver<OverrideSnapshot>,
+}
+
+impl FrozenOverrides {
+    /// Freezes `snapshot`, clearing its expiry.
+    ///
+    /// Titan stamps `expires_at` about a block ahead, so a snapshot kept as-is would go stale
+    /// seconds into the run and every pool would silently fall back to the indexed state -- the
+    /// drift this is meant to remove, replaced by a cliff partway through.
+    fn freeze(mut snapshot: OverrideSnapshot) -> Self {
+        snapshot.expires_at = None;
+        let (sender, receiver) = watch::channel(snapshot);
+        Self { _sender: sender, receiver }
+    }
+}
+
+impl StateOverrideProvider for FrozenOverrides {
+    fn subscribe(&self, _protocol_system: &str) -> Option<watch::Receiver<OverrideSnapshot>> {
+        Some(self.receiver.clone())
+    }
+}
+
+/// Takes one Titan reading per pAMM protocol and registers it for the rest of the run.
+///
+/// A protocol Titan does not serve, or one that sends nothing before the timeout, is left to the
+/// default provider: an unfrozen price is worse than a frozen one, but no price at all would drop
+/// the venue from the market entirely and change what the benchmark is measuring.
+async fn freeze_pamm_prices(
+    mut builder: ProtocolStreamBuilder,
+    protocols: &[String],
+    timeout_secs: u64,
+) -> ProtocolStreamBuilder {
+    let url = std::env::var("TITAN_PAMM_STREAM_URL")
+        .unwrap_or_else(|_| "wss://eu.rpc.titanbuilder.xyz/ws/pamm_quote_stream".to_string());
+    let names: Vec<&str> = protocols
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let titan = TitanProvider::spawn(url, &names);
+
+    for &protocol in &names {
+        // Only the protocols Titan actually serves come back with a channel.
+        let Some(mut receiver) = titan.subscribe(protocol) else {
+            continue;
+        };
+        // The channel opens on an empty snapshot; the first change is the first real reading.
+        let first =
+            tokio::time::timeout(Duration::from_secs(timeout_secs), receiver.changed()).await;
+        match first {
+            Ok(Ok(())) => {
+                let snapshot = receiver.borrow().clone();
+                header_line(
+                    "pAMM prices",
+                    format!(
+                        "{protocol} frozen at block {}",
+                        snapshot
+                            .block_number
+                            .map_or_else(|| "unknown".to_string(), |block| block.to_string())
+                    ),
+                );
+                let frozen: Arc<dyn StateOverrideProvider> =
+                    Arc::new(FrozenOverrides::freeze(snapshot));
+                builder = builder.with_override_provider(protocol, frozen);
+            }
+            Ok(Err(_)) | Err(_) => {
+                header_line(
+                    "pAMM prices",
+                    format!("{protocol} sent nothing in {timeout_secs}s -- left live"),
+                );
+            }
+        }
+    }
+    builder
+}
 
 /// Times each step of the capture and prints what it cost.
 ///
@@ -144,6 +234,13 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
         &protocols,
     )
     .map_err(|e| format!("failed to register exchanges: {e}"))?;
+
+    // pAMM prices are read from Titan on every simulation, not once per block, so left alone they
+    // move under the benchmark for as long as it runs -- the same pool answers the same amount
+    // differently in one config than in the next. One reading is taken here and served to every
+    // pool for the whole run.
+    let builder = freeze_pamm_prices(builder, &protocols, opts.capture_timeout_secs).await;
+    steps.done("pAMM prices frozen in");
 
     // Split from the build because the two fail differently on a slow start: handing the token
     // list over is local work over 8k tokens, while the build reaches out for every VM protocol's
@@ -257,6 +354,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     Ok(Market {
         chain: opts.chain,
         market_gas_price: live_gas_price,
+        rpc_url: opts.rpc_url.clone(),
         updates: vec![snapshot],
         source: MarketSource::Live {
             chain_name: opts.chain_name.clone(),
@@ -269,10 +367,13 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     })
 }
 
-/// Appends the `--include-protocols` entries to the streamed list.
+/// Adds the `--include-protocols` entries to the streamed list.
 ///
-/// A name that is already streamed stops the run, because an entry adding nothing to the market
-/// is a mistake worth seeing rather than a silent no-op.
+/// An exact repeat of a streamed entry stops the run — it adds nothing to the market, which is a
+/// mistake worth seeing. An entry differing only by the `exclusive:` prefix replaces the bare one,
+/// so `exclusive:ekubo_v3` streams the exclusive-liquidity variant for a chain whose discovery
+/// already returned `ekubo_v3`. Registration is keyed on the bare system name, and naming one
+/// system twice is rejected downstream.
 fn add_streamed_protocols(protocols: &mut Vec<String>, requested: &[String]) -> Result<(), String> {
     for protocol in requested {
         if protocols.contains(protocol) {
@@ -281,7 +382,16 @@ fn add_streamed_protocols(protocols: &mut Vec<String>, requested: &[String]) -> 
                 protocols.join(", ")
             ));
         }
-        protocols.push(protocol.clone());
+        let spec = ProtocolSpec::parse(protocol).map_err(|error| {
+            format!("--include-protocols: {protocol} is not a protocol this build streams: {error}")
+        })?;
+        let same_system = protocols.iter().position(|streamed| {
+            ProtocolSpec::parse(streamed).is_ok_and(|streamed| streamed.system == spec.system)
+        });
+        match same_system {
+            Some(ix) => protocols[ix] = protocol.clone(),
+            None => protocols.push(protocol.clone()),
+        }
     }
     Ok(())
 }
