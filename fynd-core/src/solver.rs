@@ -787,8 +787,8 @@ impl FyndBuilder {
         let derived_data: SharedDerivedDataRef = computation_manager.store();
         let derived_event_tx = computation_manager.event_sender();
 
-        // Subscribe event channels before spawning (one for computation manager + one per worker
-        // pool)
+        // Subscribe event channels before spawning (one for the computation manager + one per
+        // worker pool)
         let computation_event_rx = tycho_feed.subscribe();
         let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
 

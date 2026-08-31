@@ -66,4 +66,4 @@ pub struct TokenPriceEntry {
 /// Token prices with path dependency tracking.
 ///
 /// Used internally by `TokenGasPriceComputation` to enable incremental updates.
-pub type TokenPricesWithDeps = FxHashMap<Address, TokenPriceEntry>;
+pub type TokenPricesWithDeps = FxHashMap<TokenGasPriceKey, TokenPriceEntry>;

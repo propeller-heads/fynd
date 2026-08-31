@@ -76,7 +76,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 2. Writes new component/token/state data into `MarketState` (write lock)
 3. Broadcasts `MarketEvent` → each `SolverWorker` updates its local graph via `GraphManager`
 4. `GasPriceFetcher` runs independently on a timer → fetches gas price from RPC node → writes to `MarketState`
-5. Triggers `ComputationManager` → runs spot prices → component (pool) depths → token gas prices (in dependency order) → broadcasts `DerivedDataEvent` → workers update edge weights
+5. Triggers the `ComputationManager` → runs spot prices, token gas prices, then component (pool) depths → broadcasts `DerivedDataEvent` → workers update edge weights. Token pricing's per-token sell solves can delay a block's spot prices and depths — an accepted trade-off
 
 **Quote request path** (`POST /v1/quote`):
 1. `RouterApi` validates the request

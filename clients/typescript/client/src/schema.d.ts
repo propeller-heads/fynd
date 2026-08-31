@@ -49,11 +49,11 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * GET /v1/prices - Return derived token prices and optional market data.
-         * @description By default returns token gas prices only. Each `prices[].price` is a plain decimal string
-         *     holding raw target-token units divided by raw gas-token units; consumers must normalize
-         *     both tokens' decimals before using it. Use `include` query parameter to add spot prices
-         *     and/or component depths.
+         * GET /v1/prices - Return per-token mid prices and optional market data.
+         * @description Returns 503 until the first token-price solve has landed. Each `prices[].price` is a
+         *     plain decimal string holding raw target-token units divided by raw gas-token units;
+         *     consumers must normalize both tokens' decimals before using it. Use the `include` query
+         *     parameter to add spot prices and/or component depths.
          *
          *     # Query Parameters
          *
@@ -224,7 +224,7 @@ export interface components {
             spot_prices?: number | null;
             /**
              * Format: int64
-             * @description Block at which token gas prices were computed.
+             * @description Block at which the token prices were computed.
              */
             token_prices: number;
         };
@@ -563,7 +563,11 @@ export interface components {
              * @example 0x0000000000000000000000000000000000000000
              */
             gas_token: string;
-            /** @description Token gas prices relative to the native gas token, sorted by token address. */
+            /**
+             * @description Per-token mid prices relative to the native gas token, sorted by token address.
+             *
+             *     A token that could not be sold back is absent.
+             */
             prices: components["schemas"]["TokenPriceEntry"][];
             /** @description Spot prices per component direction (only if requested via `include=spot_prices`). */
             spot_prices?: components["schemas"]["SpotPriceEntry"][] | null;
@@ -703,11 +707,12 @@ export interface components {
              */
             token_out: string;
         };
-        /** @description A single token's gas price. */
+        /** @description A single token's mid price relative to the gas token. */
         TokenPriceEntry: {
             /**
-             * @description Raw target-token units divided by raw gas-token units, serialized as a plain decimal
-             *     string with up to 17 significant digits (no scientific notation).
+             * @description Mid price: the mean of the token's buy and sell rates in raw target-token units per raw
+             *     gas-token unit, serialized as a plain decimal string with up to 17 significant digits
+             *     (no scientific notation).
              *
              *     Intended for display and analytics only. Consumers must normalize both tokens'
              *     decimals before using it, and should parse it with a decimal-aware parser

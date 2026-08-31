@@ -74,7 +74,7 @@ impl fmt::Display for IncludeField {
 /// Block numbers at which each computation was last run.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ComputationBlocks {
-    /// Block at which token gas prices were computed.
+    /// Block at which the token prices were computed.
     pub token_prices: u64,
     /// Block at which spot prices were computed. `None` if not yet available.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,7 +87,9 @@ pub struct ComputationBlocks {
 /// Top-level response for GET /v1/prices.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PricesResponse {
-    /// Token gas prices relative to the native gas token, sorted by token address.
+    /// Per-token mid prices relative to the native gas token, sorted by token address.
+    ///
+    /// A token that could not be sold back is absent.
     pub prices: Vec<TokenPriceEntry>,
     /// The gas token address (e.g. WETH).
     #[schema(value_type = String, example = "0x0000000000000000000000000000000000000000")]
@@ -102,14 +104,15 @@ pub struct PricesResponse {
     pub component_depths: Option<Vec<ComponentDepthEntry>>,
 }
 
-/// A single token's gas price.
+/// A single token's mid price relative to the gas token.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TokenPriceEntry {
     /// Token address.
     #[schema(value_type = String, example = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
     pub token: Address,
-    /// Raw target-token units divided by raw gas-token units, serialized as a plain decimal
-    /// string with up to 17 significant digits (no scientific notation).
+    /// Mid price: the mean of the token's buy and sell rates in raw target-token units per raw
+    /// gas-token unit, serialized as a plain decimal string with up to 17 significant digits
+    /// (no scientific notation).
     ///
     /// Intended for display and analytics only. Consumers must normalize both tokens'
     /// decimals before using it, and should parse it with a decimal-aware parser

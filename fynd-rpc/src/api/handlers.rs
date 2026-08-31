@@ -246,12 +246,12 @@ const DEFAULT_PRICES_LIMIT: usize = 1000;
 const MAX_PRICES_LIMIT: usize = 1000;
 
 #[cfg(feature = "experimental")]
-/// GET /v1/prices - Return derived token prices and optional market data.
+/// GET /v1/prices - Return per-token mid prices and optional market data.
 ///
-/// By default returns token gas prices only. Each `prices[].price` is a plain decimal string
-/// holding raw target-token units divided by raw gas-token units; consumers must normalize
-/// both tokens' decimals before using it. Use `include` query parameter to add spot prices
-/// and/or component depths.
+/// Returns 503 until the first token-price solve has landed. Each `prices[].price` is a
+/// plain decimal string holding raw target-token units divided by raw gas-token units;
+/// consumers must normalize both tokens' decimals before using it. Use the `include` query
+/// parameter to add spot prices and/or component depths.
 ///
 /// # Query Parameters
 ///
@@ -300,27 +300,23 @@ pub async fn get_prices(
     }
     let spot_prices_block = store.spot_prices_block();
     let component_depths_block = store.component_depths_block();
-    let token_prices = store.token_prices().cloned();
+    let token_prices_data = store.token_prices().cloned();
     let spot_prices_data = if want_spot { store.spot_prices().cloned() } else { None };
     let component_depths_data = if want_depths { store.component_depths().cloned() } else { None };
     drop(store);
 
-    // Convert token gas prices
+    // The stored price is already the mean of the buy and sell rates.
     let mut prices = Vec::new();
     let mut skipped_tokens = 0usize;
-    if let Some(token_prices) = &token_prices {
-        for (address, price) in token_prices {
-            match price_to_decimal_string(&price.numerator, &price.denominator) {
-                Some(price) => {
-                    prices.push(TokenPriceEntry { token: address.clone(), price });
-                }
-                None => {
-                    debug!(
-                        token = %address,
-                        "cannot serialize token price (zero or oversized numerator/denominator)"
-                    );
-                    skipped_tokens += 1;
-                }
+    for (address, price) in token_prices_data.into_iter().flatten() {
+        match price_to_decimal_string(&price.numerator, &price.denominator) {
+            Some(price) => prices.push(TokenPriceEntry { token: address, price }),
+            None => {
+                debug!(
+                    token = %address,
+                    "cannot serialize token price (zero or oversized numerator/denominator)"
+                );
+                skipped_tokens += 1;
             }
         }
     }
