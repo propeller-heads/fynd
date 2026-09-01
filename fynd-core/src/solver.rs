@@ -36,9 +36,14 @@ use crate::{
     derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
     encoding::{encoder::Encoder, fee_fetcher::RouterFeeFetcher, router_fees::SharedRouterFees},
     feed::{
-        events::MarketEvent, gas::GasPriceFetcher, market_data::MarketData,
-        metrics_sampler::MetricsSampler, tycho_feed::TychoFeed, TychoFeedConfig,
+        events::{MarketEvent, MarketEventHandler},
+        gas::GasPriceFetcher,
+        market_data::MarketData,
+        metrics_sampler::MetricsSampler,
+        tycho_feed::TychoFeed,
+        TychoFeedConfig,
     },
+    graph::EdgeWeightUpdaterWithDerived,
     price_guard::{
         guard::PriceGuard, provider::PriceProvider, provider_registry::PriceProviderRegistry,
     },
@@ -54,7 +59,7 @@ use crate::{
         config::WorkerPoolRouterConfig, ExclusiveAccess, LiquidityScope, SolverPoolHandle,
         WorkerPoolRouter,
     },
-    Quote, QuoteRequest, SolveError,
+    Algorithm, Quote, QuoteRequest, SolveError,
 };
 
 /// Default values for [`FyndBuilder`] configuration and [`PoolConfig`] deserialization.
@@ -383,6 +388,7 @@ enum PoolEntry {
         liquidity_scope: Option<LiquidityScope>,
         exclude_protocols: Vec<String>,
     },
+    Custom(CustomPoolEntry),
 }
 
 impl PoolEntry {
@@ -390,8 +396,23 @@ impl PoolEntry {
     fn liquidity_scope(&self) -> Option<LiquidityScope> {
         match self {
             PoolEntry::BuiltIn { liquidity_scope, .. } => *liquidity_scope,
+            PoolEntry::Custom(custom) => custom.liquidity_scope,
         }
     }
+}
+
+/// Worker pool entry backed by a custom [`Algorithm`] implementation.
+struct CustomPoolEntry {
+    name: String,
+    num_workers: usize,
+    task_queue_capacity: usize,
+    min_hops: usize,
+    max_hops: usize,
+    timeout_ms: u64,
+    max_routes: Option<usize>,
+    liquidity_scope: Option<LiquidityScope>,
+    /// Applies the custom algorithm to a `WorkerPoolBuilder`.
+    configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
 }
 
 /// All components produced by [`FyndBuilder::assemble_components`], consumed by
@@ -595,6 +616,40 @@ impl FyndBuilder {
             liquidity_scope: None,
             exclude_protocols: Vec::new(),
         });
+        self
+    }
+
+    /// Shorthand: adds a single worker pool with a custom [`Algorithm`] implementation.
+    ///
+    /// The `factory` closure is called once per worker thread.
+    #[deprecated(
+        since = "0.99.23",
+        note = "register the algorithm in an `AlgorithmRegistry` and pass it to \
+                `with_algorithms`, which also serves pools that name it in a configuration \
+                file; this shorthand only ever added one pool"
+    )]
+    pub fn with_algorithm<A, F>(mut self, name: impl Into<String>, factory: F) -> Self
+    where
+        A: Algorithm + 'static,
+        A::GraphManager: MarketEventHandler + EdgeWeightUpdaterWithDerived + 'static,
+        F: Fn(AlgorithmConfig) -> A + Clone + Send + Sync + 'static,
+    {
+        let name = name.into();
+        let algo_name = name.clone();
+        let configure =
+            Box::new(move |builder: WorkerPoolBuilder| builder.with_algorithm(algo_name, factory));
+        self.pools
+            .push(PoolEntry::Custom(CustomPoolEntry {
+                name,
+                num_workers: num_cpus::get(),
+                task_queue_capacity: defaults::POOL_TASK_QUEUE_CAPACITY,
+                min_hops: defaults::POOL_MIN_HOPS,
+                max_hops: defaults::POOL_MAX_HOPS,
+                timeout_ms: defaults::POOL_TIMEOUT_MS,
+                max_routes: None,
+                liquidity_scope: None,
+                configure,
+            }));
         self
     }
 
@@ -805,6 +860,28 @@ impl FyndBuilder {
                     let builder = self
                         .algorithms
                         .configure(&algorithm, named)?;
+                    builder.build(
+                        market_data.clone(),
+                        Arc::clone(&derived_data),
+                        pool_event_rx,
+                        derived_rx,
+                    )?
+                }
+                PoolEntry::Custom(custom) => {
+                    let algo_cfg = AlgorithmConfig::new(
+                        custom.min_hops,
+                        custom.max_hops,
+                        Duration::from_millis(custom.timeout_ms),
+                        custom.max_routes,
+                    )?;
+                    let builder = WorkerPoolBuilder::new()
+                        .name(custom.name)
+                        .algorithm_config(algo_cfg)
+                        .num_workers(custom.num_workers)
+                        .task_queue_capacity(custom.task_queue_capacity)
+                        .liquidity_scope(pool_scope)
+                        .fallback_fee_tiers(fallback_fee_tiers.clone());
+                    let builder = (custom.configure)(builder);
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),
