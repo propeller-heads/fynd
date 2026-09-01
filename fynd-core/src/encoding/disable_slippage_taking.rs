@@ -31,6 +31,9 @@ sol! {
     /// Mirror of `TychoRouterV3.CLIENT_FEE_TYPEHASH`: the field names, types, and order must
     /// match the contract exactly, or the recovered signer changes and the router rejects the
     /// params.
+    ///
+    /// Also mirrored manually in `clients/rust/src/types.rs` (`ClientFeeParams::eip712_signing_hash`);
+    /// keep both in sync if the contract type changes.
     struct ClientFee {
         uint32 clientFeeBps;
         address clientFeeReceiver;
