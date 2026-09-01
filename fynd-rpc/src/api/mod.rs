@@ -1,5 +1,7 @@
 //! HTTP API layer: endpoint handlers, OpenAPI docs, and shared application state.
 
+/// Resolves disable-slippage-taking encoding from the request headers.
+pub mod disable_slippage_taking;
 /// OpenAPI spec construction and Swagger UI registration.
 mod docs;
 /// Re-exports of wire-format DTO types from `fynd-rpc-types`.
