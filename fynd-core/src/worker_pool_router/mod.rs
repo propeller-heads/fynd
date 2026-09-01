@@ -343,7 +343,16 @@ pub async fn encode_quotes(
 }
 
 /// Builds the final [`Quote`]: sums the per-order gas estimates and stamps the solve time.
+///
+/// Also credits each winning worker pool and algorithm. Attribution belongs here rather than at
+/// ranking: the price guard can pick a lower-ranked fallback, the exclusive overlay replaces the
+/// head of the list, and a failed encoding returns no quote at all. These are the quotes the
+/// caller receives.
 pub fn finalize_quote(order_quotes: Vec<OrderQuote>, solve_time_ms: u64) -> Quote {
+    for quote in &order_quotes {
+        record_win(quote);
+    }
+
     let total_gas_estimate = order_quotes
         .iter()
         .map(|o| o.gas_estimate())
@@ -652,9 +661,11 @@ impl WorkerPoolRouter {
                                 has_public_response = true;
                             }
 
+                            let mut quote = single_quote.order().clone();
+                            quote.set_worker_pool(worker_pool_name.clone());
                             quotes.push(WorkerPoolQuote {
                                 worker_pool: worker_pool_name.clone(),
-                                quote: single_quote.order().clone(),
+                                quote,
                                 solve_time_ms: single_quote.solve_time_ms(),
                             });
 
@@ -758,8 +769,6 @@ impl WorkerPoolRouter {
         if !valid_quotes.is_empty() {
             counter!("worker_router_orders_total", "status" => "success").increment(1);
             let best = valid_quotes[0];
-            counter!("worker_router_best_quote_pool", "pool" => best.worker_pool.clone())
-                .increment(1);
             debug!(
                 order_id = %best.quote.order_id(),
                 number_of_candidates = valid_quotes.len(),
@@ -987,6 +996,43 @@ fn to_gas_token_amount(quote: &OrderQuote, amount: &BigUint) -> Option<BigUint> 
         return None;
     }
     Some(amount * gas_cost_wei / gas_cost_out)
+}
+
+/// Records the win and the settled volume of one quote the router returns, by pool and algorithm.
+///
+/// Counting wins alone hides size: a solver can win few orders and still settle most of the flow,
+/// or the reverse. Output-token base units do not add up across tokens, so the amount is converted
+/// to the gas token first, the same way `record_gas_token_amount` does it. A quote the conversion
+/// cannot price counts under `worker_router_unpriced_won_quotes_total` rather than recording zero
+/// volume, which would read as a solver that won nothing.
+///
+/// A quote that found no route has no winner to credit. So has a quote the router built itself,
+/// which is why an empty worker pool is skipped rather than counted under a placeholder label.
+fn record_win(quote: &OrderQuote) {
+    if quote.status() != QuoteStatus::Success || quote.worker_pool().is_empty() {
+        return;
+    }
+    let worker_pool = quote.worker_pool().to_string();
+    let algorithm = quote.algorithm().to_string();
+    counter!(
+        "worker_router_best_quote_pool",
+        "pool" => worker_pool.clone(),
+        "algorithm" => algorithm.clone()
+    )
+    .increment(1);
+
+    let volume = to_gas_token_amount(quote, quote.amount_out()).and_then(|amount| amount.to_f64());
+    let Some(volume) = volume else {
+        counter!(
+            "worker_router_unpriced_won_quotes_total",
+            "pool" => worker_pool,
+            "algorithm" => algorithm
+        )
+        .increment(1);
+        return;
+    };
+    gauge!("worker_router_won_volume_gas_token", "pool" => worker_pool, "algorithm" => algorithm)
+        .increment(volume / WEI_PER_GAS_TOKEN);
 }
 
 /// Records an output-token `amount` under `metric`, in whole gas tokens.
@@ -1435,9 +1481,12 @@ mod tests {
 
     fn timed_worker_quote(
         worker_pool: &str,
-        quote: OrderQuote,
+        mut quote: OrderQuote,
         solve_time_ms: u64,
     ) -> WorkerPoolQuote {
+        // Stamped the same way `solve_order` stamps a quote as it arrives, so the ranking and
+        // overlay tests see the attribution production sees.
+        quote.set_worker_pool(worker_pool.to_string());
         WorkerPoolQuote { worker_pool: worker_pool.to_string(), quote, solve_time_ms }
     }
 
@@ -2106,6 +2155,51 @@ mod tests {
     }
 
     #[test]
+    fn test_rank_quotes_keeps_the_worker_pool() {
+        let worker_router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let responses = OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![
+                worker_quote(("slow_pool".to_string(), success_quote(900))),
+                worker_quote(("fast_pool".to_string(), success_quote(1000))),
+            ],
+            failed_solvers: vec![],
+        };
+
+        let ranked = worker_router.rank_quotes(&responses, &QuoteOptions::default());
+
+        assert_eq!(ranked[0].worker_pool(), "fast_pool");
+        assert_eq!(ranked[1].worker_pool(), "slow_pool");
+    }
+
+    #[test]
+    fn test_combine_with_surplus_credits_the_exclusive_worker_pool() {
+        let responses = responses_with_gas(900, 900, 1000, 1000);
+        let public_ranked = worker_quote((
+            "public_pool".to_string(),
+            make_public_quote_with_net(900, 900)
+                .order()
+                .clone(),
+        ))
+        .quote;
+
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_scopes(),
+            &QuoteOptions::default(),
+            vec![public_ranked],
+            1_000,
+            SimChain::Ethereum,
+        );
+
+        // The head is what the caller receives, so it is what attribution must credit. The public
+        // quote it displaced stays behind it as a price-guard fallback.
+        assert_eq!(combined[0].worker_pool(), "exclusive_access_pool");
+        assert_eq!(combined[1].worker_pool(), "public_pool");
+    }
+
+    #[test]
     fn test_rank_quotes_all_timeouts_returns_timeout_status() {
         let responses = OrderResponses {
             order_id: "test".to_string(),
@@ -2154,6 +2248,8 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status(), QuoteStatus::NoRouteFound);
+        // The router built this quote, so there is no worker pool to credit a win to.
+        assert!(result[0].worker_pool().is_empty());
     }
 
     #[test]

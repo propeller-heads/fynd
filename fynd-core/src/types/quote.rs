@@ -806,9 +806,15 @@ pub struct OrderQuote {
     amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
     block: BlockInfo,
-    /// Algorithm that found this solution (internal use only).
+    /// Algorithm that found this solution.
     #[serde(skip)]
     algorithm: String,
+    /// Worker pool that produced this solution (internal use only).
+    ///
+    /// Empty until the router receives the quote from a worker pool, and on a quote the router
+    /// builds itself, such as the `NoRouteFound` placeholder.
+    #[serde(skip)]
+    worker_pool: String,
     /// Effective gas price (in wei) at the time the route was computed.
     #[serde_as(as = "Option<DisplayFromStr>")]
     gas_price: Option<BigUint>,
@@ -864,6 +870,7 @@ impl OrderQuote {
             amount_out_net_gas,
             block,
             algorithm,
+            worker_pool: String::new(),
             gas_price: None,
             transaction: None,
             fee_breakdown: None,
@@ -1001,6 +1008,21 @@ impl OrderQuote {
     /// Returns the algorithm name that found this solution.
     pub fn algorithm(&self) -> &str {
         &self.algorithm
+    }
+
+    /// Returns the name of the worker pool that produced this solution.
+    ///
+    /// Empty on a quote the router builds itself, such as the `NoRouteFound` placeholder.
+    pub fn worker_pool(&self) -> &str {
+        &self.worker_pool
+    }
+
+    /// Names the worker pool that produced this solution.
+    ///
+    /// Set by the router when it receives the quote, so that attribution survives ranking, the
+    /// price guard and encoding — the stages after which the winner is finally known.
+    pub(crate) fn set_worker_pool(&mut self, worker_pool: String) {
+        self.worker_pool = worker_pool;
     }
 
     /// Returns the effective gas price at the time the route was computed.
