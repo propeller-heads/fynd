@@ -2556,7 +2556,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encoding_options_client_fee_params_override_disable_slippage_taking() {
+    fn test_encoding_options_disable_slippage_taking_precedence() {
         let with_client_fee = EncodingOptions::new(0.01)
             .with_client_fee_params(make_client_fee_params())
             .with_disable_slippage_taking(true);

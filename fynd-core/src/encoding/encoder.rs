@@ -496,7 +496,8 @@ impl Encoder {
             (None, vec![])
         };
 
-        let fn_sig = encoded_solution.function_signature();
+        // Read ahead of the client fee params below: the disable-slippage-taking signature covers
+        // the swap bytes.
         let swaps = encoded_solution.swaps();
 
         let client_fee_params = if let Some(fee) = encoding_options.client_fee_params() {
@@ -557,6 +558,8 @@ impl Encoder {
         } else {
             (0u32, Address::ZERO, U256::ZERO, U256::MAX, vec![])
         };
+
+        let fn_sig = encoded_solution.function_signature();
         let fee_breakdown = if encoding_options
             .client_fee_params()
             .is_some()
@@ -871,7 +874,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
-        encoding::router_fees::RouterFees,
+        encoding::{router_fees::RouterFees, DEFAULT_DEADLINE_WINDOW_SECS},
         BlockInfo, OrderQuote, QuoteStatus,
     };
 
@@ -1500,13 +1503,13 @@ mod tests {
                 .parse()
                 .unwrap(),
             1,
-            alloy::primitives::Address::repeat_byte(0x99),
-            crate::encoding::DEFAULT_DEADLINE_WINDOW_SECS,
+            EvmAddress::repeat_byte(0x99),
+            DEFAULT_DEADLINE_WINDOW_SECS,
         )
     }
 
     #[tokio::test]
-    async fn test_encode_disable_slippage_taking_signs_zero_fee_client_params() {
+    async fn test_encode_disable_slippage_taking() {
         let signer = disable_slippage_taking_signer();
         let signer_address = signer.receiver();
         let encoder = real_encoder().with_disable_slippage_taking_signer(signer);
@@ -1539,14 +1542,13 @@ mod tests {
         assert_eq!(fee_units, 0, "the params must carry no fee");
         assert_eq!(fee_receiver, signer_address);
         assert_eq!(max_contribution, U256::ZERO);
-        assert_eq!(signature.len(), 65);
 
         // Re-signing the decoded calldata values must reproduce the embedded signature
         // (ECDSA signing is deterministic), proving the signature binds this exact calldata.
         let resigned = disable_slippage_taking_signer()
             .sign_at_deadline(
                 deadline.to::<u64>(),
-                &crate::encoding::disable_slippage_taking::SwapIntent {
+                &SwapIntent {
                     amount_in,
                     token_in,
                     token_out,
@@ -1561,7 +1563,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encode_rejects_disable_slippage_taking_without_signer() {
+    async fn test_encode_disable_slippage_taking_without_signer() {
         let encoder = real_encoder();
         let quote = make_order_quote(990)
             .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
@@ -1580,7 +1582,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encode_prefers_client_fee_params_over_disable_slippage_taking() {
+    async fn test_encode_client_fee_params_precedence() {
         let signer = disable_slippage_taking_signer();
         let signer_receiver = signer.receiver();
         let encoder = real_encoder().with_disable_slippage_taking_signer(signer);
@@ -1611,7 +1613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encode_disable_slippage_taking_uses_signer_fee_rates() {
+    async fn test_encode_disable_slippage_taking_fee_rates() {
         let signer = disable_slippage_taking_signer();
         let signer_client = Bytes::from(signer.receiver().as_slice());
         let encoder = real_encoder().with_disable_slippage_taking_signer(signer);
