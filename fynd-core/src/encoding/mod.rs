@@ -16,6 +16,13 @@ pub mod exclusive_swap;
 pub mod fee_fetcher;
 pub mod router_fees;
 
+/// Validity window for a server-signed payload, in seconds.
+///
+/// Shared by [`exclusive_swap`] and [`disable_slippage_taking`]: a quote can carry both signatures
+/// at once, and whichever expires first bounds how long the quote is executable. One window keeps
+/// that bound the same whatever a quote is made of. Well under the Ekubo extension's 30-day cap.
+pub(crate) const DEFAULT_DEADLINE_WINDOW_SECS: u32 = 120;
+
 /// Current Unix time in seconds, for the deadlines the signing modules stamp into their payloads.
 ///
 /// # Errors

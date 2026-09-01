@@ -1498,7 +1498,7 @@ mod tests {
                 .unwrap(),
             1,
             alloy::primitives::Address::repeat_byte(0x99),
-            600,
+            crate::encoding::DEFAULT_DEADLINE_WINDOW_SECS,
         )
     }
 

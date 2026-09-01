@@ -15,15 +15,14 @@ use alloy::{
 };
 use tycho_simulation::tycho_common::Bytes;
 
-use crate::{encoding::now_unix_secs, SolveError};
+use crate::{
+    encoding::{now_unix_secs, DEFAULT_DEADLINE_WINDOW_SECS},
+    SolveError,
+};
 
 /// Environment variable holding the disable-slippage-taking signing key (hex, with or without
 /// `0x`).
 pub(crate) const ENV_DISABLE_SLIPPAGE_TAKING_KEY: &str = "DISABLE_SLIPPAGE_TAKING_SIGNER_KEY";
-
-/// Validity window for a signed `ClientFee`, in seconds. The router rejects the params after
-/// `deadline`, so the window must outlive quote delivery, user wallet signing, and submission.
-const DEADLINE_WINDOW_SECS: u64 = 600;
 
 sol! {
     /// Mirror of `TychoRouterV3.CLIENT_FEE_TYPEHASH`: the field names, types, and order must
@@ -74,7 +73,7 @@ pub struct DisableSlippageTakingSigner {
     signer: PrivateKeySigner,
     chain_id: u64,
     router_address: Address,
-    deadline_window_secs: u64,
+    deadline_window_secs: u32,
 }
 
 impl DisableSlippageTakingSigner {
@@ -93,7 +92,7 @@ impl DisableSlippageTakingSigner {
             })?;
         let router = crate::rpc::to_address(router_address, "router address")
             .map_err(SolveError::FailedEncoding)?;
-        Ok(Some(Self::new(signer, chain_id, router, DEADLINE_WINDOW_SECS)))
+        Ok(Some(Self::new(signer, chain_id, router, DEFAULT_DEADLINE_WINDOW_SECS)))
     }
 
     /// Creates a signer from explicit parts. `deadline_window_secs` is added to the
@@ -102,7 +101,7 @@ impl DisableSlippageTakingSigner {
         signer: PrivateKeySigner,
         chain_id: u64,
         router_address: Address,
-        deadline_window_secs: u64,
+        deadline_window_secs: u32,
     ) -> Self {
         Self { signer, chain_id, router_address, deadline_window_secs }
     }
@@ -118,7 +117,7 @@ impl DisableSlippageTakingSigner {
     /// # Errors
     /// Errors when the system clock reads before the Unix epoch.
     pub fn deadline(&self) -> Result<u64, SolveError> {
-        Ok(now_unix_secs()?.saturating_add(self.deadline_window_secs))
+        Ok(now_unix_secs()?.saturating_add(u64::from(self.deadline_window_secs)))
     }
 
     /// Signs the `ClientFee` typed data for one swap: zero fee, zero vault contribution, this
@@ -169,7 +168,12 @@ mod tests {
     const CHAIN_ID: u64 = 1;
 
     fn test_signer() -> DisableSlippageTakingSigner {
-        DisableSlippageTakingSigner::new(SIGNER_KEY.parse().unwrap(), CHAIN_ID, ROUTER, 600)
+        DisableSlippageTakingSigner::new(
+            SIGNER_KEY.parse().unwrap(),
+            CHAIN_ID,
+            ROUTER,
+            DEFAULT_DEADLINE_WINDOW_SECS,
+        )
     }
 
     fn test_intent(swaps: &[u8]) -> SwapIntent<'_> {
