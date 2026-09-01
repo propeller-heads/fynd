@@ -69,9 +69,21 @@ pending-block support). `Solver::subscribe_market_events()` returns a broadcast 
 ## Adding a Custom Algorithm
 
 1. Implement `Algorithm` with your `GraphType` and `GraphManager`
-2. Use `FyndBuilder::with_algorithm("name", factory)` or
-   `WorkerPoolBuilder::with_algorithm("name", factory)`
-3. No changes to fynd-core required
+2. Register it and name it in the pool configuration, exactly as a built-in is named:
+   ```rust
+   let algorithms = AlgorithmRegistry::new().with_algorithm("my_algo", MyAlgorithm::new)?;
+   FyndBuilder::new(..).with_algorithms(algorithms)
+   ```
+   ```toml
+   [pools.mine]
+   algorithm = "my_algo"
+   ```
+   `FyndRPCBuilder::with_algorithms` does the same for the HTTP server, and
+   `Solver::from_recording_with` for a benchmark or profiler. A name that shipping code already
+   uses is refused, so a registration cannot silently replace a built-in.
+3. Report failures with the `AlgorithmError` constructors (`no_path`, `timeout`,
+   `simulation_failed`, ...); the variants themselves cannot be built from outside the crate.
+4. No changes to fynd-core required
 
 See `fynd-core/examples/custom_algorithm.rs` for a walkthrough.
 

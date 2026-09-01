@@ -32,18 +32,13 @@ use tycho_simulation::{
 };
 
 use crate::{
-    algorithm::{AlgorithmConfig, AlgorithmError},
+    algorithm::{AlgorithmConfig, AlgorithmError, AlgorithmRegistry},
     derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
     encoding::{encoder::Encoder, fee_fetcher::RouterFeeFetcher, router_fees::SharedRouterFees},
     feed::{
-        events::{MarketEvent, MarketEventHandler},
-        gas::GasPriceFetcher,
-        market_data::MarketData,
-        metrics_sampler::MetricsSampler,
-        tycho_feed::TychoFeed,
-        TychoFeedConfig,
+        events::MarketEvent, gas::GasPriceFetcher, market_data::MarketData,
+        metrics_sampler::MetricsSampler, tycho_feed::TychoFeed, TychoFeedConfig,
     },
-    graph::EdgeWeightUpdaterWithDerived,
     price_guard::{
         guard::PriceGuard, provider::PriceProvider, provider_registry::PriceProviderRegistry,
     },
@@ -59,7 +54,7 @@ use crate::{
         config::WorkerPoolRouterConfig, ExclusiveAccess, LiquidityScope, SolverPoolHandle,
         WorkerPoolRouter,
     },
-    Algorithm, Quote, QuoteRequest, SolveError,
+    Quote, QuoteRequest, SolveError,
 };
 
 /// Default values for [`FyndBuilder`] configuration and [`PoolConfig`] deserialization.
@@ -388,7 +383,6 @@ enum PoolEntry {
         liquidity_scope: Option<LiquidityScope>,
         exclude_protocols: Vec<String>,
     },
-    Custom(CustomPoolEntry),
 }
 
 impl PoolEntry {
@@ -396,23 +390,8 @@ impl PoolEntry {
     fn liquidity_scope(&self) -> Option<LiquidityScope> {
         match self {
             PoolEntry::BuiltIn { liquidity_scope, .. } => *liquidity_scope,
-            PoolEntry::Custom(custom) => custom.liquidity_scope,
         }
     }
-}
-
-/// Worker pool entry backed by a custom [`Algorithm`] implementation.
-struct CustomPoolEntry {
-    name: String,
-    num_workers: usize,
-    task_queue_capacity: usize,
-    min_hops: usize,
-    max_hops: usize,
-    timeout_ms: u64,
-    max_routes: Option<usize>,
-    liquidity_scope: Option<LiquidityScope>,
-    /// Applies the custom algorithm to a `WorkerPoolBuilder`.
-    configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
 }
 
 /// All components produced by [`FyndBuilder::assemble_components`], consumed by
@@ -443,6 +422,8 @@ struct BuiltComponents {
 /// computation manager, one or more worker pools, encoder, and router.
 #[must_use = "a builder does nothing until .build() is called"]
 pub struct FyndBuilder {
+    /// Algorithms the caller brought, served when a pool names one.
+    algorithms: AlgorithmRegistry,
     chain: Chain,
     tycho_url: String,
     rpc_url: String,
@@ -477,6 +458,7 @@ impl FyndBuilder {
         min_tvl: f64,
     ) -> Self {
         Self {
+            algorithms: AlgorithmRegistry::new(),
             chain,
             tycho_url: tycho_url.into(),
             rpc_url: rpc_url.into(),
@@ -616,31 +598,13 @@ impl FyndBuilder {
         self
     }
 
-    /// Shorthand: adds a single worker pool with a custom [`Algorithm`] implementation.
+    /// Serves any pool whose configured algorithm name `algorithms` holds.
     ///
-    /// The `factory` closure is called once per worker thread.
-    pub fn with_algorithm<A, F>(mut self, name: impl Into<String>, factory: F) -> Self
-    where
-        A: Algorithm + 'static,
-        A::GraphManager: MarketEventHandler + EdgeWeightUpdaterWithDerived + 'static,
-        F: Fn(AlgorithmConfig) -> A + Clone + Send + Sync + 'static,
-    {
-        let name = name.into();
-        let algo_name = name.clone();
-        let configure =
-            Box::new(move |builder: WorkerPoolBuilder| builder.with_algorithm(algo_name, factory));
-        self.pools
-            .push(PoolEntry::Custom(CustomPoolEntry {
-                name,
-                num_workers: num_cpus::get(),
-                task_queue_capacity: defaults::POOL_TASK_QUEUE_CAPACITY,
-                min_hops: defaults::POOL_MIN_HOPS,
-                max_hops: defaults::POOL_MAX_HOPS,
-                timeout_ms: defaults::POOL_TIMEOUT_MS,
-                max_routes: None,
-                liquidity_scope: None,
-                configure,
-            }));
+    /// A pool configuration names an algorithm; only the built-ins are known by name here. This
+    /// hands the builder the ones the caller brought, so a deployment can run an algorithm that
+    /// lives outside this crate without changing how its pools are configured.
+    pub fn with_algorithms(mut self, algorithms: AlgorithmRegistry) -> Self {
+        self.algorithms = algorithms;
         self
     }
 
@@ -830,37 +794,17 @@ impl FyndBuilder {
                     if let Some(tokens) = connector_tokens {
                         algo_cfg = algo_cfg.with_connector_tokens(tokens);
                     }
-                    let builder = WorkerPoolBuilder::new()
+                    let named = WorkerPoolBuilder::new()
                         .name(name)
-                        .algorithm(algorithm)
                         .algorithm_config(algo_cfg)
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
                         .liquidity_scope(pool_scope)
                         .exclude_protocols(exclude_protocols)
                         .fallback_fee_tiers(fallback_fee_tiers.clone());
-                    builder.build(
-                        market_data.clone(),
-                        Arc::clone(&derived_data),
-                        pool_event_rx,
-                        derived_rx,
-                    )?
-                }
-                PoolEntry::Custom(custom) => {
-                    let algo_cfg = AlgorithmConfig::new(
-                        custom.min_hops,
-                        custom.max_hops,
-                        Duration::from_millis(custom.timeout_ms),
-                        custom.max_routes,
-                    )?;
-                    let builder = WorkerPoolBuilder::new()
-                        .name(custom.name)
-                        .algorithm_config(algo_cfg)
-                        .num_workers(custom.num_workers)
-                        .task_queue_capacity(custom.task_queue_capacity)
-                        .liquidity_scope(pool_scope)
-                        .fallback_fee_tiers(fallback_fee_tiers.clone());
-                    let builder = (custom.configure)(builder);
+                    let builder = self
+                        .algorithms
+                        .configure(&algorithm, named)?;
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),
@@ -1320,6 +1264,29 @@ impl Solver {
         pools: std::collections::HashMap<String, PoolConfig>,
         gas_price_wei: Option<num_bigint::BigUint>,
     ) -> Result<Self, SolverBuildError> {
+        Self::from_recording_with(chain, updates, pools, gas_price_wei, &AlgorithmRegistry::new())
+            .await
+    }
+
+    /// [`from_recording`](Self::from_recording), with algorithms the caller brought.
+    ///
+    /// A pool naming an algorithm in `algorithms` is served by it; every other pool falls back to
+    /// the built-in of that name. This is what lets a benchmark or a profiler run an algorithm
+    /// that lives outside this crate.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`from_recording`](Self::from_recording).
+    ///
+    /// Requires the `test-utils` feature.
+    #[cfg(feature = "test-utils")]
+    pub async fn from_recording_with(
+        chain: Chain,
+        updates: Vec<tycho_simulation::protocol::models::Update>,
+        pools: std::collections::HashMap<String, PoolConfig>,
+        gas_price_wei: Option<num_bigint::BigUint>,
+        algorithms: &AlgorithmRegistry,
+    ) -> Result<Self, SolverBuildError> {
         if pools.is_empty() {
             return Err(SolverBuildError::NoPools);
         }
@@ -1401,12 +1368,13 @@ impl Solver {
             let pool_event_rx = feed.subscribe();
             let derived_rx = derived_event_tx.subscribe();
 
-            let (worker_pool, task_handle) = WorkerPoolBuilder::new()
+            let named = WorkerPoolBuilder::new()
                 .name(name.clone())
-                .algorithm(pool_cfg.algorithm().to_string())
                 .algorithm_config(algo_cfg)
                 .num_workers(pool_cfg.num_workers())
-                .task_queue_capacity(pool_cfg.task_queue_capacity())
+                .task_queue_capacity(pool_cfg.task_queue_capacity());
+            let (worker_pool, task_handle) = algorithms
+                .configure(pool_cfg.algorithm(), named)?
                 .build(market_data.clone(), Arc::clone(&derived_data), pool_event_rx, derived_rx)?;
 
             solver_pool_handles.push(SolverPoolHandle::new(worker_pool.name(), task_handle));

@@ -1,8 +1,7 @@
 //! Custom algorithm example for fynd-core
 //!
 //! Demonstrates how to implement the [`Algorithm`] trait from scratch and plug it
-//! into [`FyndBuilder`] via [`FyndBuilder::with_algorithm`], without modifying
-//! fynd-core itself.
+//! into [`FyndBuilder`] via [`AlgorithmRegistry`], without modifying fynd-core itself.
 //!
 //! [`DirectComponentAlgorithm`] is a naive algorithm that finds a single component (liquidity pool)
 //! containing both the input and output tokens, simulates the swap, and returns the result.
@@ -24,8 +23,8 @@ use fynd_core::{
     feed::market_data::{MarketData, StateLabel},
     graph::{PetgraphStableDiGraphManager, StableDiGraph},
     types::RouteResult,
-    Algorithm, AlgorithmError, ComputationRequirements, EncodingOptions, FyndBuilder, Order,
-    OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, Swap,
+    Algorithm, AlgorithmError, AlgorithmRegistry, ComputationRequirements, EncodingOptions,
+    FyndBuilder, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, Swap,
 };
 use num_bigint::{BigInt, BigUint};
 use rustc_hash::FxHashMap;
@@ -193,7 +192,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         10.0,
     )
     .tycho_api_key(tycho_api_key)
-    .with_algorithm("direct_pool", DirectComponentAlgorithm::new)
+    .algorithm("direct_pool")
+    .with_algorithms(
+        AlgorithmRegistry::new().with_algorithm("direct_pool", DirectComponentAlgorithm::new)?,
+    )
     .build()?;
     // [doc:end custom-algo-wire]
 

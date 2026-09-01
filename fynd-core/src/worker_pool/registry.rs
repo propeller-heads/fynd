@@ -71,16 +71,32 @@ pub(crate) struct SpawnWorkersParams {
 
 /// Error returned when algorithm registration fails.
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("unknown algorithm '{name}'. Available: {}", AVAILABLE_ALGORITHMS.join(", "))]
+#[error(
+    "unknown algorithm '{name}'. Available: {}",
+    AVAILABLE_ALGORITHMS
+        .iter()
+        .copied()
+        .chain(registered.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(", ")
+)]
 pub struct UnknownAlgorithmError {
     /// The algorithm name that was not found.
     pub(crate) name: String,
+    /// Names the caller registered, so the message lists what was really on offer rather than
+    /// only what ships here.
+    pub(crate) registered: Vec<String>,
 }
 
 impl UnknownAlgorithmError {
-    /// Returns the algorithm name that was not found.
+    /// The algorithm name that was not found.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Names a caller registered alongside the built-ins.
+    pub(crate) fn of(name: impl Into<String>, registered: Vec<String>) -> Self {
+        Self { name: name.into(), registered }
     }
 }
 
@@ -125,13 +141,19 @@ impl AlgorithmSpawner {
                 "bellman_ford" => Ok(spawn_bellman_ford_workers(params)),
                 "path_frank_wolfe" => Ok(spawn_path_frank_wolfe_workers(params)),
                 "water_fill" => Ok(spawn_water_fill_workers(params)),
-                _ => Err(UnknownAlgorithmError { name: algorithm }),
+                _ => Err(UnknownAlgorithmError::of(algorithm, Vec::new())),
             },
             Self::Custom { spawner, .. } => Ok(spawner(params)),
         }
     }
 
     /// Returns the algorithm name associated with this spawner.
+    /// Whether the algorithm came from a caller rather than the built-in list.
+    #[cfg(test)]
+    pub(crate) fn is_custom(&self) -> bool {
+        matches!(self, Self::Custom { .. })
+    }
+
     pub(crate) fn algorithm_name(&self) -> &str {
         match self {
             Self::Registry { algorithm } | Self::Custom { algorithm, .. } => algorithm,
