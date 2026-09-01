@@ -857,7 +857,7 @@ fn has_exclusive_leg(quote: &OrderQuote) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address as EvmAddress, Bytes as EvmBytes};
+    use alloy::primitives::{Address as EvmAddress, Bytes as EvmBytes, Signature};
     use num_bigint::BigUint;
     use rstest::rstest;
     use rustc_hash::FxHashMap;
@@ -874,7 +874,10 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
-        encoding::{router_fees::RouterFees, DEFAULT_DEADLINE_WINDOW_SECS},
+        encoding::{
+            disable_slippage_taking::router_signing_hash, router_fees::RouterFees,
+            DEFAULT_DEADLINE_WINDOW_SECS,
+        },
         BlockInfo, OrderQuote, QuoteStatus,
     };
 
@@ -1496,14 +1499,16 @@ mod tests {
 
     const DISABLE_SLIPPAGE_TAKING_KEY: &str =
         "0x3333333333333333333333333333333333333333333333333333333333333333";
+    const SIGNER_CHAIN_ID: u64 = 1;
+    const SIGNER_ROUTER: EvmAddress = EvmAddress::repeat_byte(0x99);
 
     fn disable_slippage_taking_signer() -> DisableSlippageTakingSigner {
         DisableSlippageTakingSigner::new(
             DISABLE_SLIPPAGE_TAKING_KEY
                 .parse()
                 .unwrap(),
-            1,
-            EvmAddress::repeat_byte(0x99),
+            SIGNER_CHAIN_ID,
+            SIGNER_ROUTER,
             DEFAULT_DEADLINE_WINDOW_SECS,
         )
     }
@@ -1543,23 +1548,28 @@ mod tests {
         assert_eq!(fee_receiver, signer_address);
         assert_eq!(max_contribution, U256::ZERO);
 
-        // Re-signing the decoded calldata values must reproduce the embedded signature
-        // (ECDSA signing is deterministic), proving the signature binds this exact calldata.
-        let resigned = disable_slippage_taking_signer()
-            .sign_at_deadline(
-                deadline.to::<u64>(),
-                &SwapIntent {
-                    amount_in,
-                    token_in,
-                    token_out,
-                    expected_amount_out,
-                    min_amount_out,
-                    receiver,
-                    swaps: &swaps,
-                },
-            )
+        // The embedded signature must recover to the signer over a hash rebuilt from the decoded
+        // calldata, proving the encoder signed the values it actually encoded.
+        let signing_hash = router_signing_hash(
+            fee_receiver,
+            &SwapIntent {
+                amount_in,
+                token_in,
+                token_out,
+                expected_amount_out,
+                min_amount_out,
+                receiver,
+                swaps: &swaps,
+            },
+            deadline.to::<u64>(),
+            SIGNER_CHAIN_ID,
+            SIGNER_ROUTER,
+        );
+        let recovered = Signature::try_from(signature.as_ref())
+            .unwrap()
+            .recover_address_from_prehash(&signing_hash)
             .unwrap();
-        assert_eq!(signature.as_ref(), resigned);
+        assert_eq!(recovered, signer_address);
     }
 
     #[tokio::test]

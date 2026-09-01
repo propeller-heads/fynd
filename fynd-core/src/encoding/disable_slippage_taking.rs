@@ -150,19 +150,6 @@ impl DisableSlippageTakingSigner {
         intent: &SwapIntent,
     ) -> Result<SignedClientFee, SolveError> {
         let deadline = now_unix_secs()?.saturating_add(u64::from(self.deadline_window_secs));
-        Ok(SignedClientFee { deadline, signature: self.sign_at_deadline(deadline, intent)? })
-    }
-
-    /// Signs the `ClientFee` typed data for an already-chosen `deadline`. Reachable from the
-    /// crate's tests, which re-sign decoded calldata to check what a signature binds.
-    ///
-    /// # Errors
-    /// Errors when the underlying key fails to sign.
-    pub(crate) fn sign_at_deadline(
-        &self,
-        deadline: u64,
-        intent: &SwapIntent,
-    ) -> Result<[u8; 65], SolveError> {
         let payload = ClientFee {
             clientFeeBps: 0,
             clientFeeReceiver: self.receiver(),
@@ -187,16 +174,74 @@ impl DisableSlippageTakingSigner {
             .signer
             .sign_hash_sync(&signing_hash)
             .map_err(|e| SolveError::FailedEncoding(format!("client fee signing failed: {e}")))?;
-        Ok(signature.as_bytes())
+        Ok(SignedClientFee { deadline, signature: signature.as_bytes() })
     }
+}
+
+/// Rebuilds the signing hash the way `TychoRouterV3._verifyClientSignature` does, independently of
+/// the `sol!` struct above, so a typehash, field-order, or `bytes`-hashing mismatch with the
+/// contract fails the test that compares them.
+///
+/// Test-only, and shared with the encoder's tests: recovering an encoded signature against this
+/// hash checks both that the payload matches the contract and that the encoder signed the values it
+/// actually put in the calldata.
+#[cfg(test)]
+pub(crate) fn router_signing_hash(
+    fee_receiver: Address,
+    intent: &SwapIntent,
+    deadline: u64,
+    chain_id: u64,
+    router: Address,
+) -> alloy::primitives::B256 {
+    use alloy::{primitives::keccak256, sol_types::SolValue};
+
+    let type_hash = keccak256(
+        b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
+uint256 maxClientContribution,uint256 deadline,\
+uint256 amountIn,address tokenIn,address tokenOut,\
+uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
+    );
+    let struct_hash = keccak256(
+        (
+            type_hash,
+            U256::ZERO,
+            fee_receiver,
+            U256::ZERO,
+            U256::from(deadline),
+            intent.amount_in,
+            intent.token_in,
+            intent.token_out,
+            intent.expected_amount_out,
+            intent.min_amount_out,
+            intent.receiver,
+            keccak256(intent.swaps),
+        )
+            .abi_encode(),
+    );
+    let domain_type_hash = keccak256(
+        b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+    );
+    let domain_separator = keccak256(
+        (
+            domain_type_hash,
+            keccak256(b"TychoRouter"),
+            keccak256(b"1"),
+            U256::from(chain_id),
+            router,
+        )
+            .abi_encode(),
+    );
+    let mut data = [0u8; 66];
+    data[0] = 0x19;
+    data[1] = 0x01;
+    data[2..34].copy_from_slice(domain_separator.as_slice());
+    data[34..66].copy_from_slice(struct_hash.as_slice());
+    keccak256(data)
 }
 
 #[cfg(test)]
 mod tests {
-    use alloy::{
-        primitives::{keccak256, Signature, B256},
-        sol_types::SolValue,
-    };
+    use alloy::primitives::Signature;
 
     use super::*;
 
@@ -225,58 +270,6 @@ mod tests {
         }
     }
 
-    /// Rebuilds the signing hash the way `TychoRouterV3._verifyClientSignature` does,
-    /// independently of the `sol!` struct, so a typehash, field-order, or `bytes`-hashing
-    /// mismatch with the contract fails the test.
-    fn router_signing_hash(
-        signer: &DisableSlippageTakingSigner,
-        intent: &SwapIntent,
-        deadline: u64,
-    ) -> B256 {
-        let type_hash = keccak256(
-            b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
-uint256 maxClientContribution,uint256 deadline,\
-uint256 amountIn,address tokenIn,address tokenOut,\
-uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
-        );
-        let struct_hash = keccak256(
-            (
-                type_hash,
-                U256::ZERO,
-                signer.receiver(),
-                U256::ZERO,
-                U256::from(deadline),
-                intent.amount_in,
-                intent.token_in,
-                intent.token_out,
-                intent.expected_amount_out,
-                intent.min_amount_out,
-                intent.receiver,
-                keccak256(intent.swaps),
-            )
-                .abi_encode(),
-        );
-        let domain_type_hash = keccak256(
-            b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
-        );
-        let domain_separator = keccak256(
-            (
-                domain_type_hash,
-                keccak256(b"TychoRouter"),
-                keccak256(b"1"),
-                U256::from(CHAIN_ID),
-                ROUTER,
-            )
-                .abi_encode(),
-        );
-        let mut data = [0u8; 66];
-        data[0] = 0x19;
-        data[1] = 0x01;
-        data[2..34].copy_from_slice(domain_separator.as_slice());
-        data[34..66].copy_from_slice(struct_hash.as_slice());
-        keccak256(data)
-    }
-
     #[test]
     fn test_sign_client_fee_against_router_signing_hash() {
         let signer = test_signer();
@@ -286,7 +279,13 @@ uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
 
         let signature = Signature::try_from(&signed.signature[..]).unwrap();
         let recovered = signature
-            .recover_address_from_prehash(&router_signing_hash(&signer, &intent, signed.deadline))
+            .recover_address_from_prehash(&router_signing_hash(
+                signer.receiver(),
+                &intent,
+                signed.deadline,
+                CHAIN_ID,
+                ROUTER,
+            ))
             .unwrap();
         assert_eq!(recovered, signer.receiver());
         // v byte is 27/28, matching the on-chain `ECDSA.recover` expectation.
