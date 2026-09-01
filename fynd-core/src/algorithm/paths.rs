@@ -1,8 +1,9 @@
 //! Finding, ranking and simulating routes that name a pool for every leg.
 //!
-//! A [`Path`] is a route with its pools already chosen, as opposed to the token sequences
-//! [`TopologyGraph`] searches over. Enumerating one per pool combination is what an algorithm does
-//! when it wants to compare whole routes rather than choose a pool per leg.
+//! A [`Path`](crate::graph::Path) is a route with its pools already chosen, as opposed to the
+//! token sequences [`TopologyGraph`](crate::graph::TopologyGraph) searches over. Enumerating one
+//! per pool combination is what an algorithm does when it wants to compare whole routes rather
+//! than choose a pool per leg.
 
 use num_bigint::{BigInt, BigUint};
 use rustc_hash::FxHashMap;
