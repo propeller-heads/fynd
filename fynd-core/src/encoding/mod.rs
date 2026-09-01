@@ -3,7 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::SolveError;
 
 /// Signer for disable-slippage-taking encoding: server-signed zero-fee `ClientFee` params.
-pub mod disable_slippage_taking;
+///
+/// Crate-internal: the feature is driven by `EncodingOptions::disable_slippage_taking`, and the
+/// deployment's signing key comes from the environment, so embedders never touch the signer.
+pub(crate) mod disable_slippage_taking;
 /// Route encoder: converts solver output into ABI-encoded on-chain calldata.
 ///
 /// Wraps [tycho-execution](https://docs.propellerheads.xyz/tycho/for-solvers/execution) to

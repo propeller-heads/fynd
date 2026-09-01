@@ -49,36 +49,36 @@ sol! {
 /// The swap-intent fields the `ClientFee` signature must cover, taken verbatim from the encoded
 /// calldata: the router recomputes the signing hash from its calldata arguments, so any difference
 /// (e.g. the native-ETH sentinel address) invalidates the signature.
-pub struct SwapIntent<'a> {
+pub(crate) struct SwapIntent<'a> {
     /// Exact input amount.
-    pub amount_in: U256,
+    pub(crate) amount_in: U256,
     /// Input token as encoded in calldata.
-    pub token_in: Address,
+    pub(crate) token_in: Address,
     /// Output token as encoded in calldata.
-    pub token_out: Address,
+    pub(crate) token_out: Address,
     /// Quoted output amount — the router's positive-slippage baseline.
-    pub expected_amount_out: U256,
+    pub(crate) expected_amount_out: U256,
     /// Post-fee floor below which the router reverts.
-    pub min_amount_out: U256,
+    pub(crate) min_amount_out: U256,
     /// Address receiving the swap output.
-    pub receiver: Address,
+    pub(crate) receiver: Address,
     /// ABI-encoded swap bytes.
-    pub swaps: &'a [u8],
+    pub(crate) swaps: &'a [u8],
 }
 
 /// A signed zero-fee `ClientFee` payload: the 65-byte signature and the deadline it covers.
 ///
 /// Both go into the same calldata field, and the signature is only valid for this deadline, so
 /// they travel together.
-pub struct SignedClientFee {
+pub(crate) struct SignedClientFee {
     /// Unix timestamp after which the router rejects the params.
-    pub deadline: u64,
+    pub(crate) deadline: u64,
     /// EIP-712 signature over the `ClientFee` payload, `r || s || v`.
-    pub signature: [u8; 65],
+    pub(crate) signature: [u8; 65],
 }
 
 /// Signs zero-fee `ClientFee` payloads that identify this deployment as the router fee client.
-pub struct DisableSlippageTakingSigner {
+pub(crate) struct DisableSlippageTakingSigner {
     signer: PrivateKeySigner,
     chain_id: u64,
     router_address: Address,
@@ -88,7 +88,10 @@ pub struct DisableSlippageTakingSigner {
 impl DisableSlippageTakingSigner {
     /// Builds a signer from the `DISABLE_SLIPPAGE_TAKING_SIGNER_KEY` env var: `Ok(None)` when
     /// unset (signing disabled), an error when set but invalid.
-    pub fn from_env(chain_id: u64, router_address: &Bytes) -> Result<Option<Self>, SolveError> {
+    pub(crate) fn from_env(
+        chain_id: u64,
+        router_address: &Bytes,
+    ) -> Result<Option<Self>, SolveError> {
         let Ok(key) = std::env::var(ENV_DISABLE_SLIPPAGE_TAKING_KEY) else {
             return Ok(None);
         };
@@ -106,7 +109,7 @@ impl DisableSlippageTakingSigner {
 
     /// Creates a signer from explicit parts. `deadline_window_secs` is added to the
     /// signing-time timestamp to form each payload's deadline.
-    pub fn new(
+    pub(crate) fn new(
         signer: PrivateKeySigner,
         chain_id: u64,
         router_address: Address,
@@ -117,7 +120,7 @@ impl DisableSlippageTakingSigner {
 
     /// The `clientFeeReceiver` every payload from this signer carries: the signing key's own
     /// address.
-    pub fn receiver(&self) -> Address {
+    pub(crate) fn receiver(&self) -> Address {
         self.signer.address()
     }
 
@@ -130,7 +133,10 @@ impl DisableSlippageTakingSigner {
     /// # Errors
     /// Errors when the system clock reads before the Unix epoch, or the underlying key fails to
     /// sign.
-    pub fn sign_client_fee(&self, intent: &SwapIntent) -> Result<SignedClientFee, SolveError> {
+    pub(crate) fn sign_client_fee(
+        &self,
+        intent: &SwapIntent,
+    ) -> Result<SignedClientFee, SolveError> {
         let deadline = now_unix_secs()?.saturating_add(u64::from(self.deadline_window_secs));
         Ok(SignedClientFee { deadline, signature: self.sign_at_deadline(deadline, intent)? })
     }

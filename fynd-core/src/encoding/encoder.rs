@@ -218,9 +218,10 @@ impl Encoder {
     }
 
     /// Overrides the disable-slippage-taking signer, replacing whatever was read from the
-    /// environment.
+    /// environment. Test-only: deployments configure the key through the environment.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_disable_slippage_taking_signer(
+    pub(crate) fn with_disable_slippage_taking_signer(
         mut self,
         signer: DisableSlippageTakingSigner,
     ) -> Self {
