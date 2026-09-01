@@ -85,9 +85,6 @@ pending-block support). `Solver::subscribe_market_events()` returns a broadcast 
    `simulation_failed`, ...); the variants themselves cannot be built from outside the crate.
 4. No changes to fynd-core required
 
-`FyndBuilder::with_algorithm("name", factory)` is the older single-pool shorthand: it adds a pool
-no configuration declares, using default hop limits and worker count. Prefer the registry.
-
 See `fynd-core/examples/custom_algorithm.rs` for a walkthrough.
 
 ## Integration Tests

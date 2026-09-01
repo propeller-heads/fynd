@@ -9,8 +9,8 @@
 //! # Use cases
 //!
 //! - **Standalone routing** — embed Fynd's algorithms directly without running an HTTP server.
-//! - **Custom algorithms** — implement the [`Algorithm`] trait and plug in via
-//!   [`FyndBuilder::with_algorithm`](solver::FyndBuilder).
+//! - **Custom algorithms** — implement the [`Algorithm`] trait and register it in an
+//!   [`AlgorithmRegistry`], which [`FyndBuilder::with_algorithms`](solver::FyndBuilder) takes.
 //! - **HTTP server** — use the [`fynd-rpc`](https://crates.io/crates/fynd-rpc) crate, which wraps
 //!   this crate with Actix Web.
 //!
