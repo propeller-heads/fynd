@@ -535,12 +535,8 @@ impl Encoder {
                          configured (set {ENV_DISABLE_SLIPPAGE_TAKING_KEY})"
                     ))
                 })?;
-            let deadline = signer
-                .deadline()
-                .map_err(|e| EncodingError::FatalError(e.to_string()))?;
-            let signature = signer
+            let signed = signer
                 .sign_client_fee(&SwapIntent {
-                    deadline,
                     amount_in,
                     token_in,
                     token_out,
@@ -550,7 +546,13 @@ impl Encoder {
                     swaps,
                 })
                 .map_err(|e| EncodingError::FatalError(e.to_string()))?;
-            (0u32, signer.receiver(), U256::ZERO, U256::from(deadline), signature.to_vec())
+            (
+                0u32,
+                signer.receiver(),
+                U256::ZERO,
+                U256::from(signed.deadline),
+                signed.signature.to_vec(),
+            )
         } else {
             (0u32, Address::ZERO, U256::ZERO, U256::MAX, vec![])
         };
@@ -1541,16 +1543,18 @@ mod tests {
         // Re-signing the decoded calldata values must reproduce the embedded signature
         // (ECDSA signing is deterministic), proving the signature binds this exact calldata.
         let resigned = disable_slippage_taking_signer()
-            .sign_client_fee(&crate::encoding::disable_slippage_taking::SwapIntent {
-                deadline: deadline.to::<u64>(),
-                amount_in,
-                token_in,
-                token_out,
-                expected_amount_out,
-                min_amount_out,
-                receiver,
-                swaps: &swaps,
-            })
+            .sign_at_deadline(
+                deadline.to::<u64>(),
+                &crate::encoding::disable_slippage_taking::SwapIntent {
+                    amount_in,
+                    token_in,
+                    token_out,
+                    expected_amount_out,
+                    min_amount_out,
+                    receiver,
+                    swaps: &swaps,
+                },
+            )
             .unwrap();
         assert_eq!(signature.as_ref(), resigned);
     }

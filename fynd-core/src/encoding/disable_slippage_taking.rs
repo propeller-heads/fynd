@@ -50,8 +50,6 @@ sol! {
 /// calldata: the router recomputes the signing hash from its calldata arguments, so any difference
 /// (e.g. the native-ETH sentinel address) invalidates the signature.
 pub struct SwapIntent<'a> {
-    /// Unix timestamp after which the router rejects the params.
-    pub deadline: u64,
     /// Exact input amount.
     pub amount_in: U256,
     /// Input token as encoded in calldata.
@@ -66,6 +64,17 @@ pub struct SwapIntent<'a> {
     pub receiver: Address,
     /// ABI-encoded swap bytes.
     pub swaps: &'a [u8],
+}
+
+/// A signed zero-fee `ClientFee` payload: the 65-byte signature and the deadline it covers.
+///
+/// Both go into the same calldata field, and the signature is only valid for this deadline, so
+/// they travel together.
+pub struct SignedClientFee {
+    /// Unix timestamp after which the router rejects the params.
+    pub deadline: u64,
+    /// EIP-712 signature over the `ClientFee` payload, `r || s || v`.
+    pub signature: [u8; 65],
 }
 
 /// Signs zero-fee `ClientFee` payloads that identify this deployment as the router fee client.
@@ -112,25 +121,35 @@ impl DisableSlippageTakingSigner {
         self.signer.address()
     }
 
-    /// The deadline for a payload signed now.
-    ///
-    /// # Errors
-    /// Errors when the system clock reads before the Unix epoch.
-    pub fn deadline(&self) -> Result<u64, SolveError> {
-        Ok(now_unix_secs()?.saturating_add(u64::from(self.deadline_window_secs)))
-    }
-
     /// Signs the `ClientFee` typed data for one swap: zero fee, zero vault contribution, this
     /// signer as receiver, and the given swap intent.
     ///
+    /// The deadline is derived here, from the signing-time clock and this signer's window, and
+    /// returned alongside the signature it is covered by — the caller encodes both as they come.
+    ///
+    /// # Errors
+    /// Errors when the system clock reads before the Unix epoch, or the underlying key fails to
+    /// sign.
+    pub fn sign_client_fee(&self, intent: &SwapIntent) -> Result<SignedClientFee, SolveError> {
+        let deadline = now_unix_secs()?.saturating_add(u64::from(self.deadline_window_secs));
+        Ok(SignedClientFee { deadline, signature: self.sign_at_deadline(deadline, intent)? })
+    }
+
+    /// Signs the `ClientFee` typed data for an already-chosen `deadline`. Reachable from the
+    /// crate's tests, which re-sign decoded calldata to check what a signature binds.
+    ///
     /// # Errors
     /// Errors when the underlying key fails to sign.
-    pub fn sign_client_fee(&self, intent: &SwapIntent) -> Result<[u8; 65], SolveError> {
+    pub(crate) fn sign_at_deadline(
+        &self,
+        deadline: u64,
+        intent: &SwapIntent,
+    ) -> Result<[u8; 65], SolveError> {
         let payload = ClientFee {
             clientFeeBps: 0,
             clientFeeReceiver: self.receiver(),
             maxClientContribution: U256::ZERO,
-            deadline: U256::from(intent.deadline),
+            deadline: U256::from(deadline),
             amountIn: intent.amount_in,
             tokenIn: intent.token_in,
             tokenOut: intent.token_out,
@@ -178,7 +197,6 @@ mod tests {
 
     fn test_intent(swaps: &[u8]) -> SwapIntent<'_> {
         SwapIntent {
-            deadline: 1_900_000_000,
             amount_in: U256::from(1_000_000u64),
             token_in: Address::repeat_byte(0x01),
             token_out: Address::repeat_byte(0x02),
@@ -192,7 +210,11 @@ mod tests {
     /// Rebuilds the signing hash the way `TychoRouterV3._verifyClientSignature` does,
     /// independently of the `sol!` struct, so a typehash, field-order, or `bytes`-hashing
     /// mismatch with the contract fails the test.
-    fn router_signing_hash(signer: &DisableSlippageTakingSigner, intent: &SwapIntent) -> B256 {
+    fn router_signing_hash(
+        signer: &DisableSlippageTakingSigner,
+        intent: &SwapIntent,
+        deadline: u64,
+    ) -> B256 {
         let type_hash = keccak256(
             b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
 uint256 maxClientContribution,uint256 deadline,\
@@ -205,7 +227,7 @@ uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
                 U256::ZERO,
                 signer.receiver(),
                 U256::ZERO,
-                U256::from(intent.deadline),
+                U256::from(deadline),
                 intent.amount_in,
                 intent.token_in,
                 intent.token_out,
@@ -242,14 +264,35 @@ uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
         let signer = test_signer();
         let intent = test_intent(&[0xAB; 40]);
 
-        let signature_bytes = signer.sign_client_fee(&intent).unwrap();
+        let signed = signer.sign_client_fee(&intent).unwrap();
 
-        let signature = Signature::try_from(&signature_bytes[..]).unwrap();
+        let signature = Signature::try_from(&signed.signature[..]).unwrap();
         let recovered = signature
-            .recover_address_from_prehash(&router_signing_hash(&signer, &intent))
+            .recover_address_from_prehash(&router_signing_hash(&signer, &intent, signed.deadline))
             .unwrap();
         assert_eq!(recovered, signer.receiver());
         // v byte is 27/28, matching the on-chain `ECDSA.recover` expectation.
-        assert!(matches!(signature_bytes[64], 27 | 28));
+        assert!(matches!(signed.signature[64], 27 | 28));
+    }
+
+    #[test]
+    fn test_sign_client_fee_deadline_window() {
+        let before = now_unix_secs().unwrap();
+
+        let signed = test_signer()
+            .sign_client_fee(&test_intent(&[0xAB; 40]))
+            .unwrap();
+
+        let window = u64::from(DEFAULT_DEADLINE_WINDOW_SECS);
+        assert!(
+            signed.deadline >= before + window,
+            "deadline {} predates the window opened at {before}",
+            signed.deadline
+        );
+        assert!(
+            signed.deadline <= now_unix_secs().unwrap() + window,
+            "deadline {} outlives the window",
+            signed.deadline
+        );
     }
 }
