@@ -7,8 +7,6 @@
 //! `clientFeeReceiver`, so the signer's address doubles as the receiver; with a zero fee and
 //! zero vault contribution, no funds ever move to it.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use alloy::{
     primitives::{Address, U256},
     signers::{local::PrivateKeySigner, SignerSync},
@@ -17,7 +15,7 @@ use alloy::{
 };
 use tycho_simulation::tycho_common::Bytes;
 
-use crate::SolveError;
+use crate::{encoding::now_unix_secs, SolveError};
 
 /// Environment variable holding the disable-slippage-taking signing key (hex, with or without
 /// `0x`).
@@ -116,8 +114,11 @@ impl DisableSlippageTakingSigner {
     }
 
     /// The deadline for a payload signed now.
-    pub fn deadline(&self) -> u64 {
-        now_unix_secs().saturating_add(self.deadline_window_secs)
+    ///
+    /// # Errors
+    /// Errors when the system clock reads before the Unix epoch.
+    pub fn deadline(&self) -> Result<u64, SolveError> {
+        Ok(now_unix_secs()?.saturating_add(self.deadline_window_secs))
     }
 
     /// Signs the `ClientFee` typed data for one swap: zero fee, zero vault contribution, this
@@ -152,14 +153,6 @@ impl DisableSlippageTakingSigner {
             .map_err(|e| SolveError::FailedEncoding(format!("client fee signing failed: {e}")))?;
         Ok(signature.as_bytes())
     }
-}
-
-/// Current Unix time in seconds, or 0 if the clock is before the epoch.
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

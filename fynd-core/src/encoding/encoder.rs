@@ -535,7 +535,9 @@ impl Encoder {
                          configured (set {ENV_DISABLE_SLIPPAGE_TAKING_KEY})"
                     ))
                 })?;
-            let deadline = signer.deadline();
+            let deadline = signer
+                .deadline()
+                .map_err(|e| EncodingError::FatalError(e.to_string()))?;
             let signature = signer
                 .sign_client_fee(&SwapIntent {
                     deadline,
