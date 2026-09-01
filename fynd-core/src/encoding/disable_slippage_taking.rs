@@ -6,6 +6,18 @@
 //! produces the attribution signature. The router recovers the signature against
 //! `clientFeeReceiver`, so the signer's address doubles as the receiver; with a zero fee and
 //! zero vault contribution, no funds ever move to it.
+//!
+//! Two consequences of borrowing the fee-client mechanism for attribution:
+//!
+//! - **It replaces every other fee-client attribution for the request.** The FeeCalculator resolves
+//!   one client per swap, so naming this signer displaces what would otherwise apply — including
+//!   the `tx.origin` fallback that `Encoder::fee_client` approximates with the order sender. The
+//!   request is charged this key's router fee rates, not the caller's, so the key's FeeCalculator
+//!   configuration is part of the feature, not just its exemption.
+//! - **The quote now expires.** Params the router accepts carry a `deadline`
+//!   (`DEFAULT_DEADLINE_WINDOW_SECS` past encoding), where a request with no client fee params at
+//!   all encodes `U256::MAX` and never expires. A caller that holds a quote longer than that window
+//!   gets a revert on submission rather than a stale price.
 
 use alloy::{
     primitives::{Address, U256},
