@@ -120,7 +120,7 @@ pub enum GraphError {
     #[error("Components with less then 2 tokens cannot be added: {0:?}")]
     InvalidComponents(Vec<ComponentId>),
     /// No edge exists between the given tokens for this component (test-only).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     #[error("No edge found between tokens {0:?} and {1:?} for component {2}")]
     MissingComponentBetweenTokens(Address, Address, ComponentId),
 }

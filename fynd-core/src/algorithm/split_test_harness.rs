@@ -14,18 +14,25 @@ use tycho_simulation::{
     tycho_ethereum::gas::{BlockGasPrice, GasPrice},
 };
 
+// Only the helpers this crate's own tests use, which the `test-utils` feature does not
+// compile.
+#[cfg(test)]
+use crate::{
+    algorithm::test_utils::setup_market_unweighted, graph::petgraph::PetgraphStableDiGraphManager,
+    types::RouteResult,
+};
 use crate::{
     algorithm::{
         most_liquid::DepthAndPrice,
-        test_utils::{component, setup_market_unweighted, token_with_decimals, ConstantProductSim},
+        test_utils::{component, token_with_decimals, ConstantProductSim},
         Algorithm,
     },
     derived::{DerivedData, SharedDerivedDataRef},
     feed::market_data::{MarketData, MarketState},
-    graph::{petgraph::PetgraphStableDiGraphManager, GraphManager, TopologyGraphManager},
+    graph::{GraphManager, TopologyGraphManager},
     types::{
         quote::{Order, OrderSide, Route},
-        BlockInfo, RouteResult,
+        BlockInfo,
     },
 };
 
@@ -35,6 +42,7 @@ use crate::{
 /// Finds the split where both components offer the same marginal rate on the last unit traded.
 /// Negative allocations are clamped to `0` — a clamped value means the full trade routes through
 /// the other component.
+#[cfg(test)]
 pub(crate) fn optimal_two_component_output(
     reserve_in_1: f64,
     reserve_out_1: f64,
@@ -59,11 +67,16 @@ pub(crate) fn optimal_two_component_output(
 /// A WETH/USDC market for the `DepthAndPrice` split algorithm (`split`). The two
 /// components are fee-free constant-product components, so their optimal split matches
 /// [`optimal_two_component_output`]. One `MarketState` backs the whole market.
-pub(crate) struct WeightedSplitMarket {
+pub struct WeightedSplitMarket {
+    /// The components, tokens and block info of the market.
     pub market: MarketData,
+    /// The token graph, with a depth and a spot price on every edge.
     pub weighted: TopologyGraphManager<DepthAndPrice>,
+    /// The derived data the algorithm reads while it solves.
     pub derived: SharedDerivedDataRef,
+    /// The WETH address.
     pub weth: Address,
+    /// The USDC address.
     pub usdc: Address,
 }
 
@@ -84,7 +97,7 @@ fn weth_usdc_component() -> ConstantProductSim {
 /// Builds two equally-deep, fee-free WETH/USDC constant-product components (1000 WETH / 3,000,000
 /// USDC each) at `gas_price` wei/gas. Derived data carries unit token gas prices so the split
 /// algorithms deduct gas in output-token terms.
-pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
+pub fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
     let weth = token_with_decimals(0x01, "WETH", 18);
     let usdc = token_with_decimals(0x02, "USDC", 6);
 
@@ -150,6 +163,7 @@ pub(crate) fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
 
 /// Extracts `(net_amount_out, path_count, gross_output)` from a split result. `path_count` counts
 /// swaps consuming `token_in` (one per parallel leg); `gross` sums swaps producing `token_out`.
+#[cfg(test)]
 pub(crate) fn split_metrics(
     result: &RouteResult,
     token_in: &Address,
@@ -170,10 +184,14 @@ pub(crate) fn split_metrics(
 // ==================== Scenario harness ====================
 
 /// A component entry in a `TestScenario`.
-pub(crate) struct ScenarioComponent {
+pub struct ScenarioComponent {
+    /// The component id, also used to build the component address.
     pub id: &'static str,
+    /// The first token of the pair.
     pub token_1: Token,
+    /// The second token of the pair.
     pub token_2: Token,
+    /// The simulation that prices swaps on this component.
     pub sim: Box<dyn ProtocolSim>,
 }
 
@@ -182,12 +200,18 @@ pub(crate) struct ScenarioComponent {
 /// Both bounds are net output amounts (gross minus gas cost), hardcoded from the scenario's fixed
 /// reserves. Gas cost uses the test market's fixed assumptions: 100 wei/gas, 1 output-token = 1
 /// ETH.
-pub(crate) struct TestScenario {
+pub struct TestScenario {
+    /// The scenario name, used in assertion messages.
     pub name: &'static str,
+    /// What the scenario tests.
     pub description: &'static str,
+    /// The components that make up the market.
     pub components: Vec<ScenarioComponent>,
+    /// The token the order sells.
     pub token_in: Token,
+    /// The token the order buys.
     pub token_out: Token,
+    /// The sell amount, in the smallest unit of `token_in`.
     pub trade_amount: BigUint,
     /// Floor: the algorithm must produce at least this much net output.
     pub lower_bound: BigInt,
@@ -199,6 +223,7 @@ pub(crate) struct TestScenario {
 impl TestScenario {
     /// Builds an unweighted `MarketData` + graph manager from this scenario's component
     /// definitions.
+    #[cfg(test)]
     pub(crate) fn build_market(&self) -> (MarketData, PetgraphStableDiGraphManager<()>) {
         let components = self
             .components
@@ -212,9 +237,7 @@ impl TestScenario {
     /// component definitions, for algorithms that route on the weighted graph (`water_fill`,
     /// Most Liquid). Uses the same fixed gas assumptions as
     /// [`build_market`](Self::build_market) (100 wei/gas).
-    pub(crate) fn build_market_weighted(
-        &self,
-    ) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
+    pub fn build_market_weighted(&self) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
         let mut market = MarketState::new();
         market.update_gas_price(BlockGasPrice {
             block_number: 1,
@@ -292,8 +315,10 @@ impl TestScenario {
 // ==================== Evaluation harness ====================
 
 /// Results from running one algorithm against one scenario.
-pub(crate) struct ScenarioResult {
+pub struct ScenarioResult {
+    /// The name of the scenario the algorithm ran against.
     pub scenario_name: &'static str,
+    /// The name of the algorithm that ran.
     pub algorithm_name: String,
     /// The route returned by the algorithm. `None` when routing failed.
     pub route: Option<Route>,
@@ -309,16 +334,19 @@ pub(crate) struct ScenarioResult {
 }
 
 impl ScenarioResult {
+    /// Asserts `net_output >= lower_bound`.
     pub fn assert_meets_lower_bound(&self) {
         self.assert_bound(self.net_output >= self.lower_bound, ">=");
     }
 
+    /// Asserts `net_output > lower_bound`.
     pub fn assert_beats_lower_bound(&self) {
         self.assert_bound(self.net_output > self.lower_bound, ">");
     }
 
     /// Asserts `>= lower_bound` when optimum equals it, `> lower_bound` otherwise.
-    pub fn assert_passes_lower_bound(&self) {
+    #[cfg(test)]
+    pub(crate) fn assert_passes_lower_bound(&self) {
         if self.analytical_optimum == self.lower_bound {
             self.assert_meets_lower_bound();
         } else {
@@ -353,7 +381,7 @@ impl ScenarioResult {
 /// let result = evaluate_scenario(&algo, &scenario, market, gm).await;
 /// result.assert_beats_lower_bound();
 /// ```
-pub(crate) async fn evaluate_scenario<A>(
+pub async fn evaluate_scenario<A>(
     algo: &A,
     scenario: &TestScenario,
     market: MarketData,
@@ -416,7 +444,8 @@ where
 
 // ==================== Named split_scenarios ====================
 
-pub(crate) mod split_scenarios {
+/// The named scenarios the split algorithms are tested against.
+pub mod split_scenarios {
     use num_bigint::{BigInt, BigUint};
 
     use super::{ScenarioComponent, TestScenario};
@@ -524,7 +553,7 @@ pub(crate) mod split_scenarios {
     ///
     /// `analytical_optimum`: equals `lower_bound`. Gas overhead makes splitting strictly worse than
     /// single-route — the best achievable output is the BF single-route result.
-    pub(crate) fn gas_kills_split() -> TestScenario {
+    pub fn gas_kills_split() -> TestScenario {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
         let r = BigUint::from(20_000_000u64);
@@ -738,7 +767,7 @@ pub(crate) mod split_scenarios {
     }
 
     /// Returns all 6 named split_scenarios.
-    pub(crate) fn all() -> Vec<TestScenario> {
+    pub fn all() -> Vec<TestScenario> {
         vec![
             symmetric_split(),
             asymmetric_split(),

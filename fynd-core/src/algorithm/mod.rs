@@ -34,11 +34,11 @@ pub mod sim_meter;
 pub mod split_primitives;
 pub mod water_fill;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod split_test_harness;
 /// Remembers what a pool paid, so one solve asks it once per amount.
 pub mod swap_cache;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
 use std::time::Duration;
