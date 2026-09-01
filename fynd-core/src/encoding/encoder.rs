@@ -364,24 +364,13 @@ impl Encoder {
     /// for it).
     ///
     /// # Errors
-    /// Errors when disable-slippage-taking is combined with `client_fee_params` (both configure
-    /// the router's client fee calldata) or no signing key is configured.
+    /// Errors when disable-slippage-taking is requested but no signing key is configured.
     fn fee_client(
         &self,
         encoding_options: &EncodingOptions,
         quote: &OrderQuote,
     ) -> Result<Bytes, SolveError> {
-        if encoding_options.disable_slippage_taking() {
-            if encoding_options
-                .client_fee_params()
-                .is_some()
-            {
-                return Err(SolveError::FailedEncoding(
-                    "disable_slippage_taking cannot be combined with client_fee_params; both \
-                     set the router's client fee calldata"
-                        .to_string(),
-                ));
-            }
+        if encoding_options.applies_disable_slippage_taking() {
             let signer = self
                 .disable_slippage_taking_signer
                 .as_ref()
@@ -533,7 +522,7 @@ impl Encoder {
                     sig
                 },
             )
-        } else if encoding_options.disable_slippage_taking() {
+        } else if encoding_options.applies_disable_slippage_taking() {
             // Zero-fee params naming this deployment's signer as the router fee client. The
             // signature covers the exact calldata values, so it is computed here where they
             // are final; nothing is left for the caller to patch.
@@ -1584,25 +1573,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encode_rejects_disable_slippage_taking_with_client_fee_params() {
-        let encoder =
-            real_encoder().with_disable_slippage_taking_signer(disable_slippage_taking_signer());
+    async fn test_encode_prefers_client_fee_params_over_disable_slippage_taking() {
+        let signer = disable_slippage_taking_signer();
+        let signer_receiver = signer.receiver();
+        let encoder = real_encoder().with_disable_slippage_taking_signer(signer);
         let quote = make_order_quote(990)
             .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+        let client_fee = make_client_fee(100);
+        let client_receiver = bytes_to_address(client_fee.receiver()).unwrap();
         let opts = EncodingOptions::new(0.01)
-            .with_client_fee_params(make_client_fee(100))
+            .with_client_fee_params(client_fee)
             .with_disable_slippage_taking(true);
 
-        let err = encoder
+        let result = encoder
             .encode(vec![quote], opts)
             .await
-            .expect_err("both param sources for the same calldata field must be rejected");
+            .unwrap();
 
-        assert!(
-            err.to_string()
-                .contains("client_fee_params"),
-            "got {err:?}"
-        );
+        let tx = result[0].transaction().unwrap();
+        assert!(tx
+            .client_fee_signature_offset()
+            .is_some());
+        let (_, _, _, _, _, _, client_fee, _) =
+            <SingleSwapCalldata as SolValue>::abi_decode_params(&tx.data()[4..]).unwrap();
+        let (fee_units, fee_receiver, _, _, _) = client_fee;
+
+        assert_ne!(fee_units, 0, "explicit client fee bps must be encoded");
+        assert_eq!(fee_receiver, client_receiver);
+        assert_ne!(fee_receiver, signer_receiver);
     }
 
     #[tokio::test]

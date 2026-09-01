@@ -128,8 +128,8 @@ fn disable_slippage_taking_requested(headers: &actix_web::http::header::HeaderMa
 
 /// Marks the request's encoding options for disable-slippage-taking encoding.
 ///
-/// Rejects a request that also carries `client_fee_params` — both configure the router's
-/// client fee calldata. A request without encoding options passes through unchanged.
+/// A request without encoding options passes through unchanged. When the request also carries
+/// `client_fee_params`, the flag is still set but encoding prefers the explicit client fee.
 pub fn apply_disable_slippage_taking(
     request: fynd_core::QuoteRequest,
     disable_slippage_taking: bool,
@@ -140,16 +140,6 @@ pub fn apply_disable_slippage_taking(
     let Some(encoding_options) = request.options().encoding_options() else {
         return Ok(request);
     };
-    if encoding_options
-        .client_fee_params()
-        .is_some()
-    {
-        return Err(ApiError::BadRequest(
-            "client_fee_params cannot be combined with disable-slippage-taking encoding; \
-             drop the client fee or request without the x-disable-slippage-taking header"
-                .to_string(),
-        ));
-    }
     let options = request
         .options()
         .clone()
@@ -672,7 +662,7 @@ mod tests {
         }
 
         #[test]
-        fn test_apply_disable_slippage_taking_rejects_client_fee_params() {
+        fn test_apply_disable_slippage_taking_allows_client_fee_params() {
             let core_request =
                 validate_quote_request(dto_request_with_options(serde_json::json!({
                     "encoding_options": {
@@ -688,10 +678,18 @@ mod tests {
                 })))
                 .expect("valid");
 
-            let err = apply_disable_slippage_taking(core_request, true)
-                .expect_err("client fee params conflict");
+            let core_request = apply_disable_slippage_taking(core_request, true)
+                .expect("explicit client fee overrides the API-key default");
 
-            assert!(matches!(err, ApiError::BadRequest(_)), "{err:?}");
+            let encoding_options = core_request
+                .options()
+                .encoding_options()
+                .expect("options present");
+            assert!(encoding_options.disable_slippage_taking());
+            assert!(!encoding_options.applies_disable_slippage_taking());
+            assert!(encoding_options
+                .client_fee_params()
+                .is_some());
         }
     }
 
