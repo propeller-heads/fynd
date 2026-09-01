@@ -5,7 +5,7 @@
 //! records what was asked of which component, so a solve can say where its time went.
 //!
 //! Callers go through [`MeteredProtocolSim::get_amount_out_metered`], which wraps the panic guard
-//! in [`super::sim_guard`] rather than replacing it. Counting and reporting are one decision: an
+//! in `sim_guard` rather than replacing it. Counting and reporting are one decision: an
 //! algorithm that does not bracket its solve with [`start_solve`] and [`report`] must not meter
 //! either, or the counts pile up on the worker thread unread. `water_fill` and
 //! `path_frank_wolfe` both bracket, which is why the shared split code they run through meters;
@@ -281,7 +281,7 @@ pub fn report(_algorithm: &str, _market: &MarketState, _solve_time_ms: impl FnOn
 
 /// Extension trait adding metered, panic-guarded simulation calls to every [`ProtocolSim`].
 ///
-/// Wraps [`GuardedProtocolSim::get_amount_out_guarded`] and books the call against the component
+/// Wraps `GuardedProtocolSim::get_amount_out_guarded` and books the call against the component
 /// that served it, which the guard alone cannot do — it sees only the state and the two tokens.
 pub trait MeteredProtocolSim {
     /// Calls the panic-guarded `get_amount_out` and records it against `component_id` and `stage`.
