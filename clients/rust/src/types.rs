@@ -844,6 +844,9 @@ pub struct Quote {
     transaction: Option<Transaction>,
     /// Fee breakdown. Present only when [`EncodingOptions`] was set in the request.
     fee_breakdown: Option<FeeBreakdown>,
+    /// Routing algorithm that produced this quote.
+    /// Populated by [`FyndClient::quote`](crate::FyndClient::quote) from the response.
+    pub(crate) algorithm: Option<String>,
     /// Wall-clock time the server spent solving this request, in milliseconds.
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote).
     pub(crate) solve_time_ms: u64,
@@ -937,6 +940,13 @@ impl Quote {
         self.fee_breakdown.as_ref()
     }
 
+    /// Routing algorithm that produced this quote.
+    ///
+    /// `None` on a quote no algorithm produced, such as a no-route placeholder.
+    pub fn algorithm(&self) -> Option<&str> {
+        self.algorithm.as_deref()
+    }
+
     /// Wall-clock time the server spent solving this request, in milliseconds.
     ///
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote). Returns `0` if not set.
@@ -1010,6 +1020,7 @@ impl Quote {
             receiver,
             transaction,
             fee_breakdown,
+            algorithm: None,
             solve_time_ms: 0,
         }
     }
