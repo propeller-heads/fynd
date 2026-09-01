@@ -2003,6 +2003,21 @@ mod conversions {
             assert_eq!(*core_fee.max_contribution(), BigUint::from(500u64));
         }
 
+        /// `disable_slippage_taking` is set from a proxy-injected header, never from the request
+        /// body, so no wire field may reach it. Adding one to the DTO fails here.
+        #[test]
+        fn test_encoding_options_into_core_never_disables_slippage_taking() {
+            let json = serde_json::json!({
+                "slippage": "0.005",
+                "disable_slippage_taking": true
+            });
+            let dto: EncodingOptions = serde_json::from_value(json).expect("unknown field ignored");
+
+            let core: fynd_core::EncodingOptions = dto.into();
+
+            assert!(!core.disable_slippage_taking());
+        }
+
         #[test]
         fn test_client_fee_params_serde_roundtrip() {
             let fee = ClientFeeParams::new(
