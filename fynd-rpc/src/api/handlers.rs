@@ -79,6 +79,10 @@ pub async fn quote(
 ) -> Result<HttpResponse, ApiError> {
     let access = exclusive_access::from_headers(http_request.headers());
     let core_request = validate_quote_request(request.into_inner())?;
+    let core_request = apply_disable_slippage_taking(
+        core_request,
+        disable_slippage_taking_requested(http_request.headers()),
+    )?;
     let capture = ReplayRequest::capture(&core_request, access);
 
     let result = state
@@ -109,6 +113,52 @@ pub fn validate_quote_request(
         }
     }
     Ok(core_request)
+}
+
+/// Header through which the authenticating proxy requests disable-slippage-taking encoding.
+const DISABLE_SLIPPAGE_TAKING_HEADER: &str = "x-disable-slippage-taking";
+
+/// Reads whether the authenticating proxy requested disable-slippage-taking encoding.
+fn disable_slippage_taking_requested(headers: &actix_web::http::header::HeaderMap) -> bool {
+    headers
+        .get(DISABLE_SLIPPAGE_TAKING_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+/// Marks the request's encoding options for disable-slippage-taking encoding.
+///
+/// Rejects a request that also carries `client_fee_params` — both configure the router's
+/// client fee calldata. A request without encoding options passes through unchanged.
+pub fn apply_disable_slippage_taking(
+    request: fynd_core::QuoteRequest,
+    disable_slippage_taking: bool,
+) -> Result<fynd_core::QuoteRequest, ApiError> {
+    if !disable_slippage_taking {
+        return Ok(request);
+    }
+    let Some(encoding_options) = request.options().encoding_options() else {
+        return Ok(request);
+    };
+    if encoding_options
+        .client_fee_params()
+        .is_some()
+    {
+        return Err(ApiError::BadRequest(
+            "client_fee_params cannot be combined with disable-slippage-taking encoding; \
+             drop the client fee or request without the x-disable-slippage-taking header"
+                .to_string(),
+        ));
+    }
+    let options = request
+        .options()
+        .clone()
+        .with_encoding_options(
+            encoding_options
+                .clone()
+                .with_disable_slippage_taking(true),
+        );
+    Ok(request.with_options(options))
 }
 
 /// Emits the failure-capture and slow-solve log lines for a finished quote.
@@ -544,7 +594,11 @@ mod tests {
     // the identical note in `docs.rs`.
     mod quote_pipeline {
 
-        use crate::api::{dto, handlers::validate_quote_request, ApiError};
+        use crate::api::{
+            dto,
+            handlers::{apply_disable_slippage_taking, validate_quote_request},
+            ApiError,
+        };
 
         fn dto_request(orders: Vec<dto::Order>) -> dto::QuoteRequest {
             serde_json::from_value(serde_json::json!({
@@ -576,6 +630,68 @@ mod tests {
             let core_request =
                 validate_quote_request(dto_request(vec![dto_order()])).expect("valid");
             assert_eq!(core_request.orders().len(), 1);
+        }
+
+        fn dto_request_with_options(options: serde_json::Value) -> dto::QuoteRequest {
+            serde_json::from_value(serde_json::json!({
+                "orders": [dto_order()],
+                "options": options
+            }))
+            .expect("valid request json")
+        }
+
+        #[test]
+        fn test_apply_disable_slippage_taking_sets_encoding_flag() {
+            let core_request = validate_quote_request(dto_request_with_options(
+                serde_json::json!({"encoding_options": {"slippage": "0.01"}}),
+            ))
+            .expect("valid");
+
+            let core_request =
+                apply_disable_slippage_taking(core_request, true).expect("no conflict");
+
+            assert!(core_request
+                .options()
+                .encoding_options()
+                .expect("options present")
+                .disable_slippage_taking());
+        }
+
+        #[test]
+        fn test_apply_disable_slippage_taking_noop_without_encoding_options() {
+            let core_request =
+                validate_quote_request(dto_request(vec![dto_order()])).expect("valid");
+
+            let core_request =
+                apply_disable_slippage_taking(core_request, true).expect("nothing to encode");
+
+            assert!(core_request
+                .options()
+                .encoding_options()
+                .is_none());
+        }
+
+        #[test]
+        fn test_apply_disable_slippage_taking_rejects_client_fee_params() {
+            let core_request =
+                validate_quote_request(dto_request_with_options(serde_json::json!({
+                    "encoding_options": {
+                        "slippage": "0.01",
+                        "client_fee_params": {
+                            "bps": 100,
+                            "receiver": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+                            "max_contribution": "0",
+                            "deadline": 1893456000u64,
+                            "signature": "0x"
+                        }
+                    }
+                })))
+                .expect("valid");
+
+            let err = apply_disable_slippage_taking(core_request, true)
+                .expect_err("client fee params conflict");
+
+            assert!(matches!(err, ApiError::BadRequest(_)), "{err:?}");
         }
     }
 

@@ -350,6 +350,11 @@ pub struct EncodingOptions {
     /// Client fee configuration. When absent, no client fee is charged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_fee_params: Option<ClientFeeParams>,
+    /// Attach server-signed zero-fee client params so the FeeCalculator applies the deployment
+    /// signer's positive-slippage exemption. Defaults to `false`. Mutually exclusive with
+    /// `client_fee_params`.
+    #[serde(default)]
+    disable_slippage_taking: bool,
     /// Per-request price guard configuration. Defaults to disabled.
     #[serde(default)]
     price_guard: PriceGuardConfig,
@@ -364,6 +369,7 @@ impl EncodingOptions {
             permit: None,
             permit2_signature: None,
             client_fee_params: None,
+            disable_slippage_taking: false,
             price_guard: PriceGuardConfig::default(),
         }
     }
@@ -415,6 +421,17 @@ impl EncodingOptions {
     /// Returns the client fee params, if set.
     pub fn client_fee_params(&self) -> Option<&ClientFeeParams> {
         self.client_fee_params.as_ref()
+    }
+
+    /// Sets whether the encoder attaches server-signed zero-fee client params.
+    pub fn with_disable_slippage_taking(mut self, disable_slippage_taking: bool) -> Self {
+        self.disable_slippage_taking = disable_slippage_taking;
+        self
+    }
+
+    /// Returns whether disable-slippage-taking encoding is requested.
+    pub fn disable_slippage_taking(&self) -> bool {
+        self.disable_slippage_taking
     }
 
     /// Sets per-request price guard configuration.
