@@ -650,6 +650,7 @@ pub mod fixtures {
     }
 
     /// A <-> B <-> C <-> D linear chain (bidirectional).
+    #[cfg(test)]
     pub(crate) fn linear_graph() -> TopologyGraphManager<DepthAndPrice> {
         let (a, b, c, d) = addrs();
         let mut m = TopologyGraphManager::<DepthAndPrice>::new();
@@ -662,6 +663,7 @@ pub mod fixtures {
     }
 
     /// 3 parallel components A<->B, 2 components B<->C.
+    #[cfg(test)]
     pub(crate) fn parallel_graph() -> TopologyGraphManager<DepthAndPrice> {
         let (a, b, c, _) = addrs();
         let mut m = TopologyGraphManager::<DepthAndPrice>::new();
@@ -676,6 +678,7 @@ pub mod fixtures {
     }
 
     /// Diamond: A->B->D, A->C->D (two 2-hop paths).
+    #[cfg(test)]
     pub(crate) fn diamond_graph() -> TopologyGraphManager<DepthAndPrice> {
         let (a, b, c, d) = addrs();
         let mut m = TopologyGraphManager::<DepthAndPrice>::new();
