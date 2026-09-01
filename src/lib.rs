@@ -25,6 +25,16 @@
 //!     _ => {}
 //! }
 //! ```
+//!
+//! To also change what the server serves, use [`serve::run_solver_with`]: it hands you the
+//! builder the CLI configured, so an embedder can override a route or rewrite the OpenAPI
+//! document without restating a single flag.
+//!
+//! ```rust,ignore
+//! fynd::serve::run_solver_with(*args, algorithms, |builder| {
+//!     builder.configure_routes(my_routes::configure)
+//! })?;
+//! ```
 
 pub use fynd_core as core;
 pub use fynd_rpc as rpc;

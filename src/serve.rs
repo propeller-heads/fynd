@@ -212,10 +212,16 @@ pub(crate) fn resolve_rpc_url(
 }
 
 /// Sets up the solver (loads config, parses chain, builds solver).
+///
+/// `configure` sees the fully CLI-configured builder and returns the one to build, so an
+/// embedder can add what the CLI does not cover — route overrides, an OpenAPI rewrite — without
+/// restating the flags.
+///
 /// Returns setup errors if any step fails.
 async fn setup_solver(
     args: &cli::ServeArgs,
     algorithms: AlgorithmRegistry,
+    configure: impl FnOnce(FyndRPCBuilder) -> FyndRPCBuilder,
 ) -> Result<fynd_rpc::builder::FyndRPC, SolverError> {
     // Load worker pools config, falling back to the built-in defaults when the default path is
     // absent (e.g. `cargo install`, Docker). Custom paths that don't exist still fail fast.
@@ -305,17 +311,37 @@ async fn setup_solver(
     }
 
     // Build and start solver
-    let solver = builder
+    let solver = configure(builder)
         .build()
         .map_err(|e| SolverError::SetupError(format!("failed to start solver: {}", e)))?;
 
     Ok(solver)
 }
 
+/// Runs the solver exactly as `fynd serve` does.
+///
+/// # Errors
+///
+/// [`SolverError`] when the solver cannot be built or the server stops unexpectedly.
+pub fn run_solver(args: cli::ServeArgs, algorithms: AlgorithmRegistry) -> Result<(), SolverError> {
+    run_solver_with(args, algorithms, |builder| builder)
+}
+
+/// Runs the solver as [`run_solver`] does, letting the caller adjust the builder first.
+///
+/// A binary that embeds Fynd gets the whole `fynd serve` command — its flags, tracing, metrics
+/// and shutdown handling — and still reaches the builder, which is where an embedder registers a
+/// route override or an OpenAPI rewrite. `configure` runs once, after the CLI has configured the
+/// builder and before it is built.
+///
+/// # Errors
+///
+/// [`SolverError`] when the solver cannot be built or the server stops unexpectedly.
 #[tokio::main]
-pub async fn run_solver(
+pub async fn run_solver_with(
     args: cli::ServeArgs,
     algorithms: AlgorithmRegistry,
+    configure: impl FnOnce(FyndRPCBuilder) -> FyndRPCBuilder,
 ) -> Result<(), SolverError> {
     let provider = create_tracing_subscriber();
     info!("Starting Fynd");
@@ -323,7 +349,7 @@ pub async fn run_solver(
     #[cfg(feature = "metrics")]
     let _metrics_task = create_metrics_exporter(&args.metrics_host, args.metrics_port, &args.chain);
 
-    serve(args, algorithms, provider).await
+    serve_with(args, algorithms, provider, configure).await
 }
 
 /// Serves until shutdown, taking over nothing the caller may already own.
@@ -339,9 +365,25 @@ pub async fn serve(
     algorithms: AlgorithmRegistry,
     provider: Option<TracerProvider>,
 ) -> Result<(), SolverError> {
+    serve_with(args, algorithms, provider, |builder| builder).await
+}
+
+/// Serves as [`serve`] does, letting the caller adjust the builder first.
+///
+/// `configure` runs once, after the CLI has configured the builder and before it is built.
+///
+/// # Errors
+///
+/// [`SolverError`] when the solver cannot be built or the server stops unexpectedly.
+pub async fn serve_with(
+    args: cli::ServeArgs,
+    algorithms: AlgorithmRegistry,
+    provider: Option<TracerProvider>,
+    configure: impl FnOnce(FyndRPCBuilder) -> FyndRPCBuilder,
+) -> Result<(), SolverError> {
     // Setup solver, but allow SIGINT to cancel it for fast exit during startup
     let solver = tokio::select! {
-        result = setup_solver(&args, algorithms) => result?,
+        result = setup_solver(&args, algorithms, configure) => result?,
         _ = tokio::signal::ctrl_c() => {
             info!("SIGINT received during setup. Exiting.");
             return Ok(());
