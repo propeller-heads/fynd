@@ -1,4 +1,21 @@
 
+## [0.99.23](https://github.com/propeller-heads/fynd/compare/0.99.22...0.99.23) (2026-09-01)
+
+### Features
+
+* run Fynd's own command line with algorithms a caller brought ([967c60b](https://github.com/propeller-heads/fynd/commit/967c60bf779b2cef7d80b4aea9a9bf1e3fa8eace))
+* **core:** serve a routing algorithm that lives outside this crate ([2c95b0c](https://github.com/propeller-heads/fynd/commit/2c95b0c9205418a33322077d43d4e4f4be723fac))
+* **core:** benchmark a routing algorithm that lives outside this crate ([e1df8c3](https://github.com/propeller-heads/fynd/commit/e1df8c31934a7295d7152e46e6aab680cd8aef70))
+* **core:** let an algorithm outside this crate report why it failed ([0fb0d38](https://github.com/propeller-heads/fynd/commit/0fb0d38372f5daa7ef0edb65b7ca0585ffec2c9f))
+* name the quote's wire field after the algorithm ([fc8e2d0](https://github.com/propeller-heads/fynd/commit/fc8e2d0ce9c1a7f8d199afa5da3007b5358c5129))
+* return the winning solver in the quote response ([cdcca2b](https://github.com/propeller-heads/fynd/commit/cdcca2b461edb59ddf50f4da970a9b5f407c00fa))
+* **client:** expose the quote algorithm in the Rust client ([1b113f2](https://github.com/propeller-heads/fynd/commit/1b113f21ed7d0589dd46342f83349037a76fdc90))
+
+### Bug Fixes
+
+* **core:** restore FyndBuilder::with_algorithm as deprecated ([b63ec6c](https://github.com/propeller-heads/fynd/commit/b63ec6c7f74d4eb9f8eb91ef7ad0bbc26a2a0dd2))
+
+
 ## [0.99.22](https://github.com/propeller-heads/fynd/compare/0.99.20...0.99.22) (2026-08-29)
 
 ### Features
