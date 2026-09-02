@@ -239,6 +239,11 @@ export interface components {
             permit2_signature?: string | null;
             price_guard?: null | components["schemas"]["PriceGuardConfig"];
             /**
+             * @description Whether to simulate encoded transactions against the latest block. Defaults to `false`.
+             * @example false
+             */
+            simulate?: boolean;
+            /**
              * Format: double
              * @example 0.001
              */
@@ -485,6 +490,7 @@ export interface components {
              */
             price_impact_bps?: number | null;
             route?: null | components["schemas"]["Route"];
+            simulation_result?: null | components["schemas"]["SimulationResult"];
             /** @description Status indicating whether a route was found. */
             status: components["schemas"]["QuoteStatus"];
             transaction?: null | components["schemas"]["Transaction"];
@@ -640,6 +646,30 @@ export interface components {
         Route: {
             /** @description Ordered sequence of swaps to execute. */
             swaps: components["schemas"]["Swap"][];
+        };
+        /** @description Outcome of simulating an encoded quote on the latest block. */
+        SimulationResult: {
+            /**
+             * @description Amount returned by the router call.
+             * @example 3500000000
+             */
+            amount_out: string;
+            /**
+             * Format: int64
+             * @description Gas consumed by the simulated call; Permit2 fallback gas excludes the permit call.
+             * @example 150000
+             */
+            gas_used: number;
+            /** @enum {string} */
+            status: "success";
+        } | {
+            /**
+             * @description Readable reason the simulated call failed.
+             * @example execution reverted: insufficient output
+             */
+            reason: string;
+            /** @enum {string} */
+            status: "failure";
         };
         /** @description A single directional spot price within a component (liquidity pool). */
         SpotPriceEntry: {

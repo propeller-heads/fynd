@@ -17,6 +17,7 @@ export type {
   QuoteOptions,
   QuoteParams,
   Route,
+  SimulationResult,
   SolutionStatus,
   Swap,
   Transaction,

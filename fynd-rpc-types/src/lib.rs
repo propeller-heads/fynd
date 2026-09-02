@@ -467,6 +467,10 @@ pub struct EncodingOptions {
     /// Per-request price guard configuration. If `None`, struct defaults are used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     price_guard: Option<PriceGuardConfig>,
+    /// Whether to simulate encoded transactions against the latest block. Defaults to `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "openapi", schema(example = false))]
+    simulate: bool,
 }
 
 impl EncodingOptions {
@@ -479,6 +483,7 @@ impl EncodingOptions {
             permit2_signature: None,
             client_fee_params: None,
             price_guard: None,
+            simulate: false,
         }
     }
 
@@ -535,6 +540,17 @@ impl EncodingOptions {
     /// Per-request price guard config, if set.
     pub fn price_guard(&self) -> Option<&PriceGuardConfig> {
         self.price_guard.as_ref()
+    }
+
+    /// Enables simulation of the encoded transaction against the latest block.
+    pub fn with_simulation(mut self) -> Self {
+        self.simulate = true;
+        self
+    }
+
+    /// Returns whether simulation of the encoded transaction was requested.
+    pub fn simulate(&self) -> bool {
+        self.simulate
     }
 }
 
@@ -851,6 +867,9 @@ pub struct OrderQuote {
     /// Fee breakdown (populated when encoding options are provided).
     #[serde(skip_serializing_if = "Option::is_none")]
     fee_breakdown: Option<FeeBreakdown>,
+    /// Result of an optional on-chain simulation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    simulation_result: Option<SimulationResult>,
     /// Routing algorithm that produced this quote.
     ///
     /// Absent on a quote no algorithm produced, such as a no-route placeholder.
@@ -924,6 +943,38 @@ impl OrderQuote {
     pub fn fee_breakdown(&self) -> Option<&FeeBreakdown> {
         self.fee_breakdown.as_ref()
     }
+
+    /// Result of the optional on-chain simulation, if requested.
+    pub fn simulation_result(&self) -> Option<&SimulationResult> {
+        self.simulation_result.as_ref()
+    }
+}
+
+/// Outcome of simulating an encoded quote on the latest block.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SimulationResult {
+    /// The simulated router call returned an amount and consumed gas.
+    Success {
+        /// Amount returned by the router call.
+        #[serde_as(as = "DisplayFromStr")]
+        #[cfg_attr(feature = "openapi", schema(value_type = String, example = "3500000000"))]
+        amount_out: BigUint,
+        /// Gas consumed by the simulated call; Permit2 fallback gas excludes the permit call.
+        #[cfg_attr(feature = "openapi", schema(example = 150000))]
+        gas_used: u64,
+    },
+    /// The simulated router call could not complete.
+    Failure {
+        /// Readable reason the simulated call failed.
+        #[cfg_attr(
+            feature = "openapi",
+            schema(example = "execution reverted: insufficient output")
+        )]
+        reason: String,
+    },
 }
 
 /// Status of an order quote.
@@ -1700,6 +1751,9 @@ mod conversions {
             if let Some(pg) = self.price_guard {
                 opts = opts.with_price_guard(pg.into());
             }
+            if self.simulate {
+                opts = opts.with_simulation();
+            }
             opts
         }
     }
@@ -1817,6 +1871,10 @@ mod conversions {
                 .fee_breakdown()
                 .cloned()
                 .map(Into::into);
+            let simulation_result = core
+                .simulation_result()
+                .cloned()
+                .map(Into::into);
             let algorithm = (!core.algorithm().is_empty()).then(|| core.algorithm().to_string());
             let route = core.into_route().map(Into::into);
             Self {
@@ -1832,6 +1890,7 @@ mod conversions {
                 gas_price,
                 transaction,
                 fee_breakdown,
+                simulation_result,
                 algorithm,
             }
         }
@@ -1911,6 +1970,17 @@ mod conversions {
                 max_slippage: core.max_slippage().clone(),
                 min_amount_received: core.min_amount_received().clone(),
                 swaps_hash,
+            }
+        }
+    }
+
+    impl From<fynd_core::SimulationResult> for SimulationResult {
+        fn from(core: fynd_core::SimulationResult) -> Self {
+            match core {
+                fynd_core::SimulationResult::Success { amount_out, gas_used } => {
+                    Self::Success { amount_out, gas_used }
+                }
+                fynd_core::SimulationResult::Failure { reason } => Self::Failure { reason },
             }
         }
     }
@@ -2075,6 +2145,37 @@ mod conversions {
                 .expect("encoding_options should be set")
                 .price_guard();
             assert!(!config.enabled());
+        }
+
+        #[test]
+        fn test_encoding_options_omits_disabled_simulation() {
+            let json = serde_json::to_string(&EncodingOptions::new(0.01)).unwrap();
+            assert!(!json.contains("simulate"));
+        }
+
+        #[test]
+        fn test_simulation_result_success_serde_roundtrip() {
+            let result = SimulationResult::Success {
+                amount_out: BigUint::from(3_500_000_000_u64),
+                gas_used: 150_000,
+            };
+            let json = serde_json::to_string(&result).unwrap();
+            assert_eq!(json, r#"{"status":"success","amount_out":"3500000000","gas_used":150000}"#);
+            let decoded: SimulationResult = serde_json::from_str(&json).unwrap();
+            assert!(
+                matches!(decoded, SimulationResult::Success { amount_out, gas_used } if amount_out == BigUint::from(3_500_000_000_u64) && gas_used == 150_000)
+            );
+        }
+
+        #[test]
+        fn test_simulation_result_failure_serde_roundtrip() {
+            let result = SimulationResult::Failure { reason: "execution reverted".to_string() };
+            let json = serde_json::to_string(&result).unwrap();
+            assert_eq!(json, r#"{"status":"failure","reason":"execution reverted"}"#);
+            let decoded: SimulationResult = serde_json::from_str(&json).unwrap();
+            assert!(
+                matches!(decoded, SimulationResult::Failure { reason } if reason == "execution reverted")
+            );
         }
 
         #[test]

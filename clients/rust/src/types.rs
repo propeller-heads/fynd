@@ -325,6 +325,7 @@ pub struct EncodingOptions {
     pub(crate) permit2_signature: Option<Bytes>,
     pub(crate) client_fee_params: Option<ClientFeeParams>,
     pub(crate) price_guard: Option<PriceGuardConfig>,
+    pub(crate) simulate: bool,
 }
 
 impl EncodingOptions {
@@ -340,6 +341,7 @@ impl EncodingOptions {
             permit2_signature: None,
             client_fee_params: None,
             price_guard: None,
+            simulate: false,
         }
     }
 
@@ -377,6 +379,12 @@ impl EncodingOptions {
     /// Attach client fee configuration with a pre-signed EIP-712 signature.
     pub fn with_client_fee(mut self, params: ClientFeeParams) -> Self {
         self.client_fee_params = Some(params);
+        self
+    }
+
+    /// Enables simulation of the encoded transaction against the latest block.
+    pub fn with_simulation(mut self) -> Self {
+        self.simulate = true;
         self
     }
 
@@ -782,6 +790,23 @@ pub struct FeeBreakdown {
     swaps_hash: Option<[u8; 32]>,
 }
 
+/// Outcome of simulating an encoded quote against the latest block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SimulationResult {
+    /// The simulated router call returned an amount and consumed gas.
+    Success {
+        /// Amount returned by the router call.
+        amount_out: BigUint,
+        /// Gas consumed by the simulated call; Permit2 fallback gas excludes the permit call.
+        gas_used: u64,
+    },
+    /// The simulated router call could not complete.
+    Failure {
+        /// Readable reason the simulated call failed.
+        reason: String,
+    },
+}
+
 impl FeeBreakdown {
     pub(crate) fn new(
         router_fee: BigUint,
@@ -849,6 +874,8 @@ pub struct Quote {
     transaction: Option<Transaction>,
     /// Fee breakdown. Present only when [`EncodingOptions`] was set in the request.
     fee_breakdown: Option<FeeBreakdown>,
+    /// Simulation result, present when requested with [`EncodingOptions::with_simulation`].
+    pub(crate) simulation_result: Option<SimulationResult>,
     /// Routing algorithm that produced this quote.
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote) from the response.
     pub(crate) algorithm: Option<String>,
@@ -945,6 +972,11 @@ impl Quote {
         self.fee_breakdown.as_ref()
     }
 
+    /// Simulation result, present when requested with [`EncodingOptions::with_simulation`].
+    pub fn simulation_result(&self) -> Option<&SimulationResult> {
+        self.simulation_result.as_ref()
+    }
+
     /// Routing algorithm that produced this quote.
     ///
     /// `None` on a quote no algorithm produced, such as a no-route placeholder.
@@ -1025,6 +1057,7 @@ impl Quote {
             receiver,
             transaction,
             fee_breakdown,
+            simulation_result: None,
             algorithm: None,
             solve_time_ms: 0,
         }
