@@ -248,7 +248,7 @@ impl fmt::Display for ProtocolSpec {
 
 /// Register DEX protocol decoders for test tooling (record-market).
 ///
-/// Wrapper over [`register_exchanges`] so the recorder builds the same protocol stream as
+/// Wrapper over `register_exchanges` so the recorder builds the same protocol stream as
 /// production without exposing the crate-private `DataFeedError`.
 #[cfg(feature = "test-utils")]
 pub fn register_exchanges_for_recording(
@@ -542,7 +542,7 @@ pub(crate) fn open_price_level_stream(
 
 /// Opens the pAMM price level stream for test tooling (the benchmark's live capture).
 ///
-/// Wrapper over [`open_price_level_stream`] so the capture serves the same venues as
+/// Wrapper over `open_price_level_stream` so the capture serves the same venues as
 /// production without exposing the crate-private `DataFeedError`.
 #[cfg(feature = "test-utils")]
 pub fn open_price_level_stream_for_recording(
