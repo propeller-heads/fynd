@@ -88,7 +88,6 @@ members = [
     "clients/rust",
     "tools/benchmark",
     "tools/common",
-    "tools/erc20-overrides",
     "tools/fynd-swap-cli",
     "tools/fynd-gas-audit",
     "tools/hindsight",
@@ -192,11 +191,6 @@ fynd-core = { path = "fynd-core", version = "0.100.1" }
 fynd-rpc = { path = "fynd-rpc", version = "0.100.1" }
 fynd-rpc-types = { path = "fynd-rpc-types", version = "0.100.1" }
 fynd-client = { path = "clients/rust", version = "0.100.1" }
-# Path-only: unpublished internal crates (release = false in release-plz.toml), so they must not
-# carry a version requirement -- release-plz bumps the workspace version and rewrites the
-# requirements for the crates it releases, but leaves these untouched. A stale requirement stops
-# matching the workspace version on the next minor bump and fails resolution.
-erc20-overrides = { path = "tools/erc20-overrides" }
 fynd-tools-common = { path = "tools/common" }
 fynd-test-fixtures = { path = "test-fixtures" }
 

@@ -306,6 +306,7 @@ async fn setup_solver(
     builder = builder.blocklist(blocklist);
     builder = builder.partial_blocks(args.partial_blocks);
     builder = builder.price_guard_enabled(args.enable_price_guard);
+    builder = builder.simulation_enabled(args.enable_simulation);
     if let Some(watermark) = &args.calldata_watermark {
         builder = builder.calldata_watermark(watermark.as_bytes());
     }

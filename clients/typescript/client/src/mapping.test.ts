@@ -42,6 +42,12 @@ const baseWireSolution: WireSolution = {
 };
 
 describe('toWireRequest', () => {
+  it('serializes simulation only when requested', () => {
+    const enabled = toWireRequest({ ...baseParams, options: { encodingOptions: { slippage: 0.01, simulate: true } } });
+    const disabled = toWireRequest({ ...baseParams, options: { encodingOptions: { slippage: 0.01, simulate: false } } });
+    expect(enabled.options?.encoding_options?.simulate).toBe(true);
+    expect(disabled.options?.encoding_options).not.toHaveProperty('simulate');
+  });
   it('converts a basic sell order', () => {
     const wire = toWireRequest(baseParams);
     expect(wire.orders).toHaveLength(1);
@@ -185,6 +191,30 @@ describe('toWireRequest', () => {
   it('omits encoding_options when not provided', () => {
     const wire = toWireRequest(baseParams);
     expect(wire).not.toHaveProperty('options');
+  });
+});
+
+describe('fromWireQuote simulation results', () => {
+  const withSimulationResult = (simulation_result: unknown): WireSolution => ({
+    ...baseWireSolution,
+    orders: [{ ...baseWireSolution.orders[0]!, simulation_result } as WireSolution['orders'][0]],
+  });
+
+  it('decodes a successful simulation with its gas', () => {
+    const wire = withSimulationResult({ status: 'success', amount_out: '7', gas_used: 123 });
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.simulationResult).toEqual({ status: 'success', amountOut: 7n, gasUsed: 123 });
+  });
+
+  it('decodes a failed simulation with its reason', () => {
+    const wire = withSimulationResult({ status: 'failure', reason: 'reverted' });
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.simulationResult).toEqual({ status: 'failure', reason: 'reverted' });
+  });
+
+  it('leaves simulationResult unset when the quote carries none', () => {
+    const quote = fromWireQuote(baseWireSolution, TOKEN_OUT, SENDER);
+    expect(quote.simulationResult).toBeUndefined();
   });
 });
 

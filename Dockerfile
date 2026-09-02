@@ -21,14 +21,13 @@ COPY clients/rust/Cargo.toml clients/rust/
 COPY tools/benchmark/Cargo.toml tools/benchmark/
 COPY tools/common/Cargo.toml tools/common/
 COPY tools/fynd-swap-cli/Cargo.toml tools/fynd-swap-cli/
-COPY tools/erc20-overrides/Cargo.toml tools/erc20-overrides/
 COPY tools/fynd-gas-audit/Cargo.toml tools/fynd-gas-audit/
 COPY tools/record-market/Cargo.toml tools/record-market/
 COPY tools/hindsight/Cargo.toml tools/hindsight/
 COPY test-fixtures/Cargo.toml test-fixtures/
 RUN mkdir -p src fynd-core/src fynd-core/benches fynd-rpc/src fynd-rpc-types/src \
         clients/rust/src tools/benchmark/src tools/common/src tools/fynd-swap-cli/src \
-        tools/erc20-overrides/src tools/fynd-gas-audit/src \
+        tools/fynd-gas-audit/src \
         tools/record-market/src tools/hindsight/src test-fixtures/src && \
     echo "fn main() {}" > fynd-core/benches/algorithm_bench.rs && \
     echo "fn main() {}" > fynd-core/benches/profile.rs && \
@@ -41,7 +40,6 @@ RUN mkdir -p src fynd-core/src fynd-core/benches fynd-rpc/src fynd-rpc-types/src
     echo "fn main() {}" > tools/benchmark/src/main.rs && \
     echo "" > tools/common/src/lib.rs && \
     echo "fn main() {}" > tools/fynd-swap-cli/src/main.rs && \
-    echo "" > tools/erc20-overrides/src/lib.rs && \
     echo "fn main() {}" > tools/fynd-gas-audit/src/main.rs && \
     echo "fn main() {}" > tools/record-market/src/main.rs && \
     echo "fn main() {}" > tools/hindsight/src/main.rs && \
@@ -49,7 +47,7 @@ RUN mkdir -p src fynd-core/src fynd-core/benches fynd-rpc/src fynd-rpc-types/src
     cargo build --release --package fynd --features fynd-rpc/experimental --package fynd-swap-cli --package hindsight && \
     rm -rf src fynd-core/src fynd-rpc/src fynd-rpc-types/src \
         clients/rust/src tools/benchmark/src tools/common/src tools/fynd-swap-cli/src \
-        tools/erc20-overrides/src tools/fynd-gas-audit/src \
+        tools/fynd-gas-audit/src \
         tools/record-market/src tools/hindsight/src test-fixtures/src
 
 # Copy real source and rebuild
@@ -59,7 +57,6 @@ COPY fynd-rpc/src/ fynd-rpc/src/
 COPY fynd-rpc-types/src/ fynd-rpc-types/src/
 COPY clients/rust/src/ clients/rust/src/
 COPY tools/fynd-swap-cli/src/ tools/fynd-swap-cli/src/
-COPY tools/erc20-overrides/src/ tools/erc20-overrides/src/
 COPY tools/common/src/ tools/common/src/
 COPY tools/hindsight/src/ tools/hindsight/src/
 RUN mkdir -p tools/benchmark/src tools/fynd-gas-audit/src \
@@ -72,7 +69,7 @@ RUN mkdir -p tools/benchmark/src tools/fynd-gas-audit/src \
     echo "" > test-fixtures/src/lib.rs && \
     touch src/main.rs src/lib.rs fynd-core/src/lib.rs fynd-rpc/src/lib.rs \
         fynd-rpc-types/src/lib.rs clients/rust/src/lib.rs \
-        tools/fynd-swap-cli/src/main.rs tools/erc20-overrides/src/lib.rs \
+        tools/fynd-swap-cli/src/main.rs \
         tools/common/src/lib.rs tools/hindsight/src/main.rs && \
     cargo build --release --package fynd --features fynd-rpc/experimental --package fynd-swap-cli --package hindsight
 
