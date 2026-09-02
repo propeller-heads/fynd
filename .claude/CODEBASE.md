@@ -48,7 +48,6 @@ Both clients wrap the same OpenAPI spec (`clients/openapi.json`, generated via `
 | `hindsight` | `tools/hindsight/` | Decode solver swaps from on-chain data; live-monitor re-solve quality |
 | `record-market` | `tools/record-market/` | Record live Tycho market state and generate expected outputs for the integration tests |
 | `fynd-gas-audit` | `tools/fynd-gas-audit/` | Compare quote-time gas estimates against `eth_estimateGas` |
-| `erc20-overrides` | `tools/erc20-overrides/` | ERC-20 storage slot detection for dry-run storage overrides |
 | `fynd-tools-common` | `tools/common/` | Shared internal library for tool crates |
 
 ## Architecture Overview

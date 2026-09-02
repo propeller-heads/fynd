@@ -42,6 +42,8 @@ pub mod propamm_fallback;
 pub mod replay;
 /// `eth_call` plumbing shared by the tasks that read contract state.
 mod rpc;
+/// On-chain quote simulation and state override helpers.
+pub mod simulation;
 /// [`FyndBuilder`](solver::FyndBuilder) assembles the full pipeline and returns a
 /// [`Solver`](solver::Solver).
 pub mod solver;

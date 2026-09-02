@@ -23,13 +23,13 @@ use alloy::{
 use anyhow::{bail, Context};
 use bytes::Bytes;
 use clap::Parser;
-use erc20_overrides as erc20;
 use fynd_client::{
     AllowanceCheck, ApprovalParams, EncodingOptions, ExecutionOptions, FyndClient,
     FyndClientBuilder, HealthStatus, Order, OrderSide, PermitDetails as FyndPermitDetails,
     PermitSingle as FyndPermitSingle, QuoteOptions, QuoteParams, SignedApproval, SignedSwap,
     SigningHints, StorageOverrides, UserTransferType,
 };
+use fynd_core::simulation::erc20_slots as erc20;
 use num_bigint::BigUint;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
