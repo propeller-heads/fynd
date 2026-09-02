@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use num_bigint::BigUint;
-use num_traits::{ToPrimitive, Zero};
+use num_traits::{CheckedSub, ToPrimitive, Zero};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tycho_simulation::tycho_common::{
     dto::ProtocolStateDelta,
@@ -342,6 +342,14 @@ pub enum SplitMathError {
     /// A fraction was negative.
     #[error("fractions must not be negative")]
     NegativeFraction,
+    /// The fractions ask for more than there is to divide.
+    #[error("the fractions ask for {asked} of {total}")]
+    ExceedsTotal {
+        /// What the fractions add up to.
+        asked: BigUint,
+        /// What there was to divide.
+        total: BigUint,
+    },
 }
 
 /// Normalize a slice of fractions so they sum to 1.0.
@@ -374,7 +382,10 @@ pub fn normalize_fractions(fractions: &mut [f64]) -> Result<(), SplitMathError> 
 ///
 /// # Errors
 ///
-/// Returns [`SplitMathError::EmptyFractions`] if `fractions` is empty.
+/// Returns [`SplitMathError::EmptyFractions`] if `fractions` is empty, or
+/// [`SplitMathError::ExceedsTotal`] if the fractions before the last one already ask for more than
+/// `total`. Callers that cannot guarantee fractions summing to 1.0 — an out-of-crate algorithm
+/// sizing its own paths — get that error instead of a panic.
 pub fn fractions_to_amounts(
     total: &BigUint,
     fractions: &[f64],
@@ -392,8 +403,15 @@ pub fn fractions_to_amounts(
         amounts.push(part);
     }
 
-    // Last element gets the remainder to guarantee exact sum.
-    amounts.push(total - &running_sum);
+    // Last element gets the remainder to guarantee exact sum. There is only a remainder if the
+    // fractions before it left one.
+    let remainder = total
+        .checked_sub(&running_sum)
+        .ok_or_else(|| SplitMathError::ExceedsTotal {
+            asked: running_sum.clone(),
+            total: total.clone(),
+        })?;
+    amounts.push(remainder);
     Ok(amounts)
 }
 
@@ -637,7 +655,16 @@ fn merge_shared_hops(
 /// It does not make the quote exact against the chain. `tycho-execution` encodes the share as a
 /// `uint24`, so what the router divides by is the fraction rounded to one part in 2^24 — about
 /// `6e-8` of the branch, which the `split = 0.0` swap absorbs for the whole group.
-fn splits_from_amounts(mut hops: Vec<SplitSwap>, total_available: &BigUint) -> Vec<SplitSwap> {
+///
+/// # Errors
+///
+/// [`AlgorithmError::Other`] when the swaps ask for more than stands at the token. Inside the
+/// crate the amounts come from the balance itself, so this is the out-of-crate caller that sized
+/// its paths above the order.
+fn splits_from_amounts(
+    mut hops: Vec<SplitSwap>,
+    total_available: &BigUint,
+) -> Result<Vec<SplitSwap>, AlgorithmError> {
     // Largest first, so the remainder convention lands on the smallest share, as it did when the
     // order came from the paths' summed flow fractions. The sort also fixes the order the swaps
     // execute in, and swaps sharing a pool deplete it for each other, so reversing it would move
@@ -651,8 +678,12 @@ fn splits_from_amounts(mut hops: Vec<SplitSwap>, total_available: &BigUint) -> V
         .map(|(ix, swap)| if ix == last { 0.0 } else { share_of(&swap.amount_in, total_available) })
         .collect();
 
-    let amounts = fractions_to_amounts(total_available, &fractions)
-        .unwrap_or_else(|_| vec![total_available.clone()]);
+    let amounts = fractions_to_amounts(total_available, &fractions).map_err(|error| {
+        AlgorithmError::Other(format!(
+            "cannot divide the {total_available} standing at this token between {} swaps: {error}",
+            fractions.len(),
+        ))
+    })?;
     for ((swap, split), amount) in hops
         .iter_mut()
         .zip(fractions)
@@ -661,7 +692,7 @@ fn splits_from_amounts(mut hops: Vec<SplitSwap>, total_available: &BigUint) -> V
         swap.split = split;
         swap.amount_in = amount;
     }
-    hops
+    Ok(hops)
 }
 
 /// What share of `total` the `part` is, or zero when there is nothing to divide by.
@@ -727,6 +758,10 @@ impl PathLedger {
     /// the caller has already decided what each path carries, and a fraction is an `f64`. They set
     /// the proportions only — every swap amount is divided out of the balance actually standing at
     /// its token — so they are not required to sum to the order exactly.
+    ///
+    /// Asking for more than the order carries is not a panic. The amounts standing at a token
+    /// become fractions of the balance there, and fractions that ask for more than it holds fail
+    /// the plan through [`SplitMathError::ExceedsTotal`].
     ///
     /// # Errors
     ///
@@ -862,6 +897,9 @@ impl TokenBalances {
 /// built from the hops of these paths, and a token is only released once every hop producing it has
 /// run, so one of them is standing here. No feeder means the traversal is broken, and a zero-amount
 /// swap in the route would hide that.
+///
+/// [`AlgorithmError::Other`] again when the swaps ask for more than stands at the token — see
+/// [`splits_from_amounts`].
 fn amounts_for_branch(
     branch: Vec<SplitSwap>,
     standing: &FxHashMap<HopKey, Vec<usize>>,
@@ -888,7 +926,7 @@ fn amounts_for_branch(
         .collect::<Result<_, AlgorithmError>>()?;
 
     // Paired after the sort, so each swap keeps the feeders it was sized from.
-    Ok(splits_from_amounts(sized, total)
+    Ok(splits_from_amounts(sized, total)?
         .into_iter()
         .map(|split_swap| {
             let fed = standing
@@ -1313,6 +1351,19 @@ mod tests {
         let total = BigUint::from(1_000_u64);
         let err = fractions_to_amounts(&total, &[]).unwrap_err();
         assert_eq!(err, SplitMathError::EmptyFractions);
+    }
+
+    #[test]
+    fn test_fractions_to_amounts_exceeds_total() {
+        let total = BigUint::from(1_000_u64);
+        let err = fractions_to_amounts(&total, &[0.6, 0.6, 0.0]).unwrap_err();
+        assert_eq!(
+            err,
+            SplitMathError::ExceedsTotal {
+                asked: BigUint::from(1_200_u64),
+                total: BigUint::from(1_000_u64),
+            }
+        );
     }
 
     #[rstest]
@@ -2081,7 +2132,7 @@ mod tests {
             },
         ];
 
-        let result = splits_from_amounts(branch_collection, &BigUint::from(1000u64));
+        let result = splits_from_amounts(branch_collection, &BigUint::from(1000u64)).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].amount_in, BigUint::from(700u64));
@@ -2111,7 +2162,7 @@ mod tests {
             },
         ];
 
-        let result = splits_from_amounts(branch_collection, &BigUint::from(1000u64));
+        let result = splits_from_amounts(branch_collection, &BigUint::from(1000u64)).unwrap();
 
         let order: Vec<&str> = result
             .iter()
@@ -2201,7 +2252,7 @@ mod tests {
             amount_in: total.clone(),
         }];
 
-        let result = splits_from_amounts(branch_collection, &total);
+        let result = splits_from_amounts(branch_collection, &total).unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].split, 0.0);
@@ -2374,6 +2425,54 @@ mod tests {
         for swap in swaps {
             assert_eq!(*swap.split(), 0.0, "single path should produce all-zero splits");
         }
+    }
+
+    #[test]
+    fn test_build_split_route_rejects_oversubscribed_paths() {
+        // Three paths, each carrying 600 of a 1000 order: an allocation an out-of-crate algorithm
+        // can hand in. The two explicit shares alone ask for 1200 of the 1000 standing at A.
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let market = make_market(
+            ["component_1", "component_2", "component_3"]
+                .into_iter()
+                .map(|component_id| {
+                    (
+                        component_id,
+                        vec![token_a.clone(), token_b.clone()],
+                        Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+                    )
+                })
+                .collect(),
+        );
+        let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+        let paths: Vec<PathAllocation> = ["component_1", "component_2", "component_3"]
+            .into_iter()
+            .map(|component_id| PathAllocation {
+                hops: vec![SimulatedHop {
+                    descriptor: HopDescriptor::new(
+                        component_id.to_string(),
+                        token_a.clone(),
+                        token_b.clone(),
+                    ),
+                    amount_out: BigUint::from(1200u64),
+                    gas: BigUint::from(50_000u64),
+                }],
+                flow_fraction: 0.6,
+                amount_in: BigUint::from(600u64),
+                amount_out: BigUint::from(1200u64),
+                marginal_price_product: 2.0,
+            })
+            .collect();
+
+        let err = build_split_route(&paths, &market, &ord).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("the fractions ask for"),
+            "an oversubscribed allocation must report the amounts, not panic: {err}"
+        );
     }
 
     #[test]
