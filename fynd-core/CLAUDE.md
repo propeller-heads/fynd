@@ -128,7 +128,8 @@ its own registration function in `feed/protocol_registry.rs`:
 | `pricelevelstream:<venue>` | `open_price_level_stream` | Titan pAMM price level WebSocket, an `impl Stream<Item = Update>` polled directly (it reconnects on its own, so there is no task to supervise) |
 
 `register_exchanges` skips both prefixes, and `has_tycho_protocols` / `has_rfq_protocols` tell
-`TychoFeed` which sources to open. All three feed loops (`run`, `run_with_pending`,
+`TychoFeed` which sources to open. `is_tycho_system` is the per-entry form of the first, exported
+so `fynd_rpc::protocols` can leave these entries out of its Tycho availability check. All three feed loops (`run`, `run_with_pending`,
 `run_with_step_controller`) select over whichever sources are configured and hand every `Update`
 to the same `handle_tycho_message`. Both non-Tycho streams are opened before the loop answers its
 `pending_tx` / `controller_tx` handshake, so a configuration error reaches the caller as an error
