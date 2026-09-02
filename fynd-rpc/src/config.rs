@@ -201,8 +201,9 @@ mod tests {
 pub mod defaults {
     // Re-export shared defaults from fynd-core as the single source of truth.
     pub use fynd_core::solver::defaults::{
-        GAS_REFRESH_INTERVAL, MIN_TOKEN_QUALITY, RECONNECT_DELAY, ROUTER_MIN_RESPONSES,
-        TRADED_N_DAYS_AGO, TVL_BUFFER_RATIO,
+        GAS_REFRESH_INTERVAL, MIN_TOKEN_QUALITY, RECONNECT_DELAY,
+        ROBINHOOD_TYCHO_LATENCY_BUFFER_SECS, ROUTER_MIN_RESPONSES, TRADED_N_DAYS_AGO,
+        TVL_BUFFER_RATIO,
     };
 
     /// Default HTTP bind host (`"0.0.0.0"` — all interfaces).

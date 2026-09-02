@@ -47,6 +47,8 @@ pub(crate) struct TychoFeedConfig {
     /// Reconnect delay on connection failure.
     /// Default is 5 seconds.
     pub(crate) reconnect_delay: Duration,
+    /// Optional override for Tycho's chain-specific latency buffer.
+    pub(crate) tycho_latency_buffer_secs: Option<u64>,
     /// Only include tokens traded within this many days.
     pub(crate) traded_n_days_ago: Option<u64>,
     /// Component IDs to exclude from the Tycho stream.
@@ -78,6 +80,7 @@ impl TychoFeedConfig {
             traded_n_days_ago: None,
             tvl_buffer_ratio: 1.1,
             reconnect_delay: Duration::from_secs(5),
+            tycho_latency_buffer_secs: None,
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
         }
@@ -90,6 +93,11 @@ impl TychoFeedConfig {
 
     pub(crate) fn reconnect_delay(mut self, reconnect_delay: Duration) -> Self {
         self.reconnect_delay = reconnect_delay;
+        self
+    }
+
+    pub(crate) fn tycho_latency_buffer_secs(mut self, latency_buffer_secs: u64) -> Self {
+        self.tycho_latency_buffer_secs = Some(latency_buffer_secs);
         self
     }
 
@@ -128,4 +136,25 @@ pub(crate) enum DataFeedError {
     /// Event send error.
     #[error("event send error: {0}")]
     EventChannelError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tycho_latency_buffer_secs() {
+        let default_config = TychoFeedConfig::new(
+            "tycho.example".to_string(),
+            Chain::Robinhood,
+            None,
+            true,
+            Vec::new(),
+            1.0,
+        );
+        assert_eq!(default_config.tycho_latency_buffer_secs, None);
+
+        let overridden_config = default_config.tycho_latency_buffer_secs(7);
+        assert_eq!(overridden_config.tycho_latency_buffer_secs, Some(7));
+    }
 }

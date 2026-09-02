@@ -105,6 +105,14 @@ impl TychoFeed {
         self.event_tx.clone()
     }
 
+    fn protocol_stream_builder(&self) -> ProtocolStreamBuilder {
+        let mut builder = ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain);
+        if let Some(latency_buffer_secs) = self.config.tycho_latency_buffer_secs {
+            builder = builder.latency_buffer(latency_buffer_secs);
+        }
+        builder.skip_state_decode_failures(true)
+    }
+
     /// Runs the indexer event loop until the underlying Tycho stream ends or errors.
     ///
     /// This method does not itself reconnect. Transient transport failures are absorbed
@@ -158,14 +166,12 @@ impl TychoFeed {
             );
 
             let mut stream_builder = register_exchanges(
-                ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
-                    .skip_state_decode_failures(true),
+                self.protocol_stream_builder(),
                 tvl_filter,
                 &self.config.protocols,
             )?
             .auth_key(self.config.tycho_api_key.clone())
             .no_tls(!self.config.use_tls)
-            .skip_state_decode_failures(true)
             .min_token_quality(self.config.min_token_quality as u32)
             .add_client_metadata(fynd_client_metadata());
 
@@ -347,8 +353,7 @@ impl TychoFeed {
             };
 
         let mut stream_builder = match register_exchanges(
-            ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
-                .skip_state_decode_failures(true),
+            self.protocol_stream_builder(),
             ComponentFilter::with_tvl_range(
                 self.config.min_tvl / self.config.tvl_buffer_ratio,
                 self.config.min_tvl,
@@ -367,7 +372,6 @@ impl TychoFeed {
             }
         }
         .auth_key(self.config.tycho_api_key.clone())
-        .skip_state_decode_failures(true)
         .min_token_quality(self.config.min_token_quality as u32)
         .add_client_metadata(fynd_client_metadata())
         .set_tokens(all_tokens.clone())
@@ -562,8 +566,7 @@ impl TychoFeed {
         );
 
         let mut stream_builder = match register_exchanges(
-            ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
-                .skip_state_decode_failures(true),
+            self.protocol_stream_builder(),
             tvl_filter,
             &self.config.protocols,
         ) {
@@ -574,7 +577,6 @@ impl TychoFeed {
             }
         }
         .auth_key(self.config.tycho_api_key.clone())
-        .skip_state_decode_failures(true)
         .min_token_quality(self.config.min_token_quality as u32)
         .add_client_metadata(fynd_client_metadata());
 

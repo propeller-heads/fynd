@@ -102,6 +102,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `TYCHO_API_KEY` | Tycho API key (optional) |
 | `RPC_URL` | Ethereum RPC endpoint (chain-specific default) |
 | `TYCHO_URL` | Tycho endpoint (chain-specific default) |
+| `TYCHO_LATENCY_BUFFER_SECS` | Optional extra wait beyond the chain's block time for delayed Tycho protocol updates (default: `5` on Robinhood; Tycho's chain default elsewhere) |
 | `HTTP_HOST` | HTTP bind address (default: `0.0.0.0`) |
 | `HTTP_PORT` | API port (default: `3000`) |
 | `WORKER_POOLS_CONFIG` | Worker pools config file (default: `worker_pools.toml`) |
@@ -117,7 +118,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 | Command | Purpose |
 |---|---|
-| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--enable-price-guard` and `--enable-simulation` (both default `false`), `--partial-blocks` (enable flashblock/partial-block updates from Tycho stream) |
+| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--enable-price-guard` and `--enable-simulation` (both default `false`), `--partial-blocks` (enable flashblock/partial-block updates from Tycho stream), `--tycho-latency-buffer-secs` (extra wait for delayed protocol updates) |
 | `openapi` | Print the OpenAPI spec JSON to stdout |
 | `derive-connector-tokens` | Derive and print connector token lists for configured protocols |
 

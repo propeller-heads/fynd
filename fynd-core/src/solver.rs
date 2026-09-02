@@ -89,6 +89,8 @@ pub mod defaults {
     pub const FALLBACK_FEE_TIER_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
     /// Delay before reconnecting to the Tycho feed after a disconnect.
     pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+    /// Extra time beyond Robinhood's block time to wait for delayed protocol updates.
+    pub const ROBINHOOD_TYCHO_LATENCY_BUFFER_SECS: u64 = 5;
     /// Minimum number of solver pool responses required before returning a quote (`0` = wait for
     /// all).
     pub const ROUTER_MIN_RESPONSES: usize = 0;
@@ -502,6 +504,7 @@ pub struct FyndBuilder {
     tvl_buffer_ratio: f64,
     gas_refresh_interval: Duration,
     reconnect_delay: Duration,
+    tycho_latency_buffer_secs: Option<u64>,
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
     router_timeout: Duration,
@@ -538,6 +541,7 @@ impl FyndBuilder {
             tvl_buffer_ratio: defaults::TVL_BUFFER_RATIO,
             gas_refresh_interval: defaults::GAS_REFRESH_INTERVAL,
             reconnect_delay: defaults::RECONNECT_DELAY,
+            tycho_latency_buffer_secs: None,
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
@@ -603,6 +607,12 @@ impl FyndBuilder {
     /// Sets the delay before reconnecting to Tycho after a disconnection (default: 5 s).
     pub fn reconnect_delay(mut self, delay: Duration) -> Self {
         self.reconnect_delay = delay;
+        self
+    }
+
+    /// Overrides Tycho's chain-specific latency buffer in whole seconds.
+    pub fn tycho_latency_buffer_secs(mut self, latency_buffer_secs: u64) -> Self {
+        self.tycho_latency_buffer_secs = Some(latency_buffer_secs);
         self
     }
 
@@ -824,7 +834,7 @@ impl FyndBuilder {
 
         let market_data = MarketData::new_shared();
 
-        let tycho_feed_config = TychoFeedConfig::new(
+        let mut tycho_feed_config = TychoFeedConfig::new(
             self.tycho_url,
             self.chain,
             self.tycho_api_key,
@@ -838,6 +848,9 @@ impl FyndBuilder {
         .traded_n_days_ago(self.traded_n_days_ago)
         .blocklisted_components(self.blocklisted_components)
         .partial_blocks(self.partial_blocks);
+        if let Some(latency_buffer_secs) = self.tycho_latency_buffer_secs {
+            tycho_feed_config = tycho_feed_config.tycho_latency_buffer_secs(latency_buffer_secs);
+        }
 
         let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
             .map_err(|e| SolverBuildError::RpcClient(e.to_string()))?;
@@ -1777,6 +1790,21 @@ mod tests {
                 .unwrap_or_default(),
             LiquidityScope::PublicOnly
         );
+    }
+
+    #[test]
+    fn test_tycho_latency_buffer_secs() {
+        let default_builder = FyndBuilder::new(
+            Chain::Robinhood,
+            "wss://example.invalid",
+            "https://example.invalid",
+            vec!["uniswap_v2".to_string()],
+            100.0,
+        );
+        assert_eq!(default_builder.tycho_latency_buffer_secs, None);
+
+        let overridden_builder = default_builder.tycho_latency_buffer_secs(7);
+        assert_eq!(overridden_builder.tycho_latency_buffer_secs, Some(7));
     }
 
     /// A deployment of nothing but exclusive-access pools would serve requests without access

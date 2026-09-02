@@ -65,6 +65,7 @@ Simulation is deployment-gated with `simulation_enabled(bool)` and attached to t
 `WorkerPoolRouter::with_simulator`.
 
 Additional builder methods: `partial_blocks(bool)` (enable flashblock/partial-block updates),
+`tycho_latency_buffer_secs(u64)` (optional override for Tycho's chain-specific latency buffer),
 `with_pending_indexer(...)` (attach a pending-block indexer), `build_with_pending()` (build with
 pending-block support). `Solver::subscribe_market_events()` returns a broadcast receiver for
 `MarketEvent`s.

@@ -144,6 +144,14 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Overrides Tycho's chain-specific latency buffer in whole seconds.
+    pub fn tycho_latency_buffer_secs(mut self, latency_buffer_secs: u64) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .tycho_latency_buffer_secs(latency_buffer_secs);
+        self
+    }
+
     /// Sets the worker router timeout (default: 100ms).
     pub fn worker_router_timeout(mut self, timeout: Duration) -> Self {
         self.fynd_builder = self

@@ -51,6 +51,11 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub tycho_url: Option<String>,
 
+    /// Optional extra time beyond the chain's block time to wait for delayed Tycho protocol
+    /// updates. Defaults to 5 seconds on Robinhood and Tycho's chain-specific value elsewhere.
+    #[arg(long, env)]
+    pub tycho_latency_buffer_secs: Option<u64>,
+
     /// Tycho API key
     #[arg(long, env)]
     pub tycho_api_key: Option<String>,
@@ -193,6 +198,8 @@ mod cli_tests {
             "https://rpc.example.com",
             "--tycho-url",
             "wss://custom.tycho.url",
+            "--tycho-latency-buffer-secs",
+            "7",
             "--protocols",
             "uniswap_v2,uniswap_v3",
             "--min-tvl",
@@ -213,6 +220,7 @@ mod cli_tests {
         assert_eq!(args.tycho_api_key, Some("test-key".to_string()));
         assert_eq!(args.rpc_url, Some("https://rpc.example.com".to_string()));
         assert_eq!(args.tycho_url, Some("wss://custom.tycho.url".to_string()));
+        assert_eq!(args.tycho_latency_buffer_secs, Some(7));
         assert_eq!(args.protocols, vec!["uniswap_v2", "uniswap_v3"]);
         assert_eq!(args.min_tvl, Some(20.0));
         assert_eq!(args.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
@@ -226,6 +234,7 @@ mod cli_tests {
         std::env::remove_var("RPC_URL");
         std::env::remove_var("TYCHO_API_KEY");
         std::env::remove_var("TYCHO_URL");
+        std::env::remove_var("TYCHO_LATENCY_BUFFER_SECS");
         std::env::remove_var("HTTP_HOST");
         std::env::remove_var("HTTP_PORT");
         std::env::remove_var("FYND_HOSTED_SWAGGER_URL");
@@ -240,6 +249,7 @@ mod cli_tests {
         assert_eq!(args.tycho_api_key, None);
         assert_eq!(args.rpc_url, None);
         assert_eq!(args.tycho_url, None);
+        assert_eq!(args.tycho_latency_buffer_secs, None);
         assert!(args.protocols.is_empty());
         assert_eq!(args.min_tvl, None);
         assert_eq!(args.tvl_buffer_ratio, 1.1);

@@ -60,6 +60,7 @@ annotations live in one place.
 `FyndRPCBuilder` delegates all solver configuration to `FyndBuilder` and adds:
 - `http_host` / `http_port` (defaults: `0.0.0.0:3000`)
 - `gas_price_stale_threshold` (health returns 503 when exceeded)
+- `tycho_latency_buffer_secs` (optional override for Tycho's chain-specific latency buffer)
 - `price_guard_enabled(bool)` (delegates to `FyndBuilder`; default `false`)
 - `configure_routes(f)` registers a caller's routes inside the `/v1` scope ahead of the defaults, so
   a binary embedding `fynd-rpc` (e.g. the hosted service) can shadow one endpoint and keep the rest

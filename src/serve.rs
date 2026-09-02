@@ -32,7 +32,8 @@ use tokio::{
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use tycho_simulation::{
-    tycho_common::models::chain_config::TvlThresholdTier, utils::default_blocklist,
+    tycho_common::models::{chain_config::TvlThresholdTier, Chain},
+    utils::default_blocklist,
 };
 
 use crate::cli;
@@ -288,6 +289,13 @@ async fn setup_solver(
             )
             .hosted_swagger_url(args.hosted_swagger_url.clone());
 
+    if let Some(latency_buffer_secs) =
+        effective_tycho_latency_buffer_secs(chain, args.tycho_latency_buffer_secs)
+    {
+        info!(chain = ?chain, latency_buffer_secs, "configuring Tycho latency buffer");
+        builder = builder.tycho_latency_buffer_secs(latency_buffer_secs);
+    }
+
     if args.disable_tls {
         builder = builder.disable_tls();
     }
@@ -317,6 +325,15 @@ async fn setup_solver(
         .map_err(|e| SolverError::SetupError(format!("failed to start solver: {}", e)))?;
 
     Ok(solver)
+}
+
+fn effective_tycho_latency_buffer_secs(
+    chain: Chain,
+    configured_latency_buffer_secs: Option<u64>,
+) -> Option<u64> {
+    configured_latency_buffer_secs.or_else(|| {
+        (chain == Chain::Robinhood).then_some(defaults::ROBINHOOD_TYCHO_LATENCY_BUFFER_SECS)
+    })
 }
 
 /// Runs the solver exactly as `fynd serve` does.
@@ -439,6 +456,22 @@ pub async fn serve_with(
         let _ = provider.shutdown();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod latency_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn test_effective_tycho_latency_buffer_secs() {
+        assert_eq!(effective_tycho_latency_buffer_secs(Chain::Ethereum, None), None);
+        assert_eq!(
+            effective_tycho_latency_buffer_secs(Chain::Robinhood, None),
+            Some(defaults::ROBINHOOD_TYCHO_LATENCY_BUFFER_SECS)
+        );
+        assert_eq!(effective_tycho_latency_buffer_secs(Chain::Ethereum, Some(7)), Some(7));
+        assert_eq!(effective_tycho_latency_buffer_secs(Chain::Robinhood, Some(7)), Some(7));
+    }
 }
 
 #[cfg(all(test, feature = "metrics"))]
