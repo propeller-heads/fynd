@@ -439,6 +439,13 @@ export interface components {
          */
         OrderQuote: {
             /**
+             * @description Routing algorithm that produced this quote.
+             *
+             *     Absent on a quote no algorithm produced, such as a no-route placeholder.
+             * @example bellman_ford
+             */
+            algorithm?: string | null;
+            /**
              * @description Amount of input token (in token units, as decimal string).
              * @example 1000000000000000000
              */

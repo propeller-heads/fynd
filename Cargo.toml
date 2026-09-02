@@ -153,8 +153,8 @@ metrics-exporter-prometheus = "0.16"
 metrics-util = "0.20"
 
 # Tycho
-tycho-execution = ">=0.370.2"
-tycho-simulation = ">=0.370.2"
+tycho-execution = ">=0.372.0"
+tycho-simulation = ">=0.372.0"
 typetag = "0.2"
 
 # Compression

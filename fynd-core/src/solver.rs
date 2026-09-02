@@ -659,6 +659,12 @@ impl FyndBuilder {
     /// Shorthand: adds a single worker pool with a custom [`Algorithm`] implementation.
     ///
     /// The `factory` closure is called once per worker thread.
+    #[deprecated(
+        since = "0.99.23",
+        note = "register the algorithm in an `AlgorithmRegistry` and pass it to \
+                `with_algorithms`, which also serves pools that name it in a configuration \
+                file; this shorthand only ever added one pool"
+    )]
     pub fn with_algorithm<A, F>(mut self, name: impl Into<String>, factory: F) -> Self
     where
         A: Algorithm + 'static,
