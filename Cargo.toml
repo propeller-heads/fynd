@@ -198,6 +198,7 @@ fynd-test-fixtures = { path = "test-fixtures" }
 # Dev dependencies
 rstest = "0.18"
 tempfile = "3"
+wiremock = "0.6"
 
 # Release code with the symbols a profiler needs. Used by the benchmark
 [profile.profiling]

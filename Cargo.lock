@@ -3623,6 +3623,7 @@ dependencies = [
  "utoipa 5.5.0",
  "utoipa-swagger-ui",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

@@ -36,6 +36,8 @@ fynd serve \
 
 See the full [list of available protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols).
 
+Every named protocol is checked against the ones your Tycho endpoint serves. A protocol that is not served logs a warning and is dropped from the list rather than stopping the solver.
+
 ### Including RFQ Protocols
 
 Include RFQ (Request-for-Quote) protocols alongside on-chain protocols. Use the `all_onchain` keyword to combine auto-fetched on-chain protocols with specific RFQ protocols:
@@ -72,7 +74,7 @@ fynd serve \
   --protocols all_onchain,exclude:vm:fermiswap,pricelevelstream:fermiswap
 ```
 
-The `exclude:` prefix drops a protocol from the list. It matters here: `vm:fermiswap` and `pricelevelstream:fermiswap` price the same maker inventory, so streaming both double-counts that liquidity. Drop the Tycho-streamed one whenever you serve the same venue from the price level stream. An `exclude:` entry that matches no streamed protocol stops the solver rather than warning, so a typo cannot silently ship the double-counted market.
+The `exclude:` prefix drops a protocol from the list. It matters here: `vm:fermiswap` and `pricelevelstream:fermiswap` price the same maker inventory, so streaming both double-counts that liquidity. Drop the Tycho-streamed one whenever you serve the same venue from the price level stream. An `exclude:` entry that matches no streamed protocol logs a warning and is otherwise ignored, so a protocol Tycho has dropped does not stop the solver from starting.
 
 **Limitations:**
 

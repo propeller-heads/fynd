@@ -124,14 +124,21 @@ fn uniswap_v4_hook_filter(component: &ComponentWithState) -> bool {
 /// elsewhere.
 const PRICE_LEVEL_STREAM_CHAIN: Chain = Chain::Ethereum;
 
+/// Whether a `--protocols` entry names a Tycho protocol system.
+///
+/// The RFQ clients and the pAMM price level stream each connect to their own endpoint, so their
+/// entries never appear among the protocol systems Tycho serves.
+pub fn is_tycho_system(entry: &str) -> bool {
+    !entry.starts_with(RFQ_PREFIX) && !entry.starts_with(PRICE_LEVEL_STREAM_PREFIX)
+}
+
 /// Whether any requested protocol is streamed from Tycho.
 ///
-/// The RFQ clients and the pAMM price level stream each connect to their own endpoint, so a list
-/// naming only those needs no Tycho protocol stream at all.
+/// A list naming only RFQ or price level stream entries needs no Tycho protocol stream at all.
 pub(crate) fn has_tycho_protocols(protocols: &[String]) -> bool {
-    protocols.iter().any(|protocol| {
-        !protocol.starts_with(RFQ_PREFIX) && !protocol.starts_with(PRICE_LEVEL_STREAM_PREFIX)
-    })
+    protocols
+        .iter()
+        .any(|protocol| is_tycho_system(protocol))
 }
 
 /// Whether the components labelled `protocol_system` are the ones a `--protocols` entry asked for.
@@ -419,7 +426,7 @@ pub(crate) fn register_exchanges(
             "lunarbase" => {
                 builder = builder.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
             }
-            p if p.starts_with(RFQ_PREFIX) || p.starts_with(PRICE_LEVEL_STREAM_PREFIX) => {
+            p if !is_tycho_system(p) => {
                 // Handled by register_rfq and open_price_level_stream, which stream from their
                 // own endpoints rather than from Tycho.
                 continue;
