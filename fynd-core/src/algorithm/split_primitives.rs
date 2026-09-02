@@ -543,6 +543,7 @@ pub fn build_post_swap_overrides(
         &root_hop.descriptor.token_in.address,
         &total_amount,
         &MarketOverrides::empty(),
+        StateCapture::Skip,
     )?
     .post_swap)
 }
@@ -567,7 +568,23 @@ struct SimulatedSplitSwap {
     amount_in: BigUint,
     amount_out: BigUint,
     gas: BigUint,
-    pre_swap_state: Box<dyn ProtocolSim>,
+    /// The component state the swap ran against, which the encoder needs to re-price it.
+    ///
+    /// `None` when the plan ran under [`StateCapture::Skip`], which is every scoring pass.
+    pre_swap_state: Option<Box<dyn ProtocolSim>>,
+}
+
+/// Whether the plan keeps the component state each swap ran against.
+///
+/// Keeping it deep-copies the pool, and a `vm:*` pool carries thousands of ticks. Only
+/// [`build_split_route`] reads the copy; the line search behind [`evaluate_total_output`] runs the
+/// plan tens of times per solve and reads nothing but the amounts.
+#[derive(Clone, Copy)]
+enum StateCapture {
+    /// Drop the state the swap ran against.
+    Skip,
+    /// Keep the state the swap ran against, for the [`Swap`] the route carries.
+    Keep,
 }
 
 /// The outcome of simulating a whole split route.
@@ -951,6 +968,7 @@ fn run_merged_swap(
     market: &MarketState,
     base_overrides: &MarketOverrides,
     post_swap: &MarketOverrides,
+    capture: StateCapture,
 ) -> Result<(SimulatedSplitSwap, Box<dyn ProtocolSim>), AlgorithmError> {
     let sim = post_swap
         .get(&swap.hop.component_id)
@@ -980,7 +998,10 @@ fn run_merged_swap(
         amount_in: swap.amount_in,
         amount_out: result.amount,
         gas: result.gas,
-        pre_swap_state: sim.clone_box(),
+        pre_swap_state: match capture {
+            StateCapture::Keep => Some(sim.clone_box()),
+            StateCapture::Skip => None,
+        },
     };
     Ok((executed, result.new_state))
 }
@@ -1006,6 +1027,7 @@ fn execute_split_plan(
     start_token: &Bytes,
     start_amount: &BigUint,
     base_overrides: &MarketOverrides,
+    capture: StateCapture,
 ) -> Result<SplitExecution, AlgorithmError> {
     for path in paths {
         path.validate_token_cycles()?;
@@ -1042,7 +1064,7 @@ fn execute_split_plan(
 
             balances.spend(&token_in, &component_id, &split_swap.amount_in)?;
             let (executed, new_state) =
-                run_merged_swap(split_swap, market, base_overrides, &post_swap)?;
+                run_merged_swap(split_swap, market, base_overrides, &post_swap, capture)?;
             balances.credit(&token_out, &executed.amount_out);
 
             // Hand the output back to the paths that fed this swap, in proportion to what each put
@@ -1163,6 +1185,7 @@ pub fn evaluate_total_output(
         &first_hop.token_in.address,
         total_amount,
         overrides,
+        StateCapture::Skip,
     )?;
     let total_out = terminal_tokens
         .iter()
@@ -1237,16 +1260,27 @@ pub fn build_split_route(
         order.token_in(),
         order.amount(),
         &MarketOverrides::empty(),
+        StateCapture::Keep,
     )?;
     let mut swaps = Vec::new();
     let mut route_tokens: FxHashMap<Bytes, Token> = FxHashMap::default();
 
-    for executed in execution.swaps {
+    for mut executed in execution.swaps {
         let component = market
             .get_component(&executed.hop.component_id)
             .ok_or_else(|| AlgorithmError::DataNotFound {
                 kind: "protocol component",
                 id: Some(executed.hop.component_id.clone()),
+            })?;
+
+        let pre_swap_state = executed
+            .pre_swap_state
+            .take()
+            .ok_or_else(|| {
+                AlgorithmError::Other(format!(
+                    "the plan kept no state for the swap through {}",
+                    executed.hop.component_id,
+                ))
             })?;
 
         let in_addr = executed.hop.token_in.address.clone();
@@ -1261,7 +1295,7 @@ pub fn build_split_route(
                 executed.amount_out,
                 executed.gas,
                 component.clone(),
-                executed.pre_swap_state,
+                pre_swap_state,
             )
             .with_split(executed.split),
         );
