@@ -35,6 +35,13 @@
 //!     builder.configure_routes(my_routes::configure)
 //! })?;
 //! ```
+//!
+//! # Features
+//!
+//! - `metrics` (default): a Prometheus metrics exporter on a separate HTTP server.
+//! - `experimental`: forwards [`fynd_rpc`]'s feature of the same name, which serves `GET
+//!   /v1/{chain}/prices` and `GET /v1/{chain}/tokens`. Off by default, because both endpoints and
+//!   their response shapes can change in any release.
 
 pub use fynd_core as core;
 pub use fynd_rpc as rpc;
@@ -45,3 +52,18 @@ pub mod cli;
 pub mod commands;
 /// Running the solver, as `fynd serve` does.
 pub mod serve;
+
+#[cfg(test)]
+mod tests {
+    /// `fynd_rpc` declares `api::prices` under the same cfg that registers the two
+    /// experimental routes, so this import resolves only when the feature reached it. A
+    /// dependant gets at those endpoints through this crate alone, and no longer has to
+    /// depend on `fynd-rpc` itself to switch the feature on.
+    #[cfg(feature = "experimental")]
+    #[test]
+    fn test_experimental_forwards_to_fynd_rpc() {
+        use crate::rpc::api::prices::PricesQuery;
+
+        assert!(std::any::type_name::<PricesQuery>().ends_with("PricesQuery"));
+    }
+}
