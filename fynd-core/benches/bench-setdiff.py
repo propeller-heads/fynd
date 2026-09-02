@@ -13,16 +13,9 @@ Usage:
 
 import argparse
 import collections
-import json
 import pathlib
 
-
-def load_jsonl(path):
-    with open(path) as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                yield json.loads(line)
+from bench_common import load_jsonl
 
 
 def pools_of(route):
@@ -43,7 +36,7 @@ def main():
     # How often each pool shows up in a route that beat ours while we never used it. A pool at the
     # top of this is one whole class of loss, not one order's bad luck.
     unseen_pools = collections.Counter()
-    unseen_pool_bps = collections.Counter()
+    unseen_pool_bps = collections.defaultdict(float)
     examples = []
 
     for row in load_jsonl(args.run_dir / "routes.jsonl"):

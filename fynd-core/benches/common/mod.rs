@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fynd_core::{derived::DerivedData, PoolConfig, Solver};
+use fynd_core::{derived::DerivedData, LiquidityScope, PoolConfig, Solver};
 use fynd_test_fixtures::read_recording;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -347,7 +347,8 @@ pub fn worker_pool_configs(
     match build_public_twin(&fields) {
         // The twin splits the run's worker budget rather than adding to it, so a config carrying
         // one is compared on the same threads as every other. An odd budget gives the exclusive
-        // pool the extra worker, and one worker each is the floor.
+        // pool the extra worker, and one worker each is the floor. `--workers 1` therefore runs
+        // two threads for a config with a twin: a pool with no worker serves nothing.
         Some(public) => {
             let public_workers = (workers / 2).max(1);
             HashMap::from([
@@ -358,6 +359,9 @@ pub fn worker_pool_configs(
         None => HashMap::from([("bench".to_string(), build(fields, workers))]),
     }
 }
+
+/// The `worker_pools.toml` key that carries a pool's [`LiquidityScope`].
+const LIQUIDITY_SCOPE: &str = "liquidity_scope";
 
 /// The public worker pool that has to run alongside a config asking for exclusive liquidity, or
 /// `None` for every other config.
@@ -372,16 +376,19 @@ pub fn worker_pool_configs(
 /// The two pools split the run's worker budget between them, so the config's solve times stay
 /// comparable with the configs that build one pool.
 fn build_public_twin(fields: &toml::Table) -> Option<toml::Table> {
-    if fields
-        .get("liquidity_scope")
-        .and_then(toml::Value::as_str)? !=
-        "include_exclusive"
-    {
+    // Read as the enum rather than compared as a string, so renaming a scope in fynd-core is a
+    // compile error here rather than a config that silently builds one pool.
+    let scope: LiquidityScope = fields
+        .get(LIQUIDITY_SCOPE)?
+        .clone()
+        .try_into()
+        .unwrap_or_else(|error| panic!("{LIQUIDITY_SCOPE} is not a liquidity scope: {error}"));
+    if scope != LiquidityScope::IncludeExclusive {
         return None;
     }
     let mut public = fields.clone();
     // Absent is public: `PoolConfig::liquidity_scope` defaults to `PublicOnly`.
-    public.remove("liquidity_scope");
+    public.remove(LIQUIDITY_SCOPE);
     Some(public)
 }
 

@@ -11,10 +11,11 @@ Usage:
 """
 
 import argparse
-import json
 import pathlib
 import statistics
 import sys
+
+from bench_common import load_jsonl
 
 # Order-size bins in USD. The dataset is 1k+ with a median near 4k and a p99 near 1M, so the
 # bins are decade-ish and the top one is left open: the largest orders are the ones a split is
@@ -35,27 +36,17 @@ def bin_of(usd):
     return BINS[-1][0]
 
 
-def load_routes(run_dir):
-    rows = []
-    with open(run_dir / "routes.jsonl") as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
-
-
-def shape(route):
+def count_fan_out_and_swaps(route):
     """How many parallel paths the route splits into, and how many swaps it took."""
     edges = route.get("edges") or []
     if not edges:
         return (0, 0)
     # A leg's `split` is the fraction of its input token that this swap took. A fresh parallel
     # path shows up as a swap consuming the order's input token, so counting those counts the
-    # top-level fan-out.
+    # fan-out.
     first_token = edges[0]["token_in"]
-    top_level = sum(1 for edge in edges if edge["token_in"] == first_token)
-    return (top_level, len(edges))
+    fan_out = sum(1 for edge in edges if edge["token_in"] == first_token)
+    return (fan_out, len(edges))
 
 
 def bps(ours, theirs):
@@ -73,7 +64,7 @@ def main():
     parser.add_argument("--worst", type=int, default=15, help="how many worst losses to list")
     args = parser.parse_args()
 
-    rows = load_routes(args.run_dir)
+    rows = list(load_jsonl(args.run_dir / "routes.jsonl"))
     if not rows:
         sys.exit(f"no routes in {args.run_dir}/routes.jsonl")
 
@@ -106,7 +97,13 @@ def main():
             continue
         per_bin[bin_of(usd)].append((advantage, ours, theirs))
         if advantage < 0:
-            losses.append((advantage, usd, order["id"], shape(ours), shape(theirs)))
+            losses.append((
+                advantage,
+                usd,
+                order["id"],
+                count_fan_out_and_swaps(ours),
+                count_fan_out_and_swaps(theirs),
+            ))
 
     print(f"# {args.config} vs {args.against}   ({args.run_dir.name})\n")
     print("## By order size\n")
@@ -121,8 +118,8 @@ def main():
         wins = sum(1 for a in advantages if a > 0)
         drops = sum(1 for a in advantages if a < 0)
         ties = len(advantages) - wins - drops
-        our_fan = statistics.mean(shape(o)[0] for _, o, _ in entries)
-        their_fan = statistics.mean(shape(t)[0] for _, _, t in entries)
+        our_fan = statistics.mean(count_fan_out_and_swaps(o)[0] for _, o, _ in entries)
+        their_fan = statistics.mean(count_fan_out_and_swaps(t)[0] for _, _, t in entries)
         print(
             f"| {name} | {len(advantages)} | {statistics.mean(advantages):+.1f} "
             f"| {statistics.median(advantages):+.1f} | {wins} | {drops} | {ties} "
@@ -161,10 +158,12 @@ def main():
     print(f"\n## Worst {args.worst} losses\n")
     print("| bps | usd | order | our fan-out/swaps | their fan-out/swaps |")
     print("|---|---|---|---|---|")
-    for advantage, usd, order_id, ours_shape, theirs_shape in sorted(losses)[: args.worst]:
+    for advantage, usd, order_id, ours_counted, theirs_counted in sorted(losses)[: args.worst]:
+        our_fan_out, our_swaps = ours_counted
+        their_fan_out, their_swaps = theirs_counted
         print(
             f"| {advantage:+.1f} | ${usd:,.0f} | `{order_id}` "
-            f"| {ours_shape[0]}/{ours_shape[1]} | {theirs_shape[0]}/{theirs_shape[1]} |"
+            f"| {our_fan_out}/{our_swaps} | {their_fan_out}/{their_swaps} |"
         )
 
 
