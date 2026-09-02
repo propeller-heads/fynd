@@ -358,6 +358,9 @@ pub struct EncodingOptions {
     /// Per-request price guard configuration. Defaults to disabled.
     #[serde(default)]
     price_guard: PriceGuardConfig,
+    /// Whether to simulate encoded transactions against the latest block. Defaults to disabled.
+    #[serde(default)]
+    simulate: bool,
 }
 
 impl EncodingOptions {
@@ -371,6 +374,7 @@ impl EncodingOptions {
             client_fee_params: None,
             disable_slippage_taking: false,
             price_guard: PriceGuardConfig::default(),
+            simulate: false,
         }
     }
 
@@ -400,6 +404,17 @@ impl EncodingOptions {
     /// Returns the token transfer type.
     pub fn transfer_type(&self) -> &UserTransferType {
         &self.transfer_type
+    }
+
+    /// Enables simulation of the encoded transaction against the latest block.
+    pub fn with_simulation(mut self) -> Self {
+        self.simulate = true;
+        self
+    }
+
+    /// Returns whether simulation of the encoded transaction was requested.
+    pub fn simulate(&self) -> bool {
+        self.simulate
     }
 
     /// Returns the permit2 authorization, if set.
@@ -848,6 +863,9 @@ pub struct OrderQuote {
     /// Fee breakdown (populated when encoding options are provided).
     #[serde(skip_serializing_if = "Option::is_none")]
     fee_breakdown: Option<FeeBreakdown>,
+    /// Result of an optional on-chain simulation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    simulation_result: Option<SimulationResult>,
     /// Address of the sender.
     sender: Bytes,
     /// Address of the receiver.
@@ -899,6 +917,7 @@ impl OrderQuote {
             gas_price: None,
             transaction: None,
             fee_breakdown: None,
+            simulation_result: None,
             sender,
             receiver,
             solved_against,
@@ -1065,6 +1084,16 @@ impl OrderQuote {
         self.fee_breakdown.as_ref()
     }
 
+    /// Returns the optional on-chain simulation result.
+    pub fn simulation_result(&self) -> Option<&SimulationResult> {
+        self.simulation_result.as_ref()
+    }
+
+    /// Sets the on-chain simulation result in place.
+    pub fn set_simulation_result(&mut self, result: SimulationResult) {
+        self.simulation_result = Some(result);
+    }
+
     /// Sets the fee breakdown in place.
     pub fn set_fee_breakdown(&mut self, fb: FeeBreakdown) {
         self.fee_breakdown = Some(fb);
@@ -1103,6 +1132,26 @@ impl OrderQuote {
             _ => None,
         }
     }
+}
+
+/// Outcome of simulating an encoded quote on the latest block.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SimulationResult {
+    /// The simulated router call returned an amount and consumed gas.
+    Success {
+        /// Amount returned by the router call.
+        #[serde_as(as = "DisplayFromStr")]
+        amount_out: BigUint,
+        /// Gas consumed by the simulated call.
+        gas_used: u64,
+    },
+    /// The simulated router call could not complete.
+    Failure {
+        /// Readable reason the simulated call failed.
+        reason: String,
+    },
 }
 
 /// Status of an order solution.
@@ -2665,5 +2714,17 @@ mod tests {
         assert!(deserialized
             .client_fee_params()
             .is_none());
+    }
+
+    #[test]
+    fn test_encoding_options_simulation_defaults_to_disabled() {
+        assert!(!EncodingOptions::new(0.01).simulate());
+    }
+
+    #[test]
+    fn test_encoding_options_with_simulation_enables_simulation() {
+        assert!(EncodingOptions::new(0.01)
+            .with_simulation()
+            .simulate());
     }
 }

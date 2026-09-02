@@ -458,6 +458,11 @@
               }
             ]
           },
+          "simulate": {
+            "type": "boolean",
+            "description": "Whether to simulate encoded transactions against the latest block. Defaults to `false`.",
+            "example": false
+          },
           "slippage": {
             "type": "number",
             "format": "double",
@@ -808,6 +813,17 @@
               }
             ]
           },
+          "simulation_result": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SimulationResult",
+                "description": "Result of an optional on-chain simulation."
+              }
+            ]
+          },
           "status": {
             "$ref": "#/components/schemas/QuoteStatus",
             "description": "Status indicating whether a route was found."
@@ -1103,6 +1119,61 @@
             "description": "Ordered sequence of swaps to execute."
           }
         }
+      },
+      "SimulationResult": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The simulated router call returned an amount and consumed gas.",
+            "required": [
+              "amount_out",
+              "gas_used",
+              "status"
+            ],
+            "properties": {
+              "amount_out": {
+                "type": "string",
+                "description": "Amount returned by the router call.",
+                "example": "3500000000"
+              },
+              "gas_used": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Gas consumed by the simulated call.",
+                "example": 150000,
+                "minimum": 0
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "success"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The simulated router call could not complete.",
+            "required": [
+              "reason",
+              "status"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "description": "Readable reason the simulated call failed.",
+                "example": "execution reverted: insufficient output"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "failure"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Outcome of simulating an encoded quote on the latest block."
       },
       "SpotPriceEntry": {
         "type": "object",

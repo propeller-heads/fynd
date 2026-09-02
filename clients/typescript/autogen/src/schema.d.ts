@@ -142,6 +142,8 @@ export interface components {
              * @example 0xabcd...
              */
             permit2_signature?: string | null;
+            /** @default false */
+            simulate?: boolean;
             /**
              * Format: double
              * @example 0.001
@@ -185,6 +187,15 @@ export interface components {
              * @example 350000
              */
             router_fee: string;
+        };
+        SimulationResult: {
+            status: "success";
+            /** @example 3500000000 */
+            amount_out: string;
+        } | {
+            status: "failure";
+            /** @example execution reverted: insufficient output */
+            reason: string;
         };
         /** @description Health check response. */
         HealthStatus: {
@@ -301,6 +312,7 @@ export interface components {
             /** @description Block at which this quote was computed. */
             block: components["schemas"]["BlockInfo"];
             fee_breakdown?: null | components["schemas"]["FeeBreakdown"];
+            simulation_result?: null | components["schemas"]["SimulationResult"];
             /**
              * @description Estimated gas cost for executing this route (as decimal string).
              * @example 150000

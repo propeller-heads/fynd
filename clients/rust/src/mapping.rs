@@ -11,7 +11,7 @@ use crate::{
     types::{
         BackendKind, BatchQuoteParams, BlockInfo, EncodingOptions, FeeBreakdown, HealthStatus,
         Order, OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams,
-        QuoteStatus, Route, Swap, Transaction, UserTransferType,
+        QuoteStatus, Route, SimulationResult, Swap, Transaction, UserTransferType,
     },
 };
 // ============================================================================
@@ -172,6 +172,9 @@ impl TryFrom<EncodingOptions> for dto::EncodingOptions {
         if let Some(pg) = opts.price_guard {
             dto_opts = dto_opts.with_price_guard(pg);
         }
+        if opts.simulate {
+            dto_opts = dto_opts.with_simulation();
+        }
         Ok(dto_opts)
     }
 }
@@ -257,6 +260,15 @@ fn order_quote_to_quote(
     quote.algorithm = order_quote
         .algorithm()
         .map(str::to_string);
+    quote.simulation_result = order_quote
+        .simulation_result()
+        .cloned()
+        .map(|result| match result {
+            dto::SimulationResult::Success { amount_out, gas_used } => {
+                SimulationResult::Success { amount_out, gas_used }
+            }
+            dto::SimulationResult::Failure { reason } => SimulationResult::Failure { reason },
+        });
     Ok(quote)
 }
 

@@ -50,6 +50,7 @@ use crate::{
     propamm_fallback::{
         fee_tier_fetcher::FeeTierFetcher, SharedFeeTiers, PROPAMM_ROUTER_ADDRESS, PROPAMM_VENUES,
     },
+    simulation::simulator::QuoteSimulator,
     types::constants::native_token,
     worker_pool::{
         pool::{WorkerPool, WorkerPoolBuilder},
@@ -99,6 +100,10 @@ pub mod defaults {
     pub const POOL_MAX_HOPS: usize = 3;
     /// Per-worker-pool solve timeout in milliseconds.
     pub const POOL_TIMEOUT_MS: u64 = 100;
+    /// Limits each simulation RPC request so optional quote simulation cannot delay quotes.
+    pub const SIMULATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+    /// Limits slot discovery independently, leaving a full request budget for the simulation call.
+    pub const SIMULATION_SLOT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 }
 
 // Internal-only defaults not shared with downstream crates.
@@ -368,6 +373,9 @@ pub enum SolverBuildError {
     /// The router fee fetcher could not be created (e.g. malformed RPC URL).
     #[error("failed to create router fee fetcher: {0}")]
     RouterFeeFetcher(String),
+    /// The quote simulator could not be created (e.g. malformed RPC URL).
+    #[error("failed to create quote simulator: {0}")]
+    QuoteSimulator(String),
     /// The PropAMMRouter fee tier fetcher could not be created (e.g. malformed RPC URL, or a
     /// malformed router or venue address constant).
     #[error("failed to create fallback fee tier fetcher: {0}")]
@@ -502,6 +510,7 @@ pub struct FyndBuilder {
     calldata_watermark: Option<Vec<u8>>,
     pools: Vec<PoolEntry>,
     price_guard_enabled: bool,
+    simulation_enabled: bool,
     price_providers: Vec<Box<dyn PriceProvider>>,
     pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
 }
@@ -537,6 +546,7 @@ impl FyndBuilder {
             calldata_watermark: None,
             pools: Vec::new(),
             price_guard_enabled: false,
+            simulation_enabled: false,
             price_providers: Vec::new(),
             pending_indexers: Vec::new(),
         }
@@ -747,6 +757,14 @@ impl FyndBuilder {
     /// per-request attempts to use the guard return an error.
     pub fn price_guard_enabled(mut self, enabled: bool) -> Self {
         self.price_guard_enabled = enabled;
+        self
+    }
+
+    /// Enables or disables on-chain simulation of encoded quotes.
+    ///
+    /// When disabled, requests that ask for simulation return an error without making RPC calls.
+    pub fn simulation_enabled(mut self, enabled: bool) -> Self {
+        self.simulation_enabled = enabled;
         self
     }
 
@@ -973,6 +991,19 @@ impl FyndBuilder {
             }
         };
 
+        let quote_simulator = if self.simulation_enabled {
+            Some(
+                QuoteSimulator::new(
+                    self.rpc_url.as_str(),
+                    chain,
+                    defaults::SIMULATION_REQUEST_TIMEOUT,
+                )
+                .map_err(|error| SolverBuildError::QuoteSimulator(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+
         // The PropAMMRouter is an Ethereum mainnet deployment, so no other chain has fee tiers to
         // read. Without the fetcher the tiers stay empty and every pAMM route is dropped.
         //
@@ -990,6 +1021,9 @@ impl FyndBuilder {
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses);
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
+        if let Some(simulator) = quote_simulator {
+            router = router.with_simulator(simulator);
+        }
 
         if self.price_guard_enabled {
             let mut registry = PriceProviderRegistry::new();
