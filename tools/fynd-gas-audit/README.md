@@ -175,7 +175,7 @@ already too low.
 | types | `src/types.rs` | `AuditTrade`, `RowStatus`, `AuditRow` |
 | sampler | `src/sampler.rs` | Parses the 10k aggregator dataset, stratified cap-per-pair sampling with deterministic seed |
 | quoter | `src/quoter.rs` | `FyndClient` wrapper; one `POST /v1/quote` per trade |
-| simulator | `src/simulator.rs` | Builds `StorageOverrides` (balance + allowance via the shared `erc20-overrides` crate, plus a huge native-ETH balance), then routes through `FyndClient::execute_swap` in dry-run mode (signs with `Signature::test_signature()`; recovers `gas_used` from the returned `SettledOrder::gas_cost()`) |
+| simulator | `src/simulator.rs` | Builds `StorageOverrides` (balance + allowance via `fynd_core::simulation::erc20_slots`, plus a huge native-ETH balance), then routes through `FyndClient::execute_swap` in dry-run mode (signs with `Signature::test_signature()`; recovers `gas_used` from the returned `SettledOrder::gas_cost()`) |
 | report | `src/report.rs` | CSV writer (via serde) + markdown generator with aggregate table, worst-10, high-exclusion finding. `error_wei` for each row is derived on the fly from `error_gas × gas_price_wei` rather than stored on `AuditRow` |
 | main | `src/main.rs` | CLI parsing (clap), dataset download, orchestration loop, ETH-price-via-Fynd for the report header |
 

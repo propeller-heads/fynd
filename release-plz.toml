@@ -35,9 +35,6 @@ release = false
 name = "fynd-tools-common"
 release = false
 [[package]]
-name = "erc20-overrides"
-release = false
-[[package]]
 name = "fynd-swap-cli"
 release = false
 [[package]]
