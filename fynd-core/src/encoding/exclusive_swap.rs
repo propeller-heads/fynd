@@ -15,10 +15,7 @@
 //! Requires the Ekubo `user_data` support added in `tycho-execution` 0.338.0 (the workspace pins
 //! `>= 0.338.0`). All byte layouts and the EIP-712 digest are mirrored from the Ekubo contracts.
 
-use std::{
-    sync::atomic::{AtomicU32, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use alloy::{
     primitives::{keccak256, Address, B256, U256},
@@ -27,13 +24,13 @@ use alloy::{
 use num_bigint::BigUint;
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
-use crate::{SolveError, Swap};
+use crate::{
+    encoding::{now_unix_secs, DEFAULT_DEADLINE_WINDOW_SECS},
+    SolveError, Swap,
+};
 
 /// Environment variable holding the pool controller's private key (hex, with or without `0x`).
 pub(crate) const ENV_CONTROLLER_KEY: &str = "EXCLUSIVE_SWAP_CONTROLLER_KEY";
-
-/// Default validity window for a signed quote, in seconds. Well under the extension's 30-day cap.
-const DEFAULT_DEADLINE_WINDOW_SECS: u32 = 120;
 
 /// Produces controller-signed `user_data` payloads for exclusive swaps.
 ///
@@ -149,7 +146,7 @@ impl ExclusiveSwapSigner {
 
         let fee = derive_fee_q32(swap.amount_out(), committed);
         let nonce = self.next_nonce()?;
-        let deadline = now_unix_secs().saturating_add(u64::from(self.deadline_window_secs));
+        let deadline = now_unix_secs()?.saturating_add(u64::from(self.deadline_window_secs));
         let deadline = u32::try_from(deadline).map_err(|_| {
             SolveError::FailedEncoding("signed swap deadline overflows u32".to_string())
         })?;
@@ -328,14 +325,6 @@ fn attribute<'a>(component: &'a ProtocolComponent, key: &str) -> Result<&'a [u8]
         .get(key)
         .map(AsRef::as_ref)
         .ok_or_else(|| SolveError::FailedEncoding(format!("component missing `{key}` attribute")))
-}
-
-/// Current Unix time in seconds, or 0 if the clock is before the epoch.
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

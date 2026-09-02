@@ -158,7 +158,8 @@ The example uses `PetgraphStableDiGraphManager<()>` so the worker infrastructure
 
 ## Wire it up
 
-Pass your algorithm factory to `FyndBuilder::with_algorithm()` instead of the string-based `.algorithm()` method:
+Put your algorithm factory in an `AlgorithmRegistry` and hand it to `FyndBuilder`. A pool then
+names your algorithm exactly as it names a built-in one:
 
 ```rust
     let solver = FyndBuilder::new(
@@ -169,7 +170,10 @@ Pass your algorithm factory to `FyndBuilder::with_algorithm()` instead of the st
         10.0,
     )
     .tycho_api_key(tycho_api_key)
-    .with_algorithm("direct_pool", DirectComponentAlgorithm::new)
+    .algorithm("direct_pool")
+    .with_algorithms(
+        AlgorithmRegistry::new().with_algorithm("direct_pool", DirectComponentAlgorithm::new)?,
+    )
     .build()?;
 ```
 

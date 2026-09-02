@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.99.22"
+version = "0.100.1"
 
 [package]
 name = "fynd"
@@ -183,10 +183,10 @@ sha2 = "0.10"
 rand = "0.9"
 
 # Internal crates
-fynd-core = { path = "fynd-core", version = "0.99.22" }
-fynd-rpc = { path = "fynd-rpc", version = "0.99.22" }
-fynd-rpc-types = { path = "fynd-rpc-types", version = "0.99.22" }
-fynd-client = { path = "clients/rust", version = "0.99.22" }
+fynd-core = { path = "fynd-core", version = "0.100.1" }
+fynd-rpc = { path = "fynd-rpc", version = "0.100.1" }
+fynd-rpc-types = { path = "fynd-rpc-types", version = "0.100.1" }
+fynd-client = { path = "clients/rust", version = "0.100.1" }
 # Path-only: unpublished internal crates (release = false in release-plz.toml), so they must not
 # carry a version requirement -- release-plz bumps the workspace version and rewrites the
 # requirements for the crates it releases, but leaves these untouched. A stale requirement stops
@@ -198,6 +198,7 @@ fynd-test-fixtures = { path = "test-fixtures" }
 # Dev dependencies
 rstest = "0.18"
 tempfile = "3"
+wiremock = "0.6"
 
 # Release code with the symbols a profiler needs. Used by the benchmark
 [profile.profiling]

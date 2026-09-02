@@ -350,6 +350,11 @@ pub struct EncodingOptions {
     /// Client fee configuration. When absent, no client fee is charged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_fee_params: Option<ClientFeeParams>,
+    /// Attach server-signed zero-fee client params so the FeeCalculator applies the deployment
+    /// signer's positive-slippage exemption. Defaults to `false`. When `client_fee_params` are
+    /// also set, encoding prefers the explicit client fee.
+    #[serde(default)]
+    disable_slippage_taking: bool,
     /// Per-request price guard configuration. Defaults to disabled.
     #[serde(default)]
     price_guard: PriceGuardConfig,
@@ -364,6 +369,7 @@ impl EncodingOptions {
             permit: None,
             permit2_signature: None,
             client_fee_params: None,
+            disable_slippage_taking: false,
             price_guard: PriceGuardConfig::default(),
         }
     }
@@ -415,6 +421,25 @@ impl EncodingOptions {
     /// Returns the client fee params, if set.
     pub fn client_fee_params(&self) -> Option<&ClientFeeParams> {
         self.client_fee_params.as_ref()
+    }
+
+    /// Sets whether the encoder attaches server-signed zero-fee client params.
+    pub fn with_disable_slippage_taking(mut self, disable_slippage_taking: bool) -> Self {
+        self.disable_slippage_taking = disable_slippage_taking;
+        self
+    }
+
+    /// Returns whether disable-slippage-taking encoding is requested.
+    pub fn disable_slippage_taking(&self) -> bool {
+        self.disable_slippage_taking
+    }
+
+    /// Whether encoding should attach server-signed zero-fee client params.
+    ///
+    /// Explicit [`Self::client_fee_params`] take precedence over the API-key default, so this
+    /// returns `false` when both are set.
+    pub fn applies_disable_slippage_taking(&self) -> bool {
+        self.disable_slippage_taking && self.client_fee_params.is_none()
     }
 
     /// Sets per-request price guard configuration.
@@ -1279,7 +1304,8 @@ impl RouteResult {
         self.price_impact
     }
 
-    pub(crate) fn route(&self) -> &Route {
+    /// The route this result carries.
+    pub fn route(&self) -> &Route {
         &self.route
     }
 
@@ -1287,7 +1313,9 @@ impl RouteResult {
         self.route
     }
 
-    pub(crate) fn net_amount_out(&self) -> &BigInt {
+    /// Output less gas, priced in the output token.
+    #[must_use]
+    pub fn net_amount_out(&self) -> &BigInt {
         &self.net_amount_out
     }
 
@@ -2525,6 +2553,18 @@ mod tests {
             1_893_456_000u64,
             Bytes::from(vec![0xAB; 65]),
         )
+    }
+
+    #[test]
+    fn test_encoding_options_disable_slippage_taking_precedence() {
+        let with_client_fee = EncodingOptions::new(0.01)
+            .with_client_fee_params(make_client_fee_params())
+            .with_disable_slippage_taking(true);
+        assert!(with_client_fee.disable_slippage_taking());
+        assert!(!with_client_fee.applies_disable_slippage_taking());
+
+        let flag_only = EncodingOptions::new(0.01).with_disable_slippage_taking(true);
+        assert!(flag_only.applies_disable_slippage_taking());
     }
 
     #[test]

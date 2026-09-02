@@ -32,7 +32,7 @@ use tycho_simulation::{
 };
 
 use crate::{
-    algorithm::{AlgorithmConfig, AlgorithmError},
+    algorithm::{AlgorithmConfig, AlgorithmError, AlgorithmRegistry},
     derived::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef},
     encoding::{encoder::Encoder, fee_fetcher::RouterFeeFetcher, router_fees::SharedRouterFees},
     feed::{
@@ -124,6 +124,43 @@ fn default_max_hops() -> usize {
 
 fn default_algo_timeout_ms() -> u64 {
     defaults::POOL_TIMEOUT_MS
+}
+
+/// A fetcher for the PropAMMRouter's fee tiers, reading through the node at `rpc_url`.
+///
+/// Both build paths need one: without tiers, `SolverWorker` drops every route holding a
+/// `propammfallback:` leg, because it cannot find the Uniswap V3 pool the router would fall back
+/// to and so cannot tell whether that fallback clears the user's floor.
+///
+/// # Errors
+///
+/// Returns [`SolverBuildError::FeeTierFetcher`] if `rpc_url` will not parse. The router and venue
+/// addresses are compile-time constants, so a malformed one is a typo that would silently lose
+/// that venue's fee tiers, and it fails the build rather than warning.
+fn propamm_fee_tier_fetcher(
+    rpc_url: &str,
+    fallback_fee_tiers: SharedFeeTiers,
+) -> Result<FeeTierFetcher, SolverBuildError> {
+    let router = Bytes::from_str(PROPAMM_ROUTER_ADDRESS).map_err(|e| {
+        SolverBuildError::FeeTierFetcher(format!(
+            "PropAMMRouter address {PROPAMM_ROUTER_ADDRESS}: {e}"
+        ))
+    })?;
+    let venues = PROPAMM_VENUES
+        .iter()
+        .map(|venue| {
+            Bytes::from_str(venue)
+                .map_err(|e| SolverBuildError::FeeTierFetcher(format!("pAMM venue {venue}: {e}")))
+        })
+        .collect::<Result<Vec<Bytes>, _>>()?;
+    FeeTierFetcher::new(
+        rpc_url,
+        &router,
+        &venues,
+        fallback_fee_tiers,
+        defaults::FALLBACK_FEE_TIER_REFRESH_INTERVAL,
+    )
+    .map_err(|e| SolverBuildError::FeeTierFetcher(e.to_string()))
 }
 
 fn parse_connector_tokens(
@@ -443,6 +480,8 @@ struct BuiltComponents {
 /// computation manager, one or more worker pools, encoder, and router.
 #[must_use = "a builder does nothing until .build() is called"]
 pub struct FyndBuilder {
+    /// Algorithms the caller brought, served when a pool names one.
+    algorithms: AlgorithmRegistry,
     chain: Chain,
     tycho_url: String,
     rpc_url: String,
@@ -477,6 +516,7 @@ impl FyndBuilder {
         min_tvl: f64,
     ) -> Self {
         Self {
+            algorithms: AlgorithmRegistry::new(),
             chain,
             tycho_url: tycho_url.into(),
             rpc_url: rpc_url.into(),
@@ -619,6 +659,12 @@ impl FyndBuilder {
     /// Shorthand: adds a single worker pool with a custom [`Algorithm`] implementation.
     ///
     /// The `factory` closure is called once per worker thread.
+    #[deprecated(
+        since = "0.99.23",
+        note = "register the algorithm in an `AlgorithmRegistry` and pass it to \
+                `with_algorithms`, which also serves pools that name it in a configuration \
+                file; this shorthand only ever added one pool"
+    )]
     pub fn with_algorithm<A, F>(mut self, name: impl Into<String>, factory: F) -> Self
     where
         A: Algorithm + 'static,
@@ -641,6 +687,16 @@ impl FyndBuilder {
                 liquidity_scope: None,
                 configure,
             }));
+        self
+    }
+
+    /// Serves any pool whose configured algorithm name `algorithms` holds.
+    ///
+    /// A pool configuration names an algorithm; only the built-ins are known by name here. This
+    /// hands the builder the ones the caller brought, so a deployment can run an algorithm that
+    /// lives outside this crate without changing how its pools are configured.
+    pub fn with_algorithms(mut self, algorithms: AlgorithmRegistry) -> Self {
+        self.algorithms = algorithms;
         self
     }
 
@@ -830,15 +886,17 @@ impl FyndBuilder {
                     if let Some(tokens) = connector_tokens {
                         algo_cfg = algo_cfg.with_connector_tokens(tokens);
                     }
-                    let builder = WorkerPoolBuilder::new()
+                    let named = WorkerPoolBuilder::new()
                         .name(name)
-                        .algorithm(algorithm)
                         .algorithm_config(algo_cfg)
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
                         .liquidity_scope(pool_scope)
                         .exclude_protocols(exclude_protocols)
                         .fallback_fee_tiers(fallback_fee_tiers.clone());
+                    let builder = self
+                        .algorithms
+                        .configure(&algorithm, named)?;
                     builder.build(
                         market_data.clone(),
                         Arc::clone(&derived_data),
@@ -921,29 +979,7 @@ impl FyndBuilder {
         // The router and venue addresses are compile-time constants, so a malformed one is a typo
         // that would silently lose that venue's fee tiers. Fail the build instead.
         let fee_tier_fetcher = if chain == Chain::Ethereum {
-            let router = Bytes::from_str(PROPAMM_ROUTER_ADDRESS).map_err(|e| {
-                SolverBuildError::FeeTierFetcher(format!(
-                    "PropAMMRouter address {PROPAMM_ROUTER_ADDRESS}: {e}"
-                ))
-            })?;
-            let venues = PROPAMM_VENUES
-                .iter()
-                .map(|venue| {
-                    Bytes::from_str(venue).map_err(|e| {
-                        SolverBuildError::FeeTierFetcher(format!("pAMM venue {venue}: {e}"))
-                    })
-                })
-                .collect::<Result<Vec<Bytes>, _>>()?;
-            Some(
-                FeeTierFetcher::new(
-                    self.rpc_url.as_str(),
-                    &router,
-                    &venues,
-                    fallback_fee_tiers.clone(),
-                    defaults::FALLBACK_FEE_TIER_REFRESH_INTERVAL,
-                )
-                .map_err(|e| SolverBuildError::FeeTierFetcher(e.to_string()))?,
-            )
+            Some(propamm_fee_tier_fetcher(self.rpc_url.as_str(), fallback_fee_tiers.clone())?)
         } else {
             None
         };
@@ -1312,6 +1348,11 @@ impl Solver {
     /// the recording. Components without states will still be registered but
     /// won't contribute to routing.
     ///
+    /// `rpc_url` reads the PropAMMRouter's fee tiers once, which a recording holding
+    /// `propammfallback:` components needs: without them every route through one is dropped. It is
+    /// read once and never refreshed, because a recording is solved against a single block. `None`
+    /// skips the read, and suits a recording with no such component.
+    ///
     /// Requires the `test-utils` feature.
     #[cfg(feature = "test-utils")]
     pub async fn from_recording(
@@ -1319,9 +1360,47 @@ impl Solver {
         updates: Vec<tycho_simulation::protocol::models::Update>,
         pools: std::collections::HashMap<String, PoolConfig>,
         gas_price_wei: Option<num_bigint::BigUint>,
+        rpc_url: Option<&str>,
+    ) -> Result<Self, SolverBuildError> {
+        Self::from_recording_with(
+            chain,
+            updates,
+            pools,
+            gas_price_wei,
+            rpc_url,
+            &AlgorithmRegistry::new(),
+        )
+        .await
+    }
+
+    /// [`from_recording`](Self::from_recording), with algorithms the caller brought.
+    ///
+    /// A pool naming an algorithm in `algorithms` is served by it; every other pool falls back to
+    /// the built-in of that name. This is what lets a benchmark or a profiler run an algorithm
+    /// that lives outside this crate.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`from_recording`](Self::from_recording).
+    ///
+    /// Requires the `test-utils` feature.
+    #[cfg(feature = "test-utils")]
+    pub async fn from_recording_with(
+        chain: Chain,
+        updates: Vec<tycho_simulation::protocol::models::Update>,
+        pools: std::collections::HashMap<String, PoolConfig>,
+        gas_price_wei: Option<num_bigint::BigUint>,
+        rpc_url: Option<&str>,
+        algorithms: &AlgorithmRegistry,
     ) -> Result<Self, SolverBuildError> {
         if pools.is_empty() {
             return Err(SolverBuildError::NoPools);
+        }
+        if pools
+            .values()
+            .all(|pool| pool.liquidity_scope() == Some(LiquidityScope::IncludeExclusive))
+        {
+            return Err(SolverBuildError::NoPublicPool);
         }
 
         let market_data = MarketData::new_shared();
@@ -1385,28 +1464,48 @@ impl Solver {
                 .await;
         });
 
+        // Read once, before any worker can be asked for a route: a recording is one block, so
+        // there is nothing to refresh and no window in which a pAMM route would be dropped.
+        let fallback_fee_tiers = SharedFeeTiers::default();
+        if let Some(rpc_url) = rpc_url.filter(|_| chain == Chain::Ethereum) {
+            propamm_fee_tier_fetcher(rpc_url, fallback_fee_tiers.clone())?
+                .refresh_once()
+                .await
+                .map_err(|e| SolverBuildError::FeeTierFetcher(e.to_string()))?;
+        }
+
         // Build worker pools BEFORE sending MarketUpdated
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
         let mut max_timeout_ms = 0u64;
 
         for (name, pool_cfg) in &pools {
-            let algo_cfg = AlgorithmConfig::new(
+            let mut algo_cfg = AlgorithmConfig::new(
                 pool_cfg.min_hops(),
                 pool_cfg.max_hops(),
                 Duration::from_millis(pool_cfg.timeout_ms()),
                 pool_cfg.max_routes(),
             )?;
+            if let Some(tokens) = parse_connector_tokens(pool_cfg.connector_tokens())? {
+                algo_cfg = algo_cfg.with_connector_tokens(tokens);
+            }
 
             let pool_event_rx = feed.subscribe();
             let derived_rx = derived_event_tx.subscribe();
 
-            let (worker_pool, task_handle) = WorkerPoolBuilder::new()
+            let named = WorkerPoolBuilder::new()
                 .name(name.clone())
-                .algorithm(pool_cfg.algorithm().to_string())
                 .algorithm_config(algo_cfg)
                 .num_workers(pool_cfg.num_workers())
                 .task_queue_capacity(pool_cfg.task_queue_capacity())
+                .liquidity_scope(
+                    pool_cfg
+                        .liquidity_scope()
+                        .unwrap_or_default(),
+                )
+                .fallback_fee_tiers(fallback_fee_tiers.clone());
+            let (worker_pool, task_handle) = algorithms
+                .configure(pool_cfg.algorithm(), named)?
                 .build(market_data.clone(), Arc::clone(&derived_data), pool_event_rx, derived_rx)?;
 
             solver_pool_handles.push(SolverPoolHandle::new(worker_pool.name(), task_handle));

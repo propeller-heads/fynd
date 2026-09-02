@@ -124,22 +124,34 @@ fn uniswap_v4_hook_filter(component: &ComponentWithState) -> bool {
 /// elsewhere.
 const PRICE_LEVEL_STREAM_CHAIN: Chain = Chain::Ethereum;
 
+/// Whether a `--protocols` entry names a Tycho protocol system.
+///
+/// The RFQ clients and the pAMM price level stream each connect to their own endpoint, so their
+/// entries never appear among the protocol systems Tycho serves.
+pub fn is_tycho_system(entry: &str) -> bool {
+    !entry.starts_with(RFQ_PREFIX) && !entry.starts_with(PRICE_LEVEL_STREAM_PREFIX)
+}
+
 /// Whether any requested protocol is streamed from Tycho.
 ///
-/// The RFQ clients and the pAMM price level stream each connect to their own endpoint, so a list
-/// naming only those needs no Tycho protocol stream at all.
+/// A list naming only RFQ or price level stream entries needs no Tycho protocol stream at all.
 pub(crate) fn has_tycho_protocols(protocols: &[String]) -> bool {
-    protocols.iter().any(|protocol| {
-        !protocol.starts_with(RFQ_PREFIX) && !protocol.starts_with(PRICE_LEVEL_STREAM_PREFIX)
-    })
+    protocols
+        .iter()
+        .any(|protocol| is_tycho_system(protocol))
 }
 
 /// Whether the components labelled `protocol_system` are the ones a `--protocols` entry asked for.
 ///
-/// Most entries name their own label. A `pricelevelstream:{venue}` entry names the venue to
-/// stream, and its components arrive labelled `propammfallback:{venue}` when that venue is on the
-/// PropAMMRouter whitelist, so both prefixes answer for the same entry.
+/// Most entries name their own label. An `exclusive:{system}` entry selects the system's
+/// exclusive-liquidity stream variant, and the prefix is stripped before registration, so its
+/// components arrive under the bare system name. A `pricelevelstream:{venue}` entry names the venue
+/// to stream, and its components arrive labelled `propammfallback:{venue}` when that venue is on
+/// the PropAMMRouter whitelist, so both prefixes answer for the same entry.
 pub fn matches_streamed_system(entry: &str, protocol_system: &str) -> bool {
+    let entry = entry
+        .strip_prefix(EXCLUSIVE_PREFIX)
+        .unwrap_or(entry);
     if entry == protocol_system {
         return true;
     }
@@ -414,7 +426,7 @@ pub(crate) fn register_exchanges(
             "lunarbase" => {
                 builder = builder.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
             }
-            p if p.starts_with(RFQ_PREFIX) || p.starts_with(PRICE_LEVEL_STREAM_PREFIX) => {
+            p if !is_tycho_system(p) => {
                 // Handled by register_rfq and open_price_level_stream, which stream from their
                 // own endpoints rather than from Tycho.
                 continue;
@@ -752,6 +764,8 @@ mod tests {
         ));
         // The whitelisted venue arrives under the router's family for the same entry.
         assert!(matches_streamed_system("pricelevelstream:fermiswap", "propammfallback:fermiswap"));
+        // The prefix is stripped before registration, so the components carry the bare system.
+        assert!(matches_streamed_system("exclusive:ekubo_v3", "ekubo_v3"));
     }
 
     #[test]
@@ -760,6 +774,7 @@ mod tests {
         assert!(!matches_streamed_system("pricelevelstream:fermiswap", "vm:fermiswap"));
         assert!(!matches_streamed_system("uniswap_v3", "propammfallback:fermiswap"));
         assert!(!matches_streamed_system("vm:fermiswap", "propammfallback:fermiswap"));
+        assert!(!matches_streamed_system("exclusive:ekubo_v3", "ekubo_v2"));
     }
 
     #[test]

@@ -18,7 +18,7 @@ applications.
 | `price_guard/`        | Price guard: external price validation for quotes. Sub-modules: `guard` (validation logic), `binance_ws` (Binance WebSocket price provider), `hyperliquid` (Hyperliquid oracle provider), `provider_registry`, `config`, `utils` |
 | `rpc.rs`              | private — `eth_call` and Tycho-address-to-alloy-address helpers shared by `encoding::fee_fetcher` and `propamm_fallback::fee_tier_fetcher` |
 | `replay.rs`           | `replay_route(&Route, &MarketState)` — re-execute an already-built route against a (possibly newer) market state, honoring split fractions and shared-pool depletion. Used by `hindsight` to measure quote-to-execution slippage |
-| `encoding/`           | `Encoder` wraps `tycho-execution` to produce ABI-encoded calldata (singleSwap, sequentialSwap, Permit2 variants). Optional calldata watermark (`with_calldata_watermark`) appends attribution bytes the EVM ignores. Computes `FeeBreakdown` mirroring on-chain `FeeCalculator` logic. `RouterFees`/`SharedRouterFees` hold default + per-client fee rates; `RouterFeeFetcher` refreshes them from the FeeCalculator contract every 5 min |
+| `encoding/`           | `Encoder` wraps `tycho-execution` to produce ABI-encoded calldata (singleSwap, sequentialSwap, Permit2 variants). Optional calldata watermark (`with_calldata_watermark`) appends attribution bytes the EVM ignores. Computes `FeeBreakdown` mirroring on-chain `FeeCalculator` logic. `RouterFees`/`SharedRouterFees` hold default + per-client fee rates; `RouterFeeFetcher` refreshes them from the FeeCalculator contract every 5 min. `DisableSlippageTakingSigner` (`disable_slippage_taking.rs`, crate-internal, key from `DISABLE_SLIPPAGE_TAKING_SIGNER_KEY`) signs zero-fee `ClientFee` params when `EncodingOptions::disable_slippage_taking` is set, so the FeeCalculator applies its address's positive-slippage exemption; that also makes the signer the request's fee client (displacing the `tx.origin`/sender fallback in `Encoder::fee_client`) and stamps a `DEFAULT_DEADLINE_WINDOW_SECS` deadline the unsigned path did not have. `DEFAULT_DEADLINE_WINDOW_SECS` (120s, `mod.rs`) is shared with `exclusive_swap.rs`, so a quote carrying both signatures has one expiry |
 | `types/`              | Core types: `Order`, `Route`, `Swap`, `Quote`, `QuoteRequest`, `BlockInfo`, `EncodingOptions`, `FeeBreakdown`, error types                                                         |
 
 ## Key Traits
@@ -69,9 +69,21 @@ pending-block support). `Solver::subscribe_market_events()` returns a broadcast 
 ## Adding a Custom Algorithm
 
 1. Implement `Algorithm` with your `GraphType` and `GraphManager`
-2. Use `FyndBuilder::with_algorithm("name", factory)` or
-   `WorkerPoolBuilder::with_algorithm("name", factory)`
-3. No changes to fynd-core required
+2. Register it and name it in the pool configuration, exactly as a built-in is named:
+   ```rust
+   let algorithms = AlgorithmRegistry::new().with_algorithm("my_algo", MyAlgorithm::new)?;
+   FyndBuilder::new(..).with_algorithms(algorithms)
+   ```
+   ```toml
+   [pools.mine]
+   algorithm = "my_algo"
+   ```
+   `FyndRPCBuilder::with_algorithms` does the same for the HTTP server, and
+   `Solver::from_recording_with` for a benchmark or profiler. A name that shipping code already
+   uses is refused, so a registration cannot silently replace a built-in.
+3. Report failures with the `AlgorithmError` constructors (`no_path`, `timeout`,
+   `simulation_failed`, ...); the variants themselves cannot be built from outside the crate.
+4. No changes to fynd-core required
 
 See `fynd-core/examples/custom_algorithm.rs` for a walkthrough.
 
@@ -116,7 +128,9 @@ its own registration function in `feed/protocol_registry.rs`:
 | `pricelevelstream:<venue>` | `open_price_level_stream` | Titan pAMM price level WebSocket, an `impl Stream<Item = Update>` polled directly (it reconnects on its own, so there is no task to supervise) |
 
 `register_exchanges` skips both prefixes, and `has_tycho_protocols` / `has_rfq_protocols` tell
-`TychoFeed` which sources to open. All three feed loops (`run`, `run_with_pending`,
+`TychoFeed` which sources to open. `is_tycho_system` is the per-entry form of the first, used by
+`register_exchanges` to skip these entries and exported so `fynd_rpc::protocols` can leave them out
+of its Tycho availability check. All three feed loops (`run`, `run_with_pending`,
 `run_with_step_controller`) select over whichever sources are configured and hand every `Update`
 to the same `handle_tycho_message`. Both non-Tycho streams are opened before the loop answers its
 `pending_tx` / `controller_tx` handshake, so a configuration error reaches the caller as an error
@@ -140,7 +154,7 @@ code runs, and the flows above are complete. Skip this section unless a task nam
 Exclusive components must first be admitted to the stream. `feed/protocol_registry.rs` parses each
 `--protocols` entry into a `ProtocolSpec { system, exclusive }` (`Display` renders it back to the
 entry form): the `exclusive:` prefix (e.g. `exclusive:ekubo_v3`) selects the protocol's
-exclusive-inclusive filter — for Ekubo V3,
+exclusive-liquidity stream variant — for Ekubo V3,
 `ekubo_v3_extension_filter_with_signed_exclusive_swap` instead of the default
 `ekubo_v3_extension_filter`, which drops SignedExclusiveSwap pools. The private
 `EXCLUSIVE_CAPABLE_PROTOCOLS` is the single source of truth for which protocols accept the prefix;

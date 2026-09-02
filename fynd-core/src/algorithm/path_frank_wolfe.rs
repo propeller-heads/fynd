@@ -20,6 +20,7 @@ use tycho_simulation::tycho_core::models::Address;
 
 use super::{
     bellman_ford::{BellmanFordContext, FindRouteOptions},
+    sim_meter,
     split_primitives::{
         build_post_swap_overrides, build_split_route, compute_marginal_price_product,
         evaluate_total_output, golden_section_search, normalize_fractions, simulate_path,
@@ -678,6 +679,10 @@ impl Algorithm for PathFrankWolfeAlgorithm {
         order: &Order,
     ) -> Result<RouteResult, AlgorithmError> {
         let start = Instant::now();
+        // This solve runs through the shared split code, which meters every swap it makes. An
+        // algorithm that meters has to bracket its solve, or the counts pile up unread on the
+        // worker thread.
+        sim_meter::start_solve();
         let ctx = self
             .inner
             .build_context(graph, market, label, derived, order)
@@ -698,6 +703,10 @@ impl Algorithm for PathFrankWolfeAlgorithm {
                 None
             }
         };
+
+        sim_meter::report("path_frank_wolfe", &ctx.market_data, || {
+            start.elapsed().as_millis() as u64
+        });
 
         // Step 3: return whichever route nets more after gas.
         match split_result {

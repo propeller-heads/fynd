@@ -116,22 +116,32 @@ impl FeeTierFetcher {
         loop {
             ticker.tick().await;
 
-            match self.fetch_fee_tiers().await {
-                Ok(fee_tiers) => {
-                    info!(
-                        pair_overrides = fee_tiers.pair_override_count(),
-                        "PropAMMRouter fee tiers refreshed"
-                    );
-                    self.shared_fee_tiers.set(fee_tiers);
-                }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "failed to refresh PropAMMRouter fee tiers; keeping previous values"
-                    );
-                }
+            if let Err(e) = self.refresh_once().await {
+                warn!(
+                    error = %e,
+                    "failed to refresh PropAMMRouter fee tiers; keeping previous values"
+                );
             }
         }
+    }
+
+    /// Reads the tiers once and stores them.
+    ///
+    /// [`run`](Self::run) is this on a loop. A caller with no task to run it in takes this instead
+    /// — a replayed market is solved against one block and never refreshes — and gets the failure
+    /// back rather than a warning it has to notice in the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever the read failed with. The stored tiers are left as they were.
+    pub async fn refresh_once(&self) -> Result<(), FeeTierFetchError> {
+        let fee_tiers = self.fetch_fee_tiers().await?;
+        info!(
+            pair_overrides = fee_tiers.pair_override_count(),
+            "PropAMMRouter fee tiers refreshed"
+        );
+        self.shared_fee_tiers.set(fee_tiers);
+        Ok(())
     }
 
     /// Reads the global `fallbackFee` and the per-pair override for every pair the venues quote.

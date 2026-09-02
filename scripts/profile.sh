@@ -19,10 +19,10 @@
 # Everything else is handed to the profiler unchanged; it owns the option list and its validation.
 #
 # Examples:
-#   ./scripts/profile.sh --config water_fill_d3 --order 2073
-#   ./scripts/profile.sh --config water_fill_d3 --orders 200 --repeats 3
-#   ./scripts/profile.sh --config water_fill_d3 --orders 50 --no-record
-#   ./scripts/profile.sh --config water_fill_d3 --orders 200 -- --rate 5000
+#   ./scripts/profile.sh --config WF_d3 --order 2073
+#   ./scripts/profile.sh --config WF_d3 --orders 200 --repeats 3
+#   ./scripts/profile.sh --config WF_d3 --orders 50 --no-record
+#   ./scripts/profile.sh --config WF_d3 --orders 200 -- --rate 5000
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -68,7 +68,7 @@ done
 
 if [[ $SHOW_BIN_HELP -eq 0 ]] &&
   ! printf '%s\n' ${BIN_ARGS[@]+"${BIN_ARGS[@]}"} | grep -q -- '^--config'; then
-  echo "error: --config is required (e.g. --config water_fill_d3)" >&2
+  echo "error: --config is required (e.g. --config WF_d3)" >&2
   echo "Available:" >&2
   basename -s .toml -a fynd-core/benches/configs/*.toml | sed 's/^/  /' >&2
   exit 1
@@ -91,7 +91,7 @@ done
 # assumed: the hash tracks the feature set and would go stale the moment that changed. The
 # `profiling` profile is release plus debug symbols; without symbols a flamegraph is a wall of hex.
 echo "Building (release + debug symbols) ..."
-BIN="$(cargo bench -p fynd-core --profile profiling --features test-utils \
+BIN="$(cargo bench -p fynd-core --profile profiling --features test-utils,swap-metrics \
   --bench profile --no-run --message-format=json |
   jq -r 'select(.target.kind[0] == "bench" and .executable != null) | .executable' | tail -1)"
 

@@ -1,4 +1,39 @@
 
+## [0.100.1](https://github.com/propeller-heads/fynd/compare/0.100.0...0.100.1) (2026-09-02)
+
+### Bug Fixes
+
+* **rpc:** warn instead of failing on protocols Tycho dropped ([5a947d5](https://github.com/propeller-heads/fynd/commit/5a947d5a0482b09471a426b2c5d70cb2e8d72203))
+
+
+## [0.100.0](https://github.com/propeller-heads/fynd/compare/0.99.22...0.100.0) (2026-09-02)
+
+### Features
+
+* add disable-slippage-taking encoding ([a4f4586](https://github.com/propeller-heads/fynd/commit/a4f458607b5ecca040bcb02d0516dcf96d10fed9))
+* run Fynd's own command line with algorithms a caller brought ([967c60b](https://github.com/propeller-heads/fynd/commit/967c60bf779b2cef7d80b4aea9a9bf1e3fa8eace))
+* **core:** serve a routing algorithm that lives outside this crate ([2c95b0c](https://github.com/propeller-heads/fynd/commit/2c95b0c9205418a33322077d43d4e4f4be723fac))
+* **core:** benchmark a routing algorithm that lives outside this crate ([e1df8c3](https://github.com/propeller-heads/fynd/commit/e1df8c31934a7295d7152e46e6aab680cd8aef70))
+* **core:** let an algorithm outside this crate report why it failed ([0fb0d38](https://github.com/propeller-heads/fynd/commit/0fb0d38372f5daa7ef0edb65b7ca0585ffec2c9f))
+* capture disable-slippage-taking in the replay log ([bf1a262](https://github.com/propeller-heads/fynd/commit/bf1a2623695e492399fed6c953783f2a87a4d346))
+* **core:** tell a rejected route from a market with no path ([80b1407](https://github.com/propeller-heads/fynd/commit/80b140777f23c64962bf727f1c3fe77ba4483307))
+* name the quote's wire field after the algorithm ([fc8e2d0](https://github.com/propeller-heads/fynd/commit/fc8e2d0ce9c1a7f8d199afa5da3007b5358c5129))
+* return the winning solver in the quote response ([cdcca2b](https://github.com/propeller-heads/fynd/commit/cdcca2b461edb59ddf50f4da970a9b5f407c00fa))
+* **client:** expose the quote algorithm in the Rust client ([1b113f2](https://github.com/propeller-heads/fynd/commit/1b113f21ed7d0589dd46342f83349037a76fdc90))
+
+### Bug Fixes
+
+* share one 120s deadline window across signed payloads ([7f68dda](https://github.com/propeller-heads/fynd/commit/7f68dda8a602219d306cea932c33107aa6990bf1))
+* fail signing when the clock precedes the Unix epoch ([81ce2c7](https://github.com/propeller-heads/fynd/commit/81ce2c7fb1e7ce29ba64b1442c727993b8bafbcf))
+* prefer explicit client_fee_params over disable-slippage-taking ([9fd163d](https://github.com/propeller-heads/fynd/commit/9fd163d37adb1f36de044f728672e4c36d905519))
+* **core:** return an error when the split fractions oversubscribe ([a617973](https://github.com/propeller-heads/fynd/commit/a61797343e24fdf3a9fb9e1a75b48f2b40471950))
+* **core:** restore FyndBuilder::with_algorithm as deprecated ([b63ec6c](https://github.com/propeller-heads/fynd/commit/b63ec6c7f74d4eb9f8eb91ef7ad0bbc26a2a0dd2))
+
+### Performance Improvements
+
+* **core:** clone the pool state only for the pass that builds the route ([36bd5b1](https://github.com/propeller-heads/fynd/commit/36bd5b1a6a4ef3da55db399ff75a9e28951b0e55))
+
+
 ## [0.99.22](https://github.com/propeller-heads/fynd/compare/0.99.20...0.99.22) (2026-08-29)
 
 ### Features

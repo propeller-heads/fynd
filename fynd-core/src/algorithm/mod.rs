@@ -16,21 +16,29 @@
 //! **Built-in:** To add an algorithm to the built-in registry:
 //! 1. Create a new module with your algorithm implementation
 //! 2. Implement the `Algorithm` trait
-//! 3. Register it in `registry.rs`
+//! 3. Register it in `worker_pool/registry.rs`
+//!
+//! **From outside this crate:** implement the trait and bring it in with
+//! [`AlgorithmRegistry`](crate::algorithm::registry::AlgorithmRegistry); no change here is needed.
 
 pub mod bellman_ford;
 pub mod most_liquid;
 pub mod path_frank_wolfe;
-pub(crate) mod paths;
+pub(crate) mod path_scoring;
+/// Enumerating and simulating routes between two tokens.
+pub mod paths;
+pub mod registry;
 pub(crate) mod sim_guard;
-pub(crate) mod sim_meter;
-pub(crate) mod split_primitives;
+pub mod sim_meter;
+/// Shared machinery for algorithms that divide an order across several paths.
+pub mod split_primitives;
 pub mod water_fill;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod split_test_harness;
-mod swap_cache;
-#[cfg(test)]
+/// Remembers what a pool paid, so one solve asks it once per amount.
+pub mod swap_cache;
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
 use std::time::Duration;
@@ -38,6 +46,7 @@ use std::time::Duration;
 pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 pub use path_frank_wolfe::PathFrankWolfeAlgorithm;
+pub use registry::{AlgorithmRegistry, RegisterAlgorithmError};
 use rustc_hash::FxHashSet;
 use tycho_simulation::tycho_core::models::Address;
 pub use water_fill::WaterFillAlgorithm;
@@ -324,6 +333,42 @@ pub enum NoPathReason {
     AmountTooSmall,
 }
 
+/// Constructors for the variants that carry fields.
+///
+/// Those variants are `#[non_exhaustive]`, so a crate outside this one cannot build them with a
+/// struct expression. This is how an algorithm implemented elsewhere reports what it found.
+impl AlgorithmError {
+    /// No path exists between the two tokens.
+    #[must_use]
+    pub fn no_path(from: Address, to: Address, reason: NoPathReason) -> Self {
+        Self::NoPath { from, to, reason }
+    }
+
+    /// The search ran out of time.
+    #[must_use]
+    pub fn timeout(elapsed_ms: u64) -> Self {
+        Self::Timeout { elapsed_ms }
+    }
+
+    /// A component refused a swap.
+    #[must_use]
+    pub fn simulation_failed(component_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self::SimulationFailed { component_id: component_id.into(), error: error.into() }
+    }
+
+    /// The market does not hold something the algorithm needs.
+    #[must_use]
+    pub fn data_not_found(kind: &'static str, id: impl Into<Option<String>>) -> Self {
+        Self::DataNotFound { kind, id: id.into() }
+    }
+
+    /// The algorithm was built with settings it cannot work under.
+    #[must_use]
+    pub fn invalid_configuration(reason: impl Into<String>) -> Self {
+        Self::InvalidConfiguration { reason: reason.into() }
+    }
+}
+
 impl std::fmt::Display for NoPathReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -339,6 +384,41 @@ impl std::fmt::Display for NoPathReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two same-typed arguments in a row is where an argument swap hides, and these constructors
+    /// are the only way an algorithm outside this crate reports a failure.
+    #[test]
+    fn test_error_constructors_put_each_argument_where_its_name_says() {
+        let from = Address::from(vec![0x0Au8]);
+        let to = Address::from(vec![0x0Bu8]);
+
+        match AlgorithmError::no_path(from.clone(), to.clone(), NoPathReason::NoGraphPath) {
+            AlgorithmError::NoPath { from: f, to: t, reason } => {
+                assert_eq!((f, t, reason), (from, to, NoPathReason::NoGraphPath));
+            }
+            other => panic!("expected NoPath, got {other:?}"),
+        }
+
+        match AlgorithmError::simulation_failed("pool-1", "reverted") {
+            AlgorithmError::SimulationFailed { component_id, error } => {
+                assert_eq!((component_id.as_str(), error.as_str()), ("pool-1", "reverted"));
+            }
+            other => panic!("expected SimulationFailed, got {other:?}"),
+        }
+
+        match AlgorithmError::data_not_found("token", "0x0a".to_string()) {
+            AlgorithmError::DataNotFound { kind, id } => {
+                assert_eq!((kind, id.as_deref()), ("token", Some("0x0a")));
+            }
+            other => panic!("expected DataNotFound, got {other:?}"),
+        }
+
+        assert!(matches!(AlgorithmError::timeout(42), AlgorithmError::Timeout { elapsed_ms: 42 }));
+        assert!(matches!(
+            AlgorithmError::invalid_configuration("bad"),
+            AlgorithmError::InvalidConfiguration { .. }
+        ));
+    }
 
     #[test]
     fn test_connector_tokens_default_is_none() {

@@ -12,9 +12,12 @@ const INTERPOLATION_GAP_PERCENT: u32 = 10;
 /// three tokens answers `USDC -> DAI` and `USDT -> DAI` differently for the same amount.
 #[derive(PartialEq, Eq, Hash)]
 pub struct PoolDirection<'a> {
-    pub(crate) component_id: &'a ComponentId,
-    pub(crate) address_in: &'a Address,
-    pub(crate) address_out: &'a Address,
+    /// The pool being asked.
+    pub component_id: &'a ComponentId,
+    /// Token going in.
+    pub address_in: &'a Address,
+    /// Token coming out.
+    pub address_out: &'a Address,
 }
 
 /// Why a pool paid nothing for an amount.
@@ -34,7 +37,7 @@ pub enum Refusal {
 impl Refusal {
     /// Reads a failed simulation. Only the pool rejecting the input says anything about size;
     /// a fatal error is what a caught panic arrives as, and a recoverable one is transient.
-    pub(crate) fn of(error: &SimulationError) -> Self {
+    pub fn of(error: &SimulationError) -> Self {
         match error {
             SimulationError::InvalidInput(_, _) => Refusal::OverLimit,
             SimulationError::FatalError(_) | SimulationError::RecoverableError(_) => {
@@ -47,8 +50,10 @@ impl Refusal {
 /// What a swap paid: what came out, and the gas it cost.
 #[derive(Clone)]
 pub struct SwapResult {
-    pub(crate) amount_out: BigUint,
-    pub(crate) gas: BigUint,
+    /// What the pool paid out.
+    pub amount_out: BigUint,
+    /// What the swap costs in gas units.
+    pub gas: BigUint,
 }
 
 /// What one pool paid at each amount it was asked, ascending by amount. A missing outcome is an
@@ -129,8 +134,16 @@ pub struct SwapCache<'a> {
     by_direction: FxHashMap<PoolDirection<'a>, SwappedAmounts>,
 }
 
+impl Default for SwapCache<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> SwapCache<'a> {
-    pub(crate) fn new() -> Self {
+    /// An empty cache, for one solve.
+    #[must_use]
+    pub fn new() -> Self {
         Self { by_direction: FxHashMap::default() }
     }
 
@@ -140,7 +153,7 @@ impl<'a> SwapCache<'a> {
     /// when the asking pass allows it, and otherwise calls `simulate` and keeps the result. Every
     /// route through here is booked against the component and the pass, so the report separates
     /// what was simulated from what was reused and from what was read across.
-    pub(crate) fn swap(
+    pub fn swap(
         &mut self,
         direction: PoolDirection<'a>,
         amount_in: &BigUint,
