@@ -3,11 +3,12 @@
 //! Runs one solver per config against a single market and reports output net of gas against a
 //! baseline, per token pair and overall.
 //!
-//! The market is either the recorded fixture (`tests/fixtures/market_recording.json.zst`, the
-//! default, no network) or one block captured live from Tycho with `--market live`. Offline runs
-//! replay the same block every time and so compare with each other; a live run is a point-in-time
-//! market whose configs compare only with each other. The run solves at `--gas-price-gwei`, or at
-//! the market's own gas price when that flag is absent.
+//! The market is either the recorded fixture
+//! (`fynd-core/tests/fixtures/market_recording.json.zst`, the default, no network) or one block
+//! captured live from Tycho with `--market live`. Offline runs replay the same block every time and
+//! so compare with each other; a live run is a point-in-time market whose configs compare only with
+//! each other. The run solves at `--gas-price-gwei`, or at the market's own gas price when that
+//! flag is absent.
 //!
 //! # Running it
 //!
@@ -21,9 +22,9 @@
 //!
 //! # Which algorithms run
 //!
-//! One TOML file per configuration in `benches/configs/`, named by file stem. `--configs` takes a
+//! One TOML file per configuration in `configs/`, named by file stem. `--configs` takes a
 //! comma-separated list of those stems and defaults to all of them. Adding a configuration is
-//! adding a file; nothing here needs to change. See `benches/configs/README.md`.
+//! adding a file; nothing here needs to change. See `configs/README.md`.
 //!
 //! `BF_d2` is the baseline and is always included, listed or not. It is not a
 //! like-for-like depth comparison — the report's "Reading this" section says why.
@@ -40,7 +41,7 @@
 //! `aggregator_trades_50k_1k_usd.json` in the repo root: 50,000 real aggregator sell orders of
 //! $1,000 or more, drawn from the week either side of the market fixture's last block. Both of
 //! each order's tokens are in the fixture by construction, so a miss means the algorithm found no
-//! route rather than the market not holding the token. `fynd-core/benches/dataset.sql` is the
+//! route rather than the market not holding the token. `bench-harness/data/dataset.sql` is the
 //! query that produced it, with the reasoning behind each filter.
 //!
 //! Orders are still filtered on load — anything that is not a sell is dropped, and so is anything
@@ -52,11 +53,18 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-mod common;
-
 use chrono::Utc;
 use clap::Parser;
-use common::{
+use futures::stream::StreamExt;
+use fynd_core::{
+    types::{QuoteStatus, RouteRejection, SolveError},
+    NoPathReason, QuoteOptions, QuoteRequest, Solver,
+};
+use num_bigint::BigUint;
+use num_traits::ToPrimitive;
+use tycho_simulation::tycho_common::models::Address;
+
+use crate::{
     available_configs, block_components, build_market, build_solver, exclude_requested_protocols,
     load_bench_config, load_blocked_tokens, mean_and_median, print_protocol_breakdown,
     protocol_breakdown, resolved_gas_price_gwei, symbol_table, timings_of, token_label,
@@ -67,14 +75,6 @@ use common::{
     usd_out, wei_per_token, BenchConfig, BlockedTokens, LiveFlags, Market, MarketSource,
     ProtocolCount,
 };
-use futures::stream::StreamExt;
-use fynd_core::{
-    types::{QuoteStatus, RouteRejection, SolveError},
-    NoPathReason, QuoteOptions, QuoteRequest, Solver,
-};
-use num_bigint::BigUint;
-use num_traits::ToPrimitive;
-use tycho_simulation::tycho_common::models::Address;
 
 /// Orders solved when `--orders` says nothing else.
 const DEFAULT_ORDERS: usize = 1000;
@@ -171,20 +171,20 @@ struct Args {
 
     /// Gas price in gwei, fractions allowed. Without it a live run prices at whatever the chain
     /// is charging, and an offline run at the default, since the fixture carries no gas price.
-    #[arg(long, value_parser = common::parse_gas_price_gwei)]
+    #[arg(long, value_parser = crate::parse_gas_price_gwei)]
     gas_price_gwei: Option<f64>,
 
     /// Market flags: `--market`, and the Tycho settings a live capture needs.
     #[command(flatten)]
     live: LiveFlags,
 
-    /// Configs to run, comma separated, named after the files in `benches/configs/`, e.g.
-    /// `WF_d3,PFW_d3`. Defaults to every config on disk. The baseline is
-    /// always included. Narrowing this is what makes a run readable under a profiler.
+    /// Configs to run, comma separated, named after the config files, e.g. `WF_d3,PFW_d3`.
+    /// Defaults to every config on disk. The baseline is always included. Narrowing this is what
+    /// makes a run readable under a profiler.
     #[arg(long, value_delimiter = ',')]
     configs: Option<Vec<String>>,
 
-    /// Config every other one is measured against, named after a file in `benches/configs/`. Run
+    /// Config every other one is measured against, named after a config file. Run
     /// whether `--configs` lists it or not, and first in every table and file. Runs under
     /// different baselines are not comparable with each other, so the name is written into
     /// `run.json` and the report header.
@@ -294,7 +294,7 @@ impl Run {
         let jobs = args.jobs.unwrap_or(cores).max(1);
         let trades = args
             .trades
-            .unwrap_or_else(common::default_trades_path);
+            .unwrap_or_else(crate::default_trades_path);
         let out_dir = args.out_dir.join(&args.name);
         let configs = resolve_configs(args.configs.as_deref(), &args.baseline);
         let run = Self {
@@ -1021,7 +1021,7 @@ fn orders_csv(outcome: &BenchOutcome<'_>) -> String {
 /// available pools is the finding.
 ///
 /// `orders` and `usd` count a route once per protocol it crosses, so they overlap across
-/// protocols; `legs` and `pools_used` do not. The columns are described in `benches/README.md`.
+/// protocols; `legs` and `pools_used` do not. The columns are described in `README.md`.
 ///
 /// A final `winner` block reports the same numbers over the route that actually won each order,
 /// which is the mix a deployment running all these configs side by side would execute.
@@ -1274,7 +1274,7 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
     if !outcome.blocked.symbols.is_empty() {
         out.push_str(&format!(
             "| blocked tokens | {} — {} pools dropped from the market, see \
-             `benches/blocked_tokens.toml` |\n",
+             `data/blocked_tokens.toml` |\n",
             outcome.blocked.symbols.join(", "),
             outcome.blocked.dropped_component_count
         ));
@@ -1435,14 +1435,20 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
     out
 }
 
-#[tokio::main]
-async fn main() {
-    if common::asked_for_the_test_list() {
+/// Runs the benchmark: parses the command line, solves every config, writes the report.
+///
+/// # Panics
+///
+/// If the run cannot be set up: no order survives the dataset filters, the baseline config will
+/// not load, or the baseline will not build. Each of those makes the report meaningless rather
+/// than smaller.
+pub async fn run() {
+    if crate::asked_for_the_test_list() {
         return;
     }
 
     let args = Args::parse();
-    common::init_logging(args.logs);
+    crate::init_logging(args.logs);
 
     let mut market = match build_market(args.live.clone()).await {
         Ok(market) => market,

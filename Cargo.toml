@@ -77,6 +77,7 @@ fynd-client = { workspace = true }
 
 [workspace]
 members = [
+    "bench-harness",
     "fynd-core",
     "fynd-rpc",
     "fynd-rpc-types",

@@ -5,11 +5,11 @@ and two analysis scripts read what they wrote.
 
 | what | file | what it does |
 |---|---|---|
-| benchmark | `algorithm_bench.rs` | Runs several configs over many orders and writes a report |
-| profiler | `profile.rs` | Runs one config over a few orders on one thread, writes nothing |
+| benchmark | `src/bench.rs` | Runs several configs over many orders and writes a report |
+| profiler | `src/profile.rs` | Runs one config over a few orders on one thread, writes nothing |
 | viewer | `viewer/index.html` | Reads the reports in a browser |
-| analysis | `bench-analyze.py` | Breaks one run down by order size and route shape |
-| analysis | `bench-setdiff.py` | Per lost order, the pools the winner used and we did not |
+| analysis | `analysis/bench-analyze.py` | Breaks one run down by order size and route shape |
+| analysis | `analysis/bench-setdiff.py` | Per lost order, the pools the winner used and we did not |
 
 The benchmark and the profiler read the same order dataset and take their market the same way, so
 an order seen in the viewer can be profiled by its id.
@@ -42,7 +42,7 @@ instead of 771 KB of compressed JSON. Live runs do not read it; they need `TYCHO
 
 **The order dataset** is `aggregator_trades_50k_1k_usd.json` in the repository root. It is
 gitignored because it is large. If you do not have it, ask someone for a copy — rebuilding it means
-running `dataset.sql` against Dune, which needs an API key.
+running `data/dataset.sql` against Dune, which needs an API key.
 
 **`jq`** for either script: `brew install jq`. Both use it to read the built binary's path out of
 cargo's JSON output, so it is needed even with `--no-record`.
@@ -192,8 +192,8 @@ file reads the page needs when it is opened straight from disk.
 Two scripts read the same `bench-results/<run>/` directory for questions the report does not answer:
 
 ```bash
-fynd-core/benches/bench-analyze.py bench-results/my-run --config PFW_d3 --against WF_d3 --worst 10
-fynd-core/benches/bench-setdiff.py bench-results/my-run --config PFW_d3 --against WF_d3
+bench-harness/analysis/bench-analyze.py bench-results/my-run --config PFW_d3 --against WF_d3 --worst 10
+bench-harness/analysis/bench-setdiff.py bench-results/my-run --config PFW_d3 --against WF_d3
 ```
 
 `bench-analyze.py` says in which order-size bins a config won and which orders it lost worst, naming
@@ -278,8 +278,8 @@ is skipped and listed as skipped in the report, rather than failing the run.
 
 ### Exclude a token
 
-Add it to `blocked_tokens.toml`. Every pool holding it is dropped from the market, and every order
-naming it is dropped from the dataset.
+Add it to `data/blocked_tokens.toml`. Every pool holding it is dropped from the market, and every
+order naming it is dropped from the dataset.
 
 The bar is high on purpose: only tokens the recording prices inconsistently against the rest of the
 market, where a router exploiting the inconsistency scores a win it could never realise. The file
@@ -287,30 +287,36 @@ explains the reasoning for the two that are in it.
 
 ### Change the report
 
-`algorithm_bench.rs` writes it. The section named "Reading this" at the bottom of every report
-explains what the columns mean, and is worth updating alongside any new column.
+`src/bench.rs` writes it. The section named "Reading this" at the bottom of every report explains
+what the columns mean, and is worth updating alongside any new column.
 
 ## How the code is arranged
 
-`common/mod.rs` holds what both programs need: building the market, loading configs, applying the
+Everything is a library, and the two targets in `benches/` are three lines each.
+
+`src/lib.rs` holds what both programs need: building the market, loading configs, applying the
 blocklist, resolving token symbols, building the solver, and the percentile and median helpers the
-reported numbers come from. `common/trades.rs` reads the order dataset. `common/live.rs` captures a
-block from Tycho.
+reported numbers come from. `src/trades.rs` reads the order dataset. `src/live.rs` captures a block
+from Tycho. `src/bench.rs` is the benchmark and `src/profile.rs` the profiler, each a `run` the
+matching target calls.
 
 The two kinds of market meet in one function, `build_market`, and both come out as a `Market`.
 Nothing downstream can tell which it was handed, which is what stops an offline and a live run
 measuring differently. What each run was is carried on `Market::source`, written to `run.json`, and
 shown in the report and the viewer.
 
-Anything used by both programs belongs in `common/`, so the two cannot drift apart on what they
+Anything used by both programs belongs in `src/lib.rs`, so the two cannot drift apart on what they
 measure. The market flags are one `clap` struct, `LiveFlags`, flattened into each binary for the
 same reason: two copies of a dozen attributes drift the first time one is edited.
 
-Both are declared `harness = false` in `Cargo.toml`, which means they get a plain `main()` instead
-of the test harness. That is why they parse their own arguments with `clap`.
+The configs, the token table and the blocked list ship inside this crate, in `configs/` and
+`data/`, and are found relative to the crate rather than the working directory.
 
-Both need the `test-utils` feature, which is what makes `Solver::from_recording` available. The
-scripts pass it; a bare `cargo bench` skips them.
+Both targets are declared `harness = false` in `Cargo.toml`, which means they get a plain `main()`
+instead of the test harness. That is why they parse their own arguments with `clap`.
+
+The crate turns on `fynd-core`'s `test-utils` feature itself, because `Solver::from_recording` is
+what every run goes through.
 
 Because they parse their own arguments, they cannot answer nextest's `--list`. CI and `check.sh`
 exclude them by name (`-E 'not binary(algorithm_bench) and not binary(profile)'`) rather than

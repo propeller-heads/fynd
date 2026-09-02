@@ -46,7 +46,7 @@ needs a config file carrying the setting, and a live capture naming the protocol
 ```bash
 echo 'algorithm = "water_fill"
 max_hops = 3
-liquidity_scope = "include_exclusive"' > fynd-core/benches/configs/WF_d3_exclusive.toml
+liquidity_scope = "include_exclusive"' > bench-harness/configs/WF_d3_exclusive.toml
 
 ./scripts/bench.sh --configs WF_d3_exclusive --market live \
   --protocols uniswap_v2,uniswap_v3,uniswap_v4,ekubo_v2,exclusive:ekubo_v3

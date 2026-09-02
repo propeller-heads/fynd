@@ -42,7 +42,7 @@ if [[ ! -d bench-results ]]; then
   echo "      ./scripts/bench.sh --name my-run --orders 500" >&2
 fi
 
-URL="http://localhost:${PORT}/fynd-core/benches/viewer/"
+URL="http://localhost:${PORT}/bench-harness/viewer/"
 echo "Viewer   $URL"
 echo "Serving  $REPO_ROOT"
 echo "Stop with Ctrl-C."

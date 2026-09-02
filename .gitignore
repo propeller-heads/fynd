@@ -13,7 +13,7 @@ bench-results/**/*.json
 # Profiler output, written into the repo root by `./scripts/profile.sh --save-only`.
 profile.json*
 
-# Benchmark trade datasets: tens of MB, rebuildable from fynd-core/benches/dataset.sql
+# Benchmark trade datasets: tens of MB, rebuildable from bench-harness/data/dataset.sql
 aggregator_trades*.json
 comparison_results.json
 scale_results*.json

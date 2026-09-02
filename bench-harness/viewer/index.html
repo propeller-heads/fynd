@@ -1576,8 +1576,8 @@
 <script>
     // ---------------------------------------------------------------------------- loading
     // The bench writes bench-results/; this page reads it. Nothing is bundled, so a new run shows up
-    // on refresh. Paths are relative to this file, which sits at fynd-core/benches/viewer/.
-    const ROOT = "../../../bench-results";
+    // on refresh. Paths are relative to this file, which sits at bench-harness/viewer/.
+    const ROOT = "../../bench-results";
 
     const state = {
         run: null, runs: [], facts: {}, tab: "report",
@@ -1748,7 +1748,7 @@
         return ` <span class="pill no-route">−${((1 - k) * 100).toFixed(1)}%</span>`;
     };
 
-    // symbols come from each routes.jsonl line; decimals from benches/tokens.json, fetched once
+    // symbols come from each routes.jsonl line; decimals from data/tokens.json, fetched once
     const SYMBOLS = new Map();
     const DECIMALS = new Map();
     const sym = a => SYMBOLS.get(a) || (a ? `${a.slice(2, 10)}` : "?");
@@ -1769,7 +1769,7 @@
     async function loadTokenMeta() {
         if (DECIMALS.size) return;
         try {
-            const table = await getJson("../tokens.json");
+            const table = await getJson("../data/tokens.json");
             Object.entries(table).forEach(([addr, [symbol, decimals]]) => {
                 SYMBOLS.set(addr, symbol);
                 DECIMALS.set(addr, decimals);
@@ -1799,7 +1799,7 @@
         {lo: 100, hi: Infinity, label: ">100", k: "gain"},
     ];
     const pct = (sorted, f) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.round((sorted.length - 1) * f))] : 0;
-    // averages the two middle values on an even count, matching median in benches/common/mod.rs —
+    // averages the two middle values on an even count, matching median in bench-harness/src/lib.rs —
     // otherwise this page and report.md disagree on roughly half of all runs
     const medianOf = v => {
         if (!v.length) return null;

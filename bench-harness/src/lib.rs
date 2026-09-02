@@ -1,13 +1,16 @@
-//! Pieces shared by the benchmark and the profiler.
+//! Runs the routing algorithms over one market and reports what they paid.
 //!
-//! Both replay the same fixture, read the same configs and the same dataset; only what they do
-//! with the results differs. Keeping the setup here stops the two drifting into measuring subtly
-//! different things.
+//! Two programs: [`bench::run`] solves many orders with several configurations and writes a
+//! report, [`profile::run`] solves a few with one configuration under a profiler. Both replay the
+//! same fixture, read the same configs and the same dataset; only what they do with the results
+//! differs. Keeping the setup here stops the two drifting into measuring subtly different things.
 //!
-//! Cargo compiles this once per bench target and each uses a subset, so the few items only one of
-//! them reads carry their own `allow(dead_code)`.
+//! The configurations, the token table and the blocked list ship with this crate, in `configs/`
+//! and `data/`, and are found relative to the crate rather than the working directory.
 
+pub mod bench;
 pub mod live;
+pub mod profile;
 pub mod trades;
 
 use std::{
@@ -82,14 +85,28 @@ fn gas_price_wei(gwei: f64) -> BigUint {
 /// How long a freshly built solver is given to ingest the recording and compute derived data.
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Dataset the benchmark and the profiler both read.
-pub fn default_trades_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("aggregator_trades_50k_1k_usd.json")
+/// A path inside this crate.
+///
+/// Resolved against the crate rather than the working directory, so a caller depending on this
+/// crate from elsewhere reads the same configs, the same token table and the same blocked list.
+fn crate_path(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
 
-/// One solver configuration in the comparison, loaded from `benches/configs/<label>.toml`.
+/// A file this crate ships in `data/`.
+fn data_path(file: &str) -> PathBuf {
+    crate_path("data").join(file)
+}
+
+/// The dataset a run reads when `--trades` names nothing else.
+///
+/// Only useful inside this repository: the file is gitignored for its size, so a checkout cargo
+/// made for a git dependency does not hold it, and a caller from outside names its own copy.
+pub fn default_trades_path() -> PathBuf {
+    crate_path("../aggregator_trades_50k_1k_usd.json")
+}
+
+/// One solver configuration in the comparison, loaded from `configs/<label>.toml`.
 pub struct BenchConfig {
     /// The config file's stem: what `--configs` takes, and what the reports show.
     pub label: String,
@@ -102,17 +119,16 @@ pub struct BenchConfig {
 
 /// Tokens dropped from the market before anything is solved.
 ///
-/// Read from `benches/blocked_tokens.toml`, which records why each one is there.
+/// Read from `data/blocked_tokens.toml`, which records why each one is there.
 pub struct BlockedTokens {
     pub addresses: HashSet<Address>,
     pub symbols: Vec<String>,
     /// Components dropped because they hold one of these tokens. Filled in once the market is
     /// filtered.
-    #[allow(dead_code, reason = "the profiler prints `block_components` directly")]
     pub dropped_component_count: usize,
 }
 
-/// Deserialization shape of `benches/blocked_tokens.toml`.
+/// Deserialization shape of `data/blocked_tokens.toml`.
 #[derive(serde::Deserialize)]
 pub struct BlockedTokensFile {
     #[serde(default)]
@@ -126,7 +142,7 @@ pub struct BlockedToken {
 }
 
 pub fn load_blocked_tokens() -> BlockedTokens {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/blocked_tokens.toml");
+    let path = data_path("blocked_tokens.toml");
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return BlockedTokens {
             addresses: HashSet::new(),
@@ -260,10 +276,10 @@ pub fn block_components(updates: &mut [Update], blocked: &HashSet<Address>) -> u
 
 /// Directory holding one TOML file per available configuration.
 pub fn configs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/configs")
+    crate_path("configs")
 }
 
-/// Loads `benches/configs/<label>.toml`.
+/// Loads `configs/<label>.toml`.
 ///
 /// # Errors
 ///
@@ -314,8 +330,12 @@ pub fn available_configs() -> Vec<String> {
     names
 }
 
+/// The fixture an offline run replays.
+///
+/// Only useful inside this repository: the file is in Git LFS, so a checkout cargo made for a git
+/// dependency holds the pointer rather than the market.
 fn recording_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/market_recording.json.zst")
+    crate_path("../fynd-core/tests/fixtures/market_recording.json.zst")
 }
 
 /// Builds the worker pools for one bench config: the file's fields, with the run-level ones forced.
@@ -741,8 +761,7 @@ pub fn print_protocol_breakdown(counts: &[ProtocolCount]) {
     }
 }
 
-/// Builds a solver for one config and waits until it can answer./// Builds a solver for one config
-/// and waits until it can answer.
+/// Builds a solver for one config and waits until it can answer.
 ///
 /// # Errors
 ///
@@ -782,11 +801,11 @@ pub async fn build_solver(
 
 /// Token symbols, so the per-pair table reads as `WETH->USDC` rather than two hex strings.
 ///
-/// `benches/tokens.json` covers every token the market fixture knows about — pulled from Dune's
+/// `data/tokens.json` covers every token the market fixture knows about — pulled from Dune's
 /// `tokens.erc20` — which is a superset of anything the dataset can name. Anything absent falls
 /// back to a short address rather than failing the run.
 pub fn symbol_table() -> HashMap<Address, String> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/tokens.json");
+    let path = data_path("tokens.json");
     let Ok(json) = std::fs::read_to_string(&path) else {
         println!("  no {} — pairs will show as addresses", path.display());
         return HashMap::new();
@@ -839,7 +858,6 @@ pub fn timings_of(times_us: &mut [u128]) -> Timings {
 }
 
 /// Mean and median of `values`, sorting in place — the two figures every bps table wants together.
-#[allow(dead_code, reason = "the profiler reports timings only")]
 pub fn mean_and_median(values: &mut [f64]) -> (f64, f64) {
     if values.is_empty() {
         return (0.0, 0.0);
@@ -859,7 +877,6 @@ pub fn mean_and_median(values: &mut [f64]) -> (f64, f64) {
 }
 
 /// A microsecond count in whichever unit reads better.
-#[allow(dead_code, reason = "the benchmark writes microseconds into the CSV instead")]
 pub fn format_micros(us: u128) -> String {
     if us >= 1000 {
         format!("{:.1} ms", us as f64 / 1000.0)
@@ -873,7 +890,6 @@ pub fn format_micros(us: u128) -> String {
 /// `TokenGasPrices` is what the algorithms use to charge gas: it converts wei into a token's atomic
 /// units, so inverting it values the token in wei. Taken from the solved market rather than from an
 /// outside price feed, so the figure agrees with what the solver was optimising.
-#[allow(dead_code, reason = "the profiler does not value routes")]
 pub fn wei_per_token(store: &DerivedData) -> HashMap<Address, f64> {
     let Some(prices) = store.token_prices() else {
         return HashMap::new();
@@ -896,7 +912,6 @@ pub fn wei_per_token(store: &DerivedData) -> HashMap<Address, f64> {
 /// Both sides are converted to wei through the market's prices, and the dataset's own USD figure
 /// supplies the scale — so the ratio comes from the market being solved and only the absolute
 /// number comes from outside. `None` when either token has no derived price.
-#[allow(dead_code, reason = "the profiler does not value routes")]
 pub fn usd_out(
     order: &TradeOrder,
     amount_out: &BigUint,
