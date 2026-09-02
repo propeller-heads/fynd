@@ -566,7 +566,7 @@ export interface components {
             /**
              * @description Per-token mid prices relative to the native gas token, sorted by token address.
              *
-             *     A token that could not be sold back is absent.
+             *     A token the gas token cannot reach, or that cannot be sold back, is absent.
              */
             prices: components["schemas"]["TokenPriceEntry"][];
             /** @description Spot prices per component direction (only if requested via `include=spot_prices`). */

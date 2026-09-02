@@ -89,7 +89,7 @@ pub struct ComputationBlocks {
 pub struct PricesResponse {
     /// Per-token mid prices relative to the native gas token, sorted by token address.
     ///
-    /// A token that could not be sold back is absent.
+    /// A token the gas token cannot reach, or that cannot be sold back, is absent.
     pub prices: Vec<TokenPriceEntry>,
     /// The gas token address (e.g. WETH).
     #[schema(value_type = String, example = "0x0000000000000000000000000000000000000000")]

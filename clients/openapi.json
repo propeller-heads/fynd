@@ -961,7 +961,7 @@
             "items": {
               "$ref": "#/components/schemas/TokenPriceEntry"
             },
-            "description": "Per-token mid prices relative to the native gas token, sorted by token address.\n\nA token that could not be sold back is absent."
+            "description": "Per-token mid prices relative to the native gas token, sorted by token address.\n\nA token the gas token cannot reach, or that cannot be sold back, is absent."
           },
           "spot_prices": {
             "type": [
