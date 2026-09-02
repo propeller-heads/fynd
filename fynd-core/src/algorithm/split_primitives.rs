@@ -2240,6 +2240,68 @@ mod tests {
 
     /// A path set carrying nothing describes no split, and guessing an allocation for it would
     /// misprice the quote.
+    /// A swap spending more than stands at its token means the plan disagrees with itself: the
+    /// traversal releases a token only once every hop producing it has run.
+    #[test]
+    fn test_token_balances_overspend() {
+        let token_a = token(0x0A, "A");
+        let mut balances = TokenBalances::starting(&token_a.address, &BigUint::from(100u64));
+
+        let error = balances
+            .spend(&token_a, &"component1".to_string(), &BigUint::from(101u64))
+            .expect_err("the swap spends more than stands at the token");
+
+        assert!(
+            error
+                .to_string()
+                .contains("more than the 100 standing at it"),
+            "the error states what the swap spends and what stands there: {error}"
+        );
+    }
+
+    /// Every merged swap is built from the hops of the paths handed in, so a branch swap no path
+    /// stands at means the traversal is broken. Sizing it at zero would leave that in the route.
+    #[test]
+    fn test_amounts_for_branch_without_a_feeder() {
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let paths = vec![PathAllocation {
+            hops: vec![SimulatedHop {
+                descriptor: HopDescriptor::new(
+                    "component1".to_string(),
+                    token_a.clone(),
+                    token_b.clone(),
+                ),
+                amount_out: BigUint::from(2000u64),
+                gas: BigUint::from(50_000u64),
+            }],
+            flow_fraction: 1.0,
+            amount_in: BigUint::from(1000u64),
+            amount_out: BigUint::from(2000u64),
+            marginal_price_product: 2.0,
+        }];
+        let ledger = PathLedger::new(&paths).expect("the path carries an amount");
+        // A swap through a component none of the paths hop over, so nothing stands at it.
+        let branch = vec![SplitSwap {
+            hop: HopDescriptor::new("component2".to_string(), token_a, token_b),
+            split: 0.0,
+            amount_in: BigUint::ZERO,
+        }];
+
+        let Err(error) =
+            amounts_for_branch(branch, &FxHashMap::default(), &ledger, &BigUint::from(1000u64))
+        else {
+            panic!("a branch swap no path stands at must not be sized");
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("no path feeds the swap through component2"),
+            "the error names the swap that no path feeds: {error}"
+        );
+    }
+
     #[test]
     fn test_execute_split_plan_zero_amount_paths() {
         let token_a = token(0x0A, "A");

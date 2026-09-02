@@ -358,10 +358,10 @@ pub const PROPAMM_VENUES: &[&str] = &[
 ];
 
 /// Protocol system whose pools the PropAMMRouter falls back to.
-const FALLBACK_PROTOCOL_SYSTEM: &str = "uniswap_v3";
+pub(crate) const FALLBACK_PROTOCOL_SYSTEM: &str = "uniswap_v3";
 
 /// Static attribute carrying a Uniswap V3 pool's fee tier, in hundredths of a bip.
-const FEE_ATTRIBUTE: &str = "fee";
+pub(crate) const FEE_ATTRIBUTE: &str = "fee";
 
 /// Order-independent pair key, matching the router's `_pairKey`.
 fn sorted_pair(token_a: &Address, token_b: &Address) -> (Address, Address) {
