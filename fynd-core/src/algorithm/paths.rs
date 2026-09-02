@@ -1,8 +1,9 @@
 //! Finding, ranking and simulating routes that name a pool for every leg.
 //!
-//! A [`Path`] is a route with its pools already chosen, as opposed to the token sequences
-//! [`TopologyGraph`] searches over. Enumerating one per pool combination is what an algorithm does
-//! when it wants to compare whole routes rather than choose a pool per leg.
+//! A [`Path`](crate::graph::Path) is a route with its pools already chosen, as opposed to the
+//! token sequences [`TopologyGraph`](crate::graph::TopologyGraph) searches over. Enumerating one
+//! per pool combination is what an algorithm does when it wants to compare whole routes rather
+//! than choose a pool per leg.
 
 use num_bigint::{BigInt, BigUint};
 use rustc_hash::FxHashMap;
@@ -31,7 +32,7 @@ use crate::{
 ///
 /// [`AlgorithmError::NoPath`] naming whichever of the two tokens the graph does not hold.
 #[instrument(level = "debug", skip(graph, filter))]
-pub(crate) fn find_paths<'a, D>(
+pub fn find_paths<'a, D>(
     graph: &'a TopologyGraph<D>,
     from: &Address,
     to: &Address,
@@ -56,7 +57,7 @@ pub(crate) fn find_paths<'a, D>(
 /// # Errors
 ///
 /// [`AlgorithmError::NoPath`] naming whichever of the two tokens the graph does not hold.
-pub(crate) fn find_token_paths<D>(
+pub fn find_token_paths<D>(
     graph: &TopologyGraph<D>,
     from: &Address,
     to: &Address,
@@ -86,7 +87,7 @@ pub(crate) fn find_token_paths<D>(
 ///
 /// Higher is better. `None` when the path is empty or any edge has no weight, which means it
 /// cannot be placed against the others.
-pub(crate) fn try_score_path(path: &Path<DepthAndPrice>) -> Option<f64> {
+pub fn try_score_path(path: &Path<DepthAndPrice>) -> Option<f64> {
     if path.is_empty() {
         trace!("cannot score empty path");
         return None;
@@ -121,7 +122,7 @@ pub(crate) fn try_score_path(path: &Path<DepthAndPrice>) -> Option<f64> {
 /// [`AlgorithmError::DataNotFound`] for a token, component, state or gas price the market does not
 /// hold, and [`AlgorithmError::Other`] when a pool refuses the swap.
 #[instrument(level = "trace", skip(path, market, token_prices), fields(hop_count = path.len()))]
-pub(crate) fn simulate_pool_path<D>(
+pub fn simulate_pool_path<D>(
     path: &Path<D>,
     market: &MarketState,
     token_prices: Option<&TokenGasPrices>,
@@ -224,7 +225,7 @@ pub(crate) fn simulate_pool_path<D>(
 /// # Errors
 ///
 /// [`AlgorithmError::DataNotFound`] when the market does not hold it.
-pub(crate) fn get_token<'a>(
+pub fn get_token<'a>(
     market: &'a MarketState,
     address: &Address,
 ) -> Result<&'a Token, AlgorithmError> {
@@ -241,7 +242,7 @@ pub(crate) fn get_token<'a>(
 /// # Errors
 ///
 /// [`AlgorithmError::Other`] when `label` names no registered overlay.
-pub(crate) async fn read_market(
+pub async fn read_market(
     market: &MarketData,
     label: Option<StateLabel>,
 ) -> Result<MarketDataView<'_>, AlgorithmError> {
@@ -259,7 +260,7 @@ pub(crate) async fn read_market(
 /// # Errors
 ///
 /// [`AlgorithmError::DataNotFound`] when the view carries no gas price.
-pub(crate) fn fetch_gas_price(view: &MarketState) -> Result<BigUint, AlgorithmError> {
+pub fn fetch_gas_price(view: &MarketState) -> Result<BigUint, AlgorithmError> {
     Ok(view
         .gas_price()
         .ok_or(AlgorithmError::DataNotFound { kind: "gas price", id: None })?
