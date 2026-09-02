@@ -11,6 +11,10 @@ Each file is a flat TOML table of [`PoolConfig`] fields. `algorithm` is required
 has a default, so a file can be two lines. Anything `PoolConfig` accepts works here —
 `connector_tokens`, `min_hops`, `max_routes`, `liquidity_scope`.
 
+A run also reads any directory `--configs-dir` names, which is how a crate outside this repository
+offers a config for its own algorithm. A name held by two directories stops the run rather than one
+quietly winning, so a caller cannot replace the baseline by accident.
+
 Two fields are set by the run rather than the file, so every config is compared under the same
 conditions: `num_workers` (`--jobs`, capped at the core count, since a pool with more workers than
 cores costs setup time without adding throughput) and `task_queue_capacity`. `timeout_ms` comes

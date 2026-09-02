@@ -37,7 +37,7 @@ viewer keeps the two apart in its run picker for exactly that reason.
 
 **The market fixture**, for offline runs, is in Git LFS at
 `fynd-core/tests/fixtures/market_recording.json.zst`. Run `git lfs pull` if it is a small text file
-instead of 771 KB of compressed JSON, or pass `--fixture` to name another copy. Live runs do not read it; they need `TYCHO_URL` and
+instead of 771 KB of compressed JSON. Live runs do not read it; they need `TYCHO_URL` and
 `TYCHO_API_KEY` instead, and `RPC_URL` to price gas at the chain's rate.
 
 **The order dataset** is `aggregator_trades_50k_1k_usd.json` in the repository root. It is
@@ -181,6 +181,67 @@ Ties keep the earlier config, which puts the baseline first.
 `orders` and `usd` count a route once per protocol it crosses, so across protocols they sum to more
 than the run. `legs` and `pools_used` do not double count.
 
+## Benchmarking an algorithm from another crate
+
+The algorithms are not fixed. Both entry points take a registry, so a crate holding its own
+algorithm gets the same report the built-ins get, and compares against them in the same run.
+
+Depend on this crate, and declare a bench target that hands `run` a registry with the algorithm in
+it:
+
+```toml
+# Cargo.toml. The harness and fynd-core have to be the same revision: an `AlgorithmRegistry` built
+# from one copy of fynd-core does not typecheck against a `run` from another.
+[dev-dependencies]
+fynd-bench-harness = { git = "https://github.com/propeller-heads/fynd", tag = "<release>" }
+fynd-core = { git = "https://github.com/propeller-heads/fynd", tag = "<release>" }
+tokio = { version = "1", features = ["full"] }
+
+[[bench]]
+name = "algorithm_bench"
+harness = false
+```
+
+```rust
+// benches/algorithm_bench.rs
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    let algorithms = fynd_core::AlgorithmRegistry::new()
+        .with_algorithm("my_algorithm", MyAlgorithm::with_config)
+        .expect("the name is ours");
+    match fynd_bench_harness::bench::run(&algorithms).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(reason) => {
+            eprintln!("error: {reason}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+```
+
+Add a config file naming the algorithm — the same two lines any config in `configs/` has — and
+point the run at the directory holding it:
+
+```bash
+cargo bench -p my-crate --bench algorithm_bench --profile profiling -- \
+  --name my-run --orders 500 --configs-dir benches/configs --configs MY_d3 \
+  --fixture tests/fixtures/market_recording.json.zst \
+  --trades ~/datasets/aggregator_trades_50k_1k_usd.json
+```
+
+Three things have to be named from outside this repository:
+
+| flag | why |
+|---|---|
+| `--configs-dir` | Where the caller's config files are. Read on top of the built-in ones, which still run. A name held by two directories stops the run, so a caller cannot replace the baseline by accident |
+| `--fixture` | The market. This repository's copy is in Git LFS, so the checkout cargo makes for a git dependency holds the pointer file rather than the market — keep a copy beside the caller's tests |
+| `--trades` | The order dataset, which is gitignored here and so is not in that checkout either |
+
+Everything else works as it does in this repository, the baseline included: `BF_d2` comes from the
+config files this crate ships, so a caller's algorithm is measured against the same baseline as
+every built-in. `run.json` records the file behind each config name, so a run always says which
+configs it actually read.
+
 ## Reading the results
 
 ```bash
@@ -260,7 +321,7 @@ a slow order, then `--order <id>` to profile just that one.
 
 ### Add a configuration
 
-Add a file to `configs/`, or to a directory passed with `--configs-dir`. Nothing else changes. The file name is the name you pass to `--configs`
+Add a file to `configs/`. Nothing else changes. The file name is the name you pass to `--configs`
 and the label the report shows.
 
 ```toml
@@ -275,9 +336,10 @@ The file is a flat table of `PoolConfig` fields. Only `algorithm` is required. S
 ### Add an algorithm
 
 Nothing here needs to change. The benchmark asks the solver for the algorithm by name, so once it
-is registered, a config file naming it works. That holds for an algorithm in another crate too: the
-registry `run` takes is what puts it in the same run as the built-ins. A config naming an algorithm the build does not have
-is skipped and listed as skipped in the report, rather than failing the run.
+is registered, a config file naming it works. That holds for an algorithm in another crate too —
+see [Benchmarking an algorithm from another crate](#benchmarking-an-algorithm-from-another-crate).
+A config naming an algorithm the build does not have is skipped and listed as skipped in the
+report, rather than failing the run.
 
 ### Exclude a token
 
@@ -295,7 +357,9 @@ what the columns mean, and is worth updating alongside any new column.
 
 ## How the code is arranged
 
-Everything is a library, and the two targets in `benches/` are three lines each.
+Everything is a library, and the two `benches/` targets are three lines each. That is what lets
+another crate run the same benchmark over its own algorithm: it writes the same three lines around
+its own registry.
 
 `src/lib.rs` holds what both programs need: building the market, loading configs, applying the
 blocklist, resolving token symbols, building the solver, and the percentile and median helpers the
@@ -310,10 +374,10 @@ shown in the report and the viewer.
 
 Anything used by both programs belongs in `src/lib.rs`, so the two cannot drift apart on what they
 measure. Only the two `run` functions are public; everything else is `pub(crate)`, so the interface
-a caller depends on is the one the README describes. The shared flags are `clap` structs flattened into each program for the same reason: two
-copies of a dozen attributes drift the first time one is edited. `MarketFlags` carries `--market`,
-`--fixture` and the Tycho settings; `ConfigFlags` carries `--configs-dir`. The market flags are one `clap` struct, `LiveFlags`, flattened into each binary for the
-same reason: two copies of a dozen attributes drift the first time one is edited.
+a caller depends on is the one the README describes. The shared flags are `clap` structs flattened
+into each program for the same reason: two copies of a dozen attributes drift the first time one is
+edited. `MarketFlags` carries `--market`, `--fixture` and the Tycho settings; `ConfigFlags` carries
+`--configs-dir`.
 
 The configs, the token table and the blocked list ship inside this crate, in `configs/` and
 `data/`, and are found relative to the crate rather than the working directory. A caller depending
