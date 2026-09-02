@@ -510,6 +510,7 @@ pub struct FyndBuilder {
     calldata_watermark: Option<Vec<u8>>,
     pools: Vec<PoolEntry>,
     price_guard_enabled: bool,
+    simulation_enabled: bool,
     price_providers: Vec<Box<dyn PriceProvider>>,
     pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
 }
@@ -545,6 +546,7 @@ impl FyndBuilder {
             calldata_watermark: None,
             pools: Vec::new(),
             price_guard_enabled: false,
+            simulation_enabled: false,
             price_providers: Vec::new(),
             pending_indexers: Vec::new(),
         }
@@ -755,6 +757,14 @@ impl FyndBuilder {
     /// per-request attempts to use the guard return an error.
     pub fn price_guard_enabled(mut self, enabled: bool) -> Self {
         self.price_guard_enabled = enabled;
+        self
+    }
+
+    /// Enables or disables on-chain simulation of encoded quotes.
+    ///
+    /// When disabled, requests that ask for simulation return an error without making RPC calls.
+    pub fn simulation_enabled(mut self, enabled: bool) -> Self {
+        self.simulation_enabled = enabled;
         self
     }
 
@@ -981,9 +991,18 @@ impl FyndBuilder {
             }
         };
 
-        let quote_simulator =
-            QuoteSimulator::new(self.rpc_url.as_str(), chain, defaults::SIMULATION_REQUEST_TIMEOUT)
-                .map_err(|error| SolverBuildError::QuoteSimulator(error.to_string()))?;
+        let quote_simulator = if self.simulation_enabled {
+            Some(
+                QuoteSimulator::new(
+                    self.rpc_url.as_str(),
+                    chain,
+                    defaults::SIMULATION_REQUEST_TIMEOUT,
+                )
+                .map_err(|error| SolverBuildError::QuoteSimulator(error.to_string()))?,
+            )
+        } else {
+            None
+        };
 
         // The PropAMMRouter is an Ethereum mainnet deployment, so no other chain has fee tiers to
         // read. Without the fetcher the tiers stay empty and every pAMM route is dropped.
@@ -1002,7 +1021,9 @@ impl FyndBuilder {
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses);
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
-        router = router.with_simulator(quote_simulator);
+        if let Some(simulator) = quote_simulator {
+            router = router.with_simulator(simulator);
+        }
 
         if self.price_guard_enabled {
             let mut registry = PriceProviderRegistry::new();
