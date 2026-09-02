@@ -398,9 +398,6 @@ fn no_path_label(reason: Option<NoPathReason>) -> &'static str {
         Some(NoPathReason::NoGraphPath) => "no route: no connecting path",
         Some(NoPathReason::NoScorablePaths) => "no route: no scorable paths",
         Some(NoPathReason::AmountTooSmall) => "no route: amount too small",
-        Some(NoPathReason::RouteMissingSwaps) => {
-            "no route: algorithm returned a route with no swaps"
-        }
         // The algorithm raised no path but named no reason. Worth telling apart from the cases
         // that do: it means the algorithm returned early without saying why.
         None => "no route: unspecified",

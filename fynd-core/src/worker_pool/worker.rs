@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
 
 use crate::{
-    algorithm::{Algorithm, NoPathReason},
+    algorithm::Algorithm,
     derived::{
         computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
@@ -214,6 +214,18 @@ where
                 .map_err(|e| SolveError::NotReady(e.to_string())),
             None => Ok(self.market_data.read().await),
         }
+    }
+
+    /// The error for a route the algorithm returned with no swaps to read.
+    ///
+    /// `Route::validate` rejects an empty route before the quote reads it, so a route that reaches
+    /// this point holds swaps. It is a fault in the algorithm rather than a fact about the market,
+    /// which is why it is not a `NoPathReason`.
+    fn route_carries_no_swaps(&self) -> SolveError {
+        SolveError::AlgorithmError(format!(
+            "{} returned a route with no swaps",
+            self.algorithm.name()
+        ))
     }
 
     /// Initializes the graph from MarketState.
@@ -455,21 +467,20 @@ where
                         .ok_or_else(|| {
                             error!(
                                 order_id = %order.id(),
+                                algorithm = self.algorithm.name(),
                                 "route missing first swap for buy order"
                             );
-                            SolveError::no_route_found(order.id())
+                            self.route_carries_no_swaps()
                         })?
                 };
                 let amount_out = if order.is_sell() {
                     let output_token = route.output_token().ok_or_else(|| {
                         error!(
                             order_id = %order.id(),
+                            algorithm = self.algorithm.name(),
                             "route missing swaps for sell order"
                         );
-                        SolveError::no_route_found_with_reason(
-                            order.id(),
-                            NoPathReason::RouteMissingSwaps,
-                        )
+                        self.route_carries_no_swaps()
                     })?;
                     route
                         .swaps()
