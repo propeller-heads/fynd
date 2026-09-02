@@ -24,6 +24,8 @@
 mod allocation;
 mod comparison_log;
 pub mod config;
+#[cfg(test)]
+mod log_capture;
 
 use std::{
     sync::LazyLock,
