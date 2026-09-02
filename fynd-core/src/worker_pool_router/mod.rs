@@ -49,9 +49,9 @@ use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
     encoding::encoder::Encoder, feed::exclusivity::is_exclusive, price_guard::guard::PriceGuard,
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote,
-    OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
-    SurplusInfo, Swap,
+    simulation::simulator::QuoteSimulator, worker_pool::task_queue::TaskQueueHandle, BlockInfo,
+    EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus,
+    SolveError, SolveParams, SurplusInfo, Swap, UserTransferType,
 };
 
 /// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
@@ -246,6 +246,14 @@ pub struct WorkerPoolRouter {
     /// Validates solution outputs against external price sources.
     /// Present when the server has price guard enabled; `None` when disabled.
     price_guard: Option<PriceGuard>,
+    /// Simulates encoded quotes when a request explicitly asks for it.
+    simulator: Option<QuoteSimulator>,
+}
+
+/// Permit2 inputs needed to produce unsigned simulation-only calldata.
+struct Permit2SimulationPlan {
+    encoding_options: EncodingOptions,
+    unencoded_order_quotes: Vec<OrderQuote>,
 }
 
 /// Ranked, unencoded candidates for every order of a request — the output of
@@ -367,7 +375,7 @@ impl WorkerPoolRouter {
         config: WorkerPoolRouterConfig,
         encoder: Encoder,
     ) -> Self {
-        Self { solver_pools, config, encoder, price_guard: None }
+        Self { solver_pools, config, encoder, price_guard: None, simulator: None }
     }
 
     /// Makes price guard validation available for this router.
@@ -376,6 +384,12 @@ impl WorkerPoolRouter {
     /// requests where the client sets `enabled: true` in `PriceGuardConfig`.
     pub fn with_price_guard(mut self, price_guard: PriceGuard) -> Self {
         self.price_guard = Some(price_guard);
+        self
+    }
+
+    /// Makes encoded quote simulation available for this router.
+    pub fn with_simulator(mut self, simulator: QuoteSimulator) -> Self {
+        self.simulator = Some(simulator);
         self
     }
 
@@ -562,7 +576,26 @@ impl WorkerPoolRouter {
         let started = ranked.started();
         let mut order_quotes = ranked.into_best();
         if let Some(encoding_options) = request.options().encoding_options() {
+            let permit2_simulation_plan = if encoding_options.simulate() {
+                simulation_encoding_options(encoding_options).map(|simulation_options| {
+                    Permit2SimulationPlan {
+                        encoding_options: simulation_options,
+                        unencoded_order_quotes: order_quotes.clone(),
+                    }
+                })
+            } else {
+                None
+            };
             order_quotes = encode_quotes(&self.encoder, order_quotes, encoding_options).await?;
+            if encoding_options.simulate() {
+                order_quotes = self
+                    .simulate_encoded_quotes(
+                        order_quotes,
+                        encoding_options,
+                        permit2_simulation_plan,
+                    )
+                    .await?;
+            }
         }
         Ok(finalize_quote(order_quotes, started.elapsed().as_millis() as u64))
     }
@@ -571,6 +604,66 @@ impl WorkerPoolRouter {
     #[must_use]
     pub fn encoder(&self) -> &Encoder {
         &self.encoder
+    }
+
+    /// Simulates encoded quotes, re-encoding Permit2 quotes without user authorization when needed.
+    async fn simulate_encoded_quotes(
+        &self,
+        mut order_quotes: Vec<OrderQuote>,
+        encoding_options: &EncodingOptions,
+        permit2_simulation_plan: Option<Permit2SimulationPlan>,
+    ) -> Result<Vec<OrderQuote>, SolveError> {
+        let Some(simulator) = self.simulator.as_ref() else {
+            return Err(SolveError::Internal(
+                "simulation requested but simulation is not enabled on this server".to_string(),
+            ));
+        };
+
+        let fallback_quotes = if let Some(plan) = permit2_simulation_plan {
+            // RFQ encoding can fetch a signed quote over the network. Re-encoding costs a second
+            // fetch, but lets Permit2 quotes simulate without a user signature.
+            Some((
+                encode_quotes(&self.encoder, plan.unencoded_order_quotes, &plan.encoding_options)
+                    .await?,
+                plan.encoding_options,
+            ))
+        } else {
+            None
+        };
+
+        let fallback_quotes = fallback_quotes.as_ref();
+        futures::future::join_all(order_quotes.iter_mut().enumerate().map(
+            |(index, quote)| async move {
+                if quote.status() == QuoteStatus::Success {
+                    let actual = simulator
+                        .simulate_attempt(quote, encoding_options)
+                        .await;
+                    let result = match (
+                        actual,
+                        fallback_quotes
+                            .as_ref()
+                            .and_then(|(quotes, options)| {
+                                quotes
+                                    .get(index)
+                                    .map(|fallback| (fallback, options))
+                            }),
+                    ) {
+                        (
+                            crate::simulation::simulator::SimulationAttempt::Reverted { .. },
+                            Some((fallback, options)),
+                        ) => {
+                            simulator
+                                .simulate(fallback, options)
+                                .await
+                        }
+                        (attempt, _) => attempt.into_result(),
+                    };
+                    quote.set_simulation_result(result);
+                }
+            },
+        ))
+        .await;
+        Ok(order_quotes)
     }
 
     /// Solves a single order by fanning out to the worker pools allocated to it.
@@ -871,6 +964,22 @@ impl WorkerPoolRouter {
             .timeout_ms()
             .map(Duration::from_millis)
             .unwrap_or(self.config.default_timeout())
+    }
+}
+
+/// Builds alternate encoding options only when Permit2 calldata would need a user signature.
+fn simulation_encoding_options(options: &EncodingOptions) -> Option<EncodingOptions> {
+    match options.transfer_type() {
+        UserTransferType::TransferFromPermit2 => {
+            let mut simulation_options = EncodingOptions::new(options.slippage())
+                .with_transfer_type(UserTransferType::TransferFrom);
+            if let Some(fee) = options.client_fee_params() {
+                simulation_options = simulation_options.with_client_fee_params(fee.clone());
+            }
+            Some(simulation_options)
+        }
+        UserTransferType::TransferFrom => None,
+        UserTransferType::UseVaultsFunds => None,
     }
 }
 
@@ -1447,7 +1556,8 @@ mod tests {
         algorithm::test_utils::{component, MockProtocolSim},
         feed::exclusivity::mark_exclusive,
         types::internal::SolveTask,
-        EncodingOptions, OrderSide, Route, SingleOrderQuote, Swap,
+        EncodingOptions, OrderSide, PermitDetails, PermitSingle, Route, SimulationResult,
+        SingleOrderQuote, Swap,
     };
 
     fn default_encoder() -> Encoder {
@@ -1636,6 +1746,194 @@ mod tests {
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].status(), QuoteStatus::Success);
         assert_eq!(ranked[0].amount_out_net_gas(), &BigUint::from(900u64));
+    }
+
+    #[tokio::test]
+    async fn test_quote_rejects_requested_simulation_without_simulator() {
+        let (pool, worker) = create_mock_worker_pool("pool", Ok(make_single_quote(900)), 0);
+        let router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
+        let options = QuoteOptions::default()
+            .with_encoding_options(EncodingOptions::new(0.01).with_simulation());
+        let error = router
+            .quote(QuoteRequest::new(vec![make_order()], options), ExclusiveAccess::Denied)
+            .await
+            .expect_err("simulation requires a configured simulator");
+        worker.abort();
+        assert_eq!(
+            error.to_string(),
+            "internal error: simulation requested but simulation is not enabled on this server"
+        );
+    }
+
+    /// Builds a simulator whose provider answers from `asserter`. Its native token is the mock
+    /// quote's input token, so a simulation needs no ERC-20 slot probes and the queued responses
+    /// answer the simulated calls alone.
+    fn mocked_simulator(asserter: &alloy::transports::mock::Asserter) -> QuoteSimulator {
+        QuoteSimulator::with_provider(
+            alloy::providers::RootProvider::new(alloy::rpc::client::RpcClient::mocked(
+                asserter.clone(),
+            )),
+            alloy::primitives::Address::repeat_byte(0x01),
+            Duration::from_secs(1),
+        )
+    }
+
+    fn simulated_response(
+        amount_out: u64,
+        succeeded: bool,
+        gas_used: u64,
+    ) -> Vec<alloy::rpc::types::simulate::SimulatedBlock> {
+        vec![alloy::rpc::types::simulate::SimulatedBlock {
+            inner: Default::default(),
+            calls: vec![alloy::rpc::types::simulate::SimCallResult {
+                return_data: alloy::primitives::Bytes::from(
+                    alloy::primitives::U256::from(amount_out).to_be_bytes::<32>(),
+                ),
+                gas_used,
+                status: succeeded,
+                ..Default::default()
+            }],
+        }]
+    }
+
+    async fn quote_with_simulation(
+        encoding_options: EncodingOptions,
+        asserter: &alloy::transports::mock::Asserter,
+        pool_response: Result<SingleOrderQuote, SolveError>,
+    ) -> Quote {
+        let (pool, worker) = create_mock_worker_pool("pool", pool_response, 0);
+        let router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder())
+                .with_simulator(mocked_simulator(asserter));
+        let options = QuoteOptions::default().with_encoding_options(encoding_options);
+        let quote = router
+            .quote(QuoteRequest::new(vec![make_order()], options), ExclusiveAccess::Denied)
+            .await
+            .expect("the quote succeeds");
+        worker.abort();
+        quote
+    }
+
+    #[tokio::test]
+    async fn test_quote_reports_the_simulated_amount_out_and_gas() {
+        let asserter = alloy::transports::mock::Asserter::new();
+        asserter.push_success(&simulated_response(4_242, true, 123_456));
+
+        let quote = quote_with_simulation(
+            EncodingOptions::new(0.01).with_simulation(),
+            &asserter,
+            Ok(make_single_quote(900)),
+        )
+        .await;
+
+        let simulated = quote.orders()[0]
+            .simulation_result()
+            .expect("a successful quote carries a simulation result");
+        assert!(matches!(simulated, SimulationResult::Success { amount_out, gas_used }
+                if amount_out == &BigUint::from(4_242u64) && *gas_used == 123_456));
+    }
+
+    #[tokio::test]
+    async fn test_quote_leaves_an_unsuccessful_quote_unsimulated() {
+        let asserter = alloy::transports::mock::Asserter::new();
+
+        let quote = quote_with_simulation(
+            EncodingOptions::new(0.01).with_simulation(),
+            &asserter,
+            Err(SolveError::no_route_found("test-order")),
+        )
+        .await;
+
+        assert_ne!(quote.orders()[0].status(), QuoteStatus::Success);
+        assert!(quote.orders()[0]
+            .simulation_result()
+            .is_none());
+        assert!(asserter.read_q().is_empty(), "a quote without a route makes no RPC call");
+    }
+
+    #[tokio::test]
+    async fn test_permit2_quote_falls_back_when_its_own_calldata_reverts() {
+        let asserter = alloy::transports::mock::Asserter::new();
+        // The caller's permit2 calldata reverts, so the fallback re-encoding answers second.
+        asserter.push_success(&simulated_response(0, false, 0));
+        asserter.push_success(&simulated_response(7_007, true, 99_000));
+
+        let quote = quote_with_simulation(
+            EncodingOptions::new(0.01)
+                .with_transfer_type(UserTransferType::TransferFromPermit2)
+                .with_permit(permit_for_tests())
+                .with_signature(Bytes::from(vec![0xaa; 65]))
+                .with_simulation(),
+            &asserter,
+            Ok(make_single_quote(900)),
+        )
+        .await;
+
+        let simulated = quote.orders()[0]
+            .simulation_result()
+            .expect("the fallback produces a simulation result");
+        assert!(matches!(simulated, SimulationResult::Success { amount_out, .. }
+                if amount_out == &BigUint::from(7_007u64)));
+        assert!(asserter.read_q().is_empty(), "both the permit2 call and the fallback ran");
+    }
+
+    #[tokio::test]
+    async fn test_permit2_quote_keeps_its_own_result_when_the_calldata_succeeds() {
+        let asserter = alloy::transports::mock::Asserter::new();
+        asserter.push_success(&simulated_response(5_005, true, 88_000));
+
+        let quote = quote_with_simulation(
+            EncodingOptions::new(0.01)
+                .with_transfer_type(UserTransferType::TransferFromPermit2)
+                .with_permit(permit_for_tests())
+                .with_signature(Bytes::from(vec![0xaa; 65]))
+                .with_simulation(),
+            &asserter,
+            Ok(make_single_quote(900)),
+        )
+        .await;
+
+        let simulated = quote.orders()[0]
+            .simulation_result()
+            .expect("the caller's own calldata produces a simulation result");
+        assert!(matches!(simulated, SimulationResult::Success { amount_out, .. }
+                if amount_out == &BigUint::from(5_005u64)));
+        assert!(asserter.read_q().is_empty(), "no fallback call was needed");
+    }
+
+    fn permit_for_tests() -> PermitSingle {
+        PermitSingle::new(
+            PermitDetails::new(
+                make_address(0x01),
+                BigUint::from(1_000u64),
+                BigUint::from(1_900_000_000u64),
+                BigUint::ZERO,
+            ),
+            make_address(0x0B),
+            BigUint::from(1_900_000_000u64),
+        )
+    }
+
+    #[test]
+    fn test_permit2_simulation_uses_transfer_from_encoding() {
+        let options = EncodingOptions::new(0.01)
+            .with_transfer_type(UserTransferType::TransferFromPermit2)
+            .with_simulation();
+        let simulation_options =
+            simulation_encoding_options(&options).expect("Permit2 needs simulation-only encoding");
+
+        assert_eq!(simulation_options.transfer_type(), &UserTransferType::TransferFrom);
+        assert!(simulation_options.permit().is_none());
+        assert!(simulation_options
+            .permit2_signature()
+            .is_none());
+    }
+
+    #[test]
+    fn test_plain_transfer_simulation_uses_returned_encoding() {
+        let options = EncodingOptions::new(0.01).with_simulation();
+        assert!(simulation_encoding_options(&options).is_none());
     }
 
     /// A fallback that pays at least `min_amount_out` leaves the candidate rankable.

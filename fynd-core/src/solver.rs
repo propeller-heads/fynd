@@ -50,6 +50,7 @@ use crate::{
     propamm_fallback::{
         fee_tier_fetcher::FeeTierFetcher, SharedFeeTiers, PROPAMM_ROUTER_ADDRESS, PROPAMM_VENUES,
     },
+    simulation::simulator::QuoteSimulator,
     types::constants::native_token,
     worker_pool::{
         pool::{WorkerPool, WorkerPoolBuilder},
@@ -99,6 +100,10 @@ pub mod defaults {
     pub const POOL_MAX_HOPS: usize = 3;
     /// Per-worker-pool solve timeout in milliseconds.
     pub const POOL_TIMEOUT_MS: u64 = 100;
+    /// Limits each simulation RPC request so optional quote simulation cannot delay quotes.
+    pub const SIMULATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+    /// Limits slot discovery independently, leaving a full request budget for the simulation call.
+    pub const SIMULATION_SLOT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 }
 
 // Internal-only defaults not shared with downstream crates.
@@ -368,6 +373,9 @@ pub enum SolverBuildError {
     /// The router fee fetcher could not be created (e.g. malformed RPC URL).
     #[error("failed to create router fee fetcher: {0}")]
     RouterFeeFetcher(String),
+    /// The quote simulator could not be created (e.g. malformed RPC URL).
+    #[error("failed to create quote simulator: {0}")]
+    QuoteSimulator(String),
     /// The PropAMMRouter fee tier fetcher could not be created (e.g. malformed RPC URL, or a
     /// malformed router or venue address constant).
     #[error("failed to create fallback fee tier fetcher: {0}")]
@@ -973,6 +981,10 @@ impl FyndBuilder {
             }
         };
 
+        let quote_simulator =
+            QuoteSimulator::new(self.rpc_url.as_str(), chain, defaults::SIMULATION_REQUEST_TIMEOUT)
+                .map_err(|error| SolverBuildError::QuoteSimulator(error.to_string()))?;
+
         // The PropAMMRouter is an Ethereum mainnet deployment, so no other chain has fee tiers to
         // read. Without the fetcher the tiers stay empty and every pAMM route is dropped.
         //
@@ -990,6 +1002,7 @@ impl FyndBuilder {
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses);
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
+        router = router.with_simulator(quote_simulator);
 
         if self.price_guard_enabled {
             let mut registry = PriceProviderRegistry::new();
