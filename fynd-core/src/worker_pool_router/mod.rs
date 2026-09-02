@@ -28,6 +28,7 @@ pub mod config;
 mod log_capture;
 
 use std::{
+    collections::BTreeMap,
     sync::LazyLock,
     time::{Duration, Instant},
 };
@@ -42,7 +43,7 @@ use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn, Level};
 use tycho_execution::encoding::{
     evm::gas_estimator::estimate_gas_usage,
     models::{Solution, Strategy},
@@ -358,6 +359,7 @@ pub async fn encode_quotes(
 pub fn finalize_quote(order_quotes: Vec<OrderQuote>, solve_time_ms: u64) -> Quote {
     for quote in &order_quotes {
         record_win(quote);
+        log_winning_protocols(quote);
     }
 
     let total_gas_estimate = order_quotes
@@ -1073,6 +1075,57 @@ fn deviation_bps(quoted_amount_out: &BigUint, simulated_amount_out: &BigUint) ->
         return None;
     }
     Some((simulated - quoted) / quoted * 10_000.0)
+}
+
+/// Target for the winning-quote protocol log. Emitted at INFO, so a deployment already running
+/// at `RUST_LOG=info` collects it without further configuration; `fynd::winning_protocols=warn`
+/// turns it off.
+const WINNING_PROTOCOLS_TARGET: &str = "fynd::winning_protocols";
+
+/// Logs which protocols the quote the router returns swaps on, and how many swaps it makes on
+/// each, as one JSON object.
+///
+/// The counts are swaps, not distinct pools: a split route that crosses two Uniswap V2 pools
+/// reports 2, which is what the solution executes.
+///
+/// A quote that found no route has no protocols to report and gets no line, so the log holds one
+/// line per returned route.
+fn log_winning_protocols(quote: &OrderQuote) {
+    if !tracing::enabled!(target: WINNING_PROTOCOLS_TARGET, Level::INFO) {
+        return;
+    }
+    if quote.status() != QuoteStatus::Success {
+        return;
+    }
+    let Some(route) = quote.route() else {
+        return;
+    };
+
+    // BTreeMap, so the same set of protocols always serialises in the same order and two lines
+    // can be compared as text.
+    let mut swaps_per_protocol: BTreeMap<&str, usize> = BTreeMap::new();
+    for swap in route.swaps() {
+        *swaps_per_protocol
+            .entry(swap.protocol())
+            .or_default() += 1;
+    }
+    let Ok(protocols) = serde_json::to_string(&swaps_per_protocol) else {
+        warn!(target: WINNING_PROTOCOLS_TARGET, "failed to serialise the winning protocols");
+        return;
+    };
+
+    // The payload is one plain string rather than tracing fields because the formatter wraps
+    // field names and their `=` separators in ANSI escapes, which defeats parsers downstream.
+    info!(
+        target: WINNING_PROTOCOLS_TARGET,
+        "winning_protocols order_id={} block={} pool={} algorithm={} swaps={} protocols={}",
+        quote.order_id(),
+        quote.block().number(),
+        quote.worker_pool(),
+        quote.algorithm(),
+        route.swaps().len(),
+        protocols,
+    );
 }
 
 /// Records the win and the settled volume of one quote the router returns, by pool and algorithm.
@@ -3698,5 +3751,46 @@ mod tests {
                 .any(|(name, _)| name == "quote_simulation_deviation_bps"),
             "a call that returned no amount has no deviation to record"
         );
+    }
+
+    /// Runs `log_winning_protocols` and returns the payload of each line it wrote.
+    fn capture_winning_protocols(quote: &OrderQuote) -> Vec<String> {
+        super::log_capture::capture_payloads("winning_protocols ", || log_winning_protocols(quote))
+    }
+
+    #[test]
+    fn test_winning_protocols_counts_swaps_per_protocol() {
+        let quote = make_route_quote(&[
+            ("uniswap_v2", 0x01, 0x02),
+            ("uniswap_v2", 0x02, 0x03),
+            ("vm:balancer_v2", 0x03, 0x04),
+        ]);
+
+        let payloads = capture_winning_protocols(&quote);
+
+        assert_eq!(payloads.len(), 1);
+        assert!(
+            payloads[0].contains(r#"protocols={"uniswap_v2":2,"vm:balancer_v2":1}"#),
+            "{}",
+            payloads[0]
+        );
+        assert!(payloads[0].contains("swaps=3"), "{}", payloads[0]);
+    }
+
+    #[test]
+    fn test_winning_protocols_payload_has_no_ansi_escapes() {
+        let quote = make_route_quote(&[("uniswap_v2", 0x01, 0x02)]);
+
+        let payloads = capture_winning_protocols(&quote);
+
+        assert_eq!(payloads.len(), 1);
+        assert!(!payloads[0].contains('\u{1b}'), "escape sequence in payload: {}", payloads[0]);
+    }
+
+    #[test]
+    fn test_winning_protocols_skips_a_quote_without_a_route() {
+        let quote = make_rate_quote(1_000, 900, 0);
+
+        assert!(capture_winning_protocols(&quote).is_empty());
     }
 }
