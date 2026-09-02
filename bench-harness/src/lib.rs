@@ -120,6 +120,9 @@ pub fn default_trades_path() -> PathBuf {
 pub struct BenchConfig {
     /// The config file's stem: what `--configs` takes, and what the reports show.
     pub label: String,
+    /// The file it was read from. Written into `run.json`, because a label alone does not say
+    /// whether a run took its configs from this crate or from a caller's directory.
+    pub path: PathBuf,
     /// Read back out of the file for the CSV columns.
     pub algorithm: String,
     pub max_hops: usize,
@@ -358,7 +361,13 @@ impl ConfigCatalog {
             .and_then(|value| value.as_integer())
             .unwrap_or(3) as usize;
 
-        Ok(BenchConfig { label: label.to_string(), algorithm, max_hops, worker_pool_fields })
+        Ok(BenchConfig {
+            label: label.to_string(),
+            algorithm,
+            max_hops,
+            worker_pool_fields,
+            path: path.clone(),
+        })
     }
 
     /// Every configuration, by file stem, sorted. The default when `--configs` is absent.
@@ -619,6 +628,9 @@ impl MarketFlags {
 pub enum MarketSource {
     /// Replayed from the recorded fixture.
     Offline {
+        /// The recording that was replayed. Two offline runs only compare when this matches, and
+        /// `--fixture` means it is no longer always the same file.
+        fixture: String,
         /// When the fixture was recorded, as unix seconds, so a report can be tied to the fixture
         /// that produced it.
         recorded_at_secs: u64,
@@ -682,6 +694,7 @@ pub fn load_market(fixture: &Path) -> Market {
             .gas_price_as_biguint(),
         rpc_url: None,
         source: MarketSource::Offline {
+            fixture: fixture.display().to_string(),
             recorded_at_secs: recording.metadata.recorded_at_secs,
             chain_name: recording.metadata.chain.clone(),
         },

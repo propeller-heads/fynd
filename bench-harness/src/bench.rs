@@ -914,10 +914,17 @@ fn run_json(outcome: &BenchOutcome<'_>) -> String {
         "order_selection": run.orders.label(),
         "pairs": outcome.pairs.len(),
         "baseline": outcome.baseline_label(),
+        // Label and file both, because `--configs-dir` means a label no longer names one file, and
+        // two runs whose `BF_d2` came from different files are not comparable.
         "configs": outcome
             .results
             .iter()
-            .map(|(config, _)| config.label.clone())
+            .map(|(config, _)| {
+                serde_json::json!({
+                    "label": config.label.clone(),
+                    "path": config.path.display().to_string(),
+                })
+            })
             .collect::<Vec<_>>(),
         "skipped": outcome.skipped,
         "gas_price_gwei": run.gas_price_gwei,
