@@ -687,8 +687,13 @@ pub fn load_market(fixture: &Path) -> Market {
         )
     });
     Market {
-        chain: fynd_core::types::parse_chain(&recording.metadata.chain)
-            .expect("fixture chain supported"),
+        chain: fynd_core::types::parse_chain(&recording.metadata.chain).unwrap_or_else(|error| {
+            panic!(
+                "{} was recorded on {}, which this build does not support: {error}",
+                fixture.display(),
+                recording.metadata.chain
+            )
+        }),
         market_gas_price: recording
             .metadata
             .gas_price_as_biguint(),

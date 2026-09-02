@@ -1472,25 +1472,21 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
 /// If the run cannot be set up: no order survives the dataset filters, the baseline config will
 /// not load, or the baseline will not build. Each of those makes the report meaningless rather
 /// than smaller.
-pub async fn run(algorithms: &AlgorithmRegistry) {
+///
+/// # Errors
+///
+/// Returns the reason the run could not start — an unusable config directory, or a market that
+/// could not be built — so the caller's target can carry it to an exit code.
+pub async fn run(algorithms: &AlgorithmRegistry) -> Result<(), String> {
     if crate::asked_for_the_test_list() {
-        return;
+        return Ok(());
     }
 
     let args = Args::parse();
     crate::init_logging(args.logs);
 
-    let catalog = args
-        .configs_dirs
-        .catalog()
-        .unwrap_or_else(|reason| panic!("{reason}"));
-    let mut market = match build_market(args.market.clone()).await {
-        Ok(market) => market,
-        Err(reason) => {
-            eprintln!("error: {reason}");
-            std::process::exit(1);
-        }
-    };
+    let catalog = args.configs_dirs.catalog()?;
+    let mut market = build_market(args.market.clone()).await?;
     let source = market.source.clone();
     let (run, mut configs) = Run::resolve(args, &market, &catalog);
 
@@ -1637,17 +1633,26 @@ pub async fn run(algorithms: &AlgorithmRegistry) {
         summary: &summary,
     };
 
-    if let Err(error) = std::fs::create_dir_all(&run.out_dir) {
-        println!("could not create {}: {error}", run.out_dir.display());
-        return;
-    }
-    write_file(&run.out_dir, "report.md", &report_markdown(&outcome));
-    write_file(&run.out_dir, "orders.csv", &orders_csv(&outcome));
-    write_file(&run.out_dir, "pairs.csv", &pairs_csv(&outcome));
-    write_file(&run.out_dir, "protocols.csv", &protocols_csv(&outcome));
-    write_file(&run.out_dir, "routes.jsonl", &routes_jsonl(&outcome));
-    write_file(&run.out_dir, "run.json", &run_json(&outcome));
-    if let Some(root) = run.out_dir.parent() {
+    write_run(&run.out_dir, &outcome)
+}
+
+/// Writes the six files a run leaves behind, and refreshes the index the viewer reads.
+///
+/// # Errors
+///
+/// If the output directory cannot be created. A run that solved everything and cannot write is
+/// still a failed run: the numbers are only in memory.
+fn write_run(out_dir: &Path, outcome: &BenchOutcome<'_>) -> Result<(), String> {
+    std::fs::create_dir_all(out_dir)
+        .map_err(|error| format!("could not create {}: {error}", out_dir.display()))?;
+    write_file(out_dir, "report.md", &report_markdown(outcome));
+    write_file(out_dir, "orders.csv", &orders_csv(outcome));
+    write_file(out_dir, "pairs.csv", &pairs_csv(outcome));
+    write_file(out_dir, "protocols.csv", &protocols_csv(outcome));
+    write_file(out_dir, "routes.jsonl", &routes_jsonl(outcome));
+    write_file(out_dir, "run.json", &run_json(outcome));
+    if let Some(root) = out_dir.parent() {
         write_index(root);
     }
+    Ok(())
 }

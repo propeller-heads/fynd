@@ -192,11 +192,16 @@ fn select_orders(
 ///
 /// # Panics
 ///
-/// If the configuration will not load or the solver will not build. There is one configuration in
-/// a profiling run, so neither leaves anything to measure.
-pub async fn run(algorithms: &AlgorithmRegistry) {
+/// If the solver will not build. There is one configuration in a profiling run, so that leaves
+/// nothing to measure.
+///
+/// # Errors
+///
+/// Returns the reason the run could not start — an unusable config directory, an unknown config,
+/// or a market that could not be built — so the caller's target can carry it to an exit code.
+pub async fn run(algorithms: &AlgorithmRegistry) -> Result<(), String> {
     if crate::asked_for_the_test_list() {
-        return;
+        return Ok(());
     }
 
     let args = Args::parse();
@@ -204,17 +209,10 @@ pub async fn run(algorithms: &AlgorithmRegistry) {
 
     let config = args
         .configs_dirs
-        .catalog()
-        .and_then(|catalog| catalog.load(&args.config))
-        .unwrap_or_else(|reason| panic!("{reason}"));
+        .catalog()?
+        .load(&args.config)?;
 
-    let mut market = match build_market(args.market.clone()).await {
-        Ok(market) => market,
-        Err(reason) => {
-            eprintln!("error: {reason}");
-            std::process::exit(1);
-        }
-    };
+    let mut market = build_market(args.market.clone()).await?;
     let gas_price_gwei = resolved_gas_price_gwei(args.gas_price_gwei, &market);
     let excluded_protocols = args
         .exclude_protocols
@@ -371,4 +369,5 @@ pub async fn run(algorithms: &AlgorithmRegistry) {
         );
     }
     println!();
+    Ok(())
 }
