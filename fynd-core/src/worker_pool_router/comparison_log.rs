@@ -288,60 +288,15 @@ mod tests {
         capture_comparison(&comparison_order(), responses, &QuoteOptions::default())
     }
 
-    /// Runs `log_quote_comparison` under a subscriber and returns the payload of each line.
+    /// Runs `log_quote_comparison` and returns the payload of each line it wrote.
     fn capture_comparison(
         order: &Order,
         responses: &OrderResponses,
         options: &QuoteOptions,
     ) -> Vec<String> {
-        let logs = CapturedLogs::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(logs.clone())
-            .compact()
-            .with_ansi(true)
-            .with_max_level(Level::TRACE)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        crate::worker_pool_router::log_capture::capture_payloads("quote_comparison ", || {
             log_quote_comparison(order, responses, options);
-        });
-        let rendered = String::from_utf8(
-            logs.0
-                .lock()
-                .expect("log buffer poisoned")
-                .clone(),
-        )
-        .expect("utf-8");
-        rendered
-            .lines()
-            .filter_map(|line| line.split_once("quote_comparison "))
-            .map(|(_, payload)| payload.to_string())
-            .collect()
-    }
-
-    /// Collects formatted log output so a test can inspect the bytes a log pipeline would see.
-    #[derive(Clone, Default)]
-    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for CapturedLogs {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("log buffer poisoned")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
-        type Writer = CapturedLogs;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
+        })
     }
 
     fn responses_with(quotes: Vec<WorkerPoolQuote>) -> OrderResponses {

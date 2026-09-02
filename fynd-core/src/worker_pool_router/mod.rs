@@ -24,8 +24,11 @@
 mod allocation;
 mod comparison_log;
 pub mod config;
+#[cfg(test)]
+mod log_capture;
 
 use std::{
+    collections::BTreeMap,
     sync::LazyLock,
     time::{Duration, Instant},
 };
@@ -40,7 +43,7 @@ use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn, Level};
 use tycho_execution::encoding::{
     evm::gas_estimator::estimate_gas_usage,
     models::{Solution, Strategy},
@@ -48,10 +51,13 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
-    encoding::encoder::Encoder, feed::exclusivity::is_exclusive, price_guard::guard::PriceGuard,
-    simulation::simulator::QuoteSimulator, worker_pool::task_queue::TaskQueueHandle, BlockInfo,
-    EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus,
-    SolveError, SolveParams, SurplusInfo, Swap,
+    encoding::encoder::Encoder,
+    feed::exclusivity::is_exclusive,
+    price_guard::guard::PriceGuard,
+    simulation::simulator::{QuoteSimulator, SimulationAttempt},
+    worker_pool::task_queue::TaskQueueHandle,
+    BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
+    QuoteStatus, SolveError, SolveParams, SurplusInfo, Swap,
 };
 
 /// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
@@ -353,6 +359,7 @@ pub async fn encode_quotes(
 pub fn finalize_quote(order_quotes: Vec<OrderQuote>, solve_time_ms: u64) -> Quote {
     for quote in &order_quotes {
         record_win(quote);
+        log_winning_protocols(quote);
     }
 
     let total_gas_estimate = order_quotes
@@ -602,8 +609,9 @@ impl WorkerPoolRouter {
                 .iter_mut()
                 .map(|quote| async move {
                     if quote.status() == QuoteStatus::Success {
-                        let result = simulator.simulate(quote).await;
-                        quote.set_simulation_result(result);
+                        let attempt = simulator.simulate_attempt(quote).await;
+                        record_simulation_outcome(quote.amount_out(), &attempt);
+                        quote.set_simulation_result(attempt.into_result());
                     }
                 }),
         )
@@ -1034,6 +1042,90 @@ fn to_gas_token_amount(quote: &OrderQuote, amount: &BigUint) -> Option<BigUint> 
         return None;
     }
     Some(amount * gas_cost_wei / gas_cost_out)
+}
+
+/// Records the outcome of one simulated quote, and how far the simulated amount landed from the
+/// quoted one.
+///
+/// A revert and a failure are counted apart because they call for different work: a revert means
+/// the route the solver priced does not execute, while a failure means the simulation itself did
+/// not run, so it says nothing about the route.
+fn record_simulation_outcome(quoted_amount_out: &BigUint, attempt: &SimulationAttempt) {
+    let outcome = match attempt {
+        SimulationAttempt::Success { amount_out, .. } => {
+            if let Some(deviation_bps) = deviation_bps(quoted_amount_out, amount_out) {
+                histogram!("quote_simulation_deviation_bps").record(deviation_bps);
+            }
+            "success"
+        }
+        SimulationAttempt::Reverted { .. } => "reverted",
+        SimulationAttempt::Failure { .. } => "failed",
+    };
+    counter!("quote_simulation_total", "outcome" => outcome).increment(1);
+}
+
+/// How far the simulated amount sits from the quoted one, in basis points of the quoted amount.
+///
+/// A negative value means the simulation returned less than the quote promised. A quote of zero
+/// has no ratio to report, so it returns `None` rather than a division by zero.
+fn deviation_bps(quoted_amount_out: &BigUint, simulated_amount_out: &BigUint) -> Option<f64> {
+    let quoted = quoted_amount_out.to_f64()?;
+    let simulated = simulated_amount_out.to_f64()?;
+    if quoted <= 0.0 {
+        return None;
+    }
+    Some((simulated - quoted) / quoted * 10_000.0)
+}
+
+/// Target for the winning-quote protocol log. Emitted at INFO, so a deployment already running
+/// at `RUST_LOG=info` collects it without further configuration; `fynd::winning_protocols=warn`
+/// turns it off.
+const WINNING_PROTOCOLS_TARGET: &str = "fynd::winning_protocols";
+
+/// Logs which protocols the quote the router returns swaps on, and how many swaps it makes on
+/// each, as one JSON object.
+///
+/// The counts are swaps, not distinct pools: a split route that crosses two Uniswap V2 pools
+/// reports 2, which is what the solution executes.
+///
+/// A quote that found no route has no protocols to report and gets no line, so the log holds one
+/// line per returned route.
+fn log_winning_protocols(quote: &OrderQuote) {
+    if !tracing::enabled!(target: WINNING_PROTOCOLS_TARGET, Level::INFO) {
+        return;
+    }
+    if quote.status() != QuoteStatus::Success {
+        return;
+    }
+    let Some(route) = quote.route() else {
+        return;
+    };
+
+    // BTreeMap, so the same set of protocols always serialises in the same order and two lines
+    // can be compared as text.
+    let mut swaps_per_protocol: BTreeMap<&str, usize> = BTreeMap::new();
+    for swap in route.swaps() {
+        *swaps_per_protocol
+            .entry(swap.protocol())
+            .or_default() += 1;
+    }
+    let Ok(protocols) = serde_json::to_string(&swaps_per_protocol) else {
+        warn!(target: WINNING_PROTOCOLS_TARGET, "failed to serialise the winning protocols");
+        return;
+    };
+
+    // The payload is one plain string rather than tracing fields because the formatter wraps
+    // field names and their `=` separators in ANSI escapes, which defeats parsers downstream.
+    info!(
+        target: WINNING_PROTOCOLS_TARGET,
+        "winning_protocols order_id={} block={} pool={} algorithm={} swaps={} protocols={}",
+        quote.order_id(),
+        quote.block().number(),
+        quote.worker_pool(),
+        quote.algorithm(),
+        route.swaps().len(),
+        protocols,
+    );
 }
 
 /// Records the win and the settled volume of one quote the router returns, by pool and algorithm.
@@ -3564,5 +3656,141 @@ mod tests {
             .with_gas_price(BigUint::from(5_000_000_000u64));
 
         assert_eq!(to_gas_token_amount(&quote, &BigUint::from(100_000_000u64)), None);
+    }
+
+    #[test]
+    fn test_deviation_bps_reports_a_shortfall_as_negative() {
+        let deviation =
+            deviation_bps(&BigUint::from(1_000_000u64), &BigUint::from(999_000u64)).unwrap();
+
+        assert!((deviation - -10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_deviation_bps_reports_a_surplus_as_positive() {
+        let deviation =
+            deviation_bps(&BigUint::from(1_000_000u64), &BigUint::from(1_001_000u64)).unwrap();
+
+        assert!((deviation - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_deviation_bps_without_a_quoted_amount() {
+        assert_eq!(deviation_bps(&BigUint::ZERO, &BigUint::from(1_000u64)), None);
+    }
+
+    /// Names every metric a run recorded, with its labels, so a test can assert on them.
+    fn recorded_metrics(
+        snapshotter: &metrics_util::debugging::Snapshotter,
+    ) -> Vec<(String, Vec<String>)> {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .iter()
+            .map(|(key, _, _, _)| {
+                (
+                    key.key().name().to_string(),
+                    key.key()
+                        .labels()
+                        .map(|label| format!("{}={}", label.key(), label.value()))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_record_simulation_outcome_counts_a_success_and_its_deviation() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_simulation_outcome(
+                &BigUint::from(1_000_000u64),
+                &SimulationAttempt::Success {
+                    amount_out: BigUint::from(999_000u64),
+                    gas_used: 120_000,
+                },
+            );
+        });
+
+        let recorded = recorded_metrics(&snapshotter);
+        assert!(recorded.contains(&(
+            "quote_simulation_total".to_string(),
+            vec!["outcome=success".to_string()]
+        )));
+        assert!(recorded
+            .iter()
+            .any(|(name, _)| name == "quote_simulation_deviation_bps"));
+    }
+
+    #[test]
+    fn test_record_simulation_outcome_counts_a_revert_apart_from_a_failure() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_simulation_outcome(
+                &BigUint::from(1_000_000u64),
+                &SimulationAttempt::Reverted { reason: "reverted".to_string() },
+            );
+            record_simulation_outcome(
+                &BigUint::from(1_000_000u64),
+                &SimulationAttempt::Failure { reason: "timed out".to_string() },
+            );
+        });
+
+        let recorded = recorded_metrics(&snapshotter);
+        for outcome in ["outcome=reverted", "outcome=failed"] {
+            assert!(recorded
+                .contains(&("quote_simulation_total".to_string(), vec![outcome.to_string()])));
+        }
+        assert!(
+            !recorded
+                .iter()
+                .any(|(name, _)| name == "quote_simulation_deviation_bps"),
+            "a call that returned no amount has no deviation to record"
+        );
+    }
+
+    /// Runs `log_winning_protocols` and returns the payload of each line it wrote.
+    fn capture_winning_protocols(quote: &OrderQuote) -> Vec<String> {
+        super::log_capture::capture_payloads("winning_protocols ", || log_winning_protocols(quote))
+    }
+
+    #[test]
+    fn test_winning_protocols_counts_swaps_per_protocol() {
+        let quote = make_route_quote(&[
+            ("uniswap_v2", 0x01, 0x02),
+            ("uniswap_v2", 0x02, 0x03),
+            ("vm:balancer_v2", 0x03, 0x04),
+        ]);
+
+        let payloads = capture_winning_protocols(&quote);
+
+        assert_eq!(payloads.len(), 1);
+        assert!(
+            payloads[0].contains(r#"protocols={"uniswap_v2":2,"vm:balancer_v2":1}"#),
+            "{}",
+            payloads[0]
+        );
+        assert!(payloads[0].contains("swaps=3"), "{}", payloads[0]);
+    }
+
+    #[test]
+    fn test_winning_protocols_payload_has_no_ansi_escapes() {
+        let quote = make_route_quote(&[("uniswap_v2", 0x01, 0x02)]);
+
+        let payloads = capture_winning_protocols(&quote);
+
+        assert_eq!(payloads.len(), 1);
+        assert!(!payloads[0].contains('\u{1b}'), "escape sequence in payload: {}", payloads[0]);
+    }
+
+    #[test]
+    fn test_winning_protocols_skips_a_quote_without_a_route() {
+        let quote = make_rate_quote(1_000, 900, 0);
+
+        assert!(capture_winning_protocols(&quote).is_empty());
     }
 }
