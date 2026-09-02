@@ -962,7 +962,7 @@ pub enum SimulationResult {
         #[serde_as(as = "DisplayFromStr")]
         #[cfg_attr(feature = "openapi", schema(value_type = String, example = "3500000000"))]
         amount_out: BigUint,
-        /// Gas consumed by the simulated call; Permit2 fallback gas excludes the permit call.
+        /// Gas consumed by the simulated call.
         #[cfg_attr(feature = "openapi", schema(example = 150000))]
         gas_used: u64,
     },

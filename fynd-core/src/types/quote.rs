@@ -1144,7 +1144,7 @@ pub enum SimulationResult {
         /// Amount returned by the router call.
         #[serde_as(as = "DisplayFromStr")]
         amount_out: BigUint,
-        /// Gas consumed by the simulated call; Permit2 fallback gas excludes the permit call.
+        /// Gas consumed by the simulated call.
         gas_used: u64,
     },
     /// The simulated router call could not complete.

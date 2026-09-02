@@ -47,36 +47,26 @@ fn test_decode_revert_reason_keeps_node_message_without_data() {
 }
 
 #[test]
-fn test_token_overrides_write_balance_and_allowance_slots() {
-    let sender = Address::repeat_byte(1);
-    let spender = Address::repeat_byte(2);
-    let token = Address::repeat_byte(3);
-    let positions =
-        Erc20SlotPositions::new(MappingPosition::Standard(4), MappingPosition::Standard(5));
-    let overrides = token_overrides(sender, token, sender, positions, Some(spender));
-    let state_diff = overrides
-        .get(&token)
-        .and_then(|override_| override_.state_diff.as_ref())
-        .expect("token state diff");
-    assert!(state_diff.contains_key(&positions.balance_slot(sender)));
-    assert!(state_diff.contains_key(&positions.allowance_slot(sender, spender)));
-}
-
-#[test]
-fn test_vault_overrides_fund_router_without_allowance() {
+fn test_token_overrides_fund_both_holders_and_both_spenders() {
     let sender = Address::repeat_byte(1);
     let router = Address::repeat_byte(2);
     let token = Address::repeat_byte(3);
+    let permit2 = Address::repeat_byte(4);
     let positions =
-        Erc20SlotPositions::new(MappingPosition::Standard(4), MappingPosition::Standard(5));
-    let overrides = token_overrides(sender, token, router, positions, None);
+        Erc20SlotPositions::new(MappingPosition::Standard(5), MappingPosition::Standard(6));
+    let overrides = token_overrides(sender, token, router, permit2, positions);
     let state_diff = overrides
         .get(&token)
         .and_then(|override_| override_.state_diff.as_ref())
         .expect("token state diff");
+
+    // A `transfer_from` route pulls from the sender and a `use_vaults_funds` one from the router,
+    // so both hold a balance and the sender approves both spenders a route can name.
+    assert!(state_diff.contains_key(&positions.balance_slot(sender)));
     assert!(state_diff.contains_key(&positions.balance_slot(router)));
-    assert!(!state_diff.contains_key(&positions.balance_slot(sender)));
-    assert_eq!(state_diff.len(), 1);
+    assert!(state_diff.contains_key(&positions.allowance_slot(sender, router)));
+    assert!(state_diff.contains_key(&positions.allowance_slot(sender, permit2)));
+    assert_eq!(state_diff.len(), 4);
 }
 
 fn mocked_simulator(asserter: &Asserter, timeout: Duration) -> QuoteSimulator {

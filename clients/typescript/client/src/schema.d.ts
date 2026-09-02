@@ -656,7 +656,7 @@ export interface components {
             amount_out: string;
             /**
              * Format: int64
-             * @description Gas consumed by the simulated call; Permit2 fallback gas excludes the permit call.
+             * @description Gas consumed by the simulated call.
              * @example 150000
              */
             gas_used: number;

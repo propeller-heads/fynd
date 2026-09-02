@@ -23,7 +23,7 @@ use crate::{
     encoding::encoder::PERMIT2_ADDRESS,
     simulation::erc20_slots::{find_slot_positions, Erc20SlotPositions},
     solver::defaults::SIMULATION_SLOT_DISCOVERY_TIMEOUT,
-    EncodingOptions, OrderQuote, SimulationResult, UserTransferType,
+    OrderQuote, SimulationResult,
 };
 
 sol! { error Error(string); }
@@ -76,21 +76,13 @@ impl QuoteSimulator {
     }
 
     /// Simulates an encoded quote and reports its returned amount and gas used or a failure.
-    pub async fn simulate(
-        &self,
-        quote: &OrderQuote,
-        encoding_options: &EncodingOptions,
-    ) -> SimulationResult {
-        self.simulate_attempt(quote, encoding_options)
+    pub async fn simulate(&self, quote: &OrderQuote) -> SimulationResult {
+        self.simulate_attempt(quote)
             .await
             .into_result()
     }
 
-    pub(crate) async fn simulate_attempt(
-        &self,
-        quote: &OrderQuote,
-        encoding_options: &EncodingOptions,
-    ) -> SimulationAttempt {
+    pub(crate) async fn simulate_attempt(&self, quote: &OrderQuote) -> SimulationAttempt {
         let transaction = match quote.transaction() {
             Some(value) => value,
             None => return failure("simulation setup failed: quote has no encoded transaction"),
@@ -116,7 +108,7 @@ impl QuoteSimulator {
             Err(error) => return failure_with(format!("simulation setup failed: {error}")),
         };
         let overrides = match self
-            .overrides(sender, token_in, router, encoding_options.transfer_type())
+            .overrides(sender, token_in, router)
             .await
         {
             Ok(value) => value,
@@ -173,19 +165,17 @@ impl QuoteSimulator {
         sender: Address,
         token: Address,
         router: Address,
-        transfer_type: &UserTransferType,
     ) -> Result<StateOverride, String> {
         if token == self.native_token {
             return Ok(native_balance_override(sender));
         }
-        let (holder, spender) = match transfer_type {
-            UserTransferType::UseVaultsFunds => (router, None),
-            _ => (sender, Some(spender_for(router, transfer_type)?)),
-        };
+        let permit2: Address = PERMIT2_ADDRESS
+            .parse()
+            .map_err(|error| format!("invalid Permit2 address: {error}"))?;
         let positions = self
-            .cached_positions(token, holder, spender.unwrap_or(router))
+            .cached_positions(token, sender, router)
             .await?;
-        Ok(token_overrides(sender, token, holder, positions, spender))
+        Ok(token_overrides(sender, token, router, permit2, positions))
     }
 
     async fn cached_positions(
@@ -304,15 +294,6 @@ fn rpc_error_reason(
     decode_revert_reason(data.as_deref().map(AsRef::as_ref), &message)
 }
 
-fn spender_for(router: Address, transfer_type: &UserTransferType) -> Result<Address, String> {
-    match transfer_type {
-        UserTransferType::TransferFrom | UserTransferType::UseVaultsFunds => Ok(router),
-        UserTransferType::TransferFromPermit2 => PERMIT2_ADDRESS
-            .parse()
-            .map_err(|error| format!("invalid Permit2 address: {error}")),
-    }
-}
-
 fn native_balance_override(sender: Address) -> StateOverride {
     StateOverride::from_iter([(
         sender,
@@ -320,20 +301,26 @@ fn native_balance_override(sender: Address) -> StateOverride {
     )])
 }
 
+/// Funds and approves every account a route can pull the input token from.
+///
+/// The sender holds the funds for a `transfer_from` route and the router holds them for a
+/// `use_vaults_funds` one; the spender is the router directly, or Permit2 when the route carries a
+/// permit. Which of those a quote uses is settled by calldata the simulation does not read, so all
+/// of them are funded and approved rather than asking the caller which to prepare.
 fn token_overrides(
     sender: Address,
     token: Address,
-    holder: Address,
+    router: Address,
+    permit2: Address,
     positions: Erc20SlotPositions,
-    spender: Option<Address>,
 ) -> StateOverride {
+    let funding = B256::from(SIMULATION_FUNDING_VALUE);
     let mut state_diff = B256HashMap::default();
-    state_diff.insert(positions.balance_slot(holder), B256::from(SIMULATION_FUNDING_VALUE));
-    if let Some(spender) = spender {
-        state_diff.insert(
-            positions.allowance_slot(sender, spender),
-            B256::from(SIMULATION_FUNDING_VALUE),
-        );
+    for holder in [sender, router] {
+        state_diff.insert(positions.balance_slot(holder), funding);
+    }
+    for spender in [router, permit2] {
+        state_diff.insert(positions.allowance_slot(sender, spender), funding);
     }
     StateOverride::from_iter([
         (sender, AccountOverride::default().with_balance(SIMULATION_FUNDING_VALUE)),
