@@ -105,11 +105,15 @@ Every other option works as it does offline, plus:
 | `--capture-timeout-secs N` | How long to wait for the snapshot, and for the price level frame, before giving up |
 | `--tycho-url HOST` | Overrides `TYCHO_URL`. Scheme optional |
 | `--tycho-api-key KEY` | Overrides `TYCHO_API_KEY` |
-| `--rpc-url URL` | Overrides `RPC_URL`, read for the live gas price |
+| `--rpc-url URL` | Overrides `RPC_URL`. Read for the live gas price, and once for the PropAMMRouter's fee tiers |
 
 Without `--gas-price-gwei` a live run prices gas at whatever the chain is charging, read from
 `RPC_URL`. Pass the flag and it wins. An offline run has no such price to read — the fixture
 carries none — so it keeps using the default.
+
+The same node is read once more, for the PropAMMRouter's fee tiers. A route with a
+`propammfallback:` leg needs them: without them the solver drops every such route. An offline run
+reads no node, so a market holding those components cannot be routed through them.
 
 ### pAMM price levels
 

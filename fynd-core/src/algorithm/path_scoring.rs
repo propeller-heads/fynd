@@ -138,12 +138,13 @@ impl PairWinners {
         Self { winner_by_pair: FxHashMap::default(), reuse_winners }
     }
 
-    /// Swaps one pair: which pool to go through, and what it pays.
+    /// Chooses which pool on the pair to go through, and returns what that pool paid.
     ///
-    /// Tries the pool that won this pair before falling back to every pool.
+    /// Tries the pool that won this pair before asking every pool. Asking is the caller's
+    /// `simulate` closure; nothing here trades.
     ///
     /// Returns `None` when no pool on the pair can trade the amount.
-    fn swap_pair<'g, D>(
+    fn choose_pool_for_pair<'g, D>(
         &mut self,
         pair: (NodeIndex, NodeIndex),
         pools: &'g [EdgeData<D>],
@@ -209,7 +210,7 @@ pub(crate) fn simulate_token_path<'g, D, T>(
             best_paying_pool(leg.pools, |id| !crossed.contains(&id), simulate_pool)
                 .map(|(hop, _)| hop)
         } else {
-            winners.swap_pair(leg.pair, leg.pools, simulate_pool)
+            winners.choose_pool_for_pair(leg.pair, leg.pools, simulate_pool)
         };
         let Some(hop_result) = hop_result else {
             return Err(FailedLegIx(leg_ix));
@@ -379,7 +380,7 @@ mod tests {
         let pools = pools(multipliers.len());
 
         let outcome = winners
-            .swap_pair(pair(), &pools, simulator(multipliers, 100))
+            .choose_pool_for_pair(pair(), &pools, simulator(multipliers, 100))
             .unwrap();
 
         assert_eq!(outcome.pool_ix, 1, "pool1 pays 500 against pool0's 200");
@@ -394,12 +395,12 @@ mod tests {
         let multipliers = [2u64, 5u64];
         let pools = pools(multipliers.len());
         winners
-            .swap_pair(pair(), &pools, simulator(multipliers, 100))
+            .choose_pool_for_pair(pair(), &pools, simulator(multipliers, 100))
             .unwrap();
 
         let mut asked = Vec::new();
         let outcome = winners
-            .swap_pair(pair(), &pools, |component_id: &ComponentId| {
+            .choose_pool_for_pair(pair(), &pools, |component_id: &ComponentId| {
                 asked.push(component_id.clone());
                 simulator(multipliers, 100)(component_id)
             })
@@ -416,11 +417,11 @@ mod tests {
         let mut winners = PairWinners::new(true);
         let pools = pools(2);
         winners
-            .swap_pair(pair(), &pools, simulator([2, 5], 100))
+            .choose_pool_for_pair(pair(), &pools, simulator([2, 5], 100))
             .unwrap();
 
         let outcome = winners
-            .swap_pair(pair(), &pools, |component_id: &ComponentId| {
+            .choose_pool_for_pair(pair(), &pools, |component_id: &ComponentId| {
                 (component_id == "pool0").then(|| {
                     let amount = BigUint::from(50u64);
                     PoolQuote {
@@ -443,11 +444,11 @@ mod tests {
         let pools = pools(multipliers.len());
 
         let first = winners
-            .swap_pair(pair(), &pools, simulator(multipliers, 100))
+            .choose_pool_for_pair(pair(), &pools, simulator(multipliers, 100))
             .unwrap();
         let mut asked = 0usize;
         let second = winners
-            .swap_pair(pair(), &pools, |component_id: &ComponentId| {
+            .choose_pool_for_pair(pair(), &pools, |component_id: &ComponentId| {
                 asked += 1;
                 simulator(multipliers, 100)(component_id)
             })
@@ -463,7 +464,7 @@ mod tests {
         let mut winners = PairWinners::new(true);
         let pools = pools(2);
 
-        let outcome = winners.swap_pair(pair(), &pools, |_| None);
+        let outcome = winners.choose_pool_for_pair(pair(), &pools, |_| None);
 
         assert!(outcome.is_none());
     }

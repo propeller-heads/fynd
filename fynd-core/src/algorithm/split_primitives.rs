@@ -598,30 +598,24 @@ struct SplitExecution {
 /// Merge shared hops across paths, summing their flow fractions, and return
 /// them collected by `token_in` (sorted by amount descending within each
 /// branch collection).
-fn merge_shared_hops(
-    paths: &[PathAllocation],
-) -> Result<FxHashMap<Bytes, Vec<SplitSwap>>, AlgorithmError> {
+fn merge_shared_hops(paths: &[PathAllocation]) -> FxHashMap<Bytes, Vec<SplitSwap>> {
     let mut hops: FxHashMap<HopKey, SplitSwap> = FxHashMap::default();
 
     for path in paths {
         for hop in &path.hops {
             let desc = &hop.descriptor;
-            let key: HopKey = (
-                desc.component_id.clone(),
-                desc.token_in.address.clone(),
-                desc.token_out.address.clone(),
-            );
-            hops.entry(key).or_insert(SplitSwap {
-                hop: HopDescriptor::new(
-                    desc.component_id.clone(),
-                    desc.token_in.clone(),
-                    desc.token_out.clone(),
-                ),
-                // Both set by `splits_from_amounts`, from the amounts the paths standing at this
-                // token actually carry.
-                split: 0.0,
-                amount_in: BigUint::ZERO,
-            });
+            hops.entry(hop_key(desc))
+                .or_insert(SplitSwap {
+                    hop: HopDescriptor::new(
+                        desc.component_id.clone(),
+                        desc.token_in.clone(),
+                        desc.token_out.clone(),
+                    ),
+                    // Both set by `splits_from_amounts`, from the amounts the paths standing at
+                    // this token actually carry.
+                    split: 0.0,
+                    amount_in: BigUint::ZERO,
+                });
         }
     }
 
@@ -653,7 +647,7 @@ fn merge_shared_hops(
                 })
         });
     }
-    Ok(branch_collections)
+    branch_collections
 }
 
 /// Turns the amounts the execution wants into the fractions the encoder carries — and then back
@@ -829,6 +823,15 @@ impl PathLedger {
             .collect()
     }
 
+    /// What the paths feeding one swap carry between them, added up.
+    fn fed_total(&self, fed: &[usize]) -> BigUint {
+        let mut total = BigUint::ZERO;
+        for &path_ix in fed {
+            total += &self.amount_in[path_ix];
+        }
+        total
+    }
+
     /// Divides `total` between the paths that fed a swap, in proportion to what each put in.
     fn rescale(&mut self, fed: &[usize], total: &BigUint) {
         let fed_amounts = self.fed_amounts(fed);
@@ -934,10 +937,7 @@ fn amounts_for_branch(
                         split_swap.hop.component_id,
                     ))
                 })?;
-            split_swap.amount_in = ledger
-                .fed_amounts(fed)
-                .into_iter()
-                .sum();
+            split_swap.amount_in = ledger.fed_total(fed);
             Ok(split_swap)
         })
         .collect::<Result<_, AlgorithmError>>()?;
@@ -1033,7 +1033,7 @@ fn execute_split_plan(
         path.validate_token_cycles()?;
     }
 
-    let mut hops_by_token = merge_shared_hops(paths)?;
+    let mut hops_by_token = merge_shared_hops(paths);
     let mut in_degree = build_in_degree(&hops_by_token);
     let mut ready = VecDeque::from([start_token.clone()]);
 
@@ -2122,7 +2122,7 @@ mod tests {
             },
         ];
 
-        let hops_by_token = merge_shared_hops(&paths).unwrap();
+        let hops_by_token = merge_shared_hops(&paths);
 
         // Branch collection at A: both paths cross P1 on the same pair, so it merges to one swap.
         let branch_collection_a = &hops_by_token[&token_a.address];
@@ -3074,7 +3074,7 @@ mod tests {
         };
 
         // merge_shared_hops collapses Component A and Component B into single entries.
-        let merged = merge_shared_hops(&[path1.clone(), path2.clone()]).unwrap();
+        let merged = merge_shared_hops(&[path1.clone(), path2.clone()]);
         assert_eq!(
             merged[&usdc.address]
                 .iter()
