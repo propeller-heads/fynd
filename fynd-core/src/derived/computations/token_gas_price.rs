@@ -110,7 +110,9 @@ impl TokenGasPriceComputation {
     /// route, plus a sell solve per token.
     ///
     /// Returns the priced tokens, the block the market was read at, and one failed item per
-    /// token that could not be priced — no buy route, or no sell route back.
+    /// token that was bought but found no sell route back. Tokens the gas token cannot reach
+    /// at all are only counted (logged at debug): unreachable is the normal state for much of
+    /// the topology, and every full solve re-attempts them anyway.
     #[allow(clippy::type_complexity)]
     async fn solve_token_prices(
         &self,
@@ -153,6 +155,7 @@ impl TokenGasPriceComputation {
 
         let mut prices = FxHashMap::default();
         let mut failed_items = Vec::new();
+        let mut unreachable_tokens = 0usize;
         for token in wanted {
             match self
                 .price_token(&algorithm, graph, market, &token, buys.get(&token))
@@ -161,8 +164,15 @@ impl TokenGasPriceComputation {
                 Ok(priced) => {
                     prices.insert(token, priced);
                 }
+                // Tokens with no route from the gas token are counted, not reported: they are
+                // the normal state of much of the topology, and a failed item each would be
+                // allocated, logged, and broadcast to every worker every block.
+                Err(FailedItemError::UnreachableFromGasToken) => unreachable_tokens += 1,
                 Err(error) => failed_items.push(FailedItem { key: token.to_string(), error }),
             }
+        }
+        if unreachable_tokens > 0 {
+            debug!(unreachable_tokens, "tokens without a route from the gas token left unpriced");
         }
 
         Ok((prices, block, failed_items))
@@ -541,16 +551,26 @@ mod tests {
         let other = token(5, "OTHER");
 
         // ISLAND and OTHER trade only with each other, so no route reaches them from the gas token.
-        let prices = prices_for(
-            &eth,
-            vec![
-                ("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0)),
-                ("island_other", &island, &other, MockProtocolSim::new(1.0)),
-            ],
-        )
-        .await;
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0)),
+            ("island_other", &island, &other, MockProtocolSim::new(1.0)),
+        ]);
+        let store = DerivedData::new_shared();
+        let output = computation_for(&eth.address)
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
 
-        assert!(prices.contains_key(&usdc.address));
-        assert!(!prices.contains_key(&island.address), "an unreachable token has no price");
+        assert!(output.data.contains_key(&usdc.address));
+        assert!(
+            !output
+                .data
+                .contains_key(&island.address),
+            "an unreachable token has no price"
+        );
+        assert!(
+            output.failed_items.is_empty(),
+            "unreachable tokens are counted, not reported as failed items"
+        );
     }
 }
