@@ -19,9 +19,9 @@
 //! built-in gets. `README.md` has the manifest, the bench target and the command line.
 
 pub mod bench;
-pub mod live;
+pub(crate) mod live;
 pub mod profile;
-pub mod trades;
+pub(crate) mod trades;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -52,7 +52,7 @@ const DEFAULT_LOG_FILTER: &str = "fynd_core=debug";
 ///
 /// Logging costs time in the solve it reports on. Under a profiler the formatting and the writes
 /// land in the flamegraph alongside the algorithm.
-pub fn init_logging(enabled: bool) {
+pub(crate) fn init_logging(enabled: bool) {
     if !enabled {
         return;
     }
@@ -66,7 +66,7 @@ pub fn init_logging(enabled: bool) {
 /// Gas price both tools solve at unless `--gas-price-gwei` says otherwise.
 ///
 /// One value for both, so an order picked out of the benchmark's report profiles the same solve.
-pub const DEFAULT_GAS_PRICE_GWEI: f64 = 1.0;
+pub(crate) const DEFAULT_GAS_PRICE_GWEI: f64 = 1.0;
 
 /// Parses a `--gas-price-gwei` value.
 ///
@@ -77,7 +77,7 @@ pub const DEFAULT_GAS_PRICE_GWEI: f64 = 1.0;
 /// # Errors
 ///
 /// Returns a message for anything that is not a finite, non-negative number.
-pub fn parse_gas_price_gwei(raw: &str) -> Result<f64, String> {
+pub(crate) fn parse_gas_price_gwei(raw: &str) -> Result<f64, String> {
     let gwei: f64 = raw
         .parse()
         .map_err(|_| format!("`{raw}` is not a number"))?;
@@ -112,49 +112,49 @@ fn data_path(file: &str) -> PathBuf {
 ///
 /// Only useful inside this repository: the file is gitignored for its size, so a checkout cargo
 /// made for a git dependency does not hold it, and a caller from outside names its own copy.
-pub fn default_trades_path() -> PathBuf {
+pub(crate) fn default_trades_path() -> PathBuf {
     crate_path("../aggregator_trades_50k_1k_usd.json")
 }
 
 /// One solver configuration in the comparison, loaded from `<configs dir>/<label>.toml`.
-pub struct BenchConfig {
+pub(crate) struct BenchConfig {
     /// The config file's stem: what `--configs` takes, and what the reports show.
-    pub label: String,
+    pub(crate) label: String,
     /// The file it was read from. Written into `run.json`, because a label alone does not say
     /// whether a run took its configs from this crate or from a caller's directory.
-    pub path: PathBuf,
+    pub(crate) path: PathBuf,
     /// Read back out of the file for the CSV columns.
-    pub algorithm: String,
-    pub max_hops: usize,
+    pub(crate) algorithm: String,
+    pub(crate) max_hops: usize,
     /// The file's contents: a flat table of `PoolConfig` fields.
-    pub worker_pool_fields: toml::Table,
+    pub(crate) worker_pool_fields: toml::Table,
 }
 
 /// Tokens dropped from the market before anything is solved.
 ///
 /// Read from `data/blocked_tokens.toml`, which records why each one is there.
-pub struct BlockedTokens {
-    pub addresses: HashSet<Address>,
-    pub symbols: Vec<String>,
+pub(crate) struct BlockedTokens {
+    pub(crate) addresses: HashSet<Address>,
+    pub(crate) symbols: Vec<String>,
     /// Components dropped because they hold one of these tokens. Filled in once the market is
     /// filtered.
-    pub dropped_component_count: usize,
+    pub(crate) dropped_component_count: usize,
 }
 
 /// Deserialization shape of `data/blocked_tokens.toml`.
 #[derive(serde::Deserialize)]
-pub struct BlockedTokensFile {
+struct BlockedTokensFile {
     #[serde(default)]
     tokens: Vec<BlockedToken>,
 }
 
 #[derive(serde::Deserialize)]
-pub struct BlockedToken {
+struct BlockedToken {
     address: String,
     symbol: String,
 }
 
-pub fn load_blocked_tokens() -> BlockedTokens {
+pub(crate) fn load_blocked_tokens() -> BlockedTokens {
     let path = data_path("blocked_tokens.toml");
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return BlockedTokens {
@@ -181,7 +181,7 @@ pub fn load_blocked_tokens() -> BlockedTokens {
 }
 
 /// Every `protocol_system` present in the market, sorted, for validating `--exclude-protocols`.
-pub fn market_protocol_names(updates: &[Update]) -> Vec<String> {
+pub(crate) fn market_protocol_names(updates: &[Update]) -> Vec<String> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut names: Vec<String> = Vec::new();
     for update in updates {
@@ -199,7 +199,10 @@ pub fn market_protocol_names(updates: &[Update]) -> Vec<String> {
 ///
 /// Applied to the market rather than to a config, so it lands on every algorithm equally and an
 /// offline fixture can be narrowed the same way a live capture can.
-pub fn exclude_protocol_components(updates: &mut [Update], excluded: &HashSet<String>) -> usize {
+pub(crate) fn exclude_protocol_components(
+    updates: &mut [Update],
+    excluded: &HashSet<String>,
+) -> usize {
     if excluded.is_empty() {
         return 0;
     }
@@ -231,7 +234,7 @@ pub fn exclude_protocol_components(updates: &mut [Update], excluded: &HashSet<St
 ///
 /// An unknown name stops the run. Excluding a protocol changes every number a run reports, so a
 /// typo that quietly left it in would produce results that look valid and are not.
-pub fn exclude_requested_protocols(market: &mut Market, requested: &[String]) -> usize {
+pub(crate) fn exclude_requested_protocols(market: &mut Market, requested: &[String]) -> usize {
     if requested.is_empty() {
         return 0;
     }
@@ -256,7 +259,7 @@ pub fn exclude_requested_protocols(market: &mut Market, requested: &[String]) ->
 /// Done to the recording rather than through `connector_tokens` so it lands on every algorithm
 /// equally: `path_frank_wolfe` never reads `connector_tokens`, so a routing-level filter would
 /// quietly leave the bad pools available to it alone.
-pub fn block_components(updates: &mut [Update], blocked: &HashSet<Address>) -> usize {
+pub(crate) fn block_components(updates: &mut [Update], blocked: &HashSet<Address>) -> usize {
     if blocked.is_empty() {
         return 0;
     }
@@ -292,7 +295,7 @@ pub fn block_components(updates: &mut [Update], blocked: &HashSet<Address>) -> u
 /// Built once from the built-in directory plus whatever `--configs-dir` names. A stem is unique
 /// across all of them: two files claiming one name is an error rather than a silent winner,
 /// because the loser could be the baseline every number in the report is measured against.
-pub struct ConfigCatalog {
+pub(crate) struct ConfigCatalog {
     /// Stem to the file it was read from, so a lookup names one file and a report can say which.
     files: BTreeMap<String, PathBuf>,
 }
@@ -393,7 +396,7 @@ fn default_fixture_path() -> PathBuf {
 ///
 /// A config asking for exclusive liquidity gets two worker pools rather than one; see
 /// [`build_public_twin`].
-pub fn worker_pool_configs(
+pub(crate) fn worker_pool_configs(
     config: &BenchConfig,
     workers: usize,
     timeout_ms: u64,
@@ -464,7 +467,7 @@ fn build_public_twin(fields: &toml::Table) -> Option<toml::Table> {
 /// A test runner builds every target and asks each one to list its tests. Both benchmarks parse
 /// their own options and hold no tests, so they answer with an empty list rather than failing on an
 /// argument `clap` does not know.
-pub fn asked_for_the_test_list() -> bool {
+pub(crate) fn asked_for_the_test_list() -> bool {
     std::env::args().any(|argument| argument == "--list")
 }
 
@@ -473,11 +476,11 @@ pub fn asked_for_the_test_list() -> bool {
 /// Flattened into both programs, like the market flags, so the two agree on what a config
 /// directory means.
 #[derive(clap::Args, Debug, Clone)]
-pub struct ConfigFlags {
+pub(crate) struct ConfigFlags {
     /// A directory of configuration files to run, on top of the built-in ones. Repeatable. A name
     /// held by two directories stops the run, so a caller cannot replace the baseline by accident.
     #[arg(long = "configs-dir")]
-    pub configs_dirs: Vec<PathBuf>,
+    pub(crate) configs_dirs: Vec<PathBuf>,
 }
 
 impl ConfigFlags {
@@ -493,7 +496,7 @@ impl ConfigFlags {
 
 /// Which market a run solves against, as asked for on the command line.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum MarketMode {
+pub(crate) enum MarketMode {
     /// The recorded fixture. Reproducible, and comparable with every other offline run.
     Offline,
     /// One block captured live from Tycho.
@@ -509,7 +512,7 @@ pub enum MarketMode {
 ///
 /// Returns a message when a live capture cannot be made. The offline path panics instead -- a
 /// missing fixture is a broken checkout, not a run-time condition.
-pub async fn build_market(flags: MarketFlags) -> Result<Market, String> {
+pub(crate) async fn build_market(flags: MarketFlags) -> Result<Market, String> {
     match flags.market {
         MarketMode::Offline => {
             let fixture = flags
@@ -527,36 +530,36 @@ pub async fn build_market(flags: MarketFlags) -> Result<Market, String> {
 /// One declaration rather than two: the benchmark and the profiler have to agree on what a market
 /// is, and two copies of a dozen `clap` attributes drift the first time one is edited.
 #[derive(clap::Args, Debug, Clone)]
-pub struct MarketFlags {
+pub(crate) struct MarketFlags {
     /// Where the market comes from: the recorded fixture, or one block captured live from Tycho.
     ///
     /// Offline runs are reproducible and comparable with each other. A live run is a point-in-time
     /// market: its configs compare with each other, not with any other run.
     #[arg(long, value_enum, default_value_t = MarketMode::Offline)]
-    pub market: MarketMode,
+    pub(crate) market: MarketMode,
 
     /// The market recording an offline run replays. Defaults to this repository's fixture, which a
     /// caller depending on this crate does not have: that copy is in Git LFS, so a checkout cargo
     /// made holds the pointer file instead of the market.
     #[arg(long)]
-    pub fixture: Option<PathBuf>,
+    pub(crate) fixture: Option<PathBuf>,
 
     /// Tycho host, with or without a scheme. Live runs only.
     #[arg(long, env = "TYCHO_URL")]
-    pub tycho_url: Option<String>,
+    pub(crate) tycho_url: Option<String>,
 
     /// Tycho API key. Live runs only.
     #[arg(long, env = "TYCHO_API_KEY")]
-    pub tycho_api_key: Option<String>,
+    pub(crate) tycho_api_key: Option<String>,
 
     /// Chain to capture. Live runs only.
     #[arg(long, default_value = "ethereum")]
-    pub chain: String,
+    pub(crate) chain: String,
 
     /// Protocol systems to stream, comma separated. Defaults to every one Tycho has for the chain,
     /// including those it serves through the Dynamic Contract Indexer.
     #[arg(long, value_delimiter = ',')]
-    pub protocols: Option<Vec<String>>,
+    pub(crate) protocols: Option<Vec<String>>,
 
     /// Protocol systems to add to the streamed list, comma separated. This is how a source Tycho
     /// does not list gets into a capture, e.g. `--include-protocols pricelevelstream:fermiswap`
@@ -565,27 +568,27 @@ pub struct MarketFlags {
     /// A name that is already streamed, or that brings no component into the captured market,
     /// stops the run. Live runs only.
     #[arg(long, value_delimiter = ',')]
-    pub include_protocols: Vec<String>,
+    pub(crate) include_protocols: Vec<String>,
 
     /// Minimum component TVL in ETH. The main lever on how big the captured market is.
     #[arg(long, default_value_t = 10.0)]
-    pub min_tvl: f64,
+    pub(crate) min_tvl: f64,
 
     /// Minimum token quality score.
     #[arg(long, default_value_t = 100)]
-    pub min_token_quality: i32,
+    pub(crate) min_token_quality: i32,
 
     /// Only include tokens traded within this many days.
     #[arg(long, default_value_t = 3)]
-    pub traded_n_days_ago: u64,
+    pub(crate) traded_n_days_ago: u64,
 
     /// How long to wait for Tycho's snapshot before giving up, in seconds.
     #[arg(long, default_value_t = 120)]
-    pub capture_timeout_secs: u64,
+    pub(crate) capture_timeout_secs: u64,
 
     /// Chain RPC, read for the live gas price. Live runs only.
     #[arg(long, env = "RPC_URL")]
-    pub rpc_url: Option<String>,
+    pub(crate) rpc_url: Option<String>,
 }
 
 impl MarketFlags {
@@ -625,7 +628,7 @@ impl MarketFlags {
 /// Serialized straight into `run.json`, which is what the viewer's run picker filters on.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
-pub enum MarketSource {
+pub(crate) enum MarketSource {
     /// Replayed from the recorded fixture.
     Offline {
         /// The recording that was replayed. Two offline runs only compare when this matches, and
@@ -659,17 +662,17 @@ pub enum MarketSource {
 ///
 /// Built either by replaying the fixture or by capturing a live block; from here on the two are
 /// the same thing, which is what keeps the two paths honest about measuring the same way.
-pub struct Market {
-    pub chain: Chain,
+pub(crate) struct Market {
+    pub(crate) chain: Chain,
     /// The market's own gas price: recorded with the fixture, or read from the chain on a live
     /// capture. Used only when `--gas-price-gwei` is absent, and reported either way. `None` when
     /// the fixture carried none, or no `--rpc-url` was given.
-    pub market_gas_price: Option<BigUint>,
+    pub(crate) market_gas_price: Option<BigUint>,
     /// The node the market was captured through, so a solver built on it can read the
     /// PropAMMRouter's fee tiers. `None` for a fixture, which holds no pAMM component.
-    pub rpc_url: Option<String>,
-    pub updates: Vec<Update>,
-    pub source: MarketSource,
+    pub(crate) rpc_url: Option<String>,
+    pub(crate) updates: Vec<Update>,
+    pub(crate) source: MarketSource,
 }
 
 /// Replays the recording at `fixture` into a market.
@@ -678,7 +681,7 @@ pub struct Market {
 ///
 /// If the file cannot be read or does not hold a market. A run cannot go on without one, and the
 /// message names the path so a Git LFS pointer file is easy to tell from a missing one.
-pub fn load_market(fixture: &Path) -> Market {
+pub(crate) fn load_market(fixture: &Path) -> Market {
     let recording = read_recording(fixture).unwrap_or_else(|error| {
         panic!(
             "{} is not a market recording: {error}. Point --fixture at a copy of \
@@ -713,7 +716,7 @@ pub fn load_market(fixture: &Path) -> Market {
 /// A live run without `--gas-price-gwei` prices at whatever the chain is charging, which is the
 /// point of running live. An offline run falls back to the default, because the fixture carries no
 /// gas price.
-pub fn resolved_gas_price_gwei(flag: Option<f64>, market: &Market) -> f64 {
+pub(crate) fn resolved_gas_price_gwei(flag: Option<f64>, market: &Market) -> f64 {
     if let Some(gwei) = flag {
         return gwei;
     }
@@ -731,17 +734,17 @@ pub fn resolved_gas_price_gwei(flag: Option<f64>, market: &Market) -> f64 {
 ///
 /// The width lives here rather than in each caller's format string, which is what kept the columns
 /// lining up only by luck across four files.
-pub fn header_line(label: &str, value: impl std::fmt::Display) {
+pub(crate) fn header_line(label: &str, value: impl std::fmt::Display) {
     println!("  {label:<18} {value}");
 }
 
 /// One protocol's share of the market, as the graph will see it.
-pub struct ProtocolCount {
-    pub protocol: String,
+pub(crate) struct ProtocolCount {
+    pub(crate) protocol: String,
     /// Components the graph will hold.
-    pub components: usize,
+    pub(crate) components: usize,
     /// Of those, the ones carrying a simulation state.
-    pub with_state: usize,
+    pub(crate) with_state: usize,
     /// The components swappable only with off-chain authorization, sorted. Only a worker pool with
     /// `liquidity_scope = "include_exclusive"` may route through them, and they only reach the
     /// market at all when the protocol was streamed with the `exclusive:` prefix — so an empty
@@ -751,7 +754,7 @@ pub struct ProtocolCount {
     /// surplus a config wins over its public twin is internal to the router. These are the ids to
     /// look for in `routes.jsonl`'s `component_id` fields to find the solutions that routed
     /// through one.
-    pub exclusive_ids: Vec<String>,
+    pub(crate) exclusive_ids: Vec<String>,
 }
 
 /// Pools per protocol, and how many of them can actually be simulated.
@@ -760,7 +763,7 @@ pub struct ProtocolCount {
 /// on paper, but every attempt to swap through it fails, so it is dead liquidity. A total hides
 /// that. The recorded fixture is missing every VM-backed state, which this makes visible on the
 /// first screen of a run rather than after a puzzling report.
-pub fn protocol_breakdown(updates: &[Update]) -> Vec<ProtocolCount> {
+pub(crate) fn protocol_breakdown(updates: &[Update]) -> Vec<ProtocolCount> {
     let mut protocol_of: HashMap<&str, &str> = HashMap::new();
     let mut has_state: HashSet<&str> = HashSet::new();
     let mut is_exclusive: HashSet<&str> = HashSet::new();
@@ -824,7 +827,7 @@ pub fn protocol_breakdown(updates: &[Update]) -> Vec<ProtocolCount> {
 }
 
 /// Prints a breakdown already counted, so the market is walked once however many places read it.
-pub fn print_protocol_breakdown(counts: &[ProtocolCount]) {
+pub(crate) fn print_protocol_breakdown(counts: &[ProtocolCount]) {
     let (components, with_state) = counts
         .iter()
         .fold((0, 0), |(c, s), row| (c + row.components, s + row.with_state));
@@ -869,13 +872,13 @@ pub fn print_protocol_breakdown(counts: &[ProtocolCount]) {
 /// One value rather than three loose arguments: they are fixed for the whole run, and every config
 /// has to be compared under the same ones.
 #[derive(Copy, Clone, Debug)]
-pub struct RunSettings {
+pub(crate) struct RunSettings {
     /// Workers in each pool.
-    pub workers: usize,
+    pub(crate) workers: usize,
     /// How long one solve may take.
-    pub timeout_ms: u64,
+    pub(crate) timeout_ms: u64,
     /// Gas price the run solves at.
-    pub gas_price_gwei: f64,
+    pub(crate) gas_price_gwei: f64,
 }
 
 /// Builds a solver for one config and waits until it can answer.
@@ -889,7 +892,7 @@ pub struct RunSettings {
 /// Returns the build failure verbatim. Whether that ends the run is the caller's call: the
 /// benchmark records it and carries on with the remaining configs, the profiler has nothing left
 /// to do.
-pub async fn build_solver(
+pub(crate) async fn build_solver(
     config: &BenchConfig,
     market: &Market,
     settings: RunSettings,
@@ -925,7 +928,7 @@ pub async fn build_solver(
 /// `data/tokens.json` covers every token the market fixture knows about — pulled from Dune's
 /// `tokens.erc20` — which is a superset of anything the dataset can name. Anything absent falls
 /// back to a short address rather than failing the run.
-pub fn symbol_table() -> HashMap<Address, String> {
+pub(crate) fn symbol_table() -> HashMap<Address, String> {
     let path = data_path("tokens.json");
     let Ok(json) = std::fs::read_to_string(&path) else {
         println!("  no {} — pairs will show as addresses", path.display());
@@ -945,7 +948,7 @@ pub fn symbol_table() -> HashMap<Address, String> {
 }
 
 /// How a token reads in a report: its symbol, or the first 8 hex characters of its address.
-pub fn token_label(address: &Address, symbols: &HashMap<Address, String>) -> String {
+pub(crate) fn token_label(address: &Address, symbols: &HashMap<Address, String>) -> String {
     symbols
         .get(address)
         .cloned()
@@ -959,14 +962,14 @@ pub fn token_label(address: &Address, symbols: &HashMap<Address, String>) -> Str
 }
 
 /// The solve-time distribution, so a caller cannot read a percentile off unsorted input.
-pub struct Timings {
+pub(crate) struct Timings {
     pub p50_us: u128,
     pub p95_us: u128,
-    pub slowest_us: u128,
+    pub(crate) slowest_us: u128,
 }
 
 /// Sorts `times_us` in place and reads the distribution off it.
-pub fn timings_of(times_us: &mut [u128]) -> Timings {
+pub(crate) fn timings_of(times_us: &mut [u128]) -> Timings {
     times_us.sort_unstable();
     let at = |fraction: f64| match times_us.len() {
         0 => 0,
@@ -979,7 +982,7 @@ pub fn timings_of(times_us: &mut [u128]) -> Timings {
 }
 
 /// Mean and median of `values`, sorting in place — the two figures every bps table wants together.
-pub fn mean_and_median(values: &mut [f64]) -> (f64, f64) {
+pub(crate) fn mean_and_median(values: &mut [f64]) -> (f64, f64) {
     if values.is_empty() {
         return (0.0, 0.0);
     }
@@ -998,7 +1001,7 @@ pub fn mean_and_median(values: &mut [f64]) -> (f64, f64) {
 }
 
 /// A microsecond count in whichever unit reads better.
-pub fn format_micros(us: u128) -> String {
+pub(crate) fn format_micros(us: u128) -> String {
     if us >= 1000 {
         format!("{:.1} ms", us as f64 / 1000.0)
     } else {
@@ -1011,7 +1014,7 @@ pub fn format_micros(us: u128) -> String {
 /// `TokenGasPrices` is what the algorithms use to charge gas: it converts wei into a token's atomic
 /// units, so inverting it values the token in wei. Taken from the solved market rather than from an
 /// outside price feed, so the figure agrees with what the solver was optimising.
-pub fn wei_per_token(store: &DerivedData) -> HashMap<Address, f64> {
+pub(crate) fn wei_per_token(store: &DerivedData) -> HashMap<Address, f64> {
     let Some(prices) = store.token_prices() else {
         return HashMap::new();
     };
@@ -1033,7 +1036,7 @@ pub fn wei_per_token(store: &DerivedData) -> HashMap<Address, f64> {
 /// Both sides are converted to wei through the market's prices, and the dataset's own USD figure
 /// supplies the scale — so the ratio comes from the market being solved and only the absolute
 /// number comes from outside. `None` when either token has no derived price.
-pub fn usd_out(
+pub(crate) fn usd_out(
     order: &TradeOrder,
     amount_out: &BigUint,
     wei: &HashMap<Address, f64>,

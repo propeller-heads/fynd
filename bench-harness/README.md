@@ -309,7 +309,8 @@ measuring differently. What each run was is carried on `Market::source`, written
 shown in the report and the viewer.
 
 Anything used by both programs belongs in `src/lib.rs`, so the two cannot drift apart on what they
-measure. The shared flags are `clap` structs flattened into each program for the same reason: two
+measure. Only the two `run` functions are public; everything else is `pub(crate)`, so the interface
+a caller depends on is the one the README describes. The shared flags are `clap` structs flattened into each program for the same reason: two
 copies of a dozen attributes drift the first time one is edited. `MarketFlags` carries `--market`,
 `--fixture` and the Tycho settings; `ConfigFlags` carries `--configs-dir`. The market flags are one `clap` struct, `LiveFlags`, flattened into each binary for the
 same reason: two copies of a dozen attributes drift the first time one is edited.
