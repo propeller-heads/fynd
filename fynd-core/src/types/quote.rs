@@ -1279,7 +1279,8 @@ impl RouteResult {
         self.price_impact
     }
 
-    pub(crate) fn route(&self) -> &Route {
+    /// The route this result carries.
+    pub fn route(&self) -> &Route {
         &self.route
     }
 
@@ -1287,7 +1288,9 @@ impl RouteResult {
         self.route
     }
 
-    pub(crate) fn net_amount_out(&self) -> &BigInt {
+    /// Output less gas, priced in the output token.
+    #[must_use]
+    pub fn net_amount_out(&self) -> &BigInt {
         &self.net_amount_out
     }
 

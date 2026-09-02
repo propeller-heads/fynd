@@ -527,7 +527,7 @@ impl Algorithm for WaterFillAlgorithm {
             }
         }
         let split_won = best.is_some();
-        sim_meter::report(&input.market, || deadline.elapsed().as_millis() as u64);
+        sim_meter::report("water_fill", &input.market, || deadline.elapsed().as_millis() as u64);
         debug!(
             candidate_count,
             split_won,

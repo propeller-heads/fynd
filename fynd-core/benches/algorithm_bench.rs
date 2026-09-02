@@ -13,7 +13,7 @@
 //!
 //! ```text
 //! ./scripts/bench.sh --name my-change --orders 2000
-//! ./scripts/bench.sh --name deep --orders 400 --jobs 1 --configs water_fill_d3
+//! ./scripts/bench.sh --name deep --orders 400 --jobs 1 --configs WF_d3
 //! ```
 //!
 //! The script builds this optimised with debug symbols and runs it. For a flamegraph of a single
@@ -25,7 +25,7 @@
 //! comma-separated list of those stems and defaults to all of them. Adding a configuration is
 //! adding a file; nothing here needs to change. See `benches/configs/README.md`.
 //!
-//! `bellman_ford_d2` is the baseline and is always included, listed or not. It is not a
+//! `BF_d2` is the baseline and is always included, listed or not. It is not a
 //! like-for-like depth comparison — the report's "Reading this" section says why.
 //!
 //! # Solve times are contended unless you ask otherwise
@@ -60,21 +60,27 @@ use common::{
     available_configs, block_components, build_market, build_solver, exclude_requested_protocols,
     load_bench_config, load_blocked_tokens, mean_and_median, print_protocol_breakdown,
     protocol_breakdown, resolved_gas_price_gwei, symbol_table, timings_of, token_label,
-    trades::{load_trade_orders, recorded_tokens, TradeLoadSummary, TradeOrder},
+    trades::{
+        load_trade_orders, recorded_tokens, OrderFlags, OrderSelection, TradeLoadSummary,
+        TradeOrder,
+    },
     usd_out, wei_per_token, BenchConfig, BlockedTokens, LiveFlags, Market, MarketSource,
     ProtocolCount,
 };
 use futures::stream::StreamExt;
 use fynd_core::{
-    types::{QuoteStatus, SolveError},
+    types::{QuoteStatus, RouteRejection, SolveError},
     NoPathReason, QuoteOptions, QuoteRequest, Solver,
 };
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tycho_simulation::tycho_common::models::Address;
 
-/// Config every bps figure is measured against. Always run, listed or not.
-const BASELINE: &str = "bellman_ford_d2";
+/// Orders solved when `--orders` says nothing else.
+const DEFAULT_ORDERS: usize = 1000;
+
+/// Config every bps figure is measured against when `--baseline` says nothing else.
+const DEFAULT_BASELINE: &str = "BF_d2";
 
 /// How a config's answer compares with the baseline's on one order.
 ///
@@ -151,9 +157,9 @@ struct Args {
     #[arg(long, default_value = "run")]
     name: String,
 
-    /// Distinct orders to solve. 0 means every eligible order in the dataset.
-    #[arg(long, default_value_t = 1000)]
-    orders: usize,
+    /// Which orders to solve: `--orders`, `--tail` or `--random`.
+    #[command(flatten)]
+    order_flags: OrderFlags,
 
     /// Orders in flight at once. Defaults to one per core.
     #[arg(long)]
@@ -173,10 +179,17 @@ struct Args {
     live: LiveFlags,
 
     /// Configs to run, comma separated, named after the files in `benches/configs/`, e.g.
-    /// `water_fill_d3,path_frank_wolfe_d3`. Defaults to every config on disk. The baseline is
+    /// `WF_d3,PFW_d3`. Defaults to every config on disk. The baseline is
     /// always included. Narrowing this is what makes a run readable under a profiler.
     #[arg(long, value_delimiter = ',')]
     configs: Option<Vec<String>>,
+
+    /// Config every other one is measured against, named after a file in `benches/configs/`. Run
+    /// whether `--configs` lists it or not, and first in every table and file. Runs under
+    /// different baselines are not comparable with each other, so the name is written into
+    /// `run.json` and the report header.
+    #[arg(long, default_value = DEFAULT_BASELINE)]
+    baseline: String,
 
     /// Passes over the order set, per config. Extra passes add timing samples without changing
     /// the answers, which is what a profiler wants; quality is taken from the first pass.
@@ -223,7 +236,7 @@ struct ConfigSet {
 /// A name that will not load is skipped rather than fatal, but never silently: it is printed and
 /// recorded in the report, because a typo that quietly shrinks the run is worse than one that
 /// stops it.
-fn resolve_configs(requested: Option<&[String]>) -> ConfigSet {
+fn resolve_configs(requested: Option<&[String]>, baseline: &str) -> ConfigSet {
     let requested: Vec<String> = match requested {
         Some(names) => names
             .iter()
@@ -233,9 +246,10 @@ fn resolve_configs(requested: Option<&[String]>) -> ConfigSet {
         None => available_configs(),
     };
 
-    // The baseline first, so the reports lead with what everything else is measured against.
-    let baseline = load_bench_config(BASELINE)
-        .unwrap_or_else(|reason| panic!("the baseline config {BASELINE} is unusable: {reason}"));
+    // The baseline first, so the reports lead with what everything else is measured against and
+    // every reader of `results` can take index 0 rather than matching on a name.
+    let baseline = load_bench_config(baseline)
+        .unwrap_or_else(|reason| panic!("the baseline config {baseline} is unusable: {reason}"));
     let mut ready = vec![baseline];
     let mut skipped: Vec<(String, String)> = Vec::new();
 
@@ -265,7 +279,7 @@ struct Run {
     workers: usize,
     timeout_ms: u64,
     gas_price_gwei: f64,
-    orders: usize,
+    orders: OrderSelection,
     repeats: usize,
     trades: PathBuf,
     out_dir: PathBuf,
@@ -282,14 +296,16 @@ impl Run {
             .trades
             .unwrap_or_else(common::default_trades_path);
         let out_dir = args.out_dir.join(&args.name);
-        let configs = resolve_configs(args.configs.as_deref());
+        let configs = resolve_configs(args.configs.as_deref(), &args.baseline);
         let run = Self {
             name: args.name,
             jobs,
             workers: jobs.min(cores),
             timeout_ms: args.timeout_ms,
             gas_price_gwei: resolved_gas_price_gwei(args.gas_price_gwei, market),
-            orders: args.orders,
+            orders: args
+                .order_flags
+                .selection(DEFAULT_ORDERS),
             repeats: args.repeats.max(1),
             trades,
             out_dir,
@@ -356,6 +372,8 @@ impl Measurement {
 fn status_label(status: QuoteStatus) -> &'static str {
     match status {
         QuoteStatus::Success => "solved",
+        // Every caller routes this status to `no_path_label`; the arm keeps the match
+        // exhaustive.
         QuoteStatus::NoRouteFound => "no route",
         QuoteStatus::InsufficientLiquidity => "insufficient liquidity",
         QuoteStatus::Timeout => "timeout",
@@ -366,24 +384,40 @@ fn status_label(status: QuoteStatus) -> &'static str {
     }
 }
 
-/// The reason label for a solve that returned an error rather than a quote.
+/// The reason label for a failure that reported no path.
 ///
 /// `NoRouteFound` splits by its [`NoPathReason`], because "the token is not in the graph" and "the
 /// graph has no path within the hop limit" are different findings and the first is usually the
 /// dataset rather than the algorithm.
+fn no_path_label(reason: Option<NoPathReason>) -> &'static str {
+    match reason {
+        Some(NoPathReason::SourceTokenNotInGraph) => "no route: source token not in graph",
+        Some(NoPathReason::DestinationTokenNotInGraph) => {
+            "no route: destination token not in graph"
+        }
+        Some(NoPathReason::NoGraphPath) => "no route: no connecting path",
+        Some(NoPathReason::NoScorablePaths) => "no route: no scorable paths",
+        Some(NoPathReason::AmountTooSmall) => "no route: amount too small",
+        // The algorithm raised no path but named no reason. Worth telling apart from the cases
+        // that do: it means the algorithm returned early without saying why.
+        None => "no route: unspecified",
+        // `NoPathReason` is `#[non_exhaustive]`; a variant added upstream lands here.
+        Some(_) => "no route: other",
+    }
+}
+
+/// The reason label for a solve that returned an error rather than a quote.
 fn error_label(error: &SolveError) -> &'static str {
     match error {
-        SolveError::NoRouteFound { reason, .. } => match reason {
-            Some(NoPathReason::SourceTokenNotInGraph) => "no route: source token not in graph",
-            Some(NoPathReason::DestinationTokenNotInGraph) => {
-                "no route: destination token not in graph"
+        SolveError::NoRouteFound { reason, .. } => no_path_label(*reason),
+        SolveError::RouteRejected { reason, .. } => match reason {
+            RouteRejection::PammFeeTiersUnread => "route rejected: pAMM fee tiers not read",
+            RouteRejection::PammFallbackPoolMissing => "route rejected: pAMM fallback pool missing",
+            RouteRejection::PammFallbackUnpriceable => {
+                "route rejected: pAMM fallback not simulatable"
             }
-            Some(NoPathReason::NoGraphPath) => "no route: no connecting path",
-            Some(NoPathReason::NoScorablePaths) => "no route: no scorable paths",
-            Some(NoPathReason::AmountTooSmall) => "no route: amount too small",
-            None => "no route",
-            // `NoPathReason` is `#[non_exhaustive]`; a variant added upstream lands here.
-            Some(_) => "no route: other",
+            // `RouteRejection` is `#[non_exhaustive]`; a variant added upstream lands here.
+            _ => "route rejected: other",
         },
         SolveError::InsufficientLiquidity { .. } => "insufficient liquidity",
         SolveError::Timeout { .. } => "timeout",
@@ -415,7 +449,11 @@ async fn measure(solver: &Solver, order: &TradeOrder) -> Measurement {
         Ok(quote) => {
             let order_quote = &quote.orders()[0];
             if order_quote.status() != QuoteStatus::Success {
-                return Measurement::unsolved(elapsed_us, status_label(order_quote.status()));
+                let label = match order_quote.status() {
+                    QuoteStatus::NoRouteFound => no_path_label(order_quote.no_route_reason()),
+                    status => status_label(status),
+                };
+                return Measurement::unsolved(elapsed_us, label);
             }
             let edges: Vec<RouteEdge> = order_quote
                 .route()
@@ -748,11 +786,15 @@ impl BenchOutcome<'_> {
         &self.results[0].1.measurements
     }
 
+    /// What the baseline is called. Read off its position rather than carried separately, so the
+    /// name in the reports and the measurements the bps are taken from cannot disagree.
+    fn baseline_label(&self) -> &str {
+        &self.results[0].0.label
+    }
+
     /// Every config except the baseline — the ones the bps columns are written for.
     fn rivals(&self) -> impl Iterator<Item = &(BenchConfig, ConfigRun)> {
-        self.results
-            .iter()
-            .filter(|(config, _)| config.label != BASELINE)
+        self.results.iter().skip(1)
     }
 }
 
@@ -830,7 +872,7 @@ fn routes_jsonl(outcome: &BenchOutcome<'_>) -> String {
                 "amount_usd": order.amount_usd,
             },
             "tokens": tokens,
-            "baseline": BASELINE,
+            "baseline": outcome.baseline_label(),
             "routes": routes,
         });
         out.push_str(&line.to_string());
@@ -848,8 +890,10 @@ fn run_json(outcome: &BenchOutcome<'_>) -> String {
         // Tagged by `MarketSource`'s own `source` field, which is what the viewer filters on.
         "market": outcome.source,
         "orders": outcome.orders.len(),
+        // Which slice of the dataset, so two runs are only compared when they solved the same one.
+        "order_selection": run.orders.label(),
         "pairs": outcome.pairs.len(),
-        "baseline": BASELINE,
+        "baseline": outcome.baseline_label(),
         "configs": outcome
             .results
             .iter()
@@ -1143,7 +1187,7 @@ fn pairs_csv(outcome: &BenchOutcome<'_>) -> String {
         let name = pair_name(pair, outcome.symbols);
         for (config, _) in outcome.results {
             let stats = &outcome.pair_stats[position][&config.label];
-            let is_baseline = config.label == BASELINE;
+            let is_baseline = config.label == outcome.baseline_label();
             let cell = |value: String| if is_baseline { String::new() } else { value };
             csv.push_str(&format!(
                 "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
@@ -1203,7 +1247,7 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
         out.push_str(&format!("| **skipped** | `{name}` — {reason} |\n"));
     }
     out.push_str(&format!("| token pairs | {} |\n", outcome.pairs.len()));
-    out.push_str(&format!("| baseline | `{BASELINE}` |\n"));
+    out.push_str(&format!("| baseline | `{}` |\n", outcome.baseline_label()));
     out.push_str(&format!("| per-solve timeout | {}ms |\n", run.timeout_ms));
     out.push_str(&format!("| gas price | {} gwei |\n", run.gas_price_gwei));
     out.push_str(&format!("| orders in flight | {} |\n", run.jobs));
@@ -1214,10 +1258,11 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
         outcome.summary.seen, outcome.summary.eligible, outcome.summary.kept
     ));
     out.push_str(&format!(
-        "| dropped | {} not a sell, {} unknown token, {} malformed |\n",
+        "| dropped | {} not a sell, {} unknown token, {} malformed, {} inconsistent USD |\n",
         outcome.summary.dropped_not_sell,
         outcome.summary.dropped_unknown_token,
-        outcome.summary.dropped_malformed
+        outcome.summary.dropped_malformed,
+        outcome.summary.dropped_inconsistent_usd
     ));
     if !outcome.excluded_protocols.is_empty() {
         out.push_str(&format!(
@@ -1251,7 +1296,7 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
     );
     for (config, _) in outcome.results {
         let stats = &outcome.stats[&config.label];
-        let is_baseline = config.label == BASELINE;
+        let is_baseline = config.label == outcome.baseline_label();
         let cell = |value: String| if is_baseline { "—".to_string() } else { value };
         out.push_str(&format!(
             "| `{}` | {}/{} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
@@ -1392,6 +1437,10 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
 
 #[tokio::main]
 async fn main() {
+    if common::asked_for_the_test_list() {
+        return;
+    }
+
     let args = Args::parse();
     common::init_logging(args.logs);
 
@@ -1468,6 +1517,14 @@ async fn main() {
         println!("  (the recording captured {recorded} wei; --gas-price-gwei overrides it)");
     }
 
+    // Read before the loop takes ownership: every table and file downstream reads the baseline off
+    // `results[0]`, which only holds if the config that started first is the one that got there.
+    let baseline_label = configs
+        .ready
+        .first()
+        .map(|config| config.label.clone())
+        .expect("resolve_configs always puts the baseline first");
+
     // Pairing each config with its run makes the two structurally impossible to fall out of sync.
     let mut results: Vec<(BenchConfig, ConfigRun)> = Vec::new();
     // Every config replays the same market, so its prices are the same; read them once.
@@ -1499,8 +1556,8 @@ async fn main() {
     assert!(
         results
             .first()
-            .is_some_and(|(config, _)| config.label == BASELINE),
-        "the baseline {BASELINE} could not be built, so nothing can be compared"
+            .is_some_and(|(config, _)| config.label == baseline_label),
+        "the baseline {baseline_label} could not be built, so nothing can be compared"
     );
 
     let pairs = pairs_of(&orders);

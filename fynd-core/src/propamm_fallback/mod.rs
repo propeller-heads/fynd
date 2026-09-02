@@ -91,6 +91,8 @@ pub fn fallback_amount_out(
             return FallbackAmountOut::NoFallbackPool {
                 component_id: swap.component_id().to_string(),
                 fee_tier,
+                token_in: swap.token_in().clone(),
+                token_out: swap.token_out().clone(),
             };
         };
         let (Some(component), Some(state)) =
@@ -101,6 +103,8 @@ pub fn fallback_amount_out(
             return FallbackAmountOut::NoFallbackPool {
                 component_id: swap.component_id().to_string(),
                 fee_tier,
+                token_in: swap.token_in().clone(),
+                token_out: swap.token_out().clone(),
             };
         };
         substituted.push(
@@ -152,6 +156,10 @@ pub enum FallbackAmountOut {
         component_id: ComponentId,
         /// The fee tier the router would have used.
         fee_tier: u32,
+        /// The leg's input token, so a log line names the pair rather than only the component.
+        token_in: Address,
+        /// The leg's output token.
+        token_out: Address,
     },
     /// The substituted route could not be simulated, so there is no amount to floor at. Drop the
     /// route.
@@ -298,6 +306,23 @@ impl FallbackPoolIndex {
         }
     }
 
+    /// Every fee tier the market holds a Uniswap V3 pool at for this pair, ascending.
+    ///
+    /// Separates "the market has no pool for this pair" from "it has one, at a tier the router
+    /// does not resolve to". Only called when a fallback is already missing, so the scan over the
+    /// index costs nothing on the routing path.
+    pub fn tiers_for(&self, token_a: &Address, token_b: &Address) -> Vec<u32> {
+        let (low, high) = sorted_pair(token_a, token_b);
+        let mut tiers: Vec<u32> = self
+            .pools
+            .keys()
+            .filter(|(a, b, _)| *a == low && *b == high)
+            .map(|(_, _, tier)| *tier)
+            .collect();
+        tiers.sort_unstable();
+        tiers
+    }
+
     /// The component the router would fall back to.
     pub fn pool_for(
         &self,
@@ -333,10 +358,10 @@ pub const PROPAMM_VENUES: &[&str] = &[
 ];
 
 /// Protocol system whose pools the PropAMMRouter falls back to.
-const FALLBACK_PROTOCOL_SYSTEM: &str = "uniswap_v3";
+pub(crate) const FALLBACK_PROTOCOL_SYSTEM: &str = "uniswap_v3";
 
 /// Static attribute carrying a Uniswap V3 pool's fee tier, in hundredths of a bip.
-const FEE_ATTRIBUTE: &str = "fee";
+pub(crate) const FEE_ATTRIBUTE: &str = "fee";
 
 /// Order-independent pair key, matching the router's `_pairKey`.
 fn sorted_pair(token_a: &Address, token_b: &Address) -> (Address, Address) {
@@ -641,12 +666,34 @@ mod tests {
         let route = Route::new(vec![pamm_swap()], FxHashMap::default()).expect("non-empty route");
         let amount_out = fallback_amount_out(&route, &view, &FeeTiers::new(DEFAULT_TIER), &index);
 
+        let FallbackAmountOut::NoFallbackPool { component_id, fee_tier, token_in, token_out } =
+            amount_out
+        else {
+            panic!("expected no fallback pool, got {amount_out:?}");
+        };
+        assert_eq!(component_id, PAMM_COMPONENT.to_string());
+        assert_eq!(fee_tier, DEFAULT_TIER);
+        // This market holds a pool for the pair, at a tier the router does not resolve to. Told
+        // apart from a pair with no pool at all, which indexes no tier.
+        assert_eq!(index.tiers_for(&token_in, &token_out), vec![500]);
+    }
+
+    /// The tiers a pair is indexed at, which tells a pair the market holds no pool for from one
+    /// held at a tier the router does not resolve to.
+    #[test]
+    fn test_tiers_for() {
+        let market = market_with_fallback_pool(500);
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
+        let index = FallbackPoolIndex::build(&view);
+        let (weth, usdc) = (util::token(1, "WETH"), util::token(2, "USDC"));
+
+        assert_eq!(index.tiers_for(&weth.address, &usdc.address), vec![500]);
         assert_eq!(
-            amount_out,
-            FallbackAmountOut::NoFallbackPool {
-                component_id: PAMM_COMPONENT.to_string(),
-                fee_tier: DEFAULT_TIER,
-            }
+            index.tiers_for(&weth.address, &util::token(9, "DAI").address),
+            Vec::<u32>::new(),
+            "a pair the market holds no pool for indexes no tier"
         );
     }
 

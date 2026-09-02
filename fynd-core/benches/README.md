@@ -1,15 +1,18 @@
 # Algorithm benchmark
 
-Two programs that run the routing algorithms against one market, so a change can be measured.
+Two programs run the routing algorithms against one market, so a change can be measured; a viewer
+and two analysis scripts read what they wrote.
 
 | what | file | what it does |
 |---|---|---|
 | benchmark | `algorithm_bench.rs` | Runs several configs over many orders and writes a report |
 | profiler | `profile.rs` | Runs one config over a few orders on one thread, writes nothing |
 | viewer | `viewer/index.html` | Reads the reports in a browser |
+| analysis | `bench-analyze.py` | Breaks one run down by order size and route shape |
+| analysis | `bench-setdiff.py` | Per lost order, the pools the winner used and we did not |
 
-Both read the same order dataset and take their market the same way, so an order seen in the viewer
-can be profiled by its id.
+The benchmark and the profiler read the same order dataset and take their market the same way, so
+an order seen in the viewer can be profiled by its id.
 
 ## Two kinds of market
 
@@ -62,7 +65,10 @@ Useful options:
 | option | what it does |
 |---|---|
 | `--name NAME` | Names the output directory. Runs are kept, not overwritten |
-| `--orders N` | How many orders to solve. `0` means every eligible one |
+| `--orders N` | How many orders to solve, from the top of the dataset. `0` means every eligible one |
+| `--tail N` | The last N eligible orders instead of the first |
+| `--random N` | N eligible orders drawn at random, from a fixed seed so two runs pick the same ones |
+| `--baseline NAME` | Config every bps figure is measured against. Defaults to `BF_d2` |
 | `--configs A,B` | Only these configs. The baseline is always added |
 | `--repeats N` | Passes over the same orders, for steadier timings |
 | `--jobs N` | Orders solved at once. Defaults to one per core |
@@ -99,11 +105,15 @@ Every other option works as it does offline, plus:
 | `--capture-timeout-secs N` | How long to wait for the snapshot, and for the price level frame, before giving up |
 | `--tycho-url HOST` | Overrides `TYCHO_URL`. Scheme optional |
 | `--tycho-api-key KEY` | Overrides `TYCHO_API_KEY` |
-| `--rpc-url URL` | Overrides `RPC_URL`, read for the live gas price |
+| `--rpc-url URL` | Overrides `RPC_URL`. Read for the live gas price, and once for the PropAMMRouter's fee tiers |
 
 Without `--gas-price-gwei` a live run prices gas at whatever the chain is charging, read from
 `RPC_URL`. Pass the flag and it wins. An offline run has no such price to read — the fixture
 carries none — so it keeps using the default.
+
+The same node is read once more, for the PropAMMRouter's fee tiers. A route with a
+`propammfallback:` leg needs them: without them the solver drops every such route. An offline run
+reads no node, so a market holding those components cannot be routed through them.
 
 ### pAMM price levels
 
@@ -134,7 +144,7 @@ stream reads the whitelist through the node at the `RPC_URL` environment variabl
 does not set it, so passing the flag alone leaves every venue on the direct path.
 
 The profiler takes the same flags, so a slow order from a live run can be profiled against a fresh
-market: `./scripts/profile.sh --market live --config water_fill_d3 --orders 200`. It will be a
+market: `./scripts/profile.sh --market live --config WF_d3 --orders 200`. It will be a
 different block, so it is a different market.
 
 A run writes six files:
@@ -176,15 +186,25 @@ than the run. `legs` and `pools_used` do not double count.
 ```
 
 Opens a browser on the results. The run name in the header opens a table of every run to switch
-between them, and new runs appear on refresh.
+between them, and new runs appear on refresh. The script exists only because browsers block the
+file reads the page needs when it is opened straight from disk.
 
-The script exists only because browsers block the file reads the page needs when it is opened
-straight from disk.
+Two scripts read the same `bench-results/<run>/` directory for questions the report does not answer:
+
+```bash
+fynd-core/benches/bench-analyze.py bench-results/my-run --config PFW_d3 --against WF_d3 --worst 10
+fynd-core/benches/bench-setdiff.py bench-results/my-run --config PFW_d3 --against WF_d3
+```
+
+`bench-analyze.py` says in which order-size bins a config won and which orders it lost worst, naming
+order ids that can go straight into the profiler. `bench-setdiff.py` splits each loss into two kinds:
+the winner used a pool that was never on the table, or every pool was there and the allocation was
+worse.
 
 ## Profiling one algorithm
 
 ```bash
-./scripts/profile.sh --config water_fill_d3 --orders 200 --repeats 3
+./scripts/profile.sh --config WF_d3 --orders 200 --repeats 3
 ```
 
 Records under `samply` and opens the flamegraph. One config, one solver thread, no output files, so
@@ -195,6 +215,8 @@ the flamegraph is the solve and almost nothing else.
 | `--config NAME` | Which config to run. Required |
 | `--order ID` | Profile one order. `2073` finds `2073_00000000_ae7ab965` |
 | `--orders N` | Profile the first N instead |
+| `--tail N` | Profile the last N instead |
+| `--random N` | Profile N drawn at random, from a fixed seed |
 | `--repeats N` | More passes, more samples, same work measured |
 | `--jobs N` | Orders solved at once, on that many workers. One by default |
 | `--logs` | Print the solver's own logs. Pair with `--no-record` |
@@ -213,13 +235,13 @@ Both tools take the filter from `RUST_LOG` when it is set, and use `fynd_core=de
 
 ```bash
 RUST_LOG=fynd_core::algorithm=trace ./scripts/profile.sh \
-  --config water_fill_d3 --order 2073 --logs --no-record
+  --config WF_d3 --order 2073 --logs --no-record
 ```
 
 Options for `samply` itself go after a bare `--`:
 
 ```bash
-./scripts/profile.sh --config water_fill_d3 --orders 200 -- --rate 5000
+./scripts/profile.sh --config WF_d3 --orders 200 -- --rate 5000
 ```
 
 **Two things about the flamegraph.** Building the solver replays the recording before the first
@@ -240,7 +262,7 @@ Add a file to `configs/`. Nothing else changes. The file name is the name you pa
 and the label the report shows.
 
 ```toml
-# configs/water_fill_d4.toml
+# configs/WF_d4.toml
 algorithm = "water_fill"
 max_hops = 4
 ```

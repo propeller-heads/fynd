@@ -26,7 +26,8 @@ pub(crate) const INLINE_TOKENS: usize = 5;
 
 /// Edges held without allocating. A path's edges are its tokens less one, and an edge is a leg of
 /// a route, so this sizes per-leg buffers too.
-pub(crate) const INLINE_EDGES: usize = INLINE_TOKENS - 1;
+/// Edges a path holds inline before it spills to the heap. One fewer than its tokens.
+pub const INLINE_EDGES: usize = INLINE_TOKENS - 1;
 
 /// A route with a pool chosen for every leg.
 ///
@@ -119,7 +120,7 @@ pub enum GraphError {
     #[error("Components with less then 2 tokens cannot be added: {0:?}")]
     InvalidComponents(Vec<ComponentId>),
     /// No edge exists between the given tokens for this component (test-only).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     #[error("No edge found between tokens {0:?} and {1:?} for component {2}")]
     MissingComponentBetweenTokens(Address, Address, ComponentId),
 }

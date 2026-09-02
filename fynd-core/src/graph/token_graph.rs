@@ -60,7 +60,7 @@ impl<D> PairEdge<D> {
     }
 
     /// The pool this component runs on this pair.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     fn pool_mut(&mut self, component_id: &ComponentId) -> Option<&mut EdgeData<D>> {
         self.pools
             .iter_mut()
@@ -577,7 +577,7 @@ impl<D: Clone> TopologyGraphManager<D> {
     }
 
     /// Sets one pool's weight, for tests that need a weight without running the derived data.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn set_pool_weight(
         &mut self,
         component_id: &ComponentId,

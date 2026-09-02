@@ -24,17 +24,21 @@
 pub mod bellman_ford;
 pub mod most_liquid;
 pub mod path_frank_wolfe;
-pub(crate) mod paths;
+pub(crate) mod path_scoring;
+/// Enumerating and simulating routes between two tokens.
+pub mod paths;
 pub mod registry;
 pub(crate) mod sim_guard;
-pub(crate) mod sim_meter;
-pub(crate) mod split_primitives;
+pub mod sim_meter;
+/// Shared machinery for algorithms that divide an order across several paths.
+pub mod split_primitives;
 pub mod water_fill;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod split_test_harness;
-mod swap_cache;
-#[cfg(test)]
+/// Remembers what a pool paid, so one solve asks it once per amount.
+pub mod swap_cache;
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
 use std::time::Duration;
