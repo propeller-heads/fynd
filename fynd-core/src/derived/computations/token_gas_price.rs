@@ -21,10 +21,10 @@
 //!
 //! Buying is cheap: one pass over the graph finds the buy route to every token at once. Selling
 //! dominates: each token needs its own solve, because each sell starts from a different amount
-//! and slippage makes routes amount-dependent. A slow pass delays that block's spot prices and
-//! depths — an accepted trade-off. After the first full solve, recomputation is incremental:
-//! only tokens whose stored routes ran through a changed component are re-solved, which bounds
-//! the steady-state cost.
+//! and slippage makes routes amount-dependent. A slow pass delays that block's component depths
+//! and the start of the next block's computations — spot prices run first and are unaffected.
+//! After the first full solve, recomputation is incremental: only tokens whose stored routes ran
+//! through a changed component are re-solved, which bounds the steady-state cost.
 
 use std::time::Duration;
 
