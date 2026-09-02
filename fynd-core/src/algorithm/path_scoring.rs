@@ -306,45 +306,6 @@ mod tests {
         graph::GraphManager,
     };
 
-    // ==================== heuristic_score Tests ====================
-
-    /// A hop with no measured pool cannot be placed, so the sequence sinks to the bottom of the
-    /// queue rather than out of it: it still scores, and the score is the lowest there is.
-    #[test]
-    fn test_heuristic_score_sinks_a_sequence_with_an_unmeasured_hop() {
-        let (a, b, c, _) = addrs();
-        let mut manager = linear_graph();
-        // A->B measured, B->C left without derived data.
-        manager
-            .set_pool_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0), false)
-            .unwrap();
-        let graph = manager.graph();
-        let node = |address: &Address| graph.get_token_ix(address).unwrap();
-
-        let unmeasured = heuristic_score(graph, &[node(&a), node(&b), node(&c)]);
-
-        assert_eq!(unmeasured, Some(0.0), "an unmeasured hop scores zero, not None");
-        assert!(
-            heuristic_score(graph, &[node(&a), node(&b)]).is_some_and(|measured| measured > 0.0),
-            "a fully measured sequence still outranks it"
-        );
-    }
-
-    /// A sequence naming a pair the graph has no pool for is the two indexes disagreeing, not a
-    /// routing outcome, so it is dropped rather than ranked.
-    #[test]
-    fn test_heuristic_score_drops_a_sequence_with_an_unconnected_pair() {
-        let (a, _, c, _) = addrs();
-        let manager = linear_graph();
-        let graph = manager.graph();
-        let node = |address: &Address| graph.get_token_ix(address).unwrap();
-
-        assert_eq!(heuristic_score(graph, &[node(&a), node(&c)]), None);
-        assert_eq!(heuristic_score(graph, &[node(&a)]), None);
-    }
-
-    // ==================== PairWinners Tests ====================
-
     /// `count` pools on one pair, named `pool0`, `pool1`, ... for [`simulator`] to answer as.
     fn pools(count: usize) -> Vec<EdgeData<()>> {
         (0..count)
@@ -352,220 +313,282 @@ mod tests {
             .collect()
     }
 
-    /// Answers as pool `i` would: out is `amount_in * multipliers[i]`, gas is flat.
-    fn simulator(
-        multipliers: [u64; 2],
-        amount_in: u64,
-    ) -> impl FnMut(&ComponentId) -> Option<PoolQuote> {
-        move |component_id: &ComponentId| {
-            let index: usize = component_id
-                .trim_start_matches("pool")
-                .parse()
-                .ok()?;
-            let amount = BigUint::from(amount_in * multipliers[index]);
-            let paid = SwapResult { amount_out: amount.clone(), gas: BigUint::from(10u64) };
-            Some(PoolQuote { paid, net: BigInt::from(amount) })
+    mod heuristic_score {
+        use super::*;
+
+        /// A hop with no measured pool cannot be placed, so the sequence sinks to the bottom of the
+        /// queue rather than out of it: it still scores, and the score is the lowest there is.
+        #[test]
+        fn test_heuristic_score_sinks_a_sequence_with_an_unmeasured_hop() {
+            let (a, b, c, _) = addrs();
+            let mut manager = linear_graph();
+            // A->B measured, B->C left without derived data.
+            manager
+                .set_pool_weight(&"ab".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0), false)
+                .unwrap();
+            let graph = manager.graph();
+            let node = |address: &Address| graph.get_token_ix(address).unwrap();
+
+            let unmeasured = heuristic_score(graph, &[node(&a), node(&b), node(&c)]);
+
+            assert_eq!(unmeasured, Some(0.0), "an unmeasured hop scores zero, not None");
+            assert!(
+                heuristic_score(graph, &[node(&a), node(&b)])
+                    .is_some_and(|measured| measured > 0.0),
+                "a fully measured sequence still outranks it"
+            );
+        }
+
+        /// A sequence naming a pair the graph has no pool for is the two indexes disagreeing, not a
+        /// routing outcome, so it is dropped rather than ranked.
+        #[test]
+        fn test_heuristic_score_drops_a_sequence_with_an_unconnected_pair() {
+            let (a, _, c, _) = addrs();
+            let manager = linear_graph();
+            let graph = manager.graph();
+            let node = |address: &Address| graph.get_token_ix(address).unwrap();
+
+            assert_eq!(heuristic_score(graph, &[node(&a), node(&c)]), None);
+            assert_eq!(heuristic_score(graph, &[node(&a)]), None);
         }
     }
 
-    /// The one token pair every case works on.
-    fn pair() -> (NodeIndex, NodeIndex) {
-        (NodeIndex::new(0), NodeIndex::new(1))
-    }
+    mod pair_winners {
+        use super::*;
 
-    #[test]
-    fn test_winners_takes_the_pool_that_pays_most() {
-        let mut winners = PairWinners::new(true);
-        let multipliers = [2u64, 5u64];
-        let pools = pools(multipliers.len());
+        /// Answers as pool `i` would: out is `amount_in * multipliers[i]`, gas is flat.
+        fn simulator(
+            multipliers: [u64; 2],
+            amount_in: u64,
+        ) -> impl FnMut(&ComponentId) -> Option<PoolQuote> {
+            move |component_id: &ComponentId| {
+                let index: usize = component_id
+                    .trim_start_matches("pool")
+                    .parse()
+                    .ok()?;
+                let amount = BigUint::from(amount_in * multipliers[index]);
+                let paid = SwapResult { amount_out: amount.clone(), gas: BigUint::from(10u64) };
+                Some(PoolQuote { paid, net: BigInt::from(amount) })
+            }
+        }
 
-        let outcome = winners
-            .choose_pool_for_pair(pair(), &pools, simulator(multipliers, 100))
-            .unwrap();
+        /// The one token pair every case works on.
+        fn pair() -> (NodeIndex, NodeIndex) {
+            (NodeIndex::new(0), NodeIndex::new(1))
+        }
 
-        assert_eq!(outcome.pool_ix, 1, "pool1 pays 500 against pool0's 200");
-        assert_eq!(outcome.amount_out, BigUint::from(500u64));
-    }
+        #[test]
+        fn test_winners_takes_the_pool_that_pays_most() {
+            let mut winners = PairWinners::new(true);
+            let multipliers = [2u64, 5u64];
+            let pools = pools(multipliers.len());
 
-    /// Once a pair has a winner, only that pool is asked. Whether the ask reaches the pool or is
-    /// answered from an amount already asked is the swap cache's business, not this one's.
-    #[test]
-    fn test_winners_asks_only_the_remembered_winner() {
-        let mut winners = PairWinners::new(true);
-        let multipliers = [2u64, 5u64];
-        let pools = pools(multipliers.len());
-        winners
-            .choose_pool_for_pair(pair(), &pools, simulator(multipliers, 100))
-            .unwrap();
+            let outcome = winners
+                .choose_pool_for_pair(pair(), &pools, simulator(multipliers, 100))
+                .unwrap();
 
-        let mut asked = Vec::new();
-        let outcome = winners
-            .choose_pool_for_pair(pair(), &pools, |component_id: &ComponentId| {
-                asked.push(component_id.clone());
-                simulator(multipliers, 100)(component_id)
-            })
-            .unwrap();
+            assert_eq!(outcome.pool_ix, 1, "pool1 pays 500 against pool0's 200");
+            assert_eq!(outcome.amount_out, BigUint::from(500u64));
+        }
 
-        assert_eq!(asked, vec!["pool1".to_string()], "only the winner should be asked");
-        assert_eq!(outcome.pool_ix, 1);
-    }
+        /// Once a pair has a winner, only that pool is asked. Whether the ask reaches the pool or
+        /// is answered from an amount already asked is the swap cache's business, not this
+        /// one's.
+        #[test]
+        fn test_winners_asks_only_the_remembered_winner() {
+            let mut winners = PairWinners::new(true);
+            let multipliers = [2u64, 5u64];
+            let pools = pools(multipliers.len());
+            winners
+                .choose_pool_for_pair(pair(), &pools, simulator(multipliers, 100))
+                .unwrap();
 
-    /// A winner that cannot trade the amount does not end the hop: every pool is asked, and the
-    /// one that answers becomes the pair's winner.
-    #[test]
-    fn test_winners_falls_back_to_every_pool_when_the_winner_cannot_trade() {
-        let mut winners = PairWinners::new(true);
-        let pools = pools(2);
-        winners
-            .choose_pool_for_pair(pair(), &pools, simulator([2, 5], 100))
-            .unwrap();
-
-        let outcome = winners
-            .choose_pool_for_pair(pair(), &pools, |component_id: &ComponentId| {
-                (component_id == "pool0").then(|| {
-                    let amount = BigUint::from(50u64);
-                    PoolQuote {
-                        paid: SwapResult { amount_out: amount.clone(), gas: BigUint::from(10u64) },
-                        net: BigInt::from(amount),
-                    }
+            let mut asked = Vec::new();
+            let outcome = winners
+                .choose_pool_for_pair(pair(), &pools, |component_id: &ComponentId| {
+                    asked.push(component_id.clone());
+                    simulator(multipliers, 100)(component_id)
                 })
-            })
-            .unwrap();
+                .unwrap();
 
-        assert_eq!(outcome.pool_ix, 0, "pool1 refused, so pool0 takes the pair");
-        assert_eq!(outcome.amount_out, BigUint::from(50u64));
+            assert_eq!(asked, vec!["pool1".to_string()], "only the winner should be asked");
+            assert_eq!(outcome.pool_ix, 1);
+        }
+
+        /// A winner that cannot trade the amount does not end the hop: every pool is asked, and the
+        /// one that answers becomes the pair's winner.
+        #[test]
+        fn test_winners_falls_back_to_every_pool_when_the_winner_cannot_trade() {
+            let mut winners = PairWinners::new(true);
+            let pools = pools(2);
+            winners
+                .choose_pool_for_pair(pair(), &pools, simulator([2, 5], 100))
+                .unwrap();
+
+            let outcome = winners
+                .choose_pool_for_pair(pair(), &pools, |component_id: &ComponentId| {
+                    (component_id == "pool0").then(|| {
+                        let amount = BigUint::from(50u64);
+                        PoolQuote {
+                            paid: SwapResult {
+                                amount_out: amount.clone(),
+                                gas: BigUint::from(10u64),
+                            },
+                            net: BigInt::from(amount),
+                        }
+                    })
+                })
+                .unwrap();
+
+            assert_eq!(outcome.pool_ix, 0, "pool1 refused, so pool0 takes the pair");
+            assert_eq!(outcome.amount_out, BigUint::from(50u64));
+        }
+
+        /// Off, no winner is remembered, so every pool is asked every time.
+        #[test]
+        fn test_winners_disabled_scans_every_pool_each_time() {
+            let mut winners = PairWinners::new(false);
+            let multipliers = [2u64, 5u64];
+            let pools = pools(multipliers.len());
+
+            let first = winners
+                .choose_pool_for_pair(pair(), &pools, simulator(multipliers, 100))
+                .unwrap();
+            let mut asked = 0usize;
+            let second = winners
+                .choose_pool_for_pair(pair(), &pools, |component_id: &ComponentId| {
+                    asked += 1;
+                    simulator(multipliers, 100)(component_id)
+                })
+                .unwrap();
+
+            assert_eq!(asked, 2, "both pools are asked again, so no winner was remembered");
+            assert_eq!(first.amount_out, second.amount_out);
+        }
+
+        /// No pool on the pair can trade the amount.
+        #[test]
+        fn test_winners_returns_none_when_no_pool_trades() {
+            let mut winners = PairWinners::new(true);
+            let pools = pools(2);
+
+            let outcome = winners.choose_pool_for_pair(pair(), &pools, |_| None);
+
+            assert!(outcome.is_none());
+        }
     }
 
-    /// Off, no winner is remembered, so every pool is asked every time.
-    #[test]
-    fn test_winners_disabled_scans_every_pool_each_time() {
-        let mut winners = PairWinners::new(false);
-        let multipliers = [2u64, 5u64];
-        let pools = pools(multipliers.len());
+    mod simulate_token_path {
+        use super::*;
 
-        let first = winners
-            .choose_pool_for_pair(pair(), &pools, simulator(multipliers, 100))
-            .unwrap();
-        let mut asked = 0usize;
-        let second = winners
-            .choose_pool_for_pair(pair(), &pools, |component_id: &ComponentId| {
-                asked += 1;
-                simulator(multipliers, 100)(component_id)
-            })
-            .unwrap();
+        /// Two legs over the same pool list, so the pool that wins the first leg is on offer again
+        /// at the second.
+        fn two_legs_sharing_pools(pools: &[EdgeData<()>]) -> Vec<LegPools<'_, (), ()>> {
+            vec![
+                LegPools { pair: (NodeIndex::new(0), NodeIndex::new(1)), pools, data: () },
+                LegPools { pair: (NodeIndex::new(1), NodeIndex::new(2)), pools, data: () },
+            ]
+        }
 
-        assert_eq!(asked, 2, "both pools are asked again, so no winner was remembered");
-        assert_eq!(first.amount_out, second.amount_out);
-    }
+        /// A pool the path already crossed cannot be sold through twice, so the second leg takes
+        /// the pool that pays less rather than the one that won the first.
+        #[test]
+        fn test_simulate_token_path_withholds_a_pool_the_path_already_crossed() {
+            let pools = pools(2);
+            let legs = two_legs_sharing_pools(&pools);
+            let mut winners = PairWinners::new(true);
 
-    /// No pool on the pair can trade the amount.
-    #[test]
-    fn test_winners_returns_none_when_no_pool_trades() {
-        let mut winners = PairWinners::new(true);
-        let pools = pools(2);
+            let walked = simulate_token_path(
+                &legs,
+                &BigUint::from(100u64),
+                &mut winners,
+                |_, amount, id| {
+                    let multiplier = if id == "pool1" { 5u64 } else { 2u64 };
+                    let out = amount * BigUint::from(multiplier);
+                    Some(PoolQuote {
+                        paid: SwapResult { amount_out: out.clone(), gas: BigUint::from(10u64) },
+                        net: BigInt::from(out),
+                    })
+                },
+            )
+            .ok()
+            .expect("both legs have a pool left to trade");
 
-        let outcome = winners.choose_pool_for_pair(pair(), &pools, |_| None);
+            let crossed: Vec<usize> = walked
+                .hops
+                .iter()
+                .map(|hop| hop.pool_ix)
+                .collect();
+            assert_eq!(crossed, vec![1, 0], "the second leg cannot reuse pool1");
+            assert_eq!(
+                walked.amount_out,
+                BigUint::from(1000u64),
+                "100 * 5 through pool1, then * 2"
+            );
+        }
 
-        assert!(outcome.is_none());
-    }
-
-    // ==================== simulate_token_path Tests ====================
-
-    /// Two legs over the same pool list, so the pool that wins the first leg is on offer again at
-    /// the second.
-    fn two_legs_sharing_pools(pools: &[EdgeData<()>]) -> Vec<LegPools<'_, (), ()>> {
-        vec![
-            LegPools { pair: (NodeIndex::new(0), NodeIndex::new(1)), pools, data: () },
-            LegPools { pair: (NodeIndex::new(1), NodeIndex::new(2)), pools, data: () },
-        ]
-    }
-
-    /// A pool the path already crossed cannot be sold through twice, so the second leg takes the
-    /// pool that pays less rather than the one that won the first.
-    #[test]
-    fn test_simulate_token_path_withholds_a_pool_the_path_already_crossed() {
-        let pools = pools(2);
-        let legs = two_legs_sharing_pools(&pools);
-        let mut winners = PairWinners::new(true);
-
-        let walked =
-            simulate_token_path(&legs, &BigUint::from(100u64), &mut winners, |_, amount, id| {
-                let multiplier = if id == "pool1" { 5u64 } else { 2u64 };
+        /// A narrowed scan picks the best of a field with pools removed from it, which is not the
+        /// pair's own answer, so it must not overwrite what a full scan recorded.
+        #[test]
+        fn test_simulate_token_path_leaves_the_remembered_winner_after_a_narrowed_scan() {
+            let pools = pools(2);
+            let legs = two_legs_sharing_pools(&pools);
+            let mut winners = PairWinners::new(true);
+            let quote = |amount: &BigUint, multiplier: u64| {
                 let out = amount * BigUint::from(multiplier);
                 Some(PoolQuote {
                     paid: SwapResult { amount_out: out.clone(), gas: BigUint::from(10u64) },
                     net: BigInt::from(out),
                 })
+            };
+
+            simulate_token_path(&legs, &BigUint::from(100u64), &mut winners, |_, amount, id| {
+                quote(amount, if id == "pool1" { 5 } else { 2 })
             })
             .ok()
             .expect("both legs have a pool left to trade");
 
-        let crossed: Vec<usize> = walked
-            .hops
-            .iter()
-            .map(|hop| hop.pool_ix)
-            .collect();
-        assert_eq!(crossed, vec![1, 0], "the second leg cannot reuse pool1");
-        assert_eq!(walked.amount_out, BigUint::from(1000u64), "100 * 5 through pool1, then * 2");
-    }
+            assert_eq!(
+                winners
+                    .winner_by_pair
+                    .get(&(NodeIndex::new(1), NodeIndex::new(2))),
+                None,
+                "the second leg scanned a narrowed field, so it recorded nothing"
+            );
+            assert_eq!(
+                winners
+                    .winner_by_pair
+                    .get(&(NodeIndex::new(0), NodeIndex::new(1))),
+                Some(&1),
+                "the first leg scanned every pool, so its winner stands"
+            );
+        }
 
-    /// A narrowed scan picks the best of a field with pools removed from it, which is not the
-    /// pair's own answer, so it must not overwrite what a full scan recorded.
-    #[test]
-    fn test_simulate_token_path_leaves_the_remembered_winner_after_a_narrowed_scan() {
-        let pools = pools(2);
-        let legs = two_legs_sharing_pools(&pools);
-        let mut winners = PairWinners::new(true);
-        let quote = |amount: &BigUint, multiplier: u64| {
-            let out = amount * BigUint::from(multiplier);
-            Some(PoolQuote {
-                paid: SwapResult { amount_out: out.clone(), gas: BigUint::from(10u64) },
-                net: BigInt::from(out),
-            })
-        };
+        /// A leg no pool can trade names itself, so the caller can say which hop stopped the path.
+        #[test]
+        fn test_simulate_token_path_names_the_leg_that_could_not_trade() {
+            let pools = pools(2);
+            let legs = two_legs_sharing_pools(&pools);
+            let mut winners = PairWinners::new(true);
 
-        simulate_token_path(&legs, &BigUint::from(100u64), &mut winners, |_, amount, id| {
-            quote(amount, if id == "pool1" { 5 } else { 2 })
-        })
-        .ok()
-        .expect("both legs have a pool left to trade");
-
-        assert_eq!(
-            winners
-                .winner_by_pair
-                .get(&(NodeIndex::new(1), NodeIndex::new(2))),
-            None,
-            "the second leg scanned a narrowed field, so it recorded nothing"
-        );
-        assert_eq!(
-            winners
-                .winner_by_pair
-                .get(&(NodeIndex::new(0), NodeIndex::new(1))),
-            Some(&1),
-            "the first leg scanned every pool, so its winner stands"
-        );
-    }
-
-    /// A leg no pool can trade names itself, so the caller can say which hop stopped the path.
-    #[test]
-    fn test_simulate_token_path_names_the_leg_that_could_not_trade() {
-        let pools = pools(2);
-        let legs = two_legs_sharing_pools(&pools);
-        let mut winners = PairWinners::new(true);
-
-        let failed =
-            simulate_token_path(&legs, &BigUint::from(100u64), &mut winners, |leg, amount, _| {
-                (leg.pair.0 == NodeIndex::new(0)).then(|| {
-                    let out = amount * BigUint::from(2u64);
-                    PoolQuote {
-                        paid: SwapResult { amount_out: out.clone(), gas: BigUint::from(10u64) },
-                        net: BigInt::from(out),
-                    }
-                })
-            })
+            let failed = simulate_token_path(
+                &legs,
+                &BigUint::from(100u64),
+                &mut winners,
+                |leg, amount, _| {
+                    (leg.pair.0 == NodeIndex::new(0)).then(|| {
+                        let out = amount * BigUint::from(2u64);
+                        PoolQuote {
+                            paid: SwapResult { amount_out: out.clone(), gas: BigUint::from(10u64) },
+                            net: BigInt::from(out),
+                        }
+                    })
+                },
+            )
             .err()
             .expect("the second leg has no pool that trades");
 
-        assert_eq!(failed.0, 1);
+            assert_eq!(failed.0, 1);
+        }
     }
 }
