@@ -26,6 +26,8 @@
 //! only tokens whose stored routes ran through a changed component are re-solved, which bounds
 //! the steady-state cost.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use num_bigint::BigUint;
 #[cfg(test)]
@@ -135,10 +137,15 @@ impl TokenGasPriceComputation {
         graph_manager.initialize_graph(&topology);
 
         // Gas-aware scoring would need the prices this computation produces, so it stays off.
-        let config =
-            AlgorithmConfig::new(1, self.max_hops, AlgorithmConfig::default().timeout(), None)
-                .map_err(|error| ComputationError::InvalidConfiguration(error.to_string()))?
-                .with_gas_aware(false);
+        //
+        // The timeout bounds one solve (the buy pass, or one token's sell), not the whole run.
+        // It is deliberately not the quote timeout: this runs in the background, and a solve
+        // that needs a few hundred milliseconds should price its token, not vary with machine
+        // load. One second is a pathological-case bound — typical solves finish in
+        // milliseconds — so one degenerate token cannot stall the block's derived chain.
+        let config = AlgorithmConfig::new(1, self.max_hops, Duration::from_secs(1), None)
+            .map_err(|error| ComputationError::InvalidConfiguration(error.to_string()))?
+            .with_gas_aware(false);
         let algorithm = BellmanFordAlgorithm::with_config(config);
 
         let wanted = self.tokens_to_price(&topology, filter_tokens);
