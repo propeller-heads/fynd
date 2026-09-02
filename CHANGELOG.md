@@ -1,4 +1,11 @@
 
+## [0.100.1](https://github.com/propeller-heads/fynd/compare/0.100.0...0.100.1) (2026-09-02)
+
+### Bug Fixes
+
+* **rpc:** warn instead of failing on protocols Tycho dropped ([5a947d5](https://github.com/propeller-heads/fynd/commit/5a947d5a0482b09471a426b2c5d70cb2e8d72203))
+
+
 ## [0.100.0](https://github.com/propeller-heads/fynd/compare/0.99.22...0.100.0) (2026-09-02)
 
 ### Features
