@@ -2,12 +2,21 @@
 //!
 //! Two entry points, both taking the algorithms to run: [`bench::run`] solves many orders with
 //! several configurations and writes a report, [`profile::run`] solves a few with one
-//! configuration under a profiler. Both replay the
-//! same fixture, read the same configs and the same dataset; only what they do with the results
-//! differs. Keeping the setup here stops the two drifting into measuring subtly different things.
+//! configuration under a profiler. Both replay the same fixture, read the same configs and the
+//! same dataset; only what they do with the results differs. Keeping the setup here stops the two
+//! drifting into measuring subtly different things.
 //!
 //! The configurations, the token table and the blocked list ship with this crate, in `configs/`
-//! and `data/`, and are found relative to the crate rather than the working directory.
+//! and `data/`, and are found relative to the crate rather than the working directory. The market
+//! fixture is the exception: this repository's copy is in Git LFS, so a checkout cargo made for a
+//! git dependency holds the pointer file, and a caller from outside names its own with
+//! `--fixture`.
+//!
+//! # Benchmarking an algorithm from another crate
+//!
+//! The registry both entry points take is the seam: a crate holding its own algorithm registers
+//! it, adds a configuration file naming it with `--configs-dir`, and gets the same report every
+//! built-in gets. `README.md` has the manifest, the bench target and the command line.
 
 pub mod bench;
 pub mod live;
@@ -15,7 +24,7 @@ pub mod profile;
 pub mod trades;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -107,7 +116,7 @@ pub fn default_trades_path() -> PathBuf {
     crate_path("../aggregator_trades_50k_1k_usd.json")
 }
 
-/// One solver configuration in the comparison, loaded from `configs/<label>.toml`.
+/// One solver configuration in the comparison, loaded from `<configs dir>/<label>.toml`.
 pub struct BenchConfig {
     /// The config file's stem: what `--configs` takes, and what the reports show.
     pub label: String,
@@ -275,67 +284,95 @@ pub fn block_components(updates: &mut [Update], blocked: &HashSet<Address>) -> u
     dropped.len()
 }
 
-/// Directory holding one TOML file per available configuration.
-pub fn configs_dir() -> PathBuf {
-    crate_path("configs")
-}
-
-/// Loads `configs/<label>.toml`.
+/// Every configuration a run can name, by file stem.
 ///
-/// # Errors
-///
-/// Returns the reason the config could not be used — missing, unparseable, or without an
-/// `algorithm` key — so the caller can print it and record it in the report rather than inventing
-/// its own wording.
-pub fn load_bench_config(label: &str) -> Result<BenchConfig, String> {
-    let path = configs_dir().join(format!("{label}.toml"));
-    let contents = std::fs::read_to_string(&path)
-        .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
-    let worker_pool_fields: toml::Table = toml::from_str(&contents)
-        .map_err(|error| format!("{} does not parse: {error}", path.display()))?;
-
-    let algorithm = worker_pool_fields
-        .get("algorithm")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| format!("{} has no `algorithm` key", path.display()))?
-        .to_string();
-    let max_hops = worker_pool_fields
-        .get("max_hops")
-        .and_then(|value| value.as_integer())
-        .unwrap_or(3) as usize;
-
-    Ok(BenchConfig { label: label.to_string(), algorithm, max_hops, worker_pool_fields })
+/// Built once from the built-in directory plus whatever `--configs-dir` names. A stem is unique
+/// across all of them: two files claiming one name is an error rather than a silent winner,
+/// because the loser could be the baseline every number in the report is measured against.
+pub struct ConfigCatalog {
+    /// Stem to the file it was read from, so a lookup names one file and a report can say which.
+    files: BTreeMap<String, PathBuf>,
 }
 
-/// Every configuration on disk, by file stem, sorted. The default when `--configs` is absent.
-pub fn available_configs() -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(configs_dir()) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|ext| ext == "toml")
-        })
-        .filter_map(|entry| {
-            entry
-                .path()
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-        })
-        .collect();
-    names.sort();
-    names
+impl ConfigCatalog {
+    /// The built-in configurations, plus every `.toml` in `extra`.
+    ///
+    /// # Errors
+    ///
+    /// If a directory cannot be read, or if two directories hold the same stem. Both are the
+    /// caller's mistake, and both would otherwise shrink or silently change a run: a mistyped
+    /// `--configs-dir` would run the built-ins alone, and a duplicate would decide by order.
+    pub fn new(extra: &[PathBuf]) -> Result<Self, String> {
+        let mut files = BTreeMap::new();
+        for directory in std::iter::once(crate_path("configs")).chain(extra.iter().cloned()) {
+            let entries = std::fs::read_dir(&directory)
+                .map_err(|error| format!("{} could not be read: {error}", directory.display()))?;
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path
+                    .extension()
+                    .is_none_or(|extension| extension != "toml")
+                {
+                    continue;
+                }
+                let Some(stem) = path.file_stem() else {
+                    continue;
+                };
+                let stem = stem.to_string_lossy().into_owned();
+                if let Some(first) = files.insert(stem.clone(), path.clone()) {
+                    return Err(format!(
+                        "two configs are named {stem}: {} and {}. Rename one -- a config name is \
+                         what the report labels its column",
+                        first.display(),
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(Self { files })
+    }
+
+    /// Loads the configuration named `label`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason the config could not be used — unknown, unreadable, unparseable, or
+    /// without an `algorithm` key — so the caller can print it and record it in the report rather
+    /// than inventing its own wording. An unknown name lists the ones that do exist.
+    pub fn load(&self, label: &str) -> Result<BenchConfig, String> {
+        let path = self.files.get(label).ok_or_else(|| {
+            format!("no config named {label}. Available: {}", self.available().join(", "))
+        })?;
+        let contents = std::fs::read_to_string(path)
+            .map_err(|error| format!("{} could not be read: {error}", path.display()))?;
+        let worker_pool_fields: toml::Table = toml::from_str(&contents)
+            .map_err(|error| format!("{} does not parse: {error}", path.display()))?;
+
+        let algorithm = worker_pool_fields
+            .get("algorithm")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| format!("{} has no `algorithm` key", path.display()))?
+            .to_string();
+        let max_hops = worker_pool_fields
+            .get("max_hops")
+            .and_then(|value| value.as_integer())
+            .unwrap_or(3) as usize;
+
+        Ok(BenchConfig { label: label.to_string(), algorithm, max_hops, worker_pool_fields })
+    }
+
+    /// Every configuration, by file stem, sorted. The default when `--configs` is absent.
+    pub fn available(&self) -> Vec<String> {
+        self.files.keys().cloned().collect()
+    }
 }
 
-/// The fixture an offline run replays.
+/// The fixture an offline run replays when `--fixture` names nothing else.
 ///
 /// Only useful inside this repository: the file is in Git LFS, so a checkout cargo made for a git
-/// dependency holds the pointer rather than the market.
-fn recording_path() -> PathBuf {
+/// dependency holds the pointer rather than the market, and a caller from outside names its own
+/// copy.
+fn default_fixture_path() -> PathBuf {
     crate_path("../fynd-core/tests/fixtures/market_recording.json.zst")
 }
 
@@ -422,6 +459,29 @@ pub fn asked_for_the_test_list() -> bool {
     std::env::args().any(|argument| argument == "--list")
 }
 
+/// Where a run reads its configuration files from, on top of the ones this crate ships.
+///
+/// Flattened into both programs, like the market flags, so the two agree on what a config
+/// directory means.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ConfigFlags {
+    /// A directory of configuration files to run, on top of the built-in ones. Repeatable. A name
+    /// held by two directories stops the run, so a caller cannot replace the baseline by accident.
+    #[arg(long = "configs-dir")]
+    pub configs_dirs: Vec<PathBuf>,
+}
+
+impl ConfigFlags {
+    /// The configurations this run can name.
+    ///
+    /// # Errors
+    ///
+    /// As [`ConfigCatalog::new`].
+    pub fn catalog(&self) -> Result<ConfigCatalog, String> {
+        ConfigCatalog::new(&self.configs_dirs)
+    }
+}
+
 /// Which market a run solves against, as asked for on the command line.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum MarketMode {
@@ -440,25 +500,37 @@ pub enum MarketMode {
 ///
 /// Returns a message when a live capture cannot be made. The offline path panics instead -- a
 /// missing fixture is a broken checkout, not a run-time condition.
-pub async fn build_market(flags: LiveFlags) -> Result<Market, String> {
+pub async fn build_market(flags: MarketFlags) -> Result<Market, String> {
     match flags.market {
-        MarketMode::Offline => Ok(load_market()),
+        MarketMode::Offline => {
+            let fixture = flags
+                .fixture
+                .unwrap_or_else(default_fixture_path);
+            Ok(load_market(&fixture))
+        }
         MarketMode::Live => live::capture_market(&flags.into_options()?).await,
     }
 }
 
-/// The market flags, parsed once and flattened into both binaries.
+/// Where a run's market comes from: the mode, the fixture an offline run replays, and the Tycho
+/// settings a live capture needs.
 ///
-/// One declaration rather than two: the benchmark and the profiler have to agree on what a live
-/// capture means, and two copies of a dozen `clap` attributes drift the first time one is edited.
+/// One declaration rather than two: the benchmark and the profiler have to agree on what a market
+/// is, and two copies of a dozen `clap` attributes drift the first time one is edited.
 #[derive(clap::Args, Debug, Clone)]
-pub struct LiveFlags {
+pub struct MarketFlags {
     /// Where the market comes from: the recorded fixture, or one block captured live from Tycho.
     ///
     /// Offline runs are reproducible and comparable with each other. A live run is a point-in-time
     /// market: its configs compare with each other, not with any other run.
     #[arg(long, value_enum, default_value_t = MarketMode::Offline)]
     pub market: MarketMode,
+
+    /// The market recording an offline run replays. Defaults to this repository's fixture, which a
+    /// caller depending on this crate does not have: that copy is in Git LFS, so a checkout cargo
+    /// made holds the pointer file instead of the market.
+    #[arg(long)]
+    pub fixture: Option<PathBuf>,
 
     /// Tycho host, with or without a scheme. Live runs only.
     #[arg(long, env = "TYCHO_URL")]
@@ -507,7 +579,7 @@ pub struct LiveFlags {
     pub rpc_url: Option<String>,
 }
 
-impl LiveFlags {
+impl MarketFlags {
     /// Checks the flags a live capture cannot do without, and names the missing one.
     fn into_options(self) -> Result<live::LiveOptions, String> {
         let tycho_url = self
@@ -588,8 +660,20 @@ pub struct Market {
     pub source: MarketSource,
 }
 
-pub fn load_market() -> Market {
-    let recording = read_recording(&recording_path()).expect("market recording fixture");
+/// Replays the recording at `fixture` into a market.
+///
+/// # Panics
+///
+/// If the file cannot be read or does not hold a market. A run cannot go on without one, and the
+/// message names the path so a Git LFS pointer file is easy to tell from a missing one.
+pub fn load_market(fixture: &Path) -> Market {
+    let recording = read_recording(fixture).unwrap_or_else(|error| {
+        panic!(
+            "{} is not a market recording: {error}. Point --fixture at a copy of \
+             market_recording.json.zst -- in this repository, `git lfs pull` writes one.",
+            fixture.display()
+        )
+    });
     Market {
         chain: fynd_core::types::parse_chain(&recording.metadata.chain)
             .expect("fixture chain supported"),

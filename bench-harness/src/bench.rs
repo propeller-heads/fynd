@@ -22,9 +22,10 @@
 //!
 //! # Which algorithms run
 //!
-//! One TOML file per configuration in `configs/`, named by file stem. `--configs` takes a
-//! comma-separated list of those stems and defaults to all of them. Adding a configuration is
-//! adding a file; nothing here needs to change. See `configs/README.md`.
+//! One TOML file per configuration, named by file stem: the ones in this crate's `configs/`, plus
+//! any directory `--configs-dir` names. `--configs` takes a comma-separated list of those stems
+//! and defaults to all of them. Adding a configuration is adding a file; nothing here needs to
+//! change. See `configs/README.md`.
 //!
 //! `BF_d2` is the baseline and is always included, listed or not. It is not a
 //! like-for-like depth comparison — the report's "Reading this" section says why.
@@ -65,15 +66,15 @@ use num_traits::ToPrimitive;
 use tycho_simulation::tycho_common::models::Address;
 
 use crate::{
-    available_configs, block_components, build_market, build_solver, exclude_requested_protocols,
-    load_bench_config, load_blocked_tokens, mean_and_median, print_protocol_breakdown,
-    protocol_breakdown, resolved_gas_price_gwei, symbol_table, timings_of, token_label,
+    block_components, build_market, build_solver, exclude_requested_protocols, load_blocked_tokens,
+    mean_and_median, print_protocol_breakdown, protocol_breakdown, resolved_gas_price_gwei,
+    symbol_table, timings_of, token_label,
     trades::{
         load_trade_orders, recorded_tokens, OrderFlags, OrderSelection, TradeLoadSummary,
         TradeOrder,
     },
-    usd_out, wei_per_token, BenchConfig, BlockedTokens, LiveFlags, Market, MarketSource,
-    ProtocolCount, RunSettings,
+    usd_out, wei_per_token, BenchConfig, BlockedTokens, ConfigCatalog, ConfigFlags, Market,
+    MarketFlags, MarketSource, ProtocolCount, RunSettings,
 };
 
 /// Orders solved when `--orders` says nothing else.
@@ -174,9 +175,14 @@ struct Args {
     #[arg(long, value_parser = crate::parse_gas_price_gwei)]
     gas_price_gwei: Option<f64>,
 
-    /// Market flags: `--market`, and the Tycho settings a live capture needs.
+    /// Market flags: `--market`, the fixture an offline run replays, and the Tycho settings a live
+    /// capture needs.
     #[command(flatten)]
-    live: LiveFlags,
+    market: MarketFlags,
+
+    /// Config flags: the directories a run reads its configurations from.
+    #[command(flatten)]
+    configs_dirs: ConfigFlags,
 
     /// Configs to run, comma separated, named after the config files, e.g. `WF_d3,PFW_d3`.
     /// Defaults to every config on disk. The baseline is always included. Narrowing this is what
@@ -236,19 +242,24 @@ struct ConfigSet {
 /// A name that will not load is skipped rather than fatal, but never silently: it is printed and
 /// recorded in the report, because a typo that quietly shrinks the run is worse than one that
 /// stops it.
-fn resolve_configs(requested: Option<&[String]>, baseline: &str) -> ConfigSet {
+fn resolve_configs(
+    requested: Option<&[String]>,
+    baseline: &str,
+    catalog: &ConfigCatalog,
+) -> ConfigSet {
     let requested: Vec<String> = match requested {
         Some(names) => names
             .iter()
             .map(|name| name.trim().to_string())
             .filter(|name| !name.is_empty())
             .collect(),
-        None => available_configs(),
+        None => catalog.available(),
     };
 
     // The baseline first, so the reports lead with what everything else is measured against and
     // every reader of `results` can take index 0 rather than matching on a name.
-    let baseline = load_bench_config(baseline)
+    let baseline = catalog
+        .load(baseline)
         .unwrap_or_else(|reason| panic!("the baseline config {baseline} is unusable: {reason}"));
     let mut ready = vec![baseline];
     let mut skipped: Vec<(String, String)> = Vec::new();
@@ -260,7 +271,7 @@ fn resolve_configs(requested: Option<&[String]>, baseline: &str) -> ConfigSet {
         {
             continue;
         }
-        match load_bench_config(&name) {
+        match catalog.load(&name) {
             Ok(config) => ready.push(config),
             Err(reason) => skipped.push((name, reason)),
         }
@@ -298,14 +309,14 @@ impl Run {
         }
     }
 
-    fn resolve(args: Args, market: &Market) -> (Self, ConfigSet) {
+    fn resolve(args: Args, market: &Market, catalog: &ConfigCatalog) -> (Self, ConfigSet) {
         let cores = num_cpus::get();
         let jobs = args.jobs.unwrap_or(cores).max(1);
         let trades = args
             .trades
             .unwrap_or_else(crate::default_trades_path);
         let out_dir = args.out_dir.join(&args.name);
-        let configs = resolve_configs(args.configs.as_deref(), &args.baseline);
+        let configs = resolve_configs(args.configs.as_deref(), &args.baseline, catalog);
         let run = Self {
             name: args.name,
             jobs,
@@ -1462,7 +1473,11 @@ pub async fn run(algorithms: &AlgorithmRegistry) {
     let args = Args::parse();
     crate::init_logging(args.logs);
 
-    let mut market = match build_market(args.live.clone()).await {
+    let catalog = args
+        .configs_dirs
+        .catalog()
+        .unwrap_or_else(|reason| panic!("{reason}"));
+    let mut market = match build_market(args.market.clone()).await {
         Ok(market) => market,
         Err(reason) => {
             eprintln!("error: {reason}");
@@ -1470,7 +1485,7 @@ pub async fn run(algorithms: &AlgorithmRegistry) {
         }
     };
     let source = market.source.clone();
-    let (run, mut configs) = Run::resolve(args, &market);
+    let (run, mut configs) = Run::resolve(args, &market, &catalog);
 
     let excluded_components = exclude_requested_protocols(&mut market, &run.excluded_protocols);
 

@@ -40,11 +40,11 @@ use futures::stream::StreamExt;
 use fynd_core::{types::QuoteStatus, AlgorithmRegistry, QuoteOptions, QuoteRequest, Solver};
 
 use crate::{
-    available_configs, block_components, build_market, build_solver, exclude_requested_protocols,
-    format_micros, load_bench_config, load_blocked_tokens, print_protocol_breakdown,
-    protocol_breakdown, resolved_gas_price_gwei, symbol_table, timings_of, token_label,
+    block_components, build_market, build_solver, exclude_requested_protocols, format_micros,
+    load_blocked_tokens, print_protocol_breakdown, protocol_breakdown, resolved_gas_price_gwei,
+    symbol_table, timings_of, token_label,
     trades::{load_trade_orders, recorded_tokens, OrderFlags, OrderSelection, TradeOrder},
-    LiveFlags, MarketSource, RunSettings,
+    ConfigFlags, MarketFlags, MarketSource, RunSettings,
 };
 
 #[derive(Parser, Debug)]
@@ -54,7 +54,8 @@ use crate::{
                   use algorithm_bench for reports. Wrap it in a profiler with ./scripts/profile.sh."
 )]
 struct Args {
-    /// Config to run, named after a file in `configs/`.
+    /// Config to run, named after a config file: one in this crate's `configs/`, or one in a
+    /// directory `--configs-dir` names.
     #[arg(long)]
     config: String,
 
@@ -88,9 +89,14 @@ struct Args {
     #[arg(long, value_parser = crate::parse_gas_price_gwei)]
     gas_price_gwei: Option<f64>,
 
-    /// Market flags: `--market`, and the Tycho settings a live capture needs.
+    /// Market flags: `--market`, the fixture an offline run replays, and the Tycho settings a live
+    /// capture needs.
     #[command(flatten)]
-    live: LiveFlags,
+    market: MarketFlags,
+
+    /// Config flags: the directories a run reads its configurations from.
+    #[command(flatten)]
+    configs_dirs: ConfigFlags,
 
     /// Protocol systems to drop from the market before solving, comma separated, e.g.
     /// `vm:balancer_v2,uniswap_v4_hooks`. Names must match the market's own exactly; a name that
@@ -196,10 +202,13 @@ pub async fn run(algorithms: &AlgorithmRegistry) {
     let args = Args::parse();
     crate::init_logging(args.logs);
 
-    let config = load_bench_config(&args.config)
-        .unwrap_or_else(|reason| panic!("{reason}. Available: {}", available_configs().join(", ")));
+    let config = args
+        .configs_dirs
+        .catalog()
+        .and_then(|catalog| catalog.load(&args.config))
+        .unwrap_or_else(|reason| panic!("{reason}"));
 
-    let mut market = match build_market(args.live.clone()).await {
+    let mut market = match build_market(args.market.clone()).await {
         Ok(market) => market,
         Err(reason) => {
             eprintln!("error: {reason}");

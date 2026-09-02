@@ -37,7 +37,7 @@ viewer keeps the two apart in its run picker for exactly that reason.
 
 **The market fixture**, for offline runs, is in Git LFS at
 `fynd-core/tests/fixtures/market_recording.json.zst`. Run `git lfs pull` if it is a small text file
-instead of 771 KB of compressed JSON. Live runs do not read it; they need `TYCHO_URL` and
+instead of 771 KB of compressed JSON, or pass `--fixture` to name another copy. Live runs do not read it; they need `TYCHO_URL` and
 `TYCHO_API_KEY` instead, and `RPC_URL` to price gas at the chain's rate.
 
 **The order dataset** is `aggregator_trades_50k_1k_usd.json` in the repository root. It is
@@ -75,6 +75,8 @@ Useful options:
 | `--timeout-ms N` | How long one solve may take |
 | `--gas-price-gwei X` | Gas price the run solves at. Fractions allowed: `0.1` is roughly what the fixture's own block sat at |
 | `--logs` | Print the solver's own logs. Slows every config, so leave it off when reading timings |
+| `--fixture PATH` | The recording an offline run replays. Defaults to this repository's; mainly for a caller outside it |
+| `--configs-dir DIR` | A directory of config files to run on top of the built-in ones. Repeatable; mainly for a caller outside this repository |
 
 `--help-bench` lists them all with the benchmark's own defaults; `--help` describes the script.
 Anything the script does not consume is forwarded unchanged, so the benchmark validates its own
@@ -258,7 +260,7 @@ a slow order, then `--order <id>` to profile just that one.
 
 ### Add a configuration
 
-Add a file to `configs/`. Nothing else changes. The file name is the name you pass to `--configs`
+Add a file to `configs/`, or to a directory passed with `--configs-dir`. Nothing else changes. The file name is the name you pass to `--configs`
 and the label the report shows.
 
 ```toml
@@ -307,11 +309,16 @@ measuring differently. What each run was is carried on `Market::source`, written
 shown in the report and the viewer.
 
 Anything used by both programs belongs in `src/lib.rs`, so the two cannot drift apart on what they
-measure. The market flags are one `clap` struct, `LiveFlags`, flattened into each binary for the
+measure. The shared flags are `clap` structs flattened into each program for the same reason: two
+copies of a dozen attributes drift the first time one is edited. `MarketFlags` carries `--market`,
+`--fixture` and the Tycho settings; `ConfigFlags` carries `--configs-dir`. The market flags are one `clap` struct, `LiveFlags`, flattened into each binary for the
 same reason: two copies of a dozen attributes drift the first time one is edited.
 
 The configs, the token table and the blocked list ship inside this crate, in `configs/` and
-`data/`, and are found relative to the crate rather than the working directory.
+`data/`, and are found relative to the crate rather than the working directory. A caller depending
+on this crate therefore reads the same ones without copying anything. The market fixture is the
+exception: it is in Git LFS, so a checkout cargo made for a git dependency holds the pointer file,
+and an outside caller names its own copy with `--fixture`.
 
 Both targets are declared `harness = false` in `Cargo.toml`, which means they get a plain `main()`
 instead of the test harness. That is why they parse their own arguments with `clap`.

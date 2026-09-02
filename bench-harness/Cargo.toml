@@ -11,9 +11,9 @@ publish = false
 swap-metrics = ["fynd-core/swap-metrics"]
 
 [dependencies]
-# `test-utils` is what exposes `Solver::from_recording_with`, which every solver this crate builds goes
-# through. It is not optional: without it there is no harness. It is additive, and cargo unifies
-# features, so a whole-workspace build compiles fynd-core with it on for every member.
+# `test-utils` is what exposes `Solver::from_recording_with`, which every solver this crate builds
+# goes through. It is not optional: without it there is no harness. It is additive, and cargo
+# unifies features, so a whole-workspace build compiles fynd-core with it on for every member.
 fynd-core = { workspace = true, features = ["test-utils"] }
 fynd-test-fixtures.workspace = true
 
