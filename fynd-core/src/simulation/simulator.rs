@@ -28,6 +28,12 @@ use crate::{
 
 sol! { error Error(string); }
 
+/// Balance and allowance every simulated account is given.
+///
+/// Leaving the high bit clear avoids node-side arithmetic overflow while still funding any
+/// practical quote.
+const SIMULATION_FUNDING_VALUE: U256 = U256::MAX.wrapping_shr(1);
+
 /// Simulates encoded quote transactions with temporary sender funding.
 pub struct QuoteSimulator {
     provider: RootProvider<Ethereum>,
@@ -307,16 +313,10 @@ fn spender_for(router: Address, transfer_type: &UserTransferType) -> Result<Addr
     }
 }
 
-fn simulation_funding_value() -> U256 {
-    // Leaving the high bit clear avoids node-side arithmetic overflow while still funding any
-    // practical quote.
-    U256::MAX >> 1
-}
-
 fn native_balance_override(sender: Address) -> StateOverride {
     StateOverride::from_iter([(
         sender,
-        AccountOverride::default().with_balance(simulation_funding_value()),
+        AccountOverride::default().with_balance(SIMULATION_FUNDING_VALUE),
     )])
 }
 
@@ -328,15 +328,15 @@ fn token_overrides(
     spender: Option<Address>,
 ) -> StateOverride {
     let mut state_diff = B256HashMap::default();
-    state_diff.insert(positions.balance_slot(holder), B256::from(simulation_funding_value()));
+    state_diff.insert(positions.balance_slot(holder), B256::from(SIMULATION_FUNDING_VALUE));
     if let Some(spender) = spender {
         state_diff.insert(
             positions.allowance_slot(sender, spender),
-            B256::from(simulation_funding_value()),
+            B256::from(SIMULATION_FUNDING_VALUE),
         );
     }
     StateOverride::from_iter([
-        (sender, AccountOverride::default().with_balance(simulation_funding_value())),
+        (sender, AccountOverride::default().with_balance(SIMULATION_FUNDING_VALUE)),
         (token, AccountOverride { state_diff: Some(state_diff), ..Default::default() }),
     ])
 }
