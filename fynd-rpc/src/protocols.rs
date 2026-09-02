@@ -1,5 +1,7 @@
 //! Tycho protocol system discovery.
 
+use std::collections::HashSet;
+
 use anyhow::{bail, Result};
 use fynd_core::feed::protocol_registry::{
     is_tycho_system, parse_exclusion, ProtocolSpec, EXCLUDE_PREFIX,
@@ -89,30 +91,33 @@ pub async fn resolve_protocols(
             .iter()
             .any(|p| p == ALL_ONCHAIN);
 
-    // Also fetched for a list that needs no expansion, to check the entries against what Tycho
-    // actually serves. Skipped for a list of RFQ and price level stream entries only, which needs
-    // no Tycho protocol stream and so must not be held up by a Tycho outage.
+    // Fetched for a list that needs no expansion too, so its entries can be checked against what
+    // Tycho actually serves. A list of RFQ and price level stream entries only names no Tycho
+    // system, so it skips the fetch and needs no reachable Tycho.
     let names_tycho_system = explicit
         .iter()
         .any(|protocol| is_tycho_system(&protocol.system));
-    let available = if want_all || want_native || names_tycho_system {
-        Some(fetch_protocol_systems(tycho_url, auth_key, use_tls, chain).await?)
+    let want_expansion = want_all || want_native;
+    let check_availability = want_expansion || names_tycho_system;
+    let systems = if check_availability {
+        fetch_protocol_systems(tycho_url, auth_key, use_tls, chain).await?
     } else {
-        None
+        Vec::new()
     };
 
-    let mut protocols: Vec<ProtocolSpec> = match &available {
-        Some(fetched) if want_all || want_native => fetched
+    let mut protocols: Vec<ProtocolSpec> = if want_expansion {
+        systems
             .iter()
             .filter(|system| !(want_native && system.starts_with(VM_PREFIX)))
             .map(ProtocolSpec::public)
-            .collect(),
-        _ => Vec::new(),
+            .collect()
+    } else {
+        Vec::new()
     };
     merge_explicit(&mut protocols, explicit);
     apply_exclusions(&mut protocols, &excluded);
-    if let Some(available) = &available {
-        drop_unserved(&mut protocols, available);
+    if check_availability {
+        drop_unserved(&mut protocols, &systems);
     }
 
     if protocols.is_empty() {
@@ -194,8 +199,12 @@ fn apply_exclusions(protocols: &mut Vec<ProtocolSpec>, excluded: &[String]) {
 /// RFQ and price level stream entries are left alone: they are served from their own endpoints and
 /// so never appear among Tycho's protocol systems.
 fn drop_unserved(protocols: &mut Vec<ProtocolSpec>, available: &[String]) {
+    let served: HashSet<&str> = available
+        .iter()
+        .map(String::as_str)
+        .collect();
     protocols.retain(|protocol| {
-        if !is_tycho_system(&protocol.system) || available.contains(&protocol.system) {
+        if !is_tycho_system(&protocol.system) || served.contains(protocol.system.as_str()) {
             return true;
         }
         warn!(
@@ -327,7 +336,7 @@ mod tests {
     }
 
     /// Applies `drop_unserved` to `requested`, against a fixed set of served systems.
-    fn serve(available: &[&str], requested: &[&str]) -> Vec<String> {
+    fn filter_by_availability(available: &[&str], requested: &[&str]) -> Vec<String> {
         let mut protocols = requested
             .iter()
             .map(|entry| ProtocolSpec::parse(entry).unwrap())
@@ -339,22 +348,66 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn test_unserved_protocol_is_dropped() {
-        let served = serve(&["uniswap_v3", "ekubo_v2"], &["uniswap_v3", "vm:fermiswap"]);
-        assert_eq!(served, strings(&["uniswap_v3"]));
+    #[rstest::rstest]
+    #[case::unserved(&["uniswap_v3", "ekubo_v2"], &["uniswap_v3", "vm:fermiswap"], &["uniswap_v3"])]
+    #[case::exclusive(&["ekubo_v3"], &["exclusive:ekubo_v3"], &["exclusive:ekubo_v3"])]
+    #[case::non_tycho(
+        &["uniswap_v3"],
+        &["rfq:bebop", "pricelevelstream:fermiswap"],
+        &["rfq:bebop", "pricelevelstream:fermiswap"]
+    )]
+    fn test_drop_unserved(
+        #[case] available: &[&str],
+        #[case] requested: &[&str],
+        #[case] expected: &[&str],
+    ) {
+        assert_eq!(filter_by_availability(available, requested), strings(expected));
     }
 
-    #[test]
-    fn test_served_exclusive_protocol_is_kept() {
-        let served = serve(&["ekubo_v3"], &["exclusive:ekubo_v3"]);
-        assert_eq!(served, strings(&["exclusive:ekubo_v3"]));
+    /// A Tycho serving `systems` from the protocol systems endpoint `resolve_protocols` calls.
+    async fn mock_tycho(systems: &[&str]) -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        let body = serde_json::json!({
+            "protocol_systems": systems,
+            "dci_protocols": [],
+            "pagination": { "page": 0, "page_size": 100, "total": systems.len() },
+        });
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/protocol_systems"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
     }
 
-    #[test]
-    fn test_non_tycho_entries_survive_the_availability_check() {
-        let served = serve(&["uniswap_v3"], &["rfq:bebop", "pricelevelstream:fermiswap"]);
-        assert_eq!(served, strings(&["rfq:bebop", "pricelevelstream:fermiswap"]));
+    #[tokio::test]
+    async fn test_resolve_protocols_drops_an_unserved_entry() {
+        let tycho = mock_tycho(&["uniswap_v3", "ekubo_v2"]).await;
+        let resolved = resolve_protocols(
+            &tycho.address().to_string(),
+            None,
+            false,
+            Chain::Ethereum,
+            &strings(&["uniswap_v3", "vm:fermiswap", "rfq:bebop"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved, strings(&["uniswap_v3", "rfq:bebop"]));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_protocols_expands_all_onchain() {
+        let tycho = mock_tycho(&["uniswap_v3", "vm:curve"]).await;
+        let resolved = resolve_protocols(
+            &tycho.address().to_string(),
+            None,
+            false,
+            Chain::Ethereum,
+            &strings(&[NATIVE_ONCHAIN, "exclude:vm:fermiswap"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved, strings(&["uniswap_v3"]));
     }
 
     #[tokio::test]

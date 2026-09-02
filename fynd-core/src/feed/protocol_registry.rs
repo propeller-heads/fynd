@@ -426,7 +426,7 @@ pub(crate) fn register_exchanges(
             "lunarbase" => {
                 builder = builder.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
             }
-            p if p.starts_with(RFQ_PREFIX) || p.starts_with(PRICE_LEVEL_STREAM_PREFIX) => {
+            p if !is_tycho_system(p) => {
                 // Handled by register_rfq and open_price_level_stream, which stream from their
                 // own endpoints rather than from Tycho.
                 continue;
