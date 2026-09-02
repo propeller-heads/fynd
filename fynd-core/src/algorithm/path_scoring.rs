@@ -319,7 +319,7 @@ mod tests {
         /// A hop with no measured pool cannot be placed, so the sequence sinks to the bottom of the
         /// queue rather than out of it: it still scores, and the score is the lowest there is.
         #[test]
-        fn test_heuristic_score_sinks_a_sequence_with_an_unmeasured_hop() {
+        fn test_unmeasured_hop() {
             let (a, b, c, _) = addrs();
             let mut manager = linear_graph();
             // A->B measured, B->C left without derived data.
@@ -342,7 +342,7 @@ mod tests {
         /// A sequence naming a pair the graph has no pool for is the two indexes disagreeing, not a
         /// routing outcome, so it is dropped rather than ranked.
         #[test]
-        fn test_heuristic_score_drops_a_sequence_with_an_unconnected_pair() {
+        fn test_unconnected_pair() {
             let (a, _, c, _) = addrs();
             let manager = linear_graph();
             let graph = manager.graph();
@@ -378,7 +378,7 @@ mod tests {
         }
 
         #[test]
-        fn test_winners_takes_the_pool_that_pays_most() {
+        fn test_full_scan() {
             let mut winners = PairWinners::new(true);
             let multipliers = [2u64, 5u64];
             let pools = pools(multipliers.len());
@@ -395,7 +395,7 @@ mod tests {
         /// is answered from an amount already asked is the swap cache's business, not this
         /// one's.
         #[test]
-        fn test_winners_asks_only_the_remembered_winner() {
+        fn test_remembered_winner() {
             let mut winners = PairWinners::new(true);
             let multipliers = [2u64, 5u64];
             let pools = pools(multipliers.len());
@@ -418,7 +418,7 @@ mod tests {
         /// A winner that cannot trade the amount does not end the hop: every pool is asked, and the
         /// one that answers becomes the pair's winner.
         #[test]
-        fn test_winners_falls_back_to_every_pool_when_the_winner_cannot_trade() {
+        fn test_winner_cannot_trade() {
             let mut winners = PairWinners::new(true);
             let pools = pools(2);
             winners
@@ -446,7 +446,7 @@ mod tests {
 
         /// Off, no winner is remembered, so every pool is asked every time.
         #[test]
-        fn test_winners_disabled_scans_every_pool_each_time() {
+        fn test_reuse_disabled() {
             let mut winners = PairWinners::new(false);
             let multipliers = [2u64, 5u64];
             let pools = pools(multipliers.len());
@@ -468,7 +468,7 @@ mod tests {
 
         /// No pool on the pair can trade the amount.
         #[test]
-        fn test_winners_returns_none_when_no_pool_trades() {
+        fn test_no_pool_trades() {
             let mut winners = PairWinners::new(true);
             let pools = pools(2);
 
@@ -493,7 +493,7 @@ mod tests {
         /// A pool the path already crossed cannot be sold through twice, so the second leg takes
         /// the pool that pays less rather than the one that won the first.
         #[test]
-        fn test_simulate_token_path_withholds_a_pool_the_path_already_crossed() {
+        fn test_pool_already_crossed() {
             let pools = pools(2);
             let legs = two_legs_sharing_pools(&pools);
             let mut winners = PairWinners::new(true);
@@ -530,7 +530,7 @@ mod tests {
         /// A narrowed scan picks the best of a field with pools removed from it, which is not the
         /// pair's own answer, so it must not overwrite what a full scan recorded.
         #[test]
-        fn test_simulate_token_path_leaves_the_remembered_winner_after_a_narrowed_scan() {
+        fn test_narrowed_scan() {
             let pools = pools(2);
             let legs = two_legs_sharing_pools(&pools);
             let mut winners = PairWinners::new(true);
@@ -566,7 +566,7 @@ mod tests {
 
         /// A leg no pool can trade names itself, so the caller can say which hop stopped the path.
         #[test]
-        fn test_simulate_token_path_names_the_leg_that_could_not_trade() {
+        fn test_leg_cannot_trade() {
             let pools = pools(2);
             let legs = two_legs_sharing_pools(&pools);
             let mut winners = PairWinners::new(true);

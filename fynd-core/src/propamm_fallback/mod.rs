@@ -681,7 +681,7 @@ mod tests {
     /// The tiers a pair is indexed at, which tells a pair the market holds no pool for from one
     /// held at a tier the router does not resolve to.
     #[test]
-    fn test_tiers_for_lists_the_pairs_indexed_tiers_ascending() {
+    fn test_tiers_for() {
         let market = market_with_fallback_pool(500);
         let view = market
             .try_read_blocking()

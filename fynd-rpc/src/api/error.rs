@@ -143,7 +143,7 @@ mod tests {
     /// A rejected route is a route the deployment could not price, not a server fault: it keeps
     /// the wire code integrators already branch on.
     #[actix_web::test]
-    async fn test_route_rejected_reports_no_route_found() {
+    async fn test_route_rejected() {
         let (status, body) = json_body(ApiError::SolveFailed(SolveError::route_rejected(
             "order-1",
             fynd_core::types::RouteRejection::PammFeeTiersUnread,

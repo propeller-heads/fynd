@@ -2147,7 +2147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_splits_from_amounts_derives_fractions_from_the_amounts() {
+    fn test_splits_from_amounts() {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
 
@@ -2179,7 +2179,7 @@ mod tests {
     /// The sort is what decides which swap carries the remainder, so it has to be exercised by
     /// input that is not already in the order it produces.
     #[test]
-    fn test_splits_from_amounts_sorts_by_amount_before_assigning_the_remainder() {
+    fn test_splits_from_amounts_ascending_amounts() {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
 
@@ -2213,7 +2213,7 @@ mod tests {
     /// A path that ends on the token it started from must be scored on what it produced, not on
     /// the order's own input still standing at that token.
     #[test]
-    fn test_execute_split_plan_does_not_count_the_input_as_output() {
+    fn test_execute_split_plan_round_trip() {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
         let market = make_market(vec![
@@ -2241,7 +2241,7 @@ mod tests {
     /// A path set carrying nothing describes no split, and guessing an allocation for it would
     /// misprice the quote.
     #[test]
-    fn test_execute_split_plan_rejects_paths_that_carry_nothing() {
+    fn test_execute_split_plan_zero_amount_paths() {
         let token_a = token(0x0A, "A");
         let token_b = token(0x0B, "B");
         let market = make_market(vec![(
@@ -2294,7 +2294,7 @@ mod tests {
     }
 
     #[test]
-    fn test_share_output_divides_by_what_each_path_put_in() {
+    fn test_share_output() {
         let shares =
             share_output(&BigUint::from(1000u64), &[BigUint::from(300u64), BigUint::from(100u64)]);
 
@@ -2303,7 +2303,7 @@ mod tests {
 
     /// The shares add back to the output exactly, whatever the division leaves over.
     #[test]
-    fn test_share_output_gives_the_remainder_to_the_last_path() {
+    fn test_share_output_uneven_division() {
         let output = BigUint::from(1000u64);
         let shares =
             share_output(&output, &[BigUint::from(1u64), BigUint::from(1u64), BigUint::from(1u64)]);
@@ -2462,7 +2462,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_split_route_rejects_oversubscribed_paths() {
+    fn test_build_split_route_oversubscribed_paths() {
         // Three paths, each carrying 600 of a 1000 order: an allocation an out-of-crate algorithm
         // can hand in. The two explicit shares alone ask for 1200 of the 1000 standing at A.
         let token_a = token(0x0A, "A");
