@@ -69,6 +69,53 @@ fn test_token_overrides_fund_both_holders_and_both_spenders() {
     assert_eq!(state_diff.len(), 4);
 }
 
+/// An envelope for the tests that drive the call directly, without a quote to derive one from.
+fn test_envelope() -> SimulationEnvelope {
+    SimulationEnvelope { gas_limit: SIMULATION_MIN_GAS_LIMIT, gas_price: 1 }
+}
+
+#[test]
+fn test_envelope_doubles_the_estimated_gas() {
+    let envelope = SimulationEnvelope::new(Some(1_000_000), Some(7));
+    assert_eq!(envelope.gas_limit, 2_000_000);
+    assert_eq!(envelope.gas_price, 7);
+}
+
+#[test]
+fn test_envelope_raises_a_small_estimate_to_the_floor() {
+    let envelope = SimulationEnvelope::new(Some(1_000), Some(7));
+    assert_eq!(envelope.gas_limit, SIMULATION_MIN_GAS_LIMIT);
+}
+
+#[test]
+fn test_envelope_caps_a_large_estimate() {
+    let envelope = SimulationEnvelope::new(Some(u64::MAX), Some(7));
+    assert_eq!(envelope.gas_limit, SIMULATION_MAX_GAS_LIMIT);
+}
+
+#[test]
+fn test_envelope_prices_a_quote_that_carries_no_gas_price() {
+    let envelope = SimulationEnvelope::new(None, None);
+    assert_eq!(envelope.gas_limit, SIMULATION_MIN_GAS_LIMIT);
+    assert_eq!(envelope.gas_price, SIMULATION_FALLBACK_GAS_PRICE);
+}
+
+#[test]
+fn test_block_overrides_leave_nothing_a_pool_reads_at_zero() {
+    let overrides = block_overrides();
+    assert_eq!(overrides.coinbase, Some(SIMULATION_COINBASE));
+    assert_eq!(overrides.gas_limit, Some(SIMULATION_BLOCK_GAS_LIMIT));
+    assert_ne!(overrides.random, Some(B256::ZERO));
+    assert!(overrides.random.is_some());
+}
+
+#[test]
+fn test_sender_override_funds_a_used_account() {
+    let sender = sender_override();
+    assert_eq!(sender.balance, Some(SIMULATION_FUNDING_VALUE));
+    assert_eq!(sender.nonce, Some(SIMULATION_SENDER_NONCE));
+}
+
 fn mocked_simulator(asserter: &Asserter, timeout: Duration) -> QuoteSimulator {
     QuoteSimulator::with_provider(
         RootProvider::new(RpcClient::mocked(asserter.clone())),
@@ -106,6 +153,7 @@ async fn test_simulate_call_against_mocked_provider() {
         U256::ZERO,
         &[0x12],
         native_balance_override(Address::repeat_byte(1)),
+        test_envelope(),
     )
     .await
     .into_result();
@@ -125,6 +173,7 @@ async fn test_simulated_call_rejects_non_uint256_return_data() {
         U256::ZERO,
         &[],
         native_balance_override(Address::repeat_byte(1)),
+        test_envelope(),
     )
     .await
     .into_result();
@@ -148,6 +197,7 @@ async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
         U256::ZERO,
         &[],
         native_balance_override(Address::repeat_byte(1)),
+        test_envelope(),
     )
     .await
     .into_result();
@@ -213,6 +263,7 @@ async fn test_simulation_times_out_when_the_node_does_not_answer() {
             U256::ZERO,
             &[0x12],
             native_balance_override(Address::repeat_byte(1)),
+            test_envelope(),
         )
         .await;
 

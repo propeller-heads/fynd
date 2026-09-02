@@ -4,17 +4,18 @@ use std::sync::Mutex;
 
 use alloy::{
     network::Ethereum,
-    primitives::{map::B256HashMap, Address, Bytes, TxKind, B256, U256},
+    primitives::{address, map::B256HashMap, Address, Bytes, TxKind, B256, U256},
     providers::{Provider, ProviderBuilder, RootProvider},
     rpc::types::{
         simulate::{SimBlock, SimulatePayload},
         state::{AccountOverride, StateOverride},
-        TransactionRequest,
+        BlockOverrides, TransactionRequest,
     },
     sol,
     sol_types::SolError,
 };
 use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
 use tokio::time::timeout;
 use tycho_simulation::tycho_common::models::Chain;
@@ -34,12 +35,70 @@ sol! { error Error(string); }
 /// practical quote.
 const SIMULATION_FUNDING_VALUE: U256 = U256::MAX.wrapping_shr(1);
 
+/// Gas limit for the simulated call, as a multiple of the gas the quote estimated.
+///
+/// A call that sets no limit inherits the block's, and a pool that reads `gasleft()` can tell that
+/// budget apart from a real swap and answer differently. Twice the estimate covers the variance a
+/// real transaction meets while still reading like one.
+const SIMULATION_GAS_LIMIT_MULTIPLIER: u64 = 2;
+
+/// Floor for the simulated call's gas limit, so a small estimate still leaves room to execute.
+const SIMULATION_MIN_GAS_LIMIT: u64 = 500_000;
+
+/// Ceiling for the simulated call's gas limit.
+const SIMULATION_MAX_GAS_LIMIT: u64 = 30_000_000;
+
+/// Gas limit reported for the simulated block.
+const SIMULATION_BLOCK_GAS_LIMIT: u64 = 45_000_000;
+
+/// Gas price for a quote that carries none, so `tx.gasprice` never reads zero.
+const SIMULATION_FALLBACK_GAS_PRICE: u128 = 1_000_000_000;
+
+/// Fee recipient for the simulated block. A live builder, because zero reads as a simulation.
+const SIMULATION_COINBASE: Address = address!("0x95222290DD7278Aa3Ddd389Cc1E1d165CC4BAfe5");
+
+/// Nonce given to the sender, because an account that never sent a transaction reads as a
+/// simulation.
+const SIMULATION_SENDER_NONCE: u64 = 1;
+
 /// Simulates encoded quote transactions with temporary sender funding.
 pub struct QuoteSimulator {
     provider: RootProvider<Ethereum>,
     slot_cache: Mutex<FxHashMap<Address, Erc20SlotPositions>>,
     native_token: Address,
     request_timeout: std::time::Duration,
+}
+
+/// The transaction envelope a simulated call runs under.
+///
+/// A pool can read the gas budget and the gas price, so both are taken from what the quote itself
+/// priced rather than left at the node's defaults of "the whole block" and zero.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SimulationEnvelope {
+    gas_limit: u64,
+    gas_price: u128,
+}
+
+impl SimulationEnvelope {
+    fn for_quote(quote: &OrderQuote) -> Self {
+        Self::new(
+            quote.gas_estimate().to_u64(),
+            quote
+                .gas_price()
+                .and_then(ToPrimitive::to_u128),
+        )
+    }
+
+    /// A quote that carries neither figure falls back to the floor and a nominal price, which is
+    /// still closer to a real transaction than the node's defaults.
+    fn new(gas_estimate: Option<u64>, gas_price: Option<u128>) -> Self {
+        let gas_limit = gas_estimate
+            .map_or(SIMULATION_MIN_GAS_LIMIT, |estimate| {
+                estimate.saturating_mul(SIMULATION_GAS_LIMIT_MULTIPLIER)
+            })
+            .clamp(SIMULATION_MIN_GAS_LIMIT, SIMULATION_MAX_GAS_LIMIT);
+        Self { gas_limit, gas_price: gas_price.unwrap_or(SIMULATION_FALLBACK_GAS_PRICE) }
+    }
 }
 
 pub(crate) enum SimulationAttempt {
@@ -120,8 +179,15 @@ impl QuoteSimulator {
                 .to_bytes_be()
                 .as_slice(),
         );
-        self.simulate_within_timeout(sender, router, value, transaction.data(), overrides)
-            .await
+        self.simulate_within_timeout(
+            sender,
+            router,
+            value,
+            transaction.data(),
+            overrides,
+            SimulationEnvelope::for_quote(quote),
+        )
+        .await
     }
 
     /// Runs one simulated call, reporting a timeout as a failure rather than waiting forever.
@@ -132,10 +198,19 @@ impl QuoteSimulator {
         value: U256,
         data: &[u8],
         overrides: StateOverride,
+        envelope: SimulationEnvelope,
     ) -> SimulationAttempt {
         match timeout(
             self.request_timeout,
-            simulate_with_overrides(&self.provider, sender, router, value, data, overrides),
+            simulate_with_overrides(
+                &self.provider,
+                sender,
+                router,
+                value,
+                data,
+                overrides,
+                envelope,
+            ),
         )
         .await
         {
@@ -224,6 +299,20 @@ fn failure_with(reason: String) -> SimulationAttempt {
     SimulationAttempt::Failure { reason }
 }
 
+/// Block environment for a simulated call.
+///
+/// `eth_simulateV1` builds on the real head, so the block number, timestamp, base fee, chain id and
+/// the ancestor hashes `blockhash` reads are already the ones the next block will carry. What it
+/// leaves at zero is what a pool can read to recognise a simulation, so those are set here.
+fn block_overrides() -> BlockOverrides {
+    BlockOverrides {
+        coinbase: Some(SIMULATION_COINBASE),
+        random: Some(B256::from(rand::random::<[u8; 32]>())),
+        gas_limit: Some(SIMULATION_BLOCK_GAS_LIMIT),
+        ..Default::default()
+    }
+}
+
 async fn simulate_with_overrides(
     provider: &RootProvider<Ethereum>,
     sender: Address,
@@ -231,17 +320,21 @@ async fn simulate_with_overrides(
     value: U256,
     data: &[u8],
     overrides: StateOverride,
+    envelope: SimulationEnvelope,
 ) -> SimulationAttempt {
     let call = TransactionRequest {
         from: Some(sender),
         to: Some(TxKind::Call(router)),
         value: Some(value),
         input: Bytes::copy_from_slice(data).into(),
+        gas: Some(envelope.gas_limit),
+        gas_price: Some(envelope.gas_price),
         ..Default::default()
     };
     let payload = SimulatePayload::default().extend(
         SimBlock::default()
             .with_state_overrides(overrides)
+            .with_block_overrides(block_overrides())
             .call(call),
     );
     let response = match provider.simulate(&payload).await {
@@ -294,11 +387,17 @@ fn rpc_error_reason(
     decode_revert_reason(data.as_deref().map(AsRef::as_ref), &message)
 }
 
+/// Funds the sender and gives it a used-account nonce.
+fn sender_override() -> AccountOverride {
+    AccountOverride {
+        balance: Some(SIMULATION_FUNDING_VALUE),
+        nonce: Some(SIMULATION_SENDER_NONCE),
+        ..Default::default()
+    }
+}
+
 fn native_balance_override(sender: Address) -> StateOverride {
-    StateOverride::from_iter([(
-        sender,
-        AccountOverride::default().with_balance(SIMULATION_FUNDING_VALUE),
-    )])
+    StateOverride::from_iter([(sender, sender_override())])
 }
 
 /// Funds and approves every account a route can pull the input token from.
@@ -323,7 +422,7 @@ fn token_overrides(
         state_diff.insert(positions.allowance_slot(sender, spender), funding);
     }
     StateOverride::from_iter([
-        (sender, AccountOverride::default().with_balance(SIMULATION_FUNDING_VALUE)),
+        (sender, sender_override()),
         (token, AccountOverride { state_diff: Some(state_diff), ..Default::default() }),
     ])
 }
