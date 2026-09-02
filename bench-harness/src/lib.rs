@@ -117,6 +117,7 @@ pub(crate) fn default_trades_path() -> PathBuf {
 }
 
 /// One solver configuration in the comparison, loaded from `<configs dir>/<label>.toml`.
+#[derive(Debug)]
 pub(crate) struct BenchConfig {
     /// The config file's stem: what `--configs` takes, and what the reports show.
     pub(crate) label: String,
@@ -295,6 +296,7 @@ pub(crate) fn block_components(updates: &mut [Update], blocked: &HashSet<Address
 /// Built once from the built-in directory plus whatever `--configs-dir` names. A stem is unique
 /// across all of them: two files claiming one name is an error rather than a silent winner,
 /// because the loser could be the baseline every number in the report is measured against.
+#[derive(Debug)]
 pub(crate) struct ConfigCatalog {
     /// Stem to the file it was read from, so a lookup names one file and a report can say which.
     files: BTreeMap<String, PathBuf>,
@@ -1048,4 +1050,123 @@ pub(crate) fn usd_out(
         return None;
     }
     Some(usd_in * wei_out / wei_in)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// A directory holding one config file per `(stem, body)`.
+    fn configs_dir(files: &[(&str, &str)]) -> TempDir {
+        let directory = TempDir::new().expect("a temporary directory");
+        for (stem, body) in files {
+            fs::write(
+                directory
+                    .path()
+                    .join(format!("{stem}.toml")),
+                body,
+            )
+            .expect("the file writes");
+        }
+        directory
+    }
+
+    #[test]
+    fn test_catalog_without_extra_directories() {
+        let catalog = ConfigCatalog::new(&[]).expect("the built-in directory reads");
+
+        assert!(catalog
+            .available()
+            .contains(&"BF_d2".to_string()));
+        assert_eq!(
+            catalog
+                .load("BF_d2")
+                .expect("the baseline loads")
+                .algorithm,
+            "bellman_ford"
+        );
+    }
+
+    #[test]
+    fn test_catalog_with_an_extra_directory() {
+        let extra = configs_dir(&[("MY_d3", "algorithm = \"my_algorithm\"\nmax_hops = 3\n")]);
+
+        let catalog =
+            ConfigCatalog::new(&[extra.path().to_path_buf()]).expect("both directories read");
+        let config = catalog
+            .load("MY_d3")
+            .expect("the caller's config loads");
+
+        assert_eq!(config.algorithm, "my_algorithm");
+        assert_eq!(config.max_hops, 3);
+        assert_eq!(config.path, extra.path().join("MY_d3.toml"));
+        assert!(
+            catalog
+                .available()
+                .contains(&"BF_d2".to_string()),
+            "the built-ins still run"
+        );
+    }
+
+    /// The baseline is the reason this is an error rather than a precedence rule: a caller
+    /// shipping its own `BF_d2.toml` would otherwise change what every number is measured against
+    /// while the report still called it `BF_d2`.
+    #[test]
+    fn test_catalog_with_a_name_two_directories_hold() {
+        let extra = configs_dir(&[("BF_d2", "algorithm = \"most_liquid\"\n")]);
+
+        let error = ConfigCatalog::new(&[extra.path().to_path_buf()])
+            .expect_err("a duplicate name stops the run");
+
+        assert!(error.contains("two configs are named BF_d2"), "{error}");
+    }
+
+    #[test]
+    fn test_catalog_with_a_directory_that_does_not_exist() {
+        let error = ConfigCatalog::new(&[PathBuf::from("/no/such/configs")])
+            .expect_err("a directory that cannot be read stops the run");
+
+        assert!(error.contains("/no/such/configs"), "{error}");
+    }
+
+    #[test]
+    fn test_catalog_load_of_an_unknown_name() {
+        let catalog = ConfigCatalog::new(&[]).expect("the built-in directory reads");
+
+        let error = catalog
+            .load("NOPE")
+            .expect_err("an unknown name does not load");
+
+        assert!(error.contains("no config named NOPE"), "{error}");
+        assert!(error.contains("BF_d2"), "the message lists what does exist: {error}");
+    }
+
+    #[test]
+    fn test_catalog_load_of_a_config_without_an_algorithm() {
+        let extra = configs_dir(&[("NO_ALGO", "max_hops = 3\n")]);
+        let catalog =
+            ConfigCatalog::new(&[extra.path().to_path_buf()]).expect("both directories read");
+
+        let error = catalog
+            .load("NO_ALGO")
+            .expect_err("a config without an algorithm does not load");
+
+        assert!(error.contains("has no `algorithm` key"), "{error}");
+    }
+
+    #[test]
+    fn test_parse_gas_price_gwei_of_a_fractional_price() {
+        assert_eq!(parse_gas_price_gwei("0.1").expect("a fraction parses"), 0.1);
+    }
+
+    #[test]
+    fn test_parse_gas_price_gwei_of_values_that_are_not_prices() {
+        for raw in ["abc", "-1", "inf", "nan", ""] {
+            assert!(parse_gas_price_gwei(raw).is_err(), "{raw} is not a gas price");
+        }
+    }
 }

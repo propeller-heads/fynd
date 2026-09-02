@@ -31,6 +31,9 @@ toml.workspace = true
 tracing-subscriber.workspace = true
 tycho-simulation.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 # Report generators with their own CLI, not sets of timed micro-benchmarks. `harness = false` keeps
 # libtest out of them; `cargo bench` is here for the optimised build.
 [[bench]]
