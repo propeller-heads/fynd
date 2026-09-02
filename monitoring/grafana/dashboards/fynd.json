@@ -310,6 +310,58 @@
         },
         "overrides": []
       }
+    },
+    {
+      "id": 13,
+      "title": "Quote Simulation Outcomes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(quote_simulation_total[1m])) by (outcome)",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "title": "Simulated vs Quoted Amount (bps, p10 / p50 / p90)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 56 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.10, sum by (le) (rate(quote_simulation_deviation_bps_bucket[5m])))",
+          "legendFormat": "p10",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(quote_simulation_deviation_bps_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum by (le) (rate(quote_simulation_deviation_bps_bucket[5m])))",
+          "legendFormat": "p90",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": { "drawStyle": "line", "fillOpacity": 0 }
+        },
+        "overrides": []
+      }
     }
   ],
   "schemaVersion": 39
