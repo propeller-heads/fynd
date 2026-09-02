@@ -1,7 +1,8 @@
 //! Runs the routing algorithms over one market and reports what they paid.
 //!
-//! Two programs: [`bench::run`] solves many orders with several configurations and writes a
-//! report, [`profile::run`] solves a few with one configuration under a profiler. Both replay the
+//! Two entry points, both taking the algorithms to run: [`bench::run`] solves many orders with
+//! several configurations and writes a report, [`profile::run`] solves a few with one
+//! configuration under a profiler. Both replay the
 //! same fixture, read the same configs and the same dataset; only what they do with the results
 //! differs. Keeping the setup here stops the two drifting into measuring subtly different things.
 //!
@@ -19,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fynd_core::{derived::DerivedData, LiquidityScope, PoolConfig, Solver};
+use fynd_core::{derived::DerivedData, AlgorithmRegistry, LiquidityScope, PoolConfig, Solver};
 use fynd_test_fixtures::read_recording;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -761,7 +762,25 @@ pub fn print_protocol_breakdown(counts: &[ProtocolCount]) {
     }
 }
 
+/// What every config in one run is built and solved under.
+///
+/// One value rather than three loose arguments: they are fixed for the whole run, and every config
+/// has to be compared under the same ones.
+#[derive(Copy, Clone, Debug)]
+pub struct RunSettings {
+    /// Workers in each pool.
+    pub workers: usize,
+    /// How long one solve may take.
+    pub timeout_ms: u64,
+    /// Gas price the run solves at.
+    pub gas_price_gwei: f64,
+}
+
 /// Builds a solver for one config and waits until it can answer.
+///
+/// A pool whose `algorithm` is one of `algorithms` is served by it, and every other pool by the
+/// built-in of that name. That is what lets a run compare an algorithm from another crate with the
+/// ones in `fynd-core`.
 ///
 /// # Errors
 ///
@@ -771,20 +790,20 @@ pub fn print_protocol_breakdown(counts: &[ProtocolCount]) {
 pub async fn build_solver(
     config: &BenchConfig,
     market: &Market,
-    workers: usize,
-    timeout_ms: u64,
-    gas_price_gwei: f64,
+    settings: RunSettings,
+    algorithms: &AlgorithmRegistry,
 ) -> Result<Solver, String> {
     // The two halves of a slow start: replaying the market into a solver, then waiting for the
     // derived data every worker needs before it may answer. They are timed apart because the
     // second is the one that grows with the size of the market.
     let replaying = Instant::now();
-    let solver = Solver::from_recording(
+    let solver = Solver::from_recording_with(
         market.chain,
         market.updates.clone(),
-        worker_pool_configs(config, workers, timeout_ms),
-        Some(gas_price_wei(gas_price_gwei)),
+        worker_pool_configs(config, settings.workers, settings.timeout_ms),
+        Some(gas_price_wei(settings.gas_price_gwei)),
         market.rpc_url.as_deref(),
+        algorithms,
     )
     .await
     .map_err(|error| error.to_string())?;

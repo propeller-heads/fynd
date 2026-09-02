@@ -58,7 +58,7 @@ use clap::Parser;
 use futures::stream::StreamExt;
 use fynd_core::{
     types::{QuoteStatus, RouteRejection, SolveError},
-    NoPathReason, QuoteOptions, QuoteRequest, Solver,
+    AlgorithmRegistry, NoPathReason, QuoteOptions, QuoteRequest, Solver,
 };
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -73,7 +73,7 @@ use crate::{
         TradeOrder,
     },
     usd_out, wei_per_token, BenchConfig, BlockedTokens, LiveFlags, Market, MarketSource,
-    ProtocolCount,
+    ProtocolCount, RunSettings,
 };
 
 /// Orders solved when `--orders` says nothing else.
@@ -289,6 +289,15 @@ struct Run {
 }
 
 impl Run {
+    /// What every config in this run is built and solved under.
+    fn settings(&self) -> RunSettings {
+        RunSettings {
+            workers: self.workers,
+            timeout_ms: self.timeout_ms,
+            gas_price_gwei: self.gas_price_gwei,
+        }
+    }
+
     fn resolve(args: Args, market: &Market) -> (Self, ConfigSet) {
         let cores = num_cpus::get();
         let jobs = args.jobs.unwrap_or(cores).max(1);
@@ -1437,12 +1446,15 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
 
 /// Runs the benchmark: parses the command line, solves every config, writes the report.
 ///
+/// `algorithms` are run alongside the built-in ones, so a crate holding its own algorithm passes
+/// it here and names it in a config file.
+///
 /// # Panics
 ///
 /// If the run cannot be set up: no order survives the dataset filters, the baseline config will
 /// not load, or the baseline will not build. Each of those makes the report meaningless rather
 /// than smaller.
-pub async fn run() {
+pub async fn run(algorithms: &AlgorithmRegistry) {
     if crate::asked_for_the_test_list() {
         return;
     }
@@ -1537,19 +1549,16 @@ pub async fn run() {
     let mut wei: HashMap<Address, f64> = HashMap::new();
     for config in std::mem::take(&mut configs.ready) {
         println!("\n  {} ...", config.label);
-        let solver =
-            match build_solver(&config, &market, run.workers, run.timeout_ms, run.gas_price_gwei)
-                .await
-            {
-                Ok(solver) => solver,
-                Err(reason) => {
-                    println!("    skipped: {reason}");
-                    configs
-                        .skipped
-                        .push((config.label.clone(), reason));
-                    continue;
-                }
-            };
+        let solver = match build_solver(&config, &market, run.settings(), algorithms).await {
+            Ok(solver) => solver,
+            Err(reason) => {
+                println!("    skipped: {reason}");
+                configs
+                    .skipped
+                    .push((config.label.clone(), reason));
+                continue;
+            }
+        };
         if wei.is_empty() {
             wei = wei_per_token(&*solver.derived_data().read().await);
         }

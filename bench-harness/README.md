@@ -273,7 +273,8 @@ The file is a flat table of `PoolConfig` fields. Only `algorithm` is required. S
 ### Add an algorithm
 
 Nothing here needs to change. The benchmark asks the solver for the algorithm by name, so once it
-is registered, a config file naming it works. A config naming an algorithm the build does not have
+is registered, a config file naming it works. That holds for an algorithm in another crate too: the
+registry `run` takes is what puts it in the same run as the built-ins. A config naming an algorithm the build does not have
 is skipped and listed as skipped in the report, rather than failing the run.
 
 ### Exclude a token
@@ -297,8 +298,8 @@ Everything is a library, and the two targets in `benches/` are three lines each.
 `src/lib.rs` holds what both programs need: building the market, loading configs, applying the
 blocklist, resolving token symbols, building the solver, and the percentile and median helpers the
 reported numbers come from. `src/trades.rs` reads the order dataset. `src/live.rs` captures a block
-from Tycho. `src/bench.rs` is the benchmark and `src/profile.rs` the profiler, each a `run` the
-matching target calls.
+from Tycho. `src/bench.rs` is the benchmark and `src/profile.rs` the profiler, each a `run` taking
+the algorithms to add to the built-in ones.
 
 The two kinds of market meet in one function, `build_market`, and both come out as a `Market`.
 Nothing downstream can tell which it was handed, which is what stops an offline and a live run
@@ -315,8 +316,8 @@ The configs, the token table and the blocked list ship inside this crate, in `co
 Both targets are declared `harness = false` in `Cargo.toml`, which means they get a plain `main()`
 instead of the test harness. That is why they parse their own arguments with `clap`.
 
-The crate turns on `fynd-core`'s `test-utils` feature itself, because `Solver::from_recording` is
-what every run goes through.
+The crate turns on `fynd-core`'s `test-utils` feature itself, because `Solver::from_recording_with`
+is what every run goes through.
 
 Because they parse their own arguments, they cannot answer nextest's `--list`. CI and `check.sh`
 exclude them by name (`-E 'not binary(algorithm_bench) and not binary(profile)'`) rather than

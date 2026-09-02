@@ -37,14 +37,14 @@ use std::{path::PathBuf, time::Instant};
 
 use clap::Parser;
 use futures::stream::StreamExt;
-use fynd_core::{types::QuoteStatus, QuoteOptions, QuoteRequest, Solver};
+use fynd_core::{types::QuoteStatus, AlgorithmRegistry, QuoteOptions, QuoteRequest, Solver};
 
 use crate::{
     available_configs, block_components, build_market, build_solver, exclude_requested_protocols,
     format_micros, load_bench_config, load_blocked_tokens, print_protocol_breakdown,
     protocol_breakdown, resolved_gas_price_gwei, symbol_table, timings_of, token_label,
     trades::{load_trade_orders, recorded_tokens, OrderFlags, OrderSelection, TradeOrder},
-    LiveFlags, MarketSource,
+    LiveFlags, MarketSource, RunSettings,
 };
 
 #[derive(Parser, Debug)]
@@ -181,11 +181,14 @@ fn select_orders(
 
 /// Runs one configuration over the orders named on the command line and prints their timings.
 ///
+/// `algorithms` are run alongside the built-in ones, so a crate holding its own algorithm passes
+/// it here and names it in a config file.
+///
 /// # Panics
 ///
 /// If the configuration will not load or the solver will not build. There is one configuration in
 /// a profiling run, so neither leaves anything to measure.
-pub async fn run() {
+pub async fn run(algorithms: &AlgorithmRegistry) {
     if crate::asked_for_the_test_list() {
         return;
     }
@@ -280,7 +283,8 @@ pub async fn run() {
     println!("\nbuilding solver ...");
 
     let setup = Instant::now();
-    let solver = build_solver(&config, &market, workers, args.timeout_ms, gas_price_gwei)
+    let settings = RunSettings { workers, timeout_ms: args.timeout_ms, gas_price_gwei };
+    let solver = build_solver(&config, &market, settings, algorithms)
         .await
         .unwrap_or_else(|reason| panic!("could not build {}: {reason}", config.label));
     let setup_ms = setup.elapsed().as_millis();
