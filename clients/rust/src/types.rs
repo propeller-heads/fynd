@@ -169,6 +169,11 @@ impl ClientFeeParams {
     /// - `min_amount_out`: minimum output after fees — use [`FeeBreakdown::min_amount_received`].
     /// - `receiver`: 20-byte address receiving the swap output.
     /// - `swaps_hash`: keccak256 of the encoded swaps bytes — use [`FeeBreakdown::swaps_hash`].
+    ///
+    /// The type hash, domain (`TychoRouter`/`1`), and field order must match
+    /// `TychoRouterV3.CLIENT_FEE_TYPEHASH`. The same shape is encoded via `sol!` in
+    /// `fynd-core/src/encoding/disable_slippage_taking.rs` for server-side signing; keep both in
+    /// sync if the contract type changes.
     #[allow(clippy::too_many_arguments)]
     pub fn eip712_signing_hash(
         &self,
