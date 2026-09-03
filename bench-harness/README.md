@@ -239,8 +239,11 @@ Three things have to be named from outside this repository:
 
 Everything else works as it does in this repository, the baseline included: `BF_d2` comes from the
 config files this crate ships, so a caller's algorithm is measured against the same baseline as
-every built-in. `run.json` records the file behind each config name, so a run always says which
-configs it actually read.
+every built-in. `run.json` records the file behind each config name under `config_files`, so a run
+always says which configs it actually read.
+
+The results land in the caller's own `bench-results/`. `./scripts/bench-viewer.sh --results DIR`
+reads such a directory — see [Reading the results](#reading-the-results).
 
 ## Reading the results
 

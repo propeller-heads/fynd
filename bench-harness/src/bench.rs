@@ -914,18 +914,23 @@ fn run_json(outcome: &BenchOutcome<'_>) -> String {
         "order_selection": run.orders.label(),
         "pairs": outcome.pairs.len(),
         "baseline": outcome.baseline_label(),
-        // Label and file both, because `--configs-dir` means a label no longer names one file, and
-        // two runs whose `BF_d2` came from different files are not comparable.
+        // A flat list of labels: `orders.csv` and `routes.jsonl` key by label, and so does every
+        // reader of this file.
         "configs": outcome
             .results
             .iter()
-            .map(|(config, _)| {
-                serde_json::json!({
-                    "label": config.label.clone(),
-                    "path": config.path.display().to_string(),
-                })
-            })
+            .map(|(config, _)| config.label.clone())
             .collect::<Vec<_>>(),
+        // The file each label was read from, beside the list rather than inside it. `--configs-dir`
+        // means a label no longer names one file, and two runs whose `BF_d2` came from different
+        // files are not comparable.
+        "config_files": outcome
+            .results
+            .iter()
+            .map(|(config, _)| {
+                (config.label.clone(), serde_json::Value::from(config.path.display().to_string()))
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>(),
         "skipped": outcome.skipped,
         "gas_price_gwei": run.gas_price_gwei,
         "timeout_ms": run.timeout_ms,
@@ -1655,4 +1660,80 @@ fn write_run(out_dir: &Path, outcome: &BenchOutcome<'_>) -> Result<(), String> {
         write_index(root);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `run.json` is the contract the viewer and the analysis scripts read, and both key by config
+    /// label. This pins the shape of the fields they look up.
+    #[test]
+    fn test_run_json_shape() {
+        let run = Run {
+            name: "a-run".to_string(),
+            jobs: 1,
+            workers: 1,
+            timeout_ms: 5000,
+            gas_price_gwei: 1.5,
+            orders: OrderSelection::Head(2),
+            repeats: 1,
+            trades: PathBuf::from("data/trades.csv"),
+            out_dir: PathBuf::from("bench-results/a-run"),
+            excluded_protocols: Vec::new(),
+        };
+        let source = MarketSource::Offline {
+            fixture: "data/market_recording.json.zst".to_string(),
+            recorded_at_secs: 1_756_000_000,
+            chain_name: "ethereum".to_string(),
+        };
+        let results = vec![(
+            BenchConfig {
+                label: "BF_d2".to_string(),
+                path: PathBuf::from("configs/BF_d2.toml"),
+                algorithm: "bellman_ford".to_string(),
+                max_hops: 2,
+                worker_pool_fields: toml::Table::new(),
+            },
+            ConfigRun { measurements: Vec::new(), times_us: Vec::new(), solving_ms: 0 },
+        )];
+        let blocked = BlockedTokens {
+            addresses: HashSet::new(),
+            symbols: Vec::new(),
+            dropped_component_count: 0,
+        };
+        let summary = TradeLoadSummary::default();
+        let stats = HashMap::new();
+        let symbols = HashMap::new();
+        let wei = HashMap::new();
+        let outcome = BenchOutcome {
+            run: &run,
+            source: &source,
+            market_protocols: &[],
+            results: &results,
+            skipped: &[],
+            orders: &[],
+            pairs: &[],
+            stats: &stats,
+            pair_stats: &[],
+            symbols: &symbols,
+            wei: &wei,
+            blocked: &blocked,
+            excluded_protocols: &[],
+            excluded_components: 0,
+            summary: &summary,
+        };
+
+        let json: serde_json::Value =
+            serde_json::from_str(&run_json(&outcome)).expect("run.json is valid json");
+
+        // A flat list of labels. The viewer filters and indexes on these strings; an object here
+        // matches no column in `orders.csv` and no key in `routes.jsonl`.
+        assert_eq!(json["configs"], serde_json::json!(["BF_d2"]));
+        assert_eq!(json["config_files"]["BF_d2"], serde_json::json!("configs/BF_d2.toml"));
+        assert_eq!(json["baseline"], serde_json::json!("BF_d2"));
+        assert_eq!(json["name"], serde_json::json!("a-run"));
+        // `MarketSource` is tagged, and the picker filters offline from live on this field.
+        assert_eq!(json["market"]["source"], serde_json::json!("offline"));
+    }
 }
