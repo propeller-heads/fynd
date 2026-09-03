@@ -1,4 +1,22 @@
 
+## [0.100.2](https://github.com/propeller-heads/fynd/compare/0.100.1...0.100.2) (2026-09-03)
+
+### Features
+
+* chart quote simulation outcome and deviation ([88fe5e3](https://github.com/propeller-heads/fynd/commit/88fe5e33402bf7e219d7e82adeec2903605db1c5))
+* report quote simulation outcome and deviation ([a476fa7](https://github.com/propeller-heads/fynd/commit/a476fa7b347ec435cefa97db8ca468eea295c123))
+* **api:** return simulation_result on a quote ([b782937](https://github.com/propeller-heads/fynd/commit/b782937b8a169c3925be0cf1ff674ff6b590b0db))
+* **serve:** gate quote simulation behind --enable-simulation ([e09f154](https://github.com/propeller-heads/fynd/commit/e09f154f65c323a219f6f63ba8a4284d0c3e5c4d))
+* log the protocols the winning quote swaps on ([628d0c5](https://github.com/propeller-heads/fynd/commit/628d0c5d7a77e45e3b38d6491ea90740949b4076))
+* **core:** simulate under a realistic transaction environment ([aa804a3](https://github.com/propeller-heads/fynd/commit/aa804a30b601a7fbca966c36ff32dd0f3bfcd19f))
+* **core:** simulate encoded quotes against the latest block ([455599e](https://github.com/propeller-heads/fynd/commit/455599ee2307da668b6405c0b5d2802fdeec7c18))
+
+### Bug Fixes
+
+* update Tycho to 0.378.4 ([d60f7df](https://github.com/propeller-heads/fynd/commit/d60f7dfa3885367c06ffae4060d21d2265d37340))
+* **docker:** drop the deleted erc20-overrides crate from the build ([f5d941c](https://github.com/propeller-heads/fynd/commit/f5d941c4d2c7f7519d24909ced5a496a319cbb26))
+
+
 ## [0.100.1](https://github.com/propeller-heads/fynd/compare/0.100.0...0.100.1) (2026-09-02)
 
 ### Bug Fixes
