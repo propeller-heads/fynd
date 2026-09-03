@@ -777,12 +777,7 @@ impl WaterFillAlgorithm {
         allocations: &[PathAllocation],
     ) -> Option<SplitCandidate> {
         let route = build_split_route(allocations, &input.market, input.order).ok()?;
-        let token_out = input.order.token_out();
-        let gross = route
-            .swaps()
-            .iter()
-            .filter(|s| s.token_out() == token_out)
-            .fold(BigUint::zero(), |acc, s| acc + s.amount_out());
+        let gross = route.amount_out(input.order.token_out());
         if gross.is_zero() {
             return None;
         }

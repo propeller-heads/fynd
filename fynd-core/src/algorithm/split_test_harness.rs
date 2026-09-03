@@ -160,10 +160,7 @@ pub(crate) fn split_metrics(
         .iter()
         .filter(|s| s.token_in() == token_in)
         .count();
-    let gross = swaps
-        .iter()
-        .filter(|s| s.token_out() == token_out)
-        .fold(BigUint::zero(), |acc, s| acc + s.amount_out());
+    let gross = result.route().amount_out(token_out);
     (result.net_amount_out().clone(), path_count, gross)
 }
 

@@ -61,7 +61,7 @@ use crate::{
     },
     feed::market_data::MarketData,
     graph::{GraphManager, PetgraphStableDiGraphManager},
-    types::{ComponentId, Order, OrderSide, Route, Swap},
+    types::{ComponentId, Order, OrderSide, Route},
 };
 
 /// The graph the algorithm walks.
@@ -89,17 +89,6 @@ struct PricingPass<'a> {
     hops_to_gas: FxHashMap<NodeIndex, usize>,
     /// Token address → graph node, inverted once from the context, for re-rooting sells.
     token_nodes: FxHashMap<Address, NodeIndex>,
-}
-
-/// What a route delivers in `token_out`, summed over the swaps that end there so a split route
-/// reports its whole output rather than one leg's.
-fn route_output(route: &Route, token_out: &Address) -> BigUint {
-    route
-        .swaps()
-        .iter()
-        .filter(|swap| swap.token_out() == token_out)
-        .map(Swap::amount_out)
-        .sum()
 }
 
 /// One pass's output: what was priced, against which block, and what was not.
@@ -332,7 +321,7 @@ impl TokenGasPriceComputation {
         buy: Option<&Route>,
     ) -> Result<(Price, FxHashSet<ComponentId>), FailedItemError> {
         let buy = buy.ok_or(FailedItemError::UnreachableFromGasToken)?;
-        let buy_out = route_output(buy, token);
+        let buy_out = buy.amount_out(token);
         if buy_out.is_zero() {
             return Err(FailedItemError::UnreachableFromGasToken);
         }
@@ -340,7 +329,7 @@ impl TokenGasPriceComputation {
         let (sell, mut components) = self
             .sell_route(pass, token, buy_out.clone())
             .ok_or(FailedItemError::NoSellRoute)?;
-        let sell_out = route_output(&sell, &self.gas_token);
+        let sell_out = sell.amount_out(&self.gas_token);
         // The chosen routes are on candidate paths, so extending is defensive: it keeps the
         // stored dependencies correct even if the walk and the relaxation ever disagree.
         components.extend(
@@ -407,7 +396,10 @@ impl TokenGasPriceComputation {
                     return None;
                 }
             };
-        if route_output(&route, &self.gas_token).is_zero() {
+        if route
+            .amount_out(&self.gas_token)
+            .is_zero()
+        {
             trace!(%token, "sell route returns nothing");
             return None;
         }

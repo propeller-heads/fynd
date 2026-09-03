@@ -1298,6 +1298,16 @@ impl Route {
             .collect()
     }
 
+    /// What the route delivers in `token_out`, summed over the swaps that end there so a split
+    /// route reports its whole output rather than one leg's.
+    pub fn amount_out(&self, token_out: &Address) -> BigUint {
+        self.swaps
+            .iter()
+            .filter(|swap| &swap.token_out == token_out)
+            .map(|swap| &swap.amount_out)
+            .fold(BigUint::ZERO, |acc, amount| acc + amount)
+    }
+
     /// Returns the total gas estimate for all swaps in this route (naive approach).
     pub fn total_gas(&self) -> BigUint {
         self.swaps

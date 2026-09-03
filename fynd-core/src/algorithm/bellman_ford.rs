@@ -1635,14 +1635,12 @@ mod tests {
             .expect("re-rooted context solves back to its source");
 
         // 100 C -> 50 B -> 25 G through the two fee-free 2.0 pools read in reverse.
-        let amount_to_g: BigUint = result
-            .route()
-            .swaps()
-            .iter()
-            .filter(|swap| swap.token_out() == &token_g.address)
-            .map(Swap::amount_out)
-            .sum();
-        assert_eq!(amount_to_g, BigUint::from(25u64));
+        assert_eq!(
+            result
+                .route()
+                .amount_out(&token_g.address),
+            BigUint::from(25u64)
+        );
     }
 
     #[tokio::test]
