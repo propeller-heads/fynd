@@ -672,7 +672,7 @@ mod tests {
         // The poison task panics mid-solve; its response channel is dropped. The worker
         // now sleeps through its 500ms backoff with no session listening for shutdown.
         let (poison_tx, poison_rx) = oneshot::channel();
-        let poison_order = order(&token_a, &token_b, POISON_AMOUNT as u128, OrderSide::Sell);
+        let poison_order = order(&token_a, &token_b, POISON_AMOUNT, OrderSide::Sell);
         task_tx
             .send(SolveTask::new(Uuid::new_v4(), poison_order, poison_tx))
             .await
