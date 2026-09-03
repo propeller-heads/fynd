@@ -29,6 +29,7 @@ Key properties:
 | [`fynd-rpc`](../fynd-rpc/CLAUDE.md) | `fynd-rpc/` | HTTP RPC server builder (Actix Web): API handlers, middleware, `FyndRPCBuilder` |
 | [`fynd-rpc-types`](../fynd-rpc-types/CLAUDE.md) | `fynd-rpc-types/` | Shared DTO types for the RPC API (request/response wire format) |
 | `fynd-test-fixtures` | `test-fixtures/` | Shared types for recorded-market test fixtures: `MarketRecording`, expected outputs, test scenarios. Not published |
+| [`fynd-bench-harness`](../bench-harness/README.md) | `bench-harness/` | Runs the routing algorithms over one market and writes a report: the `algorithm_bench` and `profile` targets, the configs, the viewer. Takes an `AlgorithmRegistry`, so a crate outside this workspace can benchmark its own algorithm. Not published |
 
 ### [Clients](../clients/CLAUDE.md)
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Profile one routing algorithm over chosen orders.
 #
-# Builds fynd-core/benches/profile.rs with release optimisations plus debug symbols and records it
-# under samply. One algorithm, one solver thread, no output files -- so the flamegraph is the solve
-# and almost nothing else. For comparing algorithms and producing a report, use ./scripts/bench.sh.
+# Builds bench-harness/benches/profile.rs with release optimisations plus debug symbols and records
+# it under samply. One algorithm, one solver thread, no output files -- so the flamegraph is the
+# solve and almost nothing else. For comparing algorithms and producing a report, use
+# ./scripts/bench.sh.
 #
 # Orders come from the same dataset the benchmark reads, so an order id seen in the viewer can be
 # profiled here directly.
@@ -70,7 +71,7 @@ if [[ $SHOW_BIN_HELP -eq 0 ]] &&
   ! printf '%s\n' ${BIN_ARGS[@]+"${BIN_ARGS[@]}"} | grep -q -- '^--config'; then
   echo "error: --config is required (e.g. --config WF_d3)" >&2
   echo "Available:" >&2
-  basename -s .toml -a fynd-core/benches/configs/*.toml | sed 's/^/  /' >&2
+  basename -s .toml -a bench-harness/configs/*.toml | sed 's/^/  /' >&2
   exit 1
 fi
 
@@ -91,7 +92,7 @@ done
 # assumed: the hash tracks the feature set and would go stale the moment that changed. The
 # `profiling` profile is release plus debug symbols; without symbols a flamegraph is a wall of hex.
 echo "Building (release + debug symbols) ..."
-BIN="$(cargo bench -p fynd-core --profile profiling --features test-utils,swap-metrics \
+BIN="$(cargo bench -p fynd-bench-harness --profile profiling --features swap-metrics \
   --bench profile --no-run --message-format=json |
   jq -r 'select(.target.kind[0] == "bench" and .executable != null) | .executable' | tail -1)"
 

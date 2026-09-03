@@ -12,14 +12,34 @@ No build step and no dependencies. The script only exists because browsers block
 page needs when it is opened from disk with `file://`; any static server over the repo root works
 just as well.
 
+## Which results it reads
+
+`?root=` names the results directory, and defaults to this repository's `bench-results/`. A path is
+resolved against this file, which sits at `bench-harness/viewer/`; a URL is taken as given.
+
+A crate outside this repository benchmarks its own algorithm and writes its runs beside its own
+tests. To read those, serve that directory and name it:
+
+```bash
+./scripts/bench-viewer.sh --results ../my-solver/bench-results
+```
+
+The script serves the directory at `/results` and opens `?root=/results`, so one server answers
+both the page and the runs. Two servers would be two origins and the browser would refuse the
+cross-origin reads. When the root is not the default, the run picker says which directory it
+listed, and a failed read names it too.
+
 ## What it reads
 
 | file | used for |
 |---|---|
-| `bench-results/index.json` | the run picker. Rebuilt by every run, by scanning for `run.json` |
+| `<root>/index.json` | the run picker. Rebuilt by every run, by scanning for `run.json` |
 | `<run>/run.json` | header facts: which market, orders, baseline, configs, gas price, timeout |
 | `<run>/orders.csv` | the whole Report tab — scorecards, distribution, speed, pairs |
 | `<run>/routes.jsonl` | the Orders tab. Fetched only when that tab is opened, since it is the big one |
+
+`run.json`'s `configs` is a flat list of config labels — every other file keys by label, and so does
+this page. The file each label was read from is beside it under `config_files`.
 
 Everything on the Report tab is derived from `orders.csv` at render time, so the trade-size slicer
 moves every section together rather than just the histogram.

@@ -8,7 +8,7 @@ allocator problem, and they call for opposite work. `report.md` cannot tell them
 Reads the benchmark's `routes.jsonl`.
 
 Usage:
-    fynd-core/benches/bench-setdiff.py bench-results/<run> --config WF_d3 --against PFW_d3
+    bench-harness/analysis/bench-setdiff.py bench-results/<run> --config WF_d3 --against PFW_d3
 """
 
 import argparse

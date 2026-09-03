@@ -33,20 +33,19 @@
 //! and every order reads the same values. In production that work recurs every block, so its
 //! absence here flatters the profile.
 
-mod common;
-
 use std::{path::PathBuf, time::Instant};
 
 use clap::Parser;
-use common::{
-    available_configs, block_components, build_market, build_solver, exclude_requested_protocols,
-    format_micros, load_bench_config, load_blocked_tokens, print_protocol_breakdown,
-    protocol_breakdown, resolved_gas_price_gwei, symbol_table, timings_of, token_label,
-    trades::{load_trade_orders, recorded_tokens, OrderFlags, OrderSelection, TradeOrder},
-    LiveFlags, MarketSource,
-};
 use futures::stream::StreamExt;
-use fynd_core::{types::QuoteStatus, QuoteOptions, QuoteRequest, Solver};
+use fynd_core::{types::QuoteStatus, AlgorithmRegistry, QuoteOptions, QuoteRequest, Solver};
+
+use crate::{
+    block_components, build_market, build_solver, exclude_requested_protocols, format_micros,
+    load_blocked_tokens, print_protocol_breakdown, protocol_breakdown, resolved_gas_price_gwei,
+    symbol_table, timings_of, token_label,
+    trades::{load_trade_orders, recorded_tokens, OrderFlags, OrderSelection, TradeOrder},
+    ConfigFlags, MarketFlags, MarketSource, RunSettings,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -55,7 +54,8 @@ use fynd_core::{types::QuoteStatus, QuoteOptions, QuoteRequest, Solver};
                   use algorithm_bench for reports. Wrap it in a profiler with ./scripts/profile.sh."
 )]
 struct Args {
-    /// Config to run, named after a file in `benches/configs/`.
+    /// Config to run, named after a config file: one in this crate's `configs/`, or one in a
+    /// directory `--configs-dir` names.
     #[arg(long)]
     config: String,
 
@@ -86,12 +86,17 @@ struct Args {
 
     /// Gas price in gwei, fractions allowed. Without it a live run prices at whatever the chain
     /// is charging, and an offline run at the default.
-    #[arg(long, value_parser = common::parse_gas_price_gwei)]
+    #[arg(long, value_parser = crate::parse_gas_price_gwei)]
     gas_price_gwei: Option<f64>,
 
-    /// Market flags: `--market`, and the Tycho settings a live capture needs.
+    /// Market flags: `--market`, the fixture an offline run replays, and the Tycho settings a live
+    /// capture needs.
     #[command(flatten)]
-    live: LiveFlags,
+    market: MarketFlags,
+
+    /// Config flags: the directories a run reads its configurations from.
+    #[command(flatten)]
+    configs_dirs: ConfigFlags,
 
     /// Protocol systems to drop from the market before solving, comma separated, e.g.
     /// `vm:balancer_v2,uniswap_v4_hooks`. Names must match the market's own exactly; a name that
@@ -180,25 +185,34 @@ fn select_orders(
     picked
 }
 
-#[tokio::main]
-async fn main() {
-    if common::asked_for_the_test_list() {
-        return;
+/// Runs one configuration over the orders named on the command line and prints their timings.
+///
+/// `algorithms` are run alongside the built-in ones, so a crate holding its own algorithm passes
+/// it here and names it in a config file.
+///
+/// # Panics
+///
+/// If the solver will not build. There is one configuration in a profiling run, so that leaves
+/// nothing to measure.
+///
+/// # Errors
+///
+/// Returns the reason the run could not start — an unusable config directory, an unknown config,
+/// or a market that could not be built — so the caller's target can carry it to an exit code.
+pub async fn run(algorithms: &AlgorithmRegistry) -> Result<(), String> {
+    if crate::asked_for_the_test_list() {
+        return Ok(());
     }
 
     let args = Args::parse();
-    common::init_logging(args.logs);
+    crate::init_logging(args.logs);
 
-    let config = load_bench_config(&args.config)
-        .unwrap_or_else(|reason| panic!("{reason}. Available: {}", available_configs().join(", ")));
+    let config = args
+        .configs_dirs
+        .catalog()?
+        .load(&args.config)?;
 
-    let mut market = match build_market(args.live.clone()).await {
-        Ok(market) => market,
-        Err(reason) => {
-            eprintln!("error: {reason}");
-            std::process::exit(1);
-        }
-    };
+    let mut market = build_market(args.market.clone()).await?;
     let gas_price_gwei = resolved_gas_price_gwei(args.gas_price_gwei, &market);
     let excluded_protocols = args
         .exclude_protocols
@@ -212,7 +226,7 @@ async fn main() {
 
     let trades = args
         .trades
-        .unwrap_or_else(common::default_trades_path);
+        .unwrap_or_else(crate::default_trades_path);
     // The whole dataset is loaded so `--order` can find any id, then narrowed.
     let (all, summary) = load_trade_orders(&trades, &known_tokens, OrderSelection::All)
         .unwrap_or_else(|error| panic!("{error}"));
@@ -276,7 +290,8 @@ async fn main() {
     println!("\nbuilding solver ...");
 
     let setup = Instant::now();
-    let solver = build_solver(&config, &market, workers, args.timeout_ms, gas_price_gwei)
+    let settings = RunSettings { workers, timeout_ms: args.timeout_ms, gas_price_gwei };
+    let solver = build_solver(&config, &market, settings, algorithms)
         .await
         .unwrap_or_else(|reason| panic!("could not build {}: {reason}", config.label));
     let setup_ms = setup.elapsed().as_millis();
@@ -354,4 +369,5 @@ async fn main() {
         );
     }
     println!();
+    Ok(())
 }

@@ -1,7 +1,7 @@
 //! Loading orders from the aggregator trade dataset.
 //!
 //! The dataset is real aggregator trades, one JSON object per trade holding a single order.
-//! `fynd-core/benches/dataset.sql` is the query that builds the current one and explains its
+//! `bench-harness/data/dataset.sql` is the query that builds the current one and explains its
 //! filters.
 
 use std::{
@@ -203,7 +203,7 @@ pub fn load_trade_orders(
     let json = std::fs::read_to_string(path).map_err(|error| {
         format!(
             "could not read the trade dataset at {}: {error}. Build one with \
-             fynd-core/benches/dataset.sql, or point --trades at your own copy.",
+             bench-harness/data/dataset.sql, or point --trades at your own copy.",
             path.display()
         )
     })?;
@@ -240,7 +240,7 @@ pub fn load_trade_orders(
 #[derive(Deserialize)]
 struct DatasetTrade {
     orders: Vec<DatasetOrder>,
-    /// Present on datasets built by `fynd-core/benches/dataset.sql`; absent on older ones.
+    /// Present on datasets built by `bench-harness/data/dataset.sql`; absent on older ones.
     #[serde(default)]
     amount_usd: Option<f64>,
 }

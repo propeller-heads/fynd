@@ -3,11 +3,12 @@
 //! Runs one solver per config against a single market and reports output net of gas against a
 //! baseline, per token pair and overall.
 //!
-//! The market is either the recorded fixture (`tests/fixtures/market_recording.json.zst`, the
-//! default, no network) or one block captured live from Tycho with `--market live`. Offline runs
-//! replay the same block every time and so compare with each other; a live run is a point-in-time
-//! market whose configs compare only with each other. The run solves at `--gas-price-gwei`, or at
-//! the market's own gas price when that flag is absent.
+//! The market is either the recorded fixture
+//! (`fynd-core/tests/fixtures/market_recording.json.zst`, the default, no network) or one block
+//! captured live from Tycho with `--market live`. Offline runs replay the same block every time and
+//! so compare with each other; a live run is a point-in-time market whose configs compare only with
+//! each other. The run solves at `--gas-price-gwei`, or at the market's own gas price when that
+//! flag is absent.
 //!
 //! # Running it
 //!
@@ -21,9 +22,10 @@
 //!
 //! # Which algorithms run
 //!
-//! One TOML file per configuration in `benches/configs/`, named by file stem. `--configs` takes a
-//! comma-separated list of those stems and defaults to all of them. Adding a configuration is
-//! adding a file; nothing here needs to change. See `benches/configs/README.md`.
+//! One TOML file per configuration, named by file stem: the ones in this crate's `configs/`, plus
+//! any directory `--configs-dir` names. `--configs` takes a comma-separated list of those stems
+//! and defaults to all of them. Adding a configuration is adding a file; nothing here needs to
+//! change. See `configs/README.md`.
 //!
 //! `BF_d2` is the baseline and is always included, listed or not. It is not a
 //! like-for-like depth comparison — the report's "Reading this" section says why.
@@ -40,7 +42,7 @@
 //! `aggregator_trades_50k_1k_usd.json` in the repo root: 50,000 real aggregator sell orders of
 //! $1,000 or more, drawn from the week either side of the market fixture's last block. Both of
 //! each order's tokens are in the fixture by construction, so a miss means the algorithm found no
-//! route rather than the market not holding the token. `fynd-core/benches/dataset.sql` is the
+//! route rather than the market not holding the token. `bench-harness/data/dataset.sql` is the
 //! query that produced it, with the reasoning behind each filter.
 //!
 //! Orders are still filtered on load — anything that is not a sell is dropped, and so is anything
@@ -52,29 +54,28 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-mod common;
-
 use chrono::Utc;
 use clap::Parser;
-use common::{
-    available_configs, block_components, build_market, build_solver, exclude_requested_protocols,
-    load_bench_config, load_blocked_tokens, mean_and_median, print_protocol_breakdown,
-    protocol_breakdown, resolved_gas_price_gwei, symbol_table, timings_of, token_label,
-    trades::{
-        load_trade_orders, recorded_tokens, OrderFlags, OrderSelection, TradeLoadSummary,
-        TradeOrder,
-    },
-    usd_out, wei_per_token, BenchConfig, BlockedTokens, LiveFlags, Market, MarketSource,
-    ProtocolCount,
-};
 use futures::stream::StreamExt;
 use fynd_core::{
     types::{QuoteStatus, RouteRejection, SolveError},
-    NoPathReason, QuoteOptions, QuoteRequest, Solver,
+    AlgorithmRegistry, NoPathReason, QuoteOptions, QuoteRequest, Solver,
 };
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tycho_simulation::tycho_common::models::Address;
+
+use crate::{
+    block_components, build_market, build_solver, exclude_requested_protocols, load_blocked_tokens,
+    mean_and_median, print_protocol_breakdown, protocol_breakdown, resolved_gas_price_gwei,
+    symbol_table, timings_of, token_label,
+    trades::{
+        load_trade_orders, recorded_tokens, OrderFlags, OrderSelection, TradeLoadSummary,
+        TradeOrder,
+    },
+    usd_out, wei_per_token, BenchConfig, BlockedTokens, ConfigCatalog, ConfigFlags, Market,
+    MarketFlags, MarketSource, ProtocolCount, RunSettings,
+};
 
 /// Orders solved when `--orders` says nothing else.
 const DEFAULT_ORDERS: usize = 1000;
@@ -171,20 +172,25 @@ struct Args {
 
     /// Gas price in gwei, fractions allowed. Without it a live run prices at whatever the chain
     /// is charging, and an offline run at the default, since the fixture carries no gas price.
-    #[arg(long, value_parser = common::parse_gas_price_gwei)]
+    #[arg(long, value_parser = crate::parse_gas_price_gwei)]
     gas_price_gwei: Option<f64>,
 
-    /// Market flags: `--market`, and the Tycho settings a live capture needs.
+    /// Market flags: `--market`, the fixture an offline run replays, and the Tycho settings a live
+    /// capture needs.
     #[command(flatten)]
-    live: LiveFlags,
+    market: MarketFlags,
 
-    /// Configs to run, comma separated, named after the files in `benches/configs/`, e.g.
-    /// `WF_d3,PFW_d3`. Defaults to every config on disk. The baseline is
-    /// always included. Narrowing this is what makes a run readable under a profiler.
+    /// Config flags: the directories a run reads its configurations from.
+    #[command(flatten)]
+    configs_dirs: ConfigFlags,
+
+    /// Configs to run, comma separated, named after the config files, e.g. `WF_d3,PFW_d3`.
+    /// Defaults to every config on disk. The baseline is always included. Narrowing this is what
+    /// makes a run readable under a profiler.
     #[arg(long, value_delimiter = ',')]
     configs: Option<Vec<String>>,
 
-    /// Config every other one is measured against, named after a file in `benches/configs/`. Run
+    /// Config every other one is measured against, named after a config file. Run
     /// whether `--configs` lists it or not, and first in every table and file. Runs under
     /// different baselines are not comparable with each other, so the name is written into
     /// `run.json` and the report header.
@@ -236,19 +242,24 @@ struct ConfigSet {
 /// A name that will not load is skipped rather than fatal, but never silently: it is printed and
 /// recorded in the report, because a typo that quietly shrinks the run is worse than one that
 /// stops it.
-fn resolve_configs(requested: Option<&[String]>, baseline: &str) -> ConfigSet {
+fn resolve_configs(
+    requested: Option<&[String]>,
+    baseline: &str,
+    catalog: &ConfigCatalog,
+) -> ConfigSet {
     let requested: Vec<String> = match requested {
         Some(names) => names
             .iter()
             .map(|name| name.trim().to_string())
             .filter(|name| !name.is_empty())
             .collect(),
-        None => available_configs(),
+        None => catalog.available(),
     };
 
     // The baseline first, so the reports lead with what everything else is measured against and
     // every reader of `results` can take index 0 rather than matching on a name.
-    let baseline = load_bench_config(baseline)
+    let baseline = catalog
+        .load(baseline)
         .unwrap_or_else(|reason| panic!("the baseline config {baseline} is unusable: {reason}"));
     let mut ready = vec![baseline];
     let mut skipped: Vec<(String, String)> = Vec::new();
@@ -260,7 +271,7 @@ fn resolve_configs(requested: Option<&[String]>, baseline: &str) -> ConfigSet {
         {
             continue;
         }
-        match load_bench_config(&name) {
+        match catalog.load(&name) {
             Ok(config) => ready.push(config),
             Err(reason) => skipped.push((name, reason)),
         }
@@ -289,14 +300,23 @@ struct Run {
 }
 
 impl Run {
-    fn resolve(args: Args, market: &Market) -> (Self, ConfigSet) {
+    /// What every config in this run is built and solved under.
+    fn settings(&self) -> RunSettings {
+        RunSettings {
+            workers: self.workers,
+            timeout_ms: self.timeout_ms,
+            gas_price_gwei: self.gas_price_gwei,
+        }
+    }
+
+    fn resolve(args: Args, market: &Market, catalog: &ConfigCatalog) -> (Self, ConfigSet) {
         let cores = num_cpus::get();
         let jobs = args.jobs.unwrap_or(cores).max(1);
         let trades = args
             .trades
-            .unwrap_or_else(common::default_trades_path);
+            .unwrap_or_else(crate::default_trades_path);
         let out_dir = args.out_dir.join(&args.name);
-        let configs = resolve_configs(args.configs.as_deref(), &args.baseline);
+        let configs = resolve_configs(args.configs.as_deref(), &args.baseline, catalog);
         let run = Self {
             name: args.name,
             jobs,
@@ -894,11 +914,23 @@ fn run_json(outcome: &BenchOutcome<'_>) -> String {
         "order_selection": run.orders.label(),
         "pairs": outcome.pairs.len(),
         "baseline": outcome.baseline_label(),
+        // A flat list of labels: `orders.csv` and `routes.jsonl` key by label, and so does every
+        // reader of this file.
         "configs": outcome
             .results
             .iter()
             .map(|(config, _)| config.label.clone())
             .collect::<Vec<_>>(),
+        // The file each label was read from, beside the list rather than inside it. `--configs-dir`
+        // means a label no longer names one file, and two runs whose `BF_d2` came from different
+        // files are not comparable.
+        "config_files": outcome
+            .results
+            .iter()
+            .map(|(config, _)| {
+                (config.label.clone(), serde_json::Value::from(config.path.display().to_string()))
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>(),
         "skipped": outcome.skipped,
         "gas_price_gwei": run.gas_price_gwei,
         "timeout_ms": run.timeout_ms,
@@ -1021,7 +1053,7 @@ fn orders_csv(outcome: &BenchOutcome<'_>) -> String {
 /// available pools is the finding.
 ///
 /// `orders` and `usd` count a route once per protocol it crosses, so they overlap across
-/// protocols; `legs` and `pools_used` do not. The columns are described in `benches/README.md`.
+/// protocols; `legs` and `pools_used` do not. The columns are described in `README.md`.
 ///
 /// A final `winner` block reports the same numbers over the route that actually won each order,
 /// which is the mix a deployment running all these configs side by side would execute.
@@ -1274,7 +1306,7 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
     if !outcome.blocked.symbols.is_empty() {
         out.push_str(&format!(
             "| blocked tokens | {} — {} pools dropped from the market, see \
-             `benches/blocked_tokens.toml` |\n",
+             `data/blocked_tokens.toml` |\n",
             outcome.blocked.symbols.join(", "),
             outcome.blocked.dropped_component_count
         ));
@@ -1435,24 +1467,33 @@ fn report_markdown(outcome: &BenchOutcome<'_>) -> String {
     out
 }
 
-#[tokio::main]
-async fn main() {
-    if common::asked_for_the_test_list() {
-        return;
+/// Runs the benchmark: parses the command line, solves every config, writes the report.
+///
+/// `algorithms` are run alongside the built-in ones, so a crate holding its own algorithm passes
+/// it here and names it in a config file.
+///
+/// # Panics
+///
+/// If the run cannot be set up: no order survives the dataset filters, the baseline config will
+/// not load, or the baseline will not build. Each of those makes the report meaningless rather
+/// than smaller.
+///
+/// # Errors
+///
+/// Returns the reason the run could not start — an unusable config directory, or a market that
+/// could not be built — so the caller's target can carry it to an exit code.
+pub async fn run(algorithms: &AlgorithmRegistry) -> Result<(), String> {
+    if crate::asked_for_the_test_list() {
+        return Ok(());
     }
 
     let args = Args::parse();
-    common::init_logging(args.logs);
+    crate::init_logging(args.logs);
 
-    let mut market = match build_market(args.live.clone()).await {
-        Ok(market) => market,
-        Err(reason) => {
-            eprintln!("error: {reason}");
-            std::process::exit(1);
-        }
-    };
+    let catalog = args.configs_dirs.catalog()?;
+    let mut market = build_market(args.market.clone()).await?;
     let source = market.source.clone();
-    let (run, mut configs) = Run::resolve(args, &market);
+    let (run, mut configs) = Run::resolve(args, &market, &catalog);
 
     let excluded_components = exclude_requested_protocols(&mut market, &run.excluded_protocols);
 
@@ -1531,19 +1572,16 @@ async fn main() {
     let mut wei: HashMap<Address, f64> = HashMap::new();
     for config in std::mem::take(&mut configs.ready) {
         println!("\n  {} ...", config.label);
-        let solver =
-            match build_solver(&config, &market, run.workers, run.timeout_ms, run.gas_price_gwei)
-                .await
-            {
-                Ok(solver) => solver,
-                Err(reason) => {
-                    println!("    skipped: {reason}");
-                    configs
-                        .skipped
-                        .push((config.label.clone(), reason));
-                    continue;
-                }
-            };
+        let solver = match build_solver(&config, &market, run.settings(), algorithms).await {
+            Ok(solver) => solver,
+            Err(reason) => {
+                println!("    skipped: {reason}");
+                configs
+                    .skipped
+                    .push((config.label.clone(), reason));
+                continue;
+            }
+        };
         if wei.is_empty() {
             wei = wei_per_token(&*solver.derived_data().read().await);
         }
@@ -1600,17 +1638,102 @@ async fn main() {
         summary: &summary,
     };
 
-    if let Err(error) = std::fs::create_dir_all(&run.out_dir) {
-        println!("could not create {}: {error}", run.out_dir.display());
-        return;
-    }
-    write_file(&run.out_dir, "report.md", &report_markdown(&outcome));
-    write_file(&run.out_dir, "orders.csv", &orders_csv(&outcome));
-    write_file(&run.out_dir, "pairs.csv", &pairs_csv(&outcome));
-    write_file(&run.out_dir, "protocols.csv", &protocols_csv(&outcome));
-    write_file(&run.out_dir, "routes.jsonl", &routes_jsonl(&outcome));
-    write_file(&run.out_dir, "run.json", &run_json(&outcome));
-    if let Some(root) = run.out_dir.parent() {
+    write_run(&run.out_dir, &outcome)
+}
+
+/// Writes the six files a run leaves behind, and refreshes the index the viewer reads.
+///
+/// # Errors
+///
+/// If the output directory cannot be created. A run that solved everything and cannot write is
+/// still a failed run: the numbers are only in memory.
+fn write_run(out_dir: &Path, outcome: &BenchOutcome<'_>) -> Result<(), String> {
+    std::fs::create_dir_all(out_dir)
+        .map_err(|error| format!("could not create {}: {error}", out_dir.display()))?;
+    write_file(out_dir, "report.md", &report_markdown(outcome));
+    write_file(out_dir, "orders.csv", &orders_csv(outcome));
+    write_file(out_dir, "pairs.csv", &pairs_csv(outcome));
+    write_file(out_dir, "protocols.csv", &protocols_csv(outcome));
+    write_file(out_dir, "routes.jsonl", &routes_jsonl(outcome));
+    write_file(out_dir, "run.json", &run_json(outcome));
+    if let Some(root) = out_dir.parent() {
         write_index(root);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `run.json` is the contract the viewer and the analysis scripts read, and both key by config
+    /// label. This pins the shape of the fields they look up.
+    #[test]
+    fn test_run_json_shape() {
+        let run = Run {
+            name: "a-run".to_string(),
+            jobs: 1,
+            workers: 1,
+            timeout_ms: 5000,
+            gas_price_gwei: 1.5,
+            orders: OrderSelection::Head(2),
+            repeats: 1,
+            trades: PathBuf::from("data/trades.csv"),
+            out_dir: PathBuf::from("bench-results/a-run"),
+            excluded_protocols: Vec::new(),
+        };
+        let source = MarketSource::Offline {
+            fixture: "data/market_recording.json.zst".to_string(),
+            recorded_at_secs: 1_756_000_000,
+            chain_name: "ethereum".to_string(),
+        };
+        let results = vec![(
+            BenchConfig {
+                label: "BF_d2".to_string(),
+                path: PathBuf::from("configs/BF_d2.toml"),
+                algorithm: "bellman_ford".to_string(),
+                max_hops: 2,
+                worker_pool_fields: toml::Table::new(),
+            },
+            ConfigRun { measurements: Vec::new(), times_us: Vec::new(), solving_ms: 0 },
+        )];
+        let blocked = BlockedTokens {
+            addresses: HashSet::new(),
+            symbols: Vec::new(),
+            dropped_component_count: 0,
+        };
+        let summary = TradeLoadSummary::default();
+        let stats = HashMap::new();
+        let symbols = HashMap::new();
+        let wei = HashMap::new();
+        let outcome = BenchOutcome {
+            run: &run,
+            source: &source,
+            market_protocols: &[],
+            results: &results,
+            skipped: &[],
+            orders: &[],
+            pairs: &[],
+            stats: &stats,
+            pair_stats: &[],
+            symbols: &symbols,
+            wei: &wei,
+            blocked: &blocked,
+            excluded_protocols: &[],
+            excluded_components: 0,
+            summary: &summary,
+        };
+
+        let json: serde_json::Value =
+            serde_json::from_str(&run_json(&outcome)).expect("run.json is valid json");
+
+        // A flat list of labels. The viewer filters and indexes on these strings; an object here
+        // matches no column in `orders.csv` and no key in `routes.jsonl`.
+        assert_eq!(json["configs"], serde_json::json!(["BF_d2"]));
+        assert_eq!(json["config_files"]["BF_d2"], serde_json::json!("configs/BF_d2.toml"));
+        assert_eq!(json["baseline"], serde_json::json!("BF_d2"));
+        assert_eq!(json["name"], serde_json::json!("a-run"));
+        // `MarketSource` is tagged, and the picker filters offline from live on this field.
+        assert_eq!(json["market"]["source"], serde_json::json!("offline"));
     }
 }

@@ -66,7 +66,7 @@ pub(crate) fn optimal_two_component_output(
 
 /// A WETH/USDC market for the `DepthAndPrice` split algorithm (`split`). The two
 /// components are fee-free constant-product components, so their optimal split matches
-/// [`optimal_two_component_output`]. One `MarketState` backs the whole market.
+/// `optimal_two_component_output`. One `MarketState` backs the whole market.
 pub struct WeightedSplitMarket {
     /// The components, tokens and block info of the market.
     pub market: MarketData,
@@ -235,8 +235,7 @@ impl TestScenario {
 
     /// Builds a `DepthAndPrice`-weighted `MarketData` + graph manager from this scenario's
     /// component definitions, for algorithms that route on the weighted graph (`water_fill`,
-    /// Most Liquid). Uses the same fixed gas assumptions as
-    /// [`build_market`](Self::build_market) (100 wei/gas).
+    /// Most Liquid). Uses the same fixed gas assumptions as `build_market` (100 wei/gas).
     pub fn build_market_weighted(&self) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
         let mut market = MarketState::new();
         market.update_gas_price(BlockGasPrice {

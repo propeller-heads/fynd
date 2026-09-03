@@ -5,11 +5,11 @@ and two analysis scripts read what they wrote.
 
 | what | file | what it does |
 |---|---|---|
-| benchmark | `algorithm_bench.rs` | Runs several configs over many orders and writes a report |
-| profiler | `profile.rs` | Runs one config over a few orders on one thread, writes nothing |
+| benchmark | `src/bench.rs` | Runs several configs over many orders and writes a report |
+| profiler | `src/profile.rs` | Runs one config over a few orders on one thread, writes nothing |
 | viewer | `viewer/index.html` | Reads the reports in a browser |
-| analysis | `bench-analyze.py` | Breaks one run down by order size and route shape |
-| analysis | `bench-setdiff.py` | Per lost order, the pools the winner used and we did not |
+| analysis | `analysis/bench-analyze.py` | Breaks one run down by order size and route shape |
+| analysis | `analysis/bench-setdiff.py` | Per lost order, the pools the winner used and we did not |
 
 The benchmark and the profiler read the same order dataset and take their market the same way, so
 an order seen in the viewer can be profiled by its id.
@@ -42,7 +42,7 @@ instead of 771 KB of compressed JSON. Live runs do not read it; they need `TYCHO
 
 **The order dataset** is `aggregator_trades_50k_1k_usd.json` in the repository root. It is
 gitignored because it is large. If you do not have it, ask someone for a copy — rebuilding it means
-running `dataset.sql` against Dune, which needs an API key.
+running `data/dataset.sql` against Dune, which needs an API key.
 
 **`jq`** for either script: `brew install jq`. Both use it to read the built binary's path out of
 cargo's JSON output, so it is needed even with `--no-record`.
@@ -75,6 +75,8 @@ Useful options:
 | `--timeout-ms N` | How long one solve may take |
 | `--gas-price-gwei X` | Gas price the run solves at. Fractions allowed: `0.1` is roughly what the fixture's own block sat at |
 | `--logs` | Print the solver's own logs. Slows every config, so leave it off when reading timings |
+| `--fixture PATH` | The recording an offline run replays. Defaults to this repository's; mainly for a caller outside it |
+| `--configs-dir DIR` | A directory of config files to run on top of the built-in ones. Repeatable; mainly for a caller outside this repository |
 
 `--help-bench` lists them all with the benchmark's own defaults; `--help` describes the script.
 Anything the script does not consume is forwarded unchanged, so the benchmark validates its own
@@ -179,6 +181,70 @@ Ties keep the earlier config, which puts the baseline first.
 `orders` and `usd` count a route once per protocol it crosses, so across protocols they sum to more
 than the run. `legs` and `pools_used` do not double count.
 
+## Benchmarking an algorithm from another crate
+
+The algorithms are not fixed. Both entry points take a registry, so a crate holding its own
+algorithm gets the same report the built-ins get, and compares against them in the same run.
+
+Depend on this crate, and declare a bench target that hands `run` a registry with the algorithm in
+it:
+
+```toml
+# Cargo.toml. The harness and fynd-core have to be the same revision: an `AlgorithmRegistry` built
+# from one copy of fynd-core does not typecheck against a `run` from another.
+[dev-dependencies]
+fynd-bench-harness = { git = "https://github.com/propeller-heads/fynd", tag = "<release>" }
+fynd-core = { git = "https://github.com/propeller-heads/fynd", tag = "<release>" }
+tokio = { version = "1", features = ["full"] }
+
+[[bench]]
+name = "algorithm_bench"
+harness = false
+```
+
+```rust
+// benches/algorithm_bench.rs
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    let algorithms = fynd_core::AlgorithmRegistry::new()
+        .with_algorithm("my_algorithm", MyAlgorithm::with_config)
+        .expect("the name is ours");
+    match fynd_bench_harness::bench::run(&algorithms).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(reason) => {
+            eprintln!("error: {reason}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+```
+
+Add a config file naming the algorithm — the same two lines any config in `configs/` has — and
+point the run at the directory holding it:
+
+```bash
+cargo bench -p my-crate --bench algorithm_bench --profile profiling -- \
+  --name my-run --orders 500 --configs-dir benches/configs --configs MY_d3 \
+  --fixture tests/fixtures/market_recording.json.zst \
+  --trades ~/datasets/aggregator_trades_50k_1k_usd.json
+```
+
+Three things have to be named from outside this repository:
+
+| flag | why |
+|---|---|
+| `--configs-dir` | Where the caller's config files are. Read on top of the built-in ones, which still run. A name held by two directories stops the run, so a caller cannot replace the baseline by accident |
+| `--fixture` | The market. This repository's copy is in Git LFS, so the checkout cargo makes for a git dependency holds the pointer file rather than the market — keep a copy beside the caller's tests |
+| `--trades` | The order dataset, which is gitignored here and so is not in that checkout either |
+
+Everything else works as it does in this repository, the baseline included: `BF_d2` comes from the
+config files this crate ships, so a caller's algorithm is measured against the same baseline as
+every built-in. `run.json` records the file behind each config name under `config_files`, so a run
+always says which configs it actually read.
+
+The results land in the caller's own `bench-results/`. `./scripts/bench-viewer.sh --results DIR`
+reads such a directory — see [Reading the results](#reading-the-results).
+
 ## Reading the results
 
 ```bash
@@ -189,11 +255,23 @@ Opens a browser on the results. The run name in the header opens a table of ever
 between them, and new runs appear on refresh. The script exists only because browsers block the
 file reads the page needs when it is opened straight from disk.
 
+A caller outside this repository writes its runs outside it too. Name that directory and the viewer
+reads it instead:
+
+```bash
+./scripts/bench-viewer.sh --results ../my-solver/bench-results
+```
+
+One server answers both the page and the runs — the directory is served at `/results` and the page
+opens with `?root=/results`. A second server would be a second origin, which the browser would
+refuse to read across. The run picker names the directory it listed whenever it is not this
+repository's own.
+
 Two scripts read the same `bench-results/<run>/` directory for questions the report does not answer:
 
 ```bash
-fynd-core/benches/bench-analyze.py bench-results/my-run --config PFW_d3 --against WF_d3 --worst 10
-fynd-core/benches/bench-setdiff.py bench-results/my-run --config PFW_d3 --against WF_d3
+bench-harness/analysis/bench-analyze.py bench-results/my-run --config PFW_d3 --against WF_d3 --worst 10
+bench-harness/analysis/bench-setdiff.py bench-results/my-run --config PFW_d3 --against WF_d3
 ```
 
 `bench-analyze.py` says in which order-size bins a config won and which orders it lost worst, naming
@@ -273,13 +351,15 @@ The file is a flat table of `PoolConfig` fields. Only `algorithm` is required. S
 ### Add an algorithm
 
 Nothing here needs to change. The benchmark asks the solver for the algorithm by name, so once it
-is registered, a config file naming it works. A config naming an algorithm the build does not have
-is skipped and listed as skipped in the report, rather than failing the run.
+is registered, a config file naming it works. That holds for an algorithm in another crate too —
+see [Benchmarking an algorithm from another crate](#benchmarking-an-algorithm-from-another-crate).
+A config naming an algorithm the build does not have is skipped and listed as skipped in the
+report, rather than failing the run.
 
 ### Exclude a token
 
-Add it to `blocked_tokens.toml`. Every pool holding it is dropped from the market, and every order
-naming it is dropped from the dataset.
+Add it to `data/blocked_tokens.toml`. Every pool holding it is dropped from the market, and every
+order naming it is dropped from the dataset.
 
 The bar is high on purpose: only tokens the recording prices inconsistently against the rest of the
 market, where a router exploiting the inconsistency scores a win it could never realise. The file
@@ -287,30 +367,44 @@ explains the reasoning for the two that are in it.
 
 ### Change the report
 
-`algorithm_bench.rs` writes it. The section named "Reading this" at the bottom of every report
-explains what the columns mean, and is worth updating alongside any new column.
+`src/bench.rs` writes it. The section named "Reading this" at the bottom of every report explains
+what the columns mean, and is worth updating alongside any new column.
 
 ## How the code is arranged
 
-`common/mod.rs` holds what both programs need: building the market, loading configs, applying the
+Everything is a library, and the two `benches/` targets are three lines each. That is what lets
+another crate run the same benchmark over its own algorithm: it writes the same three lines around
+its own registry.
+
+`src/lib.rs` holds what both programs need: building the market, loading configs, applying the
 blocklist, resolving token symbols, building the solver, and the percentile and median helpers the
-reported numbers come from. `common/trades.rs` reads the order dataset. `common/live.rs` captures a
-block from Tycho.
+reported numbers come from. `src/trades.rs` reads the order dataset. `src/live.rs` captures a block
+from Tycho. `src/bench.rs` is the benchmark and `src/profile.rs` the profiler, each a `run` taking
+the algorithms to add to the built-in ones.
 
 The two kinds of market meet in one function, `build_market`, and both come out as a `Market`.
 Nothing downstream can tell which it was handed, which is what stops an offline and a live run
 measuring differently. What each run was is carried on `Market::source`, written to `run.json`, and
 shown in the report and the viewer.
 
-Anything used by both programs belongs in `common/`, so the two cannot drift apart on what they
-measure. The market flags are one `clap` struct, `LiveFlags`, flattened into each binary for the
-same reason: two copies of a dozen attributes drift the first time one is edited.
+Anything used by both programs belongs in `src/lib.rs`, so the two cannot drift apart on what they
+measure. Only the two `run` functions are public; everything else is `pub(crate)`, so the interface
+a caller depends on is the one the README describes. The shared flags are `clap` structs flattened
+into each program for the same reason: two copies of a dozen attributes drift the first time one is
+edited. `MarketFlags` carries `--market`, `--fixture` and the Tycho settings; `ConfigFlags` carries
+`--configs-dir`.
 
-Both are declared `harness = false` in `Cargo.toml`, which means they get a plain `main()` instead
-of the test harness. That is why they parse their own arguments with `clap`.
+The configs, the token table and the blocked list ship inside this crate, in `configs/` and
+`data/`, and are found relative to the crate rather than the working directory. A caller depending
+on this crate therefore reads the same ones without copying anything. The market fixture is the
+exception: it is in Git LFS, so a checkout cargo made for a git dependency holds the pointer file,
+and an outside caller names its own copy with `--fixture`.
 
-Both need the `test-utils` feature, which is what makes `Solver::from_recording` available. The
-scripts pass it; a bare `cargo bench` skips them.
+Both targets are declared `harness = false` in `Cargo.toml`, which means they get a plain `main()`
+instead of the test harness. That is why they parse their own arguments with `clap`.
+
+The crate turns on `fynd-core`'s `test-utils` feature itself, because `Solver::from_recording_with`
+is what every run goes through.
 
 Because they parse their own arguments, they cannot answer nextest's `--list`. CI and `check.sh`
 exclude them by name (`-E 'not binary(algorithm_bench) and not binary(profile)'`) rather than

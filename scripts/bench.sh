@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Compare the routing algorithms against the recorded market fixture.
 #
-# Builds fynd-core/benches/algorithm_bench.rs with release optimisations plus debug symbols and
-# runs it. Every run writes bench-results/<name>/ holding report.md, orders.csv, pairs.csv,
+# Builds bench-harness/benches/algorithm_bench.rs with release optimisations plus debug symbols
+# and runs it. Every run writes bench-results/<name>/ holding report.md, orders.csv, pairs.csv,
 # protocols.csv, routes.jsonl and run.json, so runs can be compared rather than overwritten.
 # Browse them with ./scripts/bench-viewer.sh.
 #
@@ -61,7 +61,7 @@ fi
 # assumed: the hash tracks the feature set and would go stale the moment that changed. The
 # `profiling` profile is release plus debug symbols; without symbols a flamegraph is a wall of hex.
 echo "Building (release + debug symbols) ..."
-BIN="$(cargo bench -p fynd-core --profile profiling --features test-utils \
+BIN="$(cargo bench -p fynd-bench-harness --profile profiling \
   --bench algorithm_bench --no-run --message-format=json |
   jq -r 'select(.target.kind[0] == "bench" and .executable != null) | .executable' | tail -1)"
 

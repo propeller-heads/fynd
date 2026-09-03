@@ -7,7 +7,7 @@ the input to deciding what to change next, and it is deliberately not a summary 
 here points back at order ids that can be re-run under the profiler.
 
 Usage:
-    fynd-core/benches/bench-analyze.py bench-results/<run> --config <name> --against <name> [--worst N]
+    bench-harness/analysis/bench-analyze.py bench-results/<run> --config <name> --against <name> [--worst N]
 """
 
 import argparse

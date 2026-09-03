@@ -3477,6 +3477,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fynd-bench-harness"
+version = "0.101.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "futures 0.3.32",
+ "fynd-core",
+ "fynd-test-fixtures",
+ "num-bigint",
+ "num-traits",
+ "num_cpus",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tracing-subscriber 0.3.23",
+ "tycho-simulation",
+]
+
+[[package]]
 name = "fynd-benchmark"
 version = "0.101.0"
 dependencies = [
