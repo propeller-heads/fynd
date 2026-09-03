@@ -47,6 +47,7 @@ export {
 } from "./permit2.js";
 export {
   clientFeeSigningHash,
+  patchClientFeeSignature,
   withClientFee,
 } from "./client-fee.js";
 export type { ClientFeeSwapContext } from "./client-fee.js";

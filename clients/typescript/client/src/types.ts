@@ -59,8 +59,11 @@ export interface PermitSingle {
 /** Client fee configuration for the Tycho Router.
  *
  * When provided, the router charges a fee in basis points on the swap output.
- * The `signature` must be an EIP-712 signature by the `receiver` over the
- * `ClientFee` typed data — compute the hash with `clientFeeSigningHash`.
+ *
+ * The signature covers the quoted swap, so it can only be produced after the quote comes
+ * back. Send these params unsigned, then patch the signature into the returned calldata with
+ * `patchClientFeeSignature` — no second quote request needed. Set `signature` only if you
+ * already hold a signature valid for this exact swap.
  */
 export interface ClientFeeParams {
   /** Fee in basis points (0–10,000). 100 = 1%. */
@@ -71,7 +74,7 @@ export interface ClientFeeParams {
   maxContribution: bigint;
   /** Unix timestamp after which the signature is invalid. */
   deadline: number;
-  /** 65-byte EIP-712 ECDSA signature by `receiver`. Set after signing. */
+  /** 65-byte EIP-712 ECDSA signature by `receiver`. Usually left unset. */
   signature?: Hex;
 }
 
@@ -96,6 +99,13 @@ export interface Transaction {
   to: Address;
   value: bigint;
   data: Hex;
+  /**
+   * Byte offset of the client fee signature placeholder within `data`.
+   *
+   * Present only when `clientFeeParams` was set on the quote request. Pass the quote to
+   * `patchClientFeeSignature` to overwrite the placeholder with the real signature.
+   */
+  clientFeeSignatureOffset?: number;
 }
 
 /** Optional parameters for a quote request. */
@@ -152,6 +162,13 @@ export interface FeeBreakdown {
   maxSlippage: bigint;
   /** Minimum amount the user receives on-chain (the min_amount_out in the tx). */
   minAmountReceived: bigint;
+  /**
+   * keccak256 of the ABI-encoded swap bytes.
+   *
+   * Present only when `clientFeeParams` was set on the quote request. Feed it to
+   * `clientFeeSigningHash` as `ClientFeeSwapContext.swapsHash`.
+   */
+  swapsHash?: Hex;
 }
 
 /** Outcome of simulating an encoded quote against the latest block. */

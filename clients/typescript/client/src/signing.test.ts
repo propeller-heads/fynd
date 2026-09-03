@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { approvalSigningHash, assembleSignedSwap, swapSigningHash } from './signing.js';
+import { FyndError } from './error.js';
+import {
+  approvalSigningHash,
+  assembleSignedSwap,
+  assertSignatureLength,
+  swapSigningHash,
+} from './signing.js';
 import type { ApprovalPayload, SwapPayload, PrimitiveSignature } from './signing.js';
-import type { Quote } from './types.js';
+import type { Hex, Quote } from './types.js';
 
 const TOKEN_OUT = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' as const;
 const SENDER    = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045' as const;
@@ -177,5 +183,25 @@ describe('approvalSigningHash', () => {
       amount: 9999n,
     };
     expect(approvalSigningHash(baseApprovalPayload)).not.toBe(approvalSigningHash(other));
+  });
+});
+
+describe('assertSignatureLength', () => {
+  const VALID = `0x${'ab'.repeat(65)}` as Hex;
+
+  it('accepts a 65-byte signature', () => {
+    expect(() => assertSignatureLength(VALID, 'Client fee')).not.toThrow();
+  });
+
+  it.each([
+    ['too short', '0xabcd'],
+    ['too long', `0x${'ab'.repeat(66)}`],
+    ['empty', '0x'],
+  ])('throws when the signature is %s', (_case, signature) => {
+    expect(() => assertSignatureLength(signature as Hex, 'Client fee')).toThrow(FyndError);
+  });
+
+  it('names the signature in the message', () => {
+    expect(() => assertSignatureLength('0xabcd' as Hex, 'Permit2')).toThrow(/^Permit2 signature/);
   });
 });
