@@ -664,6 +664,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_parallel_pools_price_via_best_output() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        // Two pools on the same pair. The fee-free pool has the tighter spread, but the
+        // 1%-fee pool delivers more output on the buy — a ranking by spread would pick
+        // "tight", a ranking by output must pick "wide":
+        //   buy  (wide):  1e18 ETH * 2500 * 0.99          → 2475e18 USDC (tight: 2000e18)
+        //   sell (tight): 2475e18 USDC / 2000             → 1.2375e18 ETH (wide: 0.9801e18)
+        // Each leg independently takes the pool that outputs more, so
+        //   mid = (2475 + 2475/1.2375) / 2 = (2475 + 2000) / 2 = 2237.5
+        let prices = prices_for(
+            &eth,
+            vec![
+                ("tight", &eth, &usdc, MockProtocolSim::new(2000.0)),
+                ("wide", &eth, &usdc, MockProtocolSim::new(2500.0).with_fee(0.01)),
+            ],
+        )
+        .await;
+
+        assert!((ratio(&prices[&usdc.address]) - 2237.5).abs() < 1e-6);
+    }
+
+    #[tokio::test]
     async fn test_price_via_multi_hop_route() {
         let eth = token(0, "ETH");
         let mid = token(2, "MID");
