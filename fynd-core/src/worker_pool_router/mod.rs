@@ -22,28 +22,27 @@
 //!    [`encoding::encoder::Encoder`](crate::encoding::encoder::Encoder)
 
 mod allocation;
-mod comparison_log;
 pub mod config;
+mod instrumentation;
 #[cfg(test)]
 mod log_capture;
 
 use std::{
-    collections::BTreeMap,
     sync::LazyLock,
     time::{Duration, Instant},
 };
 
 pub use allocation::ExclusiveAccess;
 use allocation::{allocate, validate_pool_allowlist, Allocation, OrderClass};
-use comparison_log::{log_quote_comparison, solver_error_label};
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
+use instrumentation::{log_quote_comparison, solver_error_label};
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn, Level};
+use tracing::{debug, warn};
 use tycho_execution::encoding::{
     evm::gas_estimator::estimate_gas_usage,
     models::{Solution, Strategy},
@@ -51,13 +50,10 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
-    encoding::encoder::Encoder,
-    feed::exclusivity::is_exclusive,
-    price_guard::guard::PriceGuard,
-    simulation::simulator::{QuoteSimulator, SimulationAttempt},
-    worker_pool::task_queue::TaskQueueHandle,
-    BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
-    QuoteStatus, SolveError, SolveParams, SurplusInfo, Swap,
+    encoding::encoder::Encoder, feed::exclusivity::is_exclusive, price_guard::guard::PriceGuard,
+    simulation::simulator::QuoteSimulator, worker_pool::task_queue::TaskQueueHandle, BlockInfo,
+    EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus,
+    SolveError, SolveParams, SurplusInfo, Swap,
 };
 
 /// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
@@ -359,7 +355,7 @@ pub async fn encode_quotes(
 pub fn finalize_quote(order_quotes: Vec<OrderQuote>, solve_time_ms: u64) -> Quote {
     for quote in &order_quotes {
         record_win(quote);
-        log_winning_protocols(quote);
+        instrumentation::log_winning_protocols(quote);
     }
 
     let total_gas_estimate = order_quotes
@@ -578,11 +574,9 @@ impl WorkerPoolRouter {
         let mut order_quotes = ranked.into_best();
         if let Some(encoding_options) = request.options().encoding_options() {
             order_quotes = encode_quotes(&self.encoder, order_quotes, encoding_options).await?;
-            if encoding_options.simulate() {
-                order_quotes = self
-                    .simulate_encoded_quotes(order_quotes)
-                    .await?;
-            }
+            order_quotes = self
+                .simulate_quotes(order_quotes, encoding_options)
+                .await?;
         }
         Ok(finalize_quote(order_quotes, started.elapsed().as_millis() as u64))
     }
@@ -593,11 +587,29 @@ impl WorkerPoolRouter {
         &self.encoder
     }
 
-    /// Simulates every successfully encoded quote and records the outcome on it.
-    async fn simulate_encoded_quotes(
+    /// Simulates every successfully encoded quote and records the outcome on it, when
+    /// `encoding_options` asks for simulation. Returns the quotes untouched when it does not.
+    ///
+    /// The fourth stage of the pipeline [`Self::quote`] runs, after [`Self::solve`],
+    /// [`encode_quotes`] and before [`finalize_quote`]. A caller that composes those stages itself
+    /// calls this one too, right after encoding, and passes the same `encoding_options`. Taking
+    /// the options rather than a boolean is what keeps that call unconditional: a service that
+    /// assembles its own pipeline cannot drop simulation by forgetting to test the flag, which is
+    /// the one mistake that leaves a request asking for simulation with nothing to say why it got
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolveError::Internal`] when the request asks for simulation and the server was
+    /// built without a simulator.
+    pub async fn simulate_quotes(
         &self,
         mut order_quotes: Vec<OrderQuote>,
+        encoding_options: &EncodingOptions,
     ) -> Result<Vec<OrderQuote>, SolveError> {
+        if !encoding_options.simulate() {
+            return Ok(order_quotes);
+        }
         let Some(simulator) = self.simulator.as_ref() else {
             return Err(SolveError::Internal(
                 "simulation requested but simulation is not enabled on this server".to_string(),
@@ -609,9 +621,11 @@ impl WorkerPoolRouter {
                 .iter_mut()
                 .map(|quote| async move {
                     if quote.status() == QuoteStatus::Success {
-                        let attempt = simulator.simulate_attempt(quote).await;
-                        record_simulation_outcome(quote.amount_out(), &attempt);
-                        quote.set_simulation_result(attempt.into_result());
+                        let result = simulator
+                            .simulate_attempt(quote)
+                            .await
+                            .into_result();
+                        quote.set_simulation_result(result);
                     }
                 }),
         )
@@ -1042,90 +1056,6 @@ fn to_gas_token_amount(quote: &OrderQuote, amount: &BigUint) -> Option<BigUint> 
         return None;
     }
     Some(amount * gas_cost_wei / gas_cost_out)
-}
-
-/// Records the outcome of one simulated quote, and how far the simulated amount landed from the
-/// quoted one.
-///
-/// A revert and a failure are counted apart because they call for different work: a revert means
-/// the route the solver priced does not execute, while a failure means the simulation itself did
-/// not run, so it says nothing about the route.
-fn record_simulation_outcome(quoted_amount_out: &BigUint, attempt: &SimulationAttempt) {
-    let outcome = match attempt {
-        SimulationAttempt::Success { amount_out, .. } => {
-            if let Some(deviation_bps) = deviation_bps(quoted_amount_out, amount_out) {
-                histogram!("quote_simulation_deviation_bps").record(deviation_bps);
-            }
-            "success"
-        }
-        SimulationAttempt::Reverted { .. } => "reverted",
-        SimulationAttempt::Failure { .. } => "failed",
-    };
-    counter!("quote_simulation_total", "outcome" => outcome).increment(1);
-}
-
-/// How far the simulated amount sits from the quoted one, in basis points of the quoted amount.
-///
-/// A negative value means the simulation returned less than the quote promised. A quote of zero
-/// has no ratio to report, so it returns `None` rather than a division by zero.
-fn deviation_bps(quoted_amount_out: &BigUint, simulated_amount_out: &BigUint) -> Option<f64> {
-    let quoted = quoted_amount_out.to_f64()?;
-    let simulated = simulated_amount_out.to_f64()?;
-    if quoted <= 0.0 {
-        return None;
-    }
-    Some((simulated - quoted) / quoted * 10_000.0)
-}
-
-/// Target for the winning-quote protocol log. Emitted at INFO, so a deployment already running
-/// at `RUST_LOG=info` collects it without further configuration; `fynd::winning_protocols=warn`
-/// turns it off.
-const WINNING_PROTOCOLS_TARGET: &str = "fynd::winning_protocols";
-
-/// Logs which protocols the quote the router returns swaps on, and how many swaps it makes on
-/// each, as one JSON object.
-///
-/// The counts are swaps, not distinct pools: a split route that crosses two Uniswap V2 pools
-/// reports 2, which is what the solution executes.
-///
-/// A quote that found no route has no protocols to report and gets no line, so the log holds one
-/// line per returned route.
-fn log_winning_protocols(quote: &OrderQuote) {
-    if !tracing::enabled!(target: WINNING_PROTOCOLS_TARGET, Level::INFO) {
-        return;
-    }
-    if quote.status() != QuoteStatus::Success {
-        return;
-    }
-    let Some(route) = quote.route() else {
-        return;
-    };
-
-    // BTreeMap, so the same set of protocols always serialises in the same order and two lines
-    // can be compared as text.
-    let mut swaps_per_protocol: BTreeMap<&str, usize> = BTreeMap::new();
-    for swap in route.swaps() {
-        *swaps_per_protocol
-            .entry(swap.protocol())
-            .or_default() += 1;
-    }
-    let Ok(protocols) = serde_json::to_string(&swaps_per_protocol) else {
-        warn!(target: WINNING_PROTOCOLS_TARGET, "failed to serialise the winning protocols");
-        return;
-    };
-
-    // The payload is one plain string rather than tracing fields because the formatter wraps
-    // field names and their `=` separators in ANSI escapes, which defeats parsers downstream.
-    info!(
-        target: WINNING_PROTOCOLS_TARGET,
-        "winning_protocols order_id={} block={} pool={} algorithm={} swaps={} protocols={}",
-        quote.order_id(),
-        quote.block().number(),
-        quote.worker_pool(),
-        quote.algorithm(),
-        route.swaps().len(),
-        protocols,
-    );
 }
 
 /// Records the win and the settled volume of one quote the router returns, by pool and algorithm.
@@ -1577,8 +1507,8 @@ mod tests {
         algorithm::test_utils::{component, MockProtocolSim},
         feed::exclusivity::mark_exclusive,
         types::internal::SolveTask,
-        EncodingOptions, OrderSide, PermitDetails, PermitSingle, Route, SimulationResult,
-        SingleOrderQuote, Swap, UserTransferType,
+        EncodingOptions, FeeBreakdown, OrderSide, PermitDetails, PermitSingle, Route,
+        SimulationResult, SingleOrderQuote, Swap, UserTransferType,
     };
 
     fn default_encoder() -> Encoder {
@@ -1767,6 +1697,41 @@ mod tests {
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].status(), QuoteStatus::Success);
         assert_eq!(ranked[0].amount_out_net_gas(), &BigUint::from(900u64));
+    }
+
+    /// The stage a service composing its own pipeline calls. It runs unconditionally, so a quote
+    /// that did not ask for simulation has to come back untouched rather than error on the
+    /// missing simulator.
+    #[tokio::test]
+    async fn test_simulate_quotes_without_simulation_requested() {
+        let router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let quote = make_single_quote(900).order().clone();
+
+        let quotes = router
+            .simulate_quotes(vec![quote], &EncodingOptions::new(0.01))
+            .await
+            .expect("a request that asks for no simulation needs no simulator");
+
+        assert_eq!(quotes.len(), 1);
+        assert!(quotes[0].simulation_result().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_simulate_quotes_without_a_simulator() {
+        let router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let quote = make_single_quote(900).order().clone();
+
+        let error = router
+            .simulate_quotes(vec![quote], &EncodingOptions::new(0.01).with_simulation())
+            .await
+            .expect_err("simulation requires a configured simulator");
+
+        assert_eq!(
+            error.to_string(),
+            "internal error: simulation requested but simulation is not enabled on this server"
+        );
     }
 
     #[tokio::test]
@@ -3658,104 +3623,11 @@ mod tests {
         assert_eq!(to_gas_token_amount(&quote, &BigUint::from(100_000_000u64)), None);
     }
 
-    #[test]
-    fn test_deviation_bps_reports_a_shortfall_as_negative() {
-        let deviation =
-            deviation_bps(&BigUint::from(1_000_000u64), &BigUint::from(999_000u64)).unwrap();
-
-        assert!((deviation - -10.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_deviation_bps_reports_a_surplus_as_positive() {
-        let deviation =
-            deviation_bps(&BigUint::from(1_000_000u64), &BigUint::from(1_001_000u64)).unwrap();
-
-        assert!((deviation - 10.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_deviation_bps_without_a_quoted_amount() {
-        assert_eq!(deviation_bps(&BigUint::ZERO, &BigUint::from(1_000u64)), None);
-    }
-
-    /// Names every metric a run recorded, with its labels, so a test can assert on them.
-    fn recorded_metrics(
-        snapshotter: &metrics_util::debugging::Snapshotter,
-    ) -> Vec<(String, Vec<String>)> {
-        snapshotter
-            .snapshot()
-            .into_vec()
-            .iter()
-            .map(|(key, _, _, _)| {
-                (
-                    key.key().name().to_string(),
-                    key.key()
-                        .labels()
-                        .map(|label| format!("{}={}", label.key(), label.value()))
-                        .collect(),
-                )
-            })
-            .collect()
-    }
-
-    #[test]
-    fn test_record_simulation_outcome_counts_a_success_and_its_deviation() {
-        let recorder = metrics_util::debugging::DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-
-        metrics::with_local_recorder(&recorder, || {
-            record_simulation_outcome(
-                &BigUint::from(1_000_000u64),
-                &SimulationAttempt::Success {
-                    amount_out: BigUint::from(999_000u64),
-                    gas_used: 120_000,
-                },
-            );
-        });
-
-        let recorded = recorded_metrics(&snapshotter);
-        assert!(recorded.contains(&(
-            "quote_simulation_total".to_string(),
-            vec!["outcome=success".to_string()]
-        )));
-        assert!(recorded
-            .iter()
-            .any(|(name, _)| name == "quote_simulation_deviation_bps"));
-    }
-
-    #[test]
-    fn test_record_simulation_outcome_counts_a_revert_apart_from_a_failure() {
-        let recorder = metrics_util::debugging::DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-
-        metrics::with_local_recorder(&recorder, || {
-            record_simulation_outcome(
-                &BigUint::from(1_000_000u64),
-                &SimulationAttempt::Reverted { reason: "reverted".to_string() },
-            );
-            record_simulation_outcome(
-                &BigUint::from(1_000_000u64),
-                &SimulationAttempt::Failure { reason: "timed out".to_string() },
-            );
-        });
-
-        let recorded = recorded_metrics(&snapshotter);
-        for outcome in ["outcome=reverted", "outcome=failed"] {
-            assert!(recorded
-                .contains(&("quote_simulation_total".to_string(), vec![outcome.to_string()])));
-        }
-        assert!(
-            !recorded
-                .iter()
-                .any(|(name, _)| name == "quote_simulation_deviation_bps"),
-            "a call that returned no amount has no deviation to record"
-        );
-    }
-
     /// Runs `log_winning_protocols` and returns the payload of each line it wrote.
     fn capture_winning_protocols(quote: &OrderQuote) -> Vec<String> {
-        super::log_capture::capture_payloads("winning_protocols ", || log_winning_protocols(quote))
+        super::log_capture::capture_payloads("winning_protocols ", || {
+            instrumentation::log_winning_protocols(quote)
+        })
     }
 
     #[test]
@@ -3775,6 +3647,61 @@ mod tests {
             payloads[0]
         );
         assert!(payloads[0].contains("swaps=3"), "{}", payloads[0]);
+    }
+
+    /// The reviewer's question: what did a route containing a given protocol simulate at. Both
+    /// values ride on the line that names the protocols, so one record answers it.
+    #[test]
+    fn test_winning_protocols_carries_the_simulated_deviation() {
+        let mut quote = make_route_quote(&[("ekubo_v3", 0x01, 0x02), ("uniswap_v3", 0x02, 0x03)]);
+        quote.set_fee_breakdown(FeeBreakdown::new(
+            BigUint::from(70u64),
+            BigUint::from(30u64),
+            BigUint::from(100u64),
+            BigUint::from(900u64),
+        ));
+        // The quote promises 1000 after fees; the simulated call returns 999, a 10 bps shortfall.
+        quote.set_simulation_result(SimulationResult::Success {
+            amount_out: BigUint::from(999u64),
+            gas_used: 120_000,
+        });
+
+        let payloads = capture_winning_protocols(&quote);
+
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].contains("simulated=success"), "{}", payloads[0]);
+        assert!(payloads[0].contains("deviation_bps=-10.0000"), "{}", payloads[0]);
+        assert!(
+            payloads[0].contains(r#"protocols={"ekubo_v3":1,"uniswap_v3":1}"#),
+            "{}",
+            payloads[0]
+        );
+    }
+
+    #[test]
+    fn test_winning_protocols_with_a_failed_simulation() {
+        let mut quote = make_route_quote(&[("uniswap_v3", 0x01, 0x02)]);
+        quote.set_simulation_result(SimulationResult::Failure {
+            reason: "simulation reverted".to_string(),
+        });
+
+        let payloads = capture_winning_protocols(&quote);
+
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].contains("simulated=failure"), "{}", payloads[0]);
+        assert!(payloads[0].contains("deviation_bps= "), "{}", payloads[0]);
+    }
+
+    /// A quote that asked for no simulation keeps both keys, so every line has the same shape.
+    #[test]
+    fn test_winning_protocols_without_simulation() {
+        let quote = make_route_quote(&[("uniswap_v3", 0x01, 0x02)]);
+
+        let payloads = capture_winning_protocols(&quote);
+
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].contains("simulated= "), "{}", payloads[0]);
+        assert!(payloads[0].contains("deviation_bps= "), "{}", payloads[0]);
     }
 
     #[test]

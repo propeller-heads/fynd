@@ -121,10 +121,11 @@ fn create_metrics_exporter(host: &str, port: u16, chain: &str) -> tokio::task::J
         &[0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
     const SOLVER_RESPONSE_BUCKETS: &[f64] = &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     // Signed: a simulation that returns less than the quote promised is the case to watch, so the
-    // negative side is the finer one.
+    // negative side is the finer one. Both sides reach 1000 bps, because `histogram_quantile`
+    // cannot interpolate past the outermost bound and a quantile that lands there reads flat.
     const SIMULATION_DEVIATION_BPS_BUCKETS: &[f64] = &[
         -1000.0, -500.0, -200.0, -100.0, -50.0, -25.0, -10.0, -5.0, -1.0, 0.0, 1.0, 5.0, 10.0,
-        25.0, 100.0,
+        25.0, 50.0, 100.0, 200.0, 500.0, 1000.0,
     ];
 
     let handle = PrometheusBuilder::new()
