@@ -355,11 +355,20 @@ where
             (block_info, solved_against)
         };
 
+        // The override rides on the handle rather than the trait, so every algorithm honours it
+        // through the market view it already reads.
+        let market_data = match params.gas_price_override() {
+            Some(wei) => self
+                .market_data
+                .with_gas_price_override(wei.clone()),
+            None => self.market_data.clone(),
+        };
+
         let result = self
             .algorithm
             .find_best_route(
                 graph,
-                self.market_data.clone(),
+                market_data,
                 params.state_label().cloned(),
                 Some(self.derived_data.clone()),
                 order,
@@ -961,6 +970,94 @@ mod tests {
             }
             other => panic!("expected AlgorithmError for invalid route, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_quote_gas_price_override_reaches_the_algorithm() {
+        // The same three components as `most_liquid`'s ranking test. At the 100 wei/gas the
+        // fixture writes, "best" nets 2000; at the 10 wei/gas the params ask for, "high_gas" nets
+        // 3700. Solving the same order twice through the worker shows the override travelling
+        // from `SolveParams` to the market handle the algorithm reads.
+        use tycho_simulation::tycho_common::simulation::protocol_sim::Price;
+
+        use crate::{
+            algorithm::most_liquid::MostLiquidAlgorithm,
+            derived::{
+                computation::DerivedComputation,
+                computations::token_gas_price::TokenGasPriceComputation, SharedDerivedDataRef,
+                TokenGasPrices,
+            },
+        };
+
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted(vec![
+            ("best", &token_a, &token_b, MockProtocolSim::new(3.0).with_gas(10)),
+            ("low_out", &token_a, &token_b, MockProtocolSim::new(2.0).with_gas(5)),
+            ("high_gas", &token_a, &token_b, MockProtocolSim::new(4.0).with_gas(30)),
+        ]);
+
+        // One wei of gas costs one unit of token B, so the net is the output less the gas cost.
+        let mut token_prices: TokenGasPrices = FxHashMap::default();
+        token_prices.insert(
+            token_b.address.clone(),
+            Price { numerator: BigUint::from(1u64), denominator: BigUint::from(1u64) },
+        );
+        let mut derived_data = DerivedData::new();
+        derived_data.set_token_prices(token_prices, vec![], 1, true);
+        let derived: SharedDerivedDataRef =
+            std::sync::Arc::new(tokio::sync::RwLock::new(derived_data));
+
+        let mut worker = SolverWorker::new(
+            market,
+            derived,
+            MostLiquidAlgorithm::new(),
+            0,
+            "test_pool".to_string(),
+        );
+        // `MostLiquidAlgorithm` requires `token_prices`, and the worker gates on its readiness
+        // tracker rather than on the store, so drive the tracker the way the main loop does.
+        worker
+            .readiness_tracker
+            .handle_event(&DerivedDataEvent::ComputationComplete {
+                computation_id: TokenGasPriceComputation::ID,
+                block: 1,
+                failed_items: vec![],
+            });
+
+        let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+        let at_market = worker
+            .quote(&ord, SolveParams::default())
+            .await
+            .expect("the market gas price prices a route");
+        assert_eq!(
+            at_market
+                .order()
+                .route()
+                .expect("a solved quote carries a route")
+                .swaps()[0]
+                .component_id(),
+            "best"
+        );
+        assert_eq!(*at_market.order().amount_out_net_gas(), BigUint::from(2000u64));
+
+        let at_override = worker
+            .quote(&ord, SolveParams::default().with_gas_price_override(BigUint::from(10u64)))
+            .await
+            .expect("the overridden gas price prices a route");
+        assert_eq!(
+            at_override
+                .order()
+                .route()
+                .expect("a solved quote carries a route")
+                .swaps()[0]
+                .component_id(),
+            "high_gas",
+            "cheap gas pays for the gas-hungry component"
+        );
+        assert_eq!(*at_override.order().amount_out_net_gas(), BigUint::from(3700u64));
+        assert_eq!(at_override.order().gas_price(), Some(&BigUint::from(10u64)));
     }
 
     /// Mock algorithm that returns a single-leg route through a pAMM executed via the

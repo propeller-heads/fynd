@@ -1176,6 +1176,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_find_best_route_gas_price_override_changes_the_winning_route() {
+        // Same three components as `test_find_best_route_ranks_by_net_amount_out`, solved on a
+        // handle that reports 10 wei/gas instead of the 100 the feed wrote:
+        //
+        // | Component | Output | Gas Cost (gas*10) | Net  |
+        // |-----------|--------|-------------------|------|
+        // | best      | 3000   | 100               | 2900 |
+        // | low_out   | 2000   | 50                | 1950 |
+        // | high_gas  | 4000   | 300               | 3700 |
+        //
+        // Cheap gas pays for the gas-hungry component, so the winner moves from "best" to
+        // "high_gas".
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_weighted(vec![
+            ("best", &token_a, &token_b, MockProtocolSim::new(3.0).with_gas(10)),
+            ("low_out", &token_a, &token_b, MockProtocolSim::new(2.0).with_gas(5)),
+            ("high_gas", &token_a, &token_b, MockProtocolSim::new(4.0).with_gas(30)),
+        ]);
+
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+        let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
+
+        let result = algorithm
+            .find_best_route(
+                manager.graph(),
+                market.with_gas_price_override(BigUint::from(10u64)),
+                None,
+                Some(derived),
+                &order,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.route().swaps()[0].component_id(), "high_gas");
+        assert_eq!(result.net_amount_out(), &BigInt::from(3700));
+        assert_eq!(result.gas_price(), &BigUint::from(10u64));
+    }
+
+    #[tokio::test]
     async fn test_find_best_route_no_path_returns_error() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");

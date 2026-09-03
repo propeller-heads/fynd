@@ -102,6 +102,12 @@ pub struct QuoteOptions {
     /// `None` uses every pool that serves the request. Library-only: never on the wire.
     #[serde(skip)]
     worker_pools: Option<Vec<String>>,
+    /// Solve as if the chain gas price were this value, in wei per gas unit.
+    ///
+    /// `None` solves at the gas price the market feed reports. Library-only: never on the wire,
+    /// because a caller that could set it would be choosing its own gas cost.
+    #[serde(skip)]
+    gas_price_override: Option<BigUint>,
 }
 
 impl QuoteOptions {
@@ -141,6 +147,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Solves this request at `wei` per gas unit instead of the market gas price.
+    pub fn with_gas_price_override(mut self, wei: BigUint) -> Self {
+        self.gas_price_override = Some(wei);
+        self
+    }
+
     /// Returns the timeout in milliseconds.
     #[must_use]
     pub fn timeout_ms(&self) -> Option<u64> {
@@ -176,6 +188,12 @@ impl QuoteOptions {
     pub fn worker_pools(&self) -> Option<&[String]> {
         self.worker_pools.as_deref()
     }
+
+    /// Returns the gas price to solve at, in wei per gas unit, if one was set.
+    #[must_use]
+    pub fn gas_price_override(&self) -> Option<&BigUint> {
+        self.gas_price_override.as_ref()
+    }
 }
 
 /// Parameters for a single solve operation.
@@ -188,6 +206,8 @@ impl QuoteOptions {
 pub struct SolveParams {
     /// Solve against this labeled state overlay. `None` uses the base Tycho state.
     state_label: Option<StateLabel>,
+    /// Solve at this gas price, in wei per gas unit. `None` uses the market gas price.
+    gas_price_override: Option<BigUint>,
 }
 
 impl SolveParams {
@@ -197,9 +217,20 @@ impl SolveParams {
         self
     }
 
+    /// Solves at `wei` per gas unit instead of the market gas price.
+    pub fn with_gas_price_override(mut self, wei: BigUint) -> Self {
+        self.gas_price_override = Some(wei);
+        self
+    }
+
     /// Returns the overlay label, if one was set.
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.state_label.as_ref()
+    }
+
+    /// Returns the gas price to solve at, in wei per gas unit, if one was set.
+    pub fn gas_price_override(&self) -> Option<&BigUint> {
+        self.gas_price_override.as_ref()
     }
 }
 
@@ -2714,6 +2745,37 @@ mod tests {
         assert!(deserialized
             .client_fee_params()
             .is_none());
+    }
+
+    #[test]
+    fn test_quote_options_gas_price_override_round_trips() {
+        let opts = QuoteOptions::default().with_gas_price_override(BigUint::from(7u64));
+        assert_eq!(opts.gas_price_override(), Some(&BigUint::from(7u64)));
+        assert_eq!(QuoteOptions::default().gas_price_override(), None);
+    }
+
+    #[test]
+    fn test_quote_options_gas_price_override_is_never_serialized() {
+        // A caller that could set this on the wire would be choosing its own gas cost, so the
+        // field has to stay library-only.
+        let opts = QuoteOptions::default().with_gas_price_override(BigUint::from(7u64));
+        let json = serde_json::to_string(&opts).unwrap();
+
+        assert!(!json.contains("gas_price_override"), "{json}");
+        assert!(!json.contains('7'), "{json}");
+
+        let deserialized: QuoteOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.gas_price_override(), None);
+    }
+
+    #[test]
+    fn test_solve_params_gas_price_override_round_trips() {
+        let params = SolveParams::default()
+            .with_state_label("overlay".to_string())
+            .with_gas_price_override(BigUint::from(7u64));
+        assert_eq!(params.gas_price_override(), Some(&BigUint::from(7u64)));
+        assert_eq!(params.state_label(), Some(&"overlay".to_string()));
+        assert_eq!(SolveParams::default().gas_price_override(), None);
     }
 
     #[test]

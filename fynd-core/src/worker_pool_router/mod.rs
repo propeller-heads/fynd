@@ -420,10 +420,17 @@ impl WorkerPoolRouter {
             return Err(SolveError::Internal("no solver pools configured".to_string()));
         }
 
-        let params = match request.options().state_label().cloned() {
-            Some(label) => SolveParams::default().with_state_label(label),
-            None => SolveParams::default(),
-        };
+        let mut params = SolveParams::default();
+        if let Some(label) = request.options().state_label().cloned() {
+            params = params.with_state_label(label);
+        }
+        if let Some(wei) = request
+            .options()
+            .gas_price_override()
+            .cloned()
+        {
+            params = params.with_gas_price_override(wei);
+        }
 
         counter!(
             "worker_router_exclusive_access_total",
