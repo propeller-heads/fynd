@@ -26,7 +26,6 @@ use crate::{
     },
     derived::{events::DerivedDataEvent, SharedDerivedDataRef},
     feed::{events::MarketEvent, market_data::MarketData},
-    propamm_fallback::SharedFeeTiers,
     types::internal::SolveTask,
     worker_pool::worker::SolverWorker,
     worker_pool_router::LiquidityScope,
@@ -65,8 +64,6 @@ pub(crate) struct SpawnWorkersParams {
     pub liquidity_scope: LiquidityScope,
     /// Protocol systems every worker in this worker pool leaves out of its graph.
     pub exclude_protocols: Vec<String>,
-    /// PropAMMRouter fee tiers, shared with the fetcher that refreshes them.
-    pub fallback_fee_tiers: SharedFeeTiers,
 }
 
 /// Error returned when algorithm registration fails.
@@ -196,7 +193,6 @@ where
         let factory = factory.clone();
         let liquidity_scope = params.liquidity_scope;
         let exclude_protocols = params.exclude_protocols.clone();
-        let fallback_fee_tiers = params.fallback_fee_tiers.clone();
 
         let handle = thread::Builder::new()
             .name(format!("{}-worker-{}", algorithm_name, worker_id))
@@ -217,8 +213,7 @@ where
                         pool_name,
                     )
                     .with_liquidity_scope(liquidity_scope)
-                    .with_exclude_protocols(exclude_protocols)
-                    .with_fallback_fee_tiers(fallback_fee_tiers);
+                    .with_exclude_protocols(exclude_protocols);
 
                     worker.initialize_graph().await;
                     worker
@@ -299,7 +294,6 @@ mod tests {
             shutdown_tx,
             liquidity_scope: LiquidityScope::default(),
             exclude_protocols: Vec::new(),
-            fallback_fee_tiers: SharedFeeTiers::default(),
         }
     }
 
@@ -340,7 +334,6 @@ mod tests {
             shutdown_tx: shutdown_tx.clone(),
             liquidity_scope: LiquidityScope::default(),
             exclude_protocols: Vec::new(),
-            fallback_fee_tiers: SharedFeeTiers::default(),
         };
 
         let workers =
@@ -384,7 +377,6 @@ mod tests {
                 shutdown_tx: shutdown_tx.clone(),
                 liquidity_scope: LiquidityScope::default(),
                 exclude_protocols: Vec::new(),
-                fallback_fee_tiers: SharedFeeTiers::default(),
             });
         assert!(registry_err.is_err());
 
@@ -414,7 +406,6 @@ mod tests {
                 shutdown_tx: shutdown_tx.clone(),
                 liquidity_scope: LiquidityScope::default(),
                 exclude_protocols: Vec::new(),
-                fallback_fee_tiers: SharedFeeTiers::default(),
             });
 
         assert!(workers.is_ok());
@@ -445,7 +436,6 @@ mod tests {
             shutdown_tx: shutdown_tx.clone(),
             liquidity_scope: LiquidityScope::default(),
             exclude_protocols: Vec::new(),
-            fallback_fee_tiers: SharedFeeTiers::default(),
         };
 
         let workers =
@@ -479,7 +469,6 @@ mod tests {
             shutdown_tx: shutdown_tx.clone(),
             liquidity_scope: LiquidityScope::default(),
             exclude_protocols: Vec::new(),
-            fallback_fee_tiers: SharedFeeTiers::default(),
         };
 
         let workers =

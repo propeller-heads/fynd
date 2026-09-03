@@ -354,7 +354,6 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     Ok(Market {
         chain: opts.chain,
         market_gas_price: live_gas_price,
-        rpc_url: opts.rpc_url.clone(),
         updates: vec![snapshot],
         source: MarketSource::Live {
             chain_name: opts.chain_name.clone(),
