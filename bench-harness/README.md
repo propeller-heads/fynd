@@ -255,6 +255,18 @@ Opens a browser on the results. The run name in the header opens a table of ever
 between them, and new runs appear on refresh. The script exists only because browsers block the
 file reads the page needs when it is opened straight from disk.
 
+A caller outside this repository writes its runs outside it too. Name that directory and the viewer
+reads it instead:
+
+```bash
+./scripts/bench-viewer.sh --results ../my-solver/bench-results
+```
+
+One server answers both the page and the runs — the directory is served at `/results` and the page
+opens with `?root=/results`. A second server would be a second origin, which the browser would
+refuse to read across. The run picker names the directory it listed whenever it is not this
+repository's own.
+
 Two scripts read the same `bench-results/<run>/` directory for questions the report does not answer:
 
 ```bash

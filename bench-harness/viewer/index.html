@@ -1556,6 +1556,7 @@
 <dialog id="run-modal" aria-label="Choose a run">
     <div class="modal-head">
         <h2 id="run-count">Runs</h2>
+        <span class="modal-hint" id="run-root"></span>
         <span class="modal-hint">↑↓ move · enter open · esc close</span>
         <div class="source-toggle" id="source-toggle" role="group" aria-label="Market">
             <button type="button" data-source="offline">offline</button>
@@ -1575,9 +1576,16 @@
 
 <script>
     // ---------------------------------------------------------------------------- loading
-    // The bench writes bench-results/; this page reads it. Nothing is bundled, so a new run shows up
-    // on refresh. Paths are relative to this file, which sits at bench-harness/viewer/.
-    const ROOT = "../../bench-results";
+    // The bench writes a results directory; this page reads it. Nothing is bundled, so a new run
+    // shows up on refresh.
+    //
+    // `?root=…` names the directory. It defaults to this repo's own `bench-results/`, and takes a
+    // path or a URL: a run produced by a crate outside this repo writes its results outside it too,
+    // and `./scripts/bench-viewer.sh --results DIR` serves such a directory at `/results`. A
+    // relative value resolves against this file, which sits at bench-harness/viewer/.
+    const DEFAULT_ROOT = "../../bench-results";
+    const ROOT = (new URLSearchParams(location.search).get("root") || DEFAULT_ROOT)
+        .replace(/\/+$/, "");
 
     const state = {
         run: null, runs: [], facts: {}, tab: "report",
@@ -1982,6 +1990,9 @@
         document.getElementById("run-count").textContent = rows.length === ofKind
             ? `${rows.length} ${kind} runs`
             : `${rows.length} of ${ofKind} ${kind} runs`;
+        // Only when reading someone else's results directory: otherwise it is this repo's own and
+        // saying so is noise.
+        document.getElementById("run-root").textContent = ROOT === DEFAULT_ROOT ? "" : `in ${ROOT}`;
         document.querySelectorAll("#source-toggle button").forEach(b =>
             b.classList.toggle("on", b.dataset.source === kind));
         if (!rows.length) {
@@ -3017,8 +3028,10 @@
         } catch (error) {
             boot(`<h1>No benchmark runs found</h1>
         <p class="err">${error.message}</p>
-        <p>This page reads <code>bench-results/</code> at the repo root. Run the benchmark, then refresh:</p>
+        <p>This page read <code>${ROOT}</code>. Run the benchmark, then refresh:</p>
         <pre>./scripts/bench.sh --name my-run --orders 500</pre>
+        <p>To read a results directory outside this repo, serve it and name it:</p>
+        <pre>./scripts/bench-viewer.sh --results /path/to/bench-results</pre>
         <p>If a run exists but this still fails, the page is probably being opened straight from disk.
            <code>file://</code> blocks the reads it needs — serve the repo instead:</p>
         <pre>./scripts/bench-viewer.sh</pre>`);
