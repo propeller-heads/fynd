@@ -5,6 +5,12 @@
 //! The payload of each line is one preformatted string rather than tracing fields, because the
 //! formatter wraps field names and their `=` separators in ANSI escapes, which defeats a logfmt
 //! parser downstream.
+//!
+//! Each line carries `parent: None`. A quote is served inside the HTTP request span, and the
+//! formatter appends the fields of every span in scope to the line: the request id, the method,
+//! the route, the client address, the user agent and the OpenTelemetry keys. None of that
+//! describes the quote, and it is several times the length of the record itself. Detaching the
+//! event from the span leaves the line as written.
 
 use std::collections::BTreeMap;
 
@@ -114,6 +120,7 @@ fn log_quote(
     let quote = &worker_quote.quote;
     trace!(
         target: QUOTE_COMPARISON_TARGET,
+        parent: None,
         "quote_comparison order_id={} block={} token_in={} token_out={} side={} amount_in={} \
          pool={} algorithm={} status={} amount_out={} amount_out_net_gas={} gas_estimate={} \
          solve_time_ms={} improvement_bps={} is_best={} ranked_candidates={} responders={}",
@@ -152,6 +159,7 @@ fn log_failure(order: &Order, worker_pool: &str, error: &SolveError, coverage: O
     };
     trace!(
         target: QUOTE_COMPARISON_TARGET,
+        parent: None,
         "quote_comparison order_id={} block= token_in={} token_out={} side={} amount_in={} \
          pool={} algorithm= status={} amount_out= amount_out_net_gas= gas_estimate= \
          solve_time_ms={} improvement_bps= is_best=false ranked_candidates={} responders={}",
@@ -266,6 +274,7 @@ pub(super) fn log_winning_protocols(quote: &OrderQuote) {
 
     trace!(
         target: WINNING_PROTOCOLS_TARGET,
+        parent: None,
         "winning_protocols order_id={} block={} pool={} algorithm={} swaps={} protocols={}",
         quote.order_id(),
         quote.block().number(),
@@ -346,6 +355,27 @@ mod tests {
 
     fn responses_with(quotes: Vec<WorkerPoolQuote>) -> OrderResponses {
         OrderResponses { order_id: "o1".to_string(), quotes, failed_solvers: vec![] }
+    }
+
+    /// A quote is served inside the HTTP request span. The formatter appends the fields of every
+    /// span in scope, so without `parent: None` the request id and the http/otel keys land on the
+    /// end of each line, several times the length of the record.
+    #[test]
+    fn test_payload_carries_no_enclosing_span_fields() {
+        let responses = responses_with(vec![comparison_quote("winner", 1_000, 3)]);
+
+        let payloads =
+            crate::worker_pool_router::log_capture::capture_payloads("quote_comparison ", || {
+                let request =
+                    tracing::info_span!("HTTP request", request_id = "abcd", http.method = "POST");
+                let _entered = request.enter();
+                log_quote_comparison(&comparison_order(), &responses, &QuoteOptions::default());
+            });
+
+        assert_eq!(payloads.len(), 1);
+        for leaked in ["request_id", "http.method", "abcd"] {
+            assert!(!payloads[0].contains(leaked), "{leaked} leaked into: {}", payloads[0]);
+        }
     }
 
     /// Asserts on the rendered bytes with colour explicitly on, as it runs in a deployment.
