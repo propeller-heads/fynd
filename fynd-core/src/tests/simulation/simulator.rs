@@ -272,21 +272,109 @@ async fn test_simulation_times_out_when_the_node_does_not_answer() {
     );
 }
 
-/// A successful quote whose raw output is `amount_out`.
-fn quote_with_amount_out(amount_out: u64) -> OrderQuote {
+/// Router fee the fixture charges, in output-token units.
+const FIXTURE_ROUTER_FEE: u64 = 7_000;
+
+/// Client fee the fixture charges, in output-token units.
+const FIXTURE_CLIENT_FEE: u64 = 3_000;
+
+/// A quote whose raw output is `RAW_AMOUNT_OUT` and whose fees leave `after_fees` receivable.
+///
+/// `max_slippage` is non-zero, so a baseline that used `min_amount_received` on its own would fail
+/// these tests rather than pass them.
+fn quote_with_fees(after_fees: u64) -> OrderQuote {
+    let slippage = after_fees / 100;
+    let mut quote = quote_without_fees();
+    quote.set_amount_out(BigUint::from(after_fees + FIXTURE_ROUTER_FEE + FIXTURE_CLIENT_FEE));
+    quote.set_fee_breakdown(crate::FeeBreakdown::new(
+        BigUint::from(FIXTURE_ROUTER_FEE),
+        BigUint::from(FIXTURE_CLIENT_FEE),
+        BigUint::from(slippage),
+        BigUint::from(after_fees - slippage),
+    ));
+    quote
+}
+
+/// The same quote before encoding computes its fees.
+fn quote_without_fees() -> OrderQuote {
     OrderQuote::new(
         "test-order".to_string(),
         crate::QuoteStatus::Success,
         BigUint::from(1_000u64),
-        BigUint::from(amount_out),
+        BigUint::from(1_000_000u64),
         BigUint::from(50_000u64),
-        BigUint::from(amount_out),
+        BigUint::from(1_000_000u64),
         crate::BlockInfo::new(1, "0x1".to_string(), 1),
         "test_algorithm".to_string(),
         tycho_simulation::tycho_common::Bytes::from(vec![0xAA; 20]),
         tycho_simulation::tycho_common::Bytes::from(vec![0xAA; 20]),
         "1".to_string(),
     )
+}
+
+#[test]
+fn test_deviation_bps_simulated_below_quote() {
+    let deviation = deviation_bps(&quote_with_fees(1_000_000), &BigUint::from(999_000u64))
+        .expect("a quote carrying fees has a baseline");
+
+    assert!((deviation - -10.0).abs() < 1e-9, "got {deviation}");
+}
+
+#[test]
+fn test_deviation_bps_simulated_above_quote() {
+    let deviation = deviation_bps(&quote_with_fees(1_000_000), &BigUint::from(1_001_000u64))
+        .expect("a quote carrying fees has a baseline");
+
+    assert!((deviation - 10.0).abs() < 1e-9, "got {deviation}");
+}
+
+/// The router returns the output after it takes its fees, so the baseline must be the quoted
+/// amount less those fees. Comparing against the raw `amount_out` would read this as a shortfall
+/// the size of the fee.
+#[test]
+fn test_deviation_bps_excludes_the_router_fee_from_the_baseline() {
+    let quote = quote_with_fees(1_000_000);
+    let after_fees = quote
+        .fee_breakdown()
+        .expect("the quote carries fees")
+        .min_amount_received() +
+        quote
+            .fee_breakdown()
+            .expect("the quote carries fees")
+            .max_slippage();
+
+    let deviation =
+        deviation_bps(&quote, &after_fees).expect("a quote carrying fees has a baseline");
+
+    assert!(deviation.abs() < 1e-9, "a simulation matching the post-fee quote is not a deviation");
+    assert!(after_fees < *quote.amount_out(), "the baseline sits below the raw swap output");
+}
+
+#[test]
+fn test_deviation_bps_without_a_fee_breakdown() {
+    assert_eq!(deviation_bps(&quote_without_fees(), &BigUint::from(1_000u64)), None);
+}
+
+#[test]
+fn test_deviation_bps_zero_quoted_amount() {
+    let mut quote = quote_with_fees(1_000_000);
+    quote.set_fee_breakdown(crate::FeeBreakdown::new(
+        BigUint::ZERO,
+        BigUint::ZERO,
+        BigUint::ZERO,
+        BigUint::ZERO,
+    ));
+
+    assert_eq!(deviation_bps(&quote, &BigUint::from(1_000u64)), None);
+}
+
+/// An amount past `f64` saturates to infinity rather than failing to convert, so the ratio is
+/// rejected on being non-finite. Recording it would put `inf` in the histogram.
+#[test]
+fn test_deviation_bps_amount_beyond_f64() {
+    let huge = BigUint::from(1u8) << 2_000;
+
+    assert_eq!(deviation_bps(&quote_with_fees(1_000_000), &huge), None);
 }
 
 /// Names every metric a run recorded, with its labels.
@@ -316,7 +404,7 @@ fn test_record_outcome_success() {
 
     metrics::with_local_recorder(&recorder, || {
         record_outcome(
-            &quote_with_amount_out(1_000_000),
+            &quote_with_fees(1_000_000),
             &SimulationAttempt::Success {
                 amount_out: BigUint::from(999_000u64),
                 gas_used: 120_000,
@@ -339,11 +427,11 @@ fn test_record_outcome_reverted_apart_from_failed() {
 
     metrics::with_local_recorder(&recorder, || {
         record_outcome(
-            &quote_with_amount_out(1_000_000),
+            &quote_with_fees(1_000_000),
             &SimulationAttempt::Reverted { reason: "reverted".to_string() },
         );
         record_outcome(
-            &quote_with_amount_out(1_000_000),
+            &quote_with_fees(1_000_000),
             &SimulationAttempt::Failure { reason: "timed out".to_string() },
         );
     });

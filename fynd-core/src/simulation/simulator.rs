@@ -316,17 +316,28 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
     counter!("quote_simulation_total", "outcome" => outcome).increment(1);
 }
 
-/// How far the simulated amount sits from the quoted one, in basis points of the quoted amount.
+/// How far the simulated amount sits from what the quote promised, in basis points.
 ///
-/// A negative value means the simulation returned less than the quote promised. A quote of zero
-/// has no ratio to report, so it returns `None` rather than a division by zero.
+/// The router returns the output after it takes the router and client fees, so the quote's own
+/// `amount_out`, which is the raw swap output, is not the same quantity and would read as a
+/// standing fee-sized gap. The comparison is against the quoted amount less those same fees.
+///
+/// A negative value means the simulation returned less than the quote promised. Returns `None`
+/// when the quote states no fees, or when the quoted amount is zero and there is no ratio to take.
 fn deviation_bps(quote: &OrderQuote, simulated_amount_out: &BigUint) -> Option<f64> {
-    let quoted = quote.amount_out().to_f64()?;
-    let simulated = simulated_amount_out.to_f64()?;
-    if quoted <= 0.0 {
+    let fees = quote.fee_breakdown()?;
+    // The quoted amount after fees, reached by addition because `min_amount_received` is that
+    // amount less the slippage the user accepted.
+    let quoted = fees.min_amount_received() + fees.max_slippage();
+    if quoted == BigUint::ZERO {
         return None;
     }
-    Some((simulated - quoted) / quoted * 10_000.0)
+    let quoted = quoted.to_f64()?;
+    let simulated = simulated_amount_out.to_f64()?;
+    let deviation = (simulated - quoted) / quoted * 10_000.0;
+    deviation
+        .is_finite()
+        .then_some(deviation)
 }
 
 fn failure(reason: &str) -> SimulationAttempt {
