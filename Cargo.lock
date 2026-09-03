@@ -3478,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-bench-harness"
-version = "0.100.1"
+version = "0.100.2"
 dependencies = [
  "chrono",
  "clap",
