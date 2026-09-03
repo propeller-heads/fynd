@@ -2,8 +2,8 @@
 //!
 //! Runs once per block, in the background chain of derived computations — never on the quoting
 //! path. Quotes read whatever the last completed run stored, so prices lag the chain head by at
-//! most the block or two a run is in flight. A token missing a price is not an error: consumers
-//! treat it as "gas converts to zero", so quoting such a token still works, just gas-blind.
+//! most the block or two a run is in flight. A token that cannot be priced is absent from the
+//! map: bought but unsellable is reported as a failed item, unreachable is only counted.
 //!
 //! # Algorithm
 //!
