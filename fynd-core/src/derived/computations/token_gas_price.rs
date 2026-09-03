@@ -10,7 +10,8 @@
 //! Routes are found with the same Bellman-Ford algorithm the solvers use to answer quotes, so a
 //! price reflects what a trade would actually get, slippage and fees included. Each token is bought
 //! with a fixed amount of gas token and sold back, and its price is the mean of the buy price and
-//! the sell price. The mean includes the round-trip cost, and its bias is one-sided: with a
+//! the sell price. The mean includes the round trip's fees and slippage — never gas, per the
+//! next paragraph — and its bias is one-sided: with a
 //! symmetric per-leg loss factor `k` the two implied rates are `p·k` and `p/k`, whose arithmetic
 //! mean `p·(k + 1/k)/2` is never below the loss-free rate `p`. In raw-token-units-per-gas-unit
 //! terms that understates a token's value, never overstates it — negligibly for deep pairs
