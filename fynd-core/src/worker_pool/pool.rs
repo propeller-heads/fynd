@@ -8,7 +8,10 @@
 //! Worker pools can use either a built-in algorithm (by name via [`WorkerPoolBuilder::algorithm`])
 //! or a custom [`Algorithm`](crate::algorithm::Algorithm) implementation (via
 //! [`WorkerPoolBuilder::with_algorithm`]).
-use std::{sync::Arc, thread::JoinHandle};
+use std::{
+    sync::{Arc, Once},
+    thread::JoinHandle,
+};
 
 use tokio::sync::broadcast;
 use tracing::{error, info};
@@ -144,8 +147,15 @@ impl WorkerPool {
             fallback_fee_tiers,
             respawn_policy: RespawnPolicy::default(),
             on_worker_gave_up: Arc::new(|| {
-                error!("a solver worker gave up after repeated panics; exiting so the orchestrator restarts the process");
-                std::process::exit(1);
+                // A deterministic panic hits every worker at once, so the whole pool gives up
+                // within milliseconds. `exit` is not reentrant across threads — concurrent
+                // callers can deadlock in the atexit handlers and hang the process, which is
+                // exactly what this exit exists to prevent.
+                static EXIT_ONCE: Once = Once::new();
+                EXIT_ONCE.call_once(|| {
+                    error!("a solver worker gave up after repeated panics; exiting so the orchestrator restarts the process");
+                    std::process::exit(1);
+                });
             }),
         };
         let workers = config.spawner.spawn(params)?;
