@@ -118,8 +118,9 @@ where
 {
     /// Runs worker sessions until clean shutdown or give-up.
     ///
-    /// Panics (e.g. pool math dividing by zero) are contained to the current
-    /// session so one bad task cannot permanently kill the worker thread.
+    /// Panics (e.g. algorithm or graph arithmetic overflowing) are contained to
+    /// the current session so one bad task cannot permanently kill the worker
+    /// thread.
     pub(crate) fn run_sessions(mut self) {
         let mut respawn = RespawnState::new(self.respawn_policy);
         loop {
@@ -187,7 +188,7 @@ where
                         algorithm = %self.algorithm_name,
                         worker_id = self.worker_id,
                         panic = %panic_message,
-                        "worker thread panicked; respawning worker"
+                        "worker session panicked"
                     );
                     metrics::counter!(
                         "worker_pool_worker_panics_total",
@@ -228,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn backoff_doubles_up_to_the_cap() {
+    fn test_backoff_doubles_up_to_the_cap() {
         let mut state = RespawnState::new(fast_policy());
         let lived = Duration::from_millis(1);
         assert_eq!(state.on_failure(lived), FailureAction::Retry(Duration::from_millis(100)));
@@ -237,13 +238,13 @@ mod tests {
     }
 
     #[test]
-    fn gives_up_after_max_attempts() {
+    fn test_gives_up_after_max_attempts() {
         let mut state = RespawnState::new(RespawnPolicy { max_attempts: 1, ..fast_policy() });
         assert_eq!(state.on_failure(Duration::from_millis(1)), FailureAction::GiveUp);
     }
 
     #[test]
-    fn stable_session_resets_the_budget() {
+    fn test_stable_session_resets_the_budget() {
         let mut state = RespawnState::new(fast_policy());
         let rapid = Duration::from_millis(1);
         state.on_failure(rapid);
@@ -256,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn backoff_cap_bounds_the_delay() {
+    fn test_backoff_cap_bounds_the_delay() {
         let mut state = RespawnState::new(RespawnPolicy { max_attempts: 10, ..fast_policy() });
         let rapid = Duration::from_millis(1);
         let mut last = Duration::ZERO;

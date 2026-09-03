@@ -627,8 +627,7 @@ where
         // A respawned worker (fresh session after a panic) starts with an empty tracker while
         // the shared store already holds results from before the panic; seed it so allow_stale
         // requirements don't wait for the next broadcast event to become ready again.
-        let derived_data = Arc::clone(&self.derived_data);
-        let store = derived_data.read().await;
+        let store = self.derived_data.read().await;
         self.readiness_tracker
             .seed_from_store(&store);
         drop(store);

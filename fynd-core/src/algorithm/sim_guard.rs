@@ -2,9 +2,10 @@
 //!
 //! `ProtocolSim` implementations run third-party component math that can panic on degenerate
 //! inputs (e.g. a U256 division by zero when quoting an absurdly large amount). Left
-//! uncaught, such a panic unwinds through the solver worker thread and permanently kills
-//! it. Simulation calls made while solving therefore go through this guard, which turns
-//! a panic into a `SimulationError` so the algorithm skips the component and keeps solving.
+//! uncaught, such a panic unwinds out of the solve and ends the worker's session, which
+//! costs a respawn and drops every in-flight task on that thread. Simulation calls made
+//! while solving therefore go through this guard, which turns a panic into a
+//! `SimulationError` so the algorithm skips the component and keeps solving.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 

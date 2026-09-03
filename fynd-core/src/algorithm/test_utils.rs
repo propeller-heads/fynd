@@ -679,12 +679,6 @@ impl StubAlgorithm {
         self.requirements = requirements;
         self
     }
-
-    /// Override the solve timeout.
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
 }
 
 impl Algorithm for StubAlgorithm {
