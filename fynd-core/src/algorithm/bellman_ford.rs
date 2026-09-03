@@ -351,27 +351,47 @@ impl BellmanFordAlgorithm {
         let spfa = self.run_spfa(ctx, amount_in, &opts.overrides, Instant::now());
 
         let mut routes = FxHashMap::default();
+        let mut dropped = 0usize;
         for (idx, amount) in spfa.amount.iter().enumerate() {
             if amount.is_zero() || idx == ctx.token_in_node.index() {
                 continue;
             }
             let node = NodeIndex::new(idx);
             let Some(address) = ctx.node_address.get(&node) else {
+                trace!(node = idx, "destination dropped: no token metadata for node");
+                dropped += 1;
                 continue;
             };
-            let Ok(path_edges) = Self::reconstruct_path(node, ctx.token_in_node, &spfa.predecessor)
-            else {
-                continue;
+            let path_edges = match Self::reconstruct_path(
+                node,
+                ctx.token_in_node,
+                &spfa.predecessor,
+            ) {
+                Ok(path_edges) => path_edges,
+                Err(error) => {
+                    trace!(node = idx, token = %address, %error, "destination dropped: path reconstruction failed");
+                    dropped += 1;
+                    continue;
+                }
             };
-            let Ok(route) =
-                Self::build_route(ctx, &path_edges, &spfa.amount, &spfa.edge_gas, &opts.overrides)
-            else {
-                continue;
+            let route = match Self::build_route(
+                ctx,
+                &path_edges,
+                &spfa.amount,
+                &spfa.edge_gas,
+                &opts.overrides,
+            ) {
+                Ok(route) => route,
+                Err(error) => {
+                    trace!(node = idx, token = %address, %error, "destination dropped: route construction failed");
+                    dropped += 1;
+                    continue;
+                }
             };
             routes.insert(address.clone(), route);
         }
 
-        debug!(reached = routes.len(), "priced every destination from one relaxation");
+        debug!(reached = routes.len(), dropped, "priced every destination from one relaxation");
         routes
     }
 
