@@ -702,10 +702,10 @@ impl Encoder {
         call_data
     }
 
-    /// Whether the quote's pAMM legs fall back to a Uniswap V3 fill that still pays the user's
+    /// Whether the quote's pAMM legs fall back to a fill that still pays the user's
     /// `min_amount_out`.
     ///
-    /// A pAMM leg fills on the venue when the maker's quote reaches the chain, and on a Uniswap V3
+    /// A pAMM leg fills on the venue when the maker's quote reaches the chain, and on its fallback
     /// pool when it does not. `min_amount_out` keeps describing the venue quote and the slippage
     /// the user accepted, so a fallback below that floor reverts. Such a quote must be dropped
     /// before the router picks it, so the next-best candidate is quoted instead.
@@ -747,7 +747,7 @@ impl Encoder {
         )?)
     }
 
-    /// Whether a pAMM route's Uniswap V3 fallback fill clears the floor the router checks.
+    /// Whether a pAMM route's fallback fill clears the floor the router checks.
     ///
     /// `floor` is `min_amount_out`: the venue quote, less fees, less the slippage the user
     /// accepted. The fallback pays less than the venue quote, and when it pays less than the floor

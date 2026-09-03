@@ -1244,7 +1244,7 @@ pub struct Route {
     /// encoding path consumes it.
     #[serde(skip, default)]
     tokens: FxHashMap<Bytes, Token>,
-    /// Amount out this route delivers if its pAMM legs fall back to Uniswap V3.
+    /// Amount out this route delivers if its pAMM legs fall back to the pools stamped on them.
     ///
     /// Set by the worker for routes that contain a `propammfallback:` leg; `None` for every other
     /// route. The router drops the candidate when this amount cannot clear `min_amount_out`,
@@ -1273,13 +1273,14 @@ impl Route {
         Ok(Self { swaps, tokens: tokens.into_iter().collect(), fallback_amount_out: None })
     }
 
-    /// Sets the amount out this route delivers if its pAMM legs fall back to Uniswap V3.
+    /// Sets the amount out this route delivers if its pAMM legs fall back.
     pub(crate) fn set_fallback_amount_out(&mut self, amount_out: BigUint) {
         self.fallback_amount_out = Some(amount_out);
     }
 
-    /// Amount out this route delivers if its pAMM legs fall back to Uniswap V3. `None` unless the
-    /// worker computed one, which it does only for routes with a `propammfallback:` leg.
+    /// Amount out this route delivers if its pAMM legs fall back to the pools stamped on them.
+    /// `None` unless the worker computed one, which it does only for routes with a
+    /// `propammfallback:` leg.
     pub fn fallback_amount_out(&self) -> Option<&BigUint> {
         self.fallback_amount_out.as_ref()
     }
@@ -1793,6 +1794,63 @@ pub struct Swap {
     /// consumed by the encoder; `#[serde(skip)]` so it never enters the wire format.
     #[serde(skip)]
     committed_amount_out: Option<BigUint>,
+    /// The pool this leg falls back to if it is a pAMM leg and the pAMM swap fails.
+    ///
+    /// Set by the worker on every `propammfallback:` leg (see
+    /// `propamm_fallback::select_fallbacks`); `None` for every other swap. In-process only —
+    /// consumed by the encoder; `#[serde(skip)]` so it never enters the wire format.
+    #[serde(skip)]
+    fallback: Option<FallbackLeg>,
+}
+
+/// The pool `TychoFallbackRouter` runs if the pAMM leg it is attached to fails.
+///
+/// Chosen by the worker among the pools the market holds for the leg's pair, by best simulated
+/// amount out for the leg's `amount_in`. Carries the component and state so the route can be
+/// replayed through it and so the encoder can derive the router's `[venue][venue data]` from it.
+/// In-process only: it never enters the wire format.
+#[derive(Debug, Clone)]
+pub struct FallbackLeg {
+    /// Identifier of the fallback pool.
+    component_id: ComponentId,
+    /// The fallback pool's component, which the encoder turns into the router's venue data.
+    protocol_component: ProtocolComponent,
+    /// The fallback pool's state at selection time, so the route can be replayed through it.
+    protocol_state: Box<dyn ProtocolSim>,
+    /// What the fallback pool pays for the leg's `amount_in`, from the selection simulation.
+    amount_out: BigUint,
+}
+
+impl FallbackLeg {
+    /// Creates a fallback leg on `protocol_component`, priced at `amount_out` for the leg's input.
+    pub fn new(
+        component_id: ComponentId,
+        protocol_component: ProtocolComponent,
+        protocol_state: Box<dyn ProtocolSim>,
+        amount_out: BigUint,
+    ) -> Self {
+        Self { component_id, protocol_component, protocol_state, amount_out }
+    }
+
+    /// Returns the fallback pool's component ID.
+    pub fn component_id(&self) -> &str {
+        &self.component_id
+    }
+
+    /// Returns the fallback pool's component.
+    pub fn protocol_component(&self) -> &ProtocolComponent {
+        &self.protocol_component
+    }
+
+    /// Returns the fallback pool's state at selection time.
+    pub fn protocol_state(&self) -> &dyn ProtocolSim {
+        self.protocol_state.as_ref()
+    }
+
+    /// Returns what the fallback pool pays for the leg's `amount_in`.
+    pub fn amount_out(&self) -> &BigUint {
+        &self.amount_out
+    }
 }
 
 impl Swap {
@@ -1821,12 +1879,27 @@ impl Swap {
             protocol_state,
             split: 0.0,
             committed_amount_out: None,
+            fallback: None,
         }
     }
     /// Sets the split fraction for this swap (e.g. 0.5 means 50% of a split route).
     pub fn with_split(mut self, split: f64) -> Self {
         self.split = split;
         self
+    }
+
+    /// Attaches the pool this pAMM leg falls back to.
+    pub fn with_fallback(mut self, fallback: FallbackLeg) -> Self {
+        self.fallback = Some(fallback);
+        self
+    }
+
+    /// Attaches the pool this pAMM leg falls back to, in place.
+    ///
+    /// The worker stamps this onto every `propammfallback:` leg after `select_fallbacks`, so
+    /// `fallback_amount_out` can replay the route and the encoder can name the pool.
+    pub(crate) fn set_fallback(&mut self, fallback: FallbackLeg) {
+        self.fallback = Some(fallback);
     }
 
     /// Sets the per-leg committed output for an exclusive swap.
@@ -1893,6 +1966,13 @@ impl Swap {
     /// exclusive-swap payload from this and the leg's `amount_out`.
     pub fn committed_amount_out(&self) -> Option<&BigUint> {
         self.committed_amount_out.as_ref()
+    }
+
+    /// Returns the pool this leg falls back to, if it is a pAMM leg the worker stamped.
+    ///
+    /// `None` for every non-pAMM swap, and for a pAMM swap before the worker has selected one.
+    pub fn fallback(&self) -> Option<&FallbackLeg> {
+        self.fallback.as_ref()
     }
 }
 

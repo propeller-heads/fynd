@@ -146,7 +146,7 @@ mod tests {
     async fn test_route_rejected() {
         let (status, body) = json_body(ApiError::SolveFailed(SolveError::route_rejected(
             "order-1",
-            fynd_core::types::RouteRejection::PammFeeTiersUnread,
+            fynd_core::types::RouteRejection::PammFallbackPoolMissing,
         )))
         .await;
 
