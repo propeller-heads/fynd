@@ -73,7 +73,7 @@ type Subgraph<'a> = (
 pub(crate) struct BellmanFordContext {
     pub(crate) token_in_node: NodeIndex,
     /// Absent when the context was built from a source token only, with no destination; such
-    /// a context serves `find_routes_from_source_token` but not `find_single_route`.
+    /// a context serves `reach_from_source_token` but not `find_single_route`.
     pub(crate) token_out_node: Option<NodeIndex>,
     pub(crate) adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
     pub(crate) token_map: FxHashMap<NodeIndex, Arc<Token>>,
@@ -96,6 +96,15 @@ impl BellmanFordContext {
         self.token_in_node = token_in_node;
         self.token_out_node = token_out_node;
     }
+}
+
+/// What one relaxation delivers at a destination the source token reaches: the output amount
+/// and the components along the best path to it.
+pub(crate) struct ReachedToken {
+    /// What the path delivers at the destination.
+    pub(crate) amount_out: BigUint,
+    /// The components the path runs through, in hop order.
+    pub(crate) components: Vec<ComponentId>,
 }
 
 /// Controls how `find_single_route` ranks candidate routes after simulation.
@@ -331,24 +340,27 @@ impl BellmanFordAlgorithm {
         }
     }
 
-    /// Every token the source token reaches, with the route to it and what that route returns, from
-    /// one relaxation.
+    /// Every token the source token reaches, with what the best path to it delivers and the
+    /// components that path runs through, from one relaxation.
     ///
     /// The relaxation fills the best amount at every node, so reading all of them costs one pass
-    /// rather than one per destination. Build `ctx` with
+    /// rather than one per destination. Deliberately not a [`Route`] per destination:
+    /// `build_route` deep-clones each swap's component, tokens, and simulation state, and a
+    /// caller pricing every reachable destination reads none of that. Build `ctx` with
     /// [`build_context_from_source_token`](Self::build_context_from_source_token), so that no
     /// destination prunes its subgraph.
     ///
-    /// Tokens the source token cannot reach, and those whose route cannot be rebuilt, are absent.
-    pub(crate) fn find_routes_from_source_token(
+    /// Tokens the source token cannot reach, and those whose path cannot be reconstructed, are
+    /// absent.
+    pub(crate) fn reach_from_source_token(
         &self,
         ctx: &BellmanFordContext,
         amount_in: &BigUint,
         opts: FindRouteOptions,
-    ) -> FxHashMap<Address, Route> {
+    ) -> FxHashMap<Address, ReachedToken> {
         let spfa = self.run_spfa(ctx, amount_in, &opts.overrides, Instant::now());
 
-        let mut routes = FxHashMap::default();
+        let mut reached = FxHashMap::default();
         let mut dropped = 0usize;
         for (idx, amount) in spfa.amount.iter().enumerate() {
             if amount.is_zero() || idx == ctx.token_in_node.index() {
@@ -372,25 +384,16 @@ impl BellmanFordAlgorithm {
                     continue;
                 }
             };
-            let route = match Self::build_route(
-                ctx,
-                &path_edges,
-                &spfa.amount,
-                &spfa.edge_gas,
-                &opts.overrides,
-            ) {
-                Ok(route) => route,
-                Err(error) => {
-                    trace!(node = idx, token = %address, %error, "destination dropped: route construction failed");
-                    dropped += 1;
-                    continue;
-                }
-            };
-            routes.insert(address.clone(), route);
+            let components = path_edges
+                .into_iter()
+                .map(|(_, _, component_id)| component_id)
+                .collect();
+            reached
+                .insert(address.clone(), ReachedToken { amount_out: amount.clone(), components });
         }
 
-        debug!(reached = routes.len(), dropped, "priced every destination from one relaxation");
-        routes
+        debug!(reached = reached.len(), dropped, "read every destination from one relaxation");
+        reached
     }
 
     /// Runs the SPFA relaxation loop and reconstructs the best route from a pre-built context.
@@ -891,7 +894,7 @@ impl BellmanFordAlgorithm {
     /// Expanding from the source alone reaches most of the market. Every component it reaches gets
     /// copied by the caller's `extract_subset`, held for the solve, and simulated during
     /// relaxation, so bounding the walk bounds all three. Only a caller that reads every relaxed
-    /// node (`find_routes_from_source_token`) should pass `None` — it needs that full reach.
+    /// node (`reach_from_source_token`) should pass `None` — it needs that full reach.
     pub(crate) fn get_subgraph<'a>(
         graph: &'a StableDiGraph<()>,
         token_in: NodeIndex,
@@ -1549,7 +1552,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_find_routes_from_source_token_covers_branches_off_any_pair() {
+    async fn test_reach_from_source_token_covers_branches_off_any_pair() {
         // G->A and G->B->C: B and C sit on no G->A path, so a subgraph pruned toward any
         // single destination would drop them. The from-source context must keep them all.
         let token_g = token(0x01, "G");
@@ -1568,11 +1571,8 @@ mod tests {
             .build_context_from_source_token(manager.graph(), market, &token_g.address, 3)
             .await
             .expect("gas token has outgoing edges");
-        let routes = algo.find_routes_from_source_token(
-            &ctx,
-            &BigUint::from(100u64),
-            FindRouteOptions::default(),
-        );
+        let routes =
+            algo.reach_from_source_token(&ctx, &BigUint::from(100u64), FindRouteOptions::default());
 
         let reached: FxHashSet<Address> = routes.keys().cloned().collect();
         let expected: FxHashSet<Address> = [&token_a, &token_b, &token_c]
