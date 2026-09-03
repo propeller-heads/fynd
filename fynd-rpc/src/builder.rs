@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use fynd_core::{
     encoding::encoder::Encoder, worker_pool::pool::WorkerPool, FyndBuilder, SolverBuildError,
 };
-use tokio::task::{AbortHandle, JoinHandle};
+use tokio::task::JoinHandle;
 use tracing::{error, info};
 use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Chain};
 
@@ -334,9 +334,6 @@ impl FyndRPCBuilder {
             native_token(&chain).context("gas token not configured for chain")?
         };
 
-        // Taken before `into_components` moves the parts: that call drops the fee tier task's
-        // `JoinHandle`, and this handle is what still stops the task.
-        let fee_tier_abort = parts.fee_tier_abort_handle();
         let (
             router,
             worker_pools,
@@ -400,7 +397,6 @@ impl FyndRPCBuilder {
             gas_price_worker_handle: gas_price_handle,
             metrics_sampler_handle,
             router_fee_worker_handle: router_fee_handle,
-            fee_tier_abort,
             computation_manager_handle: computation_handle,
             computation_shutdown_tx,
         })
@@ -417,7 +413,6 @@ pub struct FyndRPC {
     gas_price_worker_handle: JoinHandle<()>,
     metrics_sampler_handle: JoinHandle<()>,
     router_fee_worker_handle: JoinHandle<()>,
-    fee_tier_abort: AbortHandle,
     computation_manager_handle: JoinHandle<()>,
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
@@ -438,7 +433,6 @@ impl FyndRPC {
             mut gas_price_worker_handle,
             metrics_sampler_handle,
             router_fee_worker_handle,
-            fee_tier_abort,
             mut computation_manager_handle,
             computation_shutdown_tx,
         } = self;
@@ -499,7 +493,6 @@ impl FyndRPC {
 
         metrics_sampler_handle.abort();
         router_fee_worker_handle.abort();
-        fee_tier_abort.abort();
 
         info!("shutting down worker pools");
         for pool in worker_pools {

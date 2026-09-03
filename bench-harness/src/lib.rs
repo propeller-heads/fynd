@@ -670,9 +670,6 @@ pub(crate) struct Market {
     /// capture. Used only when `--gas-price-gwei` is absent, and reported either way. `None` when
     /// the fixture carried none, or no `--rpc-url` was given.
     pub(crate) market_gas_price: Option<BigUint>,
-    /// The node the market was captured through, so a solver built on it can read the
-    /// PropAMMRouter's fee tiers. `None` for a fixture, which holds no pAMM component.
-    pub(crate) rpc_url: Option<String>,
     pub(crate) updates: Vec<Update>,
     pub(crate) source: MarketSource,
 }
@@ -702,7 +699,6 @@ pub(crate) fn load_market(fixture: &Path) -> Market {
         market_gas_price: recording
             .metadata
             .gas_price_as_biguint(),
-        rpc_url: None,
         source: MarketSource::Offline {
             fixture: fixture.display().to_string(),
             recorded_at_secs: recording.metadata.recorded_at_secs,
@@ -909,7 +905,6 @@ pub(crate) async fn build_solver(
         market.updates.clone(),
         worker_pool_configs(config, settings.workers, settings.timeout_ms),
         Some(gas_price_wei(settings.gas_price_gwei)),
-        market.rpc_url.as_deref(),
         algorithms,
     )
     .await
