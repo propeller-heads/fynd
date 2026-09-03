@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(cargo:*), Bash(pnpm:*), Bash(npx:*), Bash(jq:*), Bash(diff:*), Bash(git diff:*), Bash(git branch:*), Bash(git status:*), Read
-description: "Run the full CI pipeline locally to catch failures before pushing. Use this skill before creating a PR, before pushing commits, or whenever you want to verify that CI will pass. Also use it when the user says 'run ci', 'check ci', 'run tests', 'lint', or 'will ci pass'."
+description: "Run the full CI pipeline locally. Use this skill when opening or updating a PR, when a change is workspace-wide (Cargo.toml/Cargo.lock, RPC types, broad refactor), or when the user says 'run ci', 'check ci', 'full ci', or 'will ci pass'. Do NOT use it for routine commits and pushes — those only need a format run and the tests covering the change."
 user-invocable: true
 ---
 
@@ -8,6 +8,9 @@ user-invocable: true
 
 Run the same checks that GitHub Actions CI runs, locally, to catch failures before they hit the
 remote pipeline. The canonical checks live in `.github/workflows/ci.yaml`.
+
+This is the wide, slow check. For a routine commit or push, run `cargo +nightly fmt --all` and the
+tests covering the change instead (see `.claude/knowledge/version_control.md`).
 
 ## Context
 

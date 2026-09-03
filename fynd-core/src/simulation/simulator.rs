@@ -14,6 +14,7 @@ use alloy::{
     sol,
     sol_types::SolError,
 };
+use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
@@ -135,13 +136,16 @@ impl QuoteSimulator {
     }
 
     /// Simulates an encoded quote and reports its returned amount and gas used or a failure.
-    pub async fn simulate(&self, quote: &OrderQuote) -> SimulationResult {
-        self.simulate_attempt(quote)
-            .await
-            .into_result()
+    ///
+    /// Records the outcome and, on success, how far the simulated amount sits from what the quote
+    /// promised. Instrumenting here rather than at the call site keeps every caller measured.
+    pub(crate) async fn simulate_attempt(&self, quote: &OrderQuote) -> SimulationAttempt {
+        let attempt = self.attempt(quote).await;
+        record_outcome(quote, &attempt);
+        attempt
     }
 
-    pub(crate) async fn simulate_attempt(&self, quote: &OrderQuote) -> SimulationAttempt {
+    async fn attempt(&self, quote: &OrderQuote) -> SimulationAttempt {
         let transaction = match quote.transaction() {
             Some(value) => value,
             None => return failure("simulation setup failed: quote has no encoded transaction"),
@@ -290,6 +294,67 @@ impl SimulationAttempt {
             }
         }
     }
+}
+
+/// Records the outcome of one simulated quote, and on success how far the simulated amount landed
+/// from what the quote promised.
+///
+/// A revert and a failure are counted apart because they call for different work: a revert means
+/// the route the solver priced does not execute, while a failure means the simulation itself did
+/// not run, so it says nothing about the route. Both carry the winning pool and algorithm, so a
+/// rise in either can be traced to the solver that produced the route.
+fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
+    let pool = quote.worker_pool().to_string();
+    let algorithm = quote.algorithm().to_string();
+    let outcome = match attempt {
+        SimulationAttempt::Success { amount_out, .. } => {
+            if let Some(deviation) = deviation_bps(quote, amount_out) {
+                histogram!(
+                    "quote_simulation_deviation_bps",
+                    "pool" => pool.clone(),
+                    "algorithm" => algorithm.clone()
+                )
+                .record(deviation);
+            }
+            "success"
+        }
+        SimulationAttempt::Reverted { .. } => "reverted",
+        SimulationAttempt::Failure { .. } => "failed",
+    };
+    counter!(
+        "quote_simulations_total",
+        "outcome" => outcome,
+        "pool" => pool,
+        "algorithm" => algorithm
+    )
+    .increment(1);
+}
+
+/// How far the simulated amount sits from what the quote promised, in basis points.
+///
+/// The metric records it per quote and the winning-quote log carries it per line, so both read the
+/// same figure from here rather than each deriving it.
+///
+/// The router returns the output after it takes the router and client fees, so the quote's own
+/// `amount_out`, which is the raw swap output, is not the same quantity and would read as a
+/// standing fee-sized gap. The comparison is against the quoted amount less those same fees.
+///
+/// A negative value means the simulation returned less than the quote promised. Returns `None`
+/// when the quote states no fees, or when the quoted amount is zero and there is no ratio to take.
+pub(crate) fn deviation_bps(quote: &OrderQuote, simulated_amount_out: &BigUint) -> Option<f64> {
+    let fees = quote.fee_breakdown()?;
+    // The quoted amount after fees, reached by addition because `min_amount_received` is that
+    // amount less the slippage the user accepted.
+    let quoted = fees.min_amount_received() + fees.max_slippage();
+    if quoted == BigUint::ZERO {
+        return None;
+    }
+    let quoted = quoted.to_f64()?;
+    let simulated = simulated_amount_out.to_f64()?;
+    let deviation = (simulated - quoted) / quoted * 10_000.0;
+    deviation
+        .is_finite()
+        .then_some(deviation)
 }
 
 fn failure(reason: &str) -> SimulationAttempt {

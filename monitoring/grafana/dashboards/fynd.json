@@ -319,7 +319,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(quote_simulation_total[1m])) by (outcome)",
+          "expr": "sum(rate(quote_simulations_total[1m])) by (outcome)",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }

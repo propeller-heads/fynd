@@ -1,16 +1,27 @@
-//! The per-quote comparison log: one line per worker pool per order, carrying what that pool
-//! quoted, how long it took, and how far ahead of the weakest quote it landed.
+//! The router's per-quote logs: the comparison line each worker pool writes for an order, and the
+//! protocol line the winning quote writes.
 //!
-//! Written as plain `key=value` text on a dedicated target so a log pipeline can read it as one
-//! table and compare algorithms against each other.
+//! Both are plain `key=value` text on their own target, so a log pipeline reads each as one table.
+//! The payload of each line is one preformatted string rather than tracing fields, because the
+//! formatter wraps field names and their `=` separators in ANSI escapes, which defeats a logfmt
+//! parser downstream.
+//!
+//! Each line carries `parent: None`. A quote is served inside the HTTP request span, and the
+//! formatter appends the fields of every span in scope to the line: the request id, the method,
+//! the route, the client address, the user agent and the OpenTelemetry keys. None of that
+//! describes the quote, and it is several times the length of the record itself. Detaching the
+//! event from the span leaves the line as written.
+
+use std::collections::BTreeMap;
 
 use num_traits::ToPrimitive;
 use tracing::{trace, Level};
 
 use super::{
-    is_rankable, Order, OrderResponses, OrderSide, QuoteOptions, QuoteStatus, SolveError,
-    WorkerPoolQuote, BPS_DENOMINATOR,
+    is_rankable, Order, OrderQuote, OrderResponses, OrderSide, QuoteOptions, QuoteStatus,
+    SolveError, WorkerPoolQuote, BPS_DENOMINATOR,
 };
+use crate::{simulation::simulator::deviation_bps, SimulationResult};
 
 /// Target for the per-quote comparison log. Emitted at TRACE so a plain `RUST_LOG=info` leaves
 /// it off; a deployment that wants it sets `RUST_LOG=...,fynd::quote_comparison=trace`.
@@ -100,9 +111,6 @@ pub(super) fn log_quote_comparison(
 ///
 /// Named for the response rather than the outcome: a pool that answered can still carry a
 /// non-success status, and it gets a line either way.
-///
-/// The payload is one plain string rather than tracing fields because the formatter wraps field
-/// names and their `=` separators in ANSI escapes, which defeats logfmt parsers downstream.
 fn log_quote(
     order: &Order,
     worker_quote: &WorkerPoolQuote,
@@ -113,6 +121,7 @@ fn log_quote(
     let quote = &worker_quote.quote;
     trace!(
         target: QUOTE_COMPARISON_TARGET,
+        parent: None,
         "quote_comparison order_id={} block={} token_in={} token_out={} side={} amount_in={} \
          pool={} algorithm={} status={} amount_out={} amount_out_net_gas={} gas_estimate={} \
          solve_time_ms={} improvement_bps={} is_best={} ranked_candidates={} responders={}",
@@ -151,6 +160,7 @@ fn log_failure(order: &Order, worker_pool: &str, error: &SolveError, coverage: O
     };
     trace!(
         target: QUOTE_COMPARISON_TARGET,
+        parent: None,
         "quote_comparison order_id={} block= token_in={} token_out={} side={} amount_in={} \
          pool={} algorithm= status={} amount_out= amount_out_net_gas= gas_estimate= \
          solve_time_ms={} improvement_bps= is_best=false ranked_candidates={} responders={}",
@@ -231,6 +241,79 @@ fn improvement_bps(baseline_net: Option<f64>, net: Option<f64>) -> Option<f64> {
     Some((net - baseline) / baseline * f64::from(BPS_DENOMINATOR))
 }
 
+/// Target for the winning-quote protocol log. Emitted at TRACE, like the comparison log, so a
+/// plain `RUST_LOG=info` leaves it off; a deployment that wants it sets
+/// `RUST_LOG=...,fynd::winning_protocols=trace`.
+const WINNING_PROTOCOLS_TARGET: &str = "fynd::winning_protocols";
+
+/// Logs the protocols the winning quote swaps on, how many swaps it makes on each, and how the
+/// quote simulated when the request asked for it.
+///
+/// The protocol counts are a JSON object; the rest of the line is `key=value` text. The counts are
+/// swaps, not distinct pools: a split route that crosses two Uniswap V2 pools reports 2, which is
+/// what the solution executes.
+///
+/// The simulation outcome and its deviation ride on the same line as the protocols so the two can
+/// be read together: the metric alone cannot say which protocols a deviation came from without a
+/// label per protocol, which counts one route several times.
+///
+/// Only a successful quote with a route gets a line, so the log holds one line per returned route.
+pub(super) fn log_winning_protocols(quote: &OrderQuote) {
+    if !tracing::enabled!(target: WINNING_PROTOCOLS_TARGET, Level::TRACE) {
+        return;
+    }
+    if quote.status() != QuoteStatus::Success {
+        return;
+    }
+    let Some(route) = quote.route() else {
+        return;
+    };
+
+    // BTreeMap, so the same set of protocols always serialises in the same order and two lines
+    // can be compared as text.
+    let mut swaps_per_protocol: BTreeMap<&str, usize> = BTreeMap::new();
+    for swap in route.swaps() {
+        *swaps_per_protocol
+            .entry(swap.protocol())
+            .or_default() += 1;
+    }
+
+    let (outcome, deviation) = simulation_fields(quote);
+    trace!(
+        target: WINNING_PROTOCOLS_TARGET,
+        parent: None,
+        "winning_protocols order_id={} block={} pool={} algorithm={} swaps={} simulated={} \
+         deviation_bps={} protocols={}",
+        quote.order_id(),
+        quote.block().number(),
+        quote.worker_pool(),
+        quote.algorithm(),
+        route.swaps().len(),
+        outcome,
+        deviation,
+        serde_json::to_string(&swaps_per_protocol).unwrap_or_default(),
+    );
+}
+
+/// The simulation outcome of a quote and how far the simulated amount landed from what the quote
+/// promised, as the two values the line carries.
+///
+/// Both are empty when the request asked for no simulation, and the deviation alone is empty when
+/// the simulated call did not return an amount. The keys stay on the line either way, so every
+/// line has the same shape.
+fn simulation_fields(quote: &OrderQuote) -> (&'static str, String) {
+    match quote.simulation_result() {
+        None => ("", String::new()),
+        Some(SimulationResult::Failure { .. }) => ("failure", String::new()),
+        Some(SimulationResult::Success { amount_out, .. }) => (
+            "success",
+            deviation_bps(quote, amount_out)
+                .map(|bps| format!("{bps:.4}"))
+                .unwrap_or_default(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use num_bigint::BigUint;
@@ -301,6 +384,27 @@ mod tests {
 
     fn responses_with(quotes: Vec<WorkerPoolQuote>) -> OrderResponses {
         OrderResponses { order_id: "o1".to_string(), quotes, failed_solvers: vec![] }
+    }
+
+    /// A quote is served inside the HTTP request span. The formatter appends the fields of every
+    /// span in scope, so without `parent: None` the request id and the http/otel keys land on the
+    /// end of each line, several times the length of the record.
+    #[test]
+    fn test_payload_carries_no_enclosing_span_fields() {
+        let responses = responses_with(vec![comparison_quote("winner", 1_000, 3)]);
+
+        let payloads =
+            crate::worker_pool_router::log_capture::capture_payloads("quote_comparison ", || {
+                let request =
+                    tracing::info_span!("HTTP request", request_id = "abcd", http.method = "POST");
+                let _entered = request.enter();
+                log_quote_comparison(&comparison_order(), &responses, &QuoteOptions::default());
+            });
+
+        assert_eq!(payloads.len(), 1);
+        for leaked in ["request_id", "http.method", "abcd"] {
+            assert!(!payloads[0].contains(leaked), "{leaked} leaked into: {}", payloads[0]);
+        }
     }
 
     /// Asserts on the rendered bytes with colour explicitly on, as it runs in a deployment.
