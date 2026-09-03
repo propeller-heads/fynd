@@ -156,10 +156,6 @@ pub enum FailedItemError {
     #[error("simulation failed: {0}")]
     SimulationFailed(String),
 
-    /// Every simulation path for this component failed.
-    #[error("all simulation paths failed")]
-    AllSimulationPathsFailed,
-
     /// The token was bought but the route selling it back to the gas token did not solve,
     /// so no mean price exists.
     #[error("no sell route back to the gas token")]
