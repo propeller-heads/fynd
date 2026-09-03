@@ -232,16 +232,20 @@ impl ReadinessTracker {
     /// block the store held it at, not necessarily the worker's current block, so treating it as
     /// fresh could mark a `require_fresh` requirement ready with outdated data. Fresh readiness
     /// is established the normal way, from the next `ComputationComplete` event.
+    ///
+    /// Only `ever_computed` is touched. The block a stored output carries can be well behind the
+    /// chain head, so adopting it as `current_block` would make the tracker drop a
+    /// `ComputationFailed` for the real head block and wait out the algorithm timeout instead of
+    /// failing fast.
     pub fn seed_from_store(&mut self, store: &DerivedData) {
-        let stale_ids: Vec<ComputationId> = self
+        for id in self
             .requirements
             .stale_requirements()
             .iter()
             .copied()
-            .collect();
-        for id in stale_ids {
-            if let Some(block) = store.output_block(id) {
-                self.on_computation_complete(id, block);
+        {
+            if store.output_block(id).is_some() {
+                self.ever_computed.insert(id);
             }
         }
     }
