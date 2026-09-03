@@ -20,8 +20,10 @@
 //! # Cost
 //!
 //! Buying is cheap: one pass over the graph finds the buy route to every token at once. Selling
-//! dominates: each token needs its own solve, because each sell starts from a different amount
-//! and slippage makes routes amount-dependent. A slow pass delays that block's component depths
+//! dominates: each token needs its own relaxation, because each sell starts from a different
+//! amount and slippage makes routes amount-dependent. All of it — the buy pass and every sell —
+//! runs against one market snapshot taken when the pass starts, so both legs of every price and
+//! the block the result is stored under agree. A slow pass delays that block's component depths
 //! and the start of the next block's computations — spot prices run first and are unaffected.
 //! After the first full solve, recomputation is incremental: only tokens whose stored routes ran
 //! through a changed component are re-solved, which bounds the steady-state cost.
@@ -33,6 +35,7 @@ use num_bigint::BigUint;
 #[cfg(test)]
 use num_traits::ToPrimitive;
 use num_traits::Zero;
+use petgraph::graph::NodeIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, Span};
 use tycho_simulation::{
@@ -40,7 +43,10 @@ use tycho_simulation::{
 };
 
 use crate::{
-    algorithm::{bellman_ford::FindRouteOptions, Algorithm, AlgorithmConfig, BellmanFordAlgorithm},
+    algorithm::{
+        bellman_ford::{BellmanFordContext, FindRouteOptions},
+        Algorithm, AlgorithmConfig, BellmanFordAlgorithm,
+    },
     derived::{
         computation::{
             ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
@@ -58,6 +64,30 @@ use crate::{
 
 /// The graph the algorithm walks.
 type AlgorithmGraph = <BellmanFordAlgorithm as Algorithm>::GraphType;
+
+/// One pricing pass's solving state: a single market snapshot re-rooted for every sell.
+///
+/// The context is built once around the gas token, and every solve — the buy pass and each
+/// token's sell — runs against it. One snapshot replaces a per-token lock and state clone,
+/// and it makes the pass consistent: both legs of every price read the same block's states.
+///
+/// Each sell still walks its own subgraph, pruned toward the gas token — relaxation simulates
+/// every edge it relaxes, and unpruned that is most of the market per token — but the pruning
+/// map (`hops_to_gas`) is a single BFS shared by all of them.
+struct PricingPass<'a> {
+    /// The solving algorithm; its `max_hops` bounds route length within the wider subgraph.
+    algorithm: &'a BellmanFordAlgorithm,
+    /// The graph the pass's subgraphs are walked on.
+    graph: &'a AlgorithmGraph,
+    /// The shared snapshot, re-rooted and re-pruned per sell.
+    ctx: BellmanFordContext,
+    /// The gas token's node, saved before the first reroot moves `ctx` off it.
+    gas_node: NodeIndex,
+    /// Hops from each node to the gas token, computed once, pruning every sell's walk.
+    hops_to_gas: FxHashMap<NodeIndex, usize>,
+    /// Token address → graph node, inverted once from the context, for re-rooting sells.
+    token_nodes: FxHashMap<Address, NodeIndex>,
+}
 
 /// What a route delivers in `token_out`, summed over the swaps that end there so a split route
 /// reports its whole output rather than one leg's.
@@ -154,20 +184,52 @@ impl TokenGasPriceComputation {
         }
         let graph = graph_manager.graph();
 
+        // One snapshot serves the buy pass and every sell. The subgraph is walked one hop
+        // beyond `max_hops`: a sell route of `max_hops` hops can start from a token that far
+        // from the gas token, and the walk must include that token's outgoing edges.
+        let Some(ctx) = algorithm
+            .build_context_from_source_token(
+                graph,
+                market.clone(),
+                &self.gas_token,
+                self.max_hops + 1,
+            )
+            .await
+        else {
+            // No subgraph around the gas token means nothing is priceable this block.
+            debug!(unreachable_tokens = wanted.len(), "no subgraph around the gas token");
+            return Ok((FxHashMap::default(), block, Vec::new()));
+        };
+        // Stamp the result with the snapshot's block, not the earlier topology read — the feed
+        // can advance between the two locks, and every price is computed against the snapshot.
+        let block = ctx
+            .market_data
+            .last_updated()
+            .map_or(block, |b| b.number());
+
         // One relaxation from the gas token yields the buy route for every token it reaches, so the
         // buy side costs a single pass however many tokens are priced.
-        let buys = self
-            .buy_routes(&algorithm, graph, market)
-            .await;
+        let buys = algorithm.find_routes_from_source_token(
+            &ctx,
+            &self.simulation_amount,
+            FindRouteOptions::default(),
+        );
+
+        let gas_node = ctx.token_in_node;
+        let token_nodes = ctx
+            .node_address
+            .iter()
+            .map(|(&node, address)| (address.clone(), node))
+            .collect();
+        let hops_to_gas = BellmanFordAlgorithm::get_hops_to_reach(graph, gas_node, self.max_hops);
+        let mut pass =
+            PricingPass { algorithm: &algorithm, graph, ctx, gas_node, hops_to_gas, token_nodes };
 
         let mut prices = FxHashMap::default();
         let mut failed_items = Vec::new();
         let mut unreachable_tokens = 0usize;
         for token in wanted {
-            match self
-                .price_token(&algorithm, graph, market, &token, buys.get(&token))
-                .await
-            {
+            match self.price_token(&mut pass, &token, buys.get(&token)) {
                 Ok(priced) => {
                     prices.insert(token, priced);
                 }
@@ -183,30 +245,6 @@ impl TokenGasPriceComputation {
         }
 
         Ok((prices, block, failed_items))
-    }
-
-    /// The buy route to every token the gas token reaches, from one relaxation.
-    ///
-    /// The context is bounded only by `max_hops` around the gas token — no destination prunes
-    /// its subgraph — so the routes cover every reachable token.
-    async fn buy_routes(
-        &self,
-        algorithm: &BellmanFordAlgorithm,
-        graph: &AlgorithmGraph,
-        market: &MarketData,
-    ) -> FxHashMap<Address, Route> {
-        let Some(ctx) = algorithm
-            .build_context_from_source_token(graph, market.clone(), &self.gas_token)
-            .await
-        else {
-            // No subgraph around the gas token means nothing is priceable this block.
-            return FxHashMap::default();
-        };
-        algorithm.find_routes_from_source_token(
-            &ctx,
-            &self.simulation_amount,
-            FindRouteOptions::default(),
-        )
     }
 
     /// Every token in the graph but the gas token, narrowed to `filter_tokens` when given.
@@ -229,11 +267,9 @@ impl TokenGasPriceComputation {
     ///
     /// A token missing either route is an error, not a price: a buy rate alone would flatter a
     /// token that is expensive to exit, and prices must stay comparable across tokens.
-    async fn price_token(
+    fn price_token(
         &self,
-        algorithm: &BellmanFordAlgorithm,
-        graph: &AlgorithmGraph,
-        market: &MarketData,
+        pass: &mut PricingPass<'_>,
         token: &Address,
         buy: Option<&Route>,
     ) -> Result<(Price, FxHashSet<ComponentId>), FailedItemError> {
@@ -249,8 +285,7 @@ impl TokenGasPriceComputation {
             .collect();
 
         let sell = self
-            .sell_route(algorithm, graph, market, token, buy_out.clone())
-            .await
+            .sell_route(pass, token, buy_out.clone())
             .ok_or(FailedItemError::NoSellRoute)?;
         let sell_out = route_output(&sell, &self.gas_token);
         components.extend(
@@ -269,19 +304,29 @@ impl TokenGasPriceComputation {
     /// The route that sells `amount` of `token` back to the gas token, or `None` when there is no
     /// route or it returns nothing.
     ///
-    /// Each call builds its own context, so the sell side costs one solve per token and
-    /// dominates this computation's cost.
-    async fn sell_route(
+    /// Re-roots the pass's shared context at `token` behind a freshly pruned adjacency, so a
+    /// sell costs one bounded walk and one relaxation — no lock or state clone of its own. The
+    /// relaxations still dominate this computation's cost: there is one per token.
+    fn sell_route(
         &self,
-        algorithm: &BellmanFordAlgorithm,
-        graph: &AlgorithmGraph,
-        market: &MarketData,
+        pass: &mut PricingPass<'_>,
         token: &Address,
         amount: BigUint,
     ) -> Option<Route> {
         if amount.is_zero() {
             return None;
         }
+        let token_node = *pass.token_nodes.get(token)?;
+        let (adj, _, _) = BellmanFordAlgorithm::get_subgraph_with_hop_map(
+            pass.graph,
+            token_node,
+            Some(&pass.hops_to_gas),
+            self.max_hops,
+        )?;
+        pass.ctx.adj = adj;
+        pass.ctx
+            .reroot(token_node, Some(pass.gas_node));
+
         let order = Order::new(
             token.clone(),
             self.gas_token.clone(),
@@ -289,11 +334,9 @@ impl TokenGasPriceComputation {
             OrderSide::Sell,
             Address::zero(20),
         );
-        // Derived data is deliberately withheld: gas-blind, the solve does not need it, and this
-        // computation is the one filling the part of it that would be read.
-        let route = algorithm
-            .find_best_route(graph, market.clone(), None, None, &order)
-            .await
+        let route = pass
+            .algorithm
+            .find_single_route(&pass.ctx, &order, FindRouteOptions::default())
             .ok()?
             .route()
             .clone();
@@ -548,6 +591,30 @@ mod tests {
         // 1 ETH buys 2 MID buys 6 TARGET, and the fee-free reverse returns the ETH, so the
         // mean is 6.
         assert!((ratio(&prices[&target.address]) - 6.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_price_at_exactly_max_hops() {
+        // FAR sits exactly max_hops (3) from ETH. Its sell needs FAR's outgoing edges, which
+        // lie one hop beyond the buy reach, so the shared snapshot must be walked one hop
+        // further than the algorithm routes.
+        let eth = token(0, "ETH");
+        let mid = token(2, "MID");
+        let next = token(3, "NEXT");
+        let far = token(4, "FAR");
+
+        let prices = prices_for(
+            &eth,
+            vec![
+                ("eth_mid", &eth, &mid, MockProtocolSim::new(2.0)),
+                ("mid_next", &mid, &next, MockProtocolSim::new(2.0)),
+                ("next_far", &next, &far, MockProtocolSim::new(2.0)),
+            ],
+        )
+        .await;
+
+        // 1 ETH buys 8 FAR over three fee-free doublings, and the reverse returns the ETH.
+        assert!((ratio(&prices[&far.address]) - 8.0).abs() < 1e-6);
     }
 
     #[tokio::test]
