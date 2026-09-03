@@ -24,11 +24,13 @@
 //! amount and slippage makes routes amount-dependent. All of it — the buy pass and every sell —
 //! runs against one market snapshot taken when the pass starts, so both legs of every price and
 //! the block the result is stored under agree. A slow pass delays that block's component depths
-//! and the start of the next block's computations — spot prices run first and are unaffected.
-//! After the first full solve, recomputation is incremental: only tokens whose stored routes ran
-//! through a changed component are re-solved, which bounds the steady-state cost.
+//! and the start of the next block's computations — spot prices run first and are unaffected —
+//! and a pass-wide deadline bounds that delay: tokens it cuts off keep their previous price and
+//! stay visible to invalidation. After the first full solve, recomputation is incremental: only
+//! tokens whose stored routes ran through a changed component are re-solved, which bounds the
+//! steady-state cost.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
@@ -37,7 +39,7 @@ use num_traits::ToPrimitive;
 use num_traits::Zero;
 use petgraph::graph::NodeIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tracing::{debug, instrument, Span};
+use tracing::{debug, instrument, warn, Span};
 use tycho_simulation::{
     tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
 };
@@ -100,6 +102,19 @@ fn route_output(route: &Route, token_out: &Address) -> BigUint {
         .sum()
 }
 
+/// One pass's output: what was priced, against which block, and what was not.
+struct SolvedPrices {
+    /// Priced tokens with the components that must re-price them when they change.
+    prices: FxHashMap<Address, (Price, FxHashSet<ComponentId>)>,
+    /// The block the market snapshot was taken at.
+    block: u64,
+    /// Tokens that were attempted and could not be priced: bought, but no sell route back.
+    failed_items: Vec<FailedItem>,
+    /// Tokens never attempted because the pass deadline expired first. They keep their
+    /// previous price: unlike a failure, nothing is known about them this block.
+    unattempted: FxHashSet<Address>,
+}
+
 /// Computes token prices relative to the gas token from the routes that trade it.
 #[derive(Debug, Clone)]
 pub struct TokenGasPriceComputation {
@@ -109,6 +124,11 @@ pub struct TokenGasPriceComputation {
     max_hops: usize,
     /// Amount of gas token to buy with (affects slippage).
     simulation_amount: BigUint,
+    /// Wall-clock budget for one whole pass. A full Ethereum-sized solve measures ~6 s, so
+    /// 30 s is margin, not target: it exists to stop a pathological block — per-solve
+    /// timeouts alone allow ~1 s per token — from stalling the derived chain for minutes.
+    /// Tokens not attempted before it expires keep their previous price.
+    pass_budget: Duration,
 }
 
 impl Default for TokenGasPriceComputation {
@@ -117,6 +137,7 @@ impl Default for TokenGasPriceComputation {
             gas_token: Address::zero(20), // ETH address
             max_hops: 3,
             simulation_amount: BigUint::from(10u64).pow(18), // 1 ETH
+            pass_budget: Duration::from_secs(30),
         }
     }
 }
@@ -125,7 +146,13 @@ impl TokenGasPriceComputation {
     /// Creates a computation with explicit parameters.
     #[cfg(test)]
     pub fn new(gas_token: Address, max_hops: usize, simulation_amount: BigUint) -> Self {
-        Self { gas_token, max_hops, simulation_amount }
+        Self { gas_token, max_hops, simulation_amount, ..Self::default() }
+    }
+
+    /// Sets the wall-clock budget for one pass.
+    #[cfg(test)]
+    pub fn with_pass_budget(self, pass_budget: Duration) -> Self {
+        Self { pass_budget, ..self }
     }
 
     /// Sets the longest route the algorithm may build.
@@ -139,21 +166,19 @@ impl TokenGasPriceComputation {
     }
 
     /// Solves every token, or only `filter_tokens` when given: one relaxation for every buy
-    /// route, plus a sell solve per token.
+    /// route, plus a sell solve per token, all within one wall-clock budget.
     ///
-    /// Returns the priced tokens, the block the market was read at, and one failed item per
-    /// token that was bought but found no sell route back. Tokens the gas token cannot reach
-    /// at all are only counted (logged at debug): unreachable is the normal state for much of
-    /// the topology, and every full solve re-attempts them anyway.
-    #[allow(clippy::type_complexity)]
+    /// Tokens that were bought but found no sell route back come back as failed items. Tokens
+    /// the gas token cannot reach at all are only counted (logged at debug): unreachable is the
+    /// normal state for much of the topology, and every full solve re-attempts them anyway.
+    /// Tokens the deadline cut off come back as unattempted, so callers can keep their
+    /// previous prices.
     async fn solve_token_prices(
         &self,
         market: &MarketData,
         filter_tokens: Option<&FxHashSet<Address>>,
-    ) -> Result<
-        (FxHashMap<Address, (Price, FxHashSet<ComponentId>)>, u64, Vec<FailedItem>),
-        ComputationError,
-    > {
+    ) -> Result<SolvedPrices, ComputationError> {
+        let deadline = Instant::now() + self.pass_budget;
         let (topology, block) = {
             let guard = market.read().await;
             let block = guard
@@ -180,7 +205,12 @@ impl TokenGasPriceComputation {
 
         let wanted = self.tokens_to_price(&topology, filter_tokens);
         if wanted.is_empty() {
-            return Ok((FxHashMap::default(), block, Vec::new()));
+            return Ok(SolvedPrices {
+                prices: FxHashMap::default(),
+                block,
+                failed_items: Vec::new(),
+                unattempted: FxHashSet::default(),
+            });
         }
         let graph = graph_manager.graph();
 
@@ -198,7 +228,12 @@ impl TokenGasPriceComputation {
         else {
             // No subgraph around the gas token means nothing is priceable this block.
             debug!(unreachable_tokens = wanted.len(), "no subgraph around the gas token");
-            return Ok((FxHashMap::default(), block, Vec::new()));
+            return Ok(SolvedPrices {
+                prices: FxHashMap::default(),
+                block,
+                failed_items: Vec::new(),
+                unattempted: FxHashSet::default(),
+            });
         };
         // Stamp the result with the snapshot's block, not the earlier topology read — the feed
         // can advance between the two locks, and every price is computed against the snapshot.
@@ -227,8 +262,14 @@ impl TokenGasPriceComputation {
 
         let mut prices = FxHashMap::default();
         let mut failed_items = Vec::new();
+        let mut unattempted = FxHashSet::default();
         let mut unreachable_tokens = 0usize;
-        for token in wanted {
+        let mut wanted = wanted.into_iter();
+        for token in &mut wanted {
+            if Instant::now() >= deadline {
+                unattempted.insert(token);
+                break;
+            }
             match self.price_token(&mut pass, &token, buys.get(&token)) {
                 Ok(priced) => {
                     prices.insert(token, priced);
@@ -240,11 +281,19 @@ impl TokenGasPriceComputation {
                 Err(error) => failed_items.push(FailedItem { key: token.to_string(), error }),
             }
         }
+        unattempted.extend(wanted);
         if unreachable_tokens > 0 {
             debug!(unreachable_tokens, "tokens without a route from the gas token left unpriced");
         }
+        if !unattempted.is_empty() {
+            warn!(
+                unattempted = unattempted.len(),
+                priced = prices.len(),
+                "token pricing pass hit its deadline; unattempted tokens keep previous prices"
+            );
+        }
 
-        Ok((prices, block, failed_items))
+        Ok(SolvedPrices { prices, block, failed_items, unattempted })
     }
 
     /// Every token in the graph but the gas token, narrowed to `filter_tokens` when given.
@@ -392,7 +441,7 @@ impl TokenGasPriceComputation {
             "incremental token price recomputation"
         );
 
-        let (solved, block, failed_items) = self
+        let solved = self
             .solve_token_prices(market, Some(&tokens_to_recompute))
             .await?;
 
@@ -400,13 +449,16 @@ impl TokenGasPriceComputation {
         let mut new_deps = existing_deps;
 
         for token in &tokens_to_recompute {
-            if let Some((price, components)) = solved.get(token) {
+            if let Some((price, components)) = solved.prices.get(token) {
                 new_deps.insert(
                     token.clone(),
                     TokenPriceEntry { price: price.clone(), path_components: components.clone() },
                 );
                 result.insert(token.clone(), price.clone());
-            } else {
+            } else if !solved.unattempted.contains(token) {
+                // Attempted and failed: the routes are gone, so the price is too. A token the
+                // deadline cut off keeps its entry instead — nothing is known about it this
+                // block, and dropping it would hide it from this incremental path for good.
                 result.remove(token);
                 new_deps.remove(token);
             }
@@ -415,10 +467,10 @@ impl TokenGasPriceComputation {
         store
             .write()
             .await
-            .set_token_prices_deps(new_deps, block);
+            .set_token_prices_deps(new_deps, solved.block);
         Span::current().record("updated_token_prices", result.len());
 
-        Ok(Some(ComputationOutput::with_failures(result, failed_items)))
+        Ok(Some(ComputationOutput::with_failures(result, solved.failed_items)))
     }
 
     /// The full or incremental solve behind [`DerivedComputation::compute`].
@@ -437,16 +489,32 @@ impl TokenGasPriceComputation {
             }
         }
 
-        let (solved, block, failed_items) = self
+        let solved = self
             .solve_token_prices(market, None)
             .await?;
 
         let mut token_prices_with_deps = TokenPricesWithDeps::default();
         let mut token_prices = TokenGasPrices::default();
-        for (token, (price, path_components)) in solved {
+        for (token, (price, path_components)) in solved.prices {
             token_prices_with_deps
                 .insert(token.clone(), TokenPriceEntry { price: price.clone(), path_components });
             token_prices.insert(token, price);
+        }
+
+        // Tokens the deadline cut off keep their previous entry, dependencies included: they
+        // stay served and stay visible to the incremental path, which re-prices them when one
+        // of their pools changes. Dropping them would unprice them until the next full solve.
+        if !solved.unattempted.is_empty() {
+            let store_guard = store.read().await;
+            if let Some(previous) = store_guard.token_prices_deps() {
+                for token in &solved.unattempted {
+                    let Some(entry) = previous.get(token) else {
+                        continue;
+                    };
+                    token_prices_with_deps.insert(token.clone(), entry.clone());
+                    token_prices.insert(token.clone(), entry.price.clone());
+                }
+            }
         }
 
         // The gas token is 1:1 with itself and needs no route.
@@ -466,12 +534,12 @@ impl TokenGasPriceComputation {
         store
             .write()
             .await
-            .set_token_prices_deps(token_prices_with_deps, block);
+            .set_token_prices_deps(token_prices_with_deps, solved.block);
 
         debug!(priced = token_prices.len() - 1, "token price computation complete");
         Span::current().record("updated_token_prices", token_prices.len());
 
-        Ok(ComputationOutput::with_failures(token_prices, failed_items))
+        Ok(ComputationOutput::with_failures(token_prices, solved.failed_items))
     }
 }
 
@@ -623,6 +691,72 @@ mod tests {
 
         // 1 ETH buys 8 FAR over three fee-free doublings, and the reverse returns the ETH.
         assert!((ratio(&prices[&far.address]) - 8.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_expired_deadline_keeps_previous_prices_on_full_solve() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+        let (market, _) =
+            setup_market_weighted(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]);
+        let store = DerivedData::new_shared();
+        computation_for(&eth.address)
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+
+        // A full recompute whose deadline expires immediately attempts nothing; every token
+        // must keep its previous price rather than vanish until the next full solve.
+        let output = computation_for(&eth.address)
+            .with_pass_budget(Duration::ZERO)
+            .compute(
+                &market,
+                &store,
+                &ChangedComponents { is_full_recompute: true, ..ChangedComponents::default() },
+            )
+            .await
+            .expect("pricing must not fail");
+
+        assert!((ratio(&output.data[&usdc.address]) - 2000.0).abs() < 1e-6);
+        assert!(output.failed_items.is_empty(), "an unattempted token is not a failure");
+        let guard = store.read().await;
+        assert!(
+            guard
+                .token_prices_deps()
+                .expect("deps are stored")
+                .contains_key(&usdc.address),
+            "carried tokens must stay visible to incremental invalidation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_expired_deadline_keeps_prices_on_incremental_solve() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+        let (market, _) =
+            setup_market_weighted(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]);
+        let store = DerivedData::new_shared();
+        computation_for(&eth.address)
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+
+        // The pool's state changes, marking USDC for re-pricing, but the deadline expires
+        // before it is attempted: the previous price must survive.
+        let output = computation_for(&eth.address)
+            .with_pass_budget(Duration::ZERO)
+            .compute(
+                &market,
+                &store,
+                &ChangedComponents {
+                    updated: vec!["eth_usdc".to_string()],
+                    ..ChangedComponents::default()
+                },
+            )
+            .await
+            .expect("pricing must not fail");
+
+        assert!((ratio(&output.data[&usdc.address]) - 2000.0).abs() < 1e-6);
     }
 
     #[tokio::test]
