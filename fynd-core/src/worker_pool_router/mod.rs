@@ -1507,8 +1507,8 @@ mod tests {
         algorithm::test_utils::{component, MockProtocolSim},
         feed::exclusivity::mark_exclusive,
         types::internal::SolveTask,
-        EncodingOptions, OrderSide, PermitDetails, PermitSingle, Route, SimulationResult,
-        SingleOrderQuote, Swap, UserTransferType,
+        EncodingOptions, FeeBreakdown, OrderSide, PermitDetails, PermitSingle, Route,
+        SimulationResult, SingleOrderQuote, Swap, UserTransferType,
     };
 
     fn default_encoder() -> Encoder {
@@ -3647,6 +3647,61 @@ mod tests {
             payloads[0]
         );
         assert!(payloads[0].contains("swaps=3"), "{}", payloads[0]);
+    }
+
+    /// The reviewer's question: what did a route containing a given protocol simulate at. Both
+    /// values ride on the line that names the protocols, so one record answers it.
+    #[test]
+    fn test_winning_protocols_carries_the_simulated_deviation() {
+        let mut quote = make_route_quote(&[("ekubo_v3", 0x01, 0x02), ("uniswap_v3", 0x02, 0x03)]);
+        quote.set_fee_breakdown(FeeBreakdown::new(
+            BigUint::from(70u64),
+            BigUint::from(30u64),
+            BigUint::from(100u64),
+            BigUint::from(900u64),
+        ));
+        // The quote promises 1000 after fees; the simulated call returns 999, a 10 bps shortfall.
+        quote.set_simulation_result(SimulationResult::Success {
+            amount_out: BigUint::from(999u64),
+            gas_used: 120_000,
+        });
+
+        let payloads = capture_winning_protocols(&quote);
+
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].contains("simulated=success"), "{}", payloads[0]);
+        assert!(payloads[0].contains("deviation_bps=-10.0000"), "{}", payloads[0]);
+        assert!(
+            payloads[0].contains(r#"protocols={"ekubo_v3":1,"uniswap_v3":1}"#),
+            "{}",
+            payloads[0]
+        );
+    }
+
+    #[test]
+    fn test_winning_protocols_with_a_failed_simulation() {
+        let mut quote = make_route_quote(&[("uniswap_v3", 0x01, 0x02)]);
+        quote.set_simulation_result(SimulationResult::Failure {
+            reason: "simulation reverted".to_string(),
+        });
+
+        let payloads = capture_winning_protocols(&quote);
+
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].contains("simulated=failure"), "{}", payloads[0]);
+        assert!(payloads[0].contains("deviation_bps= "), "{}", payloads[0]);
+    }
+
+    /// A quote that asked for no simulation keeps both keys, so every line has the same shape.
+    #[test]
+    fn test_winning_protocols_without_simulation() {
+        let quote = make_route_quote(&[("uniswap_v3", 0x01, 0x02)]);
+
+        let payloads = capture_winning_protocols(&quote);
+
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].contains("simulated= "), "{}", payloads[0]);
+        assert!(payloads[0].contains("deviation_bps= "), "{}", payloads[0]);
     }
 
     #[test]

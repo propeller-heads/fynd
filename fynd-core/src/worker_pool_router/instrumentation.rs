@@ -21,6 +21,7 @@ use super::{
     is_rankable, Order, OrderQuote, OrderResponses, OrderSide, QuoteOptions, QuoteStatus,
     SolveError, WorkerPoolQuote, BPS_DENOMINATOR,
 };
+use crate::{simulation::simulator::deviation_bps, SimulationResult};
 
 /// Target for the per-quote comparison log. Emitted at TRACE so a plain `RUST_LOG=info` leaves
 /// it off; a deployment that wants it sets `RUST_LOG=...,fynd::quote_comparison=trace`.
@@ -245,11 +246,16 @@ fn improvement_bps(baseline_net: Option<f64>, net: Option<f64>) -> Option<f64> {
 /// `RUST_LOG=...,fynd::winning_protocols=trace`.
 const WINNING_PROTOCOLS_TARGET: &str = "fynd::winning_protocols";
 
-/// Logs the protocols the winning quote swaps on, and how many swaps it makes on each.
+/// Logs the protocols the winning quote swaps on, how many swaps it makes on each, and how the
+/// quote simulated when the request asked for it.
 ///
 /// The protocol counts are a JSON object; the rest of the line is `key=value` text. The counts are
 /// swaps, not distinct pools: a split route that crosses two Uniswap V2 pools reports 2, which is
 /// what the solution executes.
+///
+/// The simulation outcome and its deviation ride on the same line as the protocols so the two can
+/// be read together: the metric alone cannot say which protocols a deviation came from without a
+/// label per protocol, which counts one route several times.
 ///
 /// Only a successful quote with a route gets a line, so the log holds one line per returned route.
 pub(super) fn log_winning_protocols(quote: &OrderQuote) {
@@ -272,17 +278,40 @@ pub(super) fn log_winning_protocols(quote: &OrderQuote) {
             .or_default() += 1;
     }
 
+    let (outcome, deviation) = simulation_fields(quote);
     trace!(
         target: WINNING_PROTOCOLS_TARGET,
         parent: None,
-        "winning_protocols order_id={} block={} pool={} algorithm={} swaps={} protocols={}",
+        "winning_protocols order_id={} block={} pool={} algorithm={} swaps={} simulated={} \
+         deviation_bps={} protocols={}",
         quote.order_id(),
         quote.block().number(),
         quote.worker_pool(),
         quote.algorithm(),
         route.swaps().len(),
+        outcome,
+        deviation,
         serde_json::to_string(&swaps_per_protocol).unwrap_or_default(),
     );
+}
+
+/// The simulation outcome of a quote and how far the simulated amount landed from what the quote
+/// promised, as the two values the line carries.
+///
+/// Both are empty when the request asked for no simulation, and the deviation alone is empty when
+/// the simulated call did not return an amount. The keys stay on the line either way, so every
+/// line has the same shape.
+fn simulation_fields(quote: &OrderQuote) -> (&'static str, String) {
+    match quote.simulation_result() {
+        None => ("", String::new()),
+        Some(SimulationResult::Failure { .. }) => ("failure", String::new()),
+        Some(SimulationResult::Success { amount_out, .. }) => (
+            "success",
+            deviation_bps(quote, amount_out)
+                .map(|bps| format!("{bps:.4}"))
+                .unwrap_or_default(),
+        ),
+    }
 }
 
 #[cfg(test)]

@@ -332,13 +332,16 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
 
 /// How far the simulated amount sits from what the quote promised, in basis points.
 ///
+/// The metric records it per quote and the winning-quote log carries it per line, so both read the
+/// same figure from here rather than each deriving it.
+///
 /// The router returns the output after it takes the router and client fees, so the quote's own
 /// `amount_out`, which is the raw swap output, is not the same quantity and would read as a
 /// standing fee-sized gap. The comparison is against the quoted amount less those same fees.
 ///
 /// A negative value means the simulation returned less than the quote promised. Returns `None`
 /// when the quote states no fees, or when the quoted amount is zero and there is no ratio to take.
-fn deviation_bps(quote: &OrderQuote, simulated_amount_out: &BigUint) -> Option<f64> {
+pub(crate) fn deviation_bps(quote: &OrderQuote, simulated_amount_out: &BigUint) -> Option<f64> {
     let fees = quote.fee_breakdown()?;
     // The quoted amount after fees, reached by addition because `min_amount_received` is that
     // amount less the slippage the user accepted.
