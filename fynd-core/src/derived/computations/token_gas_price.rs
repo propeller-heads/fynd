@@ -774,6 +774,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_incremental_resolves_only_affected_tokens() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        // max_hops = 1 keeps the two pools out of each other's candidate sets, so each
+        // token's price depends on exactly its own pool.
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let bbb = token(2, "BBB");
+        // Rates whose reciprocals are exact in the mock's 1e12 fixed-point scaling, so the
+        // sell leg introduces no rounding and prices compare exactly.
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0)),
+            ("eth_bbb", &eth, &bbb, MockProtocolSim::new(2500.0)),
+        ]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(SIM_AMOUNT));
+        let store = DerivedData::new_shared();
+        let full = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        // The manager persists between runs; the incremental path reads the stored prices.
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+
+        // Both pools move, but only eth_aaa is reported as changed: AAA must re-price
+        // against the new state while BBB keeps its stored price.
+        market.write().await.update_states([
+            ("eth_aaa".to_string(), Box::new(MockProtocolSim::new(4000.0)) as Box<dyn ProtocolSim>),
+            ("eth_bbb".to_string(), Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>),
+        ]);
+        let output = computation
+            .compute(
+                &market,
+                &store,
+                &ChangedComponents {
+                    updated: vec!["eth_aaa".to_string()],
+                    ..ChangedComponents::default()
+                },
+            )
+            .await
+            .expect("pricing must not fail");
+
+        assert!((ratio(&output.data[&aaa.address]) - 4000.0).abs() < 1e-6, "AAA re-solved");
+        assert!((ratio(&output.data[&bbb.address]) - 2500.0).abs() < 1e-6, "BBB untouched");
+    }
+
+    #[tokio::test]
+    async fn test_incremental_with_disjoint_change_keeps_all_prices() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+        let (market, _) =
+            setup_market_weighted(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]);
+        let computation = computation_for(&eth.address);
+        let store = DerivedData::new_shared();
+        let full = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+
+        // The pool's state moves, but the changed set names no stored dependency, so the
+        // incremental path must return the stored prices without re-solving anything.
+        market.write().await.update_states([(
+            "eth_usdc".to_string(),
+            Box::new(MockProtocolSim::new(9000.0)) as Box<dyn ProtocolSim>,
+        )]);
+        let output = computation
+            .compute(
+                &market,
+                &store,
+                &ChangedComponents {
+                    updated: vec!["unrelated_pool".to_string()],
+                    ..ChangedComponents::default()
+                },
+            )
+            .await
+            .expect("pricing must not fail");
+
+        assert!((ratio(&output.data[&usdc.address]) - 2000.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
     async fn test_token_without_sell_route_is_a_failed_item() {
         let eth = token(0, "ETH");
         let oneway = token(1, "ONEWAY");
