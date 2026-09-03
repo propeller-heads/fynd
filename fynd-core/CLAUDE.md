@@ -16,6 +16,7 @@ applications.
 | `graph/`              | `pub` — `GraphManager` trait (initialize + incremental update), `PetgraphStableDiGraphManager`, `StableDiGraph` (re-exported), `EdgeWeightUpdaterWithDerived`, `Path` type           |
 | `propamm_fallback/`   | `fallback_amount_out` computes the amount out a route delivers when its `propammfallback:` legs fall back to Uniswap V3; the router drops the candidate before ranking when that amount cannot clear `min_amount_out`, which keeps describing the pAMM quote and the user's slippage. `FeeTiers` mirrors the router's `resolvedFee`; `FallbackPoolIndex` indexes `uniswap_v3` components by pair and fee tier; `FeeTierFetcher` reads the tiers from the PropAMMRouter on a timer, in one Multicall3 batch per round. `SharedFeeTiers` is empty until the first successful read, and a worker that finds it empty drops the pAMM route |
 | `price_guard/`        | Price guard: external price validation for quotes. Sub-modules: `guard` (validation logic), `binance_ws` (Binance WebSocket price provider), `hyperliquid` (Hyperliquid oracle provider), `provider_registry`, `config`, `utils` |
+| `simulation/`         | ERC-20 storage-slot discovery and `eth_simulateV1` quote simulation with temporary state overrides |
 | `rpc.rs`              | private — `eth_call` and Tycho-address-to-alloy-address helpers shared by `encoding::fee_fetcher` and `propamm_fallback::fee_tier_fetcher` |
 | `replay.rs`           | `replay_route(&Route, &MarketState)` — re-execute an already-built route against a (possibly newer) market state, honoring split fractions and shared-pool depletion. Used by `hindsight` to measure quote-to-execution slippage |
 | `encoding/`           | `Encoder` wraps `tycho-execution` to produce ABI-encoded calldata (singleSwap, sequentialSwap, Permit2 variants). Optional calldata watermark (`with_calldata_watermark`) appends attribution bytes the EVM ignores. Computes `FeeBreakdown` mirroring on-chain `FeeCalculator` logic. `RouterFees`/`SharedRouterFees` hold default + per-client fee rates; `RouterFeeFetcher` refreshes them from the FeeCalculator contract every 5 min. `DisableSlippageTakingSigner` (`disable_slippage_taking.rs`, crate-internal, key from `DISABLE_SLIPPAGE_TAKING_SIGNER_KEY`) signs zero-fee `ClientFee` params when `EncodingOptions::disable_slippage_taking` is set, so the FeeCalculator applies its address's positive-slippage exemption; that also makes the signer the request's fee client (displacing the `tx.origin`/sender fallback in `Encoder::fee_client`) and stamps a `DEFAULT_DEADLINE_WINDOW_SECS` deadline the unsigned path did not have. `DEFAULT_DEADLINE_WINDOW_SECS` (120s, `mod.rs`) is shared with `exclusive_swap.rs`, so a quote carrying both signatures has one expiry |
@@ -60,6 +61,8 @@ Returns a `Solver` that can `quote()` directly. For standalone (non-HTTP) use.
 
 Price guard methods: `price_guard_enabled(bool)`, `register_price_provider(Box<dyn PriceProvider>)`,
 `add_default_price_providers()` (registers Binance WS + Hyperliquid providers).
+Simulation is deployment-gated with `simulation_enabled(bool)` and attached to the router with
+`WorkerPoolRouter::with_simulator`.
 
 Additional builder methods: `partial_blocks(bool)` (enable flashblock/partial-block updates),
 `with_pending_indexer(...)` (attach a pending-block indexer), `build_with_pending()` (build with

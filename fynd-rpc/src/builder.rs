@@ -275,6 +275,16 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Enables or disables encoded quote simulation.
+    ///
+    /// When disabled, per-request attempts to simulate a quote return an error.
+    pub fn simulation_enabled(mut self, enabled: bool) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .simulation_enabled(enabled);
+        self
+    }
+
     /// Assemble all components and return a running [`FyndRPC`] server handle.
     ///
     /// Starts all worker pools and binds the HTTP listener. Returns an error if any component

@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.100.1"
+version = "0.100.2"
 
 [package]
 name = "fynd"
@@ -14,6 +14,11 @@ default = ["metrics"]
 # Disable with `--no-default-features` to omit Actix-Web and the Prometheus
 # recorder from the binary (e.g. for embedded/minimal builds).
 metrics = ["dep:actix-web", "dep:metrics-exporter-prometheus", "dep:metrics"]
+# Forwards fynd-rpc's feature of the same name, which registers
+# GET /v1/{chain}/prices and GET /v1/{chain}/tokens. Off by default: both endpoints and
+# their response shapes are experimental and can change in any release. Without this,
+# a crate depending on `fynd` has no way to reach them.
+experimental = ["fynd-rpc/experimental"]
 
 [dependencies]
 fynd-rpc = { workspace = true }
@@ -84,7 +89,6 @@ members = [
     "clients/rust",
     "tools/benchmark",
     "tools/common",
-    "tools/erc20-overrides",
     "tools/fynd-swap-cli",
     "tools/fynd-gas-audit",
     "tools/hindsight",
@@ -154,8 +158,8 @@ metrics-exporter-prometheus = "0.16"
 metrics-util = "0.20"
 
 # Tycho
-tycho-execution = ">=0.372.0"
-tycho-simulation = ">=0.372.0"
+tycho-execution = ">=0.378.4"
+tycho-simulation = ">=0.378.4"
 typetag = "0.2"
 
 # Compression
@@ -184,15 +188,10 @@ sha2 = "0.10"
 rand = "0.9"
 
 # Internal crates
-fynd-core = { path = "fynd-core", version = "0.100.1" }
-fynd-rpc = { path = "fynd-rpc", version = "0.100.1" }
-fynd-rpc-types = { path = "fynd-rpc-types", version = "0.100.1" }
-fynd-client = { path = "clients/rust", version = "0.100.1" }
-# Path-only: unpublished internal crates (release = false in release-plz.toml), so they must not
-# carry a version requirement -- release-plz bumps the workspace version and rewrites the
-# requirements for the crates it releases, but leaves these untouched. A stale requirement stops
-# matching the workspace version on the next minor bump and fails resolution.
-erc20-overrides = { path = "tools/erc20-overrides" }
+fynd-core = { path = "fynd-core", version = "0.100.2" }
+fynd-rpc = { path = "fynd-rpc", version = "0.100.2" }
+fynd-rpc-types = { path = "fynd-rpc-types", version = "0.100.2" }
+fynd-client = { path = "clients/rust", version = "0.100.2" }
 fynd-tools-common = { path = "tools/common" }
 fynd-test-fixtures = { path = "test-fixtures" }
 

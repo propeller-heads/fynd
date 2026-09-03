@@ -112,13 +112,20 @@ fn create_tracing_subscriber() -> Option<TracerProvider> {
 /// global `chain` label so multi-chain fleets can aggregate without pod-name regexes.
 /// All `*_seconds` histograms render as bucketed Prometheus histograms (aggregatable
 /// across pods, unlike summary quantiles); `worker_router_solver_responses` is a count
-/// distribution and gets its own 0..=6 buckets.
+/// distribution and gets its own 0..=6 buckets; `quote_simulation_deviation_bps` is a signed
+/// basis-point distribution and gets buckets that span both sides of zero.
 /// Compiled only when the `metrics` feature is enabled.
 #[cfg(feature = "metrics")]
 fn create_metrics_exporter(host: &str, port: u16, chain: &str) -> tokio::task::JoinHandle<()> {
     const LATENCY_BUCKETS_SECONDS: &[f64] =
         &[0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
     const SOLVER_RESPONSE_BUCKETS: &[f64] = &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    // Signed: a simulation that returns less than the quote promised is the case to watch, so the
+    // negative side is the finer one.
+    const SIMULATION_DEVIATION_BPS_BUCKETS: &[f64] = &[
+        -1000.0, -500.0, -200.0, -100.0, -50.0, -25.0, -10.0, -5.0, -1.0, 0.0, 1.0, 5.0, 10.0,
+        25.0, 100.0,
+    ];
 
     let handle = PrometheusBuilder::new()
         // Normalize: `--chain` is free-form ("Ethereum" == "ethereum" after parse_chain),
@@ -129,6 +136,11 @@ fn create_metrics_exporter(host: &str, port: u16, chain: &str) -> tokio::task::J
         .set_buckets_for_metric(
             Matcher::Full("worker_router_solver_responses".to_string()),
             SOLVER_RESPONSE_BUCKETS,
+        )
+        .expect("static bucket list is non-empty")
+        .set_buckets_for_metric(
+            Matcher::Full("quote_simulation_deviation_bps".to_string()),
+            SIMULATION_DEVIATION_BPS_BUCKETS,
         )
         .expect("static bucket list is non-empty")
         .install_recorder()
@@ -306,6 +318,7 @@ async fn setup_solver(
     builder = builder.blocklist(blocklist);
     builder = builder.partial_blocks(args.partial_blocks);
     builder = builder.price_guard_enabled(args.enable_price_guard);
+    builder = builder.simulation_enabled(args.enable_simulation);
     if let Some(watermark) = &args.calldata_watermark {
         builder = builder.calldata_watermark(watermark.as_bytes());
     }

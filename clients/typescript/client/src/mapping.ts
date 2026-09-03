@@ -14,6 +14,7 @@ import type {
     Quote,
     QuoteParams,
     Route,
+    SimulationResult,
     Swap,
     Transaction,
 } from "./types.js";
@@ -33,6 +34,7 @@ type WirePermitSingle = components["schemas"]["PermitSingle"];
 type WirePermitDetails = components["schemas"]["PermitDetails"];
 type WireClientFeeParams = components["schemas"]["ClientFeeParams"];
 type WireFeeBreakdown = components["schemas"]["FeeBreakdown"];
+type WireSimulationResult = components["schemas"]["SimulationResult"];
 
 
 export function toWireRequest(params: QuoteParams): WireSolutionRequest {
@@ -88,6 +90,9 @@ export function fromWireQuote(
     const feeBreakdown = orderSolution.fee_breakdown != null
         ? fromWireFeeBreakdown(orderSolution.fee_breakdown)
         : undefined;
+    const simulationResult = orderSolution.simulation_result != null
+        ? fromWireSimulationResult(orderSolution.simulation_result)
+        : undefined;
     return {
         orderId: orderSolution.order_id,
         status: orderSolution.status,
@@ -104,6 +109,7 @@ export function fromWireQuote(
         ...(priceImpactBps !== undefined ? {priceImpactBps} : {}),
         ...(algorithm !== undefined ? {algorithm} : {}),
         ...(feeBreakdown !== undefined ? {feeBreakdown} : {}),
+        ...(simulationResult !== undefined ? {simulationResult} : {}),
     };
 }
 
@@ -143,6 +149,7 @@ function toWireEncodingOptions(opts: EncodingOptions): WireEncodingOptions {
         ...(opts.clientFeeParams !== undefined
             ? {client_fee_params: toWireClientFeeParams(opts.clientFeeParams)}
             : {}),
+        ...(opts.simulate === true ? {simulate: true} : {}),
     };
 }
 
@@ -180,6 +187,13 @@ function fromWireFeeBreakdown(wire: WireFeeBreakdown): FeeBreakdown {
         maxSlippage: BigInt(wire.max_slippage),
         minAmountReceived: BigInt(wire.min_amount_received),
     };
+}
+
+function fromWireSimulationResult(wire: WireSimulationResult): SimulationResult {
+    if (wire.status === "success") {
+        return {status: "success", amountOut: BigInt(wire.amount_out), gasUsed: wire.gas_used};
+    }
+    return {status: "failure", reason: wire.reason};
 }
 
 function fromWireTransaction(wire: WireTransaction): Transaction {

@@ -42,6 +42,8 @@ pub mod propamm_fallback;
 pub mod replay;
 /// `eth_call` plumbing shared by the tasks that read contract state.
 mod rpc;
+/// On-chain quote simulation and state override helpers.
+pub mod simulation;
 /// [`FyndBuilder`](solver::FyndBuilder) assembles the full pipeline and returns a
 /// [`Solver`](solver::Solver).
 pub mod solver;
@@ -89,8 +91,8 @@ pub use tycho_simulation::tycho_common::traits::TxDeltaIndexer;
 pub use types::{
     BlockInfo, ClientFeeParams, ComponentId, EncodingOptions, FeeBreakdown, Order, OrderQuote,
     OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions,
-    QuoteRequest, QuoteStatus, Route, RouteValidationError, SingleOrderQuote, SolveError,
-    SolveParams, SolveResult, SurplusInfo, Swap, TaskId, Transaction, UserTransferType,
+    QuoteRequest, QuoteStatus, Route, RouteValidationError, SimulationResult, SingleOrderQuote,
+    SolveError, SolveParams, SolveResult, SurplusInfo, Swap, TaskId, Transaction, UserTransferType,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},

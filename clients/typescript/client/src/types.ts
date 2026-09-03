@@ -87,6 +87,8 @@ export interface EncodingOptions {
   permit2Signature?: Hex;
   /** Client fee configuration. When absent, no fee is charged. */
   clientFeeParams?: ClientFeeParams;
+  /** Simulate the encoded transaction against the latest block. Defaults to `false`. */
+  simulate?: boolean;
 }
 
 /** An encoded on-chain transaction returned by the solver. */
@@ -152,6 +154,11 @@ export interface FeeBreakdown {
   minAmountReceived: bigint;
 }
 
+/** Outcome of simulating an encoded quote against the latest block. */
+export type SimulationResult =
+  | { status: "success"; amountOut: bigint; gasUsed: number }
+  | { status: "failure"; reason: string };
+
 /** A solver quote containing the best route, amounts, and optional encoded transaction. */
 export interface Quote {
   orderId: string;
@@ -174,6 +181,8 @@ export interface Quote {
   transaction?: Transaction;
   /** Fee breakdown; present only when `encodingOptions` was set in the quote request. */
   feeBreakdown?: FeeBreakdown;
+  /** Simulation outcome; present when `encodingOptions.simulate` was set. */
+  simulationResult?: SimulationResult;
 }
 
 /** Solver health status and readiness information. */

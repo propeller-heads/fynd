@@ -2,7 +2,7 @@
 //! in dry-run mode. With `max_fee_per_gas` pinned to a known constant, the
 //! returned `SettledOrder::gas_cost()` divides exactly to the raw `gas_used`.
 //!
-//! Storage-slot detection (balance + allowance) is delegated to `erc20-overrides`;
+//! Storage-slot detection (balance + allowance) is delegated to `fynd-core`;
 //! we still keep a local alloy provider for the probe `eth_call`s.
 
 use alloy::{
@@ -11,10 +11,10 @@ use alloy::{
     providers::{Provider, RootProvider},
 };
 use bytes::Bytes;
-use erc20_overrides::{find_allowance_slot, find_balance_slot};
 use fynd_client::{
     ExecutionOptions, FyndClient, Quote, SignedSwap, SigningHints, StorageOverrides,
 };
+use fynd_core::simulation::erc20_slots::{find_allowance_slot, find_balance_slot};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 

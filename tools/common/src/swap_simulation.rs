@@ -395,7 +395,12 @@ impl EthCallRunner {
                 return Ok(slot);
             }
         }
-        let slot = erc20_overrides::find_balance_slot(&self.provider, token, self.sender).await?;
+        let slot = fynd_core::simulation::erc20_slots::find_balance_slot(
+            &self.provider,
+            token,
+            self.sender,
+        )
+        .await?;
         self.balance_slots
             .lock()
             .await
@@ -410,9 +415,13 @@ impl EthCallRunner {
                 return Ok(slot);
             }
         }
-        let slot =
-            erc20_overrides::find_allowance_slot(&self.provider, token, self.sender, spender)
-                .await?;
+        let slot = fynd_core::simulation::erc20_slots::find_allowance_slot(
+            &self.provider,
+            token,
+            self.sender,
+            spender,
+        )
+        .await?;
         self.allowance_slots
             .lock()
             .await
