@@ -216,13 +216,16 @@ impl BellmanFordAlgorithm {
                 },
             )?;
         let market_view = paths::read_market(&market, label).await?;
-        Ok(self.snapshot_context(
+        let mut ctx = self.snapshot_context(
             graph,
             market_view,
             subgraph,
-            (token_in_node, Some(token_out_node)),
-            (token_prices, spot_prices),
-        ))
+            token_in_node,
+            Some(token_out_node),
+        );
+        ctx.token_prices = token_prices;
+        ctx.spot_prices = spot_prices;
+        Ok(ctx)
     }
 
     /// A context whose subgraph is everything within `walk_hops` of `token_in` — no destination
@@ -248,13 +251,7 @@ impl BellmanFordAlgorithm {
             .find(|&n| &graph[n] == token_in)?;
         let subgraph = Self::get_subgraph(graph, token_in_node, None, walk_hops)?;
         let market_view = market.read().await;
-        Some(self.snapshot_context(
-            graph,
-            market_view,
-            subgraph,
-            (token_in_node, None),
-            (None, None),
-        ))
+        Some(self.snapshot_context(graph, market_view, subgraph, token_in_node, None))
     }
 
     /// Snapshots everything a solve reads from the market — tokens, component states, gas price,
@@ -262,19 +259,20 @@ impl BellmanFordAlgorithm {
     ///
     /// The caller walks the subgraph *before* acquiring `market_view`: the walk needs only the
     /// graph, and holding the read guard through it would queue the feed's writer — and every
-    /// quote's read behind that writer. `endpoints` must be the pair the subgraph was walked
+    /// quote's read behind that writer. The endpoints must be the pair the subgraph was walked
     /// with; the destination, when present, is carried for
     /// [`find_single_route`](Self::find_single_route)'s readout.
+    ///
+    /// Derived data starts empty; a caller that has token or spot prices sets the fields on the
+    /// returned context.
     fn snapshot_context(
         &self,
         graph: &StableDiGraph<()>,
         market_view: MarketDataView<'_>,
         subgraph: Subgraph<'_>,
-        endpoints: (NodeIndex, Option<NodeIndex>),
-        derived: (Option<TokenGasPrices>, Option<SpotPrices>),
+        token_in_node: NodeIndex,
+        token_out_node: Option<NodeIndex>,
     ) -> BellmanFordContext {
-        let (token_in_node, token_out_node) = endpoints;
-        let (token_prices, spot_prices) = derived;
         let (adj, token_nodes, component_ids) = subgraph;
 
         let token_map: FxHashMap<NodeIndex, Arc<Token>> = token_nodes
@@ -325,8 +323,8 @@ impl BellmanFordAlgorithm {
             token_map,
             market_data,
             gas_price_wei,
-            token_prices,
-            spot_prices,
+            token_prices: None,
+            spot_prices: None,
             node_address,
             max_idx,
             scoring,
