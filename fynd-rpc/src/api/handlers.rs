@@ -301,7 +301,6 @@ pub async fn get_prices(
     let component_depths_data = if want_depths { store.component_depths().cloned() } else { None };
     drop(store);
 
-    // The stored price is already the mean of the buy and sell rates.
     let mut prices = Vec::new();
     let mut skipped_tokens = 0usize;
     for (address, price) in token_prices_data.into_iter().flatten() {
