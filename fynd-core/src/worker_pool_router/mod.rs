@@ -1464,8 +1464,7 @@ fn drop_pamm_quotes_below_min_amount_out(
                 worker_pool = worker_pool.as_str(),
                 %fallback,
                 slippage = encoding_options.slippage(),
-                "dropping pAMM quote: the Uniswap V3 fallback pays less than the user's \
-                 min_amount_out"
+                "dropping pAMM quote: the fallback pays less than the user's min_amount_out"
             );
             quote.set_status(QuoteStatus::NoRouteFound);
         }
