@@ -774,6 +774,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_token_without_sell_route_is_a_failed_item() {
+        let eth = token(0, "ETH");
+        let oneway = token(1, "ONEWAY");
+
+        // The mock's liquidity caps output per direction, making the pool one-way: buying
+        // 1 ETH outputs 0.5e18 ONEWAY (under the cap), selling that back would output
+        // 1e18 ETH (over it). Bought but not sellable must be reported, not counted.
+        let (market, _) = setup_market_weighted(vec![(
+            "eth_oneway",
+            &eth,
+            &oneway,
+            MockProtocolSim::new(0.5).with_liquidity(600_000_000_000_000_000),
+        )]);
+        let store = DerivedData::new_shared();
+        let output = computation_for(&eth.address)
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+
+        assert!(
+            !output
+                .data
+                .contains_key(&oneway.address),
+            "an unsellable token has no price"
+        );
+        assert_eq!(output.failed_items.len(), 1);
+        assert_eq!(output.failed_items[0].key, oneway.address.to_string());
+        assert_eq!(output.failed_items[0].error, FailedItemError::NoSellRoute);
+    }
+
+    #[tokio::test]
     async fn test_deps_cover_rival_routes() {
         // USDC prices via the direct pool, but the worse ETH->MID->USDC route is a candidate:
         // its pools must be in USDC's dependency set, or a state change that makes it the
