@@ -114,11 +114,18 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
    restricts allocation to a named subset
 1. `WorkerPoolRouter` fans out to the allocated pools in parallel
 2. Each pool dispatches to a `SolverWorker` → `Algorithm::find_best_route` → `RouteResult`
-3. Selects best by `amount_out_net_gas` → optional `Encoder` → `Quote`
+3. Selects best by `amount_out_net_gas` → optional `Encoder` → optional simulation → `Quote`
 
 Steps 0-2 are exposed as the public `WorkerPoolRouter::solve`, returning every order's ranked
-candidates as `RankedQuotes`; step 3 splits into the public `encode_quotes` and `finalize_quote`
-functions, for embedders that need more than the single best route per order.
+candidates as `RankedQuotes`; step 3 splits into the public `encode_quotes`,
+`WorkerPoolRouter::simulate_quotes` and `finalize_quote`, for embedders that need more than the
+single best route per order.
+
+An embedder that composes those stages runs all four, in that order. `simulate_quotes` takes the
+same `EncodingOptions` as `encode_quotes` and returns the quotes untouched when they do not ask
+for simulation, so it is called unconditionally: a pipeline that tests the flag itself can drop
+the stage by omission, and a request asking for simulation then comes back with no result and no
+reason.
 
 ## Non-Tycho Liquidity Sources
 

@@ -574,11 +574,9 @@ impl WorkerPoolRouter {
         let mut order_quotes = ranked.into_best();
         if let Some(encoding_options) = request.options().encoding_options() {
             order_quotes = encode_quotes(&self.encoder, order_quotes, encoding_options).await?;
-            if encoding_options.simulate() {
-                order_quotes = self
-                    .simulate_encoded_quotes(order_quotes)
-                    .await?;
-            }
+            order_quotes = self
+                .simulate_quotes(order_quotes, encoding_options)
+                .await?;
         }
         Ok(finalize_quote(order_quotes, started.elapsed().as_millis() as u64))
     }
@@ -589,11 +587,29 @@ impl WorkerPoolRouter {
         &self.encoder
     }
 
-    /// Simulates every successfully encoded quote and records the outcome on it.
-    async fn simulate_encoded_quotes(
+    /// Simulates every successfully encoded quote and records the outcome on it, when
+    /// `encoding_options` asks for simulation. Returns the quotes untouched when it does not.
+    ///
+    /// The fourth stage of the pipeline [`Self::quote`] runs, after [`Self::solve`],
+    /// [`encode_quotes`] and before [`finalize_quote`]. A caller that composes those stages itself
+    /// calls this one too, right after encoding, and passes the same `encoding_options`. Taking
+    /// the options rather than a boolean is what keeps that call unconditional: a service that
+    /// assembles its own pipeline cannot drop simulation by forgetting to test the flag, which is
+    /// the one mistake that leaves a request asking for simulation with nothing to say why it got
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolveError::Internal`] when the request asks for simulation and the server was
+    /// built without a simulator.
+    pub async fn simulate_quotes(
         &self,
         mut order_quotes: Vec<OrderQuote>,
+        encoding_options: &EncodingOptions,
     ) -> Result<Vec<OrderQuote>, SolveError> {
+        if !encoding_options.simulate() {
+            return Ok(order_quotes);
+        }
         let Some(simulator) = self.simulator.as_ref() else {
             return Err(SolveError::Internal(
                 "simulation requested but simulation is not enabled on this server".to_string(),
@@ -1681,6 +1697,41 @@ mod tests {
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].status(), QuoteStatus::Success);
         assert_eq!(ranked[0].amount_out_net_gas(), &BigUint::from(900u64));
+    }
+
+    /// The stage a service composing its own pipeline calls. It runs unconditionally, so a quote
+    /// that did not ask for simulation has to come back untouched rather than error on the
+    /// missing simulator.
+    #[tokio::test]
+    async fn test_simulate_quotes_without_simulation_requested() {
+        let router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let quote = make_single_quote(900).order().clone();
+
+        let quotes = router
+            .simulate_quotes(vec![quote], &EncodingOptions::new(0.01))
+            .await
+            .expect("a request that asks for no simulation needs no simulator");
+
+        assert_eq!(quotes.len(), 1);
+        assert!(quotes[0].simulation_result().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_simulate_quotes_without_a_simulator() {
+        let router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let quote = make_single_quote(900).order().clone();
+
+        let error = router
+            .simulate_quotes(vec![quote], &EncodingOptions::new(0.01).with_simulation())
+            .await
+            .expect_err("simulation requires a configured simulator");
+
+        assert_eq!(
+            error.to_string(),
+            "internal error: simulation requested but simulation is not enabled on this server"
+        );
     }
 
     #[tokio::test]
