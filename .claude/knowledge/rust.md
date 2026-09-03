@@ -53,5 +53,6 @@ refactor the code instead. Comments explain WHY, not WHAT. Wrap comment lines at
 - **Concise test names.** Name tests after what is being tested, not the expected outcome. `test_find_route_options_default`
   not `test_find_route_options_default_is_no_overrides`. Prepend all test names with 'test_'.
 
-After every task is done, run the `run-ci` skill. If that is done, check whether docs need updating with the sync-docs
-skill.
+After every task is done, run `cargo +nightly fmt --all` and the tests that cover what you changed (e.g.
+`cargo nextest run -p fynd-core`). Save the full `run-ci` skill for when you open a PR or change something
+workspace-wide. Then check whether docs need updating with the sync-docs skill.
