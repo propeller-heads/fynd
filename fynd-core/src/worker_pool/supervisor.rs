@@ -1,6 +1,24 @@
-//! Worker-session supervision: respawn policy and (from Task 4) the session loop.
+//! Worker-session supervision: the respawn policy and the per-thread session loop.
 
-use std::time::Duration;
+use std::{
+    panic::{catch_unwind, AssertUnwindSafe},
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
+
+use tokio::sync::broadcast;
+use tracing::error;
+
+use crate::{
+    algorithm::AlgorithmConfig,
+    derived::{events::DerivedDataEvent, SharedDerivedDataRef},
+    feed::{events::MarketEvent, market_data::MarketData},
+    propamm_fallback::SharedFeeTiers,
+    types::internal::SolveTask,
+    worker_pool::worker::SolverWorker,
+    worker_pool_router::LiquidityScope,
+};
 
 /// Retry policy for respawning a panicked worker.
 ///
@@ -65,10 +83,140 @@ impl RespawnState {
     }
 }
 
+/// Everything one worker thread needs to run sessions until shutdown or give-up.
+pub(crate) struct WorkerContext<A, F>
+where
+    A: crate::algorithm::Algorithm + 'static,
+    A::GraphManager:
+        crate::feed::events::MarketEventHandler + crate::graph::EdgeWeightUpdaterWithDerived,
+    F: Fn(AlgorithmConfig) -> A + Send + Sync + 'static,
+{
+    pub worker_id: usize,
+    pub algorithm_name: String,
+    pub pool_name: String,
+    pub factory: F,
+    pub algorithm_config: AlgorithmConfig,
+    pub market_data: MarketData,
+    pub derived_data: SharedDerivedDataRef,
+    pub task_rx: async_channel::Receiver<SolveTask>,
+    pub event_rx: broadcast::Receiver<MarketEvent>,
+    pub derived_event_rx: broadcast::Receiver<DerivedDataEvent>,
+    pub shutdown_rx: broadcast::Receiver<()>,
+    pub liquidity_scope: LiquidityScope,
+    pub exclude_protocols: Vec<String>,
+    pub fallback_fee_tiers: SharedFeeTiers,
+    pub respawn_policy: RespawnPolicy,
+    pub on_worker_gave_up: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl<A, F> WorkerContext<A, F>
+where
+    A: crate::algorithm::Algorithm + 'static,
+    A::GraphManager:
+        crate::feed::events::MarketEventHandler + crate::graph::EdgeWeightUpdaterWithDerived,
+    F: Fn(AlgorithmConfig) -> A + Send + Sync + 'static,
+{
+    /// Runs worker sessions until clean shutdown or give-up.
+    ///
+    /// Panics (e.g. pool math dividing by zero) are contained to the current
+    /// session so one bad task cannot permanently kill the worker thread.
+    pub(crate) fn run_sessions(mut self) {
+        let mut respawn = RespawnState::new(self.respawn_policy);
+        loop {
+            // Fresh receivers for this session; the previous session's receivers
+            // were moved into it and dropped when it ended.
+            let session_event_rx = self.event_rx.resubscribe();
+            let session_derived_event_rx = self.derived_event_rx.resubscribe();
+            let session_shutdown_rx = self.shutdown_rx.resubscribe();
+
+            // A shutdown sent while no session was listening (e.g. mid-respawn) is
+            // buffered in the receiver created before the thread started.
+            match self.shutdown_rx.try_recv() {
+                Err(broadcast::error::TryRecvError::Empty) => {}
+                // Received a shutdown, or the pool dropped the sender.
+                _ => break,
+            }
+
+            let session_started = Instant::now();
+            let session_result = catch_unwind(AssertUnwindSafe(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to create tokio runtime");
+
+                rt.block_on(async {
+                    let algorithm = (self.factory)(self.algorithm_config.clone());
+
+                    let mut worker = SolverWorker::new(
+                        self.market_data.clone(),
+                        Arc::clone(&self.derived_data),
+                        algorithm,
+                        self.worker_id,
+                        self.pool_name.clone(),
+                    )
+                    .with_liquidity_scope(self.liquidity_scope)
+                    .with_exclude_protocols(self.exclude_protocols.clone())
+                    .with_fallback_fee_tiers(self.fallback_fee_tiers.clone());
+
+                    worker.initialize_graph().await;
+                    worker
+                        .run(
+                            session_event_rx,
+                            session_derived_event_rx,
+                            self.task_rx.clone(),
+                            session_shutdown_rx,
+                        )
+                        .await;
+                });
+            }));
+
+            match session_result {
+                Ok(()) => break,
+                Err(panic_payload) => {
+                    let panic_message = panic_payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| {
+                            panic_payload
+                                .downcast_ref::<String>()
+                                .map(String::as_str)
+                        })
+                        .unwrap_or("<non-string panic payload>");
+                    error!(
+                        pool = %self.pool_name,
+                        algorithm = %self.algorithm_name,
+                        worker_id = self.worker_id,
+                        panic = %panic_message,
+                        "worker thread panicked; respawning worker"
+                    );
+                    metrics::counter!(
+                        "worker_pool_worker_panics_total",
+                        "pool" => self.pool_name.clone()
+                    )
+                    .increment(1);
+                    match respawn.on_failure(session_started.elapsed()) {
+                        FailureAction::Retry(delay) => thread::sleep(delay),
+                        FailureAction::GiveUp => {
+                            error!(
+                                pool = %self.pool_name,
+                                worker_id = self.worker_id,
+                                "worker gave up after repeated rapid panics"
+                            );
+                            (self.on_worker_gave_up)();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     fn fast_policy() -> RespawnPolicy {
         RespawnPolicy {
