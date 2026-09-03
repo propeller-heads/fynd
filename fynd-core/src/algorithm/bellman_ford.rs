@@ -89,6 +89,18 @@ pub(crate) struct BellmanFordContext {
     pub(crate) scoring: RouteScoringMode,
 }
 
+impl BellmanFordContext {
+    /// Re-points the context at new endpoints, so one snapshot can serve many solves.
+    ///
+    /// Everything else — subgraph, token metadata, market snapshot — is reused as-is, so the
+    /// caller must pick nodes inside the subgraph the context was built from. A node outside
+    /// it has no adjacency entries, so a solve from it finds no route rather than panicking.
+    pub(crate) fn reroot(&mut self, token_in_node: NodeIndex, token_out_node: Option<NodeIndex>) {
+        self.token_in_node = token_in_node;
+        self.token_out_node = token_out_node;
+    }
+}
+
 /// Controls how `find_single_route` ranks candidate routes after simulation.
 pub(crate) enum RouteScoringMode {
     /// Rank by gross output (ignore gas cost). Used when the caller accounts for gas externally.
@@ -219,8 +231,14 @@ impl BellmanFordAlgorithm {
         ))
     }
 
-    /// A context whose subgraph is bounded only by `max_hops` around `token_in` — no destination
-    /// prunes it. Having no destination, it cannot serve `find_single_route`.
+    /// A context whose subgraph is everything within `walk_hops` of `token_in` — no destination
+    /// prunes it. Having no destination, it cannot serve `find_single_route` until
+    /// [`reroot`](BellmanFordContext::reroot) gives it one.
+    ///
+    /// `walk_hops` bounds the subgraph, not route length — routes stay bounded by the
+    /// algorithm's own `max_hops`. A caller that re-roots the context at tokens away from
+    /// `token_in` walks further than it routes: a route of `max_hops` hops back to `token_in`
+    /// can start `max_hops` away, and the walk must include that node's outgoing edges.
     ///
     /// Reads the market unlabeled and no derived data. `None` when `token_in` is not in the
     /// graph or nothing is reachable from it.
@@ -229,12 +247,13 @@ impl BellmanFordAlgorithm {
         graph: &StableDiGraph<()>,
         market: MarketData,
         token_in: &Address,
+        walk_hops: usize,
     ) -> Option<BellmanFordContext> {
         let token_in_node = graph
             .node_indices()
             .find(|&n| &graph[n] == token_in)?;
         let subgraph =
-            Self::get_subgraph(graph, token_in_node, None, self.max_hops, &RouteExclusions::default())?;
+            Self::get_subgraph(graph, token_in_node, None, walk_hops, &RouteExclusions::default())?;
         let market_view = market.read().await;
         Some(self.snapshot_context(
             graph,
@@ -877,7 +896,26 @@ impl BellmanFordAlgorithm {
         // the outgoing one needs no reversed index.
         let hops_to_token_out = token_out
             .map(|token_out| Self::get_hops_to_reach(graph, token_in, token_out, max_hops, exclusions));
+        Self::get_subgraph_with_hop_map(
+            graph,
+            (token_in, token_out),
+            hops_to_token_out.as_ref(),
+            max_hops,
+            exclusions,
+        )
+    }
 
+    /// [`get_subgraph`](Self::get_subgraph) with the destination's hop map supplied by the
+    /// caller, for walks that share one destination: the map costs a BFS over the graph, and a
+    /// caller pruning many sources toward the same destination should pay it once.
+    pub(crate) fn get_subgraph_with_hop_map<'a>(
+        graph: &'a StableDiGraph<()>,
+        endpoints: (NodeIndex, Option<NodeIndex>),
+        hops_to_token_out: Option<&FxHashMap<NodeIndex, usize>>,
+        max_hops: usize,
+        exclusions: &RouteExclusions,
+    ) -> Option<Subgraph<'a>> {
+        let (token_in, token_out) = endpoints;
         let mut adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = FxHashMap::default();
         let mut token_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
         let mut component_ids: FxHashSet<&ComponentId> = FxHashSet::default();
@@ -955,7 +993,7 @@ impl BellmanFordAlgorithm {
     /// Every node within `max_hops` of `token_out`, and its distance to that destination.
     ///
     /// Counts only allowed hops, skipping excluded pools and intermediate tokens.
-    fn get_hops_to_reach(
+    pub(crate) fn get_hops_to_reach(
         graph: &StableDiGraph<()>,
         token_in: NodeIndex,
         token_out: NodeIndex,
@@ -1599,7 +1637,7 @@ mod tests {
 
         let algo = bf_algorithm(3, 1000);
         let ctx = algo
-            .build_context_from_source_token(manager.graph(), market, &token_g.address)
+            .build_context_from_source_token(manager.graph(), market, &token_g.address, 3)
             .await
             .expect("gas token has outgoing edges");
         let routes = algo.find_routes_from_source_token(
@@ -1625,13 +1663,56 @@ mod tests {
 
         let algo = bf_algorithm(3, 1000);
         let ctx = algo
-            .build_context_from_source_token(manager.graph(), market, &token_a.address)
+            .build_context_from_source_token(manager.graph(), market, &token_a.address, 3)
             .await
             .expect("source has outgoing edges");
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algo.find_single_route(&ctx, &ord, FindRouteOptions::default());
         assert!(matches!(result, Err(AlgorithmError::Other(_))));
+    }
+
+    #[tokio::test]
+    async fn test_find_single_route_after_reroot() {
+        // A context built from G, re-rooted at C, solves the reverse direction C->B->G
+        // against the same snapshot: one context serves solves from any node it covers.
+        let token_g = token(0x01, "G");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let (market, manager) = setup_market_bf(vec![
+            ("component_gb", &token_g, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+        let graph = manager.graph();
+
+        let algo = bf_algorithm(3, 1000);
+        let mut ctx = algo
+            .build_context_from_source_token(graph, market, &token_g.address, 3)
+            .await
+            .expect("source has outgoing edges");
+        let node_of = |address: &Address| {
+            graph
+                .node_indices()
+                .find(|&n| &graph[n] == address)
+                .expect("token is in the graph")
+        };
+
+        let gas_node = ctx.token_in_node;
+        ctx.reroot(node_of(&token_c.address), Some(gas_node));
+        let ord = order(&token_c, &token_g, 100, OrderSide::Sell);
+        let result = algo
+            .find_single_route(&ctx, &ord, FindRouteOptions::default())
+            .expect("re-rooted context solves back to its source");
+
+        // 100 C -> 50 B -> 25 G through the two fee-free 2.0 pools read in reverse.
+        let amount_to_g: BigUint = result
+            .route()
+            .swaps()
+            .iter()
+            .filter(|swap| swap.token_out() == &token_g.address)
+            .map(Swap::amount_out)
+            .sum();
+        assert_eq!(amount_to_g, BigUint::from(25u64));
     }
 
     #[tokio::test]
