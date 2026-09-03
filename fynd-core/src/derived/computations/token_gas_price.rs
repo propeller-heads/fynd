@@ -237,11 +237,7 @@ impl TokenGasPriceComputation {
 
         // One relaxation from the gas token yields the buy amount and path for every token it
         // reaches, so the buy side costs a single pass however many tokens are priced.
-        let buys = algorithm.reach_from_source_token(
-            &ctx,
-            &self.simulation_amount,
-            FindRouteOptions::default(),
-        );
+        let buys = algorithm.reach_from_source_token(&ctx, &self.simulation_amount);
 
         let gas_node = ctx.token_in_node;
         let token_nodes = ctx

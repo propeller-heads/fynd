@@ -357,9 +357,8 @@ impl BellmanFordAlgorithm {
         &self,
         ctx: &BellmanFordContext,
         amount_in: &BigUint,
-        opts: FindRouteOptions,
     ) -> FxHashMap<Address, ReachedToken> {
-        let spfa = self.run_spfa(ctx, amount_in, &opts.overrides, Instant::now());
+        let spfa = self.run_spfa(ctx, amount_in, &MarketOverrides::default(), Instant::now());
 
         let mut reached = FxHashMap::default();
         let mut dropped = 0usize;
@@ -1572,8 +1571,7 @@ mod tests {
             .build_context_from_source_token(manager.graph(), market, &token_g.address, 3)
             .await
             .expect("gas token has outgoing edges");
-        let routes =
-            algo.reach_from_source_token(&ctx, &BigUint::from(100u64), FindRouteOptions::default());
+        let routes = algo.reach_from_source_token(&ctx, &BigUint::from(100u64));
 
         let reached: FxHashSet<Address> = routes.keys().cloned().collect();
         let expected: FxHashSet<Address> = [&token_a, &token_b, &token_c]
