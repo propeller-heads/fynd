@@ -89,14 +89,3 @@ fn test_oz_v5_allowances_ns_is_balances_ns_plus_one() {
         U256::from_be_bytes(*OZ_V5_BALANCES_NS) + U256::from(1_u8)
     );
 }
-
-#[test]
-fn test_cached_positions_compute_expected_slots() {
-    let positions =
-        Erc20SlotPositions::new(MappingPosition::Standard(3), MappingPosition::OpenZeppelinV5);
-    assert_eq!(positions.balance_slot(usdc()), balance_slot_at(usdc(), 3));
-    assert_eq!(
-        positions.allowance_slot(usdc(), weth()),
-        allowance_slot_at_b256(usdc(), weth(), OZ_V5_ALLOWANCES_NS)
-    );
-}

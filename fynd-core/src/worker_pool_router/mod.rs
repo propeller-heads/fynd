@@ -56,6 +56,10 @@ use crate::{
     SolveError, SolveParams, SurplusInfo, Swap,
 };
 
+/// Reported when a request asks for simulation on a server started without `--enable-simulation`.
+const SIMULATION_UNAVAILABLE: &str =
+    "simulation requested but simulation is not enabled on this server";
+
 /// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
 /// first quote that overlays an exclusive-access candidate.
 const ENV_USER_IMPROVEMENT_SHARE_BPS: &str = "EXCLUSIVE_ROUTE_USER_SHARE_BPS";
@@ -601,21 +605,19 @@ impl WorkerPoolRouter {
     /// # Errors
     ///
     /// Returns [`SolveError::Internal`] when the request asks for simulation and the server was
-    /// built without a simulator.
+    /// started without `--enable-simulation`.
     pub async fn simulate_quotes(
         &self,
-        mut order_quotes: Vec<OrderQuote>,
+        order_quotes: Vec<OrderQuote>,
         encoding_options: &EncodingOptions,
     ) -> Result<Vec<OrderQuote>, SolveError> {
         if !encoding_options.simulate() {
             return Ok(order_quotes);
         }
         let Some(simulator) = self.simulator.as_ref() else {
-            return Err(SolveError::Internal(
-                "simulation requested but simulation is not enabled on this server".to_string(),
-            ));
+            return Err(SolveError::Internal(SIMULATION_UNAVAILABLE.to_string()));
         };
-
+        let mut order_quotes = order_quotes;
         futures::future::join_all(
             order_quotes
                 .iter_mut()
@@ -1728,10 +1730,7 @@ mod tests {
             .await
             .expect_err("simulation requires a configured simulator");
 
-        assert_eq!(
-            error.to_string(),
-            "internal error: simulation requested but simulation is not enabled on this server"
-        );
+        assert_eq!(error.to_string(), format!("internal error: {SIMULATION_UNAVAILABLE}"));
     }
 
     #[tokio::test]
@@ -1746,10 +1745,7 @@ mod tests {
             .await
             .expect_err("simulation requires a configured simulator");
         worker.abort();
-        assert_eq!(
-            error.to_string(),
-            "internal error: simulation requested but simulation is not enabled on this server"
-        );
+        assert_eq!(error.to_string(), format!("internal error: {SIMULATION_UNAVAILABLE}"));
     }
 
     /// Builds a simulator whose provider answers from `asserter`. Its native token is the mock

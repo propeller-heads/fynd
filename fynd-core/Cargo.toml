@@ -38,7 +38,16 @@ typetag.workspace = true
 tycho-execution.workspace = true
 reqwest.workspace = true
 tokio-tungstenite.workspace = true
-alloy = { workspace = true, features = ["sol-types", "signer-local", "providers", "provider-http", "rpc-types-eth"] }
+alloy = { workspace = true, features = [
+    "sol-types",
+    "signer-local",
+    "providers",
+    "provider-http",
+    "rpc-types-eth",
+    # `debug_traceCall`, which quote simulation uses to find a token's storage layout and to read
+    # the error a reverting call carries.
+    "provider-debug-api",
+] }
 
 [features]
 test-utils = []

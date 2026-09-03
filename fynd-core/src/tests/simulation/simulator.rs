@@ -7,12 +7,16 @@ use alloy::{
         json_rpc::ErrorPayload,
         types::simulate::{SimCallResult, SimulatedBlock},
     },
+    sol_types::SolError,
     transports::mock::Asserter,
 };
 use num_bigint::BigUint;
 
 use super::*;
-use crate::simulation::erc20_slots::MappingPosition;
+use crate::simulation::{
+    deviation::fixtures::quote_with_fees,
+    token_layout::{KeyOrder, MappingPosition, TokenLayout},
+};
 
 #[test]
 fn test_success_reports_amount_out_and_gas_used() {
@@ -30,31 +34,15 @@ fn test_revert_reports_no_gas() {
 }
 
 #[test]
-fn test_decode_revert_reason_decodes_error_string() {
-    let mut data = Error::SELECTOR.to_vec();
-    Error("no liquidity".to_string()).abi_encode_raw(&mut data);
-    assert_eq!(decode_revert_reason(Some(&data), "node error"), "reverted: no liquidity");
-}
-
-#[test]
-fn test_decode_revert_reason_keeps_unknown_data() {
-    assert_eq!(decode_revert_reason(Some(&[1, 2, 3]), "node error"), "reverted with data 0x010203");
-}
-
-#[test]
-fn test_decode_revert_reason_keeps_node_message_without_data() {
-    assert_eq!(decode_revert_reason(None, "node error"), "node error");
-}
-
-#[test]
 fn test_token_overrides_fund_both_holders_and_both_spenders() {
     let sender = Address::repeat_byte(1);
     let router = Address::repeat_byte(2);
     let token = Address::repeat_byte(3);
     let permit2 = Address::repeat_byte(4);
-    let positions =
-        Erc20SlotPositions::new(MappingPosition::Standard(5), MappingPosition::Standard(6));
-    let overrides = token_overrides(sender, token, router, permit2, positions);
+    let balance = MappingPosition::Direct { base: 5, key_order: KeyOrder::Solidity };
+    let allowance = MappingPosition::Direct { base: 6, key_order: KeyOrder::Solidity };
+    let layout = TokenLayout::new(token, balance, allowance);
+    let overrides = token_overrides(sender, router, permit2, layout);
     let state_diff = overrides
         .get(&token)
         .and_then(|override_| override_.state_diff.as_ref())
@@ -62,10 +50,10 @@ fn test_token_overrides_fund_both_holders_and_both_spenders() {
 
     // A `transfer_from` route pulls from the sender and a `use_vaults_funds` one from the router,
     // so both hold a balance and the sender approves both spenders a route can name.
-    assert!(state_diff.contains_key(&positions.balance_slot(sender)));
-    assert!(state_diff.contains_key(&positions.balance_slot(router)));
-    assert!(state_diff.contains_key(&positions.allowance_slot(sender, router)));
-    assert!(state_diff.contains_key(&positions.allowance_slot(sender, permit2)));
+    assert!(state_diff.contains_key(&layout.balance_slot(sender)));
+    assert!(state_diff.contains_key(&layout.balance_slot(router)));
+    assert!(state_diff.contains_key(&layout.allowance_slot(sender, router)));
+    assert!(state_diff.contains_key(&layout.allowance_slot(sender, permit2)));
     assert_eq!(state_diff.len(), 4);
 }
 
@@ -107,6 +95,17 @@ fn test_block_overrides_leave_nothing_a_pool_reads_at_zero() {
     assert_eq!(overrides.gas_limit, Some(SIMULATION_BLOCK_GAS_LIMIT));
     assert_ne!(overrides.random, Some(B256::ZERO));
     assert!(overrides.random.is_some());
+}
+
+/// The funding value is what makes a simulated sender solvent, and it is bounded on both sides:
+/// too small starves a large trade, too large overflows a rebasing token's balance arithmetic.
+#[test]
+fn test_funding_value_is_ten_to_the_thirty_sixth() {
+    let ten = U256::from(10_u8);
+    assert_eq!(SIMULATION_FUNDING_VALUE, ten.pow(U256::from(36_u8)));
+    // Room left above the value, so a token that packs flags into the balance word still reads
+    // it back unchanged.
+    assert!(SIMULATION_FUNDING_VALUE < U256::MAX >> 128);
 }
 
 #[test]
@@ -155,10 +154,9 @@ async fn test_simulate_call_against_mocked_provider() {
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
     )
-    .await
-    .into_result();
+    .await;
     assert!(
-        matches!(result, SimulationResult::Success { amount_out, gas_used } if amount_out == BigUint::from(123_u64) && gas_used == 87_654)
+        matches!(result, CallOutcome::Success { amount_out, gas_used } if amount_out == BigUint::from(123_u64) && gas_used == 87_654)
     );
 }
 
@@ -175,16 +173,17 @@ async fn test_simulated_call_rejects_non_uint256_return_data() {
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
     )
-    .await
-    .into_result();
-    assert!(matches!(result, SimulationResult::Failure { reason } if reason.contains("31 bytes")));
+    .await;
+    assert!(matches!(result, CallOutcome::Failure(reason) if reason.contains("31 bytes")));
 }
 
 #[tokio::test]
 async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
     let asserter = Asserter::new();
-    let mut revert_data = Error::SELECTOR.to_vec();
-    Error("insufficient output".to_string()).abi_encode_raw(&mut revert_data);
+    let revert_data = crate::simulation::revert::SolidityErrors::Error {
+        reason: "insufficient output".to_string(),
+    }
+    .abi_encode();
     asserter.push_failure(ErrorPayload::internal_error_with_message_and_obj(
         "execution reverted".into(),
         serde_json::value::to_raw_value(&format!("0x{}", alloy::hex::encode(&revert_data)))
@@ -199,35 +198,58 @@ async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
     )
-    .await
-    .into_result();
+    .await;
     assert!(
-        matches!(result, SimulationResult::Failure { reason } if reason.contains("reverted: insufficient output"))
+        matches!(result, CallOutcome::Failure(reason) if reason.contains("reverted: insufficient output"))
     );
 }
 
 #[tokio::test]
-async fn test_slot_cache_reuses_resolved_positions_without_more_probes() {
+async fn test_layout_cache_reuses_a_resolved_layout() {
     let asserter = Asserter::new();
-    for _ in 0..44 {
-        asserter.push_success(&Bytes::from(
-            B256::from(U256::from_limbs([0xdead_beef, 0, 0, 0]))
-                .as_slice()
-                .to_vec(),
-        ));
-    }
     let simulator = mocked_simulator(&asserter, Duration::from_secs(1));
     let token = Address::repeat_byte(3);
+    let layout = TokenLayout::new(
+        token,
+        MappingPosition::Direct { base: 0, key_order: KeyOrder::Solidity },
+        MappingPosition::Direct { base: 1, key_order: KeyOrder::Solidity },
+    );
     simulator
-        .cached_positions(token, Address::repeat_byte(1), Address::repeat_byte(2))
+        .layout_cache
+        .lock()
+        .expect("layout cache lock")
+        .insert(token, Ok(layout));
+
+    let resolved = simulator
+        .cached_layout(token, Address::repeat_byte(1), Address::repeat_byte(2))
         .await
-        .expect("probes resolve slots");
-    assert!(asserter.read_q().is_empty());
+        .expect("cache resolves layout");
+
+    assert_eq!(resolved, layout);
+    // The mock queues no response, so a discovery attempt would fail rather than pass silently.
+    assert!(asserter.read_q().is_empty(), "a cached layout makes no RPC call");
+}
+
+/// A token this build cannot resolve is remembered as such. Rediscovering it would spend a trace
+/// and up to 64 `eth_call`s on every quote that touches it.
+#[tokio::test]
+async fn test_layout_cache_reuses_an_unresolvable_verdict() {
+    let asserter = Asserter::new();
+    let simulator = mocked_simulator(&asserter, Duration::from_secs(1));
+    let token = Address::repeat_byte(4);
     simulator
-        .cached_positions(token, Address::repeat_byte(1), Address::repeat_byte(2))
+        .layout_cache
+        .lock()
+        .expect("layout cache lock")
+        .insert(token, Err("no supported balance mapping".to_string()));
+
+    let error = simulator
+        .cached_layout(token, Address::repeat_byte(1), Address::repeat_byte(2))
         .await
-        .expect("cache resolves slots");
-    assert!(asserter.read_q().is_empty());
+        .expect_err("the token stays unresolvable");
+
+    assert!(error.contains("no supported balance mapping"), "{error}");
+    assert!(asserter.read_q().is_empty(), "a remembered verdict makes no RPC call");
 }
 
 /// A server that accepts the connection and never answers, so the request outlives the timeout.
@@ -270,111 +292,6 @@ async fn test_simulation_times_out_when_the_node_does_not_answer() {
     assert!(
         matches!(attempt.into_result(), SimulationResult::Failure { reason } if reason.contains("timed out"))
     );
-}
-
-/// Router fee the fixture charges, in output-token units.
-const FIXTURE_ROUTER_FEE: u64 = 7_000;
-
-/// Client fee the fixture charges, in output-token units.
-const FIXTURE_CLIENT_FEE: u64 = 3_000;
-
-/// A quote whose raw output is `RAW_AMOUNT_OUT` and whose fees leave `after_fees` receivable.
-///
-/// `max_slippage` is non-zero, so a baseline that used `min_amount_received` on its own would fail
-/// these tests rather than pass them.
-fn quote_with_fees(after_fees: u64) -> OrderQuote {
-    let slippage = after_fees / 100;
-    let mut quote = quote_without_fees();
-    quote.set_amount_out(BigUint::from(after_fees + FIXTURE_ROUTER_FEE + FIXTURE_CLIENT_FEE));
-    quote.set_fee_breakdown(crate::FeeBreakdown::new(
-        BigUint::from(FIXTURE_ROUTER_FEE),
-        BigUint::from(FIXTURE_CLIENT_FEE),
-        BigUint::from(slippage),
-        BigUint::from(after_fees - slippage),
-    ));
-    quote
-}
-
-/// The same quote before encoding computes its fees.
-fn quote_without_fees() -> OrderQuote {
-    OrderQuote::new(
-        "test-order".to_string(),
-        crate::QuoteStatus::Success,
-        BigUint::from(1_000u64),
-        BigUint::from(1_000_000u64),
-        BigUint::from(50_000u64),
-        BigUint::from(1_000_000u64),
-        crate::BlockInfo::new(1, "0x1".to_string(), 1),
-        "test_algorithm".to_string(),
-        tycho_simulation::tycho_common::Bytes::from(vec![0xAA; 20]),
-        tycho_simulation::tycho_common::Bytes::from(vec![0xAA; 20]),
-        "1".to_string(),
-    )
-}
-
-#[test]
-fn test_deviation_bps_simulated_below_quote() {
-    let deviation = deviation_bps(&quote_with_fees(1_000_000), &BigUint::from(999_000u64))
-        .expect("a quote carrying fees has a baseline");
-
-    assert!((deviation - -10.0).abs() < 1e-9, "got {deviation}");
-}
-
-#[test]
-fn test_deviation_bps_simulated_above_quote() {
-    let deviation = deviation_bps(&quote_with_fees(1_000_000), &BigUint::from(1_001_000u64))
-        .expect("a quote carrying fees has a baseline");
-
-    assert!((deviation - 10.0).abs() < 1e-9, "got {deviation}");
-}
-
-/// The router returns the output after it takes its fees, so the baseline must be the quoted
-/// amount less those fees. Comparing against the raw `amount_out` would read this as a shortfall
-/// the size of the fee.
-#[test]
-fn test_deviation_bps_excludes_the_router_fee_from_the_baseline() {
-    let quote = quote_with_fees(1_000_000);
-    let after_fees = quote
-        .fee_breakdown()
-        .expect("the quote carries fees")
-        .min_amount_received() +
-        quote
-            .fee_breakdown()
-            .expect("the quote carries fees")
-            .max_slippage();
-
-    let deviation =
-        deviation_bps(&quote, &after_fees).expect("a quote carrying fees has a baseline");
-
-    assert!(deviation.abs() < 1e-9, "a simulation matching the post-fee quote is not a deviation");
-    assert!(after_fees < *quote.amount_out(), "the baseline sits below the raw swap output");
-}
-
-#[test]
-fn test_deviation_bps_without_a_fee_breakdown() {
-    assert_eq!(deviation_bps(&quote_without_fees(), &BigUint::from(1_000u64)), None);
-}
-
-#[test]
-fn test_deviation_bps_zero_quoted_amount() {
-    let mut quote = quote_with_fees(1_000_000);
-    quote.set_fee_breakdown(crate::FeeBreakdown::new(
-        BigUint::ZERO,
-        BigUint::ZERO,
-        BigUint::ZERO,
-        BigUint::ZERO,
-    ));
-
-    assert_eq!(deviation_bps(&quote, &BigUint::from(1_000u64)), None);
-}
-
-/// An amount past `f64` saturates to infinity rather than failing to convert, so the ratio is
-/// rejected on being non-finite. Recording it would put `inf` in the histogram.
-#[test]
-fn test_deviation_bps_amount_beyond_f64() {
-    let huge = BigUint::from(1u8) << 2_000;
-
-    assert_eq!(deviation_bps(&quote_with_fees(1_000_000), &huge), None);
 }
 
 /// Names every metric a run recorded, with its labels and value.

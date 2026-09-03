@@ -70,30 +70,6 @@ pub enum MappingPosition {
     OpenZeppelinV5,
 }
 
-/// Resolved ERC-20 positions that can be cached per token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Erc20SlotPositions {
-    balance: MappingPosition,
-    allowance: MappingPosition,
-}
-
-impl Erc20SlotPositions {
-    /// Creates resolved balance and allowance mapping positions.
-    pub const fn new(balance: MappingPosition, allowance: MappingPosition) -> Self {
-        Self { balance, allowance }
-    }
-
-    /// Computes a holder's balance storage slot without an RPC probe.
-    pub fn balance_slot(&self, holder: Address) -> B256 {
-        balance_slot_for_position(holder, self.balance)
-    }
-
-    /// Computes an owner's allowance storage slot without an RPC probe.
-    pub fn allowance_slot(&self, owner: Address, spender: Address) -> B256 {
-        allowance_slot_for_position(owner, spender, self.allowance)
-    }
-}
-
 /// Computes a standard Solidity balance mapping slot.
 pub fn balance_slot_at(holder: Address, position: u64) -> B256 {
     let mut buffer = [0_u8; 64];
@@ -237,20 +213,6 @@ pub async fn find_allowance_position(
         return Err(Erc20SlotError::NotFound { token, mapping: "allowance" });
     };
     Ok(position)
-}
-
-/// Resolves both ERC-20 mapping positions for a token.
-pub async fn find_slot_positions(
-    provider: &RootProvider<Ethereum>,
-    token: Address,
-    holder: Address,
-    spender: Address,
-) -> Result<Erc20SlotPositions, Erc20SlotError> {
-    let (balance, allowance) = tokio::join!(
-        find_balance_position(provider, token, holder),
-        find_allowance_position(provider, token, holder, spender)
-    );
-    Ok(Erc20SlotPositions::new(balance?, allowance?))
 }
 
 /// Finds the full storage slot that holds an ERC-20 balance.
