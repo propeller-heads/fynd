@@ -68,7 +68,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, component (pool) depths, token gas prices
 8. **Encoding** (`fynd-core/src/encoding/`) — Encodes solved routes into on-chain transactions via `TychoEncoder`
 9. **Graph** (`fynd-core/src/graph/`) — `GraphManager` trait + `PetgraphStableDiGraphManager` implementation
-10. **Simulation** (`fynd-core/src/simulation/`) — ERC-20 slot discovery and `eth_simulateV1` quote simulation
+10. **Simulation** (`fynd-core/src/simulation/`) — trace-guided ERC-20 storage-layout discovery, `eth_simulateV1` quote simulation, and revert decoding. Enabled per deployment with `--enable-simulation`
 
 ### Data Flow
 
