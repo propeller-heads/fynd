@@ -1,4 +1,5 @@
 import { keccak256, serializeTransaction } from 'viem';
+import { FyndError } from './error.js';
 import type { Address, Hex, Quote } from './types.js';
 
 /** An unsigned EIP-1559 `approve(spender, amount)` transaction. */
@@ -71,6 +72,23 @@ export interface SettleOptions {
 
 /** Default timeout for {@link ExecutionReceipt.settle} (120 seconds). */
 export const DEFAULT_SETTLE_TIMEOUT_MS = 120_000;
+
+/** Length of an ECDSA signature (r, s, v) in bytes. */
+export const SIGNATURE_BYTES = 65;
+
+/**
+ * Throws unless `signature` is a 65-byte hex string.
+ *
+ * `label` names the signature in the error message, e.g. `'Permit2'`.
+ */
+export function assertSignatureLength(signature: Hex, label: string): void {
+  const hexChars = SIGNATURE_BYTES * 2 + 2;
+  if (signature.length !== hexChars) {
+    throw FyndError.config(
+      `${label} signature must be exactly ${String(SIGNATURE_BYTES)} bytes (${String(hexChars)} hex chars), got ${String(signature.length)} chars`
+    );
+  }
+}
 
 /** Handle returned by {@link FyndClient.executeSwap} to await transaction settlement. */
 export interface ExecutionReceipt {

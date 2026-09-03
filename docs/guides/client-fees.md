@@ -60,9 +60,17 @@ min_amount_received  = 994,990 - 9,949                   = 985,041
 ## Setting up client fees
 
 1. Set a fee in basis points (e.g. `50` = 0.5%), a receiver address, and a `maxClientContribution`.
-2. Have the fee receiver sign an EIP-712 `ClientFee` message authorizing these parameters.
-3. Attach the signed params to `EncodingOptions.clientFeeParams`.
-4. The router verifies the signature on-chain and deducts the fee. Fees go to the receiver's vault balance.
+2. Request a quote with those params and **no signature**, via `EncodingOptions.clientFeeParams`. The
+   response holds the encoded transaction with a zeroed 65-byte signature placeholder, plus
+   `fee_breakdown.swaps_hash` and `transaction.client_fee_signature_offset`.
+3. Have the fee receiver sign the EIP-712 `ClientFee` message, which binds the fee params to the
+   quoted swap.
+4. Patch the signature into the calldata at `client_fee_signature_offset` and submit the transaction.
+5. The router verifies the signature on-chain and deducts the fee. Fees go to the receiver's vault balance.
+
+One quote request per swap is enough — the signature is patched into the calldata you already
+have. Do not re-quote after signing: the signature covers `expectedAmountOut` and the quoted
+swaps, so a fresh quote invalidates it.
 
 Without `ClientFeeParams`, no client fee is charged. [Fynd fees](router-fees.md) still apply.
 
@@ -109,30 +117,52 @@ client library helpers sign the scaled value rather than the raw bps.
 {% tabs %}
 {% tab title="TypeScript" %}
 ```typescript
-// Build fee params (without signature).
+// Step 1: request a quote using unsigned client fee params. The server encodes the full
+// calldata with a 65-byte signature placeholder and returns `swapsHash` in the fee breakdown
+// plus `clientFeeSignatureOffset` in the transaction, so the client can patch the real
+// signature in.
 const feeParams: ClientFeeParams = {
-    bps: 50,              // 0.5% fee
-    receiver: feeReceiver,
-    maxContribution: 0n,  // no vault subsidy
-    deadline: 1893456000, // Unix timestamp
+  bps: FEE_BPS,
+  receiver: feeAccount.address,
+  maxContribution: 0n, // no vault subsidy
+  deadline: Math.floor(Date.now() / 1000) + 3600,
 };
-
-// Compute the EIP-712 hash and sign with the fee receiver's wallet. The swap context comes
-// from a prior unsigned quote.
-const hash = clientFeeSigningHash(feeParams, 1, routerAddress, {
-    amountIn: quote.amountIn,
-    tokenIn: sellToken,
-    tokenOut: buyToken,
-    expectedAmountOut: quote.amountOut,
-    minAmountOut: quote.feeBreakdown.minAmountReceived,
-    receiver: sender,
-    swapsHash: quote.feeBreakdown.swapsHash,
+const quote = await client.quote({
+  order: {
+    tokenIn: WETH,
+    tokenOut: USDC,
+    amount: SELL_AMOUNT,
+    side: 'sell',
+    sender: account.address,
+  },
+  options: { encodingOptions: withClientFee(encodingOptions(SLIPPAGE), feeParams) },
 });
-const signature = await account.signMessage({message: {raw: hash}});
 
-// Attach signature and wire into encoding options.
-const opts = withClientFee(encodingOptions(0.005), {...feeParams, signature});
+const feeBreakdown = quote.feeBreakdown;
+if (feeBreakdown?.swapsHash === undefined) {
+  throw new Error('no swapsHash — server must support client fee signing');
+}
+
+// Step 2: sign the full 11-field EIP-712 ClientFee hash with the fee receiver's key.
+// `quote.receiver` defaults to the sender when the order has no explicit receiver.
+const hash = clientFeeSigningHash(feeParams, chainId, routerAddress, {
+  amountIn: quote.amountIn,
+  tokenIn: WETH,
+  tokenOut: USDC,
+  expectedAmountOut: quote.amountOut,
+  minAmountOut: feeBreakdown.minAmountReceived,
+  receiver: quote.receiver,
+  swapsHash: feeBreakdown.swapsHash,
+});
+// `sign` signs the digest as-is. `signMessage` would add the EIP-191 prefix and the router
+// would recover the wrong signer.
+const signature = await feeAccount.sign({ hash });
+
+// Step 3: patch the real signature into the calldata — no second quote request.
+const signed = patchClientFeeSignature(quote, signature);
 ```
+
+See the full working example: [`clients/typescript/examples/swap-client-fee/main.ts`](../../clients/typescript/examples/swap-client-fee/main.ts)
 {% endtab %}
 
 {% tab title="Rust" %}

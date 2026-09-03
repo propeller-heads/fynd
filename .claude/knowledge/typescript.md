@@ -1,7 +1,7 @@
 # TypeScript Client (`@kayibal/fynd-client`)
 
 TypeScript client for the Fynd RPC API. Lives in `clients/typescript/` as a pnpm workspace with
-two packages: `client` and `examples/tutorial`.
+three packages: `client`, `examples/tutorial`, and `examples/swap-client-fee`.
 
 ## Workspace Structure
 
