@@ -172,7 +172,14 @@ impl ComputationManagerConfig {
 
 impl Default for ComputationManagerConfig {
     fn default() -> Self {
-        Self { gas_token: Address::zero(20), max_hop: 2, depth_slippage_threshold: 0.01 }
+        // FyndBuilder overrides max_hop with the deepest configured pool's max_hops, so that
+        // every quotable token is priceable; the default only serves manual construction and
+        // matches the default pool depth.
+        Self {
+            gas_token: Address::zero(20),
+            max_hop: crate::solver::defaults::POOL_MAX_HOPS,
+            depth_slippage_threshold: 0.01,
+        }
     }
 }
 

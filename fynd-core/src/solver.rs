@@ -399,6 +399,14 @@ impl PoolEntry {
             PoolEntry::Custom(custom) => custom.liquidity_scope,
         }
     }
+
+    /// Returns the longest route this worker pool may build.
+    fn max_hops(&self) -> usize {
+        match self {
+            PoolEntry::BuiltIn { max_hops, .. } => *max_hops,
+            PoolEntry::Custom(custom) => custom.max_hops,
+        }
+    }
 }
 
 /// Worker pool entry backed by a custom [`Algorithm`] implementation.
@@ -775,8 +783,18 @@ impl FyndBuilder {
         let market_event_tx = tycho_feed.event_sender();
 
         let gas_token = native_token(&self.chain).map_err(|_| SolverBuildError::GasToken)?;
+        // Pricing must reach every token a quote can route to — a token within some pool's
+        // max_hops but beyond pricing's reach would be quoted gas-blind — so its depth follows
+        // the deepest configured pool rather than any constant.
+        let pricing_reach = self
+            .pools
+            .iter()
+            .map(PoolEntry::max_hops)
+            .max()
+            .unwrap_or(defaults::POOL_MAX_HOPS);
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
+            .with_max_hop(pricing_reach)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.
@@ -1364,10 +1382,17 @@ impl Solver {
             });
         }
 
-        // Computation manager
+        // Computation manager. As in the live build, pricing's depth follows the deepest
+        // configured pool so every quotable token is priceable.
         let gas_token = native_token(&chain).map_err(|_| SolverBuildError::GasToken)?;
+        let pricing_reach = pools
+            .values()
+            .map(|pool_cfg| pool_cfg.max_hops())
+            .max()
+            .unwrap_or(defaults::POOL_MAX_HOPS);
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
+            .with_max_hop(pricing_reach)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
         let (computation_manager, _) =
             ComputationManager::new(computation_config, market_data.clone())
