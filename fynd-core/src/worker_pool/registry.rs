@@ -199,7 +199,6 @@ where
         // Subscribed before the thread starts so shutdown signals sent at any point,
         // including while the worker is recovering from a panic, are never missed.
         let mut shutdown_rx = params.shutdown_tx.subscribe();
-        let shutdown_tx = params.shutdown_tx.clone();
         let algorithm_name = params.algorithm.clone();
         let pool_name = params.pool_name.clone();
         let factory = factory.clone();
@@ -219,7 +218,7 @@ where
                     // consumed (or poisoned) when it panics.
                     let session_event_rx = event_rx.resubscribe();
                     let session_derived_event_rx = derived_event_rx.resubscribe();
-                    let session_shutdown_rx = shutdown_tx.subscribe();
+                    let session_shutdown_rx = shutdown_rx.resubscribe();
 
                     // A shutdown sent while no session was listening (e.g. mid-respawn) is
                     // buffered in the receiver created before the thread started.
@@ -603,6 +602,45 @@ mod tests {
             handle
                 .join()
                 .expect("worker thread should shut down cleanly");
+        }
+    }
+
+    #[tokio::test]
+    async fn workers_exit_when_pool_drops_shutdown_sender() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let (_task_tx, task_rx) = async_channel::bounded::<SolveTask>(10);
+        let (event_tx, _) = broadcast::channel::<MarketEvent>(10);
+        let (derived_event_tx, _) = broadcast::channel(10);
+        let (shutdown_tx, _) = broadcast::channel(1);
+
+        let params = SpawnWorkersParams {
+            algorithm: "panic_on_poison".to_string(),
+            pool_name: "test_pool".to_string(),
+            num_workers: 1,
+            algorithm_config: AlgorithmConfig::default(),
+            task_rx,
+            market_data: market,
+            derived_data: DerivedData::new_shared(),
+            event_rx: event_tx.subscribe(),
+            derived_event_rx: derived_event_tx.subscribe(),
+            shutdown_tx,
+            liquidity_scope: LiquidityScope::default(),
+            exclude_protocols: Vec::new(),
+            fallback_fee_tiers: SharedFeeTiers::default(),
+        };
+        let factory = |_config: AlgorithmConfig| PanicOnPoisonAlgorithm;
+        let workers = spawn_workers_generic(params, &factory);
+        // `params` (holding the only shutdown sender) is consumed and dropped above.
+
+        for handle in workers {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::task::spawn_blocking(move || handle.join()),
+            )
+            .await
+            .expect("worker should exit when the shutdown sender drops")
+            .unwrap()
+            .expect("worker thread should exit cleanly");
         }
     }
 
