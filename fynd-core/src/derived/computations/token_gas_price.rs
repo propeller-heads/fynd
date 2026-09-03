@@ -39,7 +39,7 @@ use num_traits::ToPrimitive;
 use num_traits::Zero;
 use petgraph::graph::NodeIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tracing::{debug, instrument, warn, Span};
+use tracing::{debug, instrument, trace, warn, Span};
 use tycho_simulation::{
     tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
 };
@@ -282,9 +282,6 @@ impl TokenGasPriceComputation {
             }
         }
         unattempted.extend(wanted);
-        if unreachable_tokens > 0 {
-            debug!(unreachable_tokens, "tokens without a route from the gas token left unpriced");
-        }
         if !unattempted.is_empty() {
             warn!(
                 unattempted = unattempted.len(),
@@ -292,6 +289,14 @@ impl TokenGasPriceComputation {
                 "token pricing pass hit its deadline; unattempted tokens keep previous prices"
             );
         }
+        debug!(
+            priced = prices.len(),
+            failed = failed_items.len(),
+            unreachable = unreachable_tokens,
+            unattempted = unattempted.len(),
+            block,
+            "token pricing pass complete"
+        );
 
         Ok(SolvedPrices { prices, block, failed_items, unattempted })
     }
@@ -391,13 +396,22 @@ impl TokenGasPriceComputation {
             OrderSide::Sell,
             Address::zero(20),
         );
-        let route = pass
-            .algorithm
-            .find_single_route(&pass.ctx, &order, FindRouteOptions::default())
-            .ok()?
-            .route()
-            .clone();
-        (!route_output(&route, &self.gas_token).is_zero()).then_some((route, candidates))
+        let route =
+            match pass
+                .algorithm
+                .find_single_route(&pass.ctx, &order, FindRouteOptions::default())
+            {
+                Ok(result) => result.route().clone(),
+                Err(error) => {
+                    trace!(%token, %error, "sell solve found no route");
+                    return None;
+                }
+            };
+        if route_output(&route, &self.gas_token).is_zero() {
+            trace!(%token, "sell route returns nothing");
+            return None;
+        }
+        Some((route, candidates))
     }
 
     /// Re-solves only the tokens whose stored routes ran through a changed component.
