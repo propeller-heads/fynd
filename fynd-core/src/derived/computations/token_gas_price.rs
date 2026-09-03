@@ -10,8 +10,12 @@
 //! Routes are found with the same Bellman-Ford algorithm the solvers use to answer quotes, so a
 //! price reflects what a trade would actually get, slippage and fees included. Each token is bought
 //! with a fixed amount of gas token and sold back, and its price is the mean of the buy price and
-//! the sell price. The mean includes the round-trip cost, so prices are comparable across tokens (a
-//! token that is expensive to exit prices lower).
+//! the sell price. The mean includes the round-trip cost, and its bias is one-sided: with a
+//! symmetric per-leg loss factor `k` the two implied rates are `p·k` and `p/k`, whose arithmetic
+//! mean `p·(k + 1/k)/2` is never below the loss-free rate `p`. In raw-token-units-per-gas-unit
+//! terms that understates a token's value, never overstates it — negligibly for deep pairs
+//! (+0.005% at `k` = 0.99), heavily for thin ones (+25% at `k` = 0.5). A geometric mean would be
+//! exact under symmetric loss, but it is irrational and cannot be an exact fraction.
 //!
 //! The algorithm runs with gas-aware scoring off. Off is what keeps this non-circular: gas-aware
 //! scoring converts a route's gas into output-token terms, which needs the prices this computation
@@ -305,8 +309,9 @@ impl TokenGasPriceComputation {
             .collect()
     }
 
-    /// Prices one token as the mean of its buy price and its sell price, kept as an exact
-    /// fraction, with the components that must re-price it when they change.
+    /// Prices one token as the arithmetic mean of its buy price and its sell price, kept as an
+    /// exact fraction, with the components that must re-price it when they change. The mean's
+    /// round-trip bias only ever prices a token low, hardest on thin pairs — see the module doc.
     ///
     /// The component set covers every candidate route between the token and the gas token, not
     /// just the two chosen ones: a rival pool can move and become the better route, and only a
@@ -326,6 +331,9 @@ impl TokenGasPriceComputation {
             .sell_route(pass, token, buy.amount_out.clone())
             .ok_or(FailedItemError::NoSellRoute)?;
         let sell_out = sell.amount_out(&self.gas_token);
+        // The legs are discarded after the mean; this is the only place their divergence —
+        // sell_out under the simulation amount is the round-trip loss — can be observed.
+        trace!(%token, buy_out = %buy.amount_out, sell_out = %sell_out, "token priced");
         // The chosen paths are candidate paths, so extending is defensive: it keeps the
         // stored dependencies correct even if the walk and the relaxation ever disagree.
         components.extend(buy.components.iter().cloned());
