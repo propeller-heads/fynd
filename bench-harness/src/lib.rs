@@ -310,7 +310,7 @@ impl ConfigCatalog {
     /// If a directory cannot be read, or if two directories hold the same stem. Both are the
     /// caller's mistake, and both would otherwise shrink or silently change a run: a mistyped
     /// `--configs-dir` would run the built-ins alone, and a duplicate would decide by order.
-    pub fn new(extra: &[PathBuf]) -> Result<Self, String> {
+    pub(crate) fn new(extra: &[PathBuf]) -> Result<Self, String> {
         let mut files = BTreeMap::new();
         for directory in std::iter::once(crate_path("configs")).chain(extra.iter().cloned()) {
             let entries = std::fs::read_dir(&directory)
@@ -347,7 +347,7 @@ impl ConfigCatalog {
     /// Returns the reason the config could not be used — unknown, unreadable, unparseable, or
     /// without an `algorithm` key — so the caller can print it and record it in the report rather
     /// than inventing its own wording. An unknown name lists the ones that do exist.
-    pub fn load(&self, label: &str) -> Result<BenchConfig, String> {
+    pub(crate) fn load(&self, label: &str) -> Result<BenchConfig, String> {
         let path = self.files.get(label).ok_or_else(|| {
             format!("no config named {label}. Available: {}", self.available().join(", "))
         })?;
@@ -376,7 +376,7 @@ impl ConfigCatalog {
     }
 
     /// Every configuration, by file stem, sorted. The default when `--configs` is absent.
-    pub fn available(&self) -> Vec<String> {
+    pub(crate) fn available(&self) -> Vec<String> {
         self.files.keys().cloned().collect()
     }
 }
@@ -491,7 +491,7 @@ impl ConfigFlags {
     /// # Errors
     ///
     /// As [`ConfigCatalog::new`].
-    pub fn catalog(&self) -> Result<ConfigCatalog, String> {
+    pub(crate) fn catalog(&self) -> Result<ConfigCatalog, String> {
         ConfigCatalog::new(&self.configs_dirs)
     }
 }
@@ -512,8 +512,9 @@ pub(crate) enum MarketMode {
 ///
 /// # Errors
 ///
-/// Returns a message when a live capture cannot be made. The offline path panics instead -- a
-/// missing fixture is a broken checkout, not a run-time condition.
+/// Returns a message when a live capture cannot be made. The offline path panics instead, on a
+/// fixture it cannot read or cannot parse as a market. The panic names the path, which is what a
+/// caller pointing `--fixture` at one of their own needs to see.
 pub(crate) async fn build_market(flags: MarketFlags) -> Result<Market, String> {
     match flags.market {
         MarketMode::Offline => {
@@ -633,8 +634,7 @@ impl MarketFlags {
 pub(crate) enum MarketSource {
     /// Replayed from the recorded fixture.
     Offline {
-        /// The recording that was replayed. Two offline runs only compare when this matches, and
-        /// `--fixture` means it is no longer always the same file.
+        /// The recording that was replayed. Two offline runs only compare when this matches.
         fixture: String,
         /// When the fixture was recorded, as unix seconds, so a report can be tied to the fixture
         /// that produced it.
@@ -965,8 +965,8 @@ pub(crate) fn token_label(address: &Address, symbols: &HashMap<Address, String>)
 
 /// The solve-time distribution, so a caller cannot read a percentile off unsorted input.
 pub(crate) struct Timings {
-    pub p50_us: u128,
-    pub p95_us: u128,
+    pub(crate) p50_us: u128,
+    pub(crate) p95_us: u128,
     pub(crate) slowest_us: u128,
 }
 
