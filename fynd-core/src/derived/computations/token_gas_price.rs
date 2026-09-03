@@ -923,6 +923,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_empty_market_prices_only_the_gas_token() {
+        let eth = token(0, "ETH");
+
+        let prices = prices_for(&eth, vec![]).await;
+
+        // No components means nothing to price, but never an error: the gas token is 1:1
+        // with itself unconditionally, and that must be the whole map.
+        assert_eq!(prices.len(), 1);
+        assert!((ratio(&prices[&eth.address]) - 1.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_gas_token_outside_the_graph_prices_only_itself() {
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let bbb = token(2, "BBB");
+
+        // Pools exist but none trades the gas token, so no subgraph can be built around it:
+        // every token counts as unreachable, nothing is a failed item, and only the gas
+        // token's unconditional 1:1 entry is served.
+        let (market, _) =
+            setup_market_weighted(vec![("aaa_bbb", &aaa, &bbb, MockProtocolSim::new(1.0))]);
+        let store = DerivedData::new_shared();
+        let output = computation_for(&eth.address)
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+
+        assert_eq!(output.data.len(), 1);
+        assert!((ratio(&output.data[&eth.address]) - 1.0).abs() < 1e-9);
+        assert!(output.failed_items.is_empty(), "unreachable tokens are not failures");
+    }
+
+    #[tokio::test]
     async fn test_unreachable_token() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
