@@ -318,20 +318,20 @@ impl TokenGasPriceComputation {
         &self,
         pass: &mut PricingPass<'_>,
         token: &Address,
-        buy: Option<&ReachedToken>,
+        buy_leg: Option<&ReachedToken>,
     ) -> Result<TokenPriceEntry, FailedItemError> {
-        let buy = buy.ok_or(FailedItemError::UnreachableFromGasToken)?;
+        let buy_leg = buy_leg.ok_or(FailedItemError::UnreachableFromGasToken)?;
 
-        let (sell_out, mut components) = self.sell_leg(pass, token, buy.amount_out.clone())?;
+        let (sell_out, mut components) = self.sell_leg(pass, token, buy_leg.amount_out.clone())?;
         // The legs are discarded after the mean; this is the only place their divergence —
         // sell_out under the simulation amount is the round-trip loss — can be observed.
-        trace!(%token, buy_out = %buy.amount_out, sell_out = %sell_out, "token priced");
+        trace!(%token, buy_out = %buy_leg.amount_out, sell_out = %sell_out, "token priced");
         // The buy path is a candidate path, so extending is defensive: it keeps the stored
         // dependencies correct even if the walk and the relaxation ever disagree.
-        components.extend(buy.components.iter().cloned());
+        components.extend(buy_leg.components.iter().cloned());
 
         let mid_price = Price {
-            numerator: &buy.amount_out * (&self.simulation_amount + &sell_out),
+            numerator: &buy_leg.amount_out * (&self.simulation_amount + &sell_out),
             denominator: BigUint::from(2u8) * &self.simulation_amount * sell_out,
         };
         Ok(TokenPriceEntry { price: mid_price, path_components: components })
