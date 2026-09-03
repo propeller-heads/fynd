@@ -98,7 +98,7 @@ struct PricingPass<'a> {
 /// One pass's output: what was priced, against which block, and what was not.
 struct SolvedPrices {
     /// Priced tokens with the components that must re-price them when they change.
-    prices: FxHashMap<Address, (Price, FxHashSet<ComponentId>)>,
+    prices: FxHashMap<Address, TokenPriceEntry>,
     /// The block the market snapshot was taken at.
     block: u64,
     /// Tokens that were attempted and could not be priced: bought, but no sell route back.
@@ -324,7 +324,7 @@ impl TokenGasPriceComputation {
         pass: &mut PricingPass<'_>,
         token: &Address,
         buy: Option<&ReachedToken>,
-    ) -> Result<(Price, FxHashSet<ComponentId>), FailedItemError> {
+    ) -> Result<TokenPriceEntry, FailedItemError> {
         let buy = buy.ok_or(FailedItemError::UnreachableFromGasToken)?;
 
         let (sell, mut components) = self.sell_route(pass, token, buy.amount_out.clone())?;
@@ -345,7 +345,7 @@ impl TokenGasPriceComputation {
             numerator: &buy.amount_out * (&self.simulation_amount + &sell_out),
             denominator: BigUint::from(2u8) * &self.simulation_amount * sell_out,
         };
-        Ok((mid_price, components))
+        Ok(TokenPriceEntry { price: mid_price, path_components: components })
     }
 
     /// The route that sells `amount` of `token` back to the gas token, paired with every
@@ -462,12 +462,9 @@ impl TokenGasPriceComputation {
         let mut new_deps = existing_deps;
 
         for token in &tokens_to_recompute {
-            if let Some((price, components)) = solved.prices.get(token) {
-                new_deps.insert(
-                    token.clone(),
-                    TokenPriceEntry { price: price.clone(), path_components: components.clone() },
-                );
-                result.insert(token.clone(), price.clone());
+            if let Some(entry) = solved.prices.get(token) {
+                result.insert(token.clone(), entry.price.clone());
+                new_deps.insert(token.clone(), entry.clone());
             } else if !solved.unattempted.contains(token) {
                 // Attempted and failed: the routes are gone, so the price is too. A token the
                 // deadline cut off keeps its entry instead — nothing is known about it this
@@ -508,10 +505,9 @@ impl TokenGasPriceComputation {
 
         let mut token_prices_with_deps = TokenPricesWithDeps::default();
         let mut token_prices = TokenGasPrices::default();
-        for (token, (price, path_components)) in solved.prices {
-            token_prices_with_deps
-                .insert(token.clone(), TokenPriceEntry { price: price.clone(), path_components });
-            token_prices.insert(token, price);
+        for (token, entry) in solved.prices {
+            token_prices.insert(token.clone(), entry.price.clone());
+            token_prices_with_deps.insert(token, entry);
         }
 
         // Tokens the deadline cut off keep their previous entry, dependencies included: they
