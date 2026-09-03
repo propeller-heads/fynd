@@ -69,7 +69,6 @@ use crate::{
     types::{ComponentId, Order, OrderSide},
 };
 
-/// The graph the algorithm walks.
 type AlgorithmGraph = <BellmanFordAlgorithm as Algorithm>::GraphType;
 
 /// One pricing pass's solving state: a single market snapshot re-rooted for every sell.
@@ -84,7 +83,6 @@ type AlgorithmGraph = <BellmanFordAlgorithm as Algorithm>::GraphType;
 struct PricingPass<'a> {
     /// The solving algorithm; its `max_hops` bounds route length within the wider subgraph.
     algorithm: &'a BellmanFordAlgorithm,
-    /// The graph the pass's subgraphs are walked on.
     graph: &'a AlgorithmGraph,
     /// The shared snapshot, re-rooted and re-pruned per sell.
     ctx: BellmanFordContext,
