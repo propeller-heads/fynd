@@ -327,9 +327,7 @@ impl TokenGasPriceComputation {
     ) -> Result<(Price, FxHashSet<ComponentId>), FailedItemError> {
         let buy = buy.ok_or(FailedItemError::UnreachableFromGasToken)?;
 
-        let (sell, mut components) = self
-            .sell_route(pass, token, buy.amount_out.clone())
-            .ok_or(FailedItemError::NoSellRoute)?;
+        let (sell, mut components) = self.sell_route(pass, token, buy.amount_out.clone())?;
         let sell_out = sell.amount_out(&self.gas_token);
         // The legs are discarded after the mean; this is the only place their divergence —
         // sell_out under the simulation amount is the round-trip loss — can be observed.
@@ -352,8 +350,9 @@ impl TokenGasPriceComputation {
 
     /// The route that sells `amount` of `token` back to the gas token, paired with every
     /// component on any candidate route between the two — the walk's component set, which pool
-    /// edge pairs make the buy direction's candidates too. `None` when there is no route or it
-    /// returns nothing.
+    /// edge pairs make the buy direction's candidates too. Fails as
+    /// [`NoSellRoute`](FailedItemError::NoSellRoute) carrying why: on a block where many tokens
+    /// fail at once, the distribution of reasons is the signal.
     ///
     /// Re-roots the pass's shared context at `token` behind a freshly pruned adjacency, so a
     /// sell costs one bounded walk and one relaxation — no lock or state clone of its own. The
@@ -363,17 +362,27 @@ impl TokenGasPriceComputation {
         pass: &mut PricingPass<'_>,
         token: &Address,
         amount: BigUint,
-    ) -> Option<(Route, FxHashSet<ComponentId>)> {
+    ) -> Result<(Route, FxHashSet<ComponentId>), FailedItemError> {
         if amount.is_zero() {
-            return None;
+            return Err(FailedItemError::NoSellRoute(
+                "nothing to sell: the buy delivered zero".into(),
+            ));
         }
-        let token_node = *pass.token_nodes.get(token)?;
+        let token_node = *pass
+            .token_nodes
+            .get(token)
+            .ok_or_else(|| {
+                FailedItemError::NoSellRoute("token is not in the pass subgraph".into())
+            })?;
         let (adj, _, candidate_components) = BellmanFordAlgorithm::get_subgraph_with_hop_map(
             pass.graph,
             token_node,
             Some(&pass.hops_to_gas),
             self.max_hops,
-        )?;
+        )
+        .ok_or_else(|| {
+            FailedItemError::NoSellRoute("no pruned subgraph toward the gas token".into())
+        })?;
         let candidates: FxHashSet<ComponentId> = candidate_components
             .into_iter()
             .cloned()
@@ -389,25 +398,19 @@ impl TokenGasPriceComputation {
             OrderSide::Sell,
             Address::zero(20),
         );
-        let route =
-            match pass
-                .algorithm
-                .find_single_route(&pass.ctx, &order, FindRouteOptions::default())
-            {
-                Ok(result) => result.route().clone(),
-                Err(error) => {
-                    trace!(%token, %error, "sell solve found no route");
-                    return None;
-                }
-            };
+        let route = pass
+            .algorithm
+            .find_single_route(&pass.ctx, &order, FindRouteOptions::default())
+            .map_err(|error| FailedItemError::NoSellRoute(error.to_string()))?
+            .route()
+            .clone();
         if route
             .amount_out(&self.gas_token)
             .is_zero()
         {
-            trace!(%token, "sell route returns nothing");
-            return None;
+            return Err(FailedItemError::NoSellRoute("the sell route returns zero".into()));
         }
-        Some((route, candidates))
+        Ok((route, candidates))
     }
 
     /// Re-solves only the tokens whose stored routes ran through a changed component.
@@ -905,7 +908,10 @@ mod tests {
         );
         assert_eq!(output.failed_items.len(), 1);
         assert_eq!(output.failed_items[0].key, oneway.address.to_string());
-        assert_eq!(output.failed_items[0].error, FailedItemError::NoSellRoute);
+        let FailedItemError::NoSellRoute(reason) = &output.failed_items[0].error else {
+            panic!("expected NoSellRoute, got {:?}", output.failed_items[0].error);
+        };
+        assert!(!reason.is_empty(), "the failure carries why the sell solve failed");
     }
 
     #[tokio::test]
