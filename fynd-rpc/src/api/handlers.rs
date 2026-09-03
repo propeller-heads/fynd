@@ -613,6 +613,27 @@ mod tests {
         assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
     }
 
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_returns_503_before_derived_data() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 503);
+    }
+
     // The pricing pass cannot fail as a whole, so the block is set from its first run even
     // when nothing but the gas token (priced 1:1 unconditionally) is in the map. That state
     // is "no answer yet", not an empty answer: retry-on-unavailable callers rely on the 503.
