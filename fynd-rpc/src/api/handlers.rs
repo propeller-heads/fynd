@@ -275,6 +275,19 @@ pub async fn get_prices(
     let token_prices_block = store
         .token_prices_block()
         .ok_or(ApiError::StaleData { age_ms: u64::MAX })?;
+    // The pricing pass cannot fail as a whole, so the block is set from the first run onward.
+    // Until a token other than the gas token (priced 1:1 unconditionally) is in the map there
+    // is no answer to serve, and a caller with retry-on-unavailable logic must keep retrying.
+    if store
+        .token_prices()
+        .is_none_or(|prices| {
+            prices
+                .keys()
+                .all(|token| token == &state.gas_token)
+        })
+    {
+        return Err(ApiError::StaleData { age_ms: u64::MAX });
+    }
     if want_spot && store.spot_prices_block().is_none() {
         return Err(ApiError::StaleData { age_ms: u64::MAX });
     }
@@ -598,6 +611,84 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 400);
         let body = body_json(resp).await;
         assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+    }
+
+    // The pricing pass cannot fail as a whole, so the block is set from its first run even
+    // when nothing but the gas token (priced 1:1 unconditionally) is in the map. That state
+    // is "no answer yet", not an empty answer: retry-on-unavailable callers rely on the 503.
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_returns_503_until_more_than_the_gas_token_is_priced() {
+        use num_bigint::BigUint;
+        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
+
+        let state = make_test_state();
+        {
+            let mut store = state.derived_data.write().await;
+            store.set_token_prices(
+                [(test_addr(0x00), Price::new(BigUint::from(1u8), BigUint::from(1u8)))]
+                    .into_iter()
+                    .collect(),
+                vec![],
+                19_000_000,
+                true,
+            );
+        }
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 503);
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_returns_200_once_a_token_is_priced() {
+        use num_bigint::BigUint;
+        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
+
+        let state = make_test_state();
+        {
+            let mut store = state.derived_data.write().await;
+            store.set_token_prices(
+                [
+                    (test_addr(0x00), Price::new(BigUint::from(1u8), BigUint::from(1u8))),
+                    (test_addr(0x0b), Price::new(BigUint::from(2u8), BigUint::from(1u8))),
+                ]
+                .into_iter()
+                .collect(),
+                vec![],
+                19_000_000,
+                true,
+            );
+        }
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = body_json(resp).await;
+        assert_eq!(body["prices"].as_array().map(Vec::len), Some(2), "body was: {body}");
     }
 
     #[cfg(feature = "experimental")]
