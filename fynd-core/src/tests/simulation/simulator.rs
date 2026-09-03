@@ -377,21 +377,22 @@ fn test_deviation_bps_amount_beyond_f64() {
     assert_eq!(deviation_bps(&quote_with_fees(1_000_000), &huge), None);
 }
 
-/// Names every metric a run recorded, with its labels.
+/// Names every metric a run recorded, with its labels and value.
 fn recorded_metrics(
     snapshotter: &metrics_util::debugging::Snapshotter,
-) -> Vec<(String, Vec<String>)> {
+) -> Vec<(String, Vec<String>, metrics_util::debugging::DebugValue)> {
     snapshotter
         .snapshot()
         .into_vec()
-        .iter()
-        .map(|(key, _, _, _)| {
+        .into_iter()
+        .map(|(key, _, _, value)| {
             (
                 key.key().name().to_string(),
                 key.key()
                     .labels()
                     .map(|label| format!("{}={}", label.key(), label.value()))
                     .collect(),
+                value,
             )
         })
         .collect()
@@ -413,15 +414,38 @@ fn test_record_outcome_success() {
     });
 
     let recorded = recorded_metrics(&snapshotter);
-    assert!(recorded
-        .contains(&("quote_simulation_total".to_string(), vec!["outcome=success".to_string()])));
-    assert!(recorded
+    let counted = recorded
         .iter()
-        .any(|(name, _)| name == "quote_simulation_deviation_bps"));
+        .find(|(name, ..)| name == "quote_simulations_total")
+        .expect("the outcome is counted");
+    assert!(
+        counted
+            .1
+            .contains(&"outcome=success".to_string()),
+        "{:?}",
+        counted.1
+    );
+    assert!(
+        counted
+            .1
+            .contains(&"algorithm=test_algorithm".to_string()),
+        "{:?}",
+        counted.1
+    );
+
+    let (.., deviation) = recorded
+        .iter()
+        .find(|(name, ..)| name == "quote_simulation_deviation_bps")
+        .expect("a successful simulation records its deviation");
+    assert!(
+        matches!(deviation, metrics_util::debugging::DebugValue::Histogram(values)
+            if values.len() == 1 && (values[0].into_inner() - -10.0).abs() < 1e-9),
+        "{deviation:?}"
+    );
 }
 
 #[test]
-fn test_record_outcome_reverted_apart_from_failed() {
+fn test_record_outcome_reverted() {
     let recorder = metrics_util::debugging::DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
 
@@ -430,22 +454,35 @@ fn test_record_outcome_reverted_apart_from_failed() {
             &quote_with_fees(1_000_000),
             &SimulationAttempt::Reverted { reason: "reverted".to_string() },
         );
+    });
+
+    let recorded = recorded_metrics(&snapshotter);
+    assert!(recorded
+        .iter()
+        .any(|(name, labels, _)| name == "quote_simulations_total" &&
+            labels.contains(&"outcome=reverted".to_string())));
+    assert!(
+        !recorded
+            .iter()
+            .any(|(name, ..)| name == "quote_simulation_deviation_bps"),
+        "a call that returned no amount has no deviation to record"
+    );
+}
+
+#[test]
+fn test_record_outcome_failed() {
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+
+    metrics::with_local_recorder(&recorder, || {
         record_outcome(
             &quote_with_fees(1_000_000),
             &SimulationAttempt::Failure { reason: "timed out".to_string() },
         );
     });
 
-    let recorded = recorded_metrics(&snapshotter);
-    for outcome in ["outcome=reverted", "outcome=failed"] {
-        assert!(
-            recorded.contains(&("quote_simulation_total".to_string(), vec![outcome.to_string()]))
-        );
-    }
-    assert!(
-        !recorded
-            .iter()
-            .any(|(name, _)| name == "quote_simulation_deviation_bps"),
-        "a call that returned no amount has no deviation to record"
-    );
+    assert!(recorded_metrics(&snapshotter)
+        .iter()
+        .any(|(name, labels, _)| name == "quote_simulations_total" &&
+            labels.contains(&"outcome=failed".to_string())));
 }

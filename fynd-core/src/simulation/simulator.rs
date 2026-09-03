@@ -297,23 +297,37 @@ impl SimulationAttempt {
 }
 
 /// Records the outcome of one simulated quote, and on success how far the simulated amount landed
-/// from the quoted one.
+/// from what the quote promised.
 ///
 /// A revert and a failure are counted apart because they call for different work: a revert means
 /// the route the solver priced does not execute, while a failure means the simulation itself did
-/// not run, so it says nothing about the route.
+/// not run, so it says nothing about the route. Both carry the winning pool and algorithm, so a
+/// rise in either can be traced to the solver that produced the route.
 fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
+    let pool = quote.worker_pool().to_string();
+    let algorithm = quote.algorithm().to_string();
     let outcome = match attempt {
         SimulationAttempt::Success { amount_out, .. } => {
             if let Some(deviation) = deviation_bps(quote, amount_out) {
-                histogram!("quote_simulation_deviation_bps").record(deviation);
+                histogram!(
+                    "quote_simulation_deviation_bps",
+                    "pool" => pool.clone(),
+                    "algorithm" => algorithm.clone()
+                )
+                .record(deviation);
             }
             "success"
         }
         SimulationAttempt::Reverted { .. } => "reverted",
         SimulationAttempt::Failure { .. } => "failed",
     };
-    counter!("quote_simulation_total", "outcome" => outcome).increment(1);
+    counter!(
+        "quote_simulations_total",
+        "outcome" => outcome,
+        "pool" => pool,
+        "algorithm" => algorithm
+    )
+    .increment(1);
 }
 
 /// How far the simulated amount sits from what the quote promised, in basis points.
