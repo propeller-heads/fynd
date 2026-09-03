@@ -1,5 +1,7 @@
 //! Shared test utilities for algorithm tests.
 
+use std::{sync::Arc, time::Duration};
+
 use chrono::NaiveDateTime;
 use num_bigint::BigUint;
 use num_rational::BigRational;
@@ -22,10 +24,14 @@ use tycho_simulation::{
 };
 
 use crate::{
-    algorithm::most_liquid::DepthAndPrice,
-    feed::market_data::{MarketData, MarketState},
-    graph::{petgraph::PetgraphStableDiGraphManager, GraphManager, TopologyGraphManager},
-    types::{quote::OrderSide, BlockInfo, Order},
+    algorithm::{most_liquid::DepthAndPrice, Algorithm, AlgorithmError},
+    derived::{computation::ComputationRequirements, SharedDerivedDataRef},
+    feed::market_data::{MarketData, MarketState, StateLabel},
+    graph::{
+        petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+        GraphManager, TopologyGraphManager,
+    },
+    types::{quote::OrderSide, BlockInfo, Order, RouteResult},
 };
 
 /// Use amounts in wei scale (10^18) to exceed gas costs in tests.
@@ -638,6 +644,75 @@ pub fn market_read(market: &MarketData) -> crate::feed::market_data::MarketDataV
     market
         .try_read_blocking()
         .expect("lock should not be contested in test")
+}
+
+// ==================== Stub Algorithm ====================
+
+/// Solve behavior injected into a [`StubAlgorithm`].
+type StubSolve = dyn Fn(&Order) -> Result<RouteResult, AlgorithmError> + Send + Sync;
+
+/// Test algorithm whose solve behavior is injected as a closure.
+///
+/// The closure runs on every `find_best_route` call, so one stub covers the whole range of
+/// worker tests: always failing, panicking on a marker order, or returning a hand-built route.
+#[derive(Clone)]
+pub struct StubAlgorithm {
+    solve: Arc<StubSolve>,
+    requirements: ComputationRequirements,
+    timeout: Duration,
+}
+
+impl StubAlgorithm {
+    /// Creates a stub that answers every solve with `solve`.
+    pub fn returning(
+        solve: impl Fn(&Order) -> Result<RouteResult, AlgorithmError> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            solve: Arc::new(solve),
+            requirements: ComputationRequirements::none(),
+            timeout: Duration::from_secs(1),
+        }
+    }
+
+    /// Override the derived-data requirements the worker gates on.
+    pub fn with_requirements(mut self, requirements: ComputationRequirements) -> Self {
+        self.requirements = requirements;
+        self
+    }
+
+    /// Override the solve timeout.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
+impl Algorithm for StubAlgorithm {
+    type GraphType = StableDiGraph<DepthAndPrice>;
+    type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+    fn name(&self) -> &str {
+        "stub"
+    }
+
+    async fn find_best_route(
+        &self,
+        _graph: &Self::GraphType,
+        _market: MarketData,
+        _label: Option<StateLabel>,
+        _derived: Option<SharedDerivedDataRef>,
+        order: &Order,
+    ) -> Result<RouteResult, AlgorithmError> {
+        (self.solve)(order)
+    }
+
+    fn computation_requirements(&self) -> ComputationRequirements {
+        self.requirements.clone()
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
 }
 
 /// Common fixtures for tests.

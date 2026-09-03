@@ -268,14 +268,12 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::{
-            most_liquid::DepthAndPrice,
-            test_utils::{order, setup_market_weighted, token},
-            Algorithm, AlgorithmError,
+            test_utils::{order, setup_market_weighted, token, StubAlgorithm},
+            AlgorithmError,
         },
-        derived::{computation::ComputationRequirements, DerivedData},
-        feed::market_data::{MarketData, StateLabel},
-        graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
-        types::{quote::OrderSide, Order, RouteResult, SolveError},
+        derived::DerivedData,
+        feed::market_data::MarketData,
+        types::{quote::OrderSide, SolveError},
     };
 
     fn make_params(algorithm: &str, num_workers: usize) -> SpawnWorkersParams {
@@ -430,44 +428,18 @@ mod tests {
         let _ = shutdown_tx.send(());
     }
 
-    /// Amount marking the order whose solve panics in [`PanicOnPoisonAlgorithm`].
+    /// Amount marking the order whose solve panics in [`panic_on_poison`].
     const POISON_AMOUNT: u128 = 666;
 
-    /// Algorithm that panics while solving the poison order and returns an error
-    /// otherwise. Used to verify that a panicking task does not permanently lose the
-    /// worker: the worker respawns.
-    #[derive(Clone)]
-    struct PanicOnPoisonAlgorithm;
-
-    impl Algorithm for PanicOnPoisonAlgorithm {
-        type GraphType = StableDiGraph<DepthAndPrice>;
-        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
-
-        fn name(&self) -> &str {
-            "panic_on_poison"
-        }
-
-        async fn find_best_route(
-            &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<StateLabel>,
-            _derived: Option<crate::derived::SharedDerivedDataRef>,
-            order: &Order,
-        ) -> Result<RouteResult, AlgorithmError> {
+    /// Stub that panics while solving the poison order and returns an error otherwise. Used to
+    /// verify that a panicking task does not permanently lose the worker: the worker respawns.
+    fn panic_on_poison(_config: AlgorithmConfig) -> StubAlgorithm {
+        StubAlgorithm::returning(|order| {
             if order.amount() == &BigUint::from(POISON_AMOUNT) {
                 panic!("poison order");
             }
             Err(AlgorithmError::Other("no route in mock".to_string()))
-        }
-
-        fn computation_requirements(&self) -> ComputationRequirements {
-            ComputationRequirements::none()
-        }
-
-        fn timeout(&self) -> Duration {
-            Duration::from_secs(1)
-        }
+        })
     }
 
     #[tokio::test]
@@ -496,7 +468,7 @@ mod tests {
             respawn_policy: RespawnPolicy::default(),
             on_worker_gave_up: Arc::new(|| {}),
         };
-        let factory = |_config: AlgorithmConfig| PanicOnPoisonAlgorithm;
+        let factory = panic_on_poison;
         let workers = spawn_workers_generic(params, &factory);
 
         let token_a = token(0x01, "A");
@@ -566,7 +538,7 @@ mod tests {
             respawn_policy: RespawnPolicy::default(),
             on_worker_gave_up: Arc::new(|| {}),
         };
-        let factory = |_config: AlgorithmConfig| PanicOnPoisonAlgorithm;
+        let factory = panic_on_poison;
         let workers = spawn_workers_generic(params, &factory);
         // `params` (holding the only shutdown sender) is consumed and dropped above.
 
@@ -616,9 +588,8 @@ mod tests {
                 gave_up_flag.store(true, std::sync::atomic::Ordering::SeqCst)
             }),
         };
-        let factory = |_config: AlgorithmConfig| -> PanicOnPoisonAlgorithm {
-            panic!("deterministic init panic")
-        };
+        let factory =
+            |_config: AlgorithmConfig| -> StubAlgorithm { panic!("deterministic init panic") };
         let workers = spawn_workers_generic(params, &factory);
 
         for handle in workers {
@@ -663,7 +634,7 @@ mod tests {
             },
             on_worker_gave_up: Arc::new(|| {}),
         };
-        let factory = |_config: AlgorithmConfig| PanicOnPoisonAlgorithm;
+        let factory = panic_on_poison;
         let workers = spawn_workers_generic(params, &factory);
 
         let token_a = token(0x01, "A");
