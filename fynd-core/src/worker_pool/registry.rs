@@ -578,6 +578,123 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn worker_gives_up_after_repeated_rapid_panics() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let (_task_tx, task_rx) = async_channel::bounded::<SolveTask>(10);
+        let (event_tx, _) = broadcast::channel::<MarketEvent>(10);
+        let (derived_event_tx, _) = broadcast::channel(10);
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let gave_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gave_up_flag = Arc::clone(&gave_up);
+
+        let params = SpawnWorkersParams {
+            algorithm: "panic_on_poison".to_string(),
+            pool_name: "test_pool".to_string(),
+            num_workers: 1,
+            algorithm_config: AlgorithmConfig::default(),
+            task_rx,
+            market_data: market,
+            derived_data: DerivedData::new_shared(),
+            event_rx: event_tx.subscribe(),
+            derived_event_rx: derived_event_tx.subscribe(),
+            shutdown_tx: shutdown_tx.clone(),
+            liquidity_scope: LiquidityScope::default(),
+            exclude_protocols: Vec::new(),
+            fallback_fee_tiers: SharedFeeTiers::default(),
+            respawn_policy: RespawnPolicy {
+                initial_backoff: Duration::from_millis(1),
+                max_backoff: Duration::from_millis(2),
+                max_attempts: 3,
+                stable_session: Duration::from_secs(60),
+            },
+            on_worker_gave_up: Arc::new(move || {
+                gave_up_flag.store(true, std::sync::atomic::Ordering::SeqCst)
+            }),
+        };
+        let factory = |_config: AlgorithmConfig| -> PanicOnPoisonAlgorithm {
+            panic!("deterministic init panic")
+        };
+        let workers = spawn_workers_generic(params, &factory);
+
+        for handle in workers {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::task::spawn_blocking(move || handle.join()),
+            )
+            .await
+            .expect("worker should give up instead of retrying forever")
+            .unwrap()
+            .expect("worker thread should exit cleanly after giving up");
+        }
+        assert!(gave_up.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_sent_mid_respawn_is_not_lost() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let derived_data = DerivedData::new_shared();
+        let (task_tx, task_rx) = async_channel::bounded(10);
+        let (event_tx, _) = broadcast::channel::<MarketEvent>(10);
+        let (derived_event_tx, _) = broadcast::channel(10);
+        let (shutdown_tx, _) = broadcast::channel(1);
+
+        let params = SpawnWorkersParams {
+            algorithm: "panic_on_poison".to_string(),
+            pool_name: "test_pool".to_string(),
+            num_workers: 1,
+            algorithm_config: AlgorithmConfig::default(),
+            task_rx,
+            market_data: market,
+            derived_data,
+            event_rx: event_tx.subscribe(),
+            derived_event_rx: derived_event_tx.subscribe(),
+            shutdown_tx: shutdown_tx.clone(),
+            liquidity_scope: LiquidityScope::default(),
+            exclude_protocols: Vec::new(),
+            fallback_fee_tiers: SharedFeeTiers::default(),
+            respawn_policy: RespawnPolicy {
+                initial_backoff: Duration::from_millis(500),
+                ..RespawnPolicy::default()
+            },
+            on_worker_gave_up: Arc::new(|| {}),
+        };
+        let factory = |_config: AlgorithmConfig| PanicOnPoisonAlgorithm;
+        let workers = spawn_workers_generic(params, &factory);
+
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        // The poison task panics mid-solve; its response channel is dropped. The worker
+        // now sleeps through its 500ms backoff with no session listening for shutdown.
+        let (poison_tx, poison_rx) = oneshot::channel();
+        let poison_order = order(&token_a, &token_b, POISON_AMOUNT as u128, OrderSide::Sell);
+        task_tx
+            .send(SolveTask::new(Uuid::new_v4(), poison_order, poison_tx))
+            .await
+            .unwrap();
+        assert!(poison_rx.await.is_err());
+
+        // Sent while the worker is mid-respawn (no session receiver listening yet). The
+        // buffered `shutdown_rx.try_recv()` pre-check must still catch it.
+        shutdown_tx.send(()).unwrap();
+
+        for handle in workers {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::task::spawn_blocking(move || handle.join()),
+            )
+            .await
+            .expect("buffered shutdown sent mid-respawn should not be lost")
+            .unwrap()
+            .expect("worker thread should shut down cleanly");
+        }
+
+        // Keep the sender alive until after the join so the worker exits via the
+        // buffered shutdown signal, not because the task channel closed.
+        drop(task_tx);
+    }
+
     #[test]
     fn test_registry_spawns_path_frank_wolfe() {
         let (shutdown_tx, _) = broadcast::channel(1);
