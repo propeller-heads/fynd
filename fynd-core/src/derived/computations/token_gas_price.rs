@@ -475,14 +475,35 @@ impl TokenGasPriceComputation {
 
         Ok(Some(ComputationOutput::with_failures(result, solved.failed_items)))
     }
+}
 
-    /// The full or incremental solve behind [`DerivedComputation::compute`].
-    async fn compute_prices(
+#[async_trait]
+impl DerivedComputation for TokenGasPriceComputation {
+    type Output = TokenGasPrices;
+
+    const ID: ComputationId = "token_prices";
+
+    fn requirements(&self) -> ComputationRequirements {
+        // Reads no derived data, so no other computation has to precede this one.
+        ComputationRequirements::none()
+    }
+
+    fn persist(
+        store: &mut DerivedData,
+        output: ComputationOutput<Self::Output>,
+        block: u64,
+        is_full_recompute: bool,
+    ) {
+        store.set_token_prices(output.data, output.failed_items, block, is_full_recompute);
+    }
+
+    #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_token_prices))]
+    async fn compute(
         &self,
         market: &MarketData,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
-    ) -> Result<ComputationOutput<TokenGasPrices>, ComputationError> {
+    ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
         if !changed.is_full_recompute && !changed.is_topology_change() {
             if let Some(result) = self
                 .try_incremental_compute(market, store, changed)
@@ -542,38 +563,6 @@ impl TokenGasPriceComputation {
         Span::current().record("updated_token_prices", token_prices.len());
 
         Ok(ComputationOutput::with_failures(token_prices, solved.failed_items))
-    }
-}
-
-#[async_trait]
-impl DerivedComputation for TokenGasPriceComputation {
-    type Output = TokenGasPrices;
-
-    const ID: ComputationId = "token_prices";
-
-    fn requirements(&self) -> ComputationRequirements {
-        // Reads no derived data, so no other computation has to precede this one.
-        ComputationRequirements::none()
-    }
-
-    fn persist(
-        store: &mut DerivedData,
-        output: ComputationOutput<Self::Output>,
-        block: u64,
-        is_full_recompute: bool,
-    ) {
-        store.set_token_prices(output.data, output.failed_items, block, is_full_recompute);
-    }
-
-    #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_token_prices))]
-    async fn compute(
-        &self,
-        market: &MarketData,
-        store: &SharedDerivedDataRef,
-        changed: &ChangedComponents,
-    ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        self.compute_prices(market, store, changed)
-            .await
     }
 }
 
