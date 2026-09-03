@@ -1,4 +1,19 @@
 
+## [0.101.0](https://github.com/propeller-heads/fynd/compare/0.100.2...0.101.0) (2026-09-03)
+
+### Features
+
+* carry the simulated deviation on the winning-quote log ([d55eca8](https://github.com/propeller-heads/fynd/commit/d55eca88560d0d26db945d5339565443bdce8dbf))
+* expose the simulation stage of the quote pipeline ([1c21f3b](https://github.com/propeller-heads/fynd/commit/1c21f3ba948cca7bd3d03836db6fe10d92629196))
+* label the simulation metrics by pool and algorithm ([f221c52](https://github.com/propeller-heads/fynd/commit/f221c5215516d8064da47b601e309019149c0728))
+
+### Bug Fixes
+
+* keep the deviation quantiles inside the bucket range ([cb01a56](https://github.com/propeller-heads/fynd/commit/cb01a56c19c0597fcaf6c057d2bdabb4f23b24ea))
+* keep the HTTP span's fields off the per-quote log lines ([1467634](https://github.com/propeller-heads/fynd/commit/1467634858cf591a7bd2d5766702acfe4d0480f8))
+* measure the simulated amount against the post-fee quote ([6b5267e](https://github.com/propeller-heads/fynd/commit/6b5267efc7d74eda6112a3345306ab459c6fcf27))
+
+
 ## [0.100.2](https://github.com/propeller-heads/fynd/compare/0.100.1...0.100.2) (2026-09-03)
 
 ### Features
