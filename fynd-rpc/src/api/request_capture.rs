@@ -211,7 +211,6 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
         },
         SolveError::RouteRejected { reason, .. } => match reason {
             RouteRejection::PammFallbackExcluded => "route/pamm_fallback_excluded",
-            RouteRejection::PammFeeTiersUnread => "route/pamm_fee_tiers_unread",
             RouteRejection::PammFallbackPoolMissing => "route/pamm_fallback_pool_missing",
             RouteRejection::PammFallbackUnpriceable => "route/pamm_fallback_unpriceable",
             _ => "route/other",
@@ -631,9 +630,9 @@ mod tests {
         assert_eq!(
             failure_reason_slug(
                 s,
-                Some(&SolveError::route_rejected("o", RouteRejection::PammFeeTiersUnread))
+                Some(&SolveError::route_rejected("o", RouteRejection::PammFallbackPoolMissing))
             ),
-            "route/pamm_fee_tiers_unread"
+            "route/pamm_fallback_pool_missing"
         );
         assert_eq!(
             failure_reason_slug(
