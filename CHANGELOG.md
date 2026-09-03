@@ -1,4 +1,11 @@
 
+## [0.101.1](https://github.com/propeller-heads/fynd/compare/0.101.0...0.101.1) (2026-09-03)
+
+### Features
+
+* **bench:** let the viewer read another results directory ([9475175](https://github.com/propeller-heads/fynd/commit/9475175091bd8f9f21fff840f916e85b5df6d782))
+
+
 ## [0.101.0](https://github.com/propeller-heads/fynd/compare/0.100.2...0.101.0) (2026-09-03)
 
 ### Features
