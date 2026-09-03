@@ -2,10 +2,17 @@
 
 ## Workflow
 
-### Before committing
+### Before committing or pushing
 
 1. Re-read your changes for unnecessary complexity and unclear naming
-2. Run the `run-ci` and `sync-docs` skills.
+2. Format: `cargo +nightly fmt --all`
+3. Run only the tests that cover what you changed, e.g. `cargo nextest run -p fynd-core` or
+   `cargo nextest run -E 'test(route_validation)'`. Do not run the whole workspace.
+4. Run the `sync-docs` skill if you changed behaviour that the docs describe.
+
+Do **not** run the full CI pipeline (`run-ci` skill) on every push. Run it when you are about to
+open or update a PR for review, or when a change is wide enough that scoped tests do not cover it
+(workspace-wide refactors, `Cargo.toml`/`Cargo.lock`, RPC types, release prep).
 
 ### Commits
 
