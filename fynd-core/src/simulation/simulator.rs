@@ -14,6 +14,7 @@ use alloy::{
     sol,
     sol_types::SolError,
 };
+use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
@@ -135,13 +136,16 @@ impl QuoteSimulator {
     }
 
     /// Simulates an encoded quote and reports its returned amount and gas used or a failure.
-    pub async fn simulate(&self, quote: &OrderQuote) -> SimulationResult {
-        self.simulate_attempt(quote)
-            .await
-            .into_result()
+    ///
+    /// Records the outcome and, on success, how far the simulated amount sits from what the quote
+    /// promised. Instrumenting here rather than at the call site keeps every caller measured.
+    pub(crate) async fn simulate_attempt(&self, quote: &OrderQuote) -> SimulationAttempt {
+        let attempt = self.attempt(quote).await;
+        record_outcome(quote, &attempt);
+        attempt
     }
 
-    pub(crate) async fn simulate_attempt(&self, quote: &OrderQuote) -> SimulationAttempt {
+    async fn attempt(&self, quote: &OrderQuote) -> SimulationAttempt {
         let transaction = match quote.transaction() {
             Some(value) => value,
             None => return failure("simulation setup failed: quote has no encoded transaction"),
@@ -290,6 +294,39 @@ impl SimulationAttempt {
             }
         }
     }
+}
+
+/// Records the outcome of one simulated quote, and on success how far the simulated amount landed
+/// from the quoted one.
+///
+/// A revert and a failure are counted apart because they call for different work: a revert means
+/// the route the solver priced does not execute, while a failure means the simulation itself did
+/// not run, so it says nothing about the route.
+fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
+    let outcome = match attempt {
+        SimulationAttempt::Success { amount_out, .. } => {
+            if let Some(deviation) = deviation_bps(quote, amount_out) {
+                histogram!("quote_simulation_deviation_bps").record(deviation);
+            }
+            "success"
+        }
+        SimulationAttempt::Reverted { .. } => "reverted",
+        SimulationAttempt::Failure { .. } => "failed",
+    };
+    counter!("quote_simulation_total", "outcome" => outcome).increment(1);
+}
+
+/// How far the simulated amount sits from the quoted one, in basis points of the quoted amount.
+///
+/// A negative value means the simulation returned less than the quote promised. A quote of zero
+/// has no ratio to report, so it returns `None` rather than a division by zero.
+fn deviation_bps(quote: &OrderQuote, simulated_amount_out: &BigUint) -> Option<f64> {
+    let quoted = quote.amount_out().to_f64()?;
+    let simulated = simulated_amount_out.to_f64()?;
+    if quoted <= 0.0 {
+        return None;
+    }
+    Some((simulated - quoted) / quoted * 10_000.0)
 }
 
 fn failure(reason: &str) -> SimulationAttempt {

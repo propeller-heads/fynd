@@ -271,3 +271,93 @@ async fn test_simulation_times_out_when_the_node_does_not_answer() {
         matches!(attempt.into_result(), SimulationResult::Failure { reason } if reason.contains("timed out"))
     );
 }
+
+/// A successful quote whose raw output is `amount_out`.
+fn quote_with_amount_out(amount_out: u64) -> OrderQuote {
+    OrderQuote::new(
+        "test-order".to_string(),
+        crate::QuoteStatus::Success,
+        BigUint::from(1_000u64),
+        BigUint::from(amount_out),
+        BigUint::from(50_000u64),
+        BigUint::from(amount_out),
+        crate::BlockInfo::new(1, "0x1".to_string(), 1),
+        "test_algorithm".to_string(),
+        tycho_simulation::tycho_common::Bytes::from(vec![0xAA; 20]),
+        tycho_simulation::tycho_common::Bytes::from(vec![0xAA; 20]),
+        "1".to_string(),
+    )
+}
+
+/// Names every metric a run recorded, with its labels.
+fn recorded_metrics(
+    snapshotter: &metrics_util::debugging::Snapshotter,
+) -> Vec<(String, Vec<String>)> {
+    snapshotter
+        .snapshot()
+        .into_vec()
+        .iter()
+        .map(|(key, _, _, _)| {
+            (
+                key.key().name().to_string(),
+                key.key()
+                    .labels()
+                    .map(|label| format!("{}={}", label.key(), label.value()))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn test_record_outcome_success() {
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+
+    metrics::with_local_recorder(&recorder, || {
+        record_outcome(
+            &quote_with_amount_out(1_000_000),
+            &SimulationAttempt::Success {
+                amount_out: BigUint::from(999_000u64),
+                gas_used: 120_000,
+            },
+        );
+    });
+
+    let recorded = recorded_metrics(&snapshotter);
+    assert!(recorded
+        .contains(&("quote_simulation_total".to_string(), vec!["outcome=success".to_string()])));
+    assert!(recorded
+        .iter()
+        .any(|(name, _)| name == "quote_simulation_deviation_bps"));
+}
+
+#[test]
+fn test_record_outcome_reverted_apart_from_failed() {
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+
+    metrics::with_local_recorder(&recorder, || {
+        record_outcome(
+            &quote_with_amount_out(1_000_000),
+            &SimulationAttempt::Reverted { reason: "reverted".to_string() },
+        );
+        record_outcome(
+            &quote_with_amount_out(1_000_000),
+            &SimulationAttempt::Failure { reason: "timed out".to_string() },
+        );
+    });
+
+    let recorded = recorded_metrics(&snapshotter);
+    for outcome in ["outcome=reverted", "outcome=failed"] {
+        assert!(
+            recorded.contains(&("quote_simulation_total".to_string(), vec![outcome.to_string()]))
+        );
+    }
+    assert!(
+        !recorded
+            .iter()
+            .any(|(name, _)| name == "quote_simulation_deviation_bps"),
+        "a call that returned no amount has no deviation to record"
+    );
+}

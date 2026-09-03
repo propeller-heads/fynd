@@ -51,13 +51,10 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
-    encoding::encoder::Encoder,
-    feed::exclusivity::is_exclusive,
-    price_guard::guard::PriceGuard,
-    simulation::simulator::{QuoteSimulator, SimulationAttempt},
-    worker_pool::task_queue::TaskQueueHandle,
-    BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
-    QuoteStatus, SolveError, SolveParams, SurplusInfo, Swap,
+    encoding::encoder::Encoder, feed::exclusivity::is_exclusive, price_guard::guard::PriceGuard,
+    simulation::simulator::QuoteSimulator, worker_pool::task_queue::TaskQueueHandle, BlockInfo,
+    EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus,
+    SolveError, SolveParams, SurplusInfo, Swap,
 };
 
 /// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
@@ -609,9 +606,11 @@ impl WorkerPoolRouter {
                 .iter_mut()
                 .map(|quote| async move {
                     if quote.status() == QuoteStatus::Success {
-                        let attempt = simulator.simulate_attempt(quote).await;
-                        record_simulation_outcome(quote.amount_out(), &attempt);
-                        quote.set_simulation_result(attempt.into_result());
+                        let result = simulator
+                            .simulate_attempt(quote)
+                            .await
+                            .into_result();
+                        quote.set_simulation_result(result);
                     }
                 }),
         )
@@ -1042,39 +1041,6 @@ fn to_gas_token_amount(quote: &OrderQuote, amount: &BigUint) -> Option<BigUint> 
         return None;
     }
     Some(amount * gas_cost_wei / gas_cost_out)
-}
-
-/// Records the outcome of one simulated quote, and how far the simulated amount landed from the
-/// quoted one.
-///
-/// A revert and a failure are counted apart because they call for different work: a revert means
-/// the route the solver priced does not execute, while a failure means the simulation itself did
-/// not run, so it says nothing about the route.
-fn record_simulation_outcome(quoted_amount_out: &BigUint, attempt: &SimulationAttempt) {
-    let outcome = match attempt {
-        SimulationAttempt::Success { amount_out, .. } => {
-            if let Some(deviation_bps) = deviation_bps(quoted_amount_out, amount_out) {
-                histogram!("quote_simulation_deviation_bps").record(deviation_bps);
-            }
-            "success"
-        }
-        SimulationAttempt::Reverted { .. } => "reverted",
-        SimulationAttempt::Failure { .. } => "failed",
-    };
-    counter!("quote_simulation_total", "outcome" => outcome).increment(1);
-}
-
-/// How far the simulated amount sits from the quoted one, in basis points of the quoted amount.
-///
-/// A negative value means the simulation returned less than the quote promised. A quote of zero
-/// has no ratio to report, so it returns `None` rather than a division by zero.
-fn deviation_bps(quoted_amount_out: &BigUint, simulated_amount_out: &BigUint) -> Option<f64> {
-    let quoted = quoted_amount_out.to_f64()?;
-    let simulated = simulated_amount_out.to_f64()?;
-    if quoted <= 0.0 {
-        return None;
-    }
-    Some((simulated - quoted) / quoted * 10_000.0)
 }
 
 /// Target for the winning-quote protocol log. Emitted at INFO, so a deployment already running
@@ -3656,101 +3622,6 @@ mod tests {
             .with_gas_price(BigUint::from(5_000_000_000u64));
 
         assert_eq!(to_gas_token_amount(&quote, &BigUint::from(100_000_000u64)), None);
-    }
-
-    #[test]
-    fn test_deviation_bps_reports_a_shortfall_as_negative() {
-        let deviation =
-            deviation_bps(&BigUint::from(1_000_000u64), &BigUint::from(999_000u64)).unwrap();
-
-        assert!((deviation - -10.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_deviation_bps_reports_a_surplus_as_positive() {
-        let deviation =
-            deviation_bps(&BigUint::from(1_000_000u64), &BigUint::from(1_001_000u64)).unwrap();
-
-        assert!((deviation - 10.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_deviation_bps_without_a_quoted_amount() {
-        assert_eq!(deviation_bps(&BigUint::ZERO, &BigUint::from(1_000u64)), None);
-    }
-
-    /// Names every metric a run recorded, with its labels, so a test can assert on them.
-    fn recorded_metrics(
-        snapshotter: &metrics_util::debugging::Snapshotter,
-    ) -> Vec<(String, Vec<String>)> {
-        snapshotter
-            .snapshot()
-            .into_vec()
-            .iter()
-            .map(|(key, _, _, _)| {
-                (
-                    key.key().name().to_string(),
-                    key.key()
-                        .labels()
-                        .map(|label| format!("{}={}", label.key(), label.value()))
-                        .collect(),
-                )
-            })
-            .collect()
-    }
-
-    #[test]
-    fn test_record_simulation_outcome_counts_a_success_and_its_deviation() {
-        let recorder = metrics_util::debugging::DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-
-        metrics::with_local_recorder(&recorder, || {
-            record_simulation_outcome(
-                &BigUint::from(1_000_000u64),
-                &SimulationAttempt::Success {
-                    amount_out: BigUint::from(999_000u64),
-                    gas_used: 120_000,
-                },
-            );
-        });
-
-        let recorded = recorded_metrics(&snapshotter);
-        assert!(recorded.contains(&(
-            "quote_simulation_total".to_string(),
-            vec!["outcome=success".to_string()]
-        )));
-        assert!(recorded
-            .iter()
-            .any(|(name, _)| name == "quote_simulation_deviation_bps"));
-    }
-
-    #[test]
-    fn test_record_simulation_outcome_counts_a_revert_apart_from_a_failure() {
-        let recorder = metrics_util::debugging::DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-
-        metrics::with_local_recorder(&recorder, || {
-            record_simulation_outcome(
-                &BigUint::from(1_000_000u64),
-                &SimulationAttempt::Reverted { reason: "reverted".to_string() },
-            );
-            record_simulation_outcome(
-                &BigUint::from(1_000_000u64),
-                &SimulationAttempt::Failure { reason: "timed out".to_string() },
-            );
-        });
-
-        let recorded = recorded_metrics(&snapshotter);
-        for outcome in ["outcome=reverted", "outcome=failed"] {
-            assert!(recorded
-                .contains(&("quote_simulation_total".to_string(), vec![outcome.to_string()])));
-        }
-        assert!(
-            !recorded
-                .iter()
-                .any(|(name, _)| name == "quote_simulation_deviation_bps"),
-            "a call that returned no amount has no deviation to record"
-        );
     }
 
     /// Runs `log_winning_protocols` and returns the payload of each line it wrote.
