@@ -263,7 +263,11 @@ impl TokenGasPriceComputation {
     }
 
     /// Prices one token as the mean of its buy price and its sell price, kept as an exact
-    /// fraction.
+    /// fraction, with the components that must re-price it when they change.
+    ///
+    /// The component set covers every candidate route between the token and the gas token, not
+    /// just the two chosen ones: a rival pool can move and become the better route, and only a
+    /// full recompute would ever notice if it were not in the set.
     ///
     /// A token missing either route is an error, not a price: a buy rate alone would flatter a
     /// token that is expensive to exit, and prices must stay comparable across tokens.
@@ -278,19 +282,17 @@ impl TokenGasPriceComputation {
         if buy_out.is_zero() {
             return Err(FailedItemError::UnreachableFromGasToken);
         }
-        let mut components: FxHashSet<ComponentId> = buy
-            .swaps()
-            .iter()
-            .map(|swap| swap.component_id().to_string())
-            .collect();
 
-        let sell = self
+        let (sell, mut components) = self
             .sell_route(pass, token, buy_out.clone())
             .ok_or(FailedItemError::NoSellRoute)?;
         let sell_out = route_output(&sell, &self.gas_token);
+        // The chosen routes are on candidate paths, so extending is defensive: it keeps the
+        // stored dependencies correct even if the walk and the relaxation ever disagree.
         components.extend(
-            sell.swaps()
+            buy.swaps()
                 .iter()
+                .chain(sell.swaps())
                 .map(|swap| swap.component_id().to_string()),
         );
 
@@ -301,8 +303,10 @@ impl TokenGasPriceComputation {
         Ok((mid_price, components))
     }
 
-    /// The route that sells `amount` of `token` back to the gas token, or `None` when there is no
-    /// route or it returns nothing.
+    /// The route that sells `amount` of `token` back to the gas token, paired with every
+    /// component on any candidate route between the two — the walk's component set, which pool
+    /// edge pairs make the buy direction's candidates too. `None` when there is no route or it
+    /// returns nothing.
     ///
     /// Re-roots the pass's shared context at `token` behind a freshly pruned adjacency, so a
     /// sell costs one bounded walk and one relaxation — no lock or state clone of its own. The
@@ -312,17 +316,21 @@ impl TokenGasPriceComputation {
         pass: &mut PricingPass<'_>,
         token: &Address,
         amount: BigUint,
-    ) -> Option<Route> {
+    ) -> Option<(Route, FxHashSet<ComponentId>)> {
         if amount.is_zero() {
             return None;
         }
         let token_node = *pass.token_nodes.get(token)?;
-        let (adj, _, _) = BellmanFordAlgorithm::get_subgraph_with_hop_map(
+        let (adj, _, candidate_components) = BellmanFordAlgorithm::get_subgraph_with_hop_map(
             pass.graph,
             token_node,
             Some(&pass.hops_to_gas),
             self.max_hops,
         )?;
+        let candidates: FxHashSet<ComponentId> = candidate_components
+            .into_iter()
+            .cloned()
+            .collect();
         pass.ctx.adj = adj;
         pass.ctx
             .reroot(token_node, Some(pass.gas_node));
@@ -340,7 +348,7 @@ impl TokenGasPriceComputation {
             .ok()?
             .route()
             .clone();
-        (!route_output(&route, &self.gas_token).is_zero()).then_some(route)
+        (!route_output(&route, &self.gas_token).is_zero()).then_some((route, candidates))
     }
 
     /// Re-solves only the tokens whose stored routes ran through a changed component.
@@ -615,6 +623,36 @@ mod tests {
 
         // 1 ETH buys 8 FAR over three fee-free doublings, and the reverse returns the ETH.
         assert!((ratio(&prices[&far.address]) - 8.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_deps_cover_rival_routes() {
+        // USDC prices via the direct pool, but the worse ETH->MID->USDC route is a candidate:
+        // its pools must be in USDC's dependency set, or a state change that makes it the
+        // better route would leave the stored price stale until a full recompute.
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+        let mid = token(2, "MID");
+
+        let (market, _) = setup_market_weighted(vec![
+            ("direct", &eth, &usdc, MockProtocolSim::new(2000.0)),
+            ("eth_mid", &eth, &mid, MockProtocolSim::new(1.0)),
+            ("mid_usdc", &mid, &usdc, MockProtocolSim::new(1500.0)),
+        ]);
+        let store = DerivedData::new_shared();
+        computation_for(&eth.address)
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+
+        let guard = store.read().await;
+        let deps = &guard
+            .token_prices_deps()
+            .expect("deps are stored")[&usdc.address]
+            .path_components;
+        for component in ["direct", "eth_mid", "mid_usdc"] {
+            assert!(deps.contains(component), "{component} must invalidate USDC's price");
+        }
     }
 
     #[tokio::test]
