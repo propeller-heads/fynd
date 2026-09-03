@@ -65,7 +65,7 @@ use crate::{
     },
     feed::market_data::MarketData,
     graph::{GraphManager, PetgraphStableDiGraphManager},
-    types::{ComponentId, Order, OrderSide, Route},
+    types::{ComponentId, Order, OrderSide},
 };
 
 /// The graph the algorithm walks.
@@ -327,19 +327,13 @@ impl TokenGasPriceComputation {
     ) -> Result<TokenPriceEntry, FailedItemError> {
         let buy = buy.ok_or(FailedItemError::UnreachableFromGasToken)?;
 
-        let (sell, mut components) = self.sell_route(pass, token, buy.amount_out.clone())?;
-        let sell_out = sell.amount_out(&self.gas_token);
+        let (sell_out, mut components) = self.sell_leg(pass, token, buy.amount_out.clone())?;
         // The legs are discarded after the mean; this is the only place their divergence —
         // sell_out under the simulation amount is the round-trip loss — can be observed.
         trace!(%token, buy_out = %buy.amount_out, sell_out = %sell_out, "token priced");
-        // The chosen paths are candidate paths, so extending is defensive: it keeps the
-        // stored dependencies correct even if the walk and the relaxation ever disagree.
+        // The buy path is a candidate path, so extending is defensive: it keeps the stored
+        // dependencies correct even if the walk and the relaxation ever disagree.
         components.extend(buy.components.iter().cloned());
-        components.extend(
-            sell.swaps()
-                .iter()
-                .map(|swap| swap.component_id().to_string()),
-        );
 
         let mid_price = Price {
             numerator: &buy.amount_out * (&self.simulation_amount + &sell_out),
@@ -348,26 +342,22 @@ impl TokenGasPriceComputation {
         Ok(TokenPriceEntry { price: mid_price, path_components: components })
     }
 
-    /// The route that sells `amount` of `token` back to the gas token, paired with every
-    /// component on any candidate route between the two — the walk's component set, which pool
-    /// edge pairs make the buy direction's candidates too. Fails as
+    /// What selling `amount` of `token` back to the gas token returns (never zero), paired
+    /// with the components the price depends on: every component on any candidate route
+    /// between the two — the walk's component set, which pool edge pairs make the buy
+    /// direction's candidates too — plus the chosen sell route's own, defensively. Fails as
     /// [`NoSellRoute`](FailedItemError::NoSellRoute) carrying why: on a block where many tokens
     /// fail at once, the distribution of reasons is the signal.
     ///
     /// Re-roots the pass's shared context at `token` behind a freshly pruned adjacency, so a
-    /// sell costs one bounded walk and one relaxation — no lock or state clone of its own. The
-    /// relaxations still dominate this computation's cost: there is one per token.
-    fn sell_route(
+    /// sell costs one bounded walk and one relaxation — no lock, route build, or state clone of
+    /// its own. The relaxations still dominate this computation's cost: there is one per token.
+    fn sell_leg(
         &self,
         pass: &mut PricingPass<'_>,
         token: &Address,
         amount: BigUint,
-    ) -> Result<(Route, FxHashSet<ComponentId>), FailedItemError> {
-        if amount.is_zero() {
-            return Err(FailedItemError::NoSellRoute(
-                "nothing to sell: the buy delivered zero".into(),
-            ));
-        }
+    ) -> Result<(BigUint, FxHashSet<ComponentId>), FailedItemError> {
         let token_node = *pass
             .token_nodes
             .get(token)
@@ -383,7 +373,7 @@ impl TokenGasPriceComputation {
         .ok_or_else(|| {
             FailedItemError::NoSellRoute("no pruned subgraph toward the gas token".into())
         })?;
-        let candidates: FxHashSet<ComponentId> = candidate_components
+        let mut components: FxHashSet<ComponentId> = candidate_components
             .into_iter()
             .cloned()
             .collect();
@@ -398,19 +388,22 @@ impl TokenGasPriceComputation {
             OrderSide::Sell,
             Address::zero(20),
         );
-        let route = pass
+        let result = pass
             .algorithm
             .find_single_route(&pass.ctx, &order, FindRouteOptions::default())
-            .map_err(|error| FailedItemError::NoSellRoute(error.to_string()))?
-            .route()
-            .clone();
-        if route
-            .amount_out(&self.gas_token)
-            .is_zero()
-        {
+            .map_err(|error| FailedItemError::NoSellRoute(error.to_string()))?;
+        let route = result.route();
+        let sell_out = route.amount_out(&self.gas_token);
+        if sell_out.is_zero() {
             return Err(FailedItemError::NoSellRoute("the sell route returns zero".into()));
         }
-        Ok((route, candidates))
+        components.extend(
+            route
+                .swaps()
+                .iter()
+                .map(|swap| swap.component_id().to_string()),
+        );
+        Ok((sell_out, components))
     }
 
     /// Re-solves only the tokens whose stored routes ran through a changed component.

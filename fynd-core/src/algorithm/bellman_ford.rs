@@ -101,7 +101,8 @@ impl BellmanFordContext {
 /// What one relaxation delivers at a destination the source token reaches: the output amount
 /// and the components along the best path to it.
 pub(crate) struct ReachedToken {
-    /// What the path delivers at the destination.
+    /// What the path delivers at the destination. Never zero: a destination the relaxation
+    /// leaves at zero counts as unreached and is absent from the map.
     pub(crate) amount_out: BigUint,
     /// The components the path runs through, in hop order.
     pub(crate) components: Vec<ComponentId>,
