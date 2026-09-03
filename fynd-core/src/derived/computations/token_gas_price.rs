@@ -46,7 +46,7 @@ use tycho_simulation::{
 
 use crate::{
     algorithm::{
-        bellman_ford::{BellmanFordContext, FindRouteOptions},
+        bellman_ford::{BellmanFordContext, FindRouteOptions, ReachedToken},
         Algorithm, AlgorithmConfig, BellmanFordAlgorithm,
     },
     derived::{
@@ -231,9 +231,9 @@ impl TokenGasPriceComputation {
             .last_updated()
             .map_or(block, |b| b.number());
 
-        // One relaxation from the gas token yields the buy route for every token it reaches, so the
-        // buy side costs a single pass however many tokens are priced.
-        let buys = algorithm.find_routes_from_source_token(
+        // One relaxation from the gas token yields the buy amount and path for every token it
+        // reaches, so the buy side costs a single pass however many tokens are priced.
+        let buys = algorithm.reach_from_source_token(
             &ctx,
             &self.simulation_amount,
             FindRouteOptions::default(),
@@ -318,29 +318,25 @@ impl TokenGasPriceComputation {
         &self,
         pass: &mut PricingPass<'_>,
         token: &Address,
-        buy: Option<&Route>,
+        buy: Option<&ReachedToken>,
     ) -> Result<(Price, FxHashSet<ComponentId>), FailedItemError> {
         let buy = buy.ok_or(FailedItemError::UnreachableFromGasToken)?;
-        let buy_out = buy.amount_out(token);
-        if buy_out.is_zero() {
-            return Err(FailedItemError::UnreachableFromGasToken);
-        }
 
         let (sell, mut components) = self
-            .sell_route(pass, token, buy_out.clone())
+            .sell_route(pass, token, buy.amount_out.clone())
             .ok_or(FailedItemError::NoSellRoute)?;
         let sell_out = sell.amount_out(&self.gas_token);
-        // The chosen routes are on candidate paths, so extending is defensive: it keeps the
+        // The chosen paths are candidate paths, so extending is defensive: it keeps the
         // stored dependencies correct even if the walk and the relaxation ever disagree.
+        components.extend(buy.components.iter().cloned());
         components.extend(
-            buy.swaps()
+            sell.swaps()
                 .iter()
-                .chain(sell.swaps())
                 .map(|swap| swap.component_id().to_string()),
         );
 
         let mid_price = Price {
-            numerator: &buy_out * (&self.simulation_amount + &sell_out),
+            numerator: &buy.amount_out * (&self.simulation_amount + &sell_out),
             denominator: BigUint::from(2u8) * &self.simulation_amount * sell_out,
         };
         Ok((mid_price, components))
