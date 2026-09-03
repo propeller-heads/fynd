@@ -195,8 +195,8 @@ impl TokenGasPriceComputation {
             .with_gas_aware(false);
         let algorithm = BellmanFordAlgorithm::with_config(config);
 
-        let wanted = self.tokens_to_price(&topology, filter_tokens);
-        if wanted.is_empty() {
+        let tokens_to_price = self.tokens_to_price(&topology, filter_tokens);
+        if tokens_to_price.is_empty() {
             return Ok(SolvedPrices {
                 prices: FxHashMap::default(),
                 block,
@@ -219,7 +219,7 @@ impl TokenGasPriceComputation {
             .await
         else {
             // No subgraph around the gas token means nothing is priceable this block.
-            debug!(unreachable_tokens = wanted.len(), "no subgraph around the gas token");
+            debug!(unreachable_tokens = tokens_to_price.len(), "no subgraph around the gas token");
             return Ok(SolvedPrices {
                 prices: FxHashMap::default(),
                 block,
@@ -252,8 +252,8 @@ impl TokenGasPriceComputation {
         let mut failed_items = Vec::new();
         let mut unattempted = FxHashSet::default();
         let mut unreachable_tokens = 0usize;
-        let mut wanted = wanted.into_iter();
-        for token in &mut wanted {
+        let mut remaining = tokens_to_price.into_iter();
+        for token in &mut remaining {
             if Instant::now() >= deadline {
                 unattempted.insert(token);
                 break;
@@ -269,7 +269,7 @@ impl TokenGasPriceComputation {
                 Err(error) => failed_items.push(FailedItem { key: token.to_string(), error }),
             }
         }
-        unattempted.extend(wanted);
+        unattempted.extend(remaining);
         if !unattempted.is_empty() {
             warn!(
                 unattempted = unattempted.len(),
@@ -299,7 +299,7 @@ impl TokenGasPriceComputation {
             .values()
             .flatten()
             .filter(|token| *token != &self.gas_token)
-            .filter(|token| filter_tokens.is_none_or(|wanted| wanted.contains(*token)))
+            .filter(|token| filter_tokens.is_none_or(|filter| filter.contains(*token)))
             .cloned()
             .collect()
     }
