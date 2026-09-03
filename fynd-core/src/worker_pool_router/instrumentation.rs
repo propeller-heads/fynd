@@ -1,15 +1,19 @@
-//! The per-quote comparison log: one line per worker pool per order, carrying what that pool
-//! quoted, how long it took, and how far ahead of the weakest quote it landed.
+//! The router's per-quote logs: the comparison line each worker pool writes for an order, and the
+//! protocol line the winning quote writes.
 //!
-//! Written as plain `key=value` text on a dedicated target so a log pipeline can read it as one
-//! table and compare algorithms against each other.
+//! Both are plain `key=value` text on their own target, so a log pipeline reads each as one table.
+//! The payload of each line is one preformatted string rather than tracing fields, because the
+//! formatter wraps field names and their `=` separators in ANSI escapes, which defeats a logfmt
+//! parser downstream.
+
+use std::collections::BTreeMap;
 
 use num_traits::ToPrimitive;
 use tracing::{trace, Level};
 
 use super::{
-    is_rankable, Order, OrderResponses, OrderSide, QuoteOptions, QuoteStatus, SolveError,
-    WorkerPoolQuote, BPS_DENOMINATOR,
+    is_rankable, Order, OrderQuote, OrderResponses, OrderSide, QuoteOptions, QuoteStatus,
+    SolveError, WorkerPoolQuote, BPS_DENOMINATOR,
 };
 
 /// Target for the per-quote comparison log. Emitted at TRACE so a plain `RUST_LOG=info` leaves
@@ -100,9 +104,6 @@ pub(super) fn log_quote_comparison(
 ///
 /// Named for the response rather than the outcome: a pool that answered can still carry a
 /// non-success status, and it gets a line either way.
-///
-/// The payload is one plain string rather than tracing fields because the formatter wraps field
-/// names and their `=` separators in ANSI escapes, which defeats logfmt parsers downstream.
 fn log_quote(
     order: &Order,
     worker_quote: &WorkerPoolQuote,
@@ -229,6 +230,50 @@ fn improvement_bps(baseline_net: Option<f64>, net: Option<f64>) -> Option<f64> {
         return None;
     }
     Some((net - baseline) / baseline * f64::from(BPS_DENOMINATOR))
+}
+
+/// Target for the winning-quote protocol log. Emitted at TRACE, like the comparison log, so a
+/// plain `RUST_LOG=info` leaves it off; a deployment that wants it sets
+/// `RUST_LOG=...,fynd::winning_protocols=trace`.
+const WINNING_PROTOCOLS_TARGET: &str = "fynd::winning_protocols";
+
+/// Logs the protocols the winning quote swaps on, and how many swaps it makes on each.
+///
+/// The protocol counts are a JSON object; the rest of the line is `key=value` text. The counts are
+/// swaps, not distinct pools: a split route that crosses two Uniswap V2 pools reports 2, which is
+/// what the solution executes.
+///
+/// Only a successful quote with a route gets a line, so the log holds one line per returned route.
+pub(super) fn log_winning_protocols(quote: &OrderQuote) {
+    if !tracing::enabled!(target: WINNING_PROTOCOLS_TARGET, Level::TRACE) {
+        return;
+    }
+    if quote.status() != QuoteStatus::Success {
+        return;
+    }
+    let Some(route) = quote.route() else {
+        return;
+    };
+
+    // BTreeMap, so the same set of protocols always serialises in the same order and two lines
+    // can be compared as text.
+    let mut swaps_per_protocol: BTreeMap<&str, usize> = BTreeMap::new();
+    for swap in route.swaps() {
+        *swaps_per_protocol
+            .entry(swap.protocol())
+            .or_default() += 1;
+    }
+
+    trace!(
+        target: WINNING_PROTOCOLS_TARGET,
+        "winning_protocols order_id={} block={} pool={} algorithm={} swaps={} protocols={}",
+        quote.order_id(),
+        quote.block().number(),
+        quote.worker_pool(),
+        quote.algorithm(),
+        route.swaps().len(),
+        serde_json::to_string(&swaps_per_protocol).unwrap_or_default(),
+    );
 }
 
 #[cfg(test)]

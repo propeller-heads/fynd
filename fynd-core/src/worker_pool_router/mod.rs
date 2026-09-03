@@ -22,28 +22,27 @@
 //!    [`encoding::encoder::Encoder`](crate::encoding::encoder::Encoder)
 
 mod allocation;
-mod comparison_log;
 pub mod config;
+mod instrumentation;
 #[cfg(test)]
 mod log_capture;
 
 use std::{
-    collections::BTreeMap,
     sync::LazyLock,
     time::{Duration, Instant},
 };
 
 pub use allocation::ExclusiveAccess;
 use allocation::{allocate, validate_pool_allowlist, Allocation, OrderClass};
-use comparison_log::{log_quote_comparison, solver_error_label};
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
+use instrumentation::{log_quote_comparison, solver_error_label};
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn, Level};
+use tracing::{debug, warn};
 use tycho_execution::encoding::{
     evm::gas_estimator::estimate_gas_usage,
     models::{Solution, Strategy},
@@ -356,7 +355,7 @@ pub async fn encode_quotes(
 pub fn finalize_quote(order_quotes: Vec<OrderQuote>, solve_time_ms: u64) -> Quote {
     for quote in &order_quotes {
         record_win(quote);
-        log_winning_protocols(quote);
+        instrumentation::log_winning_protocols(quote);
     }
 
     let total_gas_estimate = order_quotes
@@ -1041,57 +1040,6 @@ fn to_gas_token_amount(quote: &OrderQuote, amount: &BigUint) -> Option<BigUint> 
         return None;
     }
     Some(amount * gas_cost_wei / gas_cost_out)
-}
-
-/// Target for the winning-quote protocol log. Emitted at INFO, so a deployment already running
-/// at `RUST_LOG=info` collects it without further configuration; `fynd::winning_protocols=warn`
-/// turns it off.
-const WINNING_PROTOCOLS_TARGET: &str = "fynd::winning_protocols";
-
-/// Logs which protocols the quote the router returns swaps on, and how many swaps it makes on
-/// each, as one JSON object.
-///
-/// The counts are swaps, not distinct pools: a split route that crosses two Uniswap V2 pools
-/// reports 2, which is what the solution executes.
-///
-/// A quote that found no route has no protocols to report and gets no line, so the log holds one
-/// line per returned route.
-fn log_winning_protocols(quote: &OrderQuote) {
-    if !tracing::enabled!(target: WINNING_PROTOCOLS_TARGET, Level::INFO) {
-        return;
-    }
-    if quote.status() != QuoteStatus::Success {
-        return;
-    }
-    let Some(route) = quote.route() else {
-        return;
-    };
-
-    // BTreeMap, so the same set of protocols always serialises in the same order and two lines
-    // can be compared as text.
-    let mut swaps_per_protocol: BTreeMap<&str, usize> = BTreeMap::new();
-    for swap in route.swaps() {
-        *swaps_per_protocol
-            .entry(swap.protocol())
-            .or_default() += 1;
-    }
-    let Ok(protocols) = serde_json::to_string(&swaps_per_protocol) else {
-        warn!(target: WINNING_PROTOCOLS_TARGET, "failed to serialise the winning protocols");
-        return;
-    };
-
-    // The payload is one plain string rather than tracing fields because the formatter wraps
-    // field names and their `=` separators in ANSI escapes, which defeats parsers downstream.
-    info!(
-        target: WINNING_PROTOCOLS_TARGET,
-        "winning_protocols order_id={} block={} pool={} algorithm={} swaps={} protocols={}",
-        quote.order_id(),
-        quote.block().number(),
-        quote.worker_pool(),
-        quote.algorithm(),
-        route.swaps().len(),
-        protocols,
-    );
 }
 
 /// Records the win and the settled volume of one quote the router returns, by pool and algorithm.
@@ -3626,7 +3574,9 @@ mod tests {
 
     /// Runs `log_winning_protocols` and returns the payload of each line it wrote.
     fn capture_winning_protocols(quote: &OrderQuote) -> Vec<String> {
-        super::log_capture::capture_payloads("winning_protocols ", || log_winning_protocols(quote))
+        super::log_capture::capture_payloads("winning_protocols ", || {
+            instrumentation::log_winning_protocols(quote)
+        })
     }
 
     #[test]
