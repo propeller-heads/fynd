@@ -1507,6 +1507,66 @@ mod tests {
             .expect("worker task should not panic");
     }
 
+    /// A worker respawned after a panic starts with an empty readiness tracker, and no derived
+    /// event is replayed to it. It must answer an `allow_stale` task from what the shared store
+    /// already holds instead of waiting out the algorithm timeout.
+    #[tokio::test]
+    async fn worker_answers_stale_task_seeded_from_the_store() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let derived = DerivedData::new_shared();
+        derived
+            .write()
+            .await
+            .set_spot_prices(Default::default(), vec![], 7, true);
+
+        let requirements = ComputationRequirements::none()
+            .allow_stale(SpotPriceComputation::ID)
+            .unwrap();
+        let algorithm = failing_algorithm().with_requirements(requirements);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
+
+        let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
+        let (_derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
+        let (task_tx, task_rx) = async_channel::bounded::<SolveTask>(16);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
+        let handle = tokio::spawn(async move {
+            worker
+                .run(event_rx, derived_rx, task_rx, shutdown_rx)
+                .await;
+        });
+
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        task_tx
+            .send(SolveTask::new(
+                uuid::Uuid::new_v4(),
+                order(&token_a, &token_b, 100, OrderSide::Sell),
+                response_tx,
+            ))
+            .await
+            .expect("worker should be receiving tasks");
+
+        let result = tokio::time::timeout(Duration::from_secs(5), response_rx)
+            .await
+            .expect("worker should answer the task")
+            .expect("worker should not drop the responder");
+
+        // The stub always fails to solve; reaching the solve at all is what proves readiness was
+        // seeded. Without seeding the worker returns NotReady after the algorithm timeout.
+        assert!(
+            matches!(result, Err(SolveError::AlgorithmError(_))),
+            "expected the seeded worker to solve, got {result:?}"
+        );
+
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("worker should shutdown")
+            .expect("worker task should not panic");
+    }
+
     /// Captures log output for assertions, shared between the subscriber and the test.
     #[derive(Clone, Default)]
     struct SharedLogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
