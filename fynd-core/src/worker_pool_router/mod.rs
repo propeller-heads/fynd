@@ -3619,7 +3619,7 @@ mod tests {
         assert_eq!(to_gas_token_amount(&quote, &BigUint::from(100_000_000u64)), None);
     }
 
-    /// Runs `log_winning_protocols` and returns the payload of each line it wrote.
+    /// Runs `record_winning_protocols` and returns the payload of each line it wrote.
     fn capture_winning_protocols(quote: &OrderQuote) -> Vec<String> {
         super::log_capture::capture_payloads("winning_protocols ", || {
             instrumentation::record_winning_protocols(quote)
@@ -3701,7 +3701,11 @@ mod tests {
         });
 
         assert_eq!(
-            counter_value(&recorded_metrics(&snapshotter), "winning_quote_swaps_total", "simulated=none"),
+            counter_value(
+                &recorded_metrics(&snapshotter),
+                "winning_quote_swaps_total",
+                "simulated=none"
+            ),
             Some(1)
         );
     }
