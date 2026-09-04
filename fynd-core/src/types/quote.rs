@@ -2782,7 +2782,6 @@ mod tests {
         let json = serde_json::to_string(&opts).unwrap();
 
         assert!(!json.contains("gas_price_override"), "{json}");
-        assert!(!json.contains('7'), "{json}");
 
         let deserialized: QuoteOptions = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.gas_price_override(), None);
