@@ -62,7 +62,7 @@ fn test_token_overrides_fund_both_holders_and_both_spenders() {
 
 /// An envelope for the tests that drive the call directly, without a quote to derive one from.
 fn test_envelope() -> SimulationEnvelope {
-    SimulationEnvelope { gas_limit: SIMULATION_MIN_GAS_LIMIT, gas_price: 1 }
+    SimulationEnvelope { gas_limit: SIMULATION_MIN_GAS_LIMIT, gas_price: 1, block: None }
 }
 
 #[test]
@@ -93,11 +93,24 @@ fn test_envelope_prices_a_quote_that_carries_no_gas_price() {
 
 #[test]
 fn test_block_overrides_leave_nothing_a_pool_reads_at_zero() {
-    let overrides = block_overrides();
+    let overrides = block_overrides(test_envelope());
     assert_eq!(overrides.coinbase, Some(SIMULATION_COINBASE));
     assert_eq!(overrides.gas_limit, Some(SIMULATION_BLOCK_GAS_LIMIT));
     assert_ne!(overrides.random, Some(B256::ZERO));
     assert!(overrides.random.is_some());
+}
+
+/// `eth_simulateV1` builds on the head and `debug_traceCall` runs in the head itself, so the two
+/// report different heights unless the environment pins them. A pool that keys off the height or
+/// the clock would otherwise meet two environments and the trace could name a different failure.
+#[test]
+fn test_block_overrides_pin_the_block_a_quote_was_solved_against() {
+    let quote = quote_with_fees(1_000_000);
+    let envelope = SimulationEnvelope::for_quote(&quote);
+    let overrides = block_overrides(envelope);
+
+    assert_eq!(overrides.number, Some(U256::from(quote.block().number() + 1)));
+    assert_eq!(overrides.time, Some(quote.block().timestamp() + SIMULATION_BLOCK_INTERVAL_SECS));
 }
 
 /// The funding value is what makes a simulated sender solvent, and it is bounded on both sides:
