@@ -234,6 +234,30 @@ async fn test_discover_layout_refuses_split_storage() {
     );
 }
 
+/// A rebasing token computes `balanceOf` from shares, so the balance trace finds arithmetic and
+/// the shares trace finds the mapping. The fallback is what keeps the module off an address list.
+#[tokio::test]
+async fn test_discover_balance_falls_back_to_the_shares_view() {
+    let holder = Address::repeat_byte(1);
+    let contract = Address::repeat_byte(3);
+    let shares = balance_slot(holder, solidity(0));
+    let asserter = Asserter::new();
+    // The balance trace names a slot that does not key the answer.
+    asserter.push_success(&prestate(contract, &[B256::repeat_byte(0xff)]));
+    asserter.push_failure(revert_payload());
+    // The shares trace names the mapping itself.
+    asserter.push_success(&prestate(contract, &[shares]));
+    asserter.push_success(&Bytes::from(sentinel_word()));
+
+    let (storage_contract, position) =
+        discover_balance(&mocked_provider(&asserter), Address::repeat_byte(9), holder)
+            .await
+            .expect("the shares view places the mapping");
+
+    assert_eq!(storage_contract, contract);
+    assert_eq!(position, solidity(0));
+}
+
 /// Exercises the exact layouts that motivated the trace-guided path: USDT, whose storage the
 /// sentinel probe could not place, and stETH, whose balance is derived from shares.
 ///
@@ -264,7 +288,7 @@ async fn test_discovers_mainnet_usdt_and_steth_layouts() {
         // `balanceOf`; either view proving the write is what the funding override needs.
         let balance_views = [
             IERC20LayoutProbe::balanceOfCall { account: holder }.abi_encode(),
-            ILidoStEth::sharesOfCall { account: holder }.abi_encode(),
+            ISharesToken::sharesOfCall { account: holder }.abi_encode(),
         ];
         let mut funds = false;
         for calldata in balance_views {

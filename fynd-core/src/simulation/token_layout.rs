@@ -9,7 +9,7 @@
 use alloy::{
     eips::BlockId,
     network::Ethereum,
-    primitives::{address, keccak256, map::B256HashMap, Address, Bytes, TxKind, B256, U256},
+    primitives::{keccak256, map::B256HashMap, Address, Bytes, TxKind, B256, U256},
     providers::{ext::DebugApi, Provider, RootProvider},
     rpc::{
         json_rpc::ErrorPayload,
@@ -36,12 +36,6 @@ const MAX_BASE_SLOT: u16 = 640;
 const MAX_SLOTS_TO_VERIFY: usize = 32;
 /// A value that survives common packed-balance flags and narrow integer casts.
 pub(crate) const PROBE_SENTINEL: U256 = U256::from_limbs([0xdead_beef_cafe_babe, 0, 0, 0]);
-/// Mainnet Lido stETH.
-///
-/// Its `balanceOf` multiplies a holder's shares by the pooled-ETH rate, so tracing it finds the
-/// arithmetic rather than the mapping. The shares view is traced instead. The address is mainnet's
-/// and matches nothing on another chain, which leaves every other token on the ordinary path.
-const STETH: Address = address!("0xae7ab96520de3a18e5e111b5eaab095312d7fe84");
 /// OpenZeppelin v5's ERC-20 balances mapping, under the namespace ERC-7201 prescribes.
 ///
 /// This is `keccak256(abi.encode(uint256(keccak256("openzeppelin.storage.ERC20")) - 1)) &
@@ -60,7 +54,9 @@ sol! {
         function allowance(address owner, address spender) external view returns (uint256);
     }
 
-    interface ILidoStEth {
+    /// The view a share-accounted rebasing token keeps its mapping under. stETH is the one in the
+    /// Tycho set; the rest of the family answers the same call.
+    interface ISharesToken {
         function sharesOf(address account) external view returns (uint256);
     }
 }
@@ -148,15 +144,7 @@ pub async fn discover_layout(
     holder: Address,
     spender: Address,
 ) -> Result<TokenLayout, DiscoveryError> {
-    let balance_calldata = balance_calldata(token, holder);
-    let (storage_contract, observed_balance) =
-        find_accessed_slot(provider, token, &balance_calldata).await?;
-    let balance = recover_position(observed_balance, |position| balance_slot(holder, position))
-        .ok_or_else(|| {
-            DiscoveryError::Unsupported(format!(
-                "could not recover a supported balance mapping for {token:#x}; observed slot {observed_balance:#x}"
-            ))
-        })?;
+    let (storage_contract, balance) = discover_balance(provider, token, holder).await?;
 
     let allowance_calldata =
         IERC20LayoutProbe::allowanceCall { owner: holder, spender }.abi_encode();
@@ -179,13 +167,43 @@ pub async fn discover_layout(
     Ok(TokenLayout::new(storage_contract, balance, allowance))
 }
 
-/// The view whose trace reaches the balance mapping.
-fn balance_calldata(token: Address, holder: Address) -> Vec<u8> {
-    if token == STETH {
-        ILidoStEth::sharesOfCall { account: holder }.abi_encode()
-    } else {
-        IERC20LayoutProbe::balanceOfCall { account: holder }.abi_encode()
+/// Places the balance mapping, trying the plain balance view before the share-accounted one.
+///
+/// A rebasing token multiplies shares by a pooled rate inside `balanceOf`, so tracing that call
+/// finds the arithmetic and not the mapping; `sharesOf` reads the mapping directly. The retry
+/// replaces a list of addresses, which would name only the tokens already known to need it and
+/// would have to be kept per chain.
+async fn discover_balance(
+    provider: &RootProvider<Ethereum>,
+    token: Address,
+    holder: Address,
+) -> Result<(Address, MappingPosition), DiscoveryError> {
+    let probes = [
+        IERC20LayoutProbe::balanceOfCall { account: holder }.abi_encode(),
+        ISharesToken::sharesOfCall { account: holder }.abi_encode(),
+    ];
+    let mut failure = DiscoveryError::Unsupported(format!(
+        "could not identify a balance storage slot for {token:#x}"
+    ));
+    for calldata in probes {
+        match find_accessed_slot(provider, token, &calldata).await {
+            Ok((storage_contract, observed)) => {
+                if let Some(position) =
+                    recover_position(observed, |position| balance_slot(holder, position))
+                {
+                    return Ok((storage_contract, position));
+                }
+                failure = DiscoveryError::Unsupported(format!(
+                    "could not recover a supported balance mapping for {token:#x}; observed slot {observed:#x}"
+                ));
+            }
+            // A node that refused to answer says nothing about the token, so it ends discovery
+            // rather than sending the caller on to a view this token may not even have.
+            Err(error @ DiscoveryError::Rpc(_)) => return Err(error),
+            Err(error) => failure = error,
+        }
     }
+    Err(failure)
 }
 
 /// Finds the slot a read-only call depends on, by overwriting each slot it touched in turn.
