@@ -308,6 +308,7 @@ mod tests {
         primitives::{address, Address, Bytes, U256},
         sol_types::SolError,
     };
+    use rstest::rstest;
 
     use super::*;
 
@@ -438,87 +439,61 @@ mod tests {
         assert_eq!(decode_error(&[0x01, 0x02, 0x03]), None);
     }
 
+    fn reverting(output: Option<Vec<u8>>, calls: Vec<CallFrame>) -> CallFrame {
+        frame(output.map(Bytes::from), Some("execution reverted"), calls)
+    }
+
+    /// Which frame of a reverting tree names the cause.
+    ///
+    /// A revert bubbles up, so the top frame usually carries only a generic message. The frame
+    /// worth reporting is the deepest one that carries data: descending past it would trade a
+    /// named error for "execution reverted", and stopping short of it would report the wrapper.
+    #[rstest]
+    // The error sits one level down, under a top frame that says only that it reverted.
+    #[case::descends_to_the_error(
+        reverting(None, vec![reverting(Some(RouterErrors::Dispatcher__SwapReverted {
+            executor: address!("0x000000000000000000000000000000000000dEaD"),
+        }.abi_encode()), vec![])]),
+        "Dispatcher__SwapReverted"
+    )]
+    // A bare sibling comes first: taking the first reverting child would lose the name.
+    #[case::prefers_the_child_carrying_data(
+        reverting(None, vec![
+            reverting(None, vec![]),
+            reverting(Some(RouterErrors::TychoRouter__AmountOutZero {}.abi_encode()), vec![]),
+        ]),
+        "TychoRouter__AmountOutZero"
+    )]
+    // The child reverted with nothing: taking the deepest frame would throw the name away.
+    #[case::keeps_an_ancestor_over_a_bare_child(
+        reverting(
+            Some(RouterErrors::TychoRouter__NegativeSlippage {
+                amount: U256::from(99u64),
+                minAmount: U256::from(100u64),
+            }.abi_encode()),
+            vec![reverting(None, vec![])],
+        ),
+        "TychoRouter__NegativeSlippage"
+    )]
+    // Two levels down, so the descent does not stop at the first frame carrying data.
+    #[case::takes_the_deepest_error(
+        reverting(
+            Some(RouterErrors::TychoRouter__AmountOutZero {}.abi_encode()),
+            vec![reverting(None, vec![reverting(
+                Some(RouterErrors::TychoRouter__EmptySwaps {}.abi_encode()), vec![],
+            )])],
+        ),
+        "TychoRouter__EmptySwaps"
+    )]
+    fn test_reason_from_frame_reports(#[case] top: CallFrame, #[case] expected: &str) {
+        let reason = reason_from_frame(&top).expect("the tree reverted");
+
+        assert!(reason.contains(expected), "{reason}");
+    }
+
     #[test]
     fn test_reason_from_frame_of_a_call_that_did_not_revert() {
         assert_eq!(reason_from_frame(&frame(None, None, vec![])), None);
-    }
-
-    /// A revert bubbles up: the top frame carries the generic message and the child carries the
-    /// error. Reading the top frame would report "execution reverted" and lose the cause.
-    #[test]
-    fn test_reason_from_frame_descends_to_the_originating_error() {
-        let inner = RouterErrors::Dispatcher__SwapReverted {
-            executor: address!("0x000000000000000000000000000000000000dEaD"),
-        }
-        .abi_encode();
-        let top = frame(
-            None,
-            Some("execution reverted"),
-            vec![frame(Some(Bytes::from(inner)), Some("execution reverted"), vec![])],
-        );
-
-        let reason = reason_from_frame(&top).expect("the tree reverted");
-
-        assert!(reason.contains("Dispatcher__SwapReverted"), "{reason}");
-    }
-
-    /// A low-level call bubbling a revert reports only a message, while the selector sits in a
-    /// sibling. Taking the first reverting child would surface the message and lose the error.
-    #[test]
-    fn test_reason_from_frame_prefers_the_child_carrying_data() {
-        let named = RouterErrors::TychoRouter__AmountOutZero {}.abi_encode();
-        let top = frame(
-            None,
-            Some("execution reverted"),
-            vec![
-                frame(None, Some("execution reverted"), vec![]),
-                frame(Some(Bytes::from(named)), Some("execution reverted"), vec![]),
-            ],
-        );
-
-        let reason = reason_from_frame(&top).expect("the tree reverted");
-
-        assert!(reason.contains("TychoRouter__AmountOutZero"), "{reason}");
-    }
-
-    /// A wrapper that reverts with a named error over a child that reverted with nothing. Taking
-    /// the deepest reverting frame would report "execution reverted" and throw the name away.
-    #[test]
-    fn test_reason_from_frame_keeps_an_ancestor_error_over_a_bare_child() {
-        let named = RouterErrors::TychoRouter__NegativeSlippage {
-            amount: U256::from(99u64),
-            minAmount: U256::from(100u64),
-        }
-        .abi_encode();
-        let top = frame(
-            Some(Bytes::from(named)),
-            Some("execution reverted"),
-            vec![frame(None, Some("execution reverted"), vec![])],
-        );
-
-        let reason = reason_from_frame(&top).expect("the tree reverted");
-
-        assert!(reason.contains("TychoRouter__NegativeSlippage"), "{reason}");
-    }
-
-    /// Two levels down, so the descent does not stop at the first child that carries data.
-    #[test]
-    fn test_reason_from_frame_takes_the_deepest_error() {
-        let deep = RouterErrors::TychoRouter__EmptySwaps {}.abi_encode();
-        let shallow = RouterErrors::TychoRouter__AmountOutZero {}.abi_encode();
-        let top = frame(
-            Some(Bytes::from(shallow)),
-            Some("execution reverted"),
-            vec![frame(
-                None,
-                Some("execution reverted"),
-                vec![frame(Some(Bytes::from(deep)), Some("execution reverted"), vec![])],
-            )],
-        );
-
-        let reason = reason_from_frame(&top).expect("the tree reverted");
-
-        assert!(reason.contains("TychoRouter__EmptySwaps"), "{reason}");
     }
 
     #[test]
