@@ -494,12 +494,24 @@ where
 
                 let price_impact_bps = algo_price_impact
                     .or_else(|| {
-                        super::price_impact::spot_price_impact(
+                        let spot_impact = super::price_impact::spot_price_impact(
                             &route,
                             &amount_in,
                             &amount_out,
                             &self.market_data,
-                        )
+                        );
+                        match spot_impact {
+                            Ok(impact) => Some(impact),
+                            Err(err) => {
+                                debug!(
+                                    order_id = %order.id(),
+                                    algorithm = self.algorithm.name(),
+                                    error = %err,
+                                    "quote carries no price impact"
+                                );
+                                None
+                            }
+                        }
                     })
                     .map(|f| (f * 10_000.0).round() as i32);
 
@@ -961,6 +973,88 @@ mod tests {
             }
             other => panic!("expected AlgorithmError for invalid route, got {other:?}"),
         }
+    }
+
+    /// Mock algorithm that returns a two-branch split route A→B, as `water_fill` does, without
+    /// reporting a price impact of its own.
+    struct SplitRouteAlgorithm;
+
+    impl Algorithm for SplitRouteAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "split_route_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            _graph: &Self::GraphType,
+            _market: MarketData,
+            _label: Option<crate::feed::market_data::StateLabel>,
+            _derived: Option<SharedDerivedDataRef>,
+            _order: &Order,
+        ) -> Result<RouteResult, AlgorithmError> {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            // Both pools quote spot 2.0. 60 A through p1 pays 114 (ideal 120) and the remaining
+            // 40 A through p2 pays 78 (ideal 80): 192 out of an ideal 200, a 4% impact.
+            let swap_p1 = Swap::new(
+                "p1".to_string(),
+                "mock".to_string(),
+                token_a.address.clone(),
+                token_b.address.clone(),
+                BigUint::from(60u64),
+                BigUint::from(114u64),
+                BigUint::from(1u64),
+                component("p1", &[token_a.clone(), token_b.clone()]),
+                Box::new(MockProtocolSim::new(2.0)),
+            )
+            .with_split(0.6);
+            let swap_p2 = Swap::new(
+                "p2".to_string(),
+                "mock".to_string(),
+                token_a.address.clone(),
+                token_b.address.clone(),
+                BigUint::from(40u64),
+                BigUint::from(78u64),
+                BigUint::from(1u64),
+                component("p2", &[token_a.clone(), token_b.clone()]),
+                Box::new(MockProtocolSim::new(2.0)),
+            );
+            let route =
+                Route::new(vec![swap_p1, swap_p2], FxHashMap::default()).expect("non-empty route");
+            Ok(RouteResult::new(route, num_bigint::BigInt::from(192), BigUint::from(1u64)))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quote_price_impact_for_split_route() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted(vec![
+            ("p1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("p2", &token_a, &token_b, MockProtocolSim::new(2.0)),
+        ]);
+        let derived = DerivedData::new_shared();
+        let mut worker =
+            SolverWorker::new(market, derived, SplitRouteAlgorithm, 0, "test_pool".to_string());
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let quote = worker
+            .quote(&ord, SolveParams::default())
+            .await
+            .expect("split route must quote");
+
+        assert_eq!(quote.order().price_impact_bps(), Some(400));
     }
 
     /// Mock algorithm that returns a single-leg route through a pAMM executed via the

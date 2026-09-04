@@ -1511,19 +1511,12 @@ impl Route {
     ///   must have `split == 0.0` (remainder), and the sum must be strictly less than `1.0`
     /// - BFS connectivity: outputs of each branch collection connect to inputs of the next
     fn validate_split_route(&self) -> Result<(), RouteValidationError> {
-        // Collect swaps into branch collections by their input token. Each
-        // branch collection represents a split (parallel branches sharing the
-        // same token_in), not a sequential path.
-        let mut token_in_to_index: FxHashMap<Address, usize> = FxHashMap::default();
-        let mut swaps_by_token_in: Vec<(Address, Vec<&Swap>)> = Vec::new();
-        for swap in &self.swaps {
-            if let Some(&idx) = token_in_to_index.get(&swap.token_in) {
-                swaps_by_token_in[idx].1.push(swap);
-            } else {
-                token_in_to_index.insert(swap.token_in.clone(), swaps_by_token_in.len());
-                swaps_by_token_in.push((swap.token_in.clone(), vec![swap]));
-            }
-        }
+        let swaps_by_token_in = branch_collections(&self.swaps, |swap| &swap.token_in);
+        let token_in_to_index: FxHashMap<Address, usize> = swaps_by_token_in
+            .iter()
+            .enumerate()
+            .map(|(index, (token_in, _))| (token_in.clone(), index))
+            .collect();
 
         validate_split_amounts(&swaps_by_token_in)?;
         validate_bfs_connectivity(&swaps_by_token_in, &token_in_to_index)?;
@@ -1533,6 +1526,31 @@ impl Route {
 
         Ok(())
     }
+}
+
+/// Groups `items` by the token each consumes, in order of first appearance.
+///
+/// Each group is one branch collection: the swaps that divide the balance standing at a token,
+/// whether one swap takes it all or several split it. The route validator checks a split route
+/// collection by collection, and the price-impact walk visits them in the same order, which
+/// `validate_cycles` guarantees runs every producer of a token before its consumers.
+pub(crate) fn branch_collections<'a, T>(
+    items: &'a [T],
+    token_in: impl Fn(&'a T) -> &'a Address,
+) -> Vec<(Address, Vec<&'a T>)> {
+    let mut index_by_token: FxHashMap<&'a Address, usize> = FxHashMap::default();
+    let mut collections: Vec<(Address, Vec<&'a T>)> = Vec::new();
+    for item in items {
+        let token = token_in(item);
+        match index_by_token.get(token) {
+            Some(&index) => collections[index].1.push(item),
+            None => {
+                index_by_token.insert(token, collections.len());
+                collections.push((token.clone(), vec![item]));
+            }
+        }
+    }
+    collections
 }
 
 fn validate_split_amounts(
