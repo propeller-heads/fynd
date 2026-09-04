@@ -750,6 +750,7 @@ mod tests {
         let store = manager.store();
         let guard = store.read().await;
         assert!(guard.spot_prices().is_some());
+        assert!(guard.token_prices().is_some());
         assert!(guard.component_depths().is_some());
         drop(guard);
         // ...and the receiver is back at the live tail (buffer drained).
