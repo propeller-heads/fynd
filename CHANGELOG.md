@@ -1,4 +1,27 @@
 
+## [0.102.0](https://github.com/propeller-heads/fynd/compare/0.101.1...0.102.0) (2026-09-04)
+
+### Features
+
+* update tycho deps to use latest router deployed ([bbf162c](https://github.com/propeller-heads/fynd/commit/bbf162c77b72e7a3084c7fa6e802dafa2d741dc1))
+* count the winning route's protocols as metrics ([fd1219e](https://github.com/propeller-heads/fynd/commit/fd1219e1ffed7513a474e0f4bf21c49a1e02552c))
+* simulate encoded quotes against a token's real storage layout ([1fbb733](https://github.com/propeller-heads/fynd/commit/1fbb733e7e5ae4d6eca4b99ec449b65c1cc33a38))
+
+### Bug Fixes
+
+* **core:** pin the trace to the block the simulation reported ([7f4242c](https://github.com/propeller-heads/fynd/commit/7f4242c7d8b40ec28cd3641addafc6a4f47a3342))
+* **core:** leave a favourable simulation out of the shortfall mean ([bf1a289](https://github.com/propeller-heads/fynd/commit/bf1a289fa574ee4f390458d6e33b8fcfa7811888))
+* **core:** trace a revert in the block the simulation ran in ([04bb1ce](https://github.com/propeller-heads/fynd/commit/04bb1ce9bda9c8800022e200356d1bb7d2b42168))
+* **core:** place a rebasing token's mapping without naming its address ([78c840f](https://github.com/propeller-heads/fynd/commit/78c840fc6760fa77dcecbb4d1a4917d18e7bc931))
+* **core:** keep a refused RPC from deciding a token cannot be simulated ([5c49977](https://github.com/propeller-heads/fynd/commit/5c4997723a16c906dce018c2ecd700f557acdd50))
+
+### Performance Improvements
+
+* **core:** stop preparing the winning-protocols log when it is off ([1ffaa55](https://github.com/propeller-heads/fynd/commit/1ffaa55d76ec26037c965fbaa7491482d47ca713))
+* **core:** share one layout discovery between concurrent quotes ([0abbf82](https://github.com/propeller-heads/fynd/commit/0abbf822170a46575298015e699ece8846599b26))
+* **core:** bound the layout probes over the read, not over each account ([6bc4b4d](https://github.com/propeller-heads/fynd/commit/6bc4b4d89945f9983aa34dbaddac01a6bb89edb6))
+
+
 ## [0.101.1](https://github.com/propeller-heads/fynd/compare/0.101.0...0.101.1) (2026-09-03)
 
 ### Features
