@@ -32,7 +32,7 @@ use crate::{
         revert,
         token_layout::{discover_layout, DiscoveryError, TokenLayout},
     },
-    solver::defaults::SIMULATION_SLOT_DISCOVERY_TIMEOUT,
+    solver::defaults::SIMULATION_LAYOUT_DISCOVERY_TIMEOUT,
     OrderQuote, SimulationResult,
 };
 
@@ -310,12 +310,12 @@ impl QuoteSimulator {
                 .map_err(|reason| format!("simulation token layout discovery failed: {reason}"));
         }
         let discovered = timeout(
-            SIMULATION_SLOT_DISCOVERY_TIMEOUT,
+            SIMULATION_LAYOUT_DISCOVERY_TIMEOUT,
             discover_layout(&self.provider, token, holder, spender),
         )
         .await
         .map_err(|_| {
-            format!("simulation token layout discovery timed out after {SIMULATION_SLOT_DISCOVERY_TIMEOUT:?}")
+            format!("simulation token layout discovery timed out after {SIMULATION_LAYOUT_DISCOVERY_TIMEOUT:?}")
         })?;
 
         match discovered {

@@ -29,11 +29,12 @@ use alloy::{
 /// key orders is a few thousand hashes. It sits well past the deepest base a token in the Tycho
 /// set uses, and a token beyond it fails discovery rather than being funded wrongly.
 const MAX_BASE_SLOT: u16 = 640;
-/// Slots per traced account that are sentinel-verified.
+/// Slots sentinel-verified per probe, across every account the trace touched.
 ///
-/// Each one costs an `eth_call`, and they run against the slot-discovery timeout. A `balanceOf`
-/// that touches more than this many slots is a token whose layout this module does not resolve.
-const MAX_SLOTS_TO_VERIFY: usize = 32;
+/// Each one costs an `eth_call`, and they all run against the layout-discovery timeout. The bound
+/// covers the whole probe rather than one account, so a proxy whose read spans several accounts
+/// costs no more than a token that keeps everything in one.
+const MAX_SLOTS_TO_VERIFY: usize = 48;
 /// A value that survives common packed-balance flags and narrow integer casts.
 pub(crate) const PROBE_SENTINEL: U256 = U256::from_limbs([0xdead_beef_cafe_babe, 0, 0, 0]);
 /// OpenZeppelin v5's ERC-20 balances mapping, under the namespace ERC-7201 prescribes.
@@ -230,26 +231,31 @@ async fn find_accessed_slot(
     // Highest keys first: a mapping slot is a keccak hash and lands near the top of the key order,
     // while a contract's fixed fields sit at 0, 1, 2 and sort to the bottom. Taking the cap from
     // that end reaches the mapping on a token that reads many fixed slots.
+    let mut candidates: Vec<(Address, B256)> = Vec::new();
     for (&storage_contract, account) in trace.pre_state() {
-        let candidates: Vec<B256> = account
-            .storage
-            .keys()
-            .rev()
-            .copied()
-            .take(MAX_SLOTS_TO_VERIFY)
-            .collect();
-        // Every candidate is verified with its own `eth_call`, so they go out together: run in
-        // turn they would spend the discovery timeout on round trips rather than on work.
-        let verdicts = futures::future::join_all(
-            candidates
-                .iter()
-                .map(|slot| slot_matches(provider, token, storage_contract, calldata, *slot)),
-        )
-        .await;
-        for (slot, verdict) in candidates.iter().zip(verdicts) {
-            if verdict? {
-                return Ok((storage_contract, *slot));
-            }
+        candidates.extend(
+            account
+                .storage
+                .keys()
+                .rev()
+                .map(|&slot| (storage_contract, slot)),
+        );
+    }
+    candidates.truncate(MAX_SLOTS_TO_VERIFY);
+
+    // Every candidate is verified with its own `eth_call`, so they go out together: run in turn
+    // they would spend the discovery timeout on round trips rather than on work.
+    let verdicts = futures::future::join_all(
+        candidates
+            .iter()
+            .map(|&(storage_contract, slot)| {
+                slot_matches(provider, token, storage_contract, calldata, slot)
+            }),
+    )
+    .await;
+    for (&(storage_contract, slot), verdict) in candidates.iter().zip(verdicts) {
+        if verdict? {
+            return Ok((storage_contract, slot));
         }
     }
     Err(DiscoveryError::Unsupported(format!(
