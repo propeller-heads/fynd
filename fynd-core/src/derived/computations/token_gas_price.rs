@@ -157,8 +157,7 @@ impl TokenGasPriceComputation {
         Self { gas_token, ..self }
     }
 
-    /// Solves every token, or only `filter_tokens` when given: one relaxation for every buy
-    /// route, plus a sell solve per token, all within one wall-clock budget.
+    /// Solves every token, or only `filter_tokens` when given, within one wall-clock budget.
     ///
     /// Tokens that were bought but found no sell route back come back as failed items. Tokens
     /// the gas token cannot reach at all are only counted (logged at debug): unreachable is the
@@ -234,8 +233,6 @@ impl TokenGasPriceComputation {
             .last_updated()
             .map_or(block, |b| b.number());
 
-        // One relaxation from the gas token yields the buy amount and path for every token it
-        // reaches, so the buy side costs a single pass however many tokens are priced.
         let buys = algorithm.reach_from_source_token(&ctx, &self.simulation_amount);
 
         let gas_node = ctx.token_in_node;
@@ -344,9 +341,8 @@ impl TokenGasPriceComputation {
     /// [`NoSellRoute`](FailedItemError::NoSellRoute) carrying why: on a block where many tokens
     /// fail at once, the distribution of reasons is the signal.
     ///
-    /// Re-roots the pass's shared context at `token` behind a freshly pruned adjacency, so a
-    /// sell costs one bounded walk and one relaxation — no lock, route build, or state clone of
-    /// its own. The relaxations still dominate this computation's cost: there is one per token.
+    /// Re-roots the pass's shared context at `token` behind a freshly pruned adjacency before
+    /// solving.
     fn sell_leg(
         &self,
         pass: &mut PricingPass<'_>,
