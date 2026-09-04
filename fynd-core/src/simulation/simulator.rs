@@ -83,9 +83,6 @@ const SIMULATION_SENDER_NONCE: u64 = 1;
 /// request budget would let the diagnostic cost the caller more than the simulation did.
 const SIMULATION_TRACE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Seconds `eth_simulateV1` advances the clock by when it builds its block on the head.
-const SIMULATION_BLOCK_INTERVAL_SECS: u64 = 12;
-
 /// One token's layout, or the reason this build cannot resolve one, resolved once per token.
 type LayoutCell = Arc<OnceCell<Result<TokenLayout, String>>>;
 
@@ -121,37 +118,16 @@ pub struct QuoteSimulator {
 pub(crate) struct SimulationEnvelope {
     gas_limit: u64,
     gas_price: u128,
-    /// The block the two calls must both report, when the caller knows which one that is.
-    ///
-    /// `eth_simulateV1` builds on the head and reports N+1, while `debug_traceCall` at `latest`
-    /// reports N. A pool that keys off the height or the clock would then meet two different
-    /// environments, and the reason the trace recovers could belong to a different failure than
-    /// the one the quote was rejected for. Pinning both leaves them the same.
-    block: Option<SimulationBlock>,
-}
-
-/// The height and clock a simulated call reports.
-#[derive(Clone, Copy, Debug)]
-struct SimulationBlock {
-    number: u64,
-    timestamp: u64,
 }
 
 impl SimulationEnvelope {
     fn for_quote(quote: &OrderQuote) -> Self {
-        let block = quote.block();
-        Self {
-            block: Some(SimulationBlock {
-                number: block.number() + 1,
-                timestamp: block.timestamp() + SIMULATION_BLOCK_INTERVAL_SECS,
-            }),
-            ..Self::new(
-                quote.gas_estimate().to_u64(),
-                quote
-                    .gas_price()
-                    .and_then(ToPrimitive::to_u128),
-            )
-        }
+        Self::new(
+            quote.gas_estimate().to_u64(),
+            quote
+                .gas_price()
+                .and_then(ToPrimitive::to_u128),
+        )
     }
 
     /// A quote that carries neither figure falls back to the floor and a nominal price, which is
@@ -162,11 +138,7 @@ impl SimulationEnvelope {
                 estimate.saturating_mul(SIMULATION_GAS_LIMIT_MULTIPLIER)
             })
             .clamp(SIMULATION_MIN_GAS_LIMIT, SIMULATION_MAX_GAS_LIMIT);
-        Self {
-            gas_limit,
-            gas_price: gas_price.unwrap_or(SIMULATION_FALLBACK_GAS_PRICE),
-            block: None,
-        }
+        Self { gas_limit, gas_price: gas_price.unwrap_or(SIMULATION_FALLBACK_GAS_PRICE) }
     }
 }
 
@@ -448,19 +420,23 @@ fn failure_with(reason: String) -> SimulationAttempt {
 /// `eth_simulateV1` builds on the real head, so the block number, timestamp, base fee, chain id and
 /// the ancestor hashes `blockhash` reads are already the ones the next block will carry. What it
 /// leaves at zero is what a pool can read to recognise a simulation, so those are set here.
-fn block_overrides(envelope: SimulationEnvelope) -> BlockOverrides {
+fn block_overrides() -> BlockOverrides {
     BlockOverrides {
         coinbase: Some(SIMULATION_COINBASE),
         random: Some(B256::from(rand::random::<[u8; 32]>())),
         gas_limit: Some(SIMULATION_BLOCK_GAS_LIMIT),
-        number: envelope
-            .block
-            .map(|block| U256::from(block.number)),
-        time: envelope
-            .block
-            .map(|block| block.timestamp),
         ..Default::default()
     }
+}
+
+/// The same environment, reporting the height and clock a simulated block actually carried.
+///
+/// `eth_simulateV1` numbers its own block on top of the head, so the number cannot be set in
+/// advance: a block landing between the solve and the simulation makes any prediction collide
+/// with the head, which the node refuses outright. It reports what it used, so the trace is
+/// pinned to that rather than to a guess.
+fn executed_in(environment: BlockOverrides, number: u64, timestamp: u64) -> BlockOverrides {
+    BlockOverrides { number: Some(U256::from(number)), time: Some(timestamp), ..environment }
 }
 
 /// Runs the simulated call, and names the revert when the call reverted without saying why.
@@ -487,7 +463,7 @@ async fn simulate_with_overrides(
     // The trace has to observe the same environment as `eth_simulateV1` to reproduce the same
     // revert. `prevrandao` is drawn at random per call, so it is built once and reused rather
     // than regenerated.
-    let environment = block_overrides(envelope);
+    let environment = block_overrides();
     let payload = SimulatePayload::default().extend(
         SimBlock::default()
             .with_state_overrides(overrides.clone())
@@ -530,7 +506,12 @@ async fn simulate_with_overrides(
         // produced it.
         let traced = timeout(
             SIMULATION_TRACE_TIMEOUT,
-            traced_revert_reason(provider, call, overrides, environment),
+            traced_revert_reason(
+                provider,
+                call,
+                overrides,
+                executed_in(environment, block.inner.header.number, block.inner.header.timestamp),
+            ),
         )
         .await
         .ok()

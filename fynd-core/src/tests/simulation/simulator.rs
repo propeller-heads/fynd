@@ -65,7 +65,7 @@ fn test_token_overrides_fund_both_holders_and_both_spenders() {
 
 /// An envelope for the tests that drive the call directly, without a quote to derive one from.
 fn test_envelope() -> SimulationEnvelope {
-    SimulationEnvelope { gas_limit: SIMULATION_MIN_GAS_LIMIT, gas_price: 1, block: None }
+    SimulationEnvelope { gas_limit: SIMULATION_MIN_GAS_LIMIT, gas_price: 1 }
 }
 
 #[test]
@@ -96,24 +96,36 @@ fn test_envelope_prices_a_quote_that_carries_no_gas_price() {
 
 #[test]
 fn test_block_overrides_leave_nothing_a_pool_reads_at_zero() {
-    let overrides = block_overrides(test_envelope());
+    let overrides = block_overrides();
     assert_eq!(overrides.coinbase, Some(SIMULATION_COINBASE));
     assert_eq!(overrides.gas_limit, Some(SIMULATION_BLOCK_GAS_LIMIT));
     assert_ne!(overrides.random, Some(B256::ZERO));
     assert!(overrides.random.is_some());
 }
 
-/// `eth_simulateV1` builds on the head and `debug_traceCall` runs in the head itself, so the two
-/// report different heights unless the environment pins them. A pool that keys off the height or
-/// the clock would otherwise meet two environments and the trace could name a different failure.
+/// `eth_simulateV1` numbers its own block, and `debug_traceCall` at latest runs one below it, so
+/// the trace has to be pinned to the block the simulation reported. Predicting that number instead
+/// makes the node refuse the call outright once a block lands mid-quote.
 #[test]
-fn test_block_overrides_pin_the_block_a_quote_was_solved_against() {
-    let quote = quote_with_fees(1_000_000);
-    let envelope = SimulationEnvelope::for_quote(&quote);
-    let overrides = block_overrides(envelope);
+fn test_executed_in_pins_the_block_without_touching_the_rest() {
+    let base = block_overrides();
+    let pinned = executed_in(base.clone(), 25_903_761, 1_788_531_000);
 
-    assert_eq!(overrides.number, Some(U256::from(quote.block().number() + 1)));
-    assert_eq!(overrides.time, Some(quote.block().timestamp() + SIMULATION_BLOCK_INTERVAL_SECS));
+    assert_eq!(pinned.number, Some(U256::from(25_903_761_u64)));
+    assert_eq!(pinned.time, Some(1_788_531_000));
+    assert_eq!(pinned.coinbase, base.coinbase);
+    assert_eq!(pinned.gas_limit, base.gas_limit);
+    assert_eq!(pinned.random, base.random);
+}
+
+/// The simulation itself must leave the number unset, or the node rejects a block that does not
+/// sit above the head.
+#[test]
+fn test_block_overrides_leave_the_block_for_the_node_to_number() {
+    let overrides = block_overrides();
+
+    assert_eq!(overrides.number, None);
+    assert_eq!(overrides.time, None);
 }
 
 /// The funding value is what makes a simulated sender solvent, and it is bounded on both sides:
