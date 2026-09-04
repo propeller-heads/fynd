@@ -1,4 +1,11 @@
 
+## [0.102.2](https://github.com/propeller-heads/fynd/compare/0.101.1...0.102.2) (2026-09-04)
+
+### Features
+
+* update tycho deps to use latest router deployed ([bbf162c](https://github.com/propeller-heads/fynd/commit/bbf162c77b72e7a3084c7fa6e802dafa2d741dc1))
+
+
 ## [0.102.1](https://github.com/propeller-heads/fynd/compare/0.101.1...0.102.1) (2026-09-04)
 
 ### Features
