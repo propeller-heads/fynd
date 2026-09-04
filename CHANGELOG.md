@@ -1,4 +1,11 @@
 
+## [0.102.4](https://github.com/propeller-heads/fynd/compare/0.102.3...0.102.4) (2026-09-04)
+
+### Features
+
+* **ci:** tell the downstream deployment repository about a release ([bb48446](https://github.com/propeller-heads/fynd/commit/bb4844633ebe419ad8097eb5183953f0be6ec1e7))
+
+
 ## [0.102.3](https://github.com/propeller-heads/fynd/compare/0.102.2...0.102.3) (2026-09-04)
 
 ### Bug Fixes
