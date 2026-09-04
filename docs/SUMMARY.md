@@ -18,6 +18,7 @@
 * [Fynd Fees](guides/router-fees.md)
 * [Charge Fees on your Swaps](guides/client-fees.md)
 * [Benchmarking](guides/benchmarking.md)
+* [Zero-Downtime Probe](guides/zero-downtime-probe.md)
 * [Custom Algorithm](guides/custom-algorithm.md)
 
 ## Algorithms
