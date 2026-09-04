@@ -290,10 +290,7 @@ impl<'a> MarketDataView<'a> {
         &self,
         component_ids: &FxHashSet<&ComponentId>,
     ) -> MarketState {
-        let mut subset = self.guard.extract_subset(component_ids);
-        if let Some(shadow) = self.gas_price_shadow.clone() {
-            subset.update_gas_price(shadow);
-        }
+        let mut subset = self.extract_subset(component_ids);
         if let Some((ref label, ref states)) = self.overlay {
             for (id, state) in states.iter() {
                 if subset
