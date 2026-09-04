@@ -156,14 +156,14 @@ pub enum FailedItemError {
     #[error("simulation failed: {0}")]
     SimulationFailed(String),
 
+    /// No route reaches this token from the gas token.
+    #[error("missing buy route from the gas token")]
+    MissingBuyRoute,
+
     /// The token was bought but the route selling it back to the gas token did not solve,
     /// so no mean price exists. Carries why the sell solve failed.
-    #[error("no sell route back to the gas token: {0}")]
-    NoSellRoute(String),
-
-    /// No route reaches this token from the gas token.
-    #[error("unreachable from the gas token")]
-    UnreachableFromGasToken,
+    #[error("missing sell route back to the gas token: {0}")]
+    MissingSellRoute(String),
 }
 
 /// A single item that failed during a computation.

@@ -262,7 +262,7 @@ impl TokenGasPriceComputation {
                 // Tokens with no route from the gas token are counted, not reported: they are
                 // the normal state of much of the topology, and a failed item each would be
                 // allocated, logged, and broadcast to every worker every block.
-                Err(FailedItemError::UnreachableFromGasToken) => unreachable_tokens += 1,
+                Err(FailedItemError::MissingBuyRoute) => unreachable_tokens += 1,
                 Err(error) => failed_items.push(FailedItem { key: token.to_string(), error }),
             }
         }
@@ -317,7 +317,7 @@ impl TokenGasPriceComputation {
         token: &Address,
         buy_leg: Option<&ReachedToken>,
     ) -> Result<TokenPriceEntry, FailedItemError> {
-        let buy_leg = buy_leg.ok_or(FailedItemError::UnreachableFromGasToken)?;
+        let buy_leg = buy_leg.ok_or(FailedItemError::MissingBuyRoute)?;
 
         let (sell_out, mut components) = self.sell_leg(pass, token, buy_leg.amount_out.clone())?;
         // The legs are discarded after the mean; this is the only place their divergence —
@@ -338,8 +338,8 @@ impl TokenGasPriceComputation {
     /// with the components the price depends on: every component on any candidate route
     /// between the two — the walk's component set, which pool edge pairs make the buy
     /// direction's candidates too — plus the chosen sell route's own, defensively. Fails as
-    /// [`NoSellRoute`](FailedItemError::NoSellRoute) carrying why: on a block where many tokens
-    /// fail at once, the distribution of reasons is the signal.
+    /// [`MissingSellRoute`](FailedItemError::MissingSellRoute) carrying why: on a block where many
+    /// tokens fail at once, the distribution of reasons is the signal.
     ///
     /// Re-roots the pass's shared context at `token` behind a freshly pruned adjacency before
     /// solving.
@@ -353,7 +353,7 @@ impl TokenGasPriceComputation {
             .token_nodes
             .get(token)
             .ok_or_else(|| {
-                FailedItemError::NoSellRoute("token is not in the pass subgraph".into())
+                FailedItemError::MissingSellRoute("token is not in the pass subgraph".into())
             })?;
         let (adj, _, candidate_components) = BellmanFordAlgorithm::get_subgraph_with_hop_map(
             pass.graph,
@@ -362,7 +362,7 @@ impl TokenGasPriceComputation {
             self.max_hops,
         )
         .ok_or_else(|| {
-            FailedItemError::NoSellRoute("no pruned subgraph toward the gas token".into())
+            FailedItemError::MissingSellRoute("no pruned subgraph toward the gas token".into())
         })?;
         let mut components: FxHashSet<ComponentId> = candidate_components
             .into_iter()
@@ -382,11 +382,11 @@ impl TokenGasPriceComputation {
         let result = pass
             .algorithm
             .find_single_route(&pass.ctx, &order, FindRouteOptions::default())
-            .map_err(|error| FailedItemError::NoSellRoute(error.to_string()))?;
+            .map_err(|error| FailedItemError::MissingSellRoute(error.to_string()))?;
         let route = result.route();
         let sell_out = route.amount_out(&self.gas_token);
         if sell_out.is_zero() {
-            return Err(FailedItemError::NoSellRoute("the sell route returns zero".into()));
+            return Err(FailedItemError::MissingSellRoute("the sell route returns zero".into()));
         }
         components.extend(
             route
@@ -877,8 +877,8 @@ mod tests {
         );
         assert_eq!(output.failed_items.len(), 1);
         assert_eq!(output.failed_items[0].key, oneway.address.to_string());
-        let FailedItemError::NoSellRoute(reason) = &output.failed_items[0].error else {
-            panic!("expected NoSellRoute, got {:?}", output.failed_items[0].error);
+        let FailedItemError::MissingSellRoute(reason) = &output.failed_items[0].error else {
+            panic!("expected MissingSellRoute, got {:?}", output.failed_items[0].error);
         };
         assert!(!reason.is_empty(), "the failure carries why the sell solve failed");
     }
