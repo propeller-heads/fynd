@@ -60,6 +60,17 @@ fn record_solve_duration(pool_name: &str, solve_time: Duration) {
         .record(solve_time.as_secs_f64());
 }
 
+/// Records how long the price-impact walk took for one quote. It reads one spot price per swap,
+/// and a pool that derives its spot price by probing a swap pays for that probe here, so a route
+/// through such a pool costs as much as the extra hops it simulates.
+fn record_price_impact_duration(pool_name: &str, walk_time: Duration) {
+    metrics::histogram!(
+        "worker_pool_price_impact_duration_seconds",
+        "pool" => pool_name.to_string()
+    )
+    .record(walk_time.as_secs_f64());
+}
+
 /// A solver worker instance that maintains a market graph and processes solve requests.
 pub(crate) struct SolverWorker<A>
 where
@@ -491,12 +502,14 @@ where
                     order.amount().clone()
                 };
 
+                let price_impact_started = Instant::now();
                 let spot_impact = super::price_impact::spot_price_impact(
                     &route,
                     &amount_in,
                     &amount_out,
                     &self.market_data,
                 );
+                record_price_impact_duration(&self.pool_name, price_impact_started.elapsed());
                 let price_impact_bps = match spot_impact {
                     Ok(impact) => Some((impact * 10_000.0).round() as i32),
                     Err(err) => {
@@ -1819,6 +1832,29 @@ mod tests {
             solve_seen = true;
         }
         assert!(solve_seen, "solve duration histogram not recorded");
+    }
+
+    #[test]
+    fn test_price_impact_duration_metric_recorded() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_price_impact_duration("test_pool", std::time::Duration::from_micros(250));
+        });
+
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (_, labels, value) = recorded
+            .iter()
+            .find(|(name, _, _)| name == "worker_pool_price_impact_duration_seconds")
+            .expect("price impact duration histogram not recorded");
+        assert_eq!(labels, &vec!["pool=test_pool".to_string()]);
+        let DebugValue::Histogram(samples) = value else {
+            panic!("expected histogram, got {value:?}");
+        };
+        assert_eq!(samples.len(), 1);
+        assert!((samples[0].into_inner() - 0.000_25).abs() < 1e-12);
     }
 
     #[test]
