@@ -553,3 +553,51 @@ fn test_record_outcome_failed() {
         .any(|(name, labels, _)| name == "quote_simulations_total" &&
             labels.contains(&"outcome=failed".to_string())));
 }
+
+/// Drives the real call path against a live node: the simulation must be accepted (the node
+/// numbers its own block) and a reverting call must come back named by the trace.
+#[tokio::test]
+#[ignore = "requires RPC_URL"]
+async fn test_live_simulate_and_trace() {
+    let rpc_url = std::env::var("RPC_URL").expect("set RPC_URL");
+    let provider = alloy::providers::ProviderBuilder::default()
+        .connect_http(rpc_url.parse().expect("valid URL"));
+    let sender = Address::repeat_byte(0x11);
+    let usdt = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+        .parse::<Address>()
+        .expect("valid address");
+
+    for (name, data) in [
+        // A selector USDT does not implement: reverts with an empty payload, which is the path
+        // that has to reach the tracer.
+        ("unknown selector", alloy::hex::decode("deadbeef").expect("hex")),
+        // transferFrom with no allowance: reverts through SafeMath.
+        ("transferFrom without allowance", {
+            let mut data = alloy::hex::decode("23b872dd").expect("hex");
+            data.extend_from_slice(&sender.into_word().0);
+            data.extend_from_slice(&Address::repeat_byte(0x22).into_word().0);
+            data.extend_from_slice(&U256::from(1_000_000_u64).to_be_bytes::<32>());
+            data
+        }),
+    ] {
+        let outcome = simulate_with_overrides(
+            &provider,
+            SimulatedCall { sender, router: usdt, value: U256::ZERO, data: &data },
+            native_balance_override(sender),
+            test_envelope(),
+            Duration::from_secs(10),
+        )
+        .await;
+
+        let described = match &outcome {
+            CallOutcome::Reverted { reason } => format!("reverted: {reason}"),
+            CallOutcome::Success { amount_out, .. } => format!("success: {amount_out}"),
+            CallOutcome::Failure(reason) => format!("failed: {reason}"),
+        };
+        println!("  {name} -> {described}");
+        assert!(
+            !described.contains("block numbers must be in order"),
+            "{name}: the node refused the block the simulation asked for"
+        );
+    }
+}
