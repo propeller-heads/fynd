@@ -392,7 +392,10 @@ impl BellmanFordAlgorithm {
                 .insert(address.clone(), ReachedToken { amount_out: amount.clone(), components });
         }
 
-        debug!(reached = reached.len(), dropped, "read every destination from one relaxation");
+        debug!(
+            reached = reached.len(),
+            dropped, "found a route to every reachable destination from one relaxation"
+        );
         reached
     }
 
