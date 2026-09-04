@@ -181,6 +181,21 @@ async fn test_find_accessed_slot_reports_unsupported_when_every_probe_reverts() 
     assert!(matches!(error, DiscoveryError::Unsupported(_)), "{error:?}");
 }
 
+/// A node that declined to run the probe proves nothing, so the token stays undecided and the
+/// next quote tries again. Counting it as a miss would cache "unsupported" for the process.
+#[tokio::test]
+async fn test_find_accessed_slot_reports_rpc_when_a_probe_is_refused() {
+    let asserter = Asserter::new();
+    asserter.push_success(&prestate(Address::repeat_byte(3), &[B256::repeat_byte(0xff)]));
+    asserter.push_failure(throttled_payload());
+
+    let error = find_accessed_slot(&mocked_provider(&asserter), Address::repeat_byte(9), &[0x70])
+        .await
+        .expect_err("the probe was refused");
+
+    assert!(matches!(error, DiscoveryError::Rpc(_)), "{error:?}");
+}
+
 #[tokio::test]
 async fn test_find_accessed_slot_reports_rpc_when_the_trace_fails() {
     let asserter = Asserter::new();

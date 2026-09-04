@@ -11,10 +11,13 @@ use alloy::{
     network::Ethereum,
     primitives::{address, keccak256, map::B256HashMap, Address, Bytes, TxKind, B256, U256},
     providers::{ext::DebugApi, Provider, RootProvider},
-    rpc::types::{
-        state::{AccountOverride, StateOverride},
-        trace::geth::{GethDebugTracingCallOptions, GethDebugTracingOptions, PreStateConfig},
-        TransactionRequest,
+    rpc::{
+        json_rpc::ErrorPayload,
+        types::{
+            state::{AccountOverride, StateOverride},
+            trace::geth::{GethDebugTracingCallOptions, GethDebugTracingOptions, PreStateConfig},
+            TransactionRequest,
+        },
     },
     sol,
     sol_types::SolCall,
@@ -260,14 +263,28 @@ async fn slot_matches(
         Ok(response) => {
             Ok(response.len() >= 32 && U256::from_be_slice(&response[..32]) == PROBE_SENTINEL)
         }
-        // A guarded proxy reverts when its implementation slot is overwritten, which proves the
-        // slot is not the mapping. A node that failed to answer proves nothing, so it is reported
-        // rather than counted as a miss that would end in "could not identify".
-        Err(error) if error.as_error_resp().is_some() => Ok(false),
-        Err(error) => Err(DiscoveryError::Rpc(format!(
-            "sentinel probe for {token:#x} slot {slot:#x} failed: {error}"
-        ))),
+        Err(error) => match error.as_error_resp() {
+            // A guarded proxy reverts when its implementation slot is overwritten, which proves
+            // the slot is not the mapping.
+            Some(payload) if is_revert(payload) => Ok(false),
+            // Every other error response -- a rate limit, a compute budget, a head that moved --
+            // proves nothing about the slot. Counting it as a miss would end discovery in
+            // "could not identify", and that verdict is cached for the life of the process.
+            Some(payload) => Err(DiscoveryError::Rpc(format!(
+                "sentinel probe for {token:#x} slot {slot:#x} was refused: {payload}"
+            ))),
+            None => Err(DiscoveryError::Rpc(format!(
+                "sentinel probe for {token:#x} slot {slot:#x} failed: {error}"
+            ))),
+        },
     }
+}
+
+/// Whether an error response is the contract reverting rather than the node declining to run.
+fn is_revert(payload: &ErrorPayload) -> bool {
+    // 3 is the code geth returns for a reverted call; the message covers nodes that report the
+    // same thing under a code of their own.
+    payload.code == 3 || payload.message.contains("revert")
 }
 
 /// Builds an override that writes one storage value for a contract.
