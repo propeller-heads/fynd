@@ -37,10 +37,10 @@ pub(crate) mod fixtures {
     use crate::OrderQuote;
 
     /// Router fee the fixture charges, in output-token units.
-    pub(crate) const FIXTURE_ROUTER_FEE: u64 = 7_000;
+    pub(super) const FIXTURE_ROUTER_FEE: u64 = 7_000;
 
     /// Client fee the fixture charges, in output-token units.
-    pub(crate) const FIXTURE_CLIENT_FEE: u64 = 3_000;
+    pub(super) const FIXTURE_CLIENT_FEE: u64 = 3_000;
 
     /// A quote whose raw output sits above `after_fees` by exactly the two fees.
     ///
@@ -60,7 +60,7 @@ pub(crate) mod fixtures {
     }
 
     /// The same quote before encoding computes its fees.
-    pub(crate) fn quote_without_fees() -> OrderQuote {
+    pub(super) fn quote_without_fees() -> OrderQuote {
         OrderQuote::new(
             "test-order".to_string(),
             crate::QuoteStatus::Success,
