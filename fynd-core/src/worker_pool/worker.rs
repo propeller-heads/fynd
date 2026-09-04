@@ -624,6 +624,14 @@ where
     ) where
         A::GraphManager: EdgeWeightUpdaterWithDerived,
     {
+        // A respawned worker (fresh session after a panic) starts with an empty tracker while
+        // the shared store already holds results from before the panic; seed it so allow_stale
+        // requirements don't wait for the next broadcast event to become ready again.
+        let store = self.derived_data.read().await;
+        self.readiness_tracker
+            .seed_from_store(&store);
+        drop(store);
+
         info!(self.worker_id, "worker started");
 
         // Once the derived-data channel closes, its recv() returns Closed instantly on every
@@ -817,7 +825,7 @@ mod tests {
             most_liquid::DepthAndPrice,
             test_utils::{
                 component, component_with_protocol, order, setup_market_weighted, token,
-                MockProtocolSim,
+                MockProtocolSim, StubAlgorithm,
             },
         },
         derived::{
@@ -831,73 +839,16 @@ mod tests {
         AlgorithmError,
     };
 
-    /// A minimal mock algorithm for testing the worker.
-    /// Uses DepthAndPrice as the edge weight type to satisfy trait bounds.
-    struct MockAlgorithm {
-        requirements: ComputationRequirements,
-        timeout: Duration,
+    /// A stub whose solve always fails, for tests that exercise the worker around the solve
+    /// rather than the route it produces.
+    fn failing_algorithm() -> StubAlgorithm {
+        StubAlgorithm::returning(|_order| Err(AlgorithmError::Other("not implemented".to_string())))
     }
 
-    impl MockAlgorithm {
-        fn new() -> Self {
-            Self { requirements: ComputationRequirements::none(), timeout: Duration::from_secs(1) }
-        }
-
-        fn with_requirements(mut self, requirements: ComputationRequirements) -> Self {
-            self.requirements = requirements;
-            self
-        }
-    }
-
-    impl Algorithm for MockAlgorithm {
-        type GraphType = StableDiGraph<DepthAndPrice>;
-        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
-
-        fn name(&self) -> &str {
-            "mock"
-        }
-
-        async fn find_best_route(
-            &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
-        ) -> Result<crate::types::RouteResult, crate::AlgorithmError> {
-            Err(crate::AlgorithmError::Other("not implemented".to_string()))
-        }
-
-        fn computation_requirements(&self) -> ComputationRequirements {
-            self.requirements.clone()
-        }
-
-        fn timeout(&self) -> Duration {
-            self.timeout
-        }
-    }
-
-    /// Mock algorithm that returns a structurally invalid route (two disconnected swaps).
-    /// Used to verify the worker rejects invalid routes regardless of which algorithm produced
-    /// them.
-    struct InvalidRouteAlgorithm;
-
-    impl Algorithm for InvalidRouteAlgorithm {
-        type GraphType = StableDiGraph<DepthAndPrice>;
-        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
-
-        fn name(&self) -> &str {
-            "invalid_route_mock"
-        }
-
-        async fn find_best_route(
-            &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
-        ) -> Result<RouteResult, AlgorithmError> {
+    /// A stub that returns a structurally invalid route (two disconnected swaps). Used to verify
+    /// the worker rejects invalid routes regardless of which algorithm produced them.
+    fn invalid_route_algorithm() -> StubAlgorithm {
+        StubAlgorithm::returning(|_order| {
             let token_a = token(0x01, "A");
             let token_b = token(0x02, "B");
             let token_c = token(0x03, "C");
@@ -929,23 +880,20 @@ mod tests {
             let route =
                 Route::new(vec![swap_ab, swap_cd], FxHashMap::default()).expect("non-empty route");
             Ok(RouteResult::new(route, num_bigint::BigInt::from(0), BigUint::from(1u64)))
-        }
-
-        fn computation_requirements(&self) -> ComputationRequirements {
-            ComputationRequirements::none()
-        }
-
-        fn timeout(&self) -> Duration {
-            Duration::from_secs(1)
-        }
+        })
     }
 
     #[tokio::test]
     async fn test_quote_rejects_invalid_route() {
         let (market, _) = setup_market_weighted(vec![]);
         let derived = DerivedData::new_shared();
-        let mut worker =
-            SolverWorker::new(market, derived, InvalidRouteAlgorithm, 0, "test_pool".to_string());
+        let mut worker = SolverWorker::new(
+            market,
+            derived,
+            invalid_route_algorithm(),
+            0,
+            "test_pool".to_string(),
+        );
 
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1138,7 +1086,7 @@ mod tests {
         let (market, _) = setup_market_weighted(vec![]);
         let derived = DerivedData::new_shared();
 
-        let algorithm = MockAlgorithm::new();
+        let algorithm = failing_algorithm();
         let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Should return immediately since there are no requirements
@@ -1156,7 +1104,7 @@ mod tests {
         let requirements = ComputationRequirements::none()
             .allow_stale(SpotPriceComputation::ID)
             .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let algorithm = failing_algorithm().with_requirements(requirements);
         let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Mark as ready by handling a completion event
@@ -1183,7 +1131,7 @@ mod tests {
         let requirements = ComputationRequirements::none()
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let algorithm = failing_algorithm().with_requirements(requirements);
         let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Should timeout since no events are received
@@ -1209,7 +1157,7 @@ mod tests {
         let requirements = ComputationRequirements::none()
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let algorithm = failing_algorithm().with_requirements(requirements);
         let worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Clone the notify handle to simulate the main loop notifying
@@ -1241,7 +1189,7 @@ mod tests {
         let worker = SolverWorker::new(
             market,
             DerivedData::new_shared(),
-            MockAlgorithm::new(),
+            failing_algorithm(),
             0,
             "test_pool".to_string(),
         )
@@ -1264,7 +1212,7 @@ mod tests {
         let worker = SolverWorker::new(
             market,
             DerivedData::new_shared(),
-            MockAlgorithm::new(),
+            failing_algorithm(),
             0,
             "test_pool".to_string(),
         );
@@ -1287,7 +1235,7 @@ mod tests {
         let worker = SolverWorker::new(
             market,
             DerivedData::new_shared(),
-            MockAlgorithm::new(),
+            failing_algorithm(),
             0,
             "test_pool".to_string(),
         );
@@ -1307,7 +1255,7 @@ mod tests {
         let worker = SolverWorker::new(
             market,
             DerivedData::new_shared(),
-            MockAlgorithm::new(),
+            failing_algorithm(),
             0,
             "test_pool".to_string(),
         )
@@ -1325,7 +1273,7 @@ mod tests {
         let worker = SolverWorker::new(
             market,
             DerivedData::new_shared(),
-            MockAlgorithm::new(),
+            failing_algorithm(),
             0,
             "test_pool".to_string(),
         );
@@ -1344,7 +1292,7 @@ mod tests {
         let requirements = ComputationRequirements::none()
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let algorithm = failing_algorithm().with_requirements(requirements);
         let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Clone the notify handle and get a reference to the tracker
@@ -1387,7 +1335,7 @@ mod tests {
         let requirements = ComputationRequirements::none()
             .allow_stale(TokenGasPriceComputation::ID)
             .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let algorithm = failing_algorithm().with_requirements(requirements);
         let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         let notify = worker.ready_notify.clone();
@@ -1432,7 +1380,7 @@ mod tests {
         let requirements = ComputationRequirements::none()
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let algorithm = failing_algorithm().with_requirements(requirements);
         let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Mark the current block and record a failure for spot_prices
@@ -1480,7 +1428,7 @@ mod tests {
         let requirements = ComputationRequirements::none()
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let algorithm = failing_algorithm().with_requirements(requirements);
         let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Mark the current block and record a failure for spot_prices
@@ -1522,7 +1470,7 @@ mod tests {
         let requirements = ComputationRequirements::none()
             .require_fresh(SpotPriceComputation::ID)
             .unwrap();
-        let algorithm = MockAlgorithm::new().with_requirements(requirements);
+        let algorithm = failing_algorithm().with_requirements(requirements);
         let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
 
         // Create channels
@@ -1553,6 +1501,66 @@ mod tests {
         // Shutdown
         let _ = shutdown_tx.send(());
 
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("worker should shutdown")
+            .expect("worker task should not panic");
+    }
+
+    /// A worker respawned after a panic starts with an empty readiness tracker, and no derived
+    /// event is replayed to it. It must answer an `allow_stale` task from what the shared store
+    /// already holds instead of waiting out the algorithm timeout.
+    #[tokio::test]
+    async fn worker_answers_stale_task_seeded_from_the_store() {
+        let (market, _) = setup_market_weighted(vec![]);
+        let derived = DerivedData::new_shared();
+        derived
+            .write()
+            .await
+            .set_spot_prices(Default::default(), vec![], 7, true);
+
+        let requirements = ComputationRequirements::none()
+            .allow_stale(SpotPriceComputation::ID)
+            .unwrap();
+        let algorithm = failing_algorithm().with_requirements(requirements);
+        let mut worker = SolverWorker::new(market, derived, algorithm, 0, "test_pool".to_string());
+
+        let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
+        let (_derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
+        let (task_tx, task_rx) = async_channel::bounded::<SolveTask>(16);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+
+        let handle = tokio::spawn(async move {
+            worker
+                .run(event_rx, derived_rx, task_rx, shutdown_rx)
+                .await;
+        });
+
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        task_tx
+            .send(SolveTask::new(
+                uuid::Uuid::new_v4(),
+                order(&token_a, &token_b, 100, OrderSide::Sell),
+                response_tx,
+            ))
+            .await
+            .expect("worker should be receiving tasks");
+
+        let result = tokio::time::timeout(Duration::from_secs(5), response_rx)
+            .await
+            .expect("worker should answer the task")
+            .expect("worker should not drop the responder");
+
+        // The stub always fails to solve; reaching the solve at all is what proves readiness was
+        // seeded. Without seeding the worker returns NotReady after the algorithm timeout.
+        assert!(
+            matches!(result, Err(SolveError::AlgorithmError(_))),
+            "expected the seeded worker to solve, got {result:?}"
+        );
+
+        let _ = shutdown_tx.send(());
         tokio::time::timeout(Duration::from_secs(1), handle)
             .await
             .expect("worker should shutdown")
@@ -1600,7 +1608,7 @@ mod tests {
         let (market, _) = setup_market_weighted(vec![]);
         let derived = DerivedData::new_shared();
         let mut worker =
-            SolverWorker::new(market, derived, MockAlgorithm::new(), 0, "test_pool".to_string());
+            SolverWorker::new(market, derived, failing_algorithm(), 0, "test_pool".to_string());
 
         let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
         let (derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
