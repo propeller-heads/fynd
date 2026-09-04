@@ -7,11 +7,14 @@
 use alloy::{rpc::types::trace::geth::CallFrame, sol, sol_types::SolInterface};
 
 sol! {
-    /// Every custom error the Tycho router, its dispatcher and its executors can revert with.
+    /// The custom errors of the `tycho-execution` version this crate pins.
     ///
-    /// Generated from the Solidity sources of the `tycho-execution` version this crate builds
-    /// against. An error missing here still reports its selector, so a route that reverts on a
-    /// newer contract stays diagnosable.
+    /// Copied from that version's Solidity sources rather than generated from an ABI it publishes,
+    /// so the set goes stale when the contracts gain an executor or rename an error, and nothing
+    /// here fails when it does. `test_router_error_selectors` pins a sample against selectors
+    /// computed outside this declaration, which catches a wrong argument type; a newly added error
+    /// is caught only by regenerating the list on a tycho version bump. Until then it reports its
+    /// selector, so a route that reverts on a newer contract stays diagnosable.
     ///
     /// Uniswap V4's `Currency` is a value type over `address` and is written as one here: the
     /// selector is taken from the ABI signature, which carries the underlying type.
@@ -302,7 +305,7 @@ fn decode_hex_reason(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use alloy::{
-        primitives::{address, Bytes, U256},
+        primitives::{address, Address, Bytes, U256},
         sol_types::SolError,
     };
 
@@ -345,6 +348,37 @@ mod tests {
 
     /// An error the contracts gained after this crate was generated. The selector is what makes it
     /// searchable, so it has to reach the caller rather than be dropped.
+    /// Selectors taken from the signatures in the `tycho-execution` Solidity sources, not from
+    /// this declaration. A test that encodes and decodes through the same declaration passes even
+    /// when an argument type here has drifted from the contract's; this one does not.
+    #[test]
+    fn test_router_error_selectors_match_the_contracts() {
+        let cases: [(Vec<u8>, [u8; 4]); 4] = [
+            // error TychoRouter__NegativeSlippage(uint256 amount, uint256 minAmount);
+            (
+                RouterErrors::TychoRouter__NegativeSlippage {
+                    amount: U256::ZERO,
+                    minAmount: U256::ZERO,
+                }
+                .abi_encode(),
+                alloy::hex!("fd56708c"),
+            ),
+            // error TychoRouter__EmptySwaps();
+            (RouterErrors::TychoRouter__EmptySwaps {}.abi_encode(), alloy::hex!("bc0c932b")),
+            // error TychoRouter__AmountOutZero();
+            (RouterErrors::TychoRouter__AmountOutZero {}.abi_encode(), alloy::hex!("6fa417d5")),
+            // error Dispatcher__SwapReverted(address executor);
+            (
+                RouterErrors::Dispatcher__SwapReverted { executor: Address::ZERO }.abi_encode(),
+                alloy::hex!("2680f8fe"),
+            ),
+        ];
+
+        for (encoded, selector) in cases {
+            assert_eq!(encoded[..4], selector, "0x{}", alloy::hex::encode(&encoded[..4]));
+        }
+    }
+
     /// The selectors dev logged as unknown, so a regression puts them back to bare hex.
     #[test]
     fn test_decode_error_names_an_external_error() {
