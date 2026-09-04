@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use alloy::primitives::B256;
 use num_bigint::BigUint;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
@@ -99,7 +98,11 @@ impl MarketData {
     /// Cloning is as cheap as cloning any other handle. The shared state is not touched, so
     /// handles held elsewhere keep reporting the gas price the feed wrote. The shadowed price
     /// keeps the block number, hash and timestamp of the price it replaces, so staleness checks
-    /// still read the real block; when the feed has not written a price yet, those are zero.
+    /// still read the real block.
+    ///
+    /// The override replaces the feed's price; it does not stand in for one. While the feed has
+    /// not written a price, views of this handle report none, exactly like every other handle, so
+    /// a request carrying an override cannot solve while one without it cannot.
     #[must_use]
     pub fn with_gas_price_override(&self, wei: BigUint) -> Self {
         Self {
@@ -118,7 +121,7 @@ impl MarketData {
         let gas_price_shadow = self
             .gas_price_override
             .as_ref()
-            .map(|wei| shadow_gas_price(guard.gas_price(), wei));
+            .and_then(|wei| Some(shadow_gas_price(guard.gas_price()?, wei)));
         MarketDataView { guard, overlay, gas_price_shadow }
     }
 
@@ -257,14 +260,8 @@ pub struct MarketDataView<'a> {
 
 /// Builds the gas price a view reports when its handle overrides the price, keeping the block
 /// provenance of `base` so staleness checks still read the real block.
-fn shadow_gas_price(base: Option<&BlockGasPrice>, wei: &BigUint) -> BlockGasPrice {
-    let pricing = GasPrice::Legacy { gas_price: wei.clone() };
-    match base {
-        Some(base) => BlockGasPrice { pricing, ..base.clone() },
-        None => {
-            BlockGasPrice { block_number: 0, block_hash: B256::ZERO, block_timestamp: 0, pricing }
-        }
-    }
+fn shadow_gas_price(base: &BlockGasPrice, wei: &BigUint) -> BlockGasPrice {
+    BlockGasPrice { pricing: GasPrice::Legacy { gas_price: wei.clone() }, ..base.clone() }
 }
 
 impl<'a> MarketDataView<'a> {
@@ -624,6 +621,8 @@ impl MarketState {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::B256;
+
     use super::*;
     use crate::algorithm::test_utils::{
         component, component_with_protocol, token, MockProtocolSim,
@@ -1139,24 +1138,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gas_price_override_applies_when_the_feed_has_written_no_price() {
+    async fn gas_price_override_needs_a_feed_price() {
+        // The override replaces the feed's price; it does not stand in for one. A request that
+        // carries an override must fail the same way as any other while the feed has no price.
         let market = MarketData::new_shared();
         let shadowed = market.with_gas_price_override(BigUint::from(7u64));
 
-        let view = shadowed.read().await;
-        let price = view
-            .gas_price()
-            .expect("the override supplies a price of its own");
-        assert_eq!(price.effective_gas_price(), BigUint::from(7u64));
-        assert_eq!(price.block_number, 0, "there is no block to attribute the price to");
-
         assert!(
-            market
+            shadowed
                 .read()
                 .await
                 .gas_price()
                 .is_none(),
-            "the shared state still has no price"
+            "an override without a feed price reports no price"
         );
+        let subset = shadowed
+            .read()
+            .await
+            .extract_subset(&FxHashSet::default());
+        assert!(subset.gas_price().is_none(), "the subset reports no price either");
     }
 }
