@@ -114,8 +114,8 @@ pub struct TokenGasPriceComputation {
     gas_token: Address,
     /// Longest route the algorithm may build.
     max_hops: usize,
-    /// Amount of gas token to buy with (affects slippage).
-    simulation_amount: BigUint,
+    /// Amount of gas token each probe buys with (affects slippage).
+    probe_amount: BigUint,
     /// Wall-clock budget for one whole pass. A full Ethereum-sized solve measures ~6 s, so
     /// 30 s is margin, not target: it exists to stop a pathological block — per-solve
     /// timeouts alone allow ~1 s per token — from stalling the derived chain for minutes.
@@ -128,7 +128,7 @@ impl Default for TokenGasPriceComputation {
         Self {
             gas_token: Address::zero(20), // ETH address
             max_hops: 3,
-            simulation_amount: BigUint::from(10u64).pow(18), // 1 ETH
+            probe_amount: BigUint::from(10u64).pow(18), // 1 ETH
             pass_budget: Duration::from_secs(30),
         }
     }
@@ -137,8 +137,8 @@ impl Default for TokenGasPriceComputation {
 impl TokenGasPriceComputation {
     /// Creates a computation with explicit parameters.
     #[cfg(test)]
-    pub fn new(gas_token: Address, max_hops: usize, simulation_amount: BigUint) -> Self {
-        Self { gas_token, max_hops, simulation_amount, ..Self::default() }
+    pub fn new(gas_token: Address, max_hops: usize, probe_amount: BigUint) -> Self {
+        Self { gas_token, max_hops, probe_amount, ..Self::default() }
     }
 
     /// Sets the wall-clock budget for one pass.
@@ -233,7 +233,7 @@ impl TokenGasPriceComputation {
             .last_updated()
             .map_or(block, |b| b.number());
 
-        let buys = algorithm.reach_from_source_token(&ctx, &self.simulation_amount);
+        let buys = algorithm.reach_from_source_token(&ctx, &self.probe_amount);
 
         let gas_node = ctx.token_in_node;
         let token_nodes = ctx
@@ -321,15 +321,15 @@ impl TokenGasPriceComputation {
 
         let (sell_out, mut components) = self.sell_leg(pass, token, buy_leg.amount_out.clone())?;
         // The legs are discarded after the mean; this is the only place their divergence —
-        // sell_out under the simulation amount is the round-trip loss — can be observed.
+        // sell_out under the probe amount is the round-trip loss — can be observed.
         trace!(%token, buy_out = %buy_leg.amount_out, sell_out = %sell_out, "token priced");
         // The buy path is a candidate path, so extending is defensive: it keeps the stored
         // dependencies correct even if the walk and the relaxation ever disagree.
         components.extend(buy_leg.components.iter().cloned());
 
         let mid_price = Price {
-            numerator: &buy_leg.amount_out * (&self.simulation_amount + &sell_out),
-            denominator: BigUint::from(2u8) * &self.simulation_amount * sell_out,
+            numerator: &buy_leg.amount_out * (&self.probe_amount + &sell_out),
+            denominator: BigUint::from(2u8) * &self.probe_amount * sell_out,
         };
         Ok(TokenPriceEntry { price: mid_price, path_components: components })
     }
@@ -532,10 +532,8 @@ impl DerivedComputation for TokenGasPriceComputation {
         }
 
         // The gas token is 1:1 with itself and needs no route.
-        let gas_token_price = Price {
-            numerator: self.simulation_amount.clone(),
-            denominator: self.simulation_amount.clone(),
-        };
+        let gas_token_price =
+            Price { numerator: self.probe_amount.clone(), denominator: self.probe_amount.clone() };
         token_prices_with_deps.insert(
             self.gas_token.clone(),
             TokenPriceEntry {
@@ -567,10 +565,10 @@ mod tests {
         derived::store::DerivedData,
     };
 
-    const SIM_AMOUNT: u128 = 1_000_000_000_000_000_000;
+    const PROBE_AMOUNT: u128 = 1_000_000_000_000_000_000;
 
     fn computation_for(gas_token: &Address) -> TokenGasPriceComputation {
-        TokenGasPriceComputation::new(gas_token.clone(), 3, BigUint::from(SIM_AMOUNT))
+        TokenGasPriceComputation::new(gas_token.clone(), 3, BigUint::from(PROBE_AMOUNT))
     }
 
     fn ratio(price: &Price) -> f64 {
@@ -781,7 +779,7 @@ mod tests {
             ("eth_bbb", &eth, &bbb, MockProtocolSim::new(2500.0)),
         ]);
         let computation =
-            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(SIM_AMOUNT));
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT));
         let store = DerivedData::new_shared();
         let full = computation
             .compute(&market, &store, &ChangedComponents::default())
