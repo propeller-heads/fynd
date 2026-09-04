@@ -129,6 +129,42 @@ sol! {
 }
 
 sol! {
+    /// Errors a swap reverts with that the Tycho router does not define: the token's, the venue's,
+    /// and the ones the libraries the router calls through raise on its behalf.
+    ///
+    /// Held apart from [`RouterErrors`] because the list is not generated from a source this crate
+    /// builds against. It holds the errors dev has seen, plus the rest of the two standard sets
+    /// those belong to -- OpenZeppelin's `Address`, `SafeERC20` and ERC-6093, and Solady's
+    /// `SafeTransferLib` -- since a swap that hits one of a set will hit its siblings.
+    ///
+    /// `FailedCall` deserves a word: OpenZeppelin's `Address.functionCall` raises it only when the
+    /// call it made reverted with no data at all, so it names an erased cause rather than a cause.
+    #[derive(Debug)]
+    interface ExternalErrors {
+        error ApproveFailed();
+        error CannotSwapWhileLocked();
+        error ERC20InsufficientAllowance(address spender, uint256 allowance, uint256 needed);
+        error ERC20InsufficientBalance(address sender, uint256 balance, uint256 needed);
+        error ERC20InvalidApprover(address approver);
+        error ERC20InvalidReceiver(address receiver);
+        error ERC20InvalidSender(address sender);
+        error ERC20InvalidSpender(address spender);
+        error ETHTransferFailed();
+        error FailedCall();
+        error FluidSafeTransferError(uint256 code);
+        error InsufficientAllowance(uint256 allowance);
+        error InsufficientBalance(uint256 balance, uint256 needed);
+        error Permit2AmountOverflow();
+        error Permit2Failed();
+        error SafeERC20FailedDecreaseAllowance(address spender, uint256 currentAllowance, uint256 requestedDecrease);
+        error SafeERC20FailedOperation(address token);
+        error StaleUpdate();
+        error TransferFailed();
+        error TransferFromFailed();
+    }
+}
+
+sol! {
     /// The two errors Solidity itself defines: `revert("...")` and an assertion failure.
     #[derive(Debug)]
     interface SolidityErrors {
@@ -235,6 +271,9 @@ pub(crate) fn decode_error(data: &[u8]) -> Option<String> {
     if let Ok(error) = RouterErrors::RouterErrorsErrors::abi_decode(data) {
         return Some(format!("{error:?}"));
     }
+    if let Ok(error) = ExternalErrors::ExternalErrorsErrors::abi_decode(data) {
+        return Some(format!("{error:?}"));
+    }
     // An error this build does not know still reports its selector and its arguments, so it can be
     // looked up and read without another simulation.
     let arguments = &data[4..];
@@ -306,6 +345,43 @@ mod tests {
 
     /// An error the contracts gained after this crate was generated. The selector is what makes it
     /// searchable, so it has to reach the caller rather than be dropped.
+    /// The selectors dev logged as unknown, so a regression puts them back to bare hex.
+    #[test]
+    fn test_decode_error_names_an_external_error() {
+        let cases = [
+            ("0xd6bda275", "FailedCall"),
+            ("0x666a2814", "StaleUpdate"),
+            ("0x90b8ec18", "TransferFailed"),
+            ("0x7939f424", "TransferFromFailed"),
+            ("0x1e8107a0", "CannotSwapWhileLocked"),
+        ];
+
+        for (selector, name) in cases {
+            let data = alloy::hex::decode(selector).expect("a selector is hex");
+
+            let decoded = decode_error(&data).expect("a selector decodes");
+
+            assert!(decoded.contains(name), "{selector}: {decoded}");
+        }
+    }
+
+    /// The token error a route hits when the router pulls more than the sender holds. It carries
+    /// arguments, so it also proves the payload is read and not just the selector matched.
+    #[test]
+    fn test_decode_error_names_an_external_error_with_arguments() {
+        let encoded = ExternalErrors::ERC20InsufficientBalance {
+            sender: address!("0x0000000000000000000000000000000000000042"),
+            balance: U256::from(7u64),
+            needed: U256::from(9u64),
+        }
+        .abi_encode();
+
+        let decoded = decode_error(&encoded).expect("a token error decodes");
+
+        assert!(decoded.contains("ERC20InsufficientBalance"), "{decoded}");
+        assert!(decoded.contains("7") && decoded.contains("9"), "{decoded}");
+    }
+
     #[test]
     fn test_decode_error_reports_an_unknown_selector() {
         let decoded = decode_error(&[0xde, 0xad, 0xbe, 0xef]).expect("4 bytes is a selector");
