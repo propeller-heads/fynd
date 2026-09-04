@@ -1302,7 +1302,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spot_price_failure_cascades_to_depths() {
+    async fn test_spot_price_failure_cascade() {
         // Real fynd flow: a full recompute with no sim state makes spot prices fail outright.
         // Pool depths depend on them and fail with them. Token prices read no derived data,
         // so they still complete — every token unpriced, reported as failed items.
