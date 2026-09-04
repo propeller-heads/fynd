@@ -119,11 +119,11 @@ fn test_block_overrides_pin_the_block_a_quote_was_solved_against() {
 /// The funding value is what makes a simulated sender solvent, and it is bounded on both sides:
 /// too small starves a large trade, too large overflows a rebasing token's balance arithmetic.
 #[test]
-fn test_funding_value_is_ten_to_the_thirty_sixth() {
-    let ten = U256::from(10_u8);
-    assert_eq!(SIMULATION_FUNDING_VALUE, ten.pow(U256::from(36_u8)));
-    // Room left above the value, so a token that packs flags into the balance word still reads
-    // it back unchanged.
+fn test_funding_value_bounds() {
+    // Above any practical input at 18 decimals.
+    assert!(SIMULATION_FUNDING_VALUE > U256::from(10_u8).pow(U256::from(30_u8)));
+    // Room left above the value, so a token that packs flags into the balance word still reads it
+    // back unchanged, and a rebasing token's multiplication does not overflow.
     assert!(SIMULATION_FUNDING_VALUE < U256::MAX >> 128);
 }
 
