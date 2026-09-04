@@ -15,8 +15,11 @@ use num_bigint::BigUint;
 use super::*;
 use crate::simulation::{
     deviation::fixtures::quote_with_fees,
-    token_layout::{KeyOrder, MappingPosition, TokenLayout},
+    token_layout::{KeyOrder, MappingPosition, TokenLayout, PROBE_SENTINEL},
 };
+
+/// A budget long enough that a mocked provider, which answers at once, never meets it.
+const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[test]
 fn test_success_reports_amount_out_and_gas_used() {
@@ -204,52 +207,111 @@ async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
     );
 }
 
-#[tokio::test]
-async fn test_layout_cache_reuses_a_resolved_layout() {
-    let asserter = Asserter::new();
-    let simulator = mocked_simulator(&asserter, Duration::from_secs(1));
-    let token = Address::repeat_byte(3);
+/// A prestate trace naming one account and the slots its read touched.
+fn prestate(contract: Address, slots: &[B256]) -> serde_json::Value {
+    let storage: serde_json::Map<String, serde_json::Value> = slots
+        .iter()
+        .map(|slot| (format!("{slot:#x}"), serde_json::json!(format!("{:#x}", B256::ZERO))))
+        .collect();
+    serde_json::json!({ format!("{contract:#x}"): { "storage": storage } })
+}
+
+/// Queues one full discovery: a balance trace and probe, then an allowance trace and probe.
+fn push_successful_discovery(
+    asserter: &Asserter,
+    token: Address,
+    holder: Address,
+    spender: Address,
+) {
     let layout = TokenLayout::new(
         token,
         MappingPosition::Direct { base: 0, key_order: KeyOrder::Solidity },
-        MappingPosition::Direct { base: 1, key_order: KeyOrder::Solidity },
+        MappingPosition::Direct { base: 0, key_order: KeyOrder::Solidity },
     );
-    simulator
-        .layout_cache
-        .lock()
-        .expect("layout cache lock")
-        .insert(token, Ok(layout));
+    let sentinel = Bytes::from(B256::from(PROBE_SENTINEL).to_vec());
+    asserter.push_success(&prestate(token, &[layout.balance_slot(holder)]));
+    asserter.push_success(&sentinel);
+    asserter.push_success(&prestate(token, &[layout.allowance_slot(holder, spender)]));
+    asserter.push_success(&sentinel);
+}
 
-    let resolved = simulator
-        .cached_layout(token, Address::repeat_byte(1), Address::repeat_byte(2))
+#[tokio::test]
+async fn test_layout_cache_reuses_a_resolved_layout() {
+    let asserter = Asserter::new();
+    let simulator = mocked_simulator(&asserter, TEST_TIMEOUT);
+    let token = Address::repeat_byte(3);
+    let holder = Address::repeat_byte(1);
+    let spender = Address::repeat_byte(2);
+    push_successful_discovery(&asserter, token, holder, spender);
+
+    let first = simulator
+        .cached_layout(token, holder, spender)
         .await
-        .expect("cache resolves layout");
+        .expect("discovery resolves the layout");
+    let second = simulator
+        .cached_layout(token, holder, spender)
+        .await
+        .expect("the second call reads the cache");
 
-    assert_eq!(resolved, layout);
-    // The mock queues no response, so a discovery attempt would fail rather than pass silently.
+    assert_eq!(first, second);
+    // The mock has nothing left queued, so a second discovery would have failed rather than
+    // passed silently.
     assert!(asserter.read_q().is_empty(), "a cached layout makes no RPC call");
 }
 
 /// A token this build cannot resolve is remembered as such. Rediscovering it would spend a trace
-/// and up to 64 `eth_call`s on every quote that touches it.
+/// and its probes on every quote that touches it.
 #[tokio::test]
-async fn test_layout_cache_reuses_an_unresolvable_verdict() {
+async fn test_layout_cache_remembers_an_unsupported_token() {
     let asserter = Asserter::new();
-    let simulator = mocked_simulator(&asserter, Duration::from_secs(1));
-    let token = Address::repeat_byte(4);
-    simulator
-        .layout_cache
-        .lock()
-        .expect("layout cache lock")
-        .insert(token, Err("no supported balance mapping".to_string()));
+    let simulator = mocked_simulator(&asserter, TEST_TIMEOUT);
+    // Both balance views name a slot no convention produces, so recovery fails on the token
+    // itself rather than on the node.
+    for _ in 0..2 {
+        asserter.push_success(&prestate(Address::repeat_byte(3), &[B256::repeat_byte(0x99)]));
+        asserter.push_success(&Bytes::from(B256::from(PROBE_SENTINEL).to_vec()));
+    }
 
-    let error = simulator
-        .cached_layout(token, Address::repeat_byte(1), Address::repeat_byte(2))
+    let first = simulator
+        .cached_layout(Address::repeat_byte(3), Address::repeat_byte(1), Address::repeat_byte(2))
         .await
-        .expect_err("the token stays unresolvable");
+        .expect_err("the token's layout is not one this build recovers");
+    let second = simulator
+        .cached_layout(Address::repeat_byte(3), Address::repeat_byte(1), Address::repeat_byte(2))
+        .await
+        .expect_err("the verdict is remembered");
 
-    assert!(error.contains("no supported balance mapping"), "{error}");
+    assert!(first.contains("could not recover"), "{first}");
+    assert_eq!(first, second);
     assert!(asserter.read_q().is_empty(), "a remembered verdict makes no RPC call");
+}
+
+/// A node that failed to answer says nothing about the token, so the next quote discovers again.
+/// Remembering it would disable simulation for that token until the process restarts.
+#[tokio::test]
+async fn test_layout_cache_retries_after_a_node_failure() {
+    let asserter = Asserter::new();
+    let simulator = mocked_simulator(&asserter, TEST_TIMEOUT);
+    let token = Address::repeat_byte(3);
+    let holder = Address::repeat_byte(1);
+    let spender = Address::repeat_byte(2);
+    asserter.push_failure(ErrorPayload {
+        code: -32005,
+        message: "limit exceeded".into(),
+        data: None,
+    });
+    push_successful_discovery(&asserter, token, holder, spender);
+
+    let refused = simulator
+        .cached_layout(token, holder, spender)
+        .await
+        .expect_err("the node refused the trace");
+    let resolved = simulator
+        .cached_layout(token, holder, spender)
+        .await;
+
+    assert!(refused.contains("discovery failed"), "{refused}");
+    assert!(resolved.is_ok(), "the retry resolves: {resolved:?}");
 }
 
 /// A server that accepts the connection and never answers, so the request outlives the timeout.

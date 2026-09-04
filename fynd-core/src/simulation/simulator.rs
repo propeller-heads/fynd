@@ -1,6 +1,6 @@
 //! Simulation of encoded quotes using `eth_simulateV1` state overrides.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use alloy::{
     eips::BlockNumberOrTag,
@@ -21,7 +21,7 @@ use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
-use tokio::time::timeout;
+use tokio::{sync::OnceCell, time::timeout};
 use tracing::debug;
 use tycho_simulation::tycho_common::models::Chain;
 
@@ -73,11 +73,17 @@ const SIMULATION_COINBASE: Address = address!("0x95222290DD7278Aa3Ddd389Cc1E1d16
 /// simulation.
 const SIMULATION_SENDER_NONCE: u64 = 1;
 
+/// One token's layout, or the reason this build cannot resolve one, resolved once per token.
+type LayoutCell = Arc<OnceCell<Result<TokenLayout, String>>>;
+
 /// Simulates encoded quote transactions with temporary sender funding.
 pub struct QuoteSimulator {
     provider: RootProvider<Ethereum>,
     /// Layout per token, or the reason this build cannot resolve one.
-    layout_cache: Mutex<FxHashMap<Address, Result<TokenLayout, String>>>,
+    ///
+    /// One cell per token, so quotes that arrive for a new token together await one discovery
+    /// rather than each running their own trace and probes.
+    layout_cache: Mutex<FxHashMap<Address, LayoutCell>>,
     native_token: Address,
     request_timeout: std::time::Duration,
 }
@@ -296,62 +302,53 @@ impl QuoteSimulator {
     /// The token's storage layout, discovering it on the first quote that needs it.
     ///
     /// A token whose layout this build cannot resolve is remembered as unresolvable: the verdict
-    /// is a property of the token, and rediscovering it would spend a trace and up to 64
-    /// `eth_call`s on every quote that touches it. A node that failed to answer decides nothing,
-    /// so that is not remembered and the next quote tries again.
+    /// is a property of the token, and rediscovering it would spend a trace and its probes on
+    /// every quote that touches it. A node that failed to answer decides nothing, so the cell
+    /// stays empty and the next quote tries again.
     async fn cached_layout(
         &self,
         token: Address,
         holder: Address,
         spender: Address,
     ) -> Result<TokenLayout, String> {
-        if let Some(cached) = self.cached_verdict(token)? {
-            return cached
-                .map_err(|reason| format!("simulation token layout discovery failed: {reason}"));
-        }
+        let cell = Arc::clone(
+            self.layout_cache
+                .lock()
+                .map_err(|_| "simulation layout cache lock poisoned".to_string())?
+                .entry(token)
+                .or_default(),
+        );
+        cell.get_or_try_init(|| self.discover_once(token, holder, spender))
+            .await?
+            .clone()
+            .map_err(|reason| format!("simulation token layout discovery failed: {reason}"))
+    }
+
+    /// Runs discovery once, separating a verdict worth remembering from a node that failed.
+    ///
+    /// The outer `Err` leaves the cell empty, so only the inner one is cached.
+    async fn discover_once(
+        &self,
+        token: Address,
+        holder: Address,
+        spender: Address,
+    ) -> Result<Result<TokenLayout, String>, String> {
         let discovered = timeout(
             SIMULATION_LAYOUT_DISCOVERY_TIMEOUT,
             discover_layout(&self.provider, token, holder, spender),
         )
         .await
         .map_err(|_| {
-            format!("simulation token layout discovery timed out after {SIMULATION_LAYOUT_DISCOVERY_TIMEOUT:?}")
+            format!("simulation token layout discovery failed: timed out after {SIMULATION_LAYOUT_DISCOVERY_TIMEOUT:?}")
         })?;
 
         match discovered {
-            Ok(layout) => {
-                self.remember(token, Ok(layout))?;
-                Ok(layout)
-            }
-            Err(DiscoveryError::Unsupported(reason)) => {
-                self.remember(token, Err(reason.clone()))?;
-                Err(format!("simulation token layout discovery failed: {reason}"))
-            }
+            Ok(layout) => Ok(Ok(layout)),
+            Err(DiscoveryError::Unsupported(reason)) => Ok(Err(reason)),
             Err(DiscoveryError::Rpc(reason)) => {
                 Err(format!("simulation token layout discovery failed: {reason}"))
             }
         }
-    }
-
-    /// The verdict already reached for a token, if any.
-    fn cached_verdict(
-        &self,
-        token: Address,
-    ) -> Result<Option<Result<TokenLayout, String>>, String> {
-        Ok(self
-            .layout_cache
-            .lock()
-            .map_err(|_| "simulation layout cache lock poisoned".to_string())?
-            .get(&token)
-            .cloned())
-    }
-
-    fn remember(&self, token: Address, verdict: Result<TokenLayout, String>) -> Result<(), String> {
-        self.layout_cache
-            .lock()
-            .map_err(|_| "simulation layout cache lock poisoned".to_string())?
-            .insert(token, verdict);
-        Ok(())
     }
 }
 
