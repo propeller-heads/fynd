@@ -39,8 +39,6 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
-#[cfg(test)]
-use num_traits::ToPrimitive;
 use num_traits::Zero;
 use petgraph::graph::NodeIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -557,6 +555,7 @@ impl DerivedComputation for TokenGasPriceComputation {
 
 #[cfg(test)]
 mod tests {
+    use num_traits::ToPrimitive;
     use tycho_simulation::tycho_core::models::token::Token;
 
     use super::*;
