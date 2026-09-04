@@ -1,4 +1,11 @@
 
+## [0.102.3](https://github.com/propeller-heads/fynd/compare/0.102.2...0.102.3) (2026-09-04)
+
+### Bug Fixes
+
+* drop router max slippage tolerance check from encoder ([84ef95d](https://github.com/propeller-heads/fynd/commit/84ef95d3fc0c0e53ea42dcf8e57c65c32125aed2))
+
+
 ## [0.102.2](https://github.com/propeller-heads/fynd/compare/0.101.1...0.102.2) (2026-09-04)
 
 ### Features
