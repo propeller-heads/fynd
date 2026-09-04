@@ -116,3 +116,51 @@ jobs:
             exit 0
           fi
           npm publish --provenance --access public
+
+  # Tells the downstream deployment repository that a new version is on crates.io, so it can
+  # open its own dependency-update pull request without a person or a poll noticing first.
+  # The repository is named by a secret; with no secret set, this job does nothing.
+  notify-downstream:
+    name: Notify the downstream deployment repository
+    # publish-crates does not run for a pre-release, which skips this job with it.
+    needs: publish-crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check that a downstream repository is configured
+        id: config
+        env:
+          DOWNSTREAM_REPO: ${{ secrets.DOWNSTREAM_REPO }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOWNSTREAM_REPO}" ]; then
+            echo "DOWNSTREAM_REPO is empty, so there is nothing to notify." \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate a token for the downstream repository
+        id: app-token
+        if: steps.config.outputs.configured == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ secrets.DOWNSTREAM_REPO }}
+
+      - name: Send the release dispatch
+        if: steps.config.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OWNER: ${{ github.repository_owner }}
+          DOWNSTREAM_REPO: ${{ secrets.DOWNSTREAM_REPO }}
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          jq -n --arg v "${VERSION}" \
+            '{event_type: "fynd-release", client_payload: {version: $v}}' \
+            | gh api "repos/${OWNER}/${DOWNSTREAM_REPO}/dispatches" --method POST --input -
+          echo "Sent the fynd-release dispatch for ${VERSION}." >> "$GITHUB_STEP_SUMMARY"
