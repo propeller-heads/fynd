@@ -340,7 +340,7 @@ impl FyndRPCBuilder {
         let (
             router,
             worker_pools,
-            _market_data,
+            market_data,
             _derived_data,
             feed_handle,
             gas_price_handle,
@@ -360,8 +360,7 @@ impl FyndRPCBuilder {
             Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]
             gas_token,
-            #[cfg(feature = "experimental")]
-            _market_data.clone(),
+            market_data,
         );
 
         let hosted_swagger_url = self.hosted_swagger_url;

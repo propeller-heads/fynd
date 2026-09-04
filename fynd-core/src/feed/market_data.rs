@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use num_bigint::BigUint;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
 use tycho_simulation::{
@@ -24,7 +25,7 @@ use tycho_simulation::{
         models::{protocol::ProtocolComponent, token::Token, Address},
         simulation::protocol_sim::ProtocolSim,
     },
-    tycho_ethereum::gas::BlockGasPrice,
+    tycho_ethereum::gas::{BlockGasPrice, GasPrice},
 };
 
 use crate::types::{BlockInfo, ComponentId};
@@ -68,12 +69,22 @@ pub struct MarketData {
     /// Per-label overlay states. Stored separately from the base data lock so that
     /// overlay writes do not block base-state reads.
     overlays: OverlayRegistry,
+    /// Gas price this handle reports instead of the one on the shared state, in wei per gas unit.
+    ///
+    /// Set by [`MarketData::with_gas_price_override`]. It lives on the handle, not on the shared
+    /// state, so one request can solve at a different gas price without any other request seeing
+    /// it.
+    gas_price_override: Option<Arc<BigUint>>,
 }
 
 impl MarketData {
     /// Creates a new handle wrapping the given data store.
     pub fn new(data: Arc<RwLock<MarketState>>) -> Self {
-        Self { data, overlays: Arc::new(RwLock::new(FxHashMap::default())) }
+        Self {
+            data,
+            overlays: Arc::new(RwLock::new(FxHashMap::default())),
+            gas_price_override: None,
+        }
     }
 
     /// Creates a new empty market data store wrapped in a `MarketData`.
@@ -81,9 +92,43 @@ impl MarketData {
         Self::new(Arc::new(RwLock::new(MarketState::new())))
     }
 
+    /// A handle over the same shared state and overlays whose views report `wei` as the gas
+    /// price, in wei per gas unit.
+    ///
+    /// Cloning is as cheap as cloning any other handle. The shared state is not touched, so
+    /// handles held elsewhere keep reporting the gas price the feed wrote. The shadowed price
+    /// keeps the block number, hash and timestamp of the price it replaces, so staleness checks
+    /// still read the real block.
+    ///
+    /// The override replaces the feed's price; it does not stand in for one. While the feed has
+    /// not written a price, views of this handle report none, exactly like every other handle, so
+    /// a request carrying an override cannot solve while one without it cannot.
+    #[must_use]
+    pub fn with_gas_price_override(&self, wei: BigUint) -> Self {
+        Self {
+            data: Arc::clone(&self.data),
+            overlays: Arc::clone(&self.overlays),
+            gas_price_override: Some(Arc::new(wei)),
+        }
+    }
+
+    /// Builds a view over `guard`, applying this handle's gas price override if it has one.
+    fn view<'a>(
+        &self,
+        guard: tokio::sync::RwLockReadGuard<'a, MarketState>,
+        overlay: Option<(StateLabel, OverlayStates)>,
+    ) -> MarketDataView<'a> {
+        let gas_price_shadow = self
+            .gas_price_override
+            .as_ref()
+            .and_then(|wei| Some(shadow_gas_price(guard.gas_price()?, wei)));
+        MarketDataView { guard, overlay, gas_price_shadow }
+    }
+
     /// Acquires a base view of the market data with no overlay applied.
     pub async fn read(&self) -> MarketDataView<'_> {
-        MarketDataView { guard: self.data.read().await, overlay: None }
+        let guard = self.data.read().await;
+        self.view(guard, None)
     }
 
     /// Acquires an overlay-aware view scoped to `label`.
@@ -101,10 +146,10 @@ impl MarketData {
         let guard = self.data.read().await;
         if let Some(e) = self.overlays.read().await.get(label) {
             let states = Arc::clone(&e.states);
-            return Ok(MarketDataView { guard, overlay: Some((label.clone(), states)) });
+            return Ok(self.view(guard, Some((label.clone(), states))));
         }
         if &guard.label == label {
-            return Ok(MarketDataView { guard, overlay: None });
+            return Ok(self.view(guard, None));
         }
         Err(ReadLabeledError::NotFound(label.clone()))
     }
@@ -138,7 +183,7 @@ impl MarketData {
         self.data
             .try_read()
             .ok()
-            .map(|guard| MarketDataView { guard, overlay: None })
+            .map(|guard| self.view(guard, None))
     }
 
     // ==================== Overlay CRUD ====================
@@ -208,6 +253,19 @@ impl MarketData {
 pub struct MarketDataView<'a> {
     guard: tokio::sync::RwLockReadGuard<'a, MarketState>,
     overlay: Option<(StateLabel, OverlayStates)>,
+    /// Gas price this view reports in place of the base one, set when the handle it came from
+    /// carries an override. Built once per view so `gas_price` can hand out a reference.
+    gas_price_shadow: Option<BlockGasPrice>,
+}
+
+/// Builds the gas price a view reports when its handle overrides the price, keeping the block
+/// provenance of `base` so staleness checks still read the real block.
+///
+/// The shadow is a legacy price also when `base` is an EIP-1559 one. An override is one
+/// effective price per gas unit: there is no base fee and priority fee split to keep, and every
+/// consumer reads `effective_gas_price`, which is the same for both variants.
+fn shadow_gas_price(base: &BlockGasPrice, wei: &BigUint) -> BlockGasPrice {
+    BlockGasPrice { pricing: GasPrice::Legacy { gas_price: wei.clone() }, ..base.clone() }
 }
 
 impl<'a> MarketDataView<'a> {
@@ -236,7 +294,7 @@ impl<'a> MarketDataView<'a> {
         &self,
         component_ids: &FxHashSet<&ComponentId>,
     ) -> MarketState {
-        let mut subset = self.guard.extract_subset(component_ids);
+        let mut subset = self.extract_subset(component_ids);
         if let Some((ref label, ref states)) = self.overlay {
             for (id, state) in states.iter() {
                 if subset
@@ -259,8 +317,15 @@ impl<'a> MarketDataView<'a> {
     }
 
     /// Extracts a base-data subset for the given component IDs (no overlay applied).
+    ///
+    /// The handle's gas price override, when it has one, still applies: an algorithm prices a
+    /// route off the subset it extracts, so leaving the base price on it would drop the override.
     pub fn extract_subset(&self, component_ids: &FxHashSet<&ComponentId>) -> MarketState {
-        self.guard.extract_subset(component_ids)
+        let mut subset = self.guard.extract_subset(component_ids);
+        if let Some(shadow) = self.gas_price_shadow.clone() {
+            subset.update_gas_price(shadow);
+        }
+        subset
     }
 
     /// Returns a reference to the token registry from the base data.
@@ -268,9 +333,12 @@ impl<'a> MarketDataView<'a> {
         self.guard.token_registry_ref()
     }
 
-    /// Returns the current gas price from the base data.
+    /// Returns the gas price this view solves at: the handle's override when it carries one,
+    /// and the base data's price otherwise.
     pub fn gas_price(&self) -> Option<&BlockGasPrice> {
-        self.guard.gas_price()
+        self.gas_price_shadow
+            .as_ref()
+            .or_else(|| self.guard.gas_price())
     }
 
     /// Returns the block info for the last base-state update.
@@ -554,8 +622,7 @@ impl MarketState {
 
 #[cfg(test)]
 mod tests {
-    use num_bigint::BigUint;
-    use tycho_simulation::tycho_ethereum::gas::GasPrice;
+    use alloy::primitives::B256;
 
     use super::*;
     use crate::algorithm::test_utils::{
@@ -961,5 +1028,135 @@ mod tests {
             2,
             "tokens are not removed with their components"
         );
+    }
+
+    /// Writes a legacy gas price of `wei` at block 42 into the shared state.
+    async fn set_base_gas_price(market: &MarketData, wei: u64) {
+        market
+            .write()
+            .await
+            .update_gas_price(BlockGasPrice {
+                block_number: 42,
+                block_hash: B256::repeat_byte(0x11),
+                block_timestamp: 1_700_000_000,
+                pricing: GasPrice::Legacy { gas_price: BigUint::from(wei) },
+            });
+    }
+
+    #[tokio::test]
+    async fn view_gas_price_prefers_the_handle_override() {
+        let market = MarketData::new_shared();
+        set_base_gas_price(&market, 50).await;
+
+        let base_view = market.read().await;
+        assert_eq!(
+            base_view
+                .gas_price()
+                .map(BlockGasPrice::effective_gas_price),
+            Some(BigUint::from(50u64)),
+            "a handle without an override reports the price the feed wrote"
+        );
+        drop(base_view);
+
+        let shadowed = market.with_gas_price_override(BigUint::from(5u64));
+        let shadow_view = shadowed.read().await;
+        assert_eq!(
+            shadow_view
+                .gas_price()
+                .map(BlockGasPrice::effective_gas_price),
+            Some(BigUint::from(5u64))
+        );
+        let shadow_price = shadow_view
+            .gas_price()
+            .expect("the override always reports a price");
+        assert_eq!(
+            shadow_price.block_number, 42,
+            "the shadow keeps the block the real price was read at"
+        );
+        assert_eq!(shadow_price.block_timestamp, 1_700_000_000);
+    }
+
+    #[tokio::test]
+    async fn gas_price_override_leaves_other_handles_untouched() {
+        let market = MarketData::new_shared();
+        set_base_gas_price(&market, 50).await;
+        let sibling = market.clone();
+
+        let shadowed = market.with_gas_price_override(BigUint::from(1u64));
+        assert_eq!(
+            shadowed
+                .read()
+                .await
+                .gas_price()
+                .map(BlockGasPrice::effective_gas_price),
+            Some(BigUint::from(1u64))
+        );
+
+        for (name, handle) in [("origin", &market), ("sibling", &sibling)] {
+            assert_eq!(
+                handle
+                    .read()
+                    .await
+                    .gas_price()
+                    .map(BlockGasPrice::effective_gas_price),
+                Some(BigUint::from(50u64)),
+                "{name} shares the state but not the override"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn extracted_subsets_carry_the_gas_price_override() {
+        // Algorithms price routes off the subset they extract, not off the view, so the override
+        // has to survive extraction or it does nothing.
+        let market = MarketData::new_shared();
+        let tok_a = token(0x01, "A");
+        let tok_b = token(0x02, "B");
+        {
+            let mut data = market.write().await;
+            data.upsert_components([component("component_ab", &[tok_a.clone(), tok_b.clone()])]);
+            data.upsert_tokens([tok_a, tok_b]);
+        }
+        set_base_gas_price(&market, 50).await;
+
+        let shadowed = market.with_gas_price_override(BigUint::from(5u64));
+        let view = shadowed.read().await;
+        let id = "component_ab".to_string();
+        let ids = FxHashSet::from_iter([&id]);
+
+        for (name, subset) in [
+            ("extract_subset", view.extract_subset(&ids)),
+            ("extract_subset_with_overlay", view.extract_subset_with_overlay(&ids)),
+        ] {
+            assert_eq!(
+                subset
+                    .gas_price()
+                    .map(BlockGasPrice::effective_gas_price),
+                Some(BigUint::from(5u64)),
+                "{name} dropped the override"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gas_price_override_needs_a_feed_price() {
+        // The override replaces the feed's price; it does not stand in for one. A request that
+        // carries an override must fail the same way as any other while the feed has no price.
+        let market = MarketData::new_shared();
+        let shadowed = market.with_gas_price_override(BigUint::from(7u64));
+
+        assert!(
+            shadowed
+                .read()
+                .await
+                .gas_price()
+                .is_none(),
+            "an override without a feed price reports no price"
+        );
+        let subset = shadowed
+            .read()
+            .await
+            .extract_subset(&FxHashSet::default());
+        assert!(subset.gas_price().is_none(), "the subset reports no price either");
     }
 }

@@ -36,9 +36,10 @@ use fynd_core::{
     worker_pool_router::WorkerPoolRouter,
 };
 use handlers::configure_routes;
+use num_bigint::BigUint;
 #[cfg(feature = "experimental")]
 use tycho_simulation::tycho_common::models::Address;
-use tycho_simulation::tycho_common::Bytes;
+use tycho_simulation::{tycho_common::Bytes, tycho_ethereum::gas::BlockGasPrice};
 use utoipa::OpenApi;
 
 use crate::api::error::ErrorResponse;
@@ -216,7 +217,6 @@ pub struct AppState {
     pub(crate) derived_data: SharedDerivedDataRef,
     #[cfg(feature = "experimental")]
     pub(crate) gas_token: Address,
-    #[cfg(feature = "experimental")]
     pub(crate) market_data: MarketData,
     #[cfg(feature = "experimental")]
     pub(crate) tokens_cache: Arc<tokio::sync::RwLock<Option<tokens::TokensCache>>>,
@@ -233,7 +233,7 @@ impl AppState {
         permit2_address: Bytes,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
         #[cfg(feature = "experimental")] gas_token: Address,
-        #[cfg(feature = "experimental")] market_data: MarketData,
+        market_data: MarketData,
     ) -> Self {
         Self {
             worker_router: Arc::new(worker_router),
@@ -245,7 +245,6 @@ impl AppState {
             derived_data,
             #[cfg(feature = "experimental")]
             gas_token,
-            #[cfg(feature = "experimental")]
             market_data,
             #[cfg(feature = "experimental")]
             tokens_cache: Arc::new(tokio::sync::RwLock::new(None)),
@@ -280,6 +279,18 @@ impl AppState {
     #[must_use]
     pub fn permit2_address(&self) -> &Bytes {
         &self.permit2_address
+    }
+
+    /// Returns the gas price the market feed last reported, in wei per gas unit.
+    ///
+    /// `None` until the first gas price is fetched. Read this to scale from the live price when
+    /// building a [`fynd_core::QuoteOptions::with_gas_price_override`] for a request.
+    pub async fn gas_price_wei(&self) -> Option<BigUint> {
+        self.market_data
+            .read()
+            .await
+            .gas_price()
+            .map(BlockGasPrice::effective_gas_price)
     }
 }
 
@@ -375,7 +386,6 @@ mod configure_app_tests {
             derived_data,
             #[cfg(feature = "experimental")]
             tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
-            #[cfg(feature = "experimental")]
             market_data,
         )
     }

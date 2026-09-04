@@ -638,7 +638,6 @@ mod tests {
             derived_data,
             #[cfg(feature = "experimental")]
             tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
-            #[cfg(feature = "experimental")]
             market_data,
         )
     }
