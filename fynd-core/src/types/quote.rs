@@ -886,9 +886,15 @@ pub struct OrderQuote {
     /// builds itself, such as the `NoRouteFound` placeholder.
     #[serde(skip)]
     worker_pool: String,
-    /// Effective gas price (in wei) at the time the route was computed.
+    /// Gas price (in wei) the market reported when the route was computed: the price a
+    /// transaction pays.
     #[serde_as(as = "Option<DisplayFromStr>")]
     gas_price: Option<BigUint>,
+    /// Gas price (in wei) the route was ranked at. The same as `gas_price` unless an embedder
+    /// asked to solve at a different one. Internal only: together with the gas cost netted off
+    /// `amount_out_net_gas` it forms the rate that restates output-token amounts in wei.
+    #[serde(skip)]
+    solve_gas_price: Option<BigUint>,
     /// An encoded EVM transaction ready to be submitted on-chain.
     transaction: Option<Transaction>,
     /// Fee breakdown (populated when encoding options are provided).
@@ -946,6 +952,7 @@ impl OrderQuote {
             algorithm,
             worker_pool: String::new(),
             gas_price: None,
+            solve_gas_price: None,
             transaction: None,
             fee_breakdown: None,
             simulation_result: None,
@@ -995,6 +1002,12 @@ impl OrderQuote {
     /// Sets the effective gas price.
     pub(crate) fn with_gas_price(mut self, gas_price: BigUint) -> Self {
         self.gas_price = Some(gas_price);
+        self
+    }
+
+    /// Records the gas price the route was ranked at.
+    pub(crate) fn with_solve_gas_price(mut self, gas_price: BigUint) -> Self {
+        self.solve_gas_price = Some(gas_price);
         self
     }
 
@@ -1100,9 +1113,16 @@ impl OrderQuote {
         self.worker_pool = worker_pool;
     }
 
-    /// Returns the effective gas price at the time the route was computed.
+    /// Returns the gas price the market reported when the route was computed.
     pub fn gas_price(&self) -> Option<&BigUint> {
         self.gas_price.as_ref()
+    }
+
+    /// Returns the gas price the route was ranked at.
+    ///
+    /// The same as [`Self::gas_price`] unless the request asked to solve at a different one.
+    pub fn solve_gas_price(&self) -> Option<&BigUint> {
+        self.solve_gas_price.as_ref()
     }
 
     /// Returns the encoded EVM transaction, if available.

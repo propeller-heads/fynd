@@ -332,7 +332,7 @@ where
         // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
-        let (block_info, solved_against) = {
+        let (block_info, solved_against, market_gas_price) = {
             // Read briefly to capture block info; drop the lock before solving so it is not held
             // across the algorithm's own read call.
             let view = self
@@ -352,7 +352,12 @@ where
                 .state_label()
                 .cloned()
                 .unwrap_or_else(|| last_block.number().to_string());
-            (block_info, solved_against)
+            // The price a transaction pays. The algorithm ranks at `params`' override when it
+            // carries one, and the quote reports both.
+            let market_gas_price = view
+                .gas_price()
+                .map(|price| price.effective_gas_price());
+            (block_info, solved_against, market_gas_price)
         };
 
         // The override rides on the handle rather than the trait, so every algorithm honours it
@@ -382,7 +387,7 @@ where
                     .net_amount_out()
                     .to_biguint()
                     .unwrap_or(BigUint::ZERO);
-                let gas_price = result.gas_price().clone();
+                let solve_gas_price = result.gas_price().clone();
                 let algo_price_impact = result.price_impact();
                 let mut route = result.into_route();
 
@@ -526,7 +531,10 @@ where
                     solved_against,
                 )
                 .with_route(route)
-                .with_gas_price(gas_price);
+                .with_solve_gas_price(solve_gas_price);
+                if let Some(wei) = market_gas_price {
+                    quote = quote.with_gas_price(wei);
+                }
                 if let Some(bps) = price_impact_bps {
                     quote = quote.with_price_impact_bps(bps);
                 }
@@ -1057,7 +1065,12 @@ mod tests {
             "cheap gas pays for the gas-hungry component"
         );
         assert_eq!(*at_override.order().amount_out_net_gas(), BigUint::from(3700u64));
-        assert_eq!(at_override.order().gas_price(), Some(&BigUint::from(10u64)));
+        // The override ranks routes; it is not a price a transaction can pay. The quote reports
+        // the feed's price and keeps the solve price for internal use.
+        assert_eq!(at_override.order().gas_price(), Some(&BigUint::from(100u64)));
+        assert_eq!(at_override.order().solve_gas_price(), Some(&BigUint::from(10u64)));
+        assert_eq!(at_market.order().gas_price(), Some(&BigUint::from(100u64)));
+        assert_eq!(at_market.order().solve_gas_price(), Some(&BigUint::from(100u64)));
     }
 
     /// Mock algorithm that returns a single-leg route through a pAMM executed via the
