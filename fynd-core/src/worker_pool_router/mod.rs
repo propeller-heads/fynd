@@ -3793,6 +3793,43 @@ mod tests {
             .any(|(metric, _, _)| metric == "winning_quote_shortfall_count"));
     }
 
+    /// A simulation that came back above the quote is not a shortfall. Counting it as a zero
+    /// would pull every crossed protocol's mean towards zero and read as an improvement.
+    #[test]
+    fn test_winning_protocols_leaves_out_a_favourable_simulation() {
+        let mut quote = make_route_quote(&[("uniswap_v3", 0x01, 0x02)]);
+        quote.set_fee_breakdown(FeeBreakdown::new(
+            BigUint::from(70u64),
+            BigUint::from(30u64),
+            BigUint::from(100u64),
+            BigUint::from(900u64),
+        ));
+        // 1001 against a post-fee 1000: the simulated call returned more than promised.
+        quote.set_simulation_result(SimulationResult::Success {
+            amount_out: BigUint::from(1001u64),
+            gas_used: 120_000,
+        });
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            instrumentation::record_winning_protocols(&quote);
+        });
+
+        let recorded = recorded(&snapshotter);
+        assert!(
+            !recorded
+                .iter()
+                .any(|(metric, _, _)| metric.starts_with("winning_quote_shortfall")),
+            "{recorded:?}"
+        );
+        assert_eq!(
+            counter_value(&recorded, "winning_quote_swaps_total", "simulated=success"),
+            Some(1),
+            "the quote is still counted as a successful simulation"
+        );
+    }
+
     /// The reviewer's question: what did a route containing a given protocol simulate at. Both
     /// values ride on the line that names the protocols, so one record answers it.
     #[test]

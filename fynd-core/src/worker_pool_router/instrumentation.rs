@@ -307,7 +307,7 @@ fn count_swaps_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, outcome:
     }
 }
 
-/// Totals the shortfall of the routes that crossed each protocol, and how many did.
+/// Totals the shortfall of the routes that crossed each protocol, and how many fell short.
 ///
 /// A sum and a count rather than a histogram: the mean is what the per-protocol view reports, and
 /// bucketing it would multiply the deviation histogram's boundaries across every protocol. The
@@ -317,12 +317,13 @@ fn count_swaps_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, outcome:
 /// shortfall under one basis point is the ordinary case: rounding to whole bps would report most
 /// routes as perfect. Divide the two by `SHORTFALL_SCALE` to read a mean in bps.
 fn record_deviation_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, bps: f64) {
-    // A deviation is negative when the simulation returned less than the quote promised, which is
-    // every case the router's positive-slippage capture allows. It is recorded as a positive
-    // shortfall so the counter never has to take a negative delta.
-    let shortfall = (-bps * SHORTFALL_SCALE)
-        .max(0.0)
-        .round() as u64;
+    // A simulation that returned more than the quote promised has no shortfall, and it is left
+    // out of both counters rather than entered as a zero: counting it would pull every crossed
+    // protocol's mean towards zero and read as an improvement.
+    if bps >= 0.0 {
+        return;
+    }
+    let shortfall = (-bps * SHORTFALL_SCALE).round() as u64;
     for protocol in swaps_per_protocol.keys() {
         counter!("winning_quote_shortfall_centibps_sum", "protocol" => protocol.to_string())
             .increment(shortfall);
