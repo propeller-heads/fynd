@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
-use tracing::{debug, warn};
+use tracing::debug;
 use tycho_simulation::tycho_core::models::Address;
 
 use super::{
@@ -592,23 +592,7 @@ impl PathFrankWolfeAlgorithm {
             .clone()
             .unwrap_or_default();
         let split_net = Self::compute_split_net_amount_out(&split_route, ctx)?;
-        // Attach the split route's price impact. A computation error must never fail an
-        // otherwise valid split solve (preserves the "impact never fails a quote" guarantee),
-        // but log it for review since it indicates an unexpected anomaly (e.g. non-positive
-        // marginal price). Single-path routes are linear, so the worker's spot-price fallback
-        // populates their price impact instead.
-        let split_pi = match Self::compute_average_price_impact(&allocations) {
-            Ok(pi) => Some(pi),
-            Err(e) => {
-                warn!(error = %e, "failed to compute price impact for split route; omitting from quote");
-                None
-            }
-        };
-        let mut split_result = RouteResult::new(split_route, split_net, gas_price);
-        if let Some(pi) = split_pi {
-            split_result = split_result.with_price_impact(pi);
-        }
-        Ok(Some(split_result))
+        Ok(Some(RouteResult::new(split_route, split_net, gas_price)))
     }
 
     /// Computes `net_amount_out` for a split route, mirroring
@@ -1546,48 +1530,6 @@ mod tests {
             (0.8..=1.2).contains(&ratio),
             "expected roughly equal split, got ratio {ratio} (amounts: {amounts:?})"
         );
-    }
-
-    #[tokio::test]
-    async fn find_best_route_reports_price_impact_for_split() {
-        // Two identical components force a split route; path_frank_wolfe must report the price
-        // impact it computes for it. (Single-path routes are linear and get their price
-        // impact from the worker's spot-price fallback instead.)
-        let token_a = token(0x01, "A");
-        let token_b = token(0x02, "B");
-
-        let cp = |reserve: u64| -> Box<dyn ProtocolSim> {
-            Box::new(ConstantProductSim {
-                reserve_0: BigUint::from(reserve),
-                reserve_1: BigUint::from(reserve),
-                gas: 50_000,
-            })
-        };
-
-        let (market, graph_manager) = setup_market_unweighted(vec![
-            ("P1", &token_a, &token_b, cp(100_000)),
-            ("P2", &token_a, &token_b, cp(100_000)),
-        ]);
-
-        let algo = pfw_algo_with_config(
-            2,
-            PathFrankWolfeConfig {
-                max_paths: 4,
-                max_probe: 0.25,
-                min_split: 0.01,
-                ..Default::default()
-            },
-        );
-        let derived = derived_with_token_prices(&[&token_a, &token_b]);
-        let ord = order(&token_a, &token_b, 10_000, OrderSide::Sell);
-
-        let result = algo
-            .find_best_route(graph_manager.graph(), market, None, Some(derived), &ord)
-            .await
-            .unwrap();
-
-        assert_eq!(result.route().swaps().len(), 2, "expected a split route");
-        assert!(result.price_impact().is_some(), "split route should report price impact");
     }
 
     #[tokio::test]

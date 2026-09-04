@@ -374,7 +374,6 @@ where
                     .to_biguint()
                     .unwrap_or(BigUint::ZERO);
                 let gas_price = result.gas_price().clone();
-                let algo_price_impact = result.price_impact();
                 let mut route = result.into_route();
 
                 if let Err(err) = route.validate() {
@@ -492,28 +491,24 @@ where
                     order.amount().clone()
                 };
 
-                let price_impact_bps = algo_price_impact
-                    .or_else(|| {
-                        let spot_impact = super::price_impact::spot_price_impact(
-                            &route,
-                            &amount_in,
-                            &amount_out,
-                            &self.market_data,
+                let spot_impact = super::price_impact::spot_price_impact(
+                    &route,
+                    &amount_in,
+                    &amount_out,
+                    &self.market_data,
+                );
+                let price_impact_bps = match spot_impact {
+                    Ok(impact) => Some((impact * 10_000.0).round() as i32),
+                    Err(err) => {
+                        debug!(
+                            order_id = %order.id(),
+                            algorithm = self.algorithm.name(),
+                            error = %err,
+                            "quote carries no price impact"
                         );
-                        match spot_impact {
-                            Ok(impact) => Some(impact),
-                            Err(err) => {
-                                debug!(
-                                    order_id = %order.id(),
-                                    algorithm = self.algorithm.name(),
-                                    error = %err,
-                                    "quote carries no price impact"
-                                );
-                                None
-                            }
-                        }
-                    })
-                    .map(|f| (f * 10_000.0).round() as i32);
+                        None
+                    }
+                };
 
                 let mut quote = OrderQuote::new(
                     order.id().to_string(),
