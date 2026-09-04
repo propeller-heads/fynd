@@ -22,7 +22,7 @@ use super::{
     is_rankable, Order, OrderQuote, OrderResponses, OrderSide, QuoteOptions, QuoteStatus,
     SolveError, WorkerPoolQuote, BPS_DENOMINATOR,
 };
-use crate::{simulation::deviation::deviation_bps, Route, SimulationResult};
+use crate::{simulation::deviation::deviation_bps, SimulationResult};
 
 /// Target for the per-quote comparison log. Emitted at TRACE so a plain `RUST_LOG=info` leaves
 /// it off; a deployment that wants it sets `RUST_LOG=...,fynd::quote_comparison=trace`.
@@ -281,12 +281,12 @@ pub(super) fn record_winning_protocols(quote: &OrderQuote) {
             .or_default() += 1;
     }
 
-    let (outcome, deviation) = simulation_fields(quote);
+    let (outcome, deviation) = simulation_outcome(quote);
     count_swaps_per_protocol(&swaps_per_protocol, outcome);
-    if let Some(bps) = simulated_deviation_bps(quote) {
+    if let Some(bps) = deviation {
         record_shortfall_per_protocol(&swaps_per_protocol, bps);
     }
-    log_winning_protocols(quote, route, &swaps_per_protocol, outcome, &deviation);
+    log_winning_protocols(quote, &swaps_per_protocol, outcome, deviation);
 }
 
 /// Counts the swaps the winning routes make on each protocol, by how the quote simulated.
@@ -316,7 +316,7 @@ fn count_swaps_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, outcome:
 ///
 /// The sum is in hundredths of a basis point because a counter only takes whole numbers, and a
 /// shortfall under one basis point is the ordinary case: rounding to whole bps would report most
-/// routes as perfect. Divide the two by `SHORTFALL_SCALE` to read a mean in bps.
+/// routes as perfect. Divide the two to read a mean in `SHORTFALL_SCALE`ths of a basis point.
 fn record_shortfall_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, bps: f64) {
     // A simulation that returned more than the quote promised has no shortfall, and it is left
     // out of both counters rather than entered as a zero: counting it would pull every crossed
@@ -328,28 +328,39 @@ fn record_shortfall_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, bps
     for protocol in swaps_per_protocol.keys() {
         counter!("winning_quote_shortfall_centibps_total", "protocol" => protocol.to_string())
             .increment(shortfall);
-        counter!("winning_quote_shortfall_routes_total", "protocol" => protocol.to_string()).increment(1);
+        counter!("winning_quote_shortfall_routes_total", "protocol" => protocol.to_string())
+            .increment(1);
     }
 }
 
-/// The deviation of a quote that simulated successfully, if it has one.
-fn simulated_deviation_bps(quote: &OrderQuote) -> Option<f64> {
-    match quote.simulation_result()? {
-        SimulationResult::Success { amount_out, .. } => deviation_bps(quote, amount_out),
-        SimulationResult::Failure { .. } => None,
+/// How a quote simulated, and how far the simulated amount landed from what it promised.
+///
+/// The outcome is empty when the request asked for no simulation, and the deviation is `None`
+/// whenever the simulated call returned no amount to compare.
+fn simulation_outcome(quote: &OrderQuote) -> (&'static str, Option<f64>) {
+    match quote.simulation_result() {
+        None => ("", None),
+        Some(SimulationResult::Failure { .. }) => ("failed", None),
+        Some(SimulationResult::Success { amount_out, .. }) => {
+            ("success", deviation_bps(quote, amount_out))
+        }
     }
 }
 
 fn log_winning_protocols(
     quote: &OrderQuote,
-    route: &Route,
     swaps_per_protocol: &BTreeMap<&str, usize>,
     outcome: &'static str,
-    deviation: &str,
+    deviation: Option<f64>,
 ) {
     if !tracing::enabled!(target: WINNING_PROTOCOLS_TARGET, Level::TRACE) {
         return;
     }
+    let swaps = quote
+        .route()
+        .map_or(0, |route| route.swaps().len());
+    // The key stays on the line when there is no figure, so every line has the same shape.
+    let deviation = deviation.map_or_else(String::new, |bps| format!("{bps:.4}"));
     trace!(
         target: WINNING_PROTOCOLS_TARGET,
         parent: None,
@@ -359,30 +370,11 @@ fn log_winning_protocols(
         quote.block().number(),
         quote.worker_pool(),
         quote.algorithm(),
-        route.swaps().len(),
+        swaps,
         outcome,
         deviation,
         serde_json::to_string(swaps_per_protocol).unwrap_or_default(),
     );
-}
-
-/// The simulation outcome of a quote and how far the simulated amount landed from what the quote
-/// promised, as the two values the line carries.
-///
-/// Both are empty when the request asked for no simulation, and the deviation alone is empty when
-/// the simulated call did not return an amount. The keys stay on the line either way, so every
-/// line has the same shape.
-fn simulation_fields(quote: &OrderQuote) -> (&'static str, String) {
-    match quote.simulation_result() {
-        None => ("", String::new()),
-        Some(SimulationResult::Failure { .. }) => ("failed", String::new()),
-        Some(SimulationResult::Success { amount_out, .. }) => (
-            "success",
-            deviation_bps(quote, amount_out)
-                .map(|bps| format!("{bps:.4}"))
-                .unwrap_or_default(),
-        ),
-    }
 }
 
 #[cfg(test)]
