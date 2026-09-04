@@ -56,6 +56,10 @@ use crate::{
     SolveError, SolveParams, SurplusInfo, Swap,
 };
 
+/// Reported when a request asks for simulation on a server started without `--enable-simulation`.
+const SIMULATION_UNAVAILABLE: &str =
+    "simulation requested but simulation is not enabled on this server";
+
 /// Environment variable overriding [`DEFAULT_USER_IMPROVEMENT_SHARE_BPS`]. Read once, on the
 /// first quote that overlays an exclusive-access candidate.
 const ENV_USER_IMPROVEMENT_SHARE_BPS: &str = "EXCLUSIVE_ROUTE_USER_SHARE_BPS";
@@ -355,7 +359,7 @@ pub async fn encode_quotes(
 pub fn finalize_quote(order_quotes: Vec<OrderQuote>, solve_time_ms: u64) -> Quote {
     for quote in &order_quotes {
         record_win(quote);
-        instrumentation::log_winning_protocols(quote);
+        instrumentation::record_winning_protocols(quote);
     }
 
     let total_gas_estimate = order_quotes
@@ -601,7 +605,7 @@ impl WorkerPoolRouter {
     /// # Errors
     ///
     /// Returns [`SolveError::Internal`] when the request asks for simulation and the server was
-    /// built without a simulator.
+    /// started without `--enable-simulation`.
     pub async fn simulate_quotes(
         &self,
         mut order_quotes: Vec<OrderQuote>,
@@ -611,11 +615,8 @@ impl WorkerPoolRouter {
             return Ok(order_quotes);
         }
         let Some(simulator) = self.simulator.as_ref() else {
-            return Err(SolveError::Internal(
-                "simulation requested but simulation is not enabled on this server".to_string(),
-            ));
+            return Err(SolveError::Internal(SIMULATION_UNAVAILABLE.to_string()));
         };
-
         futures::future::join_all(
             order_quotes
                 .iter_mut()
@@ -1506,6 +1507,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
         feed::exclusivity::mark_exclusive,
+        tests::metrics::recorded_metrics,
         types::internal::SolveTask,
         EncodingOptions, FeeBreakdown, OrderSide, PermitDetails, PermitSingle, Route,
         SimulationResult, SingleOrderQuote, Swap, UserTransferType,
@@ -1728,10 +1730,7 @@ mod tests {
             .await
             .expect_err("simulation requires a configured simulator");
 
-        assert_eq!(
-            error.to_string(),
-            "internal error: simulation requested but simulation is not enabled on this server"
-        );
+        assert_eq!(error.to_string(), format!("internal error: {SIMULATION_UNAVAILABLE}"));
     }
 
     #[tokio::test]
@@ -1746,10 +1745,7 @@ mod tests {
             .await
             .expect_err("simulation requires a configured simulator");
         worker.abort();
-        assert_eq!(
-            error.to_string(),
-            "internal error: simulation requested but simulation is not enabled on this server"
-        );
+        assert_eq!(error.to_string(), format!("internal error: {SIMULATION_UNAVAILABLE}"));
     }
 
     /// Builds a simulator whose provider answers from `asserter`. Its native token is the mock
@@ -3623,10 +3619,10 @@ mod tests {
         assert_eq!(to_gas_token_amount(&quote, &BigUint::from(100_000_000u64)), None);
     }
 
-    /// Runs `log_winning_protocols` and returns the payload of each line it wrote.
+    /// Runs `record_winning_protocols` and returns the payload of each line it wrote.
     fn capture_winning_protocols(quote: &OrderQuote) -> Vec<String> {
         super::log_capture::capture_payloads("winning_protocols ", || {
-            instrumentation::log_winning_protocols(quote)
+            instrumentation::record_winning_protocols(quote)
         })
     }
 
@@ -3647,6 +3643,174 @@ mod tests {
             payloads[0]
         );
         assert!(payloads[0].contains("swaps=3"), "{}", payloads[0]);
+    }
+
+    fn counter_value(
+        recorded: &[crate::tests::metrics::Recorded],
+        name: &str,
+        label: &str,
+    ) -> Option<u64> {
+        recorded
+            .iter()
+            .find(|(metric, labels, _)| metric == name && labels.contains(&label.to_string()))
+            .and_then(|(_, _, value)| match value {
+                metrics_util::debugging::DebugValue::Counter(count) => Some(*count),
+                _ => None,
+            })
+    }
+
+    /// The log is off outside dev, so the counters have to be recorded whatever the level. This is
+    /// the whole reason the metrics moved out from behind the `enabled!` gate.
+    #[test]
+    fn test_winning_protocols_counts_swaps_with_the_log_disabled() {
+        let quote = make_route_quote(&[
+            ("uniswap_v2", 0x01, 0x02),
+            ("uniswap_v2", 0x02, 0x03),
+            ("vm:balancer_v2", 0x03, 0x04),
+        ]);
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        // No subscriber, so `tracing::enabled!` is false and nothing is logged.
+        metrics::with_local_recorder(&recorder, || {
+            instrumentation::record_winning_protocols(&quote);
+        });
+
+        let recorded = recorded_metrics(&snapshotter);
+        assert_eq!(
+            counter_value(&recorded, "winning_quote_swaps_total", "protocol=uniswap_v2"),
+            Some(2),
+            "a route crossing two pools of one protocol counts both"
+        );
+        assert_eq!(
+            counter_value(&recorded, "winning_quote_swaps_total", "protocol=vm:balancer_v2"),
+            Some(1)
+        );
+    }
+
+    /// A quote that asked for no simulation still counts, under its own label, so the three
+    /// outcome shares add up to the protocol's total swaps.
+    #[test]
+    fn test_winning_protocols_labels_an_unsimulated_quote() {
+        let quote = make_route_quote(&[("uniswap_v3", 0x01, 0x02)]);
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            instrumentation::record_winning_protocols(&quote);
+        });
+
+        assert_eq!(
+            counter_value(
+                &recorded_metrics(&snapshotter),
+                "winning_quote_swaps_total",
+                "simulated=none"
+            ),
+            Some(1)
+        );
+    }
+
+    /// The shortfall is accumulated in hundredths of a basis point, because a counter takes whole
+    /// numbers and most routes fall short by less than one.
+    #[test]
+    fn test_winning_protocols_totals_the_shortfall_per_protocol() {
+        let mut quote = make_route_quote(&[("ekubo_v3", 0x01, 0x02), ("uniswap_v3", 0x02, 0x03)]);
+        quote.set_fee_breakdown(FeeBreakdown::new(
+            BigUint::from(70u64),
+            BigUint::from(30u64),
+            BigUint::from(100u64),
+            BigUint::from(900u64),
+        ));
+        // 999 against a post-fee 1000 is a shortfall of 10 bps, or 1000 hundredths.
+        quote.set_simulation_result(SimulationResult::Success {
+            amount_out: BigUint::from(999u64),
+            gas_used: 120_000,
+        });
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            instrumentation::record_winning_protocols(&quote);
+        });
+
+        let recorded = recorded_metrics(&snapshotter);
+        for protocol in ["protocol=ekubo_v3", "protocol=uniswap_v3"] {
+            assert_eq!(
+                counter_value(&recorded, "winning_quote_shortfall_centibps_total", protocol),
+                Some(1_000),
+                "{protocol} carries the whole route's shortfall"
+            );
+            assert_eq!(
+                counter_value(&recorded, "winning_quote_shortfall_routes_total", protocol),
+                Some(1)
+            );
+        }
+        assert_eq!(
+            counter_value(&recorded, "winning_quote_swaps_total", "simulated=success"),
+            Some(1)
+        );
+    }
+
+    /// A simulation that never returned an amount has no shortfall to add, so the mean is taken
+    /// over the routes that actually simulated rather than being dragged towards zero.
+    #[test]
+    fn test_winning_protocols_without_a_shortfall_to_record() {
+        let mut quote = make_route_quote(&[("uniswap_v3", 0x01, 0x02)]);
+        quote.set_simulation_result(SimulationResult::Failure {
+            reason: "simulation reverted".to_string(),
+        });
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            instrumentation::record_winning_protocols(&quote);
+        });
+
+        let recorded = recorded_metrics(&snapshotter);
+        assert_eq!(
+            counter_value(&recorded, "winning_quote_swaps_total", "simulated=failed"),
+            Some(1)
+        );
+        assert!(!recorded
+            .iter()
+            .any(|(metric, _, _)| metric == "winning_quote_shortfall_routes_total"));
+    }
+
+    /// A simulation that came back above the quote is not a shortfall. Counting it as a zero
+    /// would pull every crossed protocol's mean towards zero and read as an improvement.
+    #[test]
+    fn test_winning_protocols_leaves_out_a_favourable_simulation() {
+        let mut quote = make_route_quote(&[("uniswap_v3", 0x01, 0x02)]);
+        quote.set_fee_breakdown(FeeBreakdown::new(
+            BigUint::from(70u64),
+            BigUint::from(30u64),
+            BigUint::from(100u64),
+            BigUint::from(900u64),
+        ));
+        // 1001 against a post-fee 1000: the simulated call returned more than promised.
+        quote.set_simulation_result(SimulationResult::Success {
+            amount_out: BigUint::from(1001u64),
+            gas_used: 120_000,
+        });
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            instrumentation::record_winning_protocols(&quote);
+        });
+
+        let recorded = recorded_metrics(&snapshotter);
+        assert!(
+            !recorded
+                .iter()
+                .any(|(metric, _, _)| metric.starts_with("winning_quote_shortfall")),
+            "{recorded:?}"
+        );
+        assert_eq!(
+            counter_value(&recorded, "winning_quote_swaps_total", "simulated=success"),
+            Some(1),
+            "the quote is still counted as a successful simulation"
+        );
     }
 
     /// The reviewer's question: what did a route containing a given protocol simulate at. Both
@@ -3688,7 +3852,7 @@ mod tests {
         let payloads = capture_winning_protocols(&quote);
 
         assert_eq!(payloads.len(), 1);
-        assert!(payloads[0].contains("simulated=failure"), "{}", payloads[0]);
+        assert!(payloads[0].contains("simulated=failed"), "{}", payloads[0]);
         assert!(payloads[0].contains("deviation_bps= "), "{}", payloads[0]);
     }
 

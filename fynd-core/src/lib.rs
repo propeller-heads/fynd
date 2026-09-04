@@ -55,6 +55,9 @@ pub mod worker_pool;
 /// Request orchestration: fans out orders to all solver pools and selects the best result.
 pub mod worker_pool_router;
 
+#[cfg(test)]
+mod tests;
+
 // Re-export commonly used types for convenience
 pub use algorithm::{
     registry::AlgorithmRegistry, Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm,

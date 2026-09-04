@@ -26,6 +26,7 @@ use alloy::{
 };
 use anyhow::Context;
 use bytes::Bytes;
+use fynd_core::simulation::token_layout::{discover_layout, TokenLayout};
 use num_bigint::BigUint;
 use tokio::sync::Mutex;
 use tracing::warn;
@@ -51,10 +52,8 @@ pub struct EthCallRunner {
     provider: Arc<RootProvider<Ethereum>>,
     /// Fixed sender used in all quotes — overridden in state to hold sufficient balance.
     sender: Address,
-    /// Per-token balance storage slot (probed once, cached for the run).
-    balance_slots: Arc<Mutex<HashMap<Address, B256>>>,
-    /// Per-(token, spender) allowance storage slot (probed once, cached for the run).
-    allowance_slots: Arc<Mutex<HashMap<(Address, Address), B256>>>,
+    /// Per-(token, spender) storage layout (discovered once, cached for the run).
+    layouts: Arc<Mutex<HashMap<(Address, Address), TokenLayout>>>,
     /// Set to `false` after the first `eth_simulateV1` "method not found" error so subsequent
     /// calls skip straight to the `eth_call` fallback without retrying.
     simulate_supported: Arc<AtomicBool>,
@@ -69,8 +68,7 @@ impl EthCallRunner {
         Self {
             provider: Arc::new(provider),
             sender,
-            balance_slots: Arc::new(Mutex::new(HashMap::new())),
-            allowance_slots: Arc::new(Mutex::new(HashMap::new())),
+            layouts: Arc::new(Mutex::new(HashMap::new())),
             simulate_supported: Arc::new(AtomicBool::new(true)),
         }
     }
@@ -370,17 +368,16 @@ impl EthCallRunner {
         );
 
         if token_in != Address::ZERO {
-            let balance_slot = self.balance_slot(token_in).await?;
-            let allowance_slot = self
-                .allowance_slot(token_in, router)
-                .await?;
+            let layout = self.layout(token_in, router).await?;
 
             let mut state_diff = B256HashMap::default();
-            state_diff.insert(balance_slot, max_val);
-            state_diff.insert(allowance_slot, max_val);
+            state_diff.insert(layout.balance_slot(self.sender), max_val);
+            state_diff.insert(layout.allowance_slot(self.sender, router), max_val);
 
+            // A proxy keeps its balances somewhere other than the address the swap calls, so the
+            // write goes to the contract discovery named rather than to the token.
             overrides.insert(
-                token_in,
+                layout.storage_contract(),
                 AccountOverride { state_diff: Some(state_diff), ..Default::default() },
             );
         }
@@ -388,45 +385,19 @@ impl EthCallRunner {
         Ok(overrides)
     }
 
-    async fn balance_slot(&self, token: Address) -> anyhow::Result<B256> {
+    async fn layout(&self, token: Address, spender: Address) -> anyhow::Result<TokenLayout> {
         {
-            let cache = self.balance_slots.lock().await;
-            if let Some(&slot) = cache.get(&token) {
-                return Ok(slot);
+            let cache = self.layouts.lock().await;
+            if let Some(&layout) = cache.get(&(token, spender)) {
+                return Ok(layout);
             }
         }
-        let slot = fynd_core::simulation::erc20_slots::find_balance_slot(
-            &self.provider,
-            token,
-            self.sender,
-        )
-        .await?;
-        self.balance_slots
+        let layout = discover_layout(&self.provider, token, self.sender, spender).await?;
+        self.layouts
             .lock()
             .await
-            .insert(token, slot);
-        Ok(slot)
-    }
-
-    async fn allowance_slot(&self, token: Address, spender: Address) -> anyhow::Result<B256> {
-        {
-            let cache = self.allowance_slots.lock().await;
-            if let Some(&slot) = cache.get(&(token, spender)) {
-                return Ok(slot);
-            }
-        }
-        let slot = fynd_core::simulation::erc20_slots::find_allowance_slot(
-            &self.provider,
-            token,
-            self.sender,
-            spender,
-        )
-        .await?;
-        self.allowance_slots
-            .lock()
-            .await
-            .insert((token, spender), slot);
-        Ok(slot)
+            .insert((token, spender), layout);
+        Ok(layout)
     }
 }
 

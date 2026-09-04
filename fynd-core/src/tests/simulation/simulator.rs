@@ -7,12 +7,22 @@ use alloy::{
         json_rpc::ErrorPayload,
         types::simulate::{SimCallResult, SimulatedBlock},
     },
+    sol_types::SolError,
     transports::mock::Asserter,
 };
 use num_bigint::BigUint;
 
 use super::*;
-use crate::simulation::erc20_slots::MappingPosition;
+use crate::{
+    simulation::{
+        deviation::fixtures::quote_with_fees,
+        token_layout::{KeyOrder, MappingPosition, TokenLayout, PROBE_SENTINEL},
+    },
+    tests::metrics::recorded_metrics,
+};
+
+/// A budget long enough that a mocked provider, which answers at once, never meets it.
+const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[test]
 fn test_success_reports_amount_out_and_gas_used() {
@@ -30,31 +40,15 @@ fn test_revert_reports_no_gas() {
 }
 
 #[test]
-fn test_decode_revert_reason_decodes_error_string() {
-    let mut data = Error::SELECTOR.to_vec();
-    Error("no liquidity".to_string()).abi_encode_raw(&mut data);
-    assert_eq!(decode_revert_reason(Some(&data), "node error"), "reverted: no liquidity");
-}
-
-#[test]
-fn test_decode_revert_reason_keeps_unknown_data() {
-    assert_eq!(decode_revert_reason(Some(&[1, 2, 3]), "node error"), "reverted with data 0x010203");
-}
-
-#[test]
-fn test_decode_revert_reason_keeps_node_message_without_data() {
-    assert_eq!(decode_revert_reason(None, "node error"), "node error");
-}
-
-#[test]
 fn test_token_overrides_fund_both_holders_and_both_spenders() {
     let sender = Address::repeat_byte(1);
     let router = Address::repeat_byte(2);
     let token = Address::repeat_byte(3);
     let permit2 = Address::repeat_byte(4);
-    let positions =
-        Erc20SlotPositions::new(MappingPosition::Standard(5), MappingPosition::Standard(6));
-    let overrides = token_overrides(sender, token, router, permit2, positions);
+    let balance = MappingPosition::Direct { base: 5, key_order: KeyOrder::Solidity };
+    let allowance = MappingPosition::Direct { base: 6, key_order: KeyOrder::Solidity };
+    let layout = TokenLayout::new(token, balance, allowance);
+    let overrides = token_overrides(sender, router, permit2, layout);
     let state_diff = overrides
         .get(&token)
         .and_then(|override_| override_.state_diff.as_ref())
@@ -62,10 +56,10 @@ fn test_token_overrides_fund_both_holders_and_both_spenders() {
 
     // A `transfer_from` route pulls from the sender and a `use_vaults_funds` one from the router,
     // so both hold a balance and the sender approves both spenders a route can name.
-    assert!(state_diff.contains_key(&positions.balance_slot(sender)));
-    assert!(state_diff.contains_key(&positions.balance_slot(router)));
-    assert!(state_diff.contains_key(&positions.allowance_slot(sender, router)));
-    assert!(state_diff.contains_key(&positions.allowance_slot(sender, permit2)));
+    assert!(state_diff.contains_key(&layout.balance_slot(sender)));
+    assert!(state_diff.contains_key(&layout.balance_slot(router)));
+    assert!(state_diff.contains_key(&layout.allowance_slot(sender, router)));
+    assert!(state_diff.contains_key(&layout.allowance_slot(sender, permit2)));
     assert_eq!(state_diff.len(), 4);
 }
 
@@ -109,6 +103,42 @@ fn test_block_overrides_leave_nothing_a_pool_reads_at_zero() {
     assert!(overrides.random.is_some());
 }
 
+/// `eth_simulateV1` numbers its own block, and `debug_traceCall` at latest runs one below it, so
+/// the trace has to be pinned to the block the simulation reported. Predicting that number instead
+/// makes the node refuse the call outright once a block lands mid-quote.
+#[test]
+fn test_executed_in_pins_the_block_without_touching_the_rest() {
+    let base = block_overrides();
+    let pinned = executed_in(base.clone(), 25_903_761, 1_788_531_000);
+
+    assert_eq!(pinned.number, Some(U256::from(25_903_761_u64)));
+    assert_eq!(pinned.time, Some(1_788_531_000));
+    assert_eq!(pinned.coinbase, base.coinbase);
+    assert_eq!(pinned.gas_limit, base.gas_limit);
+    assert_eq!(pinned.random, base.random);
+}
+
+/// The simulation itself must leave the number unset, or the node rejects a block that does not
+/// sit above the head.
+#[test]
+fn test_block_overrides_leave_the_block_for_the_node_to_number() {
+    let overrides = block_overrides();
+
+    assert_eq!(overrides.number, None);
+    assert_eq!(overrides.time, None);
+}
+
+/// The funding value is what makes a simulated sender solvent, and it is bounded on both sides:
+/// too small starves a large trade, too large overflows a rebasing token's balance arithmetic.
+#[test]
+fn test_funding_value_bounds() {
+    // Above any practical input at 18 decimals.
+    assert!(SIMULATION_FUNDING_VALUE > U256::from(10_u8).pow(U256::from(30_u8)));
+    // Room left above the value, so a token that packs flags into the balance word still reads it
+    // back unchanged, and a rebasing token's multiplication does not overflow.
+    assert!(SIMULATION_FUNDING_VALUE < U256::MAX >> 128);
+}
+
 #[test]
 fn test_sender_override_funds_a_used_account() {
     let sender = sender_override();
@@ -148,17 +178,19 @@ async fn test_simulate_call_against_mocked_provider() {
     ));
     let result = simulate_with_overrides(
         &RootProvider::new(RpcClient::mocked(asserter)),
-        Address::repeat_byte(1),
-        Address::repeat_byte(2),
-        U256::ZERO,
-        &[0x12],
+        SimulatedCall {
+            sender: Address::repeat_byte(1),
+            router: Address::repeat_byte(2),
+            value: U256::ZERO,
+            data: &[0x12],
+        },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
+        TEST_TIMEOUT,
     )
-    .await
-    .into_result();
+    .await;
     assert!(
-        matches!(result, SimulationResult::Success { amount_out, gas_used } if amount_out == BigUint::from(123_u64) && gas_used == 87_654)
+        matches!(result, CallOutcome::Success { amount_out, gas_used } if amount_out == BigUint::from(123_u64) && gas_used == 87_654)
     );
 }
 
@@ -168,23 +200,27 @@ async fn test_simulated_call_rejects_non_uint256_return_data() {
     asserter.push_success(&simulated_response(vec![0; 31], true, 1));
     let result = simulate_with_overrides(
         &RootProvider::new(RpcClient::mocked(asserter)),
-        Address::repeat_byte(1),
-        Address::repeat_byte(2),
-        U256::ZERO,
-        &[],
+        SimulatedCall {
+            sender: Address::repeat_byte(1),
+            router: Address::repeat_byte(2),
+            value: U256::ZERO,
+            data: &[],
+        },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
+        TEST_TIMEOUT,
     )
-    .await
-    .into_result();
-    assert!(matches!(result, SimulationResult::Failure { reason } if reason.contains("31 bytes")));
+    .await;
+    assert!(matches!(result, CallOutcome::Failure(reason) if reason.contains("31 bytes")));
 }
 
 #[tokio::test]
 async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
     let asserter = Asserter::new();
-    let mut revert_data = Error::SELECTOR.to_vec();
-    Error("insufficient output".to_string()).abi_encode_raw(&mut revert_data);
+    let revert_data = crate::simulation::revert::SolidityErrors::Error {
+        reason: "insufficient output".to_string(),
+    }
+    .abi_encode();
     asserter.push_failure(ErrorPayload::internal_error_with_message_and_obj(
         "execution reverted".into(),
         serde_json::value::to_raw_value(&format!("0x{}", alloy::hex::encode(&revert_data)))
@@ -192,42 +228,197 @@ async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
     ));
     let result = simulate_with_overrides(
         &RootProvider::new(RpcClient::mocked(asserter)),
-        Address::repeat_byte(1),
-        Address::repeat_byte(2),
-        U256::ZERO,
-        &[],
+        SimulatedCall {
+            sender: Address::repeat_byte(1),
+            router: Address::repeat_byte(2),
+            value: U256::ZERO,
+            data: &[],
+        },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
+        TEST_TIMEOUT,
     )
-    .await
-    .into_result();
+    .await;
     assert!(
-        matches!(result, SimulationResult::Failure { reason } if reason.contains("reverted: insufficient output"))
+        matches!(result, CallOutcome::Failure(reason) if reason.contains("reverted: insufficient output"))
     );
 }
 
+/// A prestate trace naming one account and the slots its read touched.
+fn prestate(contract: Address, slots: &[B256]) -> serde_json::Value {
+    let storage: serde_json::Map<String, serde_json::Value> = slots
+        .iter()
+        .map(|slot| (format!("{slot:#x}"), serde_json::json!(format!("{:#x}", B256::ZERO))))
+        .collect();
+    serde_json::json!({ format!("{contract:#x}"): { "storage": storage } })
+}
+
+/// Queues one full discovery: a balance trace and probe, then an allowance trace and probe.
+fn push_successful_discovery(
+    asserter: &Asserter,
+    token: Address,
+    holder: Address,
+    spender: Address,
+) {
+    let layout = TokenLayout::new(
+        token,
+        MappingPosition::Direct { base: 0, key_order: KeyOrder::Solidity },
+        MappingPosition::Direct { base: 0, key_order: KeyOrder::Solidity },
+    );
+    let sentinel = Bytes::from(B256::from(PROBE_SENTINEL).to_vec());
+    asserter.push_success(&prestate(token, &[layout.balance_slot(holder)]));
+    asserter.push_success(&sentinel);
+    asserter.push_success(&prestate(token, &[layout.allowance_slot(holder, spender)]));
+    asserter.push_success(&sentinel);
+}
+
 #[tokio::test]
-async fn test_slot_cache_reuses_resolved_positions_without_more_probes() {
+async fn test_layout_cache_reuses_a_resolved_layout() {
     let asserter = Asserter::new();
-    for _ in 0..44 {
-        asserter.push_success(&Bytes::from(
-            B256::from(U256::from_limbs([0xdead_beef, 0, 0, 0]))
-                .as_slice()
-                .to_vec(),
-        ));
-    }
-    let simulator = mocked_simulator(&asserter, Duration::from_secs(1));
+    let simulator = mocked_simulator(&asserter, TEST_TIMEOUT);
     let token = Address::repeat_byte(3);
-    simulator
-        .cached_positions(token, Address::repeat_byte(1), Address::repeat_byte(2))
+    let holder = Address::repeat_byte(1);
+    let spender = Address::repeat_byte(2);
+    push_successful_discovery(&asserter, token, holder, spender);
+
+    let first = simulator
+        .cached_layout(token, holder, spender)
         .await
-        .expect("probes resolve slots");
-    assert!(asserter.read_q().is_empty());
-    simulator
-        .cached_positions(token, Address::repeat_byte(1), Address::repeat_byte(2))
+        .expect("discovery resolves the layout");
+    let second = simulator
+        .cached_layout(token, holder, spender)
         .await
-        .expect("cache resolves slots");
-    assert!(asserter.read_q().is_empty());
+        .expect("the second call reads the cache");
+
+    assert_eq!(first, second);
+    // The mock has nothing left queued, so a second discovery would have failed rather than
+    // passed silently.
+    assert!(asserter.read_q().is_empty(), "a cached layout makes no RPC call");
+}
+
+/// A token this build cannot resolve is remembered as such. Rediscovering it would spend a trace
+/// and its probes on every quote that touches it.
+#[tokio::test]
+async fn test_layout_cache_remembers_an_unsupported_token() {
+    let asserter = Asserter::new();
+    let simulator = mocked_simulator(&asserter, TEST_TIMEOUT);
+    // Both balance views name a slot no convention produces, so recovery fails on the token
+    // itself rather than on the node.
+    for _ in 0..2 {
+        asserter.push_success(&prestate(Address::repeat_byte(3), &[B256::repeat_byte(0x99)]));
+        asserter.push_success(&Bytes::from(B256::from(PROBE_SENTINEL).to_vec()));
+    }
+
+    let first = simulator
+        .cached_layout(Address::repeat_byte(3), Address::repeat_byte(1), Address::repeat_byte(2))
+        .await
+        .expect_err("the token's layout is not one this build recovers");
+    let second = simulator
+        .cached_layout(Address::repeat_byte(3), Address::repeat_byte(1), Address::repeat_byte(2))
+        .await
+        .expect_err("the verdict is remembered");
+
+    assert!(first.contains("could not recover"), "{first}");
+    assert_eq!(first, second);
+    assert!(asserter.read_q().is_empty(), "a remembered verdict makes no RPC call");
+}
+
+/// A node that failed to answer says nothing about the token, so the next quote discovers again.
+/// Remembering it would disable simulation for that token until the process restarts.
+#[tokio::test]
+async fn test_layout_cache_retries_after_a_node_failure() {
+    let asserter = Asserter::new();
+    let simulator = mocked_simulator(&asserter, TEST_TIMEOUT);
+    let token = Address::repeat_byte(3);
+    let holder = Address::repeat_byte(1);
+    let spender = Address::repeat_byte(2);
+    asserter.push_failure(ErrorPayload {
+        code: -32005,
+        message: "limit exceeded".into(),
+        data: None,
+    });
+    push_successful_discovery(&asserter, token, holder, spender);
+
+    let refused = simulator
+        .cached_layout(token, holder, spender)
+        .await
+        .expect_err("the node refused the trace");
+    let resolved = simulator
+        .cached_layout(token, holder, spender)
+        .await;
+
+    assert!(refused.contains("discovery failed"), "{refused}");
+    assert!(resolved.is_ok(), "the retry resolves: {resolved:?}");
+}
+
+/// A reverting call frame carrying revert data, as the call tracer reports it.
+fn reverting_frame(output: &[u8]) -> serde_json::Value {
+    serde_json::json!({
+        "from": format!("{:#x}", Address::repeat_byte(1)),
+        "to": format!("{:#x}", Address::repeat_byte(2)),
+        "gas": "0x0",
+        "gasUsed": "0x0",
+        "input": "0x",
+        "output": format!("0x{}", alloy::hex::encode(output)),
+        "error": "execution reverted",
+        "type": "CALL",
+    })
+}
+
+async fn simulate_reverting_call(asserter: Asserter) -> SimulationAttempt {
+    mocked_simulator(&asserter, TEST_TIMEOUT)
+        .simulate_within_timeout(
+            SimulatedCall {
+                sender: Address::repeat_byte(1),
+                router: Address::repeat_byte(2),
+                value: U256::ZERO,
+                data: &[0x12],
+            },
+            native_balance_override(Address::repeat_byte(1)),
+            test_envelope(),
+        )
+        .await
+}
+
+/// `eth_simulateV1` drops the revert payload, so a reverted call arrives saying only that it
+/// reverted. Replaying it under the tracer is what turns that into a named error, and this is the
+/// path the whole trace exists for.
+#[tokio::test]
+async fn test_simulate_names_a_revert_the_node_reported_without_a_payload() {
+    let asserter = Asserter::new();
+    asserter.push_success(&simulated_response(Vec::new(), false, 0));
+    asserter.push_success(&reverting_frame(
+        &crate::simulation::revert::RouterErrors::TychoRouter__EmptySwaps {}.abi_encode(),
+    ));
+
+    let attempt = simulate_reverting_call(asserter).await;
+
+    assert!(
+        matches!(attempt.into_result(), SimulationResult::Failure { reason }
+            if reason.contains("TychoRouter__EmptySwaps")),
+        "the traced error names the revert"
+    );
+}
+
+/// A trace the node cannot serve leaves the message it already gave, so a revert is still
+/// reported as a revert rather than swallowed.
+#[tokio::test]
+async fn test_simulate_keeps_the_node_message_when_the_trace_fails() {
+    let asserter = Asserter::new();
+    asserter.push_success(&simulated_response(Vec::new(), false, 0));
+    asserter.push_failure(ErrorPayload {
+        code: -32601,
+        message: "the method debug_traceCall does not exist".into(),
+        data: None,
+    });
+
+    let attempt = simulate_reverting_call(asserter).await;
+
+    assert!(
+        matches!(attempt.into_result(), SimulationResult::Failure { reason }
+            if reason == "simulation reverted: execution reverted"),
+        "the node's own message survives"
+    );
 }
 
 /// A server that accepts the connection and never answers, so the request outlives the timeout.
@@ -258,10 +449,12 @@ async fn test_simulation_times_out_when_the_node_does_not_answer() {
 
     let attempt = simulator
         .simulate_within_timeout(
-            Address::repeat_byte(1),
-            Address::repeat_byte(2),
-            U256::ZERO,
-            &[0x12],
+            SimulatedCall {
+                sender: Address::repeat_byte(1),
+                router: Address::repeat_byte(2),
+                value: U256::ZERO,
+                data: &[0x12],
+            },
             native_balance_override(Address::repeat_byte(1)),
             test_envelope(),
         )
@@ -270,132 +463,6 @@ async fn test_simulation_times_out_when_the_node_does_not_answer() {
     assert!(
         matches!(attempt.into_result(), SimulationResult::Failure { reason } if reason.contains("timed out"))
     );
-}
-
-/// Router fee the fixture charges, in output-token units.
-const FIXTURE_ROUTER_FEE: u64 = 7_000;
-
-/// Client fee the fixture charges, in output-token units.
-const FIXTURE_CLIENT_FEE: u64 = 3_000;
-
-/// A quote whose raw output is `RAW_AMOUNT_OUT` and whose fees leave `after_fees` receivable.
-///
-/// `max_slippage` is non-zero, so a baseline that used `min_amount_received` on its own would fail
-/// these tests rather than pass them.
-fn quote_with_fees(after_fees: u64) -> OrderQuote {
-    let slippage = after_fees / 100;
-    let mut quote = quote_without_fees();
-    quote.set_amount_out(BigUint::from(after_fees + FIXTURE_ROUTER_FEE + FIXTURE_CLIENT_FEE));
-    quote.set_fee_breakdown(crate::FeeBreakdown::new(
-        BigUint::from(FIXTURE_ROUTER_FEE),
-        BigUint::from(FIXTURE_CLIENT_FEE),
-        BigUint::from(slippage),
-        BigUint::from(after_fees - slippage),
-    ));
-    quote
-}
-
-/// The same quote before encoding computes its fees.
-fn quote_without_fees() -> OrderQuote {
-    OrderQuote::new(
-        "test-order".to_string(),
-        crate::QuoteStatus::Success,
-        BigUint::from(1_000u64),
-        BigUint::from(1_000_000u64),
-        BigUint::from(50_000u64),
-        BigUint::from(1_000_000u64),
-        crate::BlockInfo::new(1, "0x1".to_string(), 1),
-        "test_algorithm".to_string(),
-        tycho_simulation::tycho_common::Bytes::from(vec![0xAA; 20]),
-        tycho_simulation::tycho_common::Bytes::from(vec![0xAA; 20]),
-        "1".to_string(),
-    )
-}
-
-#[test]
-fn test_deviation_bps_simulated_below_quote() {
-    let deviation = deviation_bps(&quote_with_fees(1_000_000), &BigUint::from(999_000u64))
-        .expect("a quote carrying fees has a baseline");
-
-    assert!((deviation - -10.0).abs() < 1e-9, "got {deviation}");
-}
-
-#[test]
-fn test_deviation_bps_simulated_above_quote() {
-    let deviation = deviation_bps(&quote_with_fees(1_000_000), &BigUint::from(1_001_000u64))
-        .expect("a quote carrying fees has a baseline");
-
-    assert!((deviation - 10.0).abs() < 1e-9, "got {deviation}");
-}
-
-/// The router returns the output after it takes its fees, so the baseline must be the quoted
-/// amount less those fees. Comparing against the raw `amount_out` would read this as a shortfall
-/// the size of the fee.
-#[test]
-fn test_deviation_bps_excludes_the_router_fee_from_the_baseline() {
-    let quote = quote_with_fees(1_000_000);
-    let after_fees = quote
-        .fee_breakdown()
-        .expect("the quote carries fees")
-        .min_amount_received() +
-        quote
-            .fee_breakdown()
-            .expect("the quote carries fees")
-            .max_slippage();
-
-    let deviation =
-        deviation_bps(&quote, &after_fees).expect("a quote carrying fees has a baseline");
-
-    assert!(deviation.abs() < 1e-9, "a simulation matching the post-fee quote is not a deviation");
-    assert!(after_fees < *quote.amount_out(), "the baseline sits below the raw swap output");
-}
-
-#[test]
-fn test_deviation_bps_without_a_fee_breakdown() {
-    assert_eq!(deviation_bps(&quote_without_fees(), &BigUint::from(1_000u64)), None);
-}
-
-#[test]
-fn test_deviation_bps_zero_quoted_amount() {
-    let mut quote = quote_with_fees(1_000_000);
-    quote.set_fee_breakdown(crate::FeeBreakdown::new(
-        BigUint::ZERO,
-        BigUint::ZERO,
-        BigUint::ZERO,
-        BigUint::ZERO,
-    ));
-
-    assert_eq!(deviation_bps(&quote, &BigUint::from(1_000u64)), None);
-}
-
-/// An amount past `f64` saturates to infinity rather than failing to convert, so the ratio is
-/// rejected on being non-finite. Recording it would put `inf` in the histogram.
-#[test]
-fn test_deviation_bps_amount_beyond_f64() {
-    let huge = BigUint::from(1u8) << 2_000;
-
-    assert_eq!(deviation_bps(&quote_with_fees(1_000_000), &huge), None);
-}
-
-/// Names every metric a run recorded, with its labels and value.
-fn recorded_metrics(
-    snapshotter: &metrics_util::debugging::Snapshotter,
-) -> Vec<(String, Vec<String>, metrics_util::debugging::DebugValue)> {
-    snapshotter
-        .snapshot()
-        .into_vec()
-        .into_iter()
-        .map(|(key, _, _, value)| {
-            (
-                key.key().name().to_string(),
-                key.key()
-                    .labels()
-                    .map(|label| format!("{}={}", label.key(), label.value()))
-                    .collect(),
-                value,
-            )
-        })
-        .collect()
 }
 
 #[test]
@@ -485,4 +552,52 @@ fn test_record_outcome_failed() {
         .iter()
         .any(|(name, labels, _)| name == "quote_simulations_total" &&
             labels.contains(&"outcome=failed".to_string())));
+}
+
+/// Drives the real call path against a live node: the simulation must be accepted (the node
+/// numbers its own block) and a reverting call must come back named by the trace.
+#[tokio::test]
+#[ignore = "requires RPC_URL"]
+async fn test_live_simulate_and_trace() {
+    let rpc_url = std::env::var("RPC_URL").expect("set RPC_URL");
+    let provider = alloy::providers::ProviderBuilder::default()
+        .connect_http(rpc_url.parse().expect("valid URL"));
+    let sender = Address::repeat_byte(0x11);
+    let usdt = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+        .parse::<Address>()
+        .expect("valid address");
+
+    for (name, data) in [
+        // A selector USDT does not implement: reverts with an empty payload, which is the path
+        // that has to reach the tracer.
+        ("unknown selector", alloy::hex::decode("deadbeef").expect("hex")),
+        // transferFrom with no allowance: reverts through SafeMath.
+        ("transferFrom without allowance", {
+            let mut data = alloy::hex::decode("23b872dd").expect("hex");
+            data.extend_from_slice(&sender.into_word().0);
+            data.extend_from_slice(&Address::repeat_byte(0x22).into_word().0);
+            data.extend_from_slice(&U256::from(1_000_000_u64).to_be_bytes::<32>());
+            data
+        }),
+    ] {
+        let outcome = simulate_with_overrides(
+            &provider,
+            SimulatedCall { sender, router: usdt, value: U256::ZERO, data: &data },
+            native_balance_override(sender),
+            test_envelope(),
+            Duration::from_secs(10),
+        )
+        .await;
+
+        let described = match &outcome {
+            CallOutcome::Reverted { reason } => format!("reverted: {reason}"),
+            CallOutcome::Success { amount_out, .. } => format!("success: {amount_out}"),
+            CallOutcome::Failure(reason) => format!("failed: {reason}"),
+        };
+        println!("  {name} -> {described}");
+        assert!(
+            !described.contains("block numbers must be in order"),
+            "{name}: the node refused the block the simulation asked for"
+        );
+    }
 }

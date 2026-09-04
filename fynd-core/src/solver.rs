@@ -102,8 +102,13 @@ pub mod defaults {
     pub const POOL_TIMEOUT_MS: u64 = 100;
     /// Limits each simulation RPC request so optional quote simulation cannot delay quotes.
     pub const SIMULATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
-    /// Limits slot discovery independently, leaving a full request budget for the simulation call.
-    pub const SIMULATION_SLOT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+    /// Limits layout discovery independently, leaving a full request budget for the simulation
+    /// call.
+    ///
+    /// Discovery costs a prestate trace plus a probe per candidate slot, twice over, and a token
+    /// whose read spans several accounts sits at the top of that. The budget covers that work
+    /// rather than the single round trip the sentinel probe it replaced needed.
+    pub const SIMULATION_LAYOUT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 }
 
 // Internal-only defaults not shared with downstream crates.
