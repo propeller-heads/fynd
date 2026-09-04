@@ -608,7 +608,7 @@ impl WorkerPoolRouter {
     /// started without `--enable-simulation`.
     pub async fn simulate_quotes(
         &self,
-        order_quotes: Vec<OrderQuote>,
+        mut order_quotes: Vec<OrderQuote>,
         encoding_options: &EncodingOptions,
     ) -> Result<Vec<OrderQuote>, SolveError> {
         if !encoding_options.simulate() {
@@ -617,7 +617,6 @@ impl WorkerPoolRouter {
         let Some(simulator) = self.simulator.as_ref() else {
             return Err(SolveError::Internal(SIMULATION_UNAVAILABLE.to_string()));
         };
-        let mut order_quotes = order_quotes;
         futures::future::join_all(
             order_quotes
                 .iter_mut()
