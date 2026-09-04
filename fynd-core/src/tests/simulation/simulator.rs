@@ -13,9 +13,12 @@ use alloy::{
 use num_bigint::BigUint;
 
 use super::*;
-use crate::simulation::{
-    deviation::fixtures::quote_with_fees,
-    token_layout::{KeyOrder, MappingPosition, TokenLayout, PROBE_SENTINEL},
+use crate::{
+    simulation::{
+        deviation::fixtures::quote_with_fees,
+        token_layout::{KeyOrder, MappingPosition, TokenLayout, PROBE_SENTINEL},
+    },
+    tests::metrics::recorded_metrics,
 };
 
 /// A budget long enough that a mocked provider, which answers at once, never meets it.
@@ -448,27 +451,6 @@ async fn test_simulation_times_out_when_the_node_does_not_answer() {
     assert!(
         matches!(attempt.into_result(), SimulationResult::Failure { reason } if reason.contains("timed out"))
     );
-}
-
-/// Names every metric a run recorded, with its labels and value.
-fn recorded_metrics(
-    snapshotter: &metrics_util::debugging::Snapshotter,
-) -> Vec<(String, Vec<String>, metrics_util::debugging::DebugValue)> {
-    snapshotter
-        .snapshot()
-        .into_vec()
-        .into_iter()
-        .map(|(key, _, _, value)| {
-            (
-                key.key().name().to_string(),
-                key.key()
-                    .labels()
-                    .map(|label| format!("{}={}", label.key(), label.value()))
-                    .collect(),
-                value,
-            )
-        })
-        .collect()
 }
 
 #[test]

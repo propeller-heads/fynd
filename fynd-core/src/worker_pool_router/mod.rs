@@ -1508,6 +1508,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, MockProtocolSim},
         feed::exclusivity::mark_exclusive,
+        tests::metrics::recorded_metrics,
         types::internal::SolveTask,
         EncodingOptions, FeeBreakdown, OrderSide, PermitDetails, PermitSingle, Route,
         SimulationResult, SingleOrderQuote, Swap, UserTransferType,
@@ -3645,29 +3646,8 @@ mod tests {
         assert!(payloads[0].contains("swaps=3"), "{}", payloads[0]);
     }
 
-    /// Names every metric a run recorded, with its labels and value.
-    fn recorded(
-        snapshotter: &metrics_util::debugging::Snapshotter,
-    ) -> Vec<(String, Vec<String>, metrics_util::debugging::DebugValue)> {
-        snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .map(|(key, _, _, value)| {
-                (
-                    key.key().name().to_string(),
-                    key.key()
-                        .labels()
-                        .map(|label| format!("{}={}", label.key(), label.value()))
-                        .collect(),
-                    value,
-                )
-            })
-            .collect()
-    }
-
     fn counter_value(
-        recorded: &[(String, Vec<String>, metrics_util::debugging::DebugValue)],
+        recorded: &[crate::tests::metrics::Recorded],
         name: &str,
         label: &str,
     ) -> Option<u64> {
@@ -3697,7 +3677,7 @@ mod tests {
             instrumentation::record_winning_protocols(&quote);
         });
 
-        let recorded = recorded(&snapshotter);
+        let recorded = recorded_metrics(&snapshotter);
         assert_eq!(
             counter_value(&recorded, "winning_quote_swaps_total", "protocol=uniswap_v2"),
             Some(2),
@@ -3722,7 +3702,7 @@ mod tests {
         });
 
         assert_eq!(
-            counter_value(&recorded(&snapshotter), "winning_quote_swaps_total", "simulated=none"),
+            counter_value(&recorded_metrics(&snapshotter), "winning_quote_swaps_total", "simulated=none"),
             Some(1)
         );
     }
@@ -3750,7 +3730,7 @@ mod tests {
             instrumentation::record_winning_protocols(&quote);
         });
 
-        let recorded = recorded(&snapshotter);
+        let recorded = recorded_metrics(&snapshotter);
         for protocol in ["protocol=ekubo_v3", "protocol=uniswap_v3"] {
             assert_eq!(
                 counter_value(&recorded, "winning_quote_shortfall_centibps_total", protocol),
@@ -3783,7 +3763,7 @@ mod tests {
             instrumentation::record_winning_protocols(&quote);
         });
 
-        let recorded = recorded(&snapshotter);
+        let recorded = recorded_metrics(&snapshotter);
         assert_eq!(
             counter_value(&recorded, "winning_quote_swaps_total", "simulated=failed"),
             Some(1)
@@ -3816,7 +3796,7 @@ mod tests {
             instrumentation::record_winning_protocols(&quote);
         });
 
-        let recorded = recorded(&snapshotter);
+        let recorded = recorded_metrics(&snapshotter);
         assert!(
             !recorded
                 .iter()
