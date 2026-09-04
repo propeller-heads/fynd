@@ -45,7 +45,7 @@ annotations live in one place.
 | File | Purpose |
 |---|---|
 | `mod.rs` | `configure_app()`, `AppState`, `HealthTracker`, `ApiDoc` (utoipa OpenAPI) |
-| `docs.rs` | Builds the self-hosted and hosted OpenAPI specs and registers both Swagger UIs |
+| `docs.rs` | Builds the self-hosted and hosted OpenAPI specs, applies the embedder's `configure_openapi` hook to both, and registers both Swagger UIs |
 | `handlers.rs` | Request handlers for `/v1/quote`, `/v1/health`, and `/v1/info` |
 | `dto.rs` | Re-exports wire types from `fynd-rpc-types` (conversions to `fynd-core` types live in `fynd-rpc-types` via the `core` feature) |
 | `error.rs` | `ApiError` type with HTTP status code mapping |
