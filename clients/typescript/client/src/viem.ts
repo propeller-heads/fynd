@@ -23,6 +23,7 @@ export interface ViemPublicClient {
   }>;
   call(
     args: {
+      account: Address;
       to: Address;
       data: Hex;
       value: bigint;
@@ -92,7 +93,10 @@ export function viemProvider(
       };
     },
     async call(tx) {
+      // Without `account` the node runs the call from the zero address, and any router that
+      // pulls funds with `transferFrom(msg.sender, ...)` reverts.
       const result = await client.call({
+        account: sender,
         to: tx.to,
         data: tx.data,
         value: tx.value,
