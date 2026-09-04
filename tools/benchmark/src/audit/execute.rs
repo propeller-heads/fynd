@@ -1,7 +1,7 @@
 //! Per-trade execution: fire every participant's quote, validate via `eth_call`, and compute
 //! the bps diffs that go into a [`TradeResult`].
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use alloy::{
     hex,
@@ -9,11 +9,12 @@ use alloy::{
 };
 use anyhow::Result;
 use fynd_tools_common::{
-    aggregator::{AggregatorCalldata, AggregatorClient, AggregatorQuote},
+    aggregator::{AggregatorCalldata, AggregatorClient, AggregatorQuote, AggregatorStatus},
     bps::{eth_call_bps_diff, gas_adjusted_bps_diff, raw_bps_diff},
     constants::ETH_SENTINEL_ADDRESS,
     swap_simulation::EthCallRunner,
 };
+use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use num_bigint::BigUint;
 use tokio::time::sleep;
 use tracing::warn;
@@ -31,10 +32,72 @@ pub(crate) struct QuoteTask {
 }
 
 pub(crate) struct TradeConfig {
-    pub(crate) aggregator_delay_ms: u64,
+    pub(crate) rate_limiters: Arc<HashMap<String, Arc<DefaultDirectRateLimiter>>>,
+    pub(crate) retry: RetryCfg,
     pub(crate) eth_call_runner: Option<Arc<EthCallRunner>>,
     pub(crate) quote_block: Option<B256>,
     pub(crate) baseline_fee_bps: u32,
+}
+
+/// Retry policy for aggregator requests that hit a rate-limit (429) or 5xx response.
+#[derive(Clone, Copy)]
+pub(crate) struct RetryCfg {
+    pub(crate) max_retries: u32,
+    pub(crate) base_ms: u64,
+}
+
+/// Build a per-aggregator token-bucket rate limiter at `rps` requests/sec, or `None` to
+/// disable pacing when `rps <= 0`.
+pub(crate) fn make_rate_limiter(rps: f64) -> Result<Option<Arc<DefaultDirectRateLimiter>>> {
+    if rps <= 0.0 {
+        return Ok(None);
+    }
+    let period = Duration::from_secs_f64(1.0 / rps);
+    let quota = Quota::with_period(period)
+        .ok_or_else(|| anyhow::anyhow!("invalid aggregator rps {rps}: non-positive period"))?;
+    Ok(Some(Arc::new(RateLimiter::direct(quota))))
+}
+
+/// Whether an aggregator status warrants a retry (transient: rate-limit or server error).
+fn is_retryable(status: &AggregatorStatus) -> bool {
+    match status {
+        AggregatorStatus::HttpError { code, .. } => *code == 429 || *code >= 500,
+        AggregatorStatus::Success |
+        AggregatorStatus::NoAmount |
+        AggregatorStatus::NoRoute |
+        AggregatorStatus::Unavailable => false,
+    }
+}
+
+/// Quote an aggregator behind its rate limiter, retrying transient failures with
+/// exponential backoff + jitter so rate-limited samples are recovered, not dropped.
+async fn quote_governed(
+    client: &dyn AggregatorClient,
+    limiter: Option<&DefaultDirectRateLimiter>,
+    retry: RetryCfg,
+    token_in: &str,
+    token_out: &str,
+    amount: &str,
+    wallet: Option<&str>,
+) -> Result<AggregatorQuote> {
+    let mut attempt = 0u32;
+    loop {
+        if let Some(limiter) = limiter {
+            limiter.until_ready().await;
+        }
+        let quote = client
+            .quote(token_in, token_out, amount, wallet)
+            .await?;
+        if !is_retryable(&quote.status) || attempt >= retry.max_retries {
+            return Ok(quote);
+        }
+        let backoff = retry
+            .base_ms
+            .saturating_mul(1u64 << attempt.min(16));
+        let jitter = fastrand::u64(0..=retry.base_ms);
+        sleep(Duration::from_millis(backoff.saturating_add(jitter))).await;
+        attempt += 1;
+    }
 }
 
 /// One participant's raw quote outcome, keyed by participant name.
@@ -59,7 +122,7 @@ pub(crate) async fn execute_trade(
     task: QuoteTask,
     cfg: TradeConfig,
 ) -> Result<TradeResult> {
-    let TradeConfig { aggregator_delay_ms, eth_call_runner, quote_block, baseline_fee_bps } = cfg;
+    let TradeConfig { rate_limiters, retry, eth_call_runner, quote_block, baseline_fee_bps } = cfg;
 
     // When validation is enabled all calldata must route to the runner's sender so the
     // balance-delta check reads the right account.
@@ -68,7 +131,7 @@ pub(crate) async fn execute_trade(
         .map(|r| r.sender_hex());
 
     let raw_results =
-        fire_quotes(&participants, &task, aggregator_delay_ms, wallet.as_deref()).await;
+        fire_quotes(&participants, &task, &rate_limiters, retry, wallet.as_deref()).await;
     let eth_calls = run_eth_calls(
         &raw_results,
         eth_call_runner.as_deref(),
@@ -101,31 +164,40 @@ pub(crate) async fn execute_trade(
     })
 }
 
-/// Fire every participant concurrently; delay all except the first (Fynd) to rate-limit
-/// external aggregator APIs.
+/// Fire every participant concurrently. Each aggregator is paced by its own rate limiter
+/// and retries rate-limited responses, so a slow API doesn't drop samples; Fynd (which has
+/// no limiter entry) runs unthrottled.
 async fn fire_quotes(
     participants: &[Arc<dyn AggregatorClient>],
     task: &QuoteTask,
-    aggregator_delay_ms: u64,
+    rate_limiters: &Arc<HashMap<String, Arc<DefaultDirectRateLimiter>>>,
+    retry: RetryCfg,
     wallet: Option<&str>,
 ) -> Vec<RawResult> {
     let futs: Vec<_> = participants
         .iter()
-        .enumerate()
-        .map(|(i, p)| {
+        .map(|p| {
             let p = p.clone();
             let token_in = task.pair.token_in.clone();
             let token_out = task.pair.token_out.clone();
             let amount = task.amount.clone();
             let wallet = wallet.map(str::to_string);
+            let rate_limiters = rate_limiters.clone();
             async move {
-                if i > 0 && aggregator_delay_ms > 0 {
-                    sleep(Duration::from_millis(aggregator_delay_ms)).await;
-                }
                 let name = p.name().to_string();
-                let result = p
-                    .quote(&token_in, &token_out, &amount, wallet.as_deref())
-                    .await;
+                let limiter = rate_limiters
+                    .get(&name)
+                    .map(|l| l.as_ref());
+                let result = quote_governed(
+                    p.as_ref(),
+                    limiter,
+                    retry,
+                    &token_in,
+                    &token_out,
+                    &amount,
+                    wallet.as_deref(),
+                )
+                .await;
                 (name, result)
             }
         })
@@ -407,5 +479,118 @@ async fn run_eth_call_for_calldata(
             warn!("eth_call validation failed: {e}");
             (None, None, None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+
+    use super::*;
+
+    /// Aggregator stub that returns `HttpError{429}` for its first `fails` calls, then
+    /// `Success`, while counting how many times `quote` was invoked.
+    struct FlakyAggregator {
+        remaining_fails: AtomicUsize,
+        calls: AtomicUsize,
+    }
+
+    fn quote_with_status(status: AggregatorStatus) -> AggregatorQuote {
+        AggregatorQuote {
+            status,
+            amount_out: None,
+            amount_out_net_gas: None,
+            gas_units: None,
+            protocols: Vec::new(),
+            num_splits: None,
+            response_time_ms: 0,
+            calldata: None,
+            route: None,
+        }
+    }
+
+    #[async_trait]
+    impl AggregatorClient for FlakyAggregator {
+        fn name(&self) -> &str {
+            "flaky"
+        }
+
+        async fn quote(
+            &self,
+            _token_in: &str,
+            _token_out: &str,
+            _amount: &str,
+            _wallet: Option<&str>,
+        ) -> Result<AggregatorQuote> {
+            self.calls
+                .fetch_add(1, Ordering::SeqCst);
+            if self
+                .remaining_fails
+                .load(Ordering::SeqCst) >
+                0
+            {
+                self.remaining_fails
+                    .fetch_sub(1, Ordering::SeqCst);
+                return Ok(quote_with_status(AggregatorStatus::HttpError {
+                    code: 429,
+                    snippet: "rate limited".to_string(),
+                }));
+            }
+            Ok(quote_with_status(AggregatorStatus::Success))
+        }
+    }
+
+    fn fast_retry() -> RetryCfg {
+        RetryCfg { max_retries: 3, base_ms: 0 }
+    }
+
+    #[tokio::test]
+    async fn quote_governed_retries_then_succeeds() {
+        let client =
+            FlakyAggregator { remaining_fails: AtomicUsize::new(2), calls: AtomicUsize::new(0) };
+        let quote = quote_governed(&client, None, fast_retry(), "a", "b", "1", None)
+            .await
+            .expect("quote");
+        assert_eq!(quote.status, AggregatorStatus::Success);
+        assert_eq!(client.calls.load(Ordering::SeqCst), 3); // 2 failures + 1 success
+    }
+
+    #[tokio::test]
+    async fn quote_governed_gives_up_after_max_retries() {
+        let client =
+            FlakyAggregator { remaining_fails: AtomicUsize::new(10), calls: AtomicUsize::new(0) };
+        let quote = quote_governed(&client, None, fast_retry(), "a", "b", "1", None)
+            .await
+            .expect("quote");
+        match quote.status {
+            AggregatorStatus::HttpError { code, .. } => assert_eq!(code, 429),
+            other => panic!("expected HttpError, got {other:?}"),
+        }
+        assert_eq!(client.calls.load(Ordering::SeqCst), 4); // initial + 3 retries
+    }
+
+    #[test]
+    fn make_rate_limiter_disabled_for_non_positive_rps() {
+        assert!(make_rate_limiter(0.0)
+            .expect("ok")
+            .is_none());
+        assert!(make_rate_limiter(-1.0)
+            .expect("ok")
+            .is_none());
+        assert!(make_rate_limiter(5.0)
+            .expect("ok")
+            .is_some());
+    }
+
+    #[test]
+    fn is_retryable_classifies_transient_statuses() {
+        assert!(is_retryable(&AggregatorStatus::HttpError { code: 429, snippet: String::new() }));
+        assert!(is_retryable(&AggregatorStatus::HttpError { code: 503, snippet: String::new() }));
+        assert!(!is_retryable(&AggregatorStatus::HttpError { code: 400, snippet: String::new() }));
+        assert!(!is_retryable(&AggregatorStatus::Success));
+        assert!(!is_retryable(&AggregatorStatus::NoRoute));
+        assert!(!is_retryable(&AggregatorStatus::Unavailable));
     }
 }

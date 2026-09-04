@@ -18,6 +18,14 @@ Five subcommands available via `cargo run -p fynd-benchmark --release --`:
 
 Run `--help` on any subcommand for detailed options.
 
+## Automated suite
+
+`scripts/bench_suite.py` runs the audit + scale stages for multiple named configs on a single EC2
+instance (via `scripts/bench-suite-remote.sh`) and renders all plots locally, driven by one TOML
+file. Configure worker pools, protocols, `min_tvl`, and audit/scale params per config; outputs land
+in gitignored `bench_runs/<timestamp>/`. See
+[`docs/guides/benchmark-suite.md`](../../docs/guides/benchmark-suite.md).
+
 ## Running the Audit
 
 ### Prerequisites

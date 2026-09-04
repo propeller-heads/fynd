@@ -1,0 +1,68 @@
+# Benchmark suite: defines N named configs run sequentially on one EC2 box.
+# Run with:  python3 scripts/bench_suite.py benchmark_suite.toml
+# Secrets (TYCHO_URL, TYCHO_API_KEY, RPC_URL, BEBOP_*, HASHFLOW_*, AWS_*) come from
+# the environment or ./.env — never put them here.
+
+[suite]
+title = "PathFrankWolfe 3-hop throughput & quote quality"
+
+[remote]
+region        = "eu-west-1"
+instance_type = "c7a.8xlarge"   # 32 vCPU
+volume_size   = 60
+
+# Applied to every [[config]] unless the config overrides the key.
+[defaults]
+# worker pool
+algorithm           = "path_frank_wolfe"
+num_workers         = 3
+task_queue_capacity = 1000
+max_hops            = 3
+pool_timeout_ms     = 1000
+# audit
+dataset                   = "aggregator_trades_10k.json"
+top_pairs                 = 100
+amounts_per_pair          = 10
+block_stride              = 1
+min_amount_usd            = 100      # dust filter (0 disables)
+quote_timeout_ms          = 10000
+concurrency               = 5        # bounds trades in flight (and Fynd load)
+# per-aggregator request pacing (req/s) + retry-on-429; keeps KyberSwap under its limit
+# without throttling the others, so sample sizes stay comparable across aggregators
+nordstern_rps             = 20
+kyberswap_rps             = 3
+zerox_rps                 = 5
+aggregator_max_retries    = 3
+eth_call_slippage_bps     = 50
+chain_id                  = 1
+http_port                 = 3000
+
+[scale_defaults]
+worker_counts       = [1, 2, 4, 8, 16]
+num_requests        = 2000
+mode                = "fixed:16"     # auto-bumped to >= max(worker_counts)
+warmup_secs         = 30
+health_timeout_secs = 600
+requests_file       = "tools/benchmark/requests_set.json"
+
+[[config]]
+name      = "all_onchain_tvl4"
+label     = "all_onchain, tvl=4"
+protocols = "all_onchain,rfq:bebop,rfq:hashflow"
+min_tvl   = 4
+connector_tokens = [
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  # WETH
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # USDC
+    "0xdac17f958d2ee523a2206206994597c13d831ec7",  # USDT
+]
+
+[[config]]
+name      = "native_tvl10"
+label     = "native, tvl=10"
+protocols = "native_onchain,rfq:bebop,rfq:hashflow"
+min_tvl   = 10
+connector_tokens = [
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  # WETH
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # USDC
+    "0xdac17f958d2ee523a2206206994597c13d831ec7",  # USDT
+]
