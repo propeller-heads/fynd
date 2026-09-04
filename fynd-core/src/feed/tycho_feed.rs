@@ -105,12 +105,28 @@ impl TychoFeed {
         self.event_tx.clone()
     }
 
+    /// Builds the terminal error for a stream that ended without an error. The feed's job is
+    /// to never end, so a clean end is still a failure. The last block makes the log line
+    /// self-sufficient during triage.
+    async fn stream_ended_error(&self, stream_name: &str) -> DataFeedError {
+        let last_block = match self
+            .market_data
+            .read()
+            .await
+            .last_updated()
+        {
+            Some(block) => block.number().to_string(),
+            None => "none".to_string(),
+        };
+        DataFeedError::StreamError(format!("{stream_name} stream ended (last block: {last_block})"))
+    }
+
     /// Runs the indexer event loop until the underlying Tycho stream ends or errors.
     ///
     /// This method does not itself reconnect. Transient transport failures are absorbed
-    /// by tycho-client's internal reconnection, but a hard stream error propagates out as
-    /// an `Err` and a clean stream end returns `Ok(())`. In either case the feed stops,
-    /// which tears down the solver and exits the process (crash-only design — the
+    /// by tycho-client's internal reconnection, but any end of the stream — clean or error —
+    /// returns an `Err` naming the stream and the last block seen. In either case the feed
+    /// stops, which tears down the solver and exits the process (crash-only design — the
     /// orchestrator is expected to restart it). It is recommended to call this in a
     /// dedicated tokio task.
     pub(crate) async fn run(self) -> Result<(), DataFeedError> {
@@ -230,10 +246,7 @@ impl TychoFeed {
                             let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
                             self.handle_tycho_message(msg).await?;
                         }
-                        None => {
-                            info!("Protocol stream ended");
-                            break;
-                        }
+                        None => return Err(self.stream_ended_error("protocol").await),
                     }
                 }
                 // Handle RFQ stream messages
@@ -249,10 +262,7 @@ impl TychoFeed {
                             trace!("Received message from RFQ stream: {:?}", msg);
                             self.handle_tycho_message(msg).await?;
                         }
-                        None => {
-                            info!("RFQ stream ended");
-                            break;
-                        }
+                        None => return Err(self.stream_ended_error("RFQ").await),
                     }
                 }
                 msg = next_price_level_update(&mut price_level_stream) => {
@@ -282,8 +292,6 @@ impl TychoFeed {
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Like [`run`](Self::run) but calls [`ProtocolStreamBuilder::build_with_pending`]
@@ -438,10 +446,7 @@ impl TychoFeed {
                             let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
                             self.handle_tycho_message(msg).await?;
                         }
-                        None => {
-                            info!("Protocol stream ended");
-                            break;
-                        }
+                        None => return Err(self.stream_ended_error("protocol").await),
                     }
                 }
                 msg = async {
@@ -453,10 +458,7 @@ impl TychoFeed {
                             trace!("Received message from RFQ stream: {:?}", msg);
                             self.handle_tycho_message(msg).await?;
                         }
-                        None => {
-                            info!("RFQ stream ended");
-                            break;
-                        }
+                        None => return Err(self.stream_ended_error("RFQ").await),
                     }
                 }
                 msg = next_price_level_update(&mut price_level_stream) => {
@@ -484,8 +486,6 @@ impl TychoFeed {
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Like [`run`](Self::run) but gates each block behind a [`BlockStepController`].
@@ -960,6 +960,31 @@ mod tests {
                 .unwrap()
                 .naive_utc(),
         )
+    }
+
+    #[tokio::test]
+    async fn test_stream_ended_error_includes_last_block() {
+        let market_data = new_shared_market_data();
+        market_data
+            .write()
+            .await
+            .update_last_updated(BlockInfo::new(12345, "0xabc".to_string(), 0));
+        let feed = TychoFeed::new(create_test_config(), market_data);
+
+        let err = feed
+            .stream_ended_error("protocol")
+            .await;
+
+        assert_eq!(err.to_string(), "stream error: protocol stream ended (last block: 12345)");
+    }
+
+    #[tokio::test]
+    async fn test_stream_ended_error_without_block() {
+        let feed = TychoFeed::new(create_test_config(), new_shared_market_data());
+
+        let err = feed.stream_ended_error("RFQ").await;
+
+        assert_eq!(err.to_string(), "stream error: RFQ stream ended (last block: none)");
     }
 
     #[tokio::test]
