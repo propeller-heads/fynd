@@ -29,7 +29,7 @@ use fynd_client::{
     PermitSingle as FyndPermitSingle, QuoteOptions, QuoteParams, SignedApproval, SignedSwap,
     SigningHints, StorageOverrides, UserTransferType,
 };
-use fynd_core::simulation::erc20_slots as erc20;
+use fynd_core::simulation::token_layout::discover_layout;
 use num_bigint::BigUint;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -112,19 +112,21 @@ async fn build_dry_run_overrides(
     spender: Address,
 ) -> anyhow::Result<StorageOverrides> {
     info!("Detecting storage slots for {sell_token:#x}...");
-    let (balance_res, allowance_res) = tokio::join!(
-        erc20::find_balance_slot(provider, sell_token, sender),
-        erc20::find_allowance_slot(provider, sell_token, sender, spender),
+    let layout = discover_layout(provider, sell_token, sender, spender).await?;
+    let balance_slot = layout.balance_slot(sender);
+    let allowance_slot = layout.allowance_slot(sender, spender);
+    info!(
+        "Found balance slot {balance_slot} and allowance slot {allowance_slot} in {:#x}",
+        layout.storage_contract()
     );
-    let balance_slot = balance_res?;
-    let allowance_slot = allowance_res?;
-    info!("Found balance slot {balance_slot} and allowance slot {allowance_slot}");
 
     // Use MAX >> 1 (clear the top bit) to avoid triggering tokens that pack metadata into
     // bit 255 of the storage slot — e.g. USDC uses the top bit as a blacklist flag.
     // 2^255 - 1 is still large enough to cover any realistic balance or allowance.
     let max_val = Bytes::copy_from_slice(&B256::from(U256::MAX >> 1).0);
-    let token_key = Bytes::copy_from_slice(sell_token.as_slice());
+    // A proxy keeps its balances somewhere other than the address the swap calls, so the write
+    // goes to the contract discovery named rather than to the token.
+    let token_key = Bytes::copy_from_slice(layout.storage_contract().as_slice());
     let mut overrides = StorageOverrides::default();
     overrides.insert(token_key.clone(), Bytes::copy_from_slice(&balance_slot.0), max_val.clone());
     overrides.insert(token_key, Bytes::copy_from_slice(&allowance_slot.0), max_val);

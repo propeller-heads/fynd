@@ -1,4 +1,4 @@
-//! Trace-guided ERC-20 storage-layout discovery for quote simulation.
+//! Trace-guided ERC-20 storage-layout discovery.
 //!
 //! State overrides only help when they land on the slots a token actually reads. Most ERC-20s
 //! use Solidity's `keccak256(holder || base_slot)` mapping convention, but real tokens also use
@@ -32,17 +32,22 @@ const MAX_BASE_SLOT: u16 = 640;
 /// that touches more than this many slots is a token whose layout this module does not resolve.
 const MAX_SLOTS_TO_VERIFY: usize = 32;
 /// A value that survives common packed-balance flags and narrow integer casts.
-const PROBE_SENTINEL: U256 = U256::from_limbs([0xdead_beef_cafe_babe, 0, 0, 0]);
+pub(crate) const PROBE_SENTINEL: U256 = U256::from_limbs([0xdead_beef_cafe_babe, 0, 0, 0]);
 /// Mainnet Lido stETH.
 ///
 /// Its `balanceOf` multiplies a holder's shares by the pooled-ETH rate, so tracing it finds the
 /// arithmetic rather than the mapping. The shares view is traced instead. The address is mainnet's
 /// and matches nothing on another chain, which leaves every other token on the ordinary path.
-const STETH: Address = address!("ae7ab96520de3a18e5e111b5eaab095312d7fe84");
-/// OpenZeppelin v5's standard ERC-7201 balance namespace.
+const STETH: Address = address!("0xae7ab96520de3a18e5e111b5eaab095312d7fe84");
+/// OpenZeppelin v5's ERC-20 balances mapping, under the namespace ERC-7201 prescribes.
+///
+/// This is `keccak256(abi.encode(uint256(keccak256("openzeppelin.storage.ERC20")) - 1)) &
+/// ~bytes32(uint256(0xff))`.
 const OZ_V5_BALANCES_NS: B256 =
     B256::new(alloy::hex!("52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00"));
-/// Field one of OpenZeppelin v5's ERC-20 storage struct.
+/// OpenZeppelin v5's ERC-20 allowances mapping.
+///
+/// Allowances are field 1 of `ERC20Storage`, so their namespace is the balances namespace plus one.
 const OZ_V5_ALLOWANCES_NS: B256 =
     B256::new(alloy::hex!("52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace01"));
 
@@ -59,7 +64,7 @@ sol! {
 
 /// Mapping-key convention used by a token implementation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum KeyOrder {
+pub enum KeyOrder {
     /// Solidity: `keccak256(pad32(address) || pad32(slot))`.
     Solidity,
     /// Vyper: `keccak256(pad32(slot) || pad32(address))`.
@@ -68,27 +73,30 @@ pub(crate) enum KeyOrder {
 
 /// The base of one balance or allowance mapping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MappingPosition {
+pub enum MappingPosition {
     /// A small integer base slot under Solidity or Vyper mapping layout.
-    Direct { base: u16, key_order: KeyOrder },
-    /// The canonical OpenZeppelin v5 ERC-7201 balances namespace.
-    OpenZeppelinV5Balances,
-    /// The canonical OpenZeppelin v5 ERC-7201 allowances namespace.
-    OpenZeppelinV5Allowances,
+    Direct {
+        /// Declaration order of the mapping in the contract's storage.
+        base: u16,
+        /// Which way the implementation hashes the key and the base.
+        key_order: KeyOrder,
+    },
+    /// OpenZeppelin v5's namespaced storage. Which namespace applies follows from the mapping
+    /// being addressed, so a balance reads the balances one and an allowance the allowances one.
+    OpenZeppelinV5,
 }
 
 /// The slots needed to fund and approve one simulated token input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TokenLayout {
+pub struct TokenLayout {
     storage_contract: Address,
     balance: MappingPosition,
     allowance: MappingPosition,
 }
 
 impl TokenLayout {
-    /// Creates a layout from known positions. [`discover_layout`] resolves them from a live token;
-    /// this builds one directly, which is what the tests need.
-    pub(crate) const fn new(
+    /// Creates a layout from known positions.
+    pub const fn new(
         storage_contract: Address,
         balance: MappingPosition,
         allowance: MappingPosition,
@@ -97,17 +105,20 @@ impl TokenLayout {
     }
 
     /// Contract whose state holds this token's balances and allowances.
-    pub(crate) fn storage_contract(self) -> Address {
+    ///
+    /// A proxy keeps them somewhere other than the address the swap calls, so an override goes to
+    /// this contract rather than to the token.
+    pub fn storage_contract(self) -> Address {
         self.storage_contract
     }
 
-    /// Slot of `balanceOf(holder)` or, for stETH, `sharesOf(holder)`.
-    pub(crate) fn balance_slot(self, holder: Address) -> B256 {
-        mapping_slot(holder, self.balance)
+    /// Slot holding one holder's balance, or its share balance on a rebasing token.
+    pub fn balance_slot(self, holder: Address) -> B256 {
+        balance_slot(holder, self.balance)
     }
 
-    /// Slot of `allowance(owner, spender)`.
-    pub(crate) fn allowance_slot(self, owner: Address, spender: Address) -> B256 {
+    /// Slot holding what one owner has approved one spender to spend.
+    pub fn allowance_slot(self, owner: Address, spender: Address) -> B256 {
         allowance_slot(owner, spender, self.allowance)
     }
 }
@@ -117,56 +128,55 @@ impl TokenLayout {
 /// The two are cached differently: a layout this module cannot resolve is a property of the token
 /// and stays decided, while a node that failed to answer says nothing about the token and is
 /// retried on the next quote.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DiscoveryError {
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DiscoveryError {
     /// The token's layout is not one this module recovers.
+    #[error("{0}")]
     Unsupported(String),
     /// The node did not answer a probe.
+    #[error("{0}")]
     Rpc(String),
 }
 
-impl std::fmt::Display for DiscoveryError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unsupported(reason) | Self::Rpc(reason) => formatter.write_str(reason),
-        }
-    }
-}
-
 /// Resolves the storage a quote's input token reads, so an override can fund it.
-pub(crate) async fn discover_layout(
+pub async fn discover_layout(
     provider: &RootProvider<Ethereum>,
     token: Address,
     holder: Address,
     spender: Address,
 ) -> Result<TokenLayout, DiscoveryError> {
     let balance_calldata = balance_calldata(token, holder);
-    let (storage_contract, balance_slot) =
+    let (storage_contract, observed_balance) =
         find_accessed_slot(provider, token, &balance_calldata).await?;
-    let balance = recover_balance_position(balance_slot, holder).ok_or_else(|| {
-        DiscoveryError::Unsupported(format!(
-            "could not recover a supported balance mapping for {token:#x}; observed slot {balance_slot:#x}"
-        ))
-    })?;
+    let balance = recover_position(observed_balance, |position| balance_slot(holder, position))
+        .ok_or_else(|| {
+            DiscoveryError::Unsupported(format!(
+                "could not recover a supported balance mapping for {token:#x}; observed slot {observed_balance:#x}"
+            ))
+        })?;
 
     let allowance_calldata =
         IERC20LayoutProbe::allowanceCall { owner: holder, spender }.abi_encode();
-    let (allowance_contract, allowance_slot) =
+    let (allowance_contract, observed) =
         find_accessed_slot(provider, token, &allowance_calldata).await?;
     if allowance_contract != storage_contract {
         return Err(DiscoveryError::Unsupported(format!(
             "token {token:#x} stores balance and allowance in different contracts ({storage_contract:#x}, {allowance_contract:#x})"
         )));
     }
-    let allowance = recover_allowance_position(allowance_slot, holder, spender).ok_or_else(|| {
+    let allowance = recover_position(observed, |position| {
+        allowance_slot(holder, spender, position)
+    })
+    .ok_or_else(|| {
         DiscoveryError::Unsupported(format!(
-            "could not recover a supported allowance mapping for {token:#x}; observed slot {allowance_slot:#x}"
+            "could not recover a supported allowance mapping for {token:#x}; observed slot {observed:#x}"
         ))
     })?;
 
     Ok(TokenLayout::new(storage_contract, balance, allowance))
 }
 
+/// The view whose trace reaches the balance mapping.
 fn balance_calldata(token: Address, holder: Address) -> Vec<u8> {
     if token == STETH {
         ILidoStEth::sharesOfCall { account: holder }.abi_encode()
@@ -175,15 +185,15 @@ fn balance_calldata(token: Address, holder: Address) -> Vec<u8> {
     }
 }
 
+/// Finds the slot a read-only call depends on, by overwriting each slot it touched in turn.
 async fn find_accessed_slot(
     provider: &RootProvider<Ethereum>,
     token: Address,
     calldata: &[u8],
 ) -> Result<(Address, B256), DiscoveryError> {
-    let call = token_call(token, calldata);
     let trace = provider
         .debug_trace_call_prestate(
-            call.clone(),
+            token_call(token, calldata),
             BlockId::latest(),
             GethDebugTracingCallOptions::new(GethDebugTracingOptions::prestate_tracer(
                 PreStateConfig::default(),
@@ -196,12 +206,10 @@ async fn find_accessed_slot(
             ))
         })?;
 
-    // Every candidate is verified with its own `eth_call`, so they go out together: run in turn
-    // they would spend the discovery timeout on round trips rather than on work.
+    // Highest keys first: a mapping slot is a keccak hash and lands near the top of the key order,
+    // while a contract's fixed fields sit at 0, 1, 2 and sort to the bottom. Taking the cap from
+    // that end reaches the mapping on a token that reads many fixed slots.
     for (&storage_contract, account) in trace.pre_state() {
-        // Highest keys first: a mapping slot is a keccak hash and lands near the top of the key
-        // order, while a contract's fixed fields sit at 0, 1, 2 and sort to the bottom. Taking
-        // the cap from that end reaches the mapping on a token that reads many fixed slots.
         let candidates: Vec<B256> = account
             .storage
             .keys()
@@ -209,6 +217,8 @@ async fn find_accessed_slot(
             .copied()
             .take(MAX_SLOTS_TO_VERIFY)
             .collect();
+        // Every candidate is verified with its own `eth_call`, so they go out together: run in
+        // turn they would spend the discovery timeout on round trips rather than on work.
         let verdicts = futures::future::join_all(
             candidates
                 .iter()
@@ -234,6 +244,7 @@ fn token_call(token: Address, calldata: &[u8]) -> TransactionRequest {
     }
 }
 
+/// Whether overwriting one slot changes what the token reports, which is what identifies it.
 async fn slot_matches(
     provider: &RootProvider<Ethereum>,
     token: Address,
@@ -241,15 +252,9 @@ async fn slot_matches(
     calldata: &[u8],
     slot: B256,
 ) -> Result<bool, DiscoveryError> {
-    let mut state_diff = B256HashMap::default();
-    state_diff.insert(slot, B256::from(PROBE_SENTINEL));
-    let overrides = StateOverride::from_iter([(
-        storage_contract,
-        AccountOverride { state_diff: Some(state_diff), ..Default::default() },
-    )]);
     match provider
         .call(token_call(token, calldata))
-        .overrides(overrides)
+        .overrides(state_override_single(storage_contract, slot, B256::from(PROBE_SENTINEL)))
         .await
     {
         Ok(response) => {
@@ -265,51 +270,46 @@ async fn slot_matches(
     }
 }
 
-fn recover_balance_position(slot: B256, holder: Address) -> Option<MappingPosition> {
-    for base in 0..=MAX_BASE_SLOT {
-        let solidity = MappingPosition::Direct { base, key_order: KeyOrder::Solidity };
-        if mapping_slot(holder, solidity) == slot {
-            return Some(solidity);
-        }
-        let vyper = MappingPosition::Direct { base, key_order: KeyOrder::Vyper };
-        if mapping_slot(holder, vyper) == slot {
-            return Some(vyper);
-        }
-    }
-    let oz = MappingPosition::OpenZeppelinV5Balances;
-    (mapping_slot(holder, oz) == slot).then_some(oz)
+/// Builds an override that writes one storage value for a contract.
+fn state_override_single(contract: Address, slot: B256, value: B256) -> StateOverride {
+    let mut state_diff = B256HashMap::default();
+    state_diff.insert(slot, value);
+    StateOverride::from_iter([(
+        contract,
+        AccountOverride { state_diff: Some(state_diff), ..Default::default() },
+    )])
 }
 
-fn recover_allowance_position(
+/// Finds the convention whose arithmetic reproduces an observed slot.
+///
+/// `slot_for` closes over the keys, so one search serves balances and allowances alike.
+fn recover_position(
     slot: B256,
-    owner: Address,
-    spender: Address,
+    slot_for: impl Fn(MappingPosition) -> B256,
 ) -> Option<MappingPosition> {
     for base in 0..=MAX_BASE_SLOT {
-        let direct = MappingPosition::Direct { base, key_order: KeyOrder::Solidity };
-        if allowance_slot(owner, spender, direct) == slot {
-            return Some(direct);
-        }
-        let vyper = MappingPosition::Direct { base, key_order: KeyOrder::Vyper };
-        if allowance_slot(owner, spender, vyper) == slot {
-            return Some(vyper);
+        for key_order in [KeyOrder::Solidity, KeyOrder::Vyper] {
+            let direct = MappingPosition::Direct { base, key_order };
+            if slot_for(direct) == slot {
+                return Some(direct);
+            }
         }
     }
-    let oz = MappingPosition::OpenZeppelinV5Allowances;
-    (allowance_slot(owner, spender, oz) == slot).then_some(oz)
+    (slot_for(MappingPosition::OpenZeppelinV5) == slot).then_some(MappingPosition::OpenZeppelinV5)
 }
 
-fn mapping_slot(holder: Address, position: MappingPosition) -> B256 {
+/// Slot holding one holder's balance under a given convention.
+fn balance_slot(holder: Address, position: MappingPosition) -> B256 {
     match position {
         MappingPosition::Direct { base, key_order: KeyOrder::Solidity } => {
             solidity_mapping(holder, B256::from(U256::from(base)))
         }
         MappingPosition::Direct { base, key_order: KeyOrder::Vyper } => vyper_mapping(holder, base),
-        MappingPosition::OpenZeppelinV5Balances => solidity_mapping(holder, OZ_V5_BALANCES_NS),
-        MappingPosition::OpenZeppelinV5Allowances => solidity_mapping(holder, OZ_V5_ALLOWANCES_NS),
+        MappingPosition::OpenZeppelinV5 => solidity_mapping(holder, OZ_V5_BALANCES_NS),
     }
 }
 
+/// Slot holding one owner-and-spender allowance under a given convention.
 fn allowance_slot(owner: Address, spender: Address, position: MappingPosition) -> B256 {
     match position {
         MappingPosition::Direct { base, key_order: KeyOrder::Solidity } => {
@@ -322,11 +322,8 @@ fn allowance_slot(owner: Address, spender: Address, position: MappingPosition) -
             buffer[44..].copy_from_slice(spender.as_slice());
             keccak256(buffer)
         }
-        MappingPosition::OpenZeppelinV5Allowances => {
+        MappingPosition::OpenZeppelinV5 => {
             solidity_mapping(spender, solidity_mapping(owner, OZ_V5_ALLOWANCES_NS))
-        }
-        MappingPosition::OpenZeppelinV5Balances => {
-            solidity_mapping(spender, solidity_mapping(owner, OZ_V5_BALANCES_NS))
         }
     }
 }
@@ -346,102 +343,5 @@ fn vyper_mapping(holder: Address, base: u16) -> B256 {
 }
 
 #[cfg(test)]
-mod tests {
-    use alloy::{
-        primitives::{address, Address},
-        providers::ProviderBuilder,
-    };
-
-    use super::*;
-
-    #[test]
-    fn test_recovers_deep_solidity_balance_and_allowance_slots() {
-        let owner = Address::repeat_byte(0x11);
-        let spender = Address::repeat_byte(0x22);
-        let position = MappingPosition::Direct { base: 516, key_order: KeyOrder::Solidity };
-
-        assert_eq!(recover_balance_position(mapping_slot(owner, position), owner), Some(position));
-        assert_eq!(
-            recover_allowance_position(allowance_slot(owner, spender, position), owner, spender),
-            Some(position)
-        );
-    }
-
-    #[test]
-    fn test_recovers_vyper_mapping_slots() {
-        let owner = Address::repeat_byte(0x11);
-        let spender = Address::repeat_byte(0x22);
-        let position = MappingPosition::Direct { base: 17, key_order: KeyOrder::Vyper };
-
-        assert_eq!(recover_balance_position(mapping_slot(owner, position), owner), Some(position));
-        assert_eq!(
-            recover_allowance_position(allowance_slot(owner, spender, position), owner, spender),
-            Some(position)
-        );
-    }
-
-    #[test]
-    fn test_recovers_openzeppelin_v5_mapping_slots() {
-        let owner = Address::repeat_byte(0x11);
-        let spender = Address::repeat_byte(0x22);
-        let balance = MappingPosition::OpenZeppelinV5Balances;
-        let allowance = MappingPosition::OpenZeppelinV5Allowances;
-
-        assert_eq!(recover_balance_position(mapping_slot(owner, balance), owner), Some(balance));
-        assert_eq!(
-            recover_allowance_position(allowance_slot(owner, spender, allowance), owner, spender),
-            Some(allowance)
-        );
-    }
-
-    /// Exercises the exact layouts that motivated the trace-guided path: USDT, whose storage the
-    /// sentinel probe could not place, and stETH, whose balance is derived from shares.
-    ///
-    /// Asserts the property the discovery exists for -- writing the discovered slot changes what
-    /// the token reports -- rather than that two slots differ, which two keccak hashes always do.
-    /// Requires an endpoint serving `debug_traceCall`, so it stays opt-in.
-    #[tokio::test]
-    #[ignore = "requires RPC_URL with debug_traceCall support"]
-    async fn test_discovers_mainnet_usdt_and_steth_layouts() {
-        let rpc_url = std::env::var("RPC_URL").expect("set RPC_URL for the live layout test");
-        let provider = ProviderBuilder::default().connect_http(
-            rpc_url
-                .parse()
-                .expect("RPC_URL must be a valid HTTP URL"),
-        );
-        let holder = address!("0000000000000000000000000000000000000001");
-        let spender = address!("0000000000000000000000000000000000000002");
-
-        for token in [address!("dAC17F958D2ee523a2206206994597C13D831ec7"), STETH] {
-            let layout = discover_layout(&provider, token, holder, spender)
-                .await
-                .unwrap_or_else(|error| panic!("{token:#x} layout discovery failed: {error}"));
-            let storage = layout.storage_contract();
-
-            let funds = slot_matches(
-                &provider,
-                token,
-                storage,
-                &balance_calldata(token, holder),
-                layout.balance_slot(holder),
-            )
-            .await
-            .expect("the balance probe answers");
-            assert!(funds, "{token:#x}: the discovered balance slot does not set the balance");
-
-            let approves = slot_matches(
-                &provider,
-                token,
-                storage,
-                &IERC20LayoutProbe::allowanceCall { owner: holder, spender }.abi_encode(),
-                layout.allowance_slot(holder, spender),
-            )
-            .await
-            .expect("the allowance probe answers");
-            assert!(
-                approves,
-                "{token:#x}: the discovered allowance slot does not set the allowance"
-            );
-        }
-    }
-}
+#[path = "../tests/simulation/token_layout.rs"]
+mod tests;
