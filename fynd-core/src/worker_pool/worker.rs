@@ -60,6 +60,17 @@ fn record_solve_duration(pool_name: &str, solve_time: Duration) {
         .record(solve_time.as_secs_f64());
 }
 
+/// Records how long the price-impact walk took for one quote. It reads one spot price per swap,
+/// and a pool that derives its spot price by probing a swap pays for that probe here, so a route
+/// through such a pool costs as much as the extra hops it simulates.
+fn record_price_impact_duration(pool_name: &str, walk_time: Duration) {
+    metrics::histogram!(
+        "worker_pool_price_impact_duration_seconds",
+        "pool" => pool_name.to_string()
+    )
+    .record(walk_time.as_secs_f64());
+}
+
 /// A solver worker instance that maintains a market graph and processes solve requests.
 pub(crate) struct SolverWorker<A>
 where
@@ -374,7 +385,6 @@ where
                     .to_biguint()
                     .unwrap_or(BigUint::ZERO);
                 let gas_price = result.gas_price().clone();
-                let algo_price_impact = result.price_impact();
                 let mut route = result.into_route();
 
                 if let Err(err) = route.validate() {
@@ -492,16 +502,26 @@ where
                     order.amount().clone()
                 };
 
-                let price_impact_bps = algo_price_impact
-                    .or_else(|| {
-                        super::price_impact::spot_price_impact(
-                            &route,
-                            &amount_in,
-                            &amount_out,
-                            &self.market_data,
-                        )
-                    })
-                    .map(|f| (f * 10_000.0).round() as i32);
+                let price_impact_started = Instant::now();
+                let spot_impact = super::price_impact::spot_price_impact(
+                    &route,
+                    &amount_in,
+                    &amount_out,
+                    &self.market_data,
+                );
+                record_price_impact_duration(&self.pool_name, price_impact_started.elapsed());
+                let price_impact_bps = match spot_impact {
+                    Ok(impact) => Some((impact * 10_000.0).round() as i32),
+                    Err(err) => {
+                        debug!(
+                            order_id = %order.id(),
+                            algorithm = self.algorithm.name(),
+                            error = %err,
+                            "quote carries no price impact"
+                        );
+                        None
+                    }
+                };
 
                 let mut quote = OrderQuote::new(
                     order.id().to_string(),
@@ -961,6 +981,88 @@ mod tests {
             }
             other => panic!("expected AlgorithmError for invalid route, got {other:?}"),
         }
+    }
+
+    /// Mock algorithm that returns a two-branch split route A→B, as `water_fill` does, without
+    /// reporting a price impact of its own.
+    struct SplitRouteAlgorithm;
+
+    impl Algorithm for SplitRouteAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "split_route_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            _graph: &Self::GraphType,
+            _market: MarketData,
+            _label: Option<crate::feed::market_data::StateLabel>,
+            _derived: Option<SharedDerivedDataRef>,
+            _order: &Order,
+        ) -> Result<RouteResult, AlgorithmError> {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            // Both pools quote spot 2.0. 60 A through p1 pays 114 (ideal 120) and the remaining
+            // 40 A through p2 pays 78 (ideal 80): 192 out of an ideal 200, a 4% impact.
+            let swap_p1 = Swap::new(
+                "p1".to_string(),
+                "mock".to_string(),
+                token_a.address.clone(),
+                token_b.address.clone(),
+                BigUint::from(60u64),
+                BigUint::from(114u64),
+                BigUint::from(1u64),
+                component("p1", &[token_a.clone(), token_b.clone()]),
+                Box::new(MockProtocolSim::new(2.0)),
+            )
+            .with_split(0.6);
+            let swap_p2 = Swap::new(
+                "p2".to_string(),
+                "mock".to_string(),
+                token_a.address.clone(),
+                token_b.address.clone(),
+                BigUint::from(40u64),
+                BigUint::from(78u64),
+                BigUint::from(1u64),
+                component("p2", &[token_a.clone(), token_b.clone()]),
+                Box::new(MockProtocolSim::new(2.0)),
+            );
+            let route =
+                Route::new(vec![swap_p1, swap_p2], FxHashMap::default()).expect("non-empty route");
+            Ok(RouteResult::new(route, num_bigint::BigInt::from(192), BigUint::from(1u64)))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quote_price_impact_for_split_route() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted(vec![
+            ("p1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("p2", &token_a, &token_b, MockProtocolSim::new(2.0)),
+        ]);
+        let derived = DerivedData::new_shared();
+        let mut worker =
+            SolverWorker::new(market, derived, SplitRouteAlgorithm, 0, "test_pool".to_string());
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let quote = worker
+            .quote(&ord, SolveParams::default())
+            .await
+            .expect("split route must quote");
+
+        assert_eq!(quote.order().price_impact_bps(), Some(400));
     }
 
     /// Mock algorithm that returns a single-leg route through a pAMM executed via the
@@ -1730,6 +1832,29 @@ mod tests {
             solve_seen = true;
         }
         assert!(solve_seen, "solve duration histogram not recorded");
+    }
+
+    #[test]
+    fn test_price_impact_duration_metric_recorded() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_price_impact_duration("test_pool", std::time::Duration::from_micros(250));
+        });
+
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (_, labels, value) = recorded
+            .iter()
+            .find(|(name, _, _)| name == "worker_pool_price_impact_duration_seconds")
+            .expect("price impact duration histogram not recorded");
+        assert_eq!(labels, &vec!["pool=test_pool".to_string()]);
+        let DebugValue::Histogram(samples) = value else {
+            panic!("expected histogram, got {value:?}");
+        };
+        assert_eq!(samples.len(), 1);
+        assert!((samples[0].into_inner() - 0.000_25).abs() < 1e-12);
     }
 
     #[test]
