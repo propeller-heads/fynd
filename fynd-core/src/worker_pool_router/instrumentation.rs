@@ -247,7 +247,7 @@ fn improvement_bps(baseline_net: Option<f64>, net: Option<f64>) -> Option<f64> {
 /// `RUST_LOG=...,fynd::winning_protocols=trace`.
 const WINNING_PROTOCOLS_TARGET: &str = "fynd::winning_protocols";
 
-/// Hundredths of a basis point, the unit `winning_quote_shortfall_centibps_sum` accumulates in.
+/// Hundredths of a basis point, the unit `winning_quote_shortfall_centibps_total` accumulates in.
 const SHORTFALL_SCALE: f64 = 100.0;
 
 /// Counts the protocols the winning quote swaps on and logs them, with how the quote simulated.
@@ -284,15 +284,16 @@ pub(super) fn record_winning_protocols(quote: &OrderQuote) {
     let (outcome, deviation) = simulation_fields(quote);
     count_swaps_per_protocol(&swaps_per_protocol, outcome);
     if let Some(bps) = simulated_deviation_bps(quote) {
-        record_deviation_per_protocol(&swaps_per_protocol, bps);
+        record_shortfall_per_protocol(&swaps_per_protocol, bps);
     }
     log_winning_protocols(quote, route, &swaps_per_protocol, outcome, &deviation);
 }
 
 /// Counts the swaps the winning routes make on each protocol, by how the quote simulated.
 ///
-/// The `simulated` label answers per protocol what the outcome counter answers overall, and
-/// carries `none` for a quote that asked for no simulation so the three shares still sum to the
+/// The `simulated` label answers per protocol what `quote_simulations_total` answers overall, and
+/// takes its values from the same set so a dashboard reading both does not have to translate. It
+/// carries `none` for a quote that asked for no simulation, so the shares still sum to the
 /// protocol's total. A route counts once per protocol it crosses, which is what makes the shares
 /// add up to the swaps executed rather than to the quotes served.
 fn count_swaps_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, outcome: &'static str) {
@@ -316,7 +317,7 @@ fn count_swaps_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, outcome:
 /// The sum is in hundredths of a basis point because a counter only takes whole numbers, and a
 /// shortfall under one basis point is the ordinary case: rounding to whole bps would report most
 /// routes as perfect. Divide the two by `SHORTFALL_SCALE` to read a mean in bps.
-fn record_deviation_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, bps: f64) {
+fn record_shortfall_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, bps: f64) {
     // A simulation that returned more than the quote promised has no shortfall, and it is left
     // out of both counters rather than entered as a zero: counting it would pull every crossed
     // protocol's mean towards zero and read as an improvement.
@@ -325,9 +326,9 @@ fn record_deviation_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, bps
     }
     let shortfall = (-bps * SHORTFALL_SCALE).round() as u64;
     for protocol in swaps_per_protocol.keys() {
-        counter!("winning_quote_shortfall_centibps_sum", "protocol" => protocol.to_string())
+        counter!("winning_quote_shortfall_centibps_total", "protocol" => protocol.to_string())
             .increment(shortfall);
-        counter!("winning_quote_shortfall_count", "protocol" => protocol.to_string()).increment(1);
+        counter!("winning_quote_shortfall_routes_total", "protocol" => protocol.to_string()).increment(1);
     }
 }
 
@@ -374,7 +375,7 @@ fn log_winning_protocols(
 fn simulation_fields(quote: &OrderQuote) -> (&'static str, String) {
     match quote.simulation_result() {
         None => ("", String::new()),
-        Some(SimulationResult::Failure { .. }) => ("failure", String::new()),
+        Some(SimulationResult::Failure { .. }) => ("failed", String::new()),
         Some(SimulationResult::Success { amount_out, .. }) => (
             "success",
             deviation_bps(quote, amount_out)

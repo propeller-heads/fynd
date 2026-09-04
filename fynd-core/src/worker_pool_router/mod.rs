@@ -3753,12 +3753,12 @@ mod tests {
         let recorded = recorded(&snapshotter);
         for protocol in ["protocol=ekubo_v3", "protocol=uniswap_v3"] {
             assert_eq!(
-                counter_value(&recorded, "winning_quote_shortfall_centibps_sum", protocol),
+                counter_value(&recorded, "winning_quote_shortfall_centibps_total", protocol),
                 Some(1_000),
                 "{protocol} carries the whole route's shortfall"
             );
             assert_eq!(
-                counter_value(&recorded, "winning_quote_shortfall_count", protocol),
+                counter_value(&recorded, "winning_quote_shortfall_routes_total", protocol),
                 Some(1)
             );
         }
@@ -3785,12 +3785,12 @@ mod tests {
 
         let recorded = recorded(&snapshotter);
         assert_eq!(
-            counter_value(&recorded, "winning_quote_swaps_total", "simulated=failure"),
+            counter_value(&recorded, "winning_quote_swaps_total", "simulated=failed"),
             Some(1)
         );
         assert!(!recorded
             .iter()
-            .any(|(metric, _, _)| metric == "winning_quote_shortfall_count"));
+            .any(|(metric, _, _)| metric == "winning_quote_shortfall_routes_total"));
     }
 
     /// A simulation that came back above the quote is not a shortfall. Counting it as a zero
@@ -3869,7 +3869,7 @@ mod tests {
         let payloads = capture_winning_protocols(&quote);
 
         assert_eq!(payloads.len(), 1);
-        assert!(payloads[0].contains("simulated=failure"), "{}", payloads[0]);
+        assert!(payloads[0].contains("simulated=failed"), "{}", payloads[0]);
         assert!(payloads[0].contains("deviation_bps= "), "{}", payloads[0]);
     }
 
