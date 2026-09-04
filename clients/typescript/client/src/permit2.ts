@@ -1,5 +1,5 @@
 import { hashTypedData } from 'viem';
-import { FyndError } from './error.js';
+import { assertSignatureLength } from './signing.js';
 import type { Address, EncodingOptions, Hex, PermitSingle } from './types.js';
 
 const PERMIT_DETAILS_TYPE = {
@@ -72,11 +72,7 @@ export function withPermit2(
   permit: PermitSingle,
   signature: Hex,
 ): EncodingOptions {
-  if (signature.length !== 132) {
-    throw FyndError.config(
-      `Permit2 signature must be exactly 65 bytes (132 hex chars), got ${String(signature.length)} chars`
-    );
-  }
+  assertSignatureLength(signature, 'Permit2');
   return {
     ...opts,
     transferType: 'transfer_from_permit2',
