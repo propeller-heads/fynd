@@ -150,12 +150,15 @@ async fn test_simulate_call_against_mocked_provider() {
     ));
     let result = simulate_with_overrides(
         &RootProvider::new(RpcClient::mocked(asserter)),
-        Address::repeat_byte(1),
-        Address::repeat_byte(2),
-        U256::ZERO,
-        &[0x12],
+        SimulatedCall {
+            sender: Address::repeat_byte(1),
+            router: Address::repeat_byte(2),
+            value: U256::ZERO,
+            data: &[0x12],
+        },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
+        TEST_TIMEOUT,
     )
     .await;
     assert!(
@@ -169,12 +172,15 @@ async fn test_simulated_call_rejects_non_uint256_return_data() {
     asserter.push_success(&simulated_response(vec![0; 31], true, 1));
     let result = simulate_with_overrides(
         &RootProvider::new(RpcClient::mocked(asserter)),
-        Address::repeat_byte(1),
-        Address::repeat_byte(2),
-        U256::ZERO,
-        &[],
+        SimulatedCall {
+            sender: Address::repeat_byte(1),
+            router: Address::repeat_byte(2),
+            value: U256::ZERO,
+            data: &[],
+        },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
+        TEST_TIMEOUT,
     )
     .await;
     assert!(matches!(result, CallOutcome::Failure(reason) if reason.contains("31 bytes")));
@@ -194,12 +200,15 @@ async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
     ));
     let result = simulate_with_overrides(
         &RootProvider::new(RpcClient::mocked(asserter)),
-        Address::repeat_byte(1),
-        Address::repeat_byte(2),
-        U256::ZERO,
-        &[],
+        SimulatedCall {
+            sender: Address::repeat_byte(1),
+            router: Address::repeat_byte(2),
+            value: U256::ZERO,
+            data: &[],
+        },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
+        TEST_TIMEOUT,
     )
     .await;
     assert!(
@@ -314,6 +323,76 @@ async fn test_layout_cache_retries_after_a_node_failure() {
     assert!(resolved.is_ok(), "the retry resolves: {resolved:?}");
 }
 
+/// A reverting call frame carrying revert data, as the call tracer reports it.
+fn reverting_frame(output: &[u8]) -> serde_json::Value {
+    serde_json::json!({
+        "from": format!("{:#x}", Address::repeat_byte(1)),
+        "to": format!("{:#x}", Address::repeat_byte(2)),
+        "gas": "0x0",
+        "gasUsed": "0x0",
+        "input": "0x",
+        "output": format!("0x{}", alloy::hex::encode(output)),
+        "error": "execution reverted",
+        "type": "CALL",
+    })
+}
+
+async fn simulate_reverting_call(asserter: Asserter) -> SimulationAttempt {
+    mocked_simulator(&asserter, TEST_TIMEOUT)
+        .simulate_within_timeout(
+            SimulatedCall {
+                sender: Address::repeat_byte(1),
+                router: Address::repeat_byte(2),
+                value: U256::ZERO,
+                data: &[0x12],
+            },
+            native_balance_override(Address::repeat_byte(1)),
+            test_envelope(),
+        )
+        .await
+}
+
+/// `eth_simulateV1` drops the revert payload, so a reverted call arrives saying only that it
+/// reverted. Replaying it under the tracer is what turns that into a named error, and this is the
+/// path the whole trace exists for.
+#[tokio::test]
+async fn test_simulate_names_a_revert_the_node_reported_without_a_payload() {
+    let asserter = Asserter::new();
+    asserter.push_success(&simulated_response(Vec::new(), false, 0));
+    asserter.push_success(&reverting_frame(
+        &crate::simulation::revert::RouterErrors::TychoRouter__EmptySwaps {}.abi_encode(),
+    ));
+
+    let attempt = simulate_reverting_call(asserter).await;
+
+    assert!(
+        matches!(attempt.into_result(), SimulationResult::Failure { reason }
+            if reason.contains("TychoRouter__EmptySwaps")),
+        "the traced error names the revert"
+    );
+}
+
+/// A trace the node cannot serve leaves the message it already gave, so a revert is still
+/// reported as a revert rather than swallowed.
+#[tokio::test]
+async fn test_simulate_keeps_the_node_message_when_the_trace_fails() {
+    let asserter = Asserter::new();
+    asserter.push_success(&simulated_response(Vec::new(), false, 0));
+    asserter.push_failure(ErrorPayload {
+        code: -32601,
+        message: "the method debug_traceCall does not exist".into(),
+        data: None,
+    });
+
+    let attempt = simulate_reverting_call(asserter).await;
+
+    assert!(
+        matches!(attempt.into_result(), SimulationResult::Failure { reason }
+            if reason == "simulation reverted: execution reverted"),
+        "the node's own message survives"
+    );
+}
+
 /// A server that accepts the connection and never answers, so the request outlives the timeout.
 async fn unresponsive_rpc_url() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -342,10 +421,12 @@ async fn test_simulation_times_out_when_the_node_does_not_answer() {
 
     let attempt = simulator
         .simulate_within_timeout(
-            Address::repeat_byte(1),
-            Address::repeat_byte(2),
-            U256::ZERO,
-            &[0x12],
+            SimulatedCall {
+                sender: Address::repeat_byte(1),
+                router: Address::repeat_byte(2),
+                value: U256::ZERO,
+                data: &[0x12],
+            },
             native_balance_override(Address::repeat_byte(1)),
             test_envelope(),
         )

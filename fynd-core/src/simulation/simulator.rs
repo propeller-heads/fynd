@@ -1,6 +1,6 @@
 //! Simulation of encoded quotes using `eth_simulateV1` state overrides.
 
-use std::sync::{Arc, Mutex};
+use std::{sync::Arc, sync::Mutex, time::Duration};
 
 use alloy::{
     eips::BlockNumberOrTag,
@@ -73,8 +73,27 @@ const SIMULATION_COINBASE: Address = address!("0x95222290DD7278Aa3Ddd389Cc1E1d16
 /// simulation.
 const SIMULATION_SENDER_NONCE: u64 = 1;
 
+/// Budget for the trace that recovers a revert's error.
+///
+/// Fixed, and far below the request budget: `debug_traceCall` costs a node markedly more than
+/// `eth_simulateV1`, and the trace only names a revert the caller already knows about. Reusing the
+/// request budget would let the diagnostic cost the caller more than the simulation did.
+const SIMULATION_TRACE_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// One token's layout, or the reason this build cannot resolve one, resolved once per token.
 type LayoutCell = Arc<OnceCell<Result<TokenLayout, String>>>;
+
+/// The call a simulation runs.
+///
+/// The four travel together and always come from the same quote, so they are passed as one rather
+/// than as four parameters a caller could pair up wrongly.
+#[derive(Clone, Copy)]
+pub(crate) struct SimulatedCall<'a> {
+    pub(crate) sender: Address,
+    pub(crate) router: Address,
+    pub(crate) value: U256,
+    pub(crate) data: &'a [u8],
+}
 
 /// Simulates encoded quote transactions with temporary sender funding.
 pub struct QuoteSimulator {
@@ -202,10 +221,7 @@ impl QuoteSimulator {
                 .as_slice(),
         );
         self.simulate_within_timeout(
-            sender,
-            router,
-            value,
-            transaction.data(),
+            SimulatedCall { sender, router, value, data: transaction.data() },
             overrides,
             SimulationEnvelope::for_quote(quote),
         )
@@ -215,37 +231,19 @@ impl QuoteSimulator {
     /// Runs one simulated call, reporting a timeout as a failure rather than waiting forever.
     pub(crate) async fn simulate_within_timeout(
         &self,
-        sender: Address,
-        router: Address,
-        value: U256,
-        data: &[u8],
+        call: SimulatedCall<'_>,
         overrides: StateOverride,
         envelope: SimulationEnvelope,
     ) -> SimulationAttempt {
-        let outcome = match timeout(
+        match simulate_with_overrides(
+            &self.provider,
+            call,
+            overrides,
+            envelope,
             self.request_timeout,
-            simulate_with_overrides(
-                &self.provider,
-                sender,
-                router,
-                value,
-                data,
-                overrides,
-                envelope,
-            ),
         )
         .await
         {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                return failure_with(format!(
-                    "simulation request timed out after {:?}",
-                    self.request_timeout
-                ))
-            }
-        };
-
-        match outcome {
             CallOutcome::Success { amount_out, gas_used } => {
                 SimulationAttempt::Success { amount_out, gas_used }
             }
@@ -253,18 +251,6 @@ impl QuoteSimulator {
                 SimulationAttempt::Reverted { reason: format!("simulation reverted: {reason}") }
             }
             CallOutcome::Failure(reason) => SimulationAttempt::Failure { reason },
-            // The trace gets a budget of its own. Sharing the call's would let a slow trace
-            // report a timeout for a quote whose revert is already known.
-            CallOutcome::RevertedUntraced { message, replay } => {
-                let traced =
-                    timeout(self.request_timeout, traced_revert_reason(&self.provider, *replay))
-                        .await
-                        .ok()
-                        .flatten();
-                SimulationAttempt::Reverted {
-                    reason: format!("simulation reverted: {}", traced.unwrap_or(message)),
-                }
-            }
         }
     }
 
@@ -440,20 +426,23 @@ fn block_overrides() -> BlockOverrides {
     }
 }
 
+/// Runs the simulated call, and names the revert when the call reverted without saying why.
+///
+/// Each RPC gets a budget of its own: the simulation the caller's, the trace a fixed and much
+/// smaller one. A trace that runs out of time leaves the node's own message, so a revert is
+/// reported either way.
 async fn simulate_with_overrides(
     provider: &RootProvider<Ethereum>,
-    sender: Address,
-    router: Address,
-    value: U256,
-    data: &[u8],
+    simulated: SimulatedCall<'_>,
     overrides: StateOverride,
     envelope: SimulationEnvelope,
+    request_timeout: Duration,
 ) -> CallOutcome {
     let call = TransactionRequest {
-        from: Some(sender),
-        to: Some(TxKind::Call(router)),
-        value: Some(value),
-        input: Bytes::copy_from_slice(data).into(),
+        from: Some(simulated.sender),
+        to: Some(TxKind::Call(simulated.router)),
+        value: Some(simulated.value),
+        input: Bytes::copy_from_slice(simulated.data).into(),
         gas: Some(envelope.gas_limit),
         gas_price: Some(envelope.gas_price),
         ..Default::default()
@@ -468,12 +457,17 @@ async fn simulate_with_overrides(
             .with_block_overrides(environment.clone())
             .call(call.clone()),
     );
-    let response = match provider.simulate(&payload).await {
-        Ok(value) => value,
-        Err(error) => {
+    let response = match timeout(request_timeout, provider.simulate(&payload)).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
             return CallOutcome::Failure(format!(
                 "simulation eth_simulateV1 failed: {}",
                 rpc_error_reason(&error)
+            ))
+        }
+        Err(_) => {
+            return CallOutcome::Failure(format!(
+                "simulation request timed out after {request_timeout:?}"
             ))
         }
     };
@@ -491,15 +485,20 @@ async fn simulate_with_overrides(
             .as_ref()
             .map_or("execution reverted", |error| error.message.as_str())
             .to_string();
-        return match revert::decode_error(&result.return_data) {
-            Some(decoded) => CallOutcome::Reverted { reason: decoded },
-            // `eth_simulateV1` drops the revert payload. The caller replays the call under the
-            // tracer to recover it, on a budget of its own.
-            None => CallOutcome::RevertedUntraced {
-                message,
-                replay: Box::new(Replay { call, overrides, environment }),
-            },
-        };
+        if let Some(decoded) = revert::decode_error(&result.return_data) {
+            return CallOutcome::Reverted { reason: decoded };
+        }
+        // `eth_simulateV1` drops the revert payload, so the same call is replayed under the
+        // tracer -- same overrides, same environment -- to read the error off the frame that
+        // produced it.
+        let traced = timeout(
+            SIMULATION_TRACE_TIMEOUT,
+            traced_revert_reason(provider, call, overrides, environment),
+        )
+        .await
+        .ok()
+        .flatten();
+        return CallOutcome::Reverted { reason: traced.unwrap_or(message) };
     }
     if result.return_data.len() != 32 {
         return CallOutcome::Failure(format!(
@@ -514,31 +513,16 @@ async fn simulate_with_overrides(
     }
 }
 
-/// What a replay of the same call needs to reproduce the same revert.
-///
-/// The three travel together: a trace run against a different call, a different set of overrides
-/// or a different block environment reverts somewhere else, or not at all.
-struct Replay {
-    call: TransactionRequest,
-    overrides: StateOverride,
-    environment: BlockOverrides,
-}
-
-/// What one `eth_simulateV1` call returned, before any trace recovers a revert's error.
+/// What one simulated call came back with.
 enum CallOutcome {
     Success {
         amount_out: BigUint,
         gas_used: u64,
     },
-    /// The call reverted and carried an error the payload already named.
+    /// The call reverted, with the best reason available: the payload's own error, or the one the
+    /// trace recovered, or the node's message.
     Reverted {
         reason: String,
-    },
-    /// The call reverted with no usable payload. Replaying it under the tracer recovers the
-    /// error, so the inputs travel with the outcome.
-    RevertedUntraced {
-        message: String,
-        replay: Box<Replay>,
     },
     Failure(String),
 }
@@ -602,8 +586,12 @@ fn token_overrides(
 /// Runs against the same block and the same overrides as the simulation, so it reproduces the
 /// revert rather than a different one. Returns `None` when the node serves no `debug_traceCall`
 /// or the trace carries no reason, which leaves the caller the message it already has.
-async fn traced_revert_reason(provider: &RootProvider<Ethereum>, replay: Replay) -> Option<String> {
-    let Replay { call, overrides, environment } = replay;
+async fn traced_revert_reason(
+    provider: &RootProvider<Ethereum>,
+    call: TransactionRequest,
+    overrides: StateOverride,
+    environment: BlockOverrides,
+) -> Option<String> {
     let options = GethDebugTracingCallOptions::default()
         .with_tracing_options(
             GethDebugTracingOptions::default()
