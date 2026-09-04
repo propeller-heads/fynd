@@ -338,7 +338,7 @@ impl TokenGasPriceComputation {
     /// with the components the price depends on: every component on any candidate route
     /// between the two — the walk's component set, which pool edge pairs make the buy
     /// direction's candidates too — plus the chosen sell route's own, defensively. Fails as
-    /// [`MissingSellRoute`](FailedItemError::MissingSellRoute) carrying why: on a block where many
+    /// `MissingSellRoute` carrying why: on a block where many
     /// tokens fail at once, the distribution of reasons is the signal.
     ///
     /// Re-roots the pass's shared context at `token` behind a freshly pruned adjacency before

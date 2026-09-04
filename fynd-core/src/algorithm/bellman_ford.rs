@@ -240,7 +240,7 @@ impl BellmanFordAlgorithm {
 
     /// A context whose subgraph is everything within `walk_hops` of `token_in` — no destination
     /// prunes it. Having no destination, it cannot serve `find_single_route` until
-    /// [`reroot`](BellmanFordContext::reroot) gives it one.
+    /// `reroot` gives it one.
     ///
     /// `walk_hops` bounds the subgraph, not route length — routes stay bounded by the
     /// algorithm's own `max_hops`. A caller that re-roots the context at tokens away from
@@ -271,7 +271,7 @@ impl BellmanFordAlgorithm {
     /// graph, and holding the read guard through it would queue the feed's writer — and every
     /// quote's read behind that writer. The endpoints must be the pair the subgraph was walked
     /// with; the destination, when present, is carried for
-    /// [`find_single_route`](Self::find_single_route)'s readout.
+    /// `find_single_route`'s readout.
     ///
     /// Derived data starts empty; a caller that has token or spot prices sets the fields on the
     /// returned context.
@@ -348,7 +348,7 @@ impl BellmanFordAlgorithm {
     /// rather than one per destination. Deliberately not a [`Route`] per destination:
     /// `build_route` deep-clones each swap's component, tokens, and simulation state, and a
     /// caller pricing every reachable destination reads none of that. Build `ctx` with
-    /// [`build_context_from_source_token`](Self::build_context_from_source_token), so that no
+    /// `build_context_from_source_token`, so that no
     /// destination prunes its subgraph.
     ///
     /// Tokens the source token cannot reach, and those whose path cannot be reconstructed, are
@@ -912,7 +912,7 @@ impl BellmanFordAlgorithm {
         Self::get_subgraph_with_hop_map(graph, token_in, hops_to_token_out.as_ref(), max_hops)
     }
 
-    /// [`get_subgraph`](Self::get_subgraph) with the destination's hop map supplied by the
+    /// `get_subgraph` with the destination's hop map supplied by the
     /// caller, for walks that share one destination: the map costs a BFS over the graph, and a
     /// caller pruning many sources toward the same destination should pay it once.
     pub(crate) fn get_subgraph_with_hop_map<'a>(
