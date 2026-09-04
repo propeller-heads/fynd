@@ -147,6 +147,8 @@ jobs:
       - run: pnpm --dir clients/typescript --filter @kayibal/fynd-client run typecheck
       - run: pnpm --dir clients/typescript --filter @kayibal/fynd-client run lint
       - run: pnpm --dir clients/typescript --filter @kayibal/fynd-client run test
+      - name: Check published package shape (CJS + ESM + type resolution)
+        run: ./scripts/check-client-packaging.sh
 
   integration_tests:
     name: Integration Tests
