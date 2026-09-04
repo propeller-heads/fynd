@@ -512,7 +512,7 @@ mod tests {
         let mut store = DerivedData::new();
         store.set_token_prices(
             Default::default(),
-            vec![failed(&key_str, FailedItemError::NoSellRoute("no route".to_string()))],
+            vec![failed(&key_str, FailedItemError::MissingSellRoute("no route".to_string()))],
             1,
             true,
         );
@@ -633,7 +633,7 @@ mod tests {
         let mut store = DerivedData::new();
         store.set_token_prices(
             Default::default(),
-            vec![failed(&token_str, FailedItemError::NoSellRoute("no route".to_string()))],
+            vec![failed(&token_str, FailedItemError::MissingSellRoute("no route".to_string()))],
             1,
             true,
         );
