@@ -1,0 +1,185 @@
+{
+  "timestamp_unix": 1784132200,
+  "target_url": "http://bsc-fynd.staging-fynd.svc.cluster.local:3000",
+  "target_label": "bsc-2vcpu-1w-t3a",
+  "requests_file": "/requests/trades.json",
+  "requests_sha256": "bd2e9036ca26554c1c3c33c8279eecaafa85314d2c44c39ac6c80bb8ce73448a",
+  "encoding": false,
+  "timeout_ms": 5000,
+  "step_duration_secs": 60,
+  "slo": {
+    "p95_multiplier": 3.0,
+    "max_http_error_rate": 0.001,
+    "max_excess_unsolved_rate": 0.05
+  },
+  "baseline": {
+    "requests": 500,
+    "unsolved_rate": 0.018,
+    "round_trip": {
+      "min": 4,
+      "max": 511,
+      "mean": 37,
+      "median": 34,
+      "p95": 59,
+      "p99": 74,
+      "std_dev": 23.93762728425689
+    },
+    "solve_time": {
+      "min": 2,
+      "max": 510,
+      "mean": 36,
+      "median": 32,
+      "p95": 57,
+      "p99": 71,
+      "std_dev": 23.8878211647693
+    }
+  },
+  "steps": [
+    {
+      "target_rps": 5,
+      "achieved_rps": 5.01269883705387,
+      "requests_sent": 300,
+      "requests_succeeded": 300,
+      "orders_solved": 297,
+      "orders_unsolved": 3,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.01,
+      "round_trip": {
+        "min": 3,
+        "max": 153,
+        "mean": 39,
+        "median": 36,
+        "p95": 59,
+        "p99": 78,
+        "std_dev": 13.367871932360812
+      },
+      "solve_time": {
+        "min": 2,
+        "max": 151,
+        "mean": 37,
+        "median": 35,
+        "p95": 57,
+        "p99": 76,
+        "std_dev": 13.281691659323121
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 10,
+      "achieved_rps": 10.01117915005089,
+      "requests_sent": 600,
+      "requests_succeeded": 600,
+      "orders_solved": 593,
+      "orders_unsolved": 7,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.011666666666666667,
+      "round_trip": {
+        "min": 3,
+        "max": 126,
+        "mean": 36,
+        "median": 34,
+        "p95": 55,
+        "p99": 71,
+        "std_dev": 10.903745533836831
+      },
+      "solve_time": {
+        "min": 2,
+        "max": 125,
+        "mean": 34,
+        "median": 32,
+        "p95": 53,
+        "p99": 69,
+        "std_dev": 10.846427983442291
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 15,
+      "achieved_rps": 15.160703456640388,
+      "requests_sent": 900,
+      "requests_succeeded": 900,
+      "orders_solved": 890,
+      "orders_unsolved": 10,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.011111111111111112,
+      "round_trip": {
+        "min": 4,
+        "max": 505,
+        "mean": 49,
+        "median": 37,
+        "p95": 89,
+        "p99": 403,
+        "std_dev": 56.29833232185677
+      },
+      "solve_time": {
+        "min": 2,
+        "max": 502,
+        "mean": 47,
+        "median": 35,
+        "p95": 88,
+        "p99": 395,
+        "std_dev": 55.56849627061882
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 20,
+      "achieved_rps": 20.007669606682562,
+      "requests_sent": 1200,
+      "requests_succeeded": 1200,
+      "orders_solved": 1177,
+      "orders_unsolved": 23,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.019166666666666665,
+      "round_trip": {
+        "min": 3,
+        "max": 461,
+        "mean": 43,
+        "median": 35,
+        "p95": 82,
+        "p99": 271,
+        "std_dev": 42.02225600797748
+      },
+      "solve_time": {
+        "min": 2,
+        "max": 460,
+        "mean": 42,
+        "median": 33,
+        "p95": 80,
+        "p99": 269,
+        "std_dev": 41.45031161925485
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 25,
+      "achieved_rps": 25.003333777837046,
+      "requests_sent": 1500,
+      "requests_succeeded": 1500,
+      "orders_solved": 1481,
+      "orders_unsolved": 19,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.012666666666666666,
+      "round_trip": {
+        "min": 3,
+        "max": 713,
+        "mean": 97,
+        "median": 40,
+        "p95": 488,
+        "p99": 659,
+        "std_dev": 141.3808685784608
+      },
+      "solve_time": {
+        "min": 2,
+        "max": 712,
+        "mean": 95,
+        "median": 39,
+        "p95": 487,
+        "p99": 652,
+        "std_dev": 140.93435824288318
+      },
+      "passed": false
+    }
+  ],
+  "capacity_rps": 20
+}

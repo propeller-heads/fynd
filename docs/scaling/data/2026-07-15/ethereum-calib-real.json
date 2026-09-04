@@ -1,0 +1,156 @@
+{
+  "timestamp_unix": 1784077871,
+  "target_url": "http://ethereum-fynd.staging-fynd.svc.cluster.local:3000",
+  "target_label": "ethereum-2vcpu-1w-calib-real",
+  "requests_file": "/tmp/trades.json",
+  "requests_sha256": "7bec74375dd9b7445791110a6d15b89a6c045016d9b3b233018cb378d56ea8aa",
+  "encoding": false,
+  "timeout_ms": 5000,
+  "step_duration_secs": 60,
+  "slo": {
+    "p95_multiplier": 3.0,
+    "max_http_error_rate": 0.001,
+    "max_excess_unsolved_rate": 0.05
+  },
+  "baseline": {
+    "requests": 500,
+    "unsolved_rate": 0.322,
+    "round_trip": {
+      "min": 2,
+      "max": 203,
+      "mean": 43,
+      "median": 54,
+      "p95": 92,
+      "p99": 121,
+      "std_dev": 32.17349841095929
+    },
+    "solve_time": {
+      "min": 1,
+      "max": 202,
+      "mean": 42,
+      "median": 53,
+      "p95": 91,
+      "p99": 120,
+      "std_dev": 32.02630169095395
+    }
+  },
+  "steps": [
+    {
+      "target_rps": 5,
+      "achieved_rps": 5.0117776775422245,
+      "requests_sent": 300,
+      "requests_succeeded": 300,
+      "orders_solved": 209,
+      "orders_unsolved": 91,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.30333333333333334,
+      "round_trip": {
+        "min": 2,
+        "max": 241,
+        "mean": 50,
+        "median": 57,
+        "p95": 109,
+        "p99": 182,
+        "std_dev": 36.08762484102641
+      },
+      "solve_time": {
+        "min": 2,
+        "max": 239,
+        "mean": 49,
+        "median": 56,
+        "p95": 108,
+        "p99": 181,
+        "std_dev": 36.02142880749365
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 10,
+      "achieved_rps": 10.015356880550177,
+      "requests_sent": 600,
+      "requests_succeeded": 600,
+      "orders_solved": 426,
+      "orders_unsolved": 174,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.29,
+      "round_trip": {
+        "min": 2,
+        "max": 259,
+        "mean": 50,
+        "median": 56,
+        "p95": 107,
+        "p99": 164,
+        "std_dev": 35.85765841025689
+      },
+      "solve_time": {
+        "min": 1,
+        "max": 258,
+        "mean": 49,
+        "median": 55,
+        "p95": 106,
+        "p99": 163,
+        "std_dev": 35.646224671531954
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 15,
+      "achieved_rps": 15.137753557372086,
+      "requests_sent": 900,
+      "requests_succeeded": 900,
+      "orders_solved": 623,
+      "orders_unsolved": 277,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.30777777777777776,
+      "round_trip": {
+        "min": 2,
+        "max": 246,
+        "mean": 57,
+        "median": 57,
+        "p95": 142,
+        "p99": 201,
+        "std_dev": 43.471612704282215
+      },
+      "solve_time": {
+        "min": 1,
+        "max": 244,
+        "mean": 56,
+        "median": 56,
+        "p95": 141,
+        "p99": 200,
+        "std_dev": 43.232151101800255
+      },
+      "passed": true
+    },
+    {
+      "target_rps": 20,
+      "achieved_rps": 19.833727253194056,
+      "requests_sent": 1200,
+      "requests_succeeded": 1200,
+      "orders_solved": 846,
+      "orders_unsolved": 354,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.295,
+      "round_trip": {
+        "min": 2,
+        "max": 1588,
+        "mean": 504,
+        "median": 397,
+        "p95": 1310,
+        "p99": 1537,
+        "std_dev": 426.9896407798828
+      },
+      "solve_time": {
+        "min": 2,
+        "max": 1587,
+        "mean": 503,
+        "median": 394,
+        "p95": 1308,
+        "p99": 1534,
+        "std_dev": 426.78097720024965
+      },
+      "passed": false
+    }
+  ],
+  "capacity_rps": 15
+}
