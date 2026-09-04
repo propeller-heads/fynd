@@ -43,7 +43,8 @@ pub type ComponentDepths = FxHashMap<ComponentDepthKey, BigUint>;
 /// Key for token price lookups: token address.
 pub type TokenGasPriceKey = Address;
 
-/// Token prices map: token address -> it's mid-price relative to gas token.
+/// Token prices map: token address → its mid-price relative to the gas token, the mean of
+/// its buy and sell rates — a token's exit cost is already reflected in its price.
 pub type TokenGasPrices = FxHashMap<TokenGasPriceKey, Price>;
 
 /// Token price with path dependency tracking for incremental computation.

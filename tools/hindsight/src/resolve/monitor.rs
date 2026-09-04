@@ -689,7 +689,6 @@ async fn run_session<P: Provider>(
 /// Snapshot the solver's current token prices as `Prices` (token native-units per wei of
 /// the gas token), anchored by `registry`'s USD anchor tokens. Empty until the first
 /// derived-data computation completes; tokens with an unconvertible price are skipped.
-/// The prices are buy+sell means, so a token's exit cost is already reflected in its price.
 async fn snapshot_prices(solver: &Solver, registry: &Registry) -> Prices {
     let mut prices = Prices::new(registry);
     let derived = solver.derived_data();
