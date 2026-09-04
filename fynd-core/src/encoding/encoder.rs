@@ -34,13 +34,6 @@ use crate::{
 /// Canonical Permit2 contract address — identical on all EVM chains.
 pub const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 
-/// Mirror of `TychoRouter.MAX_SLIPPAGE_TOLERANCE_BPS`: the router rejects calldata whose
-/// `minAmountOut` is more than this many basis points below `expectedAmountOut`.
-const MAX_SLIPPAGE_TOLERANCE_BPS: u64 = 2_000;
-
-/// Basis-point denominator used by the router's slippage guardrail.
-const BPS_DENOMINATOR: u64 = 10_000;
-
 /// Encodes solution into tycho compatible transactions.
 ///
 /// # Fields
@@ -80,8 +73,8 @@ impl TryFrom<&OrderQuote> for Solution {
 
 /// Maps a successful quote onto an encodable solution with an explicit `min_amount_out`.
 ///
-/// `min_amount_out` is the router's revert guardrail: it rejects a value above
-/// `expected_amount_out` (the quoted output) or more than `MAX_SLIPPAGE_TOLERANCE_BPS` below it.
+/// `min_amount_out` is the router's revert guardrail: it must be non-zero, and the router rejects
+/// a value above `expected_amount_out` (the quoted output).
 fn solution_from_quote(
     quote: &OrderQuote,
     min_amount_out: BigUint,
@@ -294,10 +287,7 @@ impl Encoder {
                 slippage,
                 fee_rates,
             )?;
-            Self::check_slippage_guardrail(
-                biguint_to_u256(quote.amount_out()),
-                biguint_to_u256(fee_breakdown.min_amount_received()),
-            )?;
+            Self::check_min_amount_out(fee_breakdown.min_amount_received())?;
 
             let solution = solution_from_quote(
                 quote,
@@ -661,21 +651,16 @@ impl Encoder {
 
     /// Rejects calldata the router would revert on.
     ///
-    /// `TychoRouter` reverts with `TychoRouter__InvalidMinAmountOut` when `minAmountOut` is above
-    /// `expectedAmountOut` or more than `MAX_SLIPPAGE_TOLERANCE_BPS` below it, so fees plus
-    /// slippage may not eat more than 20% of the quoted output.
-    fn check_slippage_guardrail(
-        expected_amount_out: U256,
-        min_amount_out: U256,
-    ) -> Result<(), EncodingError> {
-        let floor = expected_amount_out * U256::from(BPS_DENOMINATOR - MAX_SLIPPAGE_TOLERANCE_BPS) /
-            U256::from(BPS_DENOMINATOR);
-        if min_amount_out > expected_amount_out || min_amount_out < floor {
-            return Err(EncodingError::FatalError(format!(
-                "minimum amount out {min_amount_out} is outside the router's accepted range \
-                 [{floor}, {expected_amount_out}] for the quoted output; reduce slippage or the \
-                 client fee"
-            )));
+    /// `TychoRouter` reverts with `TychoRouter__InvalidMinAmountOut` when `minAmountOut` is zero,
+    /// which happens once fees plus slippage eat the whole quoted output. The router sets no lower
+    /// bound beyond that, so any positive floor is accepted.
+    fn check_min_amount_out(min_amount_out: &BigUint) -> Result<(), EncodingError> {
+        if *min_amount_out == BigUint::ZERO {
+            return Err(EncodingError::FatalError(
+                "minimum amount out is zero; the router rejects it. Reduce slippage or the client \
+                 fee"
+                .to_string(),
+            ));
         }
         Ok(())
     }
@@ -1287,20 +1272,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encode_rejects_slippage_beyond_router_guardrail() {
+    async fn test_encode_with_slippage_above_20_percent() {
         let encoder = real_encoder();
         let quote = make_order_quote(1_000_000_000)
             .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
 
-        // The router accepts a minAmountOut at most 20% below the quoted output.
-        let err = encoder
+        let result = encoder
             .encode(vec![quote], EncodingOptions::new(0.25))
             .await
-            .expect_err("25% slippage must be rejected before it reaches the router");
+            .expect("the router no longer caps how far minAmountOut sits below the quote");
+
+        assert!(result[0].transaction().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_encode_with_zero_min_amount_out() {
+        let encoder = real_encoder();
+        let quote = make_order_quote(1_000_000_000)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+
+        let err = encoder
+            .encode(vec![quote], EncodingOptions::new(1.0))
+            .await
+            .expect_err("100% slippage leaves nothing for the router's floor");
 
         assert!(
             err.to_string()
-                .contains("outside the router's accepted range"),
+                .contains("minimum amount out is zero"),
             "got {err:?}"
         );
     }
