@@ -1306,7 +1306,7 @@ mod tests {
     async fn test_spot_price_failure_cascade() {
         // Real fynd flow: a full recompute with no sim state makes spot prices fail outright.
         // Pool depths depend on them and fail with them. Token prices read no derived data,
-        // so they still complete — every token unpriced, reported as failed items.
+        // so they still complete.
         let (manager, _event_rx) = ComputationManager::new(
             ComputationManagerConfig::new(),
             market_with_component_no_sim_state(),
