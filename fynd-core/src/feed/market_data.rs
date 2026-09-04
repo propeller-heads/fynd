@@ -260,6 +260,10 @@ pub struct MarketDataView<'a> {
 
 /// Builds the gas price a view reports when its handle overrides the price, keeping the block
 /// provenance of `base` so staleness checks still read the real block.
+///
+/// The shadow is a legacy price also when `base` is an EIP-1559 one. An override is one
+/// effective price per gas unit: there is no base fee and priority fee split to keep, and every
+/// consumer reads `effective_gas_price`, which is the same for both variants.
 fn shadow_gas_price(base: &BlockGasPrice, wei: &BigUint) -> BlockGasPrice {
     BlockGasPrice { pricing: GasPrice::Legacy { gas_price: wei.clone() }, ..base.clone() }
 }
