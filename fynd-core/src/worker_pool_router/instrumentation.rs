@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use metrics::counter;
 use num_traits::ToPrimitive;
 use tracing::{trace, Level};
 
@@ -21,7 +22,7 @@ use super::{
     is_rankable, Order, OrderQuote, OrderResponses, OrderSide, QuoteOptions, QuoteStatus,
     SolveError, WorkerPoolQuote, BPS_DENOMINATOR,
 };
-use crate::{simulation::deviation::deviation_bps, SimulationResult};
+use crate::{simulation::deviation::deviation_bps, Route, SimulationResult};
 
 /// Target for the per-quote comparison log. Emitted at TRACE so a plain `RUST_LOG=info` leaves
 /// it off; a deployment that wants it sets `RUST_LOG=...,fynd::quote_comparison=trace`.
@@ -246,8 +247,13 @@ fn improvement_bps(baseline_net: Option<f64>, net: Option<f64>) -> Option<f64> {
 /// `RUST_LOG=...,fynd::winning_protocols=trace`.
 const WINNING_PROTOCOLS_TARGET: &str = "fynd::winning_protocols";
 
-/// Logs the protocols the winning quote swaps on, how many swaps it makes on each, and how the
-/// quote simulated when the request asked for it.
+/// Hundredths of a basis point, the unit `winning_quote_shortfall_centibps_sum` accumulates in.
+const SHORTFALL_SCALE: f64 = 100.0;
+
+/// Counts the protocols the winning quote swaps on and logs them, with how the quote simulated.
+///
+/// The metrics are recorded whatever the log level: the log is off outside dev, and gating the
+/// counters behind it would leave the per-protocol panels empty everywhere else.
 ///
 /// The protocol counts are a JSON object; the rest of the line is `key=value` text. The counts are
 /// swaps, not distinct pools: a split route that crosses two Uniswap V2 pools reports 2, which is
@@ -258,10 +264,7 @@ const WINNING_PROTOCOLS_TARGET: &str = "fynd::winning_protocols";
 /// label per protocol, which counts one route several times.
 ///
 /// Only a successful quote with a route gets a line, so the log holds one line per returned route.
-pub(super) fn log_winning_protocols(quote: &OrderQuote) {
-    if !tracing::enabled!(target: WINNING_PROTOCOLS_TARGET, Level::TRACE) {
-        return;
-    }
+pub(super) fn record_winning_protocols(quote: &OrderQuote) {
     if quote.status() != QuoteStatus::Success {
         return;
     }
@@ -279,6 +282,72 @@ pub(super) fn log_winning_protocols(quote: &OrderQuote) {
     }
 
     let (outcome, deviation) = simulation_fields(quote);
+    count_swaps_per_protocol(&swaps_per_protocol, outcome);
+    if let Some(bps) = simulated_deviation_bps(quote) {
+        record_deviation_per_protocol(&swaps_per_protocol, bps);
+    }
+    log_winning_protocols(quote, route, &swaps_per_protocol, outcome, &deviation);
+}
+
+/// Counts the swaps the winning routes make on each protocol, by how the quote simulated.
+///
+/// The `simulated` label answers per protocol what the outcome counter answers overall, and
+/// carries `none` for a quote that asked for no simulation so the three shares still sum to the
+/// protocol's total. A route counts once per protocol it crosses, which is what makes the shares
+/// add up to the swaps executed rather than to the quotes served.
+fn count_swaps_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, outcome: &'static str) {
+    let simulated = if outcome.is_empty() { "none" } else { outcome };
+    for (protocol, swaps) in swaps_per_protocol {
+        counter!(
+            "winning_quote_swaps_total",
+            "protocol" => protocol.to_string(),
+            "simulated" => simulated
+        )
+        .increment(*swaps as u64);
+    }
+}
+
+/// Totals the shortfall of the routes that crossed each protocol, and how many did.
+///
+/// A sum and a count rather than a histogram: the mean is what the per-protocol view reports, and
+/// bucketing it would multiply the deviation histogram's boundaries across every protocol. The
+/// figure is one per quote, so a route crossing two protocols reports the same shortfall to both.
+///
+/// The sum is in hundredths of a basis point because a counter only takes whole numbers, and a
+/// shortfall under one basis point is the ordinary case: rounding to whole bps would report most
+/// routes as perfect. Divide the two by `SHORTFALL_SCALE` to read a mean in bps.
+fn record_deviation_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, bps: f64) {
+    // A deviation is negative when the simulation returned less than the quote promised, which is
+    // every case the router's positive-slippage capture allows. It is recorded as a positive
+    // shortfall so the counter never has to take a negative delta.
+    let shortfall = (-bps * SHORTFALL_SCALE)
+        .max(0.0)
+        .round() as u64;
+    for protocol in swaps_per_protocol.keys() {
+        counter!("winning_quote_shortfall_centibps_sum", "protocol" => protocol.to_string())
+            .increment(shortfall);
+        counter!("winning_quote_shortfall_count", "protocol" => protocol.to_string()).increment(1);
+    }
+}
+
+/// The deviation of a quote that simulated successfully, if it has one.
+fn simulated_deviation_bps(quote: &OrderQuote) -> Option<f64> {
+    match quote.simulation_result()? {
+        SimulationResult::Success { amount_out, .. } => deviation_bps(quote, amount_out),
+        SimulationResult::Failure { .. } => None,
+    }
+}
+
+fn log_winning_protocols(
+    quote: &OrderQuote,
+    route: &Route,
+    swaps_per_protocol: &BTreeMap<&str, usize>,
+    outcome: &'static str,
+    deviation: &str,
+) {
+    if !tracing::enabled!(target: WINNING_PROTOCOLS_TARGET, Level::TRACE) {
+        return;
+    }
     trace!(
         target: WINNING_PROTOCOLS_TARGET,
         parent: None,
@@ -291,7 +360,7 @@ pub(super) fn log_winning_protocols(quote: &OrderQuote) {
         route.swaps().len(),
         outcome,
         deviation,
-        serde_json::to_string(&swaps_per_protocol).unwrap_or_default(),
+        serde_json::to_string(swaps_per_protocol).unwrap_or_default(),
     );
 }
 
