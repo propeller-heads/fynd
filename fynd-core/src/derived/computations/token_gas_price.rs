@@ -597,16 +597,29 @@ mod tests {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
+        // A fee-free symmetric pool buys and sells back at the same rate, so the mean is that
+        // rate exactly.
         let prices =
             prices_for(&eth, vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]).await;
 
-        // The gas token is 1:1 with itself. A fee-free symmetric pool buys and sells back at the
-        // same rate, so the mean is that rate exactly.
+        assert!((ratio(&prices[&usdc.address]) - 2000.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_gas_token_priced_one_to_one_at_the_probe_amount() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+
+        let prices =
+            prices_for(&eth, vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]).await;
+
+        // The gas token needs no route: its entry is the probe amount over itself, not merely
+        // any equal pair.
         let eth_price = prices
             .get(&eth.address)
             .expect("gas token should be priced");
-        assert_eq!(eth_price.numerator, eth_price.denominator);
-        assert!((ratio(&prices[&usdc.address]) - 2000.0).abs() < 1e-6);
+        assert_eq!(eth_price.numerator, BigUint::from(PROBE_AMOUNT));
+        assert_eq!(eth_price.denominator, BigUint::from(PROBE_AMOUNT));
     }
 
     #[tokio::test]
