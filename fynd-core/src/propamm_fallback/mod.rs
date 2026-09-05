@@ -35,7 +35,8 @@ pub fn has_pamm_leg(route: &Route) -> bool {
     })
 }
 
-/// Whether `component` is a pAMM: a venue the router executes through a Uniswap V3 fallback.
+/// Whether `component` is a pAMM: a proprietary AMM that publishes a quote ladder per block, and
+/// that the PropAMMRouter executes through a Uniswap V3 fallback pool.
 pub fn is_pamm(
     component: &tycho_simulation::tycho_common::models::protocol::ProtocolComponent,
 ) -> bool {
@@ -44,20 +45,20 @@ pub fn is_pamm(
         .starts_with(PROPAMM_FALLBACK_PREFIX)
 }
 
-/// Whether `component` is a pAMM this market cannot route through.
+/// Whether `component` is a pAMM this market does not back.
 ///
-/// The one rule for admitting a pAMM: a `propammfallback:` leg only reaches the chain through its
-/// fallback, so a component whose fee tier has no pool in this market can never produce a quotable
-/// route. Every caller asks this and nothing decides it a second way.
+/// A pAMM is backed when the market holds the Uniswap V3 pool it falls back to, at the tier the
+/// router resolves for its pair. A `propammfallback:` leg only reaches the chain through that
+/// pool, so an unbacked pAMM can never produce a quotable route.
 ///
 /// `fee_tiers` is `None` before [`FeeTierFetcher`](fee_tier_fetcher::FeeTierFetcher) reads the
-/// router. There is no tier to look up then, and guessing one prices the wrong pool, so no pAMM is
-/// backed until they arrive.
+/// router. There is no tier to look up then, and guessing one prices the wrong pool, so this
+/// returns `true` for every pAMM until the tiers arrive.
 ///
 /// Returns `false` for any other protocol system, and for a pAMM that does not name exactly two
 /// tokens once the tiers are known: the fallback resolves per leg from the swap's own pair, so a
 /// wider component is left to [`fallback_amount_out`].
-pub fn lacks_fallback_pool(
+pub fn is_unbacked_pamm(
     component: &tycho_simulation::tycho_common::models::protocol::ProtocolComponent,
     fee_tiers: Option<&FeeTiers>,
     index: &FallbackPoolIndex,
@@ -189,8 +190,7 @@ pub enum FallbackAmountOut {
 /// Mirrors the router's `resolvedFee`: the per-pair override if set, else `fallbackFee`. Both are
 /// settable on chain without an upgrade, so this is read from chain rather than hardcoded.
 ///
-/// Compared for equality so a worker can tell a refresh that changed a tier from one that did not:
-/// a changed tier moves which Uniswap V3 pool backs a pAMM, and the graph has to be rebuilt for it.
+/// Compared for equality to tell a refresh that changed a tier from one that did not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeeTiers {
     default_tier: u32,
@@ -229,9 +229,9 @@ impl FeeTiers {
 
 /// Shared with the task that reads the tiers from the router.
 ///
-/// Empty until the first successful read. A worker that finds it empty drops the pAMM route rather
-/// than guess a tier: the wrong tier prices the wrong pool, and a floor derived from the wrong
-/// pool is the revert this whole path exists to prevent.
+/// Empty until the first successful read. A worker that finds it empty admits no pAMM to its graph
+/// and drops any pAMM route it is handed, rather than guess a tier: the wrong tier prices the wrong
+/// pool, and a floor derived from the wrong pool is the revert this whole path exists to prevent.
 #[derive(Debug, Clone, Default)]
 pub struct SharedFeeTiers(Arc<RwLock<Option<FeeTiers>>>);
 
@@ -718,7 +718,7 @@ mod tests {
     /// The pair-level rule the graph filter uses: a pAMM is only admitted when this market holds
     /// the Uniswap V3 pool its resolved fee tier names.
     #[test]
-    fn test_lacks_fallback_pool_follows_the_resolved_tier() {
+    fn test_is_unbacked_pamm_follows_the_resolved_tier() {
         let market = market_with_fallback_pool(DEFAULT_TIER);
         let view = market
             .try_read_blocking()
@@ -730,14 +730,14 @@ mod tests {
             &[util::token(1, "WETH"), util::token(2, "USDC")],
         );
 
-        assert!(!lacks_fallback_pool(&pamm, Some(&FeeTiers::new(DEFAULT_TIER)), &index));
+        assert!(!is_unbacked_pamm(&pamm, Some(&FeeTiers::new(DEFAULT_TIER)), &index));
         // Same pool, a tier the router does not resolve to: nothing to fall back on.
-        assert!(lacks_fallback_pool(&pamm, Some(&FeeTiers::new(DEFAULT_TIER + 1)), &index));
+        assert!(is_unbacked_pamm(&pamm, Some(&FeeTiers::new(DEFAULT_TIER + 1)), &index));
     }
 
     /// Only `propammfallback:` components are judged. Everything else routes on its own terms.
     #[test]
-    fn test_lacks_fallback_pool_ignores_other_protocols() {
+    fn test_is_unbacked_pamm_ignores_other_protocols() {
         let market = market_with_fallback_pool(DEFAULT_TIER);
         let view = market
             .try_read_blocking()
@@ -749,7 +749,7 @@ mod tests {
             &[util::token(3, "DAI"), util::token(4, "WBTC")],
         );
 
-        assert!(!lacks_fallback_pool(&uniswap, Some(&FeeTiers::new(DEFAULT_TIER)), &index));
+        assert!(!is_unbacked_pamm(&uniswap, Some(&FeeTiers::new(DEFAULT_TIER)), &index));
     }
 
     /// A split route prices through `replay_route`, so both legs of the split are counted.
