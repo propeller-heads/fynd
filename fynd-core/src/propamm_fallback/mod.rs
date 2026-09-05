@@ -10,6 +10,7 @@
 //! the user accepted, so a fallback below that floor reverts the route anyway — and lowering the
 //! floor to fit would pay the user less than they accepted. Such a route is not quoted.
 
+pub(crate) mod admission;
 pub mod fee_tier_fetcher;
 
 use std::sync::{Arc, RwLock};
