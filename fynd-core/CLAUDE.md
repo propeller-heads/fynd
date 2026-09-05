@@ -31,7 +31,7 @@ pub trait Algorithm: Send + Sync {
     type GraphType: Send + Sync;
     type GraphManager: GraphManager<Self::GraphType> + Default;
     fn name(&self) -> &str;
-    async fn find_best_route(&self, graph: &Self::GraphType, market: MarketData, label: Option<StateLabel>, derived: Option<SharedDerivedDataRef>, order: &Order) -> Result<RouteResult, AlgorithmError>;
+    async fn find_best_route(&self, request: SolveRequest<'_, Self::GraphType>) -> Result<RouteResult, AlgorithmError>;
     fn computation_requirements(&self) -> ComputationRequirements;
     fn timeout(&self) -> Duration;
 }

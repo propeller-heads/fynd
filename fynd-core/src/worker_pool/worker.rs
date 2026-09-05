@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
 
 use crate::{
-    algorithm::Algorithm,
+    algorithm::{request::SolveRequest, Algorithm},
     derived::{
         computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
@@ -357,11 +357,9 @@ where
         let result = self
             .algorithm
             .find_best_route(
-                graph,
-                self.market_data.clone(),
-                params.state_label().cloned(),
-                Some(self.derived_data.clone()),
-                order,
+                SolveRequest::new(graph, self.market_data.clone(), order)
+                    .with_label(params.state_label().cloned())
+                    .with_derived(Some(self.derived_data.clone())),
             )
             .await;
 
@@ -866,11 +864,7 @@ mod tests {
 
         async fn find_best_route(
             &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
+            _request: SolveRequest<'_, Self::GraphType>,
         ) -> Result<crate::types::RouteResult, crate::AlgorithmError> {
             Err(crate::AlgorithmError::Other("not implemented".to_string()))
         }
@@ -899,11 +893,7 @@ mod tests {
 
         async fn find_best_route(
             &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
+            _request: SolveRequest<'_, Self::GraphType>,
         ) -> Result<RouteResult, AlgorithmError> {
             let token_a = token(0x01, "A");
             let token_b = token(0x02, "B");
@@ -985,11 +975,7 @@ mod tests {
 
         async fn find_best_route(
             &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
+            _request: SolveRequest<'_, Self::GraphType>,
         ) -> Result<RouteResult, AlgorithmError> {
             let token_a = token(0x01, "A");
             let token_b = token(0x02, "B");

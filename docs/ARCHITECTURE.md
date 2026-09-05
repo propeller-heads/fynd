@@ -186,7 +186,7 @@ Each worker:
 1. Initializes a graph from market topology
 2. Runs a prioritized `select!` loop: shutdown > market events > derived events > solve tasks
 3. Maintains a `ReadinessTracker` for derived data requirements
-4. Calls the algorithm's `find_best_route` with the local graph and shared market data
+4. Calls the algorithm's `find_best_route` with a `SolveRequest`: the local graph, the shared market data, the order, and a `RouteFilter` saying what the caller will accept
 
 ***
 

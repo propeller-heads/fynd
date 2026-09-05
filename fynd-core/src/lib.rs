@@ -61,7 +61,7 @@ mod tests;
 // Re-export commonly used types for convenience
 pub use algorithm::{
     registry::AlgorithmRegistry, Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm,
-    NoPathReason, PathFrankWolfeAlgorithm,
+    NoPathReason, PathFrankWolfeAlgorithm, SolveRequest,
 };
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;

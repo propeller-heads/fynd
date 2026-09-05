@@ -28,6 +28,8 @@ pub(crate) mod path_scoring;
 /// Enumerating and simulating routes between two tokens.
 pub mod paths;
 pub mod registry;
+/// What an algorithm is given to solve one order.
+pub mod request;
 pub(crate) mod sim_guard;
 pub mod sim_meter;
 /// Shared machinery for algorithms that divide an order across several paths.
@@ -47,15 +49,13 @@ pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 pub use path_frank_wolfe::PathFrankWolfeAlgorithm;
 pub use registry::{AlgorithmRegistry, RegisterAlgorithmError};
+pub use request::SolveRequest;
 use rustc_hash::FxHashSet;
 use tycho_simulation::tycho_core::models::Address;
 pub use water_fill::WaterFillAlgorithm;
 
 use crate::{
-    derived::{computation::ComputationRequirements, SharedDerivedDataRef},
-    feed::market_data::{MarketData, StateLabel},
-    graph::GraphManager,
-    types::{quote::Order, RouteResult},
+    derived::computation::ComputationRequirements, graph::GraphManager, types::RouteResult,
 };
 
 /// Configuration for an Algorithm instance.
@@ -197,17 +197,14 @@ pub trait Algorithm: Send + Sync {
     /// Returns the algorithm's name.
     fn name(&self) -> &str;
 
-    /// Finds the best route for the given order.
+    /// Finds the best route for the order the request carries.
     ///
-    /// # Arguments
+    /// [`SolveRequest`] holds the graph, the market, the order, the overlay to read state through,
+    /// the derived data, and what the caller will accept in a route. It is `#[non_exhaustive]`, so
+    /// a later addition does not break an algorithm outside this crate.
     ///
-    /// * `graph` - The algorithm's preferred graph type (e.g., petgraph::Graph)
-    /// * `market` - Shared reference to market data for state lookups (algorithms acquire their own
-    ///   locks)
-    /// * `label` - Optional overlay label; when `Some`, the algorithm reads market state through
-    ///   the named overlay so per-request component overrides are applied during solving
-    /// * `derived` - Optional shared reference to derived data (token prices, etc.)
-    /// * `order` - The order to solve
+    /// Honour [`SolveRequest::filter`]. Nothing enforces it, so an algorithm that ignores it
+    /// returns routes the caller asked not to have.
     ///
     /// # Returns
     ///
@@ -215,11 +212,7 @@ pub trait Algorithm: Send + Sync {
     /// found.
     async fn find_best_route(
         &self,
-        graph: &Self::GraphType,
-        market: MarketData,
-        label: Option<StateLabel>,
-        derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError>;
 
     /// Returns the derived data computation requirements for this algorithm.

@@ -19,12 +19,11 @@
 use std::{env, str::FromStr, time::Duration};
 
 use fynd_core::{
-    derived::SharedDerivedDataRef,
-    feed::market_data::{MarketData, StateLabel},
     graph::{PetgraphStableDiGraphManager, StableDiGraph},
     types::RouteResult,
     Algorithm, AlgorithmError, AlgorithmRegistry, ComputationRequirements, EncodingOptions,
-    FyndBuilder, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, Swap,
+    FyndBuilder, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, SolveRequest,
+    Swap,
 };
 use num_bigint::{BigInt, BigUint};
 use rustc_hash::FxHashMap;
@@ -63,18 +62,21 @@ impl Algorithm for DirectComponentAlgorithm {
 
     async fn find_best_route(
         &self,
-        graph: &Self::GraphType,
-        market: MarketData,
-        label: Option<StateLabel>,
-        _derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
+        // Everything a solve reads arrives on the request. Honour `request.filter()` if your
+        // algorithm can: nothing enforces it, and a caller that excluded a pool expects it left
+        // alone. This one routes through a single component, so it checks the filter once.
+        let graph = request.graph();
+        let order = request.order();
+        let label = request.label().cloned();
         let market = match label.as_ref() {
-            Some(l) => market
+            Some(l) => request
+                .market()
                 .read_labeled(l)
                 .await
                 .map_err(|e| AlgorithmError::Other(e.to_string()))?,
-            None => market.read().await,
+            None => request.market().read().await,
         };
 
         let gas_price = market

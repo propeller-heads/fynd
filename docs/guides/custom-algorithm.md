@@ -11,7 +11,7 @@ Fynd exposes an `Algorithm` trait that lets you plug in custom routing logic wit
 The trait has four methods:
 
 * `name()` — a string identifier used in config and logs
-* `find_best_route()` — given a routing graph and an order, return the best route. Call `Route::validate()` on each candidate and skip invalid ones (disconnected swaps, repeated tokens, malformed splits): the solver worker rejects an invalid route, which drops the whole solution for that worker pool, so prefer the next-best valid route instead
+* `find_best_route()` — given a [`SolveRequest`], return the best route. The request carries the graph, the market, the order, the overlay to read state through, the derived data, and a `RouteFilter` saying what the caller will accept in a route — honour `request.filter()`. It is `#[non_exhaustive]`, so later additions do not break your algorithm. Call `Route::validate()` on each candidate and skip invalid ones (disconnected swaps, repeated tokens, malformed splits): the solver worker rejects an invalid route, which drops the whole solution for that worker pool, so prefer the next-best valid route instead
 * `computation_requirements()` — declares which derived data the algorithm needs (spot prices, depths, etc.)
 * `timeout()` — per-order solve deadline
 
@@ -50,18 +50,17 @@ impl Algorithm for DirectComponentAlgorithm {
 
     async fn find_best_route(
         &self,
-        graph: &Self::GraphType,
-        market: MarketData,
-        label: Option<StateLabel>,
-        _derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let market = match label.as_ref() {
-            Some(l) => market
+        let graph = request.graph();
+        let order = request.order();
+        let market = match request.label() {
+            Some(l) => request
+                .market()
                 .read_labeled(l)
                 .await
                 .map_err(|e| AlgorithmError::Other(e.to_string()))?,
-            None => market.read().await,
+            None => request.market().read().await,
         };
 
         let gas_price = market

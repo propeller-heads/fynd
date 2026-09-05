@@ -73,6 +73,62 @@ impl QuoteRequest {
     }
 }
 
+/// What the caller will accept in a route.
+///
+/// Today it excludes: pools by id, whole protocol systems, and tokens a route must not pass
+/// through. It is the home for anything else a caller asks of a route, so a later rule that
+/// requires something of one belongs here too.
+///
+/// Empty for most quotes. An algorithm is expected to honour it; nothing enforces it, so one that
+/// ignores it returns routes the caller asked not to have.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteFilter {
+    components: FxHashSet<ComponentId>,
+    protocols: FxHashSet<String>,
+    tokens: FxHashSet<Address>,
+}
+
+impl RouteFilter {
+    /// Excludes these pools, by component id.
+    #[must_use]
+    pub fn with_components(mut self, components: impl IntoIterator<Item = ComponentId>) -> Self {
+        self.components.extend(components);
+        self
+    }
+
+    /// Excludes every pool of these protocol systems.
+    #[must_use]
+    pub fn with_protocols(mut self, protocols: impl IntoIterator<Item = String>) -> Self {
+        self.protocols.extend(protocols);
+        self
+    }
+
+    /// Excludes routes that pass through these tokens.
+    #[must_use]
+    pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.tokens.extend(tokens);
+        self
+    }
+
+    /// Whether nothing is excluded, so a caller can skip the checks.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.components.is_empty() && self.protocols.is_empty() && self.tokens.is_empty()
+    }
+
+    /// Whether this pool is excluded, by its component id or by its protocol system.
+    #[must_use]
+    pub fn excludes_pool(&self, component_id: &str, protocol: &str) -> bool {
+        self.components.contains(component_id) || self.protocols.contains(protocol)
+    }
+
+    /// Whether routes through this token are excluded.
+    #[must_use]
+    pub fn excludes_token(&self, token: &Address) -> bool {
+        self.tokens.contains(token)
+    }
+}
+
 /// Options to customize the solving behavior.
 #[must_use]
 #[serde_as]

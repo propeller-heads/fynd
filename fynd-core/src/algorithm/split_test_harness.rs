@@ -24,6 +24,7 @@ use crate::{
 use crate::{
     algorithm::{
         most_liquid::DepthAndPrice,
+        request::SolveRequest,
         test_utils::{component, token_with_decimals, ConstantProductSim},
         Algorithm,
     },
@@ -402,7 +403,9 @@ where
     let analytical_optimum = scenario.analytical_optimum.clone();
 
     let Ok(route_result) = algo
-        .find_best_route(graph_manager.graph(), market, None, Some(derived), &order)
+        .find_best_route(
+            SolveRequest::new(graph_manager.graph(), market, &order).with_derived(Some(derived)),
+        )
         .await
     else {
         return ScenarioResult {

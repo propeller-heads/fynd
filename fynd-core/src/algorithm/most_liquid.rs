@@ -31,13 +31,14 @@ use crate::{
             PoolQuote,
         },
         paths,
+        request::SolveRequest,
         sim_guard::GuardedProtocolSim,
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
     },
-    derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
+    derived::{computation::ComputationRequirements, types::TokenGasPrices},
     feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{GraphQueryFilter, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES},
-    types::{ComponentId, Order, Route, RouteResult, Swap},
+    types::{ComponentId, Route, RouteResult, Swap},
     AlgorithmError,
 };
 
@@ -712,15 +713,16 @@ impl Algorithm for MostLiquidAlgorithm {
     }
 
     // TODO: Consider adding token pair symbols to the span for easier interpretation
-    #[instrument(level = "debug", skip_all, fields(order_id = %order.id()))]
+    #[instrument(level = "debug", skip_all, fields(order_id = %request.order().id()))]
     async fn find_best_route(
         &self,
-        graph: &Self::GraphType,
-        market: MarketData,
-        label: Option<StateLabel>,
-        derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
+        let graph = request.graph();
+        let market = request.market().clone();
+        let label = request.label().cloned();
+        let derived = request.derived().cloned();
+        let order = request.order();
         let start = Instant::now();
 
         // Exact-out isn't supported yet
@@ -822,7 +824,7 @@ mod tests {
         derived::{
             computation::{FailedItem, FailedItemError},
             types::TokenGasPrices,
-            DerivedData,
+            DerivedData, SharedDerivedDataRef,
         },
         graph::GraphManager,
         types::OrderSide,
@@ -1124,7 +1126,7 @@ mod tests {
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1164,7 +1166,9 @@ mod tests {
         let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, Some(derived), &order)
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &order).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
 
@@ -1192,7 +1196,7 @@ mod tests {
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
         assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
     }
@@ -1215,7 +1219,7 @@ mod tests {
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1291,7 +1295,7 @@ mod tests {
         let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1328,7 +1332,7 @@ mod tests {
         let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
 
         assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
@@ -1399,7 +1403,7 @@ mod tests {
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
         let market = wrap_market(market);
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1451,7 +1455,7 @@ mod tests {
         let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .expect("an unranked route is still a route");
 
@@ -1494,7 +1498,9 @@ mod tests {
 
         // Route should still be returned, but with negative net_amount_out
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, Some(derived), &order)
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &order).with_derived(Some(derived)),
+            )
             .await
             .expect("should return route even with negative net_amount_out");
 
@@ -1524,7 +1530,7 @@ mod tests {
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell); // More than 1000 wei liquidity
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
         assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
     }
@@ -1567,7 +1573,7 @@ mod tests {
         let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
 
         // Should get DataNotFound for gas price, not InsufficientLiquidity
@@ -1597,7 +1603,7 @@ mod tests {
         let order = order(&token_a, &token_a, 100, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1641,7 +1647,7 @@ mod tests {
         let order = order(&token_a, &token_a, 100, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
 
         assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
@@ -1675,7 +1681,9 @@ mod tests {
         let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, Some(derived), &order)
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &order).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
 
@@ -1706,7 +1714,7 @@ mod tests {
         let order = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })),
@@ -1739,7 +1747,7 @@ mod tests {
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
 
         // With 0ms timeout, we either get:
@@ -1823,7 +1831,7 @@ mod tests {
         .unwrap();
         let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1873,7 +1881,7 @@ mod tests {
         .unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1903,7 +1911,7 @@ mod tests {
         .unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 

@@ -29,8 +29,8 @@ use super::{
     Algorithm, AlgorithmConfig, AlgorithmError, BellmanFordAlgorithm,
 };
 use crate::{
-    derived::{computation::ComputationRequirements, SharedDerivedDataRef},
-    feed::market_data::{MarketData, StateLabel},
+    algorithm::request::SolveRequest,
+    derived::computation::ComputationRequirements,
     graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
     types::{quote::Order, OrderSide, Route, RouteResult},
 };
@@ -672,12 +672,13 @@ impl Algorithm for PathFrankWolfeAlgorithm {
 
     async fn find_best_route(
         &self,
-        graph: &Self::GraphType,
-        market: MarketData,
-        label: Option<StateLabel>,
-        derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
+        let graph = request.graph();
+        let market = request.market().clone();
+        let label = request.label().cloned();
+        let derived = request.derived().cloned();
+        let order = request.order();
         let start = Instant::now();
         // This solve runs through the shared split code, which meters every swap it makes. An
         // algorithm that meters has to bracket its solve, or the counts pile up unread on the
@@ -748,6 +749,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::{
+            request::SolveRequest,
             split_primitives::{build_split_route, MarketOverrides},
             test_utils::{
                 order, setup_market_unweighted, token, token_with_decimals, ConstantProductSim,
@@ -1050,7 +1052,10 @@ mod tests {
         let ord = order(&token_a, &token_b, 2_000, OrderSide::Sell);
 
         let result_hi = algo
-            .find_best_route(gm_hi.graph(), market_hi, None, Some(derived.clone()), &ord)
+            .find_best_route(
+                SolveRequest::new(gm_hi.graph(), market_hi, &ord)
+                    .with_derived(Some(derived.clone())),
+            )
             .await
             .unwrap();
 
@@ -1071,7 +1076,9 @@ mod tests {
 
         let algo_lo = pfw_algo_with_config(2, config);
         let result_lo = algo_lo
-            .find_best_route(gm_lo.graph(), market_lo, None, Some(derived), &ord)
+            .find_best_route(
+                SolveRequest::new(gm_lo.graph(), market_lo, &ord).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
 
@@ -1446,7 +1453,7 @@ mod tests {
         let ord = order(&token_a, &token_b, 1, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(graph_manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(graph_manager.graph(), market, &ord))
             .await;
 
         assert!(matches!(
@@ -1478,7 +1485,9 @@ mod tests {
         let ord = order(&token_a, &token_b, 1_000, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(graph_manager.graph(), market, None, Some(derived), &ord)
+            .find_best_route(
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
 
@@ -1523,7 +1532,9 @@ mod tests {
         let ord = order(&token_a, &token_b, 10_000, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(graph_manager.graph(), market, None, Some(derived), &ord)
+            .find_best_route(
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
 
@@ -1582,7 +1593,9 @@ mod tests {
         let ord = order(&token_a, &token_b, 10_000, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(graph_manager.graph(), market, None, Some(derived), &ord)
+            .find_best_route(
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
 
@@ -1626,7 +1639,9 @@ mod tests {
         let ord = order(&token_a, &token_b, 30_000, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(graph_manager.graph(), market, None, Some(derived), &ord)
+            .find_best_route(
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
 
@@ -1689,11 +1704,8 @@ mod tests {
 
         let split_result = algo
             .find_best_route(
-                graph_manager.graph(),
-                market.clone(),
-                None,
-                Some(derived.clone()),
-                &ord,
+                SolveRequest::new(graph_manager.graph(), market.clone(), &ord)
+                    .with_derived(Some(derived.clone())),
             )
             .await
             .unwrap();
@@ -1702,7 +1714,9 @@ mod tests {
         let single_algo =
             pfw_algo_with_config(2, PathFrankWolfeConfig { max_paths: 1, ..Default::default() });
         let single_result = single_algo
-            .find_best_route(graph_manager.graph(), market, None, Some(derived), &ord)
+            .find_best_route(
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
 
@@ -1752,7 +1766,9 @@ mod tests {
         let ord = order(&token_a, &token_b, 30_000, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(graph_manager.graph(), market, None, Some(derived), &ord)
+            .find_best_route(
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
 
@@ -1829,11 +1845,8 @@ mod tests {
 
         let result = algo
             .find_best_route(
-                graph_manager.graph(),
-                market.clone(),
-                None,
-                Some(derived.clone()),
-                &ord,
+                SolveRequest::new(graph_manager.graph(), market.clone(), &ord)
+                    .with_derived(Some(derived.clone())),
             )
             .await
             .unwrap();
@@ -1853,7 +1866,9 @@ mod tests {
         let single_algo =
             pfw_algo_with_config(3, PathFrankWolfeConfig { max_paths: 1, ..Default::default() });
         let single_result = single_algo
-            .find_best_route(graph_manager.graph(), market, None, Some(derived), &ord)
+            .find_best_route(
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
 
@@ -1902,7 +1917,9 @@ mod tests {
         let generous_algo = pfw_algo_with_config(2, pfw_config.clone());
         let derived = derived_with_token_prices(&[&token_a, &token_b]);
         let generous_result = generous_algo
-            .find_best_route(graph_manager.graph(), market, None, Some(derived), &ord)
+            .find_best_route(
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
         let generous_swaps = generous_result.route().swaps().len();
@@ -1919,7 +1936,9 @@ mod tests {
         );
         let derived = derived_with_token_prices(&[&token_a, &token_b]);
         let timeout_result = timeout_algo
-            .find_best_route(graph_manager.graph(), market, None, Some(derived), &ord)
+            .find_best_route(
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+            )
             .await
             .unwrap();
         let timeout_swaps = timeout_result.route().swaps().len();

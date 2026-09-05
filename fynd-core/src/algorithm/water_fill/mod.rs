@@ -60,6 +60,7 @@ use super::{
 use crate::{
     algorithm::{
         paths::read_market,
+        request::SolveRequest,
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
         water_fill::config::{
             BASELINE_CANDIDATES, CANDIDATE_CONNECTOR_EDGES_PER_TOKEN,
@@ -461,15 +462,16 @@ impl Algorithm for WaterFillAlgorithm {
         "water_fill"
     }
 
-    #[instrument(level = "debug", skip_all, fields(order_id = %order.id()))]
+    #[instrument(level = "debug", skip_all, fields(order_id = %request.order().id()))]
     async fn find_best_route(
         &self,
-        graph: &Self::GraphType,
-        market: MarketData,
-        label: Option<StateLabel>,
-        derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
+        let graph = request.graph();
+        let market = request.market().clone();
+        let label = request.label().cloned();
+        let derived = request.derived().cloned();
+        let order = request.order();
         let deadline = Deadline::new(Instant::now(), self.timeout);
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
@@ -1829,14 +1831,14 @@ mod tests {
         // Premise: no single path fills the full order.
         let single = MostLiquidAlgorithm::with_config(config())
             .unwrap()
-            .find_best_route(gm.graph(), market.clone(), None, None, &order)
+            .find_best_route(SolveRequest::new(gm.graph(), market.clone(), &order))
             .await;
         assert!(single.is_err(), "premise: no single path fills the full order");
 
         // The portfolio still returns a split across both components.
         let split = WaterFillAlgorithm::with_config(config())
             .unwrap()
-            .find_best_route(gm.graph(), market.clone(), None, None, &order)
+            .find_best_route(SolveRequest::new(gm.graph(), market.clone(), &order))
             .await
             .expect("water_fill returns a split when no single path fills");
         assert!(split.route().swaps().len() >= 2, "expected a split across both components");
@@ -1868,7 +1870,7 @@ mod tests {
 
         let result = WaterFillAlgorithm::with_config(config())
             .unwrap()
-            .find_best_route(gm.graph(), market.clone(), None, None, &order)
+            .find_best_route(SolveRequest::new(gm.graph(), market.clone(), &order))
             .await
             .expect("panicking component is skipped; the healthy component still fills the order");
 
@@ -1894,11 +1896,8 @@ mod tests {
         let result = WaterFillAlgorithm::with_config(config())
             .unwrap()
             .find_best_route(
-                m.weighted.graph(),
-                m.market.clone(),
-                None,
-                Some(m.derived.clone()),
-                &order,
+                SolveRequest::new(m.weighted.graph(), m.market.clone(), &order)
+                    .with_derived(Some(m.derived.clone())),
             )
             .await
             .expect("split solves");
@@ -1939,21 +1938,15 @@ mod tests {
             let split = WaterFillAlgorithm::with_config(config_ms(ms))
                 .unwrap()
                 .find_best_route(
-                    m.weighted.graph(),
-                    m.market.clone(),
-                    None,
-                    Some(m.derived.clone()),
-                    &order,
+                    SolveRequest::new(m.weighted.graph(), m.market.clone(), &order)
+                        .with_derived(Some(m.derived.clone())),
                 )
                 .await;
             let single = MostLiquidAlgorithm::with_config(config_ms(ms))
                 .unwrap()
                 .find_best_route(
-                    m.weighted.graph(),
-                    m.market.clone(),
-                    None,
-                    Some(m.derived.clone()),
-                    &order,
+                    SolveRequest::new(m.weighted.graph(), m.market.clone(), &order)
+                        .with_derived(Some(m.derived.clone())),
                 )
                 .await;
 
