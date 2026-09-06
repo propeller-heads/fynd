@@ -94,8 +94,9 @@ pub use tycho_simulation::tycho_common::traits::TxDeltaIndexer;
 pub use types::{
     BlockInfo, ClientFeeParams, ComponentId, EncodingOptions, FeeBreakdown, Order, OrderQuote,
     OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions,
-    QuoteRequest, QuoteStatus, Route, RouteValidationError, SimulationResult, SingleOrderQuote,
-    SolveError, SolveParams, SolveResult, SurplusInfo, Swap, TaskId, Transaction, UserTransferType,
+    QuoteRequest, QuoteStatus, Route, RouteExclusions, RouteFilter, RouteValidationError,
+    SimulationResult, SingleOrderQuote, SolveError, SolveParams, SolveResult, SurplusInfo, Swap,
+    TaskId, Transaction, UserTransferType,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},

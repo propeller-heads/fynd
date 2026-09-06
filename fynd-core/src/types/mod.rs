@@ -25,6 +25,7 @@ pub use primitives::*;
 pub use quote::{
     BlockInfo, ClientFeeParams, EncodingOptions, FeeBreakdown, Order, OrderQuote, OrderSide,
     OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest,
-    QuoteStatus, Route, RouteResult, RouteValidationError, SimulationResult, SingleOrderQuote,
-    SolveParams, SurplusInfo, Swap, Transaction, UserTransferType,
+    QuoteStatus, Route, RouteExclusions, RouteFilter, RouteResult, RouteValidationError,
+    SimulationResult, SingleOrderQuote, SolveParams, SurplusInfo, Swap, Transaction,
+    UserTransferType,
 };

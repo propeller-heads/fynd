@@ -3,7 +3,7 @@
 use crate::{
     derived::SharedDerivedDataRef,
     feed::market_data::{MarketData, StateLabel},
-    types::{quote::RouteFilter, Order},
+    types::{quote::RouteExclusions, Order},
 };
 
 /// One order to solve, and everything the algorithm reads to solve it.
@@ -17,13 +17,20 @@ pub struct SolveRequest<'a, G> {
     order: &'a Order,
     label: Option<StateLabel>,
     derived: Option<SharedDerivedDataRef>,
-    filter: RouteFilter,
+    exclusions: RouteExclusions,
 }
 
 impl<'a, G> SolveRequest<'a, G> {
     /// A solve against the live market state, with no derived data and nothing excluded.
     pub fn new(graph: &'a G, market: MarketData, order: &'a Order) -> Self {
-        Self { graph, market, order, label: None, derived: None, filter: RouteFilter::default() }
+        Self {
+            graph,
+            market,
+            order,
+            label: None,
+            derived: None,
+            exclusions: RouteExclusions::default(),
+        }
     }
 
     /// Reads market state through this overlay, so a request's component overrides apply.
@@ -42,12 +49,12 @@ impl<'a, G> SolveRequest<'a, G> {
 
     /// Liquidity this solve must not route through.
     #[must_use]
-    pub fn with_filter(mut self, filter: RouteFilter) -> Self {
-        self.filter = filter;
+    pub fn with_exclusions(mut self, exclusions: RouteExclusions) -> Self {
+        self.exclusions = exclusions;
         self
     }
 
-    /// The graph to search, in the type the algorithm asked for.
+    /// The graph to search, in the algorithm's own `GraphType`.
     pub fn graph(&self) -> &'a G {
         self.graph
     }
@@ -67,16 +74,17 @@ impl<'a, G> SolveRequest<'a, G> {
         self.label.as_ref()
     }
 
-    /// The derived data, if this deployment computes any.
+    /// The derived data, if the caller passed any.
     pub fn derived(&self) -> Option<&SharedDerivedDataRef> {
         self.derived.as_ref()
     }
 
-    /// What the caller will accept in a route.
+    /// The pools and tokens this solve must not use.
     ///
-    /// Empty for most quotes. Hop bounds are not here: those are the algorithm's own configuration,
-    /// not the caller's to set.
-    pub fn filter(&self) -> &RouteFilter {
-        &self.filter
+    /// The caller's [`crate::RouteFilter`] is already resolved: a protocol system it named is here
+    /// as that system's pools. Hop bounds stay in the algorithm's own configuration; a caller does
+    /// not set them.
+    pub fn exclusions(&self) -> &RouteExclusions {
+        &self.exclusions
     }
 }
