@@ -151,6 +151,7 @@ curl -X POST https://fynd-api.propellerheads.xyz/v1/ethereum/quote \
 | `min_responses` | server default | Minimum number of solver pools that must respond before the server returns. `1` returns as soon as one pool has a route (fastest). Higher values wait for more pools to compete, improving price at the cost of latency. |
 | `encoding_options` | `null` | If set, the response includes a ready-to-submit `transaction` object. See [step 4](#4-encode-and-approve). |
 | `max_gas` | `null` | Cap on gas units the route may use. Routes exceeding it are rejected. |
+| `route_filter` | `null` | Liquidity to exclude from every route: `exclude_pools` (component ids), `exclude_protocols` (protocol systems named exactly, e.g. `uniswap_v2`) and `exclude_tokens` (tokens no route may pass through; the order's own two are always allowed). A name the server holds no pool for excludes nothing. |
 
 The response contains the route, the expected `amount_out`, gas estimate, and the `solve_time_ms` the server spent finding the route:
 

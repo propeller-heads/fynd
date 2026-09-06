@@ -618,6 +618,7 @@ export interface components {
              *     Values exceeding the number of active solver pools are clamped internally.
              */
             min_responses?: number | null;
+            route_filter?: null | components["schemas"]["RouteFilter"];
             /**
              * Format: int64
              * @description Timeout in milliseconds. If `None`, uses server default.
@@ -646,6 +647,32 @@ export interface components {
         Route: {
             /** @description Ordered sequence of swaps to execute. */
             swaps: components["schemas"]["Swap"][];
+        };
+        /**
+         * @description Liquidity a request excludes from a route.
+         *
+         *     Every field is optional. The pools, protocol systems and tokens it names are excluded from
+         *     every route.
+         */
+        RouteFilter: {
+            /** @description Pools to exclude, by component id. */
+            exclude_pools?: string[];
+            /**
+             * @description Protocol systems to exclude, every pool of them. A system is named exactly, as the market
+             *     carries it (`uniswap_v2`); a name the market holds no pool of excludes nothing.
+             * @example [
+             *       "uniswap_v2"
+             *     ]
+             */
+            exclude_protocols?: string[];
+            /**
+             * @description Tokens to exclude as intermediates. The order's own two tokens are always allowed, so
+             *     naming one of them changes nothing.
+             * @example [
+             *       "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+             *     ]
+             */
+            exclude_tokens?: string[];
         };
         /** @description Outcome of simulating an encoded quote on the latest block. */
         SimulationResult: {

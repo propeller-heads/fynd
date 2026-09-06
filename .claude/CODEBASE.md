@@ -83,7 +83,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 1. `RouterApi` validates the request
 2. `WorkerPoolRouter` allocates the worker pools serving each order (an exclusive-access pool only for a request granted access via the `x-exclusive-access` header) and fans out to them in parallel
 3. Each pool's `TaskQueue` dispatches to a `SolverWorker` on a dedicated OS thread
-4. Worker calls `Algorithm::find_best_route` with its local graph + shared market/derived data
+4. Worker calls `Algorithm::find_best_route` with a `SolveRequest` carrying its local graph, the shared market/derived data, and the pools and tokens the request excluded
 5. `WorkerPoolRouter` collects results, ranks candidates by `amount_out_net_gas` descending; if price guard is enabled it validates in rank order
 6. If `EncodingOptions` provided, `Encoder` produces ABI-encoded calldata
 7. Returns `Quote` response

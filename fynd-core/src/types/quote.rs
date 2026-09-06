@@ -31,7 +31,9 @@ use uuid::Uuid;
 
 use super::{internal::SolveError, primitives::ComponentId};
 use crate::{
-    algorithm::NoPathReason, feed::market_data::StateLabel, price_guard::config::PriceGuardConfig,
+    algorithm::NoPathReason,
+    feed::market_data::{MarketState, StateLabel},
+    price_guard::config::PriceGuardConfig,
     AlgorithmError,
 };
 
@@ -73,6 +75,137 @@ impl QuoteRequest {
     }
 }
 
+/// Liquidity the caller excludes from a route.
+///
+/// It excludes pools by id, whole protocol systems, and tokens a route must not pass through.
+///
+/// Empty by default. An algorithm is expected to honour it; nothing enforces it, so one that
+/// ignores it returns routes the caller excluded.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteFilter {
+    pools: FxHashSet<ComponentId>,
+    protocols: FxHashSet<String>,
+    tokens: FxHashSet<Address>,
+}
+
+impl RouteFilter {
+    /// Excludes these pools, by component id.
+    #[must_use]
+    pub fn with_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
+        self.pools.extend(pools);
+        self
+    }
+
+    /// Excludes every pool of these protocol systems.
+    ///
+    /// A system is named exactly, as its components carry it (`uniswap_v2`). There is no prefix
+    /// form: an entry the market holds no pool for excludes nothing.
+    #[must_use]
+    pub fn with_protocols(mut self, protocols: impl IntoIterator<Item = String>) -> Self {
+        self.protocols.extend(protocols);
+        self
+    }
+
+    /// Excludes routes that pass through these tokens.
+    #[must_use]
+    pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.tokens.extend(tokens);
+        self
+    }
+
+    /// Whether nothing is excluded, so a caller can skip the checks.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pools.is_empty() && self.protocols.is_empty() && self.tokens.is_empty()
+    }
+
+    /// The pools excluded, by component id.
+    #[must_use]
+    pub fn pools(&self) -> &FxHashSet<ComponentId> {
+        &self.pools
+    }
+
+    /// The protocol systems excluded.
+    #[must_use]
+    pub fn protocols(&self) -> &FxHashSet<String> {
+        &self.protocols
+    }
+
+    /// The tokens excluded as intermediates.
+    #[must_use]
+    pub fn tokens(&self) -> &FxHashSet<Address> {
+        &self.tokens
+    }
+
+    /// The pools and tokens this filter excludes, with every protocol system it names replaced by
+    /// that system's pools.
+    ///
+    /// A graph knows a pool by its component id alone, so the expansion happens once per solve
+    /// rather than at every pool a search looks at. The market indexes its components by protocol
+    /// system, so this reads one entry per system named rather than passing over the market. It
+    /// copies the ids it finds.
+    #[must_use]
+    pub fn create_exclusions(&self, market: &MarketState) -> RouteExclusions {
+        let mut pools = self.pools.clone();
+        for protocol in &self.protocols {
+            pools.extend(
+                market
+                    .components_by_protocol(protocol)
+                    .cloned(),
+            );
+        }
+        RouteExclusions { pools, tokens: self.tokens.clone() }
+    }
+}
+
+/// The pools and tokens one solve must not use.
+///
+/// What [`RouteFilter::create_exclusions`] makes of a caller's filter: the protocol systems are
+/// gone, and every pool one of them named is in `pools`. This is what a graph query and an
+/// algorithm read.
+///
+/// A token here is excluded as an intermediate. The order's own two tokens stay allowed, because
+/// every route touches them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteExclusions {
+    pools: FxHashSet<ComponentId>,
+    tokens: FxHashSet<Address>,
+}
+
+impl RouteExclusions {
+    /// Excludes these pools, by component id.
+    #[must_use]
+    pub fn with_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
+        self.pools.extend(pools);
+        self
+    }
+
+    /// Excludes routes that pass through these tokens.
+    #[must_use]
+    pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.tokens.extend(tokens);
+        self
+    }
+
+    /// Whether nothing is excluded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pools.is_empty() && self.tokens.is_empty()
+    }
+
+    /// Whether this pool is excluded.
+    #[must_use]
+    pub fn excludes_pool(&self, component_id: &str) -> bool {
+        self.pools.contains(component_id)
+    }
+
+    /// Whether routes through this token are excluded.
+    #[must_use]
+    pub fn excludes_token(&self, token: &Address) -> bool {
+        self.tokens.contains(token)
+    }
+}
+
 /// Options to customize the solving behavior.
 #[must_use]
 #[serde_as]
@@ -102,6 +235,11 @@ pub struct QuoteOptions {
     /// `None` uses every pool that serves the request. Library-only: never on the wire.
     #[serde(skip)]
     worker_pools: Option<Vec<String>>,
+    /// Liquidity this request will not route through: pools, protocol systems, tokens. Filled
+    /// from `options.route_filter` on the wire. Skipped during JSON serialization — the wire type
+    /// owns the request shape.
+    #[serde(skip)]
+    route_filter: RouteFilter,
 }
 
 impl QuoteOptions {
@@ -141,6 +279,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Excludes the pools, protocol systems and tokens this filter names.
+    pub fn with_route_filter(mut self, filter: RouteFilter) -> Self {
+        self.route_filter = filter;
+        self
+    }
+
     /// Returns the timeout in milliseconds.
     #[must_use]
     pub fn timeout_ms(&self) -> Option<u64> {
@@ -176,6 +320,12 @@ impl QuoteOptions {
     pub fn worker_pools(&self) -> Option<&[String]> {
         self.worker_pools.as_deref()
     }
+
+    /// Returns what this request excludes from a route. Empty unless one was set.
+    #[must_use]
+    pub fn route_filter(&self) -> &RouteFilter {
+        &self.route_filter
+    }
 }
 
 /// Parameters for a single solve operation.
@@ -188,6 +338,9 @@ impl QuoteOptions {
 pub struct SolveParams {
     /// Solve against this labeled state overlay. `None` uses the base Tycho state.
     state_label: Option<StateLabel>,
+    /// Liquidity the request will not route through. Resolved against the market by the worker,
+    /// which is where the protocol systems it names become pools.
+    route_filter: RouteFilter,
 }
 
 impl SolveParams {
@@ -197,9 +350,20 @@ impl SolveParams {
         self
     }
 
+    /// Excludes the pools, protocol systems and tokens this filter names.
+    pub fn with_route_filter(mut self, filter: RouteFilter) -> Self {
+        self.route_filter = filter;
+        self
+    }
+
     /// Returns the overlay label, if one was set.
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.state_label.as_ref()
+    }
+
+    /// Returns what the request excludes from a route. Empty unless one was set.
+    pub fn route_filter(&self) -> &RouteFilter {
+        &self.route_filter
     }
 }
 
@@ -1964,7 +2128,9 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::algorithm::test_utils::{component, token, MockProtocolSim};
+    use crate::algorithm::test_utils::{
+        component, component_with_protocol, token, MockProtocolSim,
+    };
 
     #[test]
     fn test_no_route_reason_shim_extracts_nested_path_reason() {
@@ -2022,6 +2188,37 @@ mod tests {
             component("test-component", &[token_in, token_out]),
             Box::new(MockProtocolSim::default()),
         )
+    }
+
+    /// A filter names protocol systems; a solve reads pools, so resolving replaces each system
+    /// with that system's pools and leaves every other pool alone.
+    #[test]
+    fn test_create_exclusions_with_a_protocol() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([
+            component_with_protocol("v2_pool", "uniswap_v2", &[token_a.clone(), token_b.clone()]),
+            component_with_protocol("v3_pool", "uniswap_v3", &[token_a.clone(), token_b.clone()]),
+        ]);
+
+        let exclusions = RouteFilter::default()
+            .with_pools(["named_pool".to_string()])
+            .with_protocols(["uniswap_v2".to_string()])
+            .with_tokens([token_b.address.clone()])
+            .create_exclusions(&market);
+
+        assert!(exclusions.excludes_pool("v2_pool"), "the protocol's own pool is excluded");
+        assert!(exclusions.excludes_pool("named_pool"), "a pool named directly stays excluded");
+        assert!(!exclusions.excludes_pool("v3_pool"), "another protocol's pool is untouched");
+        assert!(exclusions.excludes_token(&token_b.address));
+        assert!(
+            RouteFilter::default()
+                .with_protocols(["not_a_protocol".to_string()])
+                .create_exclusions(&market)
+                .is_empty(),
+            "a system the market holds no pool of excludes nothing"
+        );
     }
 
     // -------------------------------------------------------------------------

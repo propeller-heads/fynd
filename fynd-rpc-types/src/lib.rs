@@ -145,6 +145,70 @@ impl QuoteRequest {
     }
 }
 
+/// Liquidity a request excludes from a route.
+///
+/// Every field is optional. The pools, protocol systems and tokens it names are excluded from
+/// every route.
+#[must_use]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RouteFilter {
+    /// Pools to exclude, by component id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    exclude_pools: Vec<String>,
+    /// Protocol systems to exclude, every pool of them. A system is named exactly, as the market
+    /// carries it (`uniswap_v2`); a name the market holds no pool of excludes nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "openapi", schema(example = json!(["uniswap_v2"])))]
+    exclude_protocols: Vec<String>,
+    /// Tokens to exclude as intermediates. The order's own two tokens are always allowed, so
+    /// naming one of them changes nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(
+            value_type = Vec<String>,
+            example = json!(["0xdAC17F958D2ee523a2206206994597C13D831ec7"])
+        )
+    )]
+    exclude_tokens: Vec<Address>,
+}
+
+impl RouteFilter {
+    /// Leaves out these pools, by component id.
+    pub fn with_pools(mut self, pools: impl IntoIterator<Item = String>) -> Self {
+        self.exclude_pools.extend(pools);
+        self
+    }
+
+    /// Leaves out every pool of these protocol systems.
+    pub fn with_protocols(mut self, protocols: impl IntoIterator<Item = String>) -> Self {
+        self.exclude_protocols.extend(protocols);
+        self
+    }
+
+    /// Leaves out routes that pass through these tokens.
+    pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.exclude_tokens.extend(tokens);
+        self
+    }
+
+    /// The pools left out, by component id.
+    pub fn exclude_pools(&self) -> &[String] {
+        &self.exclude_pools
+    }
+
+    /// The protocol systems left out.
+    pub fn exclude_protocols(&self) -> &[String] {
+        &self.exclude_protocols
+    }
+
+    /// The tokens no route may pass through.
+    pub fn exclude_tokens(&self) -> &[Address] {
+        &self.exclude_tokens
+    }
+}
+
 /// Options to customize the solving behavior.
 #[must_use]
 #[serde_as]
@@ -168,6 +232,9 @@ pub struct QuoteOptions {
     max_gas: Option<BigUint>,
     /// Options during encoding. If None, quote will be returned without calldata.
     encoding_options: Option<EncodingOptions>,
+    /// Liquidity this request will not route through. If None, nothing is excluded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route_filter: Option<RouteFilter>,
 }
 
 impl QuoteOptions {
@@ -195,6 +262,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Excludes the pools, protocol systems and tokens this filter names.
+    pub fn with_route_filter(mut self, filter: RouteFilter) -> Self {
+        self.route_filter = Some(filter);
+        self
+    }
+
     /// Timeout in milliseconds, if set.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -213,6 +286,11 @@ impl QuoteOptions {
     /// Encoding options, if set.
     pub fn encoding_options(&self) -> Option<&EncodingOptions> {
         self.encoding_options.as_ref()
+    }
+
+    /// What this request excludes from a route, if set.
+    pub fn route_filter(&self) -> Option<&RouteFilter> {
+        self.route_filter.as_ref()
     }
 }
 
@@ -1506,6 +1584,33 @@ mod wire_format_tests {
         assert_eq!(b.as_ref(), [0xDE, 0xAD, 0xBE, 0xEF]);
     }
 
+    /// The field names a caller writes, and what an unset filter serializes to.
+    mod route_filter {
+        use super::*;
+
+        #[test]
+        fn test_route_filter_deserializes_from_request_json() {
+            let json = r#"{
+                "timeout_ms": 2000,
+                "route_filter": {
+                    "exclude_pools": ["0xabc"],
+                    "exclude_protocols": ["uniswap_v2"],
+                    "exclude_tokens": ["0xdAC17F958D2ee523a2206206994597C13D831ec7"]
+                }
+            }"#;
+
+            let options: QuoteOptions = serde_json::from_str(json).unwrap();
+            let filter = options.route_filter().unwrap();
+
+            assert_eq!(filter.exclude_pools(), ["0xabc".to_string()]);
+            assert_eq!(filter.exclude_protocols(), ["uniswap_v2".to_string()]);
+            assert_eq!(
+                filter.exclude_tokens(),
+                [Bytes::from(hex::decode("dAC17F958D2ee523a2206206994597C13D831ec7").unwrap())]
+            );
+        }
+    }
+
     // ── Order: full request JSON shape ────────────────────────────────────────
     //
     // Verifies field names, side as "sell" (not "Sell"), amount as decimal
@@ -1710,7 +1815,23 @@ mod conversions {
             if let Some(enc) = self.encoding_options {
                 opts = opts.with_encoding_options(enc.into());
             }
+            if let Some(filter) = self.route_filter {
+                opts = opts.with_route_filter(filter.into());
+            }
             opts
+        }
+    }
+
+    impl Into<fynd_core::RouteFilter> for RouteFilter {
+        fn into(self) -> fynd_core::RouteFilter {
+            fynd_core::RouteFilter::default()
+                .with_pools(self.exclude_pools)
+                .with_protocols(self.exclude_protocols)
+                .with_tokens(
+                    self.exclude_tokens
+                        .into_iter()
+                        .map(Into::into),
+                )
         }
     }
 
@@ -2012,6 +2133,7 @@ mod conversions {
                     min_responses: None,
                     max_gas: None,
                     encoding_options: None,
+                    route_filter: None,
                 },
             };
 
@@ -2031,6 +2153,26 @@ mod conversions {
             let dto = Quote::from(core);
             assert_eq!(dto.total_gas_estimate, BigUint::from(100_000u64));
             assert_eq!(dto.solve_time_ms, 50);
+        }
+
+        /// A request's filter reaches the core options.
+        #[test]
+        fn test_route_filter_into_core() {
+            let usdt = make_address(0xDA);
+            let dto = QuoteOptions::default().with_route_filter(
+                RouteFilter::default()
+                    .with_pools(["pool-1".to_string()])
+                    .with_protocols(["uniswap_v2".to_string()])
+                    .with_tokens([usdt.clone()]),
+            );
+
+            let core: fynd_core::QuoteOptions = dto.into();
+
+            let expected = fynd_core::RouteFilter::default()
+                .with_pools(["pool-1".to_string()])
+                .with_protocols(["uniswap_v2".to_string()])
+                .with_tokens([TychoBytes::from(usdt)]);
+            assert_eq!(core.route_filter(), &expected);
         }
 
         #[test]

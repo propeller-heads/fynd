@@ -19,12 +19,11 @@
 use std::{env, str::FromStr, time::Duration};
 
 use fynd_core::{
-    derived::SharedDerivedDataRef,
-    feed::market_data::{MarketData, StateLabel},
     graph::{PetgraphStableDiGraphManager, StableDiGraph},
     types::RouteResult,
     Algorithm, AlgorithmError, AlgorithmRegistry, ComputationRequirements, EncodingOptions,
-    FyndBuilder, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, Swap,
+    FyndBuilder, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, SolveRequest,
+    Swap,
 };
 use num_bigint::{BigInt, BigUint};
 use rustc_hash::FxHashMap;
@@ -63,18 +62,20 @@ impl Algorithm for DirectComponentAlgorithm {
 
     async fn find_best_route(
         &self,
-        graph: &Self::GraphType,
-        market: MarketData,
-        label: Option<StateLabel>,
-        _derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
+        // Nothing enforces `request.exclusions()`, so this algorithm checks each pool against it
+        // before simulating.
+        let graph = request.graph();
+        let order = request.order();
+        let label = request.label().cloned();
         let market = match label.as_ref() {
-            Some(l) => market
+            Some(l) => request
+                .market()
                 .read_labeled(l)
                 .await
                 .map_err(|e| AlgorithmError::Other(e.to_string()))?,
-            None => market.read().await,
+            None => request.market().read().await,
         };
 
         let gas_price = market
@@ -98,6 +99,13 @@ impl Algorithm for DirectComponentAlgorithm {
                 .edge_weight(edge_idx)
                 .expect("edge exists")
                 .component_id;
+
+            if request
+                .exclusions()
+                .excludes_pool(component_id)
+            {
+                continue;
+            }
 
             // Look up component metadata and simulation state.
             let Some(component) = market.get_component(component_id) else {

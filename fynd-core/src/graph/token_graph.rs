@@ -16,14 +16,15 @@ use tracing::{debug, trace};
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
-    EdgeData, GraphError, GraphManager, GraphQueryFilter, Path, INLINE_EDGES, INLINE_TOKENS,
+    EdgeData, GraphError, GraphManager, GraphQueryFilter, Path, RouteSearch, INLINE_EDGES,
+    INLINE_TOKENS,
 };
 use crate::{
     feed::{
         events::{EventError, MarketEvent, MarketEventHandler},
         market_data::MarketDataView,
     },
-    types::ComponentId,
+    types::{ComponentId, RouteExclusions},
 };
 
 /// The pools that trade one directed token pair.
@@ -71,6 +72,35 @@ impl<D> PairEdge<D> {
 /// A route as a sequence of tokens, before the pools serving each leg are chosen.
 pub type TokenPath = SmallVec<[NodeIndex; INLINE_TOKENS]>;
 
+/// Pools a leg may go through, held inline up to `INLINE_POOLS`.
+type Leg<'a, D> = SmallVec<[&'a EdgeData<D>; INLINE_POOLS]>;
+
+/// Pools one leg holds before it spills to the heap. Most pairs are traded by fewer.
+const INLINE_POOLS: usize = 8;
+
+/// Whether a token may sit between a route's two endpoints.
+///
+/// The algorithm's connector list and the request's exclusions both answer the same question, so a
+/// search asks it once. The endpoints are the caller's to exempt: every route touches them.
+struct IntermediateRule<'a> {
+    /// Tokens a route may pass through. `None` allows every token.
+    connector_tokens: Option<&'a FxHashSet<Address>>,
+    /// Pools and tokens the request excludes.
+    exclusions: &'a RouteExclusions,
+}
+
+impl IntermediateRule<'_> {
+    /// Whether a route may pass through this token.
+    fn allows(&self, address: &Address) -> bool {
+        if let Some(allowed) = self.connector_tokens {
+            if !allowed.contains(address) {
+                return false;
+            }
+        }
+        !self.exclusions.excludes_token(address)
+    }
+}
+
 /// Tokens as nodes, one edge per directed token pair.
 pub type TokenGraph<D> = stable_graph::StableDiGraph<Address, PairEdge<D>>;
 
@@ -96,6 +126,24 @@ impl<D> TopologyGraph<D> {
             .get(&(from, to))
             .and_then(|&edge| self.graph.edge_weight(edge))
             .map_or(&[], PairEdge::pools)
+    }
+
+    /// Whether any pool trading `from` for `to` is one this solve may use.
+    ///
+    /// A pair whose every pool is excluded does not connect its two tokens for this query, so a
+    /// search steps over it rather than returning a route the caller refused.
+    fn pair_has_allowed_pool(
+        &self,
+        from: NodeIndex,
+        to: NodeIndex,
+        exclusions: &RouteExclusions,
+    ) -> bool {
+        if exclusions.is_empty() {
+            return true;
+        }
+        self.pools_between(from, to)
+            .iter()
+            .any(|pool| !exclusions.excludes_pool(&pool.component_id))
     }
 
     /// The node holding `token`, or `None` if the market has no such token.
@@ -154,7 +202,7 @@ impl<D> TopologyGraph<D> {
         &self,
         from: &Address,
         to: &Address,
-        filter: &GraphQueryFilter,
+        search: &RouteSearch<'_>,
     ) -> Result<Vec<TokenPath>, GraphError> {
         let from_ix = self
             .get_token_ix(from)
@@ -162,7 +210,7 @@ impl<D> TopologyGraph<D> {
         let to_ix = self
             .get_token_ix(to)
             .ok_or_else(|| GraphError::TokenNotFound(to.clone()))?;
-        Ok(self.paths_between_ix(from_ix, to_ix, filter))
+        Ok(self.paths_between_ix(from_ix, to_ix, search))
     }
 
     /// Every token path from `from` to `to` within the filter's hop bounds.
@@ -174,15 +222,20 @@ impl<D> TopologyGraph<D> {
         &self,
         from: NodeIndex,
         to: NodeIndex,
-        filter: &GraphQueryFilter,
+        search: &RouteSearch<'_>,
     ) -> Vec<TokenPath> {
+        let filter = search.filter;
         if filter.min_hops == 0 || filter.min_hops > filter.max_hops {
             return Vec::new();
         }
+        let rule = IntermediateRule {
+            connector_tokens: filter.connector_tokens.as_ref(),
+            exclusions: search.exclusions,
+        };
         if from == to {
-            self.circular_token_paths(to, filter)
+            self.circular_token_paths(to, filter, &rule)
         } else {
-            self.bidirectional_search(from, to, filter)
+            self.bidirectional_search(from, to, filter, &rule)
         }
     }
 
@@ -200,12 +253,20 @@ impl<D> TopologyGraph<D> {
         &self,
         token_path: &[NodeIndex],
         max_paths: Option<usize>,
+        exclusions: &RouteExclusions,
     ) -> Vec<Path<'_, D>> {
-        // Inline, like everything else in the search: this runs once per token sequence found, and
-        // a route has at most `max_hops` legs.
-        let legs: SmallVec<[&[EdgeData<D>]; INLINE_EDGES]> = token_path
+        // Inline, like everything else in the search: this runs once per token sequence found, a
+        // route has at most `max_hops` legs, and a leg rarely carries more than `INLINE_POOLS`
+        // pools. Each leg holds only the pools the request allows, so an excluded one is not
+        // counted into the product either.
+        let legs: SmallVec<[Leg<'_, D>; INLINE_EDGES]> = token_path
             .windows(2)
-            .map(|pair| self.pools_between(pair[0], pair[1]))
+            .map(|pair| {
+                self.pools_between(pair[0], pair[1])
+                    .iter()
+                    .filter(|pool| !exclusions.excludes_pool(&pool.component_id))
+                    .collect()
+            })
             .collect();
 
         // A sequence of one token names no leg, and a leg with no pool names a pair the graph
@@ -282,12 +343,11 @@ impl<D> TopologyGraph<D> {
         from: NodeIndex,
         to: NodeIndex,
         filter: &GraphQueryFilter,
+        rule: &IntermediateRule<'_>,
     ) -> Vec<TokenPath> {
-        let connector_tokens = filter.connector_tokens.as_ref();
         let endpoints = (from, to);
-        let head_levels =
-            self.walk_levels(from, filter.max_hops.div_ceil(2), endpoints, connector_tokens);
-        let tail_levels = self.walk_levels(to, filter.max_hops / 2, endpoints, connector_tokens);
+        let head_levels = self.walk_levels(from, filter.max_hops.div_ceil(2), endpoints, rule);
+        let tail_levels = self.walk_levels(to, filter.max_hops / 2, endpoints, rule);
 
         // Grouping a tail level by its midpoint is worth doing once per depth, not once per length.
         let mut midpoint_index: Vec<Option<FxHashMap<NodeIndex, Vec<TokenPath>>>> =
@@ -353,14 +413,14 @@ impl<D> TopologyGraph<D> {
     /// Walking breadth-first produces every level on the way to the deepest, so they are all kept
     /// rather than the deepest alone.
     ///
-    /// `endpoints` is the route's own `(from, to)`. The connector filter never applies to those
-    /// two; every other token a walk passes through is an intermediate and must be allowed.
+    /// `endpoints` is the route's own `(from, to)`. The rule never applies to those two; every
+    /// other token a walk passes through is an intermediate and must be allowed.
     fn walk_levels(
         &self,
         start: NodeIndex,
         hops: usize,
         endpoints: (NodeIndex, NodeIndex),
-        connector_tokens: Option<&FxHashSet<Address>>,
+        rule: &IntermediateRule<'_>,
     ) -> Vec<Vec<TokenPath>> {
         let (from, to) = endpoints;
         let mut levels = vec![vec![TokenPath::from_slice(&[start])]];
@@ -375,12 +435,12 @@ impl<D> TopologyGraph<D> {
                     if sequence.contains(&neighbor) {
                         continue;
                     }
-                    if neighbor != from && neighbor != to {
-                        if let Some(allowed) = connector_tokens {
-                            if !allowed.contains(&self[neighbor]) {
-                                continue;
-                            }
-                        }
+                    let is_endpoint = neighbor == from || neighbor == to;
+                    if !is_endpoint && !rule.allows(&self[neighbor]) {
+                        continue;
+                    }
+                    if !self.pair_has_allowed_pool(last, neighbor, rule.exclusions) {
+                        continue;
                     }
 
                     let mut extended = TokenPath::from_slice(sequence);
@@ -399,7 +459,12 @@ impl<D> TopologyGraph<D> {
     /// Such a route closes a cycle, so it has no midpoint to split on -- both halves would have to
     /// start and end on that token, which the no-revisit rule forbids. Searched from the one end
     /// instead, with the closing hop exempt from that rule.
-    fn circular_token_paths(&self, target: NodeIndex, filter: &GraphQueryFilter) -> Vec<TokenPath> {
+    fn circular_token_paths(
+        &self,
+        target: NodeIndex,
+        filter: &GraphQueryFilter,
+        rule: &IntermediateRule<'_>,
+    ) -> Vec<TokenPath> {
         let mut token_paths = Vec::new();
         let mut frontier = vec![TokenPath::from_slice(&[target])];
 
@@ -410,6 +475,9 @@ impl<D> TopologyGraph<D> {
                     continue;
                 };
                 for neighbor in self.neighbors(last) {
+                    if !self.pair_has_allowed_pool(last, neighbor, rule.exclusions) {
+                        continue;
+                    }
                     if neighbor == target {
                         if hops >= filter.min_hops {
                             let mut closed = TokenPath::from_slice(sequence);
@@ -424,10 +492,8 @@ impl<D> TopologyGraph<D> {
                     if sequence.contains(&neighbor) {
                         continue;
                     }
-                    if let Some(allowed) = filter.connector_tokens.as_ref() {
-                        if !allowed.contains(&self[neighbor]) {
-                            continue;
-                        }
+                    if !rule.allows(&self[neighbor]) {
+                        continue;
                     }
 
                     let mut extended = TokenPath::from_slice(sequence);
@@ -961,10 +1027,12 @@ mod tests {
             return Vec::new();
         };
         let filter = GraphQueryFilter { min_hops, max_hops, connector_tokens };
+        let exclusions = RouteExclusions::default();
+        let search = RouteSearch { filter: &filter, exclusions: &exclusions };
         graph
-            .paths_between_ix(from, to, &filter)
+            .paths_between_ix(from, to, &search)
             .iter()
-            .flat_map(|token_path| graph.expand_path(token_path, None))
+            .flat_map(|token_path| graph.expand_path(token_path, None, &exclusions))
             .collect()
     }
 
@@ -1166,12 +1234,14 @@ mod tests {
         let (from, to) = (g.get_token_ix(&a).unwrap(), g.get_token_ix(&b).unwrap());
 
         let filter = GraphQueryFilter { min_hops, max_hops, connector_tokens: None };
+        let exclusions = RouteExclusions::default();
+        let search = RouteSearch { filter: &filter, exclusions: &exclusions };
 
         assert!(g
-            .paths_between_ix(from, to, &filter)
+            .paths_between_ix(from, to, &search)
             .is_empty());
         assert!(
-            g.paths_between_ix(from, from, &filter)
+            g.paths_between_ix(from, from, &search)
                 .is_empty(),
             "the cyclic search is bound by the same rule"
         );
@@ -1190,7 +1260,10 @@ mod tests {
         let cycles = g.paths_between_ix(
             start,
             start,
-            &GraphQueryFilter { min_hops: 1, max_hops: 4, connector_tokens: None },
+            &RouteSearch {
+                filter: &GraphQueryFilter { min_hops: 1, max_hops: 4, connector_tokens: None },
+                exclusions: &RouteExclusions::default(),
+            },
         );
 
         assert!(!cycles.is_empty(), "the diamond closes cycles through B and through C");
@@ -1202,6 +1275,68 @@ mod tests {
                 "the start token must appear only at the two ends, got {cycle:?}"
             );
         }
+    }
+
+    /// Every route between two tokens under the given hop bounds and exclusions.
+    fn routes_excluding<'a>(
+        graph: &'a TopologyGraph<DepthAndPrice>,
+        from: &Address,
+        to: &Address,
+        hops: (usize, usize),
+        exclusions: &RouteExclusions,
+    ) -> FxHashSet<Vec<&'a str>> {
+        let filter =
+            GraphQueryFilter { min_hops: hops.0, max_hops: hops.1, connector_tokens: None };
+        let search = RouteSearch { filter: &filter, exclusions };
+        all_ids(
+            graph
+                .paths_between(from, to, &search)
+                .unwrap()
+                .iter()
+                .flat_map(|token_path| graph.expand_path(token_path, None, exclusions))
+                .collect(),
+        )
+    }
+
+    /// A route may not pass through a token the request excludes.
+    #[test]
+    fn test_paths_with_excluded_token() {
+        let (a, b, _, d) = addrs();
+        let m = diamond_graph();
+        let exclusions = RouteExclusions::default().with_tokens([b.clone()]);
+
+        let routes = routes_excluding(m.graph(), &a, &d, (1, 3), &exclusions);
+
+        assert_eq!(routes, FxHashSet::from_iter([vec!["ac", "cd"]]));
+    }
+
+    /// A pair whose every pool is excluded no longer connects its two tokens.
+    #[test]
+    fn test_paths_with_every_pool_of_a_pair_excluded() {
+        let (a, _, _, d) = addrs();
+        let m = diamond_graph();
+        let exclusions = RouteExclusions::default().with_pools(["ab".to_string()]);
+
+        let routes = routes_excluding(m.graph(), &a, &d, (1, 3), &exclusions);
+
+        assert_eq!(routes, FxHashSet::from_iter([vec!["ac", "cd"]]));
+    }
+
+    /// A pair keeps the pools that are left, so the expansion drops the excluded one alone.
+    #[test]
+    fn test_expand_path_with_excluded_pool() {
+        let (a, _, c, _) = addrs();
+        let m = parallel_graph();
+        let exclusions =
+            RouteExclusions::default().with_pools(["ab2".to_string(), "bc1".to_string()]);
+
+        let routes = routes_excluding(m.graph(), &a, &c, (2, 2), &exclusions);
+
+        assert_eq!(
+            routes,
+            FxHashSet::from_iter([vec!["ab1", "bc2"], vec!["ab3", "bc2"]]),
+            "the two excluded pools are gone; every other pool combination remains"
+        );
     }
 
     /// S and T, with parallel pools stacked on every leg of the long way round.

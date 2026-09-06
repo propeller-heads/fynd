@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
 
 use crate::{
-    algorithm::Algorithm,
+    algorithm::{request::SolveRequest, Algorithm},
     derived::{
         computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
@@ -331,7 +331,7 @@ where
         // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
-        let (block_info, solved_against) = {
+        let (block_info, solved_against, exclusions) = {
             // Read briefly to capture block info; drop the lock before solving so it is not held
             // across the algorithm's own read call.
             let view = self
@@ -351,18 +351,23 @@ where
                 .state_label()
                 .cloned()
                 .unwrap_or_else(|| last_block.number().to_string());
-            (block_info, solved_against)
+            // Resolved under the read the worker already holds: an excluded protocol system
+            // becomes that system's pools, so the algorithm only ever checks pool ids.
+            let exclusions = params
+                .route_filter()
+                .create_exclusions(view.base_market_state());
+            (block_info, solved_against, exclusions)
         };
 
+        let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
+            .with_derived(self.derived_data.clone())
+            .with_exclusions(exclusions);
+        if let Some(label) = params.state_label().cloned() {
+            request = request.with_label(label);
+        }
         let result = self
             .algorithm
-            .find_best_route(
-                graph,
-                self.market_data.clone(),
-                params.state_label().cloned(),
-                Some(self.derived_data.clone()),
-                order,
-            )
+            .find_best_route(request)
             .await;
 
         let order_quote = match result {
@@ -834,7 +839,7 @@ mod tests {
         propamm_fallback::{
             FeeTiers, FALLBACK_PROTOCOL_SYSTEM, FEE_ATTRIBUTE, PROPAMM_FALLBACK_PREFIX,
         },
-        types::{ComponentId, OrderSide, Route, RouteResult, Swap},
+        types::{ComponentId, OrderSide, Route, RouteFilter, RouteResult, Swap},
         AlgorithmError,
     };
 
@@ -866,11 +871,7 @@ mod tests {
 
         async fn find_best_route(
             &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
+            _request: SolveRequest<'_, Self::GraphType>,
         ) -> Result<crate::types::RouteResult, crate::AlgorithmError> {
             Err(crate::AlgorithmError::Other("not implemented".to_string()))
         }
@@ -899,11 +900,7 @@ mod tests {
 
         async fn find_best_route(
             &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
+            _request: SolveRequest<'_, Self::GraphType>,
         ) -> Result<RouteResult, AlgorithmError> {
             let token_a = token(0x01, "A");
             let token_b = token(0x02, "B");
@@ -970,6 +967,71 @@ mod tests {
         }
     }
 
+    /// Always fails, with an error message listing the pools the worker resolved the request's
+    /// filter into.
+    struct ReportExclusionsAlgorithm;
+
+    impl Algorithm for ReportExclusionsAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "report_exclusions_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<RouteResult, AlgorithmError> {
+            let mut excluded: Vec<&str> = ["p1", "p2"]
+                .into_iter()
+                .filter(|id| request.exclusions().excludes_pool(id))
+                .collect();
+            excluded.sort_unstable();
+            Err(AlgorithmError::Other(format!("excluded: {}", excluded.join(","))))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    /// The request names a protocol system; the worker hands the algorithm that system's pools.
+    #[tokio::test]
+    async fn test_quote_resolves_the_route_filter_against_the_market() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted(vec![
+            ("p1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("p2", &token_a, &token_b, MockProtocolSim::new(2.0)),
+        ]);
+        let derived = DerivedData::new_shared();
+        let mut worker = SolverWorker::new(
+            market,
+            derived,
+            ReportExclusionsAlgorithm,
+            0,
+            "test_pool".to_string(),
+        );
+
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let params = SolveParams::default()
+            .with_route_filter(RouteFilter::default().with_protocols(["uniswap_v2".to_string()]));
+
+        let result = worker.quote(&ord, params).await;
+
+        match result {
+            Err(SolveError::AlgorithmError(msg)) => {
+                assert!(msg.contains("excluded: p1,p2"), "unexpected message: {msg}");
+            }
+            other => panic!("expected the algorithm's report, got {other:?}"),
+        }
+    }
+
     /// Mock algorithm that returns a single-leg route through a pAMM executed via the
     /// PropAMMRouter. The market holds no Uniswap V3 pool for the pair, so the router's fallback
     /// would revert and the worker must drop the route.
@@ -985,11 +1047,7 @@ mod tests {
 
         async fn find_best_route(
             &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
+            _request: SolveRequest<'_, Self::GraphType>,
         ) -> Result<RouteResult, AlgorithmError> {
             let token_a = token(0x01, "A");
             let token_b = token(0x02, "B");

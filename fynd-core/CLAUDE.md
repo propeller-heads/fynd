@@ -20,7 +20,7 @@ applications.
 | `rpc.rs`              | private — `eth_call` and Tycho-address-to-alloy-address helpers shared by `encoding::fee_fetcher` and `propamm_fallback::fee_tier_fetcher` |
 | `replay.rs`           | `replay_route(&Route, &MarketState)` — re-execute an already-built route against a (possibly newer) market state, honoring split fractions and shared-pool depletion. Used by `hindsight` to measure quote-to-execution slippage |
 | `encoding/`           | `Encoder` wraps `tycho-execution` to produce ABI-encoded calldata (singleSwap, sequentialSwap, Permit2 variants). Optional calldata watermark (`with_calldata_watermark`) appends attribution bytes the EVM ignores. Computes `FeeBreakdown` mirroring on-chain `FeeCalculator` logic. `RouterFees`/`SharedRouterFees` hold default + per-client fee rates; `RouterFeeFetcher` refreshes them from the FeeCalculator contract every 5 min. `DisableSlippageTakingSigner` (`disable_slippage_taking.rs`, crate-internal, key from `DISABLE_SLIPPAGE_TAKING_SIGNER_KEY`) signs zero-fee `ClientFee` params when `EncodingOptions::disable_slippage_taking` is set, so the FeeCalculator applies its address's positive-slippage exemption; that also makes the signer the request's fee client (displacing the `tx.origin`/sender fallback in `Encoder::fee_client`) and stamps a `DEFAULT_DEADLINE_WINDOW_SECS` deadline the unsigned path did not have. `DEFAULT_DEADLINE_WINDOW_SECS` (120s, `mod.rs`) is shared with `exclusive_swap.rs`, so a quote carrying both signatures has one expiry |
-| `types/`              | Core types: `Order`, `Route`, `Swap`, `Quote`, `QuoteRequest`, `BlockInfo`, `EncodingOptions`, `FeeBreakdown`, error types                                                         |
+| `types/`              | Core types: `Order`, `Route`, `Swap`, `Quote`, `QuoteRequest`, `BlockInfo`, `EncodingOptions`, `FeeBreakdown`, error types. `RouteFilter` is the liquidity a request excludes from a route (pools, protocol systems, tokens), empty by default. `RouteFilter::create_exclusions` turns it into the `RouteExclusions` a graph query and an algorithm read, with each protocol system replaced by the pools `MarketState::components_by_protocol` holds for it                                                         |
 
 ## Key Traits
 
@@ -31,7 +31,7 @@ pub trait Algorithm: Send + Sync {
     type GraphType: Send + Sync;
     type GraphManager: GraphManager<Self::GraphType> + Default;
     fn name(&self) -> &str;
-    async fn find_best_route(&self, graph: &Self::GraphType, market: MarketData, label: Option<StateLabel>, derived: Option<SharedDerivedDataRef>, order: &Order) -> Result<RouteResult, AlgorithmError>;
+    async fn find_best_route(&self, request: SolveRequest<'_, Self::GraphType>) -> Result<RouteResult, AlgorithmError>;
     fn computation_requirements(&self) -> ComputationRequirements;
     fn timeout(&self) -> Duration;
 }
@@ -113,7 +113,10 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
    allocated only to a request granted exclusive access; `QuoteOptions::with_worker_pools` further
    restricts allocation to a named subset
 1. `WorkerPoolRouter` fans out to the allocated pools in parallel
-2. Each pool dispatches to a `SolverWorker` → `Algorithm::find_best_route` → `RouteResult`
+2. Each pool dispatches to a `SolverWorker`, which resolves the request's `RouteFilter` against the
+   market and hands the result to `Algorithm::find_best_route` → `RouteResult`. An algorithm takes
+   the request apart with `SolveRequest::into_parts`; a route search reads its own
+   `GraphQueryFilter` bounds and the request's `RouteExclusions` through one `RouteSearch`
 3. Selects best by `amount_out_net_gas` → optional `Encoder` → optional simulation → `Quote`
 
 Steps 0-2 are exposed as the public `WorkerPoolRouter::solve`, returning every order's ranked
