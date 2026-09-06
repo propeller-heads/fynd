@@ -235,8 +235,9 @@ pub struct QuoteOptions {
     /// `None` uses every pool that serves the request. Library-only: never on the wire.
     #[serde(skip)]
     worker_pools: Option<Vec<String>>,
-    /// Liquidity this request will not route through: pools, protocol systems, tokens. Skipped
-    /// during JSON serialization — the wire type owns the request shape.
+    /// Liquidity this request will not route through: pools, protocol systems, tokens. Filled
+    /// from `options.route_filter` on the wire. Skipped during JSON serialization — the wire type
+    /// owns the request shape.
     #[serde(skip)]
     route_filter: RouteFilter,
 }

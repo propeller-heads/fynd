@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.99.22"
+    "version": "0.102.3"
   },
   "paths": {
     "/v1/health": {
@@ -1060,6 +1060,17 @@
             "description": "Minimum number of solver responses to wait for before returning.\nIf `None` or `0`, waits for all solvers to respond (or timeout).\n\nUse the `/health` endpoint to check `num_solver_pools` before setting this value.\nValues exceeding the number of active solver pools are clamped internally.",
             "minimum": 0
           },
+          "route_filter": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RouteFilter",
+                "description": "Liquidity this request will not route through. If None, nothing is excluded."
+              }
+            ]
+          },
           "timeout_ms": {
             "type": [
               "integer",
@@ -1117,6 +1128,39 @@
               "$ref": "#/components/schemas/Swap"
             },
             "description": "Ordered sequence of swaps to execute."
+          }
+        }
+      },
+      "RouteFilter": {
+        "type": "object",
+        "description": "Liquidity a request excludes from a route.\n\nEvery field is optional. The pools, protocol systems and tokens it names are excluded from\nevery route.",
+        "properties": {
+          "exclude_pools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Pools to exclude, by component id."
+          },
+          "exclude_protocols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Protocol systems to exclude, every pool of them. A system is named exactly, as the market\ncarries it (`uniswap_v2`); a name the market holds no pool of excludes nothing.",
+            "example": [
+              "uniswap_v2"
+            ]
+          },
+          "exclude_tokens": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tokens to exclude as intermediates. The order's own two tokens are always allowed, so\nnaming one of them changes nothing.",
+            "example": [
+              "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+            ]
           }
         }
       },

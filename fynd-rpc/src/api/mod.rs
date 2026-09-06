@@ -62,6 +62,7 @@ pub type RouteConfigurator =
         dto::Order,
         dto::OrderSide,
         dto::QuoteOptions,
+        dto::RouteFilter,
         dto::PriceGuardConfig,
         dto::Quote,
         dto::OrderQuote,
