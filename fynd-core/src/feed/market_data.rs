@@ -324,9 +324,10 @@ pub struct MarketState {
     /// Block info for the last update (only updated when protocols reported "Ready" status).
     /// None if no block has been processed yet.
     last_updated: Option<BlockInfo>,
-    /// Number of components per protocol system, maintained incrementally on
-    /// upsert/remove so readers never scan the full component map.
-    component_counts: FxHashMap<String, u64>,
+    /// The components of each protocol system, maintained on upsert/remove so a quote that
+    /// excludes a protocol names that system's pools without scanning the component map, and so
+    /// the metrics sampler can count them without one either.
+    components_by_protocol: FxHashMap<String, FxHashSet<ComponentId>>,
 }
 
 impl MarketState {
@@ -340,7 +341,7 @@ impl MarketState {
             gas_price: None,
             protocol_sync_status: FxHashMap::default(),
             last_updated: None,
-            component_counts: FxHashMap::default(),
+            components_by_protocol: FxHashMap::default(),
         }
     }
 
@@ -364,12 +365,15 @@ impl MarketState {
         self.tokens.len()
     }
 
-    /// Number of components (components) per protocol system.
+    /// Number of components per protocol system.
     ///
-    /// Entries stay present at zero after all of a protocol's components are
-    /// removed so exported gauges reset instead of freezing at the last value.
-    pub fn component_counts_by_protocol(&self) -> &FxHashMap<String, u64> {
-        &self.component_counts
+    /// Entries stay present at zero after all of a protocol's components are removed, so exported
+    /// gauges reset instead of freezing at the last value.
+    pub fn component_counts_by_protocol(&self) -> FxHashMap<String, u64> {
+        self.components_by_protocol
+            .iter()
+            .map(|(protocol_system, ids)| (protocol_system.clone(), ids.len() as u64))
+            .collect()
     }
 
     /// Returns the sync status of every protocol system.
@@ -395,6 +399,18 @@ impl MarketState {
     /// Gets a component by ID.
     pub fn get_component(&self, id: &str) -> Option<&ProtocolComponent> {
         self.components.get(id).map(Arc::as_ref)
+    }
+
+    /// The ids of every component this protocol system holds. Empty for a system the market does
+    /// not carry.
+    pub fn components_by_protocol(
+        &self,
+        protocol_system: &str,
+    ) -> impl Iterator<Item = &ComponentId> {
+        self.components_by_protocol
+            .get(protocol_system)
+            .into_iter()
+            .flatten()
     }
 
     /// Gets a component by ID as a shared handle, for callers that need to keep it.
@@ -435,15 +451,13 @@ impl MarketState {
     pub fn upsert_components(&mut self, components: impl IntoIterator<Item = ProtocolComponent>) {
         for component in components {
             let protocol_system = component.protocol_system.clone();
-            let previous = self
-                .components
-                .insert(component.id.clone(), Arc::new(component));
-            if previous.is_none() {
-                *self
-                    .component_counts
-                    .entry(protocol_system)
-                    .or_default() += 1;
-            }
+            let component_id = component.id.clone();
+            self.components
+                .insert(component_id.clone(), Arc::new(component));
+            self.components_by_protocol
+                .entry(protocol_system)
+                .or_default()
+                .insert(component_id);
         }
     }
 
@@ -470,11 +484,11 @@ impl MarketState {
     pub fn remove_components<'a>(&mut self, ids: impl IntoIterator<Item = &'a ComponentId>) {
         for id in ids {
             if let Some(component) = self.components.remove(id) {
-                if let Some(count) = self
-                    .component_counts
+                if let Some(ids) = self
+                    .components_by_protocol
                     .get_mut(&component.protocol_system)
                 {
-                    *count = count.saturating_sub(1);
+                    ids.remove(id);
                 }
             }
             self.simulation_states.remove(id);
@@ -539,6 +553,8 @@ impl MarketState {
             }
         }
 
+        let components_by_protocol = index_by_protocol(&components);
+
         MarketState {
             label: self.label.clone(),
             components,
@@ -547,9 +563,26 @@ impl MarketState {
             gas_price: self.gas_price.clone(),
             protocol_sync_status: FxHashMap::default(), // Not needed for simulation
             last_updated: self.last_updated.clone(),
-            component_counts: FxHashMap::default(), // Not needed for simulation
+            components_by_protocol,
         }
     }
+}
+
+/// Groups component ids by the protocol system their component carries.
+///
+/// A subset built by [`MarketState::extract_subset`] needs the same index the base state keeps, so
+/// a filter naming a protocol system finds that system's pools in either one.
+fn index_by_protocol(
+    components: &FxHashMap<ComponentId, Arc<ProtocolComponent>>,
+) -> FxHashMap<String, FxHashSet<ComponentId>> {
+    let mut index: FxHashMap<String, FxHashSet<ComponentId>> = FxHashMap::default();
+    for (id, component) in components {
+        index
+            .entry(component.protocol_system.clone())
+            .or_default()
+            .insert(id.clone());
+    }
+    index
 }
 
 #[cfg(test)]
