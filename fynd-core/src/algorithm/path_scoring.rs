@@ -26,7 +26,7 @@ use tracing::trace;
 use crate::{
     algorithm::{most_liquid::DepthAndPrice, swap_cache::SwapResult},
     graph::{EdgeData, TokenPath, TopologyGraph, INLINE_EDGES},
-    types::ComponentId,
+    types::{ComponentId, RouteExclusions},
 };
 
 /// What one pool paid for one input amount, on one token pair.
@@ -238,12 +238,19 @@ pub(crate) fn simulate_token_path<'g, D, T>(
 ///
 /// This is the cheap half of ranking: it costs a walk over edge weights, and it is what narrows a
 /// field of candidates down to the few worth simulating. `None` when the path is too short to have
-/// a leg, or when some leg has no pool at all.
+/// a leg, or when some leg has no pool the request may use.
+///
+/// An excluded pool scores nothing: a leg is read at the best pool the solve can actually take, so
+/// a path is not ranked on liquidity it will be refused at simulation time.
 ///
 /// A leg whose pools carry no measurement is not fatal. It leaves the price alone and takes the
 /// depth to zero, so the path sinks to the bottom of the ranking rather than out of it — an
 /// unmeasured leg is unknown, not known to be unusable.
-fn heuristic_score(graph: &TopologyGraph<DepthAndPrice>, token_path: &[NodeIndex]) -> Option<f64> {
+fn heuristic_score(
+    graph: &TopologyGraph<DepthAndPrice>,
+    token_path: &[NodeIndex],
+    exclusions: &RouteExclusions,
+) -> Option<f64> {
     if token_path.len() < 2 {
         return None;
     }
@@ -259,11 +266,20 @@ fn heuristic_score(graph: &TopologyGraph<DepthAndPrice>, token_path: &[NodeIndex
 
         let mut best_price = f64::MIN;
         let mut best_depth = f64::MIN;
+        let mut has_pool = false;
         for pool in pools {
+            if exclusions.excludes_pool(&pool.component_id) {
+                continue;
+            }
+            has_pool = true;
             if let Some(data) = pool.data.as_ref() {
                 best_price = best_price.max(data.spot_price);
                 best_depth = best_depth.max(data.depth);
             }
+        }
+        if !has_pool {
+            // Every pool on this leg is excluded, so no route through this path can settle.
+            return None;
         }
 
         if best_price == f64::MIN {
@@ -283,11 +299,12 @@ fn heuristic_score(graph: &TopologyGraph<DepthAndPrice>, token_path: &[NodeIndex
 pub(crate) fn rank_by_heuristic(
     graph: &TopologyGraph<DepthAndPrice>,
     token_paths: Vec<TokenPath>,
+    exclusions: &RouteExclusions,
 ) -> Vec<(TokenPath, f64)> {
     let mut scored: Vec<(TokenPath, f64)> = token_paths
         .into_iter()
         .filter_map(|path| {
-            let score = heuristic_score(graph, &path)?;
+            let score = heuristic_score(graph, &path, exclusions)?;
             Some((path, score))
         })
         .collect();
@@ -302,7 +319,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        algorithm::test_utils::fixtures::{addrs, linear_graph},
+        algorithm::test_utils::fixtures::{addrs, linear_graph, parallel_graph},
         graph::GraphManager,
     };
 
@@ -315,6 +332,20 @@ mod tests {
 
     mod heuristic_score {
         use super::*;
+
+        /// The empty exclusion set the cases that do not test exclusion score with.
+        fn nothing_excluded() -> RouteExclusions {
+            RouteExclusions::default()
+        }
+
+        /// Every pool of the A->B pair in `parallel_graph`.
+        fn every_pool_excluded() -> RouteExclusions {
+            RouteExclusions::default().with_pools([
+                "ab1".to_string(),
+                "ab2".to_string(),
+                "ab3".to_string(),
+            ])
+        }
 
         /// A hop with no measured pool cannot be placed, so the sequence sinks to the bottom of the
         /// queue rather than out of it: it still scores, and the score is the lowest there is.
@@ -329,27 +360,50 @@ mod tests {
             let graph = manager.graph();
             let node = |address: &Address| graph.get_token_ix(address).unwrap();
 
-            let unmeasured = heuristic_score(graph, &[node(&a), node(&b), node(&c)]);
+            let unmeasured =
+                heuristic_score(graph, &[node(&a), node(&b), node(&c)], &nothing_excluded());
 
             assert_eq!(unmeasured, Some(0.0), "an unmeasured hop scores zero, not None");
             assert!(
-                heuristic_score(graph, &[node(&a), node(&b)])
+                heuristic_score(graph, &[node(&a), node(&b)], &nothing_excluded())
                     .is_some_and(|measured| measured > 0.0),
                 "a fully measured sequence still outranks it"
             );
         }
 
-        /// A sequence naming a pair the graph has no pool for is the two indexes disagreeing, not a
-        /// routing outcome, so it is dropped rather than ranked.
+        /// A leg is read at the best pool the request may take, so an excluded pool does not lift
+        /// a sequence up the queue.
         #[test]
-        fn test_unconnected_pair() {
-            let (a, _, c, _) = addrs();
-            let manager = linear_graph();
+        fn test_excluded_pool_on_a_leg() {
+            let (a, b, _, _) = addrs();
+            let mut manager = parallel_graph();
+            manager
+                .set_pool_weight(&"ab1".to_string(), &a, &b, DepthAndPrice::new(5.0, 5000.0), false)
+                .unwrap();
+            manager
+                .set_pool_weight(&"ab2".to_string(), &a, &b, DepthAndPrice::new(2.0, 1000.0), false)
+                .unwrap();
             let graph = manager.graph();
             let node = |address: &Address| graph.get_token_ix(address).unwrap();
+            let path = [node(&a), node(&b)];
 
-            assert_eq!(heuristic_score(graph, &[node(&a), node(&c)]), None);
-            assert_eq!(heuristic_score(graph, &[node(&a)]), None);
+            let deep = heuristic_score(graph, &path, &nothing_excluded()).unwrap();
+            let without_deep_pool = heuristic_score(
+                graph,
+                &path,
+                &RouteExclusions::default().with_pools(["ab1".to_string()]),
+            )
+            .unwrap();
+
+            assert!(
+                without_deep_pool < deep,
+                "the excluded pool set the score: {without_deep_pool} vs {deep}"
+            );
+            assert_eq!(
+                heuristic_score(graph, &path, &every_pool_excluded()),
+                None,
+                "a leg with no pool left cannot carry a route"
+            );
         }
     }
 

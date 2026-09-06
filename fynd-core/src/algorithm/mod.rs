@@ -200,10 +200,10 @@ pub trait Algorithm: Send + Sync {
     /// Finds the best route for the order the request carries.
     ///
     /// [`SolveRequest`] holds the graph, the market, the order, the overlay to read state through,
-    /// the derived data, and what the caller will accept in a route. It is `#[non_exhaustive]`, so
-    /// a later addition does not break an algorithm outside this crate.
+    /// the derived data, and what the caller excludes from a route. Take it apart with
+    /// `into_parts` when the algorithm needs to own the market and the derived data.
     ///
-    /// Honour [`SolveRequest::filter`]. Nothing enforces it, so an algorithm that ignores it
+    /// Honour [`SolveRequest::exclusions`]. Nothing enforces it, so an algorithm that ignores it
     /// returns routes the caller asked not to have.
     ///
     /// # Returns

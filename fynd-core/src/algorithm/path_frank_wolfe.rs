@@ -674,10 +674,6 @@ impl Algorithm for PathFrankWolfeAlgorithm {
         &self,
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let graph = request.graph();
-        let market = request.market().clone();
-        let label = request.label().cloned();
-        let derived = request.derived().cloned();
         let order = request.order();
         let start = Instant::now();
         // This solve runs through the shared split code, which meters every swap it makes. An
@@ -686,7 +682,7 @@ impl Algorithm for PathFrankWolfeAlgorithm {
         sim_meter::start_solve();
         let ctx = self
             .inner
-            .build_context(graph, market, label, derived, order)
+            .build_context(&request)
             .await?;
 
         // Step 1: initial single-path route via BF at full amount.
@@ -1053,8 +1049,7 @@ mod tests {
 
         let result_hi = algo
             .find_best_route(
-                SolveRequest::new(gm_hi.graph(), market_hi, &ord)
-                    .with_derived(Some(derived.clone())),
+                SolveRequest::new(gm_hi.graph(), market_hi, &ord).with_derived(derived.clone()),
             )
             .await
             .unwrap();
@@ -1077,7 +1072,7 @@ mod tests {
         let algo_lo = pfw_algo_with_config(2, config);
         let result_lo = algo_lo
             .find_best_route(
-                SolveRequest::new(gm_lo.graph(), market_lo, &ord).with_derived(Some(derived)),
+                SolveRequest::new(gm_lo.graph(), market_lo, &ord).with_derived(derived),
             )
             .await
             .unwrap();
@@ -1120,7 +1115,9 @@ mod tests {
 
         let ctx = algo
             .inner
-            .build_context(graph_manager.graph(), market, None, Some(derived), &ord)
+            .build_context(
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(derived),
+            )
             .await
             .unwrap();
 
@@ -1291,7 +1288,7 @@ mod tests {
 
         let ctx = algo
             .inner
-            .build_context(graph_manager.graph(), market, None, None, &ord)
+            .build_context(&SolveRequest::new(graph_manager.graph(), market, &ord))
             .await
             .unwrap();
 
@@ -1375,7 +1372,7 @@ mod tests {
 
         let ctx = algo
             .inner
-            .build_context(graph_manager.graph(), market, None, None, &ord)
+            .build_context(&SolveRequest::new(graph_manager.graph(), market, &ord))
             .await
             .unwrap();
 
@@ -1486,7 +1483,7 @@ mod tests {
 
         let result = algo
             .find_best_route(
-                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(derived),
             )
             .await
             .unwrap();
@@ -1533,7 +1530,7 @@ mod tests {
 
         let result = algo
             .find_best_route(
-                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(derived),
             )
             .await
             .unwrap();
@@ -1594,7 +1591,7 @@ mod tests {
 
         let result = algo
             .find_best_route(
-                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(derived),
             )
             .await
             .unwrap();
@@ -1640,7 +1637,7 @@ mod tests {
 
         let result = algo
             .find_best_route(
-                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(derived),
             )
             .await
             .unwrap();
@@ -1705,7 +1702,7 @@ mod tests {
         let split_result = algo
             .find_best_route(
                 SolveRequest::new(graph_manager.graph(), market.clone(), &ord)
-                    .with_derived(Some(derived.clone())),
+                    .with_derived(derived.clone()),
             )
             .await
             .unwrap();
@@ -1715,7 +1712,7 @@ mod tests {
             pfw_algo_with_config(2, PathFrankWolfeConfig { max_paths: 1, ..Default::default() });
         let single_result = single_algo
             .find_best_route(
-                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(derived),
             )
             .await
             .unwrap();
@@ -1767,7 +1764,7 @@ mod tests {
 
         let result = algo
             .find_best_route(
-                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(derived),
             )
             .await
             .unwrap();
@@ -1846,7 +1843,7 @@ mod tests {
         let result = algo
             .find_best_route(
                 SolveRequest::new(graph_manager.graph(), market.clone(), &ord)
-                    .with_derived(Some(derived.clone())),
+                    .with_derived(derived.clone()),
             )
             .await
             .unwrap();
@@ -1867,7 +1864,7 @@ mod tests {
             pfw_algo_with_config(3, PathFrankWolfeConfig { max_paths: 1, ..Default::default() });
         let single_result = single_algo
             .find_best_route(
-                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(derived),
             )
             .await
             .unwrap();
@@ -1918,7 +1915,7 @@ mod tests {
         let derived = derived_with_token_prices(&[&token_a, &token_b]);
         let generous_result = generous_algo
             .find_best_route(
-                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(derived),
             )
             .await
             .unwrap();
@@ -1937,7 +1934,7 @@ mod tests {
         let derived = derived_with_token_prices(&[&token_a, &token_b]);
         let timeout_result = timeout_algo
             .find_best_route(
-                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(Some(derived)),
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(derived),
             )
             .await
             .unwrap();

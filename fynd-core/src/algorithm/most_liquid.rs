@@ -37,8 +37,10 @@ use crate::{
     },
     derived::{computation::ComputationRequirements, types::TokenGasPrices},
     feed::market_data::{MarketData, MarketState, StateLabel},
-    graph::{GraphQueryFilter, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES},
-    types::{ComponentId, Route, RouteResult, Swap},
+    graph::{
+        GraphQueryFilter, RouteSearch, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES,
+    },
+    types::{ComponentId, Route, RouteExclusions, RouteResult, Swap},
     AlgorithmError,
 };
 
@@ -74,6 +76,8 @@ type LegTokens<'a> = (&'a Token, &'a Token, Option<&'a Price>);
 struct SolveContext<'a> {
     graph: &'a TopologyGraph<DepthAndPrice>,
     market: &'a MarketState,
+    /// The pools and tokens this request excludes, checked before a pool is simulated.
+    exclusions: &'a RouteExclusions,
     token_prices: Option<&'a TokenGasPrices>,
     amount_in: &'a BigUint,
     /// What a unit of gas costs, read once off the market snapshot.
@@ -632,6 +636,12 @@ impl MostLiquidAlgorithm {
 
         let scored =
             simulate_token_path(&legs, ctx.amount_in, winners, |leg, amount, component_id| {
+                if ctx
+                    .exclusions
+                    .excludes_pool(component_id)
+                {
+                    return None;
+                }
                 let (token_in, token_out, token_out_gas_price) = leg.data;
                 let paid = swaps.swap(
                     PoolDirection {
@@ -723,6 +733,7 @@ impl Algorithm for MostLiquidAlgorithm {
         let label = request.label().cloned();
         let derived = request.derived().cloned();
         let order = request.order();
+        let exclusions = request.exclusions().clone();
         let start = Instant::now();
 
         // Exact-out isn't supported yet
@@ -744,8 +755,9 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 1: Find every route as a sequence of tokens. Pools are chosen per hop during
         // simulation.
+        let search = RouteSearch { filter: &self.query, exclusions: &exclusions };
         let all_paths =
-            paths::find_token_paths(graph, order.token_in(), order.token_out(), &self.query)?;
+            paths::find_token_paths(graph, order.token_in(), order.token_out(), &search)?;
         let n_paths = all_paths.len();
         let no_path = |reason| AlgorithmError::NoPath {
             from: order.token_in().clone(),
@@ -758,7 +770,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 2: Score and sort all paths by estimated output (higher score = better)
         // No lock needed — scoring uses only local graph data.
-        let mut scored_paths = rank_by_heuristic(graph, all_paths);
+        let mut scored_paths = rank_by_heuristic(graph, all_paths, search.exclusions);
         if scored_paths.is_empty() {
             return Err(no_path(NoPathReason::NoScorablePaths));
         }
@@ -786,6 +798,7 @@ impl Algorithm for MostLiquidAlgorithm {
             amount_in: &amount_in,
             gas_price: &gas_price,
             start,
+            exclusions: search.exclusions,
         };
 
         self.solve_for_best_path(&scored_paths, &mut report, &ctx)
@@ -1108,6 +1121,34 @@ mod tests {
 
     // ==================== find_best_route Tests ====================
 
+    /// A pool the request excludes is not offered to any hop, so the next best pool wins.
+    #[tokio::test]
+    async fn test_find_best_route_with_excluded_pool() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_weighted(vec![
+            ("best", &token_a, &token_b, MockProtocolSim::new(3.0)),
+            ("second", &token_a, &token_b, MockProtocolSim::new(2.0)),
+        ]);
+
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+        let result = algorithm
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &order)
+                    .with_exclusions(RouteExclusions::default().with_pools(["best".to_string()])),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.route().swaps()[0].component_id(), "second");
+    }
+
     #[tokio::test]
     async fn test_find_best_route_single_path() {
         let token_a = token(0x01, "A");
@@ -1167,7 +1208,7 @@ mod tests {
 
         let result = algorithm
             .find_best_route(
-                SolveRequest::new(manager.graph(), market, &order).with_derived(Some(derived)),
+                SolveRequest::new(manager.graph(), market, &order).with_derived(derived),
             )
             .await
             .unwrap();
@@ -1499,7 +1540,7 @@ mod tests {
         // Route should still be returned, but with negative net_amount_out
         let result = algorithm
             .find_best_route(
-                SolveRequest::new(manager.graph(), market, &order).with_derived(Some(derived)),
+                SolveRequest::new(manager.graph(), market, &order).with_derived(derived),
             )
             .await
             .expect("should return route even with negative net_amount_out");
@@ -1682,7 +1723,7 @@ mod tests {
 
         let result = algorithm
             .find_best_route(
-                SolveRequest::new(manager.graph(), market, &order).with_derived(Some(derived)),
+                SolveRequest::new(manager.graph(), market, &order).with_derived(derived),
             )
             .await
             .unwrap();

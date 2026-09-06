@@ -64,9 +64,8 @@ impl Algorithm for DirectComponentAlgorithm {
         &self,
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        // Everything a solve reads arrives on the request. Honour `request.filter()` if your
-        // algorithm can: nothing enforces it, and a caller that excluded a pool expects it left
-        // alone. This one routes through a single component, so it checks the filter once.
+        // Nothing enforces `request.exclusions()`, so this algorithm checks each pool against it
+        // before simulating.
         let graph = request.graph();
         let order = request.order();
         let label = request.label().cloned();
@@ -100,6 +99,13 @@ impl Algorithm for DirectComponentAlgorithm {
                 .edge_weight(edge_idx)
                 .expect("edge exists")
                 .component_id;
+
+            if request
+                .exclusions()
+                .excludes_pool(component_id)
+            {
+                continue;
+            }
 
             // Look up component metadata and simulation state.
             let Some(component) = market.get_component(component_id) else {
