@@ -17,7 +17,11 @@ use tycho_simulation::{
     tycho_core::models::token::Token,
 };
 
-use crate::{derived::DerivedData, feed::market_data::MarketDataView, types::ComponentId};
+use crate::{
+    derived::DerivedData,
+    feed::market_data::MarketDataView,
+    types::{ComponentId, RouteExclusions},
+};
 
 /// Tokens held without allocating. A path of `h` hops names `h + 1` tokens, so this covers every
 /// `max_hops` up to 4. A deeper path still works: `SmallVec` moves to the heap and behaves as a
@@ -143,9 +147,12 @@ where
     fn graph(&self) -> &G;
 }
 
-/// What a caller will accept from a route search.
+/// The bounds a route search runs under.
 ///
-/// Bundles the bounds every path query carries so they travel as one argument instead of three.
+/// Bundles what an algorithm configures once — how long a route may be, and which tokens it may
+/// pass through — so they travel as one argument instead of three. What a request excludes is not
+/// here: that changes per solve and travels beside this as a [`RouteExclusions`].
+#[derive(Debug, Clone)]
 pub struct GraphQueryFilter {
     /// Shortest route to return, in hops. A query with `0` matches nothing.
     pub min_hops: usize,
@@ -154,6 +161,18 @@ pub struct GraphQueryFilter {
     /// Tokens a route may pass *through*. Its own endpoints are always allowed, whatever this
     /// holds. `None` allows every token.
     pub connector_tokens: Option<FxHashSet<Address>>,
+}
+
+/// One solve's route search: the bounds the algorithm configured, and what the request excludes.
+///
+/// The two have different lifetimes — the bounds are built with the algorithm, the exclusions
+/// arrive with the order — so a search borrows both rather than owning either.
+#[derive(Debug, Clone, Copy)]
+pub struct RouteSearch<'a> {
+    /// How long a route may be, and which tokens it may pass through.
+    pub filter: &'a GraphQueryFilter,
+    /// Pools and tokens this request excludes.
+    pub exclusions: &'a RouteExclusions,
 }
 
 /// Trait for edge weight types that can be computed from a ProtocolSim and DerivedData.
