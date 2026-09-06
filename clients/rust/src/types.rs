@@ -528,6 +528,11 @@ impl Order {
 /// All fields are optional. When `None`, struct defaults are used.
 /// Re-exported from `fynd-rpc-types` for wire compatibility.
 pub use fynd_rpc_types::PriceGuardConfig;
+/// Liquidity a request will not accept in a route.
+///
+/// Whatever it names is left out on top of the server's own default, which keeps the RFQ
+/// makers out of every route. Re-exported from `fynd-rpc-types` for wire compatibility.
+pub use fynd_rpc_types::RouteFilter;
 
 /// Optional parameters that tune solving behaviour for a [`QuoteParams`] request.
 ///
@@ -538,6 +543,7 @@ pub struct QuoteOptions {
     pub(crate) min_responses: Option<usize>,
     pub(crate) max_gas: Option<BigUint>,
     pub(crate) encoding_options: Option<EncodingOptions>,
+    pub(crate) route_filter: Option<RouteFilter>,
 }
 
 impl QuoteOptions {
@@ -569,6 +575,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Exclude the pools, protocol systems and tokens this filter names from every route.
+    pub fn with_route_filter(mut self, filter: RouteFilter) -> Self {
+        self.route_filter = Some(filter);
+        self
+    }
+
     /// The configured timeout in milliseconds, or `None` if using the server default.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -582,6 +594,11 @@ impl QuoteOptions {
     /// The configured gas cap, or `None` if no cap was set.
     pub fn max_gas(&self) -> Option<&BigUint> {
         self.max_gas.as_ref()
+    }
+
+    /// What this request excludes from a route, or `None` if nothing is excluded.
+    pub fn route_filter(&self) -> Option<&RouteFilter> {
+        self.route_filter.as_ref()
     }
 }
 

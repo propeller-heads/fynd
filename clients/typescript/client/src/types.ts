@@ -98,6 +98,23 @@ export interface Transaction {
   data: Hex;
 }
 
+/**
+ * Liquidity a request will not accept in a route.
+ *
+ * The pools, protocols and tokens it names are excluded from every route.
+ */
+export interface RouteFilter {
+  /** Pools to exclude, by component id. */
+  excludePools?: string[];
+  /** Protocol systems to exclude, every pool of them (e.g. `uniswap_v2`). */
+  excludeProtocols?: string[];
+  /**
+   * Tokens to exclude as intermediates. The order's own two tokens are always allowed, so
+   * naming one of them changes nothing.
+   */
+  excludeTokens?: Address[];
+}
+
 /** Optional parameters for a quote request. */
 export interface QuoteOptions {
   /** Server-side solver timeout in milliseconds. */
@@ -108,6 +125,8 @@ export interface QuoteOptions {
   maxGas?: bigint;
   /** Encoding options; when set, the response includes a ready-to-sign transaction. */
   encodingOptions?: EncodingOptions;
+  /** Liquidity this request will not route through. */
+  routeFilter?: RouteFilter;
 }
 
 /** Input parameters for {@link FyndClient.quote}. */
