@@ -235,6 +235,10 @@ pub struct QuoteOptions {
     /// `None` uses every pool that serves the request. Library-only: never on the wire.
     #[serde(skip)]
     worker_pools: Option<Vec<String>>,
+    /// Liquidity this request will not route through: pools, protocol systems, tokens. Skipped
+    /// during JSON serialization — the wire type owns the request shape.
+    #[serde(skip)]
+    route_filter: RouteFilter,
 }
 
 impl QuoteOptions {
@@ -274,6 +278,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Excludes the pools, protocol systems and tokens this filter names.
+    pub fn with_route_filter(mut self, filter: RouteFilter) -> Self {
+        self.route_filter = filter;
+        self
+    }
+
     /// Returns the timeout in milliseconds.
     #[must_use]
     pub fn timeout_ms(&self) -> Option<u64> {
@@ -310,6 +320,11 @@ impl QuoteOptions {
         self.worker_pools.as_deref()
     }
 
+    /// Returns what this request excludes from a route. Empty unless one was set.
+    #[must_use]
+    pub fn route_filter(&self) -> &RouteFilter {
+        &self.route_filter
+    }
 }
 
 /// Parameters for a single solve operation.
@@ -322,6 +337,9 @@ impl QuoteOptions {
 pub struct SolveParams {
     /// Solve against this labeled state overlay. `None` uses the base Tycho state.
     state_label: Option<StateLabel>,
+    /// Liquidity the request will not route through. Resolved against the market by the worker,
+    /// which is where the protocol systems it names become pools.
+    route_filter: RouteFilter,
 }
 
 impl SolveParams {
@@ -331,11 +349,21 @@ impl SolveParams {
         self
     }
 
+    /// Excludes the pools, protocol systems and tokens this filter names.
+    pub fn with_route_filter(mut self, filter: RouteFilter) -> Self {
+        self.route_filter = filter;
+        self
+    }
+
     /// Returns the overlay label, if one was set.
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.state_label.as_ref()
     }
 
+    /// Returns what the request excludes from a route. Empty unless one was set.
+    pub fn route_filter(&self) -> &RouteFilter {
+        &self.route_filter
+    }
 }
 
 /// Client fee configuration for the Tycho Router.

@@ -424,10 +424,11 @@ impl WorkerPoolRouter {
             return Err(SolveError::Internal("no solver pools configured".to_string()));
         }
 
-        let params = match request.options().state_label().cloned() {
-            Some(label) => SolveParams::default().with_state_label(label),
-            None => SolveParams::default(),
-        };
+        let mut params =
+            SolveParams::default().with_route_filter(request.options().route_filter().clone());
+        if let Some(label) = request.options().state_label().cloned() {
+            params = params.with_state_label(label);
+        }
 
         counter!(
             "worker_router_exclusive_access_total",
