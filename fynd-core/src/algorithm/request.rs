@@ -8,9 +8,7 @@ use crate::{
 
 /// One order to solve, and everything the algorithm reads to solve it.
 ///
-/// `#[non_exhaustive]`, so what a solve carries can grow without breaking an algorithm outside this
-/// crate. Build one with [`SolveRequest::new`] and the `with_` methods.
-#[non_exhaustive]
+/// Build one with [`SolveRequest::new`] and the `with_` methods, and read it through the getters.
 pub struct SolveRequest<'a, G> {
     graph: &'a G,
     market: MarketData,
@@ -18,6 +16,24 @@ pub struct SolveRequest<'a, G> {
     label: Option<StateLabel>,
     derived: Option<SharedDerivedDataRef>,
     exclusions: RouteExclusions,
+}
+
+/// The request taken apart, so an algorithm owns the market and the derived data in one move.
+///
+/// Every built-in algorithm opens by moving the market, the overlay label and the derived data out
+/// of the request. Crate-internal: an algorithm outside this crate reads the request through its
+/// getters.
+pub(crate) fn take_parts<G>(
+    request: SolveRequest<'_, G>,
+) -> (&G, &Order, MarketData, Option<StateLabel>, Option<SharedDerivedDataRef>, RouteExclusions) {
+    (
+        request.graph,
+        request.order,
+        request.market,
+        request.label,
+        request.derived,
+        request.exclusions,
+    )
 }
 
 impl<'a, G> SolveRequest<'a, G> {
@@ -33,17 +49,18 @@ impl<'a, G> SolveRequest<'a, G> {
         }
     }
 
-    /// Reads market state through this overlay, so a request's component overrides apply.
+    /// The solve reads market state through this overlay, so the request's component overrides
+    /// apply.
     #[must_use]
-    pub fn with_label(mut self, label: Option<StateLabel>) -> Self {
-        self.label = label;
+    pub fn with_label(mut self, label: StateLabel) -> Self {
+        self.label = Some(label);
         self
     }
 
     /// The derived data the algorithm may read: token prices, component depths.
     #[must_use]
-    pub fn with_derived(mut self, derived: Option<SharedDerivedDataRef>) -> Self {
-        self.derived = derived;
+    pub fn with_derived(mut self, derived: SharedDerivedDataRef) -> Self {
+        self.derived = Some(derived);
         self
     }
 

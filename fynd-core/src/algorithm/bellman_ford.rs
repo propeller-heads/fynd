@@ -45,7 +45,7 @@ use super::{
 use crate::{
     algorithm::{
         paths,
-        request::SolveRequest,
+        request::{take_parts, SolveRequest},
         sim_guard::GuardedProtocolSim,
     },
     derived::{
@@ -155,14 +155,9 @@ impl BellmanFordAlgorithm {
     /// component states.
     pub(crate) async fn build_context(
         &self,
-        request: &SolveRequest<'_, StableDiGraph<()>>,
+        request: SolveRequest<'_, StableDiGraph<()>>,
     ) -> Result<BellmanFordContext, AlgorithmError> {
-        let graph = request.graph();
-        let market = request.market().clone();
-        let label = request.label().cloned();
-        let derived = request.derived().cloned();
-        let order = request.order();
-        let exclusions = request.exclusions().clone();
+        let (graph, order, market, label, derived, exclusions) = take_parts(request);
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
@@ -936,8 +931,9 @@ impl Algorithm for BellmanFordAlgorithm {
         &self,
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let ctx = self.build_context(&request).await?;
-        self.find_single_route(&ctx, request.order(), FindRouteOptions::default())
+        let order = request.order();
+        let ctx = self.build_context(request).await?;
+        self.find_single_route(&ctx, order, FindRouteOptions::default())
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {
@@ -2089,7 +2085,7 @@ mod tests {
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
         let ctx = algo
-            .build_context(&SolveRequest::new(manager.graph(), market, &ord))
+            .build_context(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
@@ -2128,7 +2124,7 @@ mod tests {
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
         let ctx = algo
-            .build_context(&SolveRequest::new(manager.graph(), market, &ord))
+            .build_context(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 

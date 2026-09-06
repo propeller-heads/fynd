@@ -60,7 +60,7 @@ use super::{
 use crate::{
     algorithm::{
         paths::read_market,
-        request::SolveRequest,
+        request::{take_parts, SolveRequest},
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
         water_fill::config::{
             BASELINE_CANDIDATES, CANDIDATE_CONNECTOR_EDGES_PER_TOKEN,
@@ -216,15 +216,10 @@ impl WaterFillAlgorithm {
     #[instrument(level = "debug", skip_all)]
     async fn setup<'a>(
         &self,
-        request: &SolveRequest<'a, TopologyGraph<DepthAndPrice>>,
+        request: SolveRequest<'a, TopologyGraph<DepthAndPrice>>,
         deadline: Deadline,
     ) -> Result<SetupResult<'a, 'a>, AlgorithmError> {
-        let graph = request.graph();
-        let market = request.market().clone();
-        let label = request.label().cloned();
-        let derived = request.derived().cloned();
-        let order = request.order();
-        let exclusions = request.exclusions().clone();
+        let (graph, order, market, label, derived, exclusions) = take_parts(request);
         // The hop bounds are this algorithm's, the exclusions are the request's; a search borrows
         // both.
         let search = RouteSearch { filter: &self.query, exclusions: &exclusions };
@@ -479,8 +474,7 @@ impl Algorithm for WaterFillAlgorithm {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
 
-        let SetupResult { input, best_single, mut cache } =
-            self.setup(&request, deadline).await?;
+        let SetupResult { input, best_single, mut cache } = self.setup(request, deadline).await?;
 
         // Build the split candidates; the best net of them competes with the single path.
         let mut candidates: Vec<SplitCandidate> = Vec::new();

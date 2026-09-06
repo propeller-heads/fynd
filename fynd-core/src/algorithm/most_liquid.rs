@@ -31,7 +31,7 @@ use crate::{
             PoolQuote,
         },
         paths,
-        request::SolveRequest,
+        request::{take_parts, SolveRequest},
         sim_guard::GuardedProtocolSim,
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
     },
@@ -728,12 +728,7 @@ impl Algorithm for MostLiquidAlgorithm {
         &self,
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let graph = request.graph();
-        let market = request.market().clone();
-        let label = request.label().cloned();
-        let derived = request.derived().cloned();
-        let order = request.order();
-        let exclusions = request.exclusions().clone();
+        let (graph, order, market, label, derived, exclusions) = take_parts(request);
         let start = Instant::now();
 
         // Exact-out isn't supported yet

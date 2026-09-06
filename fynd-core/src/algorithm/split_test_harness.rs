@@ -404,7 +404,7 @@ where
 
     let Ok(route_result) = algo
         .find_best_route(
-            SolveRequest::new(graph_manager.graph(), market, &order).with_derived(Some(derived)),
+            SolveRequest::new(graph_manager.graph(), market, &order).with_derived(derived),
         )
         .await
     else {

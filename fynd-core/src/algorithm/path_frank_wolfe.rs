@@ -682,7 +682,7 @@ impl Algorithm for PathFrankWolfeAlgorithm {
         sim_meter::start_solve();
         let ctx = self
             .inner
-            .build_context(&request)
+            .build_context(request)
             .await?;
 
         // Step 1: initial single-path route via BF at full amount.
@@ -1288,7 +1288,7 @@ mod tests {
 
         let ctx = algo
             .inner
-            .build_context(&SolveRequest::new(graph_manager.graph(), market, &ord))
+            .build_context(SolveRequest::new(graph_manager.graph(), market, &ord))
             .await
             .unwrap();
 
@@ -1372,7 +1372,7 @@ mod tests {
 
         let ctx = algo
             .inner
-            .build_context(&SolveRequest::new(graph_manager.graph(), market, &ord))
+            .build_context(SolveRequest::new(graph_manager.graph(), market, &ord))
             .await
             .unwrap();
 
