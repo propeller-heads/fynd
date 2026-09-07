@@ -1,12 +1,10 @@
-//! Price impact of a quote.
+//! Calculates signed quote price impact as
+//! `1 - executed_output / spot_reference_output`.
 //!
-//! Signed price impact is `1 - executed_output / spot_reference_output`; negative values mean
-//! favorable execution. The reference output is what the route would pay if every leg executed at
-//! the spot price its component state returns for the `(token_in, token_out)` arguments, the
-//! state the leg's amounts were simulated against. A split route is walked as the token-flow
-//! graph it is, so a route from any algorithm gets the same definition. The calculation is
-//! best-effort: a route it cannot price ships without `price_impact_bps`, and the worker logs and
-//! counts why.
+//! A negative value means favorable execution. Each swap contributes the spot price from
+//! the component state stored in that swap. The calculation processes split routes as
+//! token-flow graphs. If the calculation fails, the worker omits `price_impact_bps`, logs
+//! the reason, and counts the outcome.
 //!
 //! # Limitation: the reference is the reported spot price, not a marginal output rate
 //!
@@ -27,7 +25,7 @@ use tycho_simulation::tycho_common::models::{token::Token, Address};
 
 use crate::types::{quote::branch_collections, ComponentId, Route, Swap};
 
-/// Which amount failed to convert to an `f64`.
+/// Identifies an amount that cannot be represented as a finite `f64`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AmountSource {
     RouteInput,
@@ -56,16 +54,25 @@ pub(crate) enum PriceImpactError {
     #[error("the route's token map has no entry for {0}")]
     UnknownToken(Address),
     #[error(
-        "spot price of component {component_id} from {token_in} to {token_out} failed: {reason}"
+        "component {component_id} could not report spot_price for ({token_in}, {token_out}): \
+         {reason}"
     )]
-    SpotPrice { component_id: ComponentId, token_in: Address, token_out: Address, reason: String },
-    #[error("{kind} amount {amount} does not fit an f64")]
+    SpotPriceQueryFailed {
+        component_id: ComponentId,
+        token_in: Address,
+        token_out: Address,
+        reason: String,
+    },
+    #[error("{kind} amount {amount} cannot be represented as a finite f64")]
     AmountOutOfRange { kind: AmountSource, amount: BigUint },
     #[error("a swap consumes {0} before any swap produced it")]
     UnfedToken(Address),
-    #[error("no input flows through {0}")]
-    NoFlow(Address),
-    #[error("spot price {price} from {token_in} to {token_out} is not a positive finite number")]
+    #[error("swaps from token {0} consume zero input")]
+    ZeroConsumedInput(Address),
+    #[error(
+        "spot_price for ({token_in}, {token_out}) returned {price}, which is not a positive \
+         finite number"
+    )]
     InvalidSpotPrice { token_in: Address, token_out: Address, price: f64 },
     #[error("the route's output at spot prices is not a positive finite number")]
     NoReferenceOutput,
@@ -77,10 +84,10 @@ impl PriceImpactError {
         match self {
             PriceImpactError::EmptyRoute => "empty_route",
             PriceImpactError::UnknownToken(_) => "unknown_token",
-            PriceImpactError::SpotPrice { .. } => "spot_price",
+            PriceImpactError::SpotPriceQueryFailed { .. } => "spot_price_query_failed",
             PriceImpactError::AmountOutOfRange { .. } => "amount_out_of_range",
             PriceImpactError::UnfedToken(_) => "unfed_token",
-            PriceImpactError::NoFlow(_) => "no_flow",
+            PriceImpactError::ZeroConsumedInput(_) => "zero_consumed_input",
             PriceImpactError::InvalidSpotPrice { .. } => "invalid_spot_price",
             PriceImpactError::NoReferenceOutput => "no_reference_output",
         }
@@ -113,11 +120,11 @@ pub(crate) struct PriceImpactInputs<'a> {
 ///
 /// The walk seeds the input token with the route's input and visits the legs one branch
 /// collection at a time. Each leg takes its share of the reference amount standing at its input
-/// token — its share of what the route actually consumed there — and multiplies it by its spot
-/// rate into its output token. Legs into the route's output token accumulate the reference
-/// output. On a linear route every share is one and the reference is the input times the product
-/// of the spot prices; on a split route a deviation at an earlier hop compounds through the hops it
-/// feeds.
+/// token — its share of what the route actually consumed there — and multiplies it by its
+/// reported spot price into its output token. Legs into the route's output token accumulate the
+/// reference output. On a linear route every share is one and the reference is the input times the
+/// product of the spot prices; on a split route a deviation at an earlier hop compounds through the
+/// hops it feeds.
 ///
 /// Shares are ratios of raw amounts and spot prices are in human units, so decimals enter only at
 /// the two endpoints.
@@ -128,13 +135,13 @@ pub(crate) fn price_impact_from_spot_legs(
     if legs.is_empty() {
         return Err(PriceImpactError::EmptyRoute);
     }
-    let spot_reference_output = spot_reference_output(legs, inputs)?;
-    let executed_output = raw_to_human_units(
+    let spot_reference_output_human = spot_reference_output(legs, inputs)?;
+    let executed_output_human = raw_to_human_units(
         inputs.amount_out_raw,
         inputs.output_decimals,
         AmountSource::RouteOutput,
     )?;
-    Ok(1.0 - executed_output / spot_reference_output)
+    Ok(1.0 - executed_output_human / spot_reference_output_human)
 }
 
 /// What the route would pay at spot prices, in human units of its output token.
@@ -166,7 +173,7 @@ fn spot_reference_output(
             .copied()
             .unwrap_or_default();
         if consumed_input_raw_total <= 0.0 {
-            return Err(PriceImpactError::NoFlow(token_in));
+            return Err(PriceImpactError::ZeroConsumedInput(token_in));
         }
         for leg in collection {
             if !(leg.reported_spot_price.is_finite() && leg.reported_spot_price > 0.0) {
@@ -211,8 +218,8 @@ fn raw_to_human_units(
 /// The spot price returned for the `(token_in, token_out)` arguments by the component state
 /// used to simulate this swap, in human `token_out` per human `token_in`.
 ///
-/// This is the one place the reference comes from. Tycho's cross-implementation direction and
-/// fee limitation documented in the module docs applies here.
+/// This is the one place the reference comes from. Tycho's cross-implementation differences
+/// in direction and fee semantics are documented in the module-level limitation.
 fn reported_spot_price(
     swap: &Swap,
     token_in: &Token,
@@ -220,7 +227,7 @@ fn reported_spot_price(
 ) -> Result<f64, PriceImpactError> {
     swap.protocol_state()
         .spot_price(token_in, token_out)
-        .map_err(|err| PriceImpactError::SpotPrice {
+        .map_err(|err| PriceImpactError::SpotPriceQueryFailed {
             component_id: swap.component_id().to_string(),
             token_in: token_in.address.clone(),
             token_out: token_out.address.clone(),
@@ -250,7 +257,7 @@ pub(crate) fn route_price_impact(
 
     let mut legs = Vec::with_capacity(swaps.len());
     for swap in swaps {
-        let rate =
+        let reported_spot_price =
             reported_spot_price(swap, token_of(swap.token_in())?, token_of(swap.token_out())?)?;
         let amount_in_raw = swap
             .amount_in()
@@ -264,7 +271,7 @@ pub(crate) fn route_price_impact(
             token_in: swap.token_in(),
             token_out: swap.token_out(),
             amount_in_raw,
-            reported_spot_price: rate,
+            reported_spot_price,
         });
     }
 
@@ -297,7 +304,7 @@ mod tests {
         addr, component, token, token_with_decimals, MockProtocolSim,
     };
 
-    fn bu(s: &str) -> BigUint {
+    fn parse_biguint(s: &str) -> BigUint {
         s.parse().unwrap()
     }
 
@@ -328,13 +335,14 @@ mod tests {
             amount_in_raw: 1e24,
             reported_spot_price: 0.9998,
         }];
-        let (amount_in, amount_out) = (bu("1000000000000000000000000"), bu("999843730000"));
-        let route = PriceImpactInputs {
+        let (amount_in, amount_out) =
+            (parse_biguint("1000000000000000000000000"), parse_biguint("999843730000"));
+        let impact_inputs = PriceImpactInputs {
             input_decimals: 18,
             output_decimals: 6,
             ..inputs(&dai, &usdc, &amount_in, &amount_out)
         };
-        let impact = price_impact_from_spot_legs(&legs, &route).unwrap();
+        let impact = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap();
         assert!(impact.abs() < 0.001, "expected ~0 impact, got {impact}");
     }
 
@@ -358,9 +366,9 @@ mod tests {
                 reported_spot_price: 0.5,
             },
         ];
-        let (amount_in, amount_out) = (bu("1000"), bu("980"));
-        let route = inputs(&a, &c, &amount_in, &amount_out);
-        let impact = price_impact_from_spot_legs(&legs, &route).unwrap();
+        let (amount_in, amount_out) = (parse_biguint("1000"), parse_biguint("980"));
+        let impact_inputs = inputs(&a, &c, &amount_in, &amount_out);
+        let impact = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap();
         assert!((impact - 0.02).abs() < 1e-9, "got {impact}");
     }
 
@@ -374,9 +382,9 @@ mod tests {
             amount_in_raw: 100.0,
             reported_spot_price: 1.0,
         }];
-        let (amount_in, amount_out) = (bu("100"), bu("101"));
-        let route = inputs(&a, &b, &amount_in, &amount_out);
-        let impact = price_impact_from_spot_legs(&legs, &route).unwrap();
+        let (amount_in, amount_out) = (parse_biguint("100"), parse_biguint("101"));
+        let impact_inputs = inputs(&a, &b, &amount_in, &amount_out);
+        let impact = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap();
         assert!(impact < 0.0, "got {impact}");
     }
 
@@ -390,9 +398,9 @@ mod tests {
             amount_in_raw: 100.0,
             reported_spot_price: 0.0,
         }];
-        let (amount_in, amount_out) = (bu("100"), bu("100"));
-        let route = inputs(&a, &b, &amount_in, &amount_out);
-        let err = price_impact_from_spot_legs(&legs, &route).unwrap_err();
+        let (amount_in, amount_out) = (parse_biguint("100"), parse_biguint("100"));
+        let impact_inputs = inputs(&a, &b, &amount_in, &amount_out);
+        let err = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap_err();
         let PriceImpactError::InvalidSpotPrice { price, .. } = err else {
             panic!("expected InvalidSpotPrice, got {err}");
         };
@@ -410,27 +418,29 @@ mod tests {
             amount_in_raw: 1e18,
             reported_spot_price: 2000.0,
         }];
-        let (amount_in, amount_out) = (bu("1000000000000000000"), bu("2000000000"));
-        let route = PriceImpactInputs {
+        let (amount_in, amount_out) =
+            (parse_biguint("1000000000000000000"), parse_biguint("2000000000"));
+        let impact_inputs = PriceImpactInputs {
             input_decimals: 18,
             output_decimals: 6,
             ..inputs(&weth, &usdc, &amount_in, &amount_out)
         };
-        let impact = price_impact_from_spot_legs(&legs, &route).unwrap();
+        let impact = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap();
         assert!(impact.abs() < 1e-6, "got {impact}");
     }
 
     #[test]
     fn test_amount_beyond_f64_names_its_source() {
-        // A 1e400 amount does not fit an f64; the walk must refuse it rather than divide by inf.
+        // A 1e400 amount cannot be represented as a finite f64; the walk must refuse it rather
+        // than divide by inf.
         let a = addr(0x01);
         let b = addr(0x02);
         let huge = "1".to_string() + &"0".repeat(400);
         let legs =
             [SpotLeg { token_in: &a, token_out: &b, amount_in_raw: 1.0, reported_spot_price: 1.0 }];
-        let (amount_in, amount_out) = (bu(&huge), bu("1"));
-        let route = inputs(&a, &b, &amount_in, &amount_out);
-        let err = price_impact_from_spot_legs(&legs, &route).unwrap_err();
+        let (amount_in, amount_out) = (parse_biguint(&huge), parse_biguint("1"));
+        let impact_inputs = inputs(&a, &b, &amount_in, &amount_out);
+        let err = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap_err();
         let PriceImpactError::AmountOutOfRange { kind, .. } = err else {
             panic!("expected AmountOutOfRange, got {err}");
         };
@@ -447,9 +457,9 @@ mod tests {
             SpotLeg { token_in: &a, token_out: &b, amount_in_raw: 60.0, reported_spot_price: 2.0 },
             SpotLeg { token_in: &a, token_out: &b, amount_in_raw: 40.0, reported_spot_price: 3.0 },
         ];
-        let (amount_in, amount_out) = (bu("100"), bu("228"));
-        let route = inputs(&a, &b, &amount_in, &amount_out);
-        let impact = price_impact_from_spot_legs(&legs, &route).unwrap();
+        let (amount_in, amount_out) = (parse_biguint("100"), parse_biguint("228"));
+        let impact_inputs = inputs(&a, &b, &amount_in, &amount_out);
+        let impact = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap();
         assert!((impact - 0.05).abs() < 1e-9, "got {impact}");
     }
 
@@ -468,9 +478,9 @@ mod tests {
             SpotLeg { token_in: &b, token_out: &c, amount_in_raw: 30.0, reported_spot_price: 2.0 },
             SpotLeg { token_in: &b, token_out: &c, amount_in_raw: 19.0, reported_spot_price: 2.0 },
         ];
-        let (amount_in, amount_out) = (bu("100"), bu("186"));
-        let route = inputs(&a, &c, &amount_in, &amount_out);
-        let impact = price_impact_from_spot_legs(&legs, &route).unwrap();
+        let (amount_in, amount_out) = (parse_biguint("100"), parse_biguint("186"));
+        let impact_inputs = inputs(&a, &c, &amount_in, &amount_out);
+        let impact = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap();
         assert!((impact - 0.07).abs() < 1e-9, "got {impact}");
     }
 
@@ -491,9 +501,9 @@ mod tests {
             SpotLeg { token_in: &c, token_out: &d, amount_in_raw: 97.0, reported_spot_price: 2.0 },
             SpotLeg { token_in: &a, token_out: &c, amount_in_raw: 50.0, reported_spot_price: 1.0 },
         ];
-        let (amount_in, amount_out) = (bu("100"), bu("190"));
-        let route = inputs(&a, &d, &amount_in, &amount_out);
-        let impact = price_impact_from_spot_legs(&legs, &route).unwrap();
+        let (amount_in, amount_out) = (parse_biguint("100"), parse_biguint("190"));
+        let impact_inputs = inputs(&a, &d, &amount_in, &amount_out);
+        let impact = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap();
         assert!((impact - 0.05).abs() < 1e-9, "got {impact}");
     }
 
@@ -508,17 +518,17 @@ mod tests {
             amount_in_raw: 10.0,
             reported_spot_price: 1.0,
         }];
-        let (amount_in, amount_out) = (bu("10"), bu("10"));
-        let route = inputs(&a, &c, &amount_in, &amount_out);
-        let err = price_impact_from_spot_legs(&legs, &route).unwrap_err();
+        let (amount_in, amount_out) = (parse_biguint("10"), parse_biguint("10"));
+        let impact_inputs = inputs(&a, &c, &amount_in, &amount_out);
+        let err = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap_err();
         let PriceImpactError::UnfedToken(unfed) = err else {
             panic!("expected UnfedToken, got {err}");
         };
         assert_eq!(unfed, b);
     }
 
-    /// A swap as a route carries it: the pool's own state, from which the walk takes the spot
-    /// rate.
+    /// Builds a swap with the component state stored by the route. Price-impact calculation
+    /// reads the reported spot price from this state.
     fn route_swap(
         pool_id: &str,
         token_in: &Token,
@@ -564,7 +574,8 @@ mod tests {
         )
         .unwrap();
 
-        let impact = route_price_impact(&route, &bu("100"), &bu("192")).unwrap();
+        let impact =
+            route_price_impact(&route, &parse_biguint("100"), &parse_biguint("192")).unwrap();
         assert!((impact - 0.04).abs() < 1e-9, "got {impact}");
     }
 
@@ -587,8 +598,12 @@ mod tests {
         )
         .unwrap();
 
-        let impact =
-            route_price_impact(&route, &bu("1000000000000000000"), &bu("2000000")).unwrap();
+        let impact = route_price_impact(
+            &route,
+            &parse_biguint("1000000000000000000"),
+            &parse_biguint("2000000"),
+        )
+        .unwrap();
         assert!(impact.abs() < 1e-9, "got {impact}");
     }
 
@@ -602,7 +617,8 @@ mod tests {
         )
         .unwrap();
 
-        let err = route_price_impact(&route, &bu("100"), &bu("200")).unwrap_err();
+        let err =
+            route_price_impact(&route, &parse_biguint("100"), &parse_biguint("200")).unwrap_err();
         let PriceImpactError::UnknownToken(unknown) = err else {
             panic!("expected UnknownToken, got {err}");
         };
@@ -619,22 +635,24 @@ mod tests {
         )
         .unwrap();
 
-        let err = route_price_impact(&route, &bu("100"), &bu("200")).unwrap_err();
-        let PriceImpactError::SpotPrice { component_id, token_in, token_out, .. } = err else {
-            panic!("expected SpotPrice, got {err}");
+        let err =
+            route_price_impact(&route, &parse_biguint("100"), &parse_biguint("200")).unwrap_err();
+        let PriceImpactError::SpotPriceQueryFailed { component_id, token_in, token_out, .. } = err
+        else {
+            panic!("expected SpotPriceQueryFailed, got {err}");
         };
         assert_eq!(component_id, "p1");
         assert_eq!(token_in, a.address);
         assert_eq!(token_out, b.address);
     }
 
-    /// Whether the fixture answers `spot_price`.
+    /// How the fixture responds to `spot_price`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    enum SpotQuote {
+    enum SpotPriceBehavior {
         /// The sell-side rate the pool pays: `mid * (1 - fee)` from the lower to the higher
         /// address.
         SellRate,
-        /// Refuses, as a venue without a spot price does.
+        /// Returns an error to model a venue that does not provide a spot price.
         Unavailable,
     }
 
@@ -645,16 +663,16 @@ mod tests {
     struct SellRateSim {
         mid: f64,
         fee: f64,
-        spot: SpotQuote,
+        spot: SpotPriceBehavior,
     }
 
     impl SellRateSim {
         fn new(mid: f64, fee: f64) -> Self {
-            Self { mid, fee, spot: SpotQuote::SellRate }
+            Self { mid, fee, spot: SpotPriceBehavior::SellRate }
         }
 
         fn unpriced() -> Self {
-            Self { mid: 1.0, fee: 0.0, spot: SpotQuote::Unavailable }
+            Self { mid: 1.0, fee: 0.0, spot: SpotPriceBehavior::Unavailable }
         }
 
         fn rate_for(&self, token_in: &Token, token_out: &Token) -> f64 {
@@ -671,10 +689,10 @@ mod tests {
 
         fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
             match self.spot {
-                SpotQuote::SellRate => Ok(self.rate_for(base, quote)),
-                SpotQuote::Unavailable => Err(SimulationError::RecoverableError(
-                    "spot_price is not available".to_string(),
-                )),
+                SpotPriceBehavior::SellRate => Ok(self.rate_for(base, quote)),
+                SpotPriceBehavior::Unavailable => {
+                    Err(SimulationError::RecoverableError("spot price is unavailable".to_string()))
+                }
             }
         }
 
@@ -732,9 +750,9 @@ mod tests {
 
     #[test]
     fn test_no_slippage_sell_rate_pool_reports_zero_impact() {
-        // The contract Fynd wants from the reference: when it equals the fee-inclusive rate the
-        // pool paid, a 30 bps fee on a trade that did not move the pool is not impact.
-        // 1_000_000 A at mid 1.0 pays 997_000 B.
+        // Fynd expects the reference rate to include the fee. If the reference rate equals the
+        // fee-inclusive rate that the pool paid, a 30 bps fee on a trade that does not move the
+        // pool produces zero price impact. 1_000_000 A at mid 1.0 pays 997_000 B.
         let a = token(0x01, "A");
         let b = token(0x02, "B");
         let state = SellRateSim::new(1.0, 0.003);
@@ -749,7 +767,9 @@ mod tests {
         )
         .unwrap();
 
-        let impact = route_price_impact(&route, &bu("1000000"), &bu("997000")).unwrap();
+        let impact =
+            route_price_impact(&route, &parse_biguint("1000000"), &parse_biguint("997000"))
+                .unwrap();
         assert!(impact.abs() < 1e-9, "expected 0 bps, got {impact}");
     }
 }

@@ -193,9 +193,10 @@ fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth
 ///
 /// Successful quotes only: a pool that exhausts its timeout returns before this point and is
 /// counted in `worker_router_solver_failures_total{error_type="timeout"}` instead.
-fn record_solve_duration(pool_name: &str, solve_time: Duration) {
+fn record_quote_duration(pool_name: &str, quote_duration: Duration) {
+    // The metric keeps its established external name for dashboard compatibility.
     metrics::histogram!("worker_pool_solve_duration_seconds", "pool" => pool_name.to_string())
-        .record(solve_time.as_secs_f64());
+        .record(quote_duration.as_secs_f64());
 }
 
 /// Records end-to-end price-impact calculation time, including protocol-specific spot-price
@@ -208,7 +209,7 @@ fn record_price_impact_metrics(pool_name: &str, duration: Duration, outcome: &'s
     )
     .record(duration.as_secs_f64());
     metrics::counter!(
-        "worker_pool_price_impact_total",
+        "worker_pool_price_impact_calculations_total",
         "pool" => pool_name.to_string(),
         "outcome" => outcome
     )
@@ -611,7 +612,7 @@ where
                 // This is a first naive approach to getting the total gas of this quote
                 // A finer estimation is done during encoding
                 let gas_estimate = route.total_gas();
-                let amount_in = if order.is_sell() {
+                let amount_in_raw = if order.is_sell() {
                     order.amount().clone()
                 } else {
                     route
@@ -627,7 +628,7 @@ where
                             self.route_carries_no_swaps()
                         })?
                 };
-                let amount_out = if order.is_sell() {
+                let amount_out_raw = if order.is_sell() {
                     let output_token = route.output_token().ok_or_else(|| {
                         error!(
                             order_id = %order.id(),
@@ -642,8 +643,11 @@ where
                 };
 
                 let price_impact_started = Instant::now();
-                let price_impact_result =
-                    super::price_impact::route_price_impact(&route, &amount_in, &amount_out);
+                let price_impact_result = super::price_impact::route_price_impact(
+                    &route,
+                    &amount_in_raw,
+                    &amount_out_raw,
+                );
                 let price_impact_outcome = match &price_impact_result {
                     Ok(_) => "computed",
                     Err(err) => err.outcome(),
@@ -669,8 +673,8 @@ where
                 let mut quote = OrderQuote::new(
                     order.id().to_string(),
                     QuoteStatus::Success,
-                    amount_in,
-                    amount_out,
+                    amount_in_raw,
+                    amount_out_raw,
                     gas_estimate,
                     amount_out_net_gas,
                     block_info.clone(),
@@ -691,10 +695,10 @@ where
             }
         };
 
-        let solve_time = start_time.elapsed();
-        record_solve_duration(&self.pool_name, solve_time);
+        let quote_duration = start_time.elapsed();
+        record_quote_duration(&self.pool_name, quote_duration);
 
-        Ok(SingleOrderQuote::new(order_quote, solve_time.as_millis() as u64))
+        Ok(SingleOrderQuote::new(order_quote, quote_duration.as_millis() as u64))
     }
 
     /// Waits for required derived data to become ready, or until timeout.
@@ -1253,8 +1257,8 @@ mod tests {
         }
     }
 
-    /// Mock algorithm that returns a two-branch split route A→B, as `water_fill` does, without
-    /// reporting a price impact of its own.
+    /// Mock algorithm that returns a two-branch A→B route. This models the split-route shape
+    /// that `water_fill` returns. The worker calculates the quote's price impact.
     struct SplitRouteAlgorithm;
 
     impl Algorithm for SplitRouteAlgorithm {
@@ -2436,16 +2440,16 @@ mod tests {
     }
 
     #[test]
-    fn solve_duration_metric_recorded() {
+    fn quote_duration_metric_recorded() {
         use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         metrics::with_local_recorder(&recorder, || {
-            record_solve_duration("test_pool", std::time::Duration::from_millis(120));
+            record_quote_duration("test_pool", std::time::Duration::from_millis(120));
         });
 
-        let mut solve_seen = false;
+        let mut quote_duration_seen = false;
         for (key, _unit, _description, value) in snapshotter.snapshot().into_vec() {
             let key = key.key();
             if key.name() != "worker_pool_solve_duration_seconds" {
@@ -2461,9 +2465,9 @@ mod tests {
             };
             assert_eq!(samples.len(), 1);
             assert!((samples[0].into_inner() - 0.120).abs() < 1e-9);
-            solve_seen = true;
+            quote_duration_seen = true;
         }
-        assert!(solve_seen, "solve duration histogram not recorded");
+        assert!(quote_duration_seen, "quote duration histogram not recorded");
     }
 
     #[test]
@@ -2494,7 +2498,7 @@ mod tests {
 
         let (_, labels, value) = recorded
             .iter()
-            .find(|(name, _, _)| name == "worker_pool_price_impact_total")
+            .find(|(name, _, _)| name == "worker_pool_price_impact_calculations_total")
             .expect("price impact outcome counter not recorded");
         assert_eq!(
             labels,

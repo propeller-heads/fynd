@@ -1470,9 +1470,11 @@ impl BlockInfo {
 pub struct Route {
     /// Ordered sequence of swaps to execute.
     swaps: Vec<Swap>,
-    /// Full `Token` objects keyed by address, populated by the algorithm that
-    /// built the route. Skipped during (de)serialization — only the in-process
-    /// encoding path consumes it.
+    /// Full `Token` objects keyed by address.
+    ///
+    /// Built-in algorithms add every token referenced by the swaps. Price-impact calculation
+    /// and in-process encoding use this map. Serialization omits it, so a deserialized route
+    /// has an empty map.
     #[serde(skip, default)]
     tokens: FxHashMap<Bytes, Token>,
     /// Amount out this route delivers if its pAMM legs fall back to Uniswap V3.
@@ -1530,18 +1532,18 @@ impl Route {
         self.swaps
     }
 
-    /// Returns the token map given to [`Route::new`]: every token the swaps name, when an
-    /// algorithm built the route. Empty for a route built without one (tests, replays).
+    /// Returns the route's token map.
+    ///
+    /// Built-in algorithms add every token referenced by the swaps. Custom, deserialized,
+    /// test, and replay routes can have missing entries.
     pub(crate) fn tokens(&self) -> &FxHashMap<Bytes, Token> {
         &self.tokens
     }
 
-    /// Returns the symbol of `address`, resolved from this route's own token map (populated by
-    /// the algorithm that built the route). `None` if the route carries no entry for it — for
-    /// example a route built without a token map (tests, replays).
+    /// Returns the symbol for `address` from this route's token map. Returns `None` when the
+    /// map has no entry for the address.
     ///
-    /// Lets a caller outside this crate render a human-readable path (tokens and protocols
-    /// interleaved) without needing a separate, externally-sourced token table.
+    /// This lets an external caller render a human-readable route without a separate token table.
     pub fn token_symbol(&self, address: &Address) -> Option<&str> {
         self.tokens
             .get(address)
