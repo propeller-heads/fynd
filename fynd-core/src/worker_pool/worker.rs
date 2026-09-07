@@ -219,16 +219,16 @@ where
             self.pamm_admission
                 .rebuild_pools(&market);
             let fee_tiers = self.pamm_admission.fee_tiers();
-            let kept = {
-                let Self { pamm_admission, liquidity_scope, exclude_protocols, .. } = self;
-                remove_components(market.base_market_state(), topology, &|component| {
-                    should_drop_component(*liquidity_scope, exclude_protocols, component) ||
-                        pamm_admission.is_unbacked(component, fee_tiers.as_ref())
-                })
+            let Self { pamm_admission, liquidity_scope, exclude_protocols, .. } = self;
+            let caller_drops = |component: &ProtocolComponent| {
+                should_drop_component(*liquidity_scope, exclude_protocols, component)
             };
-            self.pamm_admission
-                .record_graph_build(&market, &kept, fee_tiers);
-            kept
+            // Decided first, so the filter below reads one recorded answer per pAMM instead of
+            // deciding each a second time.
+            pamm_admission.record_graph_build(&market, fee_tiers, &caller_drops);
+            remove_components(market.base_market_state(), topology, &|component| {
+                caller_drops(component) || pamm_admission.is_withheld(&component.id)
+            })
         };
 
         self.graph_manager
@@ -1581,6 +1581,21 @@ mod tests {
             Some(PammState::Admitted),
             "the rebuild admits the backed pAMM"
         );
+    }
+
+    /// A pAMM the worker's own `exclude_protocols` rule drops is out for a reason this rule does
+    /// not own, so the build records it as neither admitted nor withheld. Were it withheld, the
+    /// event path would put it back the moment its fallback pool arrived.
+    #[tokio::test]
+    async fn test_initialize_graph_leaves_an_excluded_pamm_off_the_record() {
+        let market = market_for_admission(true);
+        let (mut worker, _shared_tiers) =
+            admission_worker(market, Some(FeeTiers::new(ADMISSION_TIER)));
+        worker.exclude_protocols = vec![PROPAMM_FALLBACK_PREFIX.to_string()];
+
+        worker.initialize_graph().await;
+
+        assert_eq!(worker.pamm_admission.state_of(PAMM), None);
     }
 
     /// Without `exclude_protocols` the worker drops nothing on protocol grounds — the liquidity

@@ -6,7 +6,7 @@
 
 use metrics::counter;
 use rustc_hash::FxHashMap;
-use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
+use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
 
 use crate::{
     feed::{events::MarketEvent, market_data::MarketDataView},
@@ -34,7 +34,8 @@ pub(crate) struct PammManager {
     fee_tiers: SharedFeeTiers,
     /// Uniswap V3 pools the PropAMMRouter can fall back to, kept current from market events.
     pools: FallbackPoolIndex,
-    /// Where each pAMM stands with the graph.
+    /// Where each pAMM this rule decided stands. A pAMM the caller's own rule drops is absent,
+    /// so a withheld pAMM always means one this market does not back.
     states: FxHashMap<ComponentId, PammState>,
     /// The fee tiers the graph was last filtered with, `None` before the first read.
     built_with_fee_tiers: Option<FeeTiers>,
@@ -78,15 +79,11 @@ impl PammManager {
         fee_tiers != self.built_with_fee_tiers.as_ref()
     }
 
-    /// Whether `component` is a pAMM this market does not back, against the pools indexed here.
+    /// Whether the last graph build kept `component_id` out because the market does not back it.
     ///
-    /// `fee_tiers` is passed in so one pass over many components reads it once.
-    pub(crate) fn is_unbacked(
-        &self,
-        component: &ProtocolComponent,
-        fee_tiers: Option<&FeeTiers>,
-    ) -> bool {
-        is_unbacked_pamm(component, fee_tiers, &self.pools)
+    /// The build's filter reads this, so the graph and this record cannot disagree.
+    pub(crate) fn is_withheld(&self, component_id: &ComponentId) -> bool {
+        self.states.get(component_id) == Some(&PammState::Withheld)
     }
 
     /// Rebuilds the pool index from the whole market.
@@ -96,26 +93,30 @@ impl PammManager {
         self.pools = FallbackPoolIndex::build(market);
     }
 
-    /// Records what a graph build decided. `kept` is the topology it ended up with; every other
-    /// pAMM in the market was left out.
+    /// Records, for every pAMM in the market, whether the graph the caller is about to build
+    /// holds it or leaves it out.
+    ///
+    /// `caller_drops` is the caller's own rule. A pAMM it drops never reaches the graph for a
+    /// reason this manager does not own, so it is left off the record entirely rather than
+    /// withheld — otherwise the event path would try to put it back.
     pub(crate) fn record_graph_build(
         &mut self,
         market: &MarketDataView<'_>,
-        kept: &FxHashMap<ComponentId, Vec<Bytes>>,
         fee_tiers: Option<FeeTiers>,
+        caller_drops: &dyn Fn(&ProtocolComponent) -> bool,
     ) {
         self.states.clear();
         for component_id in market.component_topology().keys() {
-            let is_pamm_component = market
-                .get_component(component_id)
-                .is_some_and(is_pamm);
-            if !is_pamm_component {
+            let Some(component) = market.get_component(component_id) else {
+                continue;
+            };
+            if !is_pamm(component) || caller_drops(component) {
                 continue;
             }
-            let state = if kept.contains_key(component_id) {
-                PammState::Admitted
-            } else {
+            let state = if is_unbacked_pamm(component, fee_tiers.as_ref(), &self.pools) {
                 PammState::Withheld
+            } else {
+                PammState::Admitted
             };
             self.states
                 .insert(component_id.clone(), state);
