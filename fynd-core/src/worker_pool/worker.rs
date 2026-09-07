@@ -1505,6 +1505,35 @@ mod tests {
             .is_empty());
     }
 
+    /// A pAMM held out because nothing backs it can leave the market before the block that adds
+    /// its fallback pool reaches the worker. A component the market has dropped is not backed
+    /// again, and adding it would carry no tokens at all.
+    #[test]
+    fn test_apply_pamm_admission_keeps_a_missing_pamm_withheld() {
+        let market = market_with_pamm();
+        let (mut worker, _shared_tiers) =
+            admission_worker(market.clone(), Some(FeeTiers::new(ADMISSION_TIER)));
+        admit(&mut worker, &market, added_component_event(PAMM));
+        assert!(worker
+            .pamm_admission
+            .withheld()
+            .contains(PAMM));
+
+        add_fallback_pool(&market);
+        // The market has advanced past the pool's arrival before the worker processes it.
+        market
+            .try_write()
+            .expect("uncontended")
+            .remove_components([&PAMM.to_string()]);
+        let event = admit(&mut worker, &market, added_component_event(FALLBACK_POOL));
+
+        assert_eq!(added_ids(&event), vec![FALLBACK_POOL.to_string()]);
+        assert!(worker
+            .pamm_admission
+            .withheld()
+            .contains(PAMM));
+    }
+
     /// The index reads the event before the worker's filter, so a pAMM and the pool it falls back
     /// to can arrive in one block. Driven through `process_event`, which is what orders the two.
     #[tokio::test]

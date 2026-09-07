@@ -183,19 +183,18 @@ impl PammManager {
             true
         });
 
-        let readmitted: Vec<ComponentId> = withheld
+        let readmitted: Vec<_> = withheld
             .iter()
-            .filter(|component_id| !unbacked(component_id))
-            .cloned()
+            .filter_map(|component_id| {
+                let component = market.get_component(component_id)?;
+                (!is_unbacked_pamm(component, fee_tiers, pools))
+                    .then(|| (component_id.clone(), component.tokens.clone()))
+            })
             .collect();
-        for component_id in readmitted {
+        for (component_id, tokens) in readmitted {
             withheld.remove(&component_id);
             admitted.insert(component_id.clone());
             count("admitted");
-            let tokens = market
-                .get_component(&component_id)
-                .map(|component| component.tokens.clone())
-                .unwrap_or_default();
             added_components.insert(component_id, tokens);
         }
 
