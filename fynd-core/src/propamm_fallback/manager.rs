@@ -6,11 +6,11 @@
 
 use metrics::counter;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
+use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
 
 use crate::{
     feed::{events::MarketEvent, market_data::MarketDataView},
-    propamm_fallback::{is_pamm, is_unbacked_pamm, FallbackPoolIndex, FeeTiers, SharedFeeTiers},
+    propamm_fallback::{is_pamm, must_withhold_pamm, FallbackPoolIndex, FeeTiers, SharedFeeTiers},
     types::ComponentId,
 };
 
@@ -33,25 +33,25 @@ pub(crate) struct PammManager {
     /// Fee tiers the PropAMMRouter falls back on, read from chain by `FeeTierFetcher`.
     fee_tiers: SharedFeeTiers,
     /// Uniswap V3 pools the PropAMMRouter can fall back to, kept current from market events.
-    pools: FallbackPoolIndex,
+    fallback_pools: FallbackPoolIndex,
     /// Where each pAMM this rule decided stands. A pAMM the caller's own rule drops is absent,
     /// so a withheld pAMM always means one this market does not back.
     states: FxHashMap<ComponentId, PammState>,
     /// The fee tiers the graph was last filtered with, `None` before the first read.
     built_with_fee_tiers: Option<FeeTiers>,
     /// The worker pool this belongs to, as the `pool` label on the admission counter.
-    pool_name: String,
+    worker_pool_name: String,
 }
 
 impl PammManager {
     /// Starts with no tiers, no pools and no pAMMs on record.
-    pub(crate) fn new(pool_name: String) -> Self {
+    pub(crate) fn new(worker_pool_name: String) -> Self {
         Self {
             fee_tiers: SharedFeeTiers::default(),
-            pools: FallbackPoolIndex::default(),
+            fallback_pools: FallbackPoolIndex::default(),
             states: FxHashMap::default(),
             built_with_fee_tiers: None,
-            pool_name,
+            worker_pool_name,
         }
     }
 
@@ -67,8 +67,8 @@ impl PammManager {
     }
 
     /// The pools a pAMM leg can fall back to, for pricing a route that holds one.
-    pub(crate) fn pools(&self) -> &FallbackPoolIndex {
-        &self.pools
+    pub(crate) fn fallback_pools(&self) -> &FallbackPoolIndex {
+        &self.fallback_pools
     }
 
     /// Whether `fee_tiers` has moved since the graph was filtered.
@@ -83,8 +83,9 @@ impl PammManager {
     /// Uniswap V3 pool they can fall back to.
     ///
     /// Reindexes the fallback pools, reads the tiers and decides every pAMM in one call, all from
-    /// the `market` the caller is about to build from. The caller filters its topology with the
-    /// returned ids, so the graph and this record cannot disagree.
+    /// the `market` the caller is about to build from. The caller filters `topology` with the
+    /// returned ids, so the graph and this record cannot disagree. `topology` is the caller's own
+    /// copy, walked here rather than allocated again.
     ///
     /// `caller_drops` is the caller's own rule. A pAMM it drops never reaches the graph for a
     /// reason this manager does not own, so it is left off the record entirely rather than
@@ -92,21 +93,22 @@ impl PammManager {
     pub(crate) fn withhold_from_graph(
         &mut self,
         market: &MarketDataView<'_>,
+        topology: &FxHashMap<ComponentId, Vec<Address>>,
         caller_drops: &dyn Fn(&ProtocolComponent) -> bool,
     ) -> FxHashSet<ComponentId> {
-        self.pools = FallbackPoolIndex::build(market);
+        self.fallback_pools = FallbackPoolIndex::build(market);
         let fee_tiers = self.fee_tiers.snapshot();
 
         self.states.clear();
         let mut withheld = FxHashSet::default();
-        for component_id in market.component_topology().keys() {
+        for component_id in topology.keys() {
             let Some(component) = market.get_component(component_id) else {
                 continue;
             };
             if !is_pamm(component) || caller_drops(component) {
                 continue;
             }
-            let state = if is_unbacked_pamm(component, fee_tiers.as_ref(), &self.pools) {
+            let state = if must_withhold_pamm(component, fee_tiers.as_ref(), &self.fallback_pools) {
                 withheld.insert(component_id.clone());
                 PammState::Withheld
             } else {
@@ -134,14 +136,15 @@ impl PammManager {
     ///
     /// `fee_tiers` is the one the caller tested with [`needs_rebuild`](Self::needs_rebuild), so
     /// both decisions read one value.
-    pub(crate) fn select_pamm_updates(
+    pub(crate) fn apply_pamm_admission(
         &mut self,
         market: &MarketDataView<'_>,
         fee_tiers: Option<&FeeTiers>,
         caller_drops: &dyn Fn(&ProtocolComponent) -> bool,
         event: &mut MarketEvent,
     ) {
-        self.pools.apply_event(market, event);
+        self.fallback_pools
+            .apply_event(market, event);
 
         let MarketEvent::MarketUpdated { added_components, removed_components, .. } = event;
         // Only an added or removed component moves a pool in or out of the index, so a block that
@@ -151,14 +154,14 @@ impl PammManager {
         }
 
         // Destructured so the closure below can read the index while it writes the states.
-        let Self { pools, states, pool_name, .. } = self;
+        let Self { fallback_pools, states, worker_pool_name, .. } = self;
         let unbacked = |component_id: &ComponentId| {
             market
                 .get_component(component_id)
-                .is_some_and(|component| is_unbacked_pamm(component, fee_tiers, pools))
+                .is_some_and(|component| must_withhold_pamm(component, fee_tiers, fallback_pools))
         };
         let count = |outcome: &'static str| {
-            counter!("propamm_admissions_total", "outcome" => outcome, "pool" => pool_name.clone())
+            counter!("propamm_admissions_total", "outcome" => outcome, "pool" => worker_pool_name.clone())
                 .increment(1);
         };
 
@@ -175,9 +178,9 @@ impl PammManager {
             if !is_pamm(component) || caller_drops(component) {
                 return true;
             }
-            if is_unbacked_pamm(component, fee_tiers, pools) {
+            if must_withhold_pamm(component, fee_tiers, fallback_pools) {
                 states.insert(component_id.clone(), PammState::Withheld);
-                count("dropped");
+                count("withheld");
                 return false;
             }
             states.insert(component_id.clone(), PammState::Admitted);
@@ -190,7 +193,7 @@ impl PammManager {
             .filter(|(_, state)| **state == PammState::Withheld)
             .filter_map(|(component_id, _)| {
                 let component = market.get_component(component_id)?;
-                (!is_unbacked_pamm(component, fee_tiers, pools))
+                (!must_withhold_pamm(component, fee_tiers, fallback_pools))
                     .then(|| (component_id.clone(), component.tokens.clone()))
             })
             .collect();
@@ -212,7 +215,7 @@ impl PammManager {
         }
         if !evicted.is_empty() {
             tracing::debug!(
-                pool = %pool_name,
+                pool = %worker_pool_name,
                 components = ?evicted,
                 "dropping pAMM components whose Uniswap V3 fallback left the market"
             );
@@ -224,7 +227,7 @@ impl PammManager {
     /// against a market it never built a graph from.
     #[cfg(test)]
     pub(crate) fn rebuild_pools(&mut self, market: &MarketDataView<'_>) {
-        self.pools = FallbackPoolIndex::build(market);
+        self.fallback_pools = FallbackPoolIndex::build(market);
     }
 
     #[cfg(test)]
@@ -243,16 +246,5 @@ impl PammManager {
     #[cfg(test)]
     pub(crate) fn built_with_fee_tiers(&self) -> Option<&FeeTiers> {
         self.built_with_fee_tiers.as_ref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn admit_for_test(&mut self, component_id: ComponentId) {
-        self.states
-            .insert(component_id, PammState::Admitted);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn forget_for_test(&mut self) {
-        self.states.clear();
     }
 }

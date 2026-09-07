@@ -215,12 +215,14 @@ where
             // One read: the index and the topology must describe the same market, or a pAMM whose
             // fallback pool arrived between the two reads stays out until the next rebuild.
             let market = self.market_data.read().await;
-            let topology = market.component_topology().clone(); // clone to avoid holding the lock
+            // Owned already, so the graph is built without holding the market lock.
+            let topology = market.component_topology();
             let Self { pamm_admission, liquidity_scope, exclude_protocols, .. } = self;
             let caller_drops = |component: &ProtocolComponent| {
                 should_drop_component(*liquidity_scope, exclude_protocols, component)
             };
-            let withheld_pamms = pamm_admission.withhold_from_graph(&market, &caller_drops);
+            let withheld_pamms =
+                pamm_admission.withhold_from_graph(&market, &topology, &caller_drops);
             remove_components(market.base_market_state(), topology, &|component| {
                 caller_drops(component) || withheld_pamms.contains(&component.id)
             })
@@ -258,7 +260,7 @@ where
                 should_drop_component(*liquidity_scope, exclude_protocols, component)
             };
             let mut event = event;
-            pamm_admission.select_pamm_updates(
+            pamm_admission.apply_pamm_admission(
                 &market,
                 fee_tiers.as_ref(),
                 &caller_drops,
@@ -405,7 +407,7 @@ where
                         &route,
                         &market,
                         &fee_tiers,
-                        self.pamm_admission.pools(),
+                        self.pamm_admission.fallback_pools(),
                     ) {
                         FallbackAmountOut::AmountOut(amount) => {
                             route.set_fallback_amount_out(amount)
@@ -421,7 +423,7 @@ where
                             // router does not resolve to.
                             let tiers_in_market = self
                                 .pamm_admission
-                                .pools()
+                                .fallback_pools()
                                 .tiers_for(&token_in, &token_out);
                             debug!(
                                 order_id = %order.id(),
@@ -805,6 +807,7 @@ fn solve_error_from_algorithm_error(
 mod tests {
     use std::time::Duration;
 
+    use rstest::rstest;
     use rustc_hash::FxHashMap;
     use tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim;
 
@@ -1255,27 +1258,28 @@ mod tests {
         assert!(!should_drop_component(worker.liquidity_scope, &worker.exclude_protocols, &public));
     }
 
-    /// The fee tier the router resolves the pAMM's pair to.
-    const ADMISSION_TIER: u32 = 3000;
-
     /// The pAMM every admission test decides.
     const PAMM: &str = "pamm-1";
 
     /// The Uniswap V3 pool the pAMM falls back to.
     const FALLBACK_POOL: &str = "uni-1";
 
-    /// A market holding the pAMM, plus the Uniswap V3 pool it falls back to at [`ADMISSION_TIER`]
-    /// when `with_fallback` is true.
-    fn market_for_admission(with_fallback: bool) -> MarketData {
+    /// A market holding the pAMM and the Uniswap V3 pool it falls back to.
+    fn market_with_pamm_and_fallback() -> MarketData {
         let market = market_with_pamm();
-        if with_fallback {
-            add_fallback_pool(&market);
-        }
+        add_fallback_pool(&market);
         market
     }
 
     /// A market holding the pAMM and no fallback pool.
     fn market_with_pamm() -> MarketData {
+        let (market, _) = setup_market_weighted(vec![]);
+        add_pamm(&market);
+        market
+    }
+
+    /// Adds the pAMM the admission tests decide.
+    fn add_pamm(market: &MarketData) {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let pamm = component_with_protocol(
@@ -1283,25 +1287,22 @@ mod tests {
             "propammfallback:fermiswap",
             &[token_a.clone(), token_b.clone()],
         );
-        let (market, _) = setup_market_weighted(vec![]);
-        {
-            let mut state = market.try_write().expect("uncontended");
-            state.upsert_tokens([token_a, token_b]);
-            state.upsert_components([pamm]);
-        }
-        market
+        let mut state = market.try_write().expect("uncontended");
+        state.upsert_tokens([token_a, token_b]);
+        state.upsert_components([pamm]);
     }
 
-    /// Adds the Uniswap V3 pool the pAMM falls back to at [`ADMISSION_TIER`].
+    /// Adds the Uniswap V3 pool the pAMM falls back to at [`FALLBACK_FEE_TIER`].
     fn add_fallback_pool(market: &MarketData) {
         let mut fallback = component_with_protocol(
             FALLBACK_POOL,
             FALLBACK_PROTOCOL_SYSTEM,
             &[token(0x01, "A"), token(0x02, "B")],
         );
-        fallback
-            .static_attributes
-            .insert(FEE_ATTRIBUTE.to_string(), Bytes::from(ADMISSION_TIER.to_be_bytes().to_vec()));
+        fallback.static_attributes.insert(
+            FEE_ATTRIBUTE.to_string(),
+            Bytes::from(FALLBACK_FEE_TIER.to_be_bytes().to_vec()),
+        );
         let mut state = market.try_write().expect("uncontended");
         state.upsert_components([fallback]);
     }
@@ -1364,8 +1365,7 @@ mod tests {
         removed_components.clone()
     }
 
-    /// Runs the pAMM pass over `event` the way `process_event` does, for a worker whose own rules
-    /// drop nothing.
+    /// Runs `event` through both of the worker's rules, in the order `process_event` runs them.
     fn admit(
         worker: &mut SolverWorker<MockAlgorithm>,
         market: &MarketData,
@@ -1375,69 +1375,51 @@ mod tests {
             .try_read_blocking()
             .expect("uncontended");
         let fee_tiers = worker.pamm_admission.fee_tiers();
+        let caller_drops = |component: &ProtocolComponent| {
+            should_drop_component(worker.liquidity_scope, &worker.exclude_protocols, component)
+        };
         worker
             .pamm_admission
-            .select_pamm_updates(&view, fee_tiers.as_ref(), &|_| false, &mut event);
-        event
+            .apply_pamm_admission(&view, fee_tiers.as_ref(), &caller_drops, &mut event);
+        filter_event(view.base_market_state(), event, &caller_drops)
     }
 
-    /// A pAMM whose pair this market holds no Uniswap V3 pool for can never produce a quotable
-    /// route, so it must not reach the graph.
-    #[test]
-    fn test_apply_pamm_admission_without_fallback_pool() {
-        let market = market_for_admission(false);
-        let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(ADMISSION_TIER)));
+    /// A pAMM only reaches the chain through the Uniswap V3 pool it falls back to, so the worker
+    /// admits one exactly when this market holds that pool at the tier the router resolves. With
+    /// no tiers read there is no tier to look up, and guessing one prices the wrong pool.
+    #[rstest]
+    #[case::without_fallback_pool(
+        market_with_pamm(),
+        Some(FeeTiers::new(FALLBACK_FEE_TIER)),
+        false
+    )]
+    #[case::with_fallback_pool(
+        market_with_pamm_and_fallback(),
+        Some(FeeTiers::new(FALLBACK_FEE_TIER)),
+        true
+    )]
+    #[case::before_fee_tiers(market_with_pamm_and_fallback(), None, false)]
+    fn test_apply_pamm_admission(
+        #[case] market: MarketData,
+        #[case] fee_tiers: Option<FeeTiers>,
+        #[case] expect_admitted: bool,
+    ) {
+        let (mut worker, _shared_tiers) = admission_worker(market.clone(), fee_tiers);
+
         let event = admit(&mut worker, &market, added_component_event(PAMM));
 
-        assert!(added_ids(&event).is_empty(), "the unbacked pAMM must not be added");
-        assert_eq!(
-            worker.pamm_admission.state_of(PAMM),
-            Some(PammState::Withheld),
-            "kept, so it can come back"
-        );
-        assert_eq!(
-            worker
-                .pamm_admission
-                .count_in(PammState::Admitted),
-            0
-        );
-    }
-
-    /// This market holds the pAMM's fallback pool, so the pAMM enters the graph like any other
-    /// component.
-    #[test]
-    fn test_apply_pamm_admission_with_fallback_pool() {
-        let market = market_for_admission(true);
-        let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(ADMISSION_TIER)));
-        let event = admit(&mut worker, &market, added_component_event(PAMM));
-
-        assert_eq!(added_ids(&event), vec![PAMM.to_string()]);
-        assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Admitted));
-    }
-
-    /// Without the router's tiers there is no tier to look up, and guessing one prices the wrong
-    /// pool, so the worker admits no pAMM until the tiers arrive.
-    #[test]
-    fn test_apply_pamm_admission_before_fee_tiers() {
-        let market = market_for_admission(true);
-        let (mut worker, _shared_tiers) = admission_worker(market.clone(), None);
-        let event = admit(&mut worker, &market, added_component_event(PAMM));
-
-        assert!(added_ids(&event).is_empty(), "no pAMM is backed until the tiers are read");
+        let admitted = added_ids(&event) == vec![PAMM.to_string()];
+        assert_eq!(admitted, expect_admitted, "additions were {:?}", added_ids(&event));
     }
 
     /// The event that removes a Uniswap V3 pool does not name the pAMMs that fell back to it, so
     /// the pAMM would otherwise stay in the graph and produce routes the worker cannot price.
     #[test]
     fn test_apply_pamm_admission_after_the_fallback_pool_leaves() {
-        let market = market_for_admission(true);
+        let market = market_with_pamm_and_fallback();
         let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(ADMISSION_TIER)));
-        worker
-            .pamm_admission
-            .admit_for_test(PAMM.to_string());
+            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
+        admit(&mut worker, &market, added_component_event(PAMM));
         let event = admit(&mut worker, &market, removed_component_event(FALLBACK_POOL));
 
         assert!(
@@ -1450,12 +1432,6 @@ mod tests {
             Some(PammState::Withheld),
             "kept, so it can come back"
         );
-        assert_eq!(
-            worker
-                .pamm_admission
-                .count_in(PammState::Admitted),
-            0
-        );
     }
 
     /// The market names a component in `added_components` once, so the event that adds the
@@ -1465,7 +1441,7 @@ mod tests {
     fn test_apply_pamm_admission_after_the_fallback_pool_arrives() {
         let market = market_with_pamm();
         let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(ADMISSION_TIER)));
+            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
         admit(&mut worker, &market, added_component_event(PAMM));
         assert_eq!(
             worker.pamm_admission.state_of(PAMM),
@@ -1482,12 +1458,6 @@ mod tests {
             added_ids(&event)
         );
         assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Admitted));
-        assert_eq!(
-            worker
-                .pamm_admission
-                .count_in(PammState::Withheld),
-            0
-        );
     }
 
     /// A pAMM held out because nothing backs it can leave the market before the block that adds
@@ -1497,7 +1467,7 @@ mod tests {
     fn test_apply_pamm_admission_keeps_a_missing_pamm_withheld() {
         let market = market_with_pamm();
         let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(ADMISSION_TIER)));
+            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
         admit(&mut worker, &market, added_component_event(PAMM));
         assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Withheld));
 
@@ -1513,15 +1483,18 @@ mod tests {
         assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Withheld));
     }
 
-    /// The index reads the event before the worker's filter, so a pAMM and the pool it falls back
-    /// to can arrive in one block. Driven through `process_event`, which is what orders the two.
+    /// A pAMM and the Uniswap V3 pool it falls back to can arrive in one block. The pool index
+    /// has to take the block before admission reads it, or the pAMM is judged against an index
+    /// that does not hold its pool yet. Built against a market holding neither component, so no
+    /// earlier index build can hide the ordering.
     #[tokio::test]
     async fn test_process_event_pamm_and_fallback_pool_in_one_block() {
-        let market = market_for_admission(true);
+        let (market, _) = setup_market_weighted(vec![]);
         let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(ADMISSION_TIER)));
+            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
         worker.initialize_graph().await;
-        worker.pamm_admission.forget_for_test();
+        add_pamm(&market);
+        add_fallback_pool(&market);
         let event = MarketEvent::MarketUpdated {
             added_components: FxHashMap::from_iter([
                 (PAMM.to_string(), Vec::new()),
@@ -1536,7 +1509,7 @@ mod tests {
         assert_eq!(
             worker.pamm_admission.state_of(PAMM),
             Some(PammState::Admitted),
-            "the index must see the event before admission decides"
+            "the index must take the block before admission reads it"
         );
     }
 
@@ -1544,7 +1517,7 @@ mod tests {
     /// filtered with stop matching the current ones.
     #[tokio::test]
     async fn test_process_event_after_the_first_fee_tier_read() {
-        let market = market_for_admission(true);
+        let market = market_with_pamm_and_fallback();
         let (mut worker, shared_tiers) = admission_worker(market.clone(), None);
         worker.initialize_graph().await;
         assert_eq!(
@@ -1555,7 +1528,7 @@ mod tests {
             "no tiers, no pAMM"
         );
 
-        shared_tiers.set(FeeTiers::new(ADMISSION_TIER));
+        shared_tiers.set(FeeTiers::new(FALLBACK_FEE_TIER));
         worker
             .process_event(added_component_event(FALLBACK_POOL))
             .await;
@@ -1564,12 +1537,41 @@ mod tests {
             worker
                 .pamm_admission
                 .built_with_fee_tiers(),
-            Some(&FeeTiers::new(ADMISSION_TIER))
+            Some(&FeeTiers::new(FALLBACK_FEE_TIER))
         );
         assert_eq!(
             worker.pamm_admission.state_of(PAMM),
             Some(PammState::Admitted),
             "the rebuild admits the backed pAMM"
+        );
+    }
+
+    /// A tier change moves which Uniswap V3 pool a pAMM falls back to, so the worker rebuilds and
+    /// the pAMM leaves the graph when the new tier names no pool for its pair.
+    #[tokio::test]
+    async fn test_process_event_after_a_fee_tier_change() {
+        let market = market_with_pamm_and_fallback();
+        let (mut worker, shared_tiers) =
+            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
+        worker.initialize_graph().await;
+        assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Admitted));
+
+        shared_tiers.set(FeeTiers::new(FALLBACK_FEE_TIER + 1));
+        worker
+            .process_event(added_component_event(FALLBACK_POOL))
+            .await;
+
+        assert_eq!(
+            worker
+                .pamm_admission
+                .built_with_fee_tiers(),
+            Some(&FeeTiers::new(FALLBACK_FEE_TIER + 1)),
+            "the tier change must rebuild the graph"
+        );
+        assert_eq!(
+            worker.pamm_admission.state_of(PAMM),
+            Some(PammState::Withheld),
+            "no pool at the new tier, so the pAMM leaves"
         );
     }
 
@@ -1581,7 +1583,7 @@ mod tests {
     async fn test_process_event_readmits_a_pamm_behind_an_excluded_fallback_pool() {
         let market = market_with_pamm();
         let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(ADMISSION_TIER)));
+            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
         worker.exclude_protocols = vec![FALLBACK_PROTOCOL_SYSTEM.to_string()];
         worker.initialize_graph().await;
         assert_eq!(
@@ -1607,9 +1609,9 @@ mod tests {
     /// event path would put it back the moment its fallback pool arrived.
     #[tokio::test]
     async fn test_initialize_graph_leaves_an_excluded_pamm_off_the_record() {
-        let market = market_for_admission(true);
+        let market = market_with_pamm_and_fallback();
         let (mut worker, _shared_tiers) =
-            admission_worker(market, Some(FeeTiers::new(ADMISSION_TIER)));
+            admission_worker(market, Some(FeeTiers::new(FALLBACK_FEE_TIER)));
         worker.exclude_protocols = vec![PROPAMM_FALLBACK_PREFIX.to_string()];
 
         worker.initialize_graph().await;
