@@ -128,20 +128,25 @@ impl PammManager {
         self.pools.apply_event(market, event);
     }
 
-    /// Rewrites `event` so that applying it leaves the graph holding exactly the pAMMs this
-    /// market backs.
+    /// Rewrites `event`, as the market broadcast it, so that applying it leaves the graph holding
+    /// exactly the pAMMs this market backs.
     ///
     /// An unbacked pAMM drops out of the additions. A pAMM whose fallback pool has left joins the
     /// removals. A pAMM withheld earlier joins the additions once the market backs it: the event
     /// names the pool that moved, never the pAMMs that fall back to it.
     ///
-    /// Expects an event the caller has already filtered, and the pool index to have seen the
-    /// unfiltered one — see [`update_pools`](Self::update_pools). `fee_tiers` is the one the
-    /// caller tested with [`needs_rebuild`](Self::needs_rebuild), so both decisions read one value.
+    /// Takes the event the market broadcast, before the caller's own filter touches it. A pAMM
+    /// falls back to a pool its worker excludes just as well, so a block the caller's filter
+    /// empties can still change these answers. `caller_drops` is the caller's own rule, and this
+    /// leaves every component it drops for the caller's filter to remove, on no record of its own.
+    ///
+    /// `fee_tiers` is the one the caller tested with [`needs_rebuild`](Self::needs_rebuild), so
+    /// both decisions read one value.
     pub(crate) fn select_pamm_updates(
         &mut self,
         market: &MarketDataView<'_>,
         fee_tiers: Option<&FeeTiers>,
+        caller_drops: &dyn Fn(&ProtocolComponent) -> bool,
         event: &mut MarketEvent,
     ) {
         let MarketEvent::MarketUpdated { added_components, removed_components, .. } = event;
@@ -173,7 +178,7 @@ impl PammManager {
                 // keeps such a component for the same reason.
                 return true;
             };
-            if !is_pamm(component) {
+            if !is_pamm(component) || caller_drops(component) {
                 return true;
             }
             if is_unbacked_pamm(component, fee_tiers, pools) {

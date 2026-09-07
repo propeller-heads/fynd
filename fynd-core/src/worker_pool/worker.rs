@@ -253,20 +253,20 @@ where
         let market_data = self.market_data.clone();
         let event = {
             let market = market_data.read().await;
-            // The index reads the event the market broadcast, before this worker's own filter
-            // touches it: a pAMM and the Uniswap V3 pool it falls back to can arrive in the same
-            // block, and the pool is indexed whether or not this worker routes through it.
             self.pamm_admission
                 .update_pools(&market, &event);
-            let mut event = {
-                let Self { liquidity_scope, exclude_protocols, .. } = self;
-                filter_event(market.base_market_state(), event, &|component| {
-                    should_drop_component(*liquidity_scope, exclude_protocols, component)
-                })
+            let Self { pamm_admission, liquidity_scope, exclude_protocols, .. } = self;
+            let caller_drops = |component: &ProtocolComponent| {
+                should_drop_component(*liquidity_scope, exclude_protocols, component)
             };
-            self.pamm_admission
-                .select_pamm_updates(&market, fee_tiers.as_ref(), &mut event);
-            event
+            let mut event = event;
+            pamm_admission.select_pamm_updates(
+                &market,
+                fee_tiers.as_ref(),
+                &caller_drops,
+                &mut event,
+            );
+            filter_event(market.base_market_state(), event, &caller_drops)
         };
 
         match event {
@@ -1382,7 +1382,7 @@ mod tests {
             .update_pools(&view, &event);
         worker
             .pamm_admission
-            .select_pamm_updates(&view, fee_tiers.as_ref(), &mut event);
+            .select_pamm_updates(&view, fee_tiers.as_ref(), &|_| false, &mut event);
         event
     }
 
@@ -1575,6 +1575,35 @@ mod tests {
             worker.pamm_admission.state_of(PAMM),
             Some(PammState::Admitted),
             "the rebuild admits the backed pAMM"
+        );
+    }
+
+    /// A pAMM falls back through the router, not through this worker's graph, so a Uniswap V3
+    /// pool the worker excludes still backs it. The block that adds that pool names no pAMM, and
+    /// the worker's own filter empties it, so the pAMM pass must read the event the market
+    /// broadcast rather than the filtered one.
+    #[tokio::test]
+    async fn test_process_event_readmits_a_pamm_behind_an_excluded_fallback_pool() {
+        let market = market_with_pamm();
+        let (mut worker, _shared_tiers) =
+            admission_worker(market.clone(), Some(FeeTiers::new(ADMISSION_TIER)));
+        worker.exclude_protocols = vec![FALLBACK_PROTOCOL_SYSTEM.to_string()];
+        worker.initialize_graph().await;
+        assert_eq!(
+            worker.pamm_admission.state_of(PAMM),
+            Some(PammState::Withheld),
+            "no fallback pool yet"
+        );
+
+        add_fallback_pool(&market);
+        worker
+            .process_event(added_component_event(FALLBACK_POOL))
+            .await;
+
+        assert_eq!(
+            worker.pamm_admission.state_of(PAMM),
+            Some(PammState::Admitted),
+            "the excluded pool still backs the pAMM on chain"
         );
     }
 
