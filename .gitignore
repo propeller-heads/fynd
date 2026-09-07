@@ -28,3 +28,4 @@ run_2hop_audit.sh
 audit_results*.json
 audit_*.log
 solver.log
+bench-results/
