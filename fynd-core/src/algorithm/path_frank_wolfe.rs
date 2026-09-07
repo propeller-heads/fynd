@@ -76,20 +76,20 @@ impl Default for PathFrankWolfeAlgorithm {
 }
 
 impl PathFrankWolfeAlgorithm {
-    /// Computes the minimum probe amount from the initial route's price impact.
+    /// Computes the minimum probe amount from the current probe impact estimate.
     ///
     /// Returns `None` when the probe exceeds `config.max_probe × total_amount`,
     /// signalling that splitting is not worthwhile.
     fn compute_probe_amount(
         &self,
         total_amount: &BigUint,
-        price_impact: f64,
+        probe_impact: f64,
         gas_cost_output_tokens: f64,
     ) -> Option<BigUint> {
-        if price_impact <= 0.0 {
+        if probe_impact <= 0.0 {
             return None;
         }
-        let gas_floor = gas_cost_output_tokens / price_impact;
+        let gas_floor = gas_cost_output_tokens / probe_impact;
 
         let probe_amount = BigUint::from(gas_floor.ceil() as u128);
         let (max_probe_amount, _remainder) = split_amount(total_amount, self.config.max_probe);
@@ -100,13 +100,17 @@ impl PathFrankWolfeAlgorithm {
         Some(probe_amount)
     }
 
-    /// Flow-fraction-weighted average price impact across all active paths.
+    /// Flow-fraction-weighted average of per-path impact estimates, used only to size the next
+    /// candidate probe.
     ///
-    /// Per-path price impact measures how much the realized output falls short
-    /// of the ideal (marginal-price) output. Paths are weighted by their share of
-    /// total flow, not averaged equally — a 95/5 split means the big path
-    /// dominates the result and the small path barely matters.
-    fn compute_average_price_impact(paths: &[PathAllocation]) -> Result<f64, AlgorithmError> {
+    /// Each path's estimate compares its realized output with the output at the marginal price
+    /// product it was last simulated against, and that product depends on the order the paths
+    /// were allocated in: a later path sees the reserves earlier paths consumed. Paths are
+    /// weighted by their share of total flow, so a 95/5 split is dominated by the big path.
+    /// This is a heuristic for the Frank-Wolfe loop, not the quote's price impact: the worker
+    /// computes `price_impact_bps` from the finished route (`worker_pool::price_impact`) and
+    /// never reads this value.
+    fn estimate_probe_impact(paths: &[PathAllocation]) -> Result<f64, AlgorithmError> {
         let mut weighted_price_impact = 0.0;
         for path in paths {
             let first_hop = path
@@ -519,12 +523,15 @@ impl PathFrankWolfeAlgorithm {
         // Compute gas cost and initial probe.
         let gas_cost = Self::gas_cost_output_tokens(single_path_result.route(), ctx)?;
         let total_amount = order.amount();
-        let initial_pi = Self::compute_average_price_impact(&allocations)?;
+        let initial_probe_impact = Self::estimate_probe_impact(&allocations)?;
         if self
-            .compute_probe_amount(total_amount, initial_pi, gas_cost)
+            .compute_probe_amount(total_amount, initial_probe_impact, gas_cost)
             .is_none()
         {
-            debug!(pi = initial_pi, gas_cost, "price impact too low to justify splitting");
+            debug!(
+                probe_impact = initial_probe_impact,
+                gas_cost, "probe impact too low to justify splitting"
+            );
             return Ok(None);
         }
 
@@ -535,11 +542,12 @@ impl PathFrankWolfeAlgorithm {
                 break;
             }
 
-            let pi = Self::compute_average_price_impact(&allocations)?;
-            let probe_amount = match self.compute_probe_amount(total_amount, pi, gas_cost) {
+            let probe_impact = Self::estimate_probe_impact(&allocations)?;
+            let probe_amount = match self.compute_probe_amount(total_amount, probe_impact, gas_cost)
+            {
                 Some(p) => p,
                 None => {
-                    debug!(iteration, pi, "probe exceeds cap, stopping");
+                    debug!(iteration, probe_impact, "probe exceeds cap, stopping");
                     break;
                 }
             };
@@ -859,10 +867,10 @@ mod tests {
             .is_none());
     }
 
-    // ==================== compute_average_price_impact ====================
+    // ==================== estimate_probe_impact ====================
 
     #[test]
-    fn test_average_price_impact_redistribution() {
+    fn test_probe_impact_redistribution() {
         // Splitting flow across more paths should reduce average price impact.
         // Uses constant-product component outputs (reserve_in=1M, reserve_out=2M) to construct
         // allocations at 1, 2, and 3 paths.
@@ -917,9 +925,9 @@ mod tests {
             },
         ];
 
-        let pi_0 = PathFrankWolfeAlgorithm::compute_average_price_impact(&iter_0).unwrap();
-        let pi_1 = PathFrankWolfeAlgorithm::compute_average_price_impact(&iter_1).unwrap();
-        let pi_2 = PathFrankWolfeAlgorithm::compute_average_price_impact(&iter_2).unwrap();
+        let pi_0 = PathFrankWolfeAlgorithm::estimate_probe_impact(&iter_0).unwrap();
+        let pi_1 = PathFrankWolfeAlgorithm::estimate_probe_impact(&iter_1).unwrap();
+        let pi_2 = PathFrankWolfeAlgorithm::estimate_probe_impact(&iter_2).unwrap();
 
         assert!(pi_1 < pi_0, "price impact should decrease after first split: {pi_1} >= {pi_0}");
         assert!(pi_2 < pi_1, "price impact should decrease after second split: {pi_2} >= {pi_1}");
@@ -930,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn test_average_price_impact_weighting() {
+    fn test_probe_impact_weighting() {
         // Weighted average: 90% of flow with 10% price impact + 10% of flow
         // with 50% price impact = 0.14, not the simple mean of 0.30.
         //   Path 1: flow=0.9, price_impact = 1 − 900/1000 = 0.10
@@ -954,12 +962,12 @@ mod tests {
             },
         ];
 
-        let pi = PathFrankWolfeAlgorithm::compute_average_price_impact(&allocations).unwrap();
+        let pi = PathFrankWolfeAlgorithm::estimate_probe_impact(&allocations).unwrap();
         assert!((pi - 0.14).abs() < 1e-10, "expected 0.14, got {pi}");
     }
 
     #[test]
-    fn test_average_price_impact_mixed_decimals() {
+    fn test_probe_impact_mixed_decimals() {
         // USDC (6 dec) → WETH (18 dec): spot_price = 0.0005 (human units).
         // Trade: 2000 USDC → ~1 WETH with 10% price impact.
         //   amount_in  = 2000 * 10^6  = 2_000_000_000 (raw USDC)
@@ -976,7 +984,7 @@ mod tests {
             marginal_price_product: 0.0005,
         }];
 
-        let pi = PathFrankWolfeAlgorithm::compute_average_price_impact(&allocations).unwrap();
+        let pi = PathFrankWolfeAlgorithm::estimate_probe_impact(&allocations).unwrap();
         assert!((pi - 0.10).abs() < 1e-10, "expected 0.10 for cross-decimal pair, got {pi}");
     }
 

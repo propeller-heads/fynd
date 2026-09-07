@@ -185,26 +185,34 @@ fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth
         .set(queue_depth as f64);
 }
 
-/// Records per-pool solve latency: one algorithm's own working time for one order, excluding
-/// queue wait. Unlike `worker_router_solve_duration_seconds`, which times the router racing every
-/// pool and so belongs to no single pool, this is attributable per pool.
+/// Records successful worker-side quote latency after pickup, excluding queue wait: everything
+/// from taking the order to handing the quote back, so the algorithm's solve plus route
+/// validation, pAMM fallback pricing, price-impact calculation and quote construction. Unlike
+/// `worker_router_solve_duration_seconds`, which times the router racing every pool and so
+/// belongs to no single pool, this is attributable per pool.
 ///
-/// Successful solves only — a pool that exhausts its timeout returns before this point and is
+/// Successful quotes only: a pool that exhausts its timeout returns before this point and is
 /// counted in `worker_router_solver_failures_total{error_type="timeout"}` instead.
 fn record_solve_duration(pool_name: &str, solve_time: Duration) {
     metrics::histogram!("worker_pool_solve_duration_seconds", "pool" => pool_name.to_string())
         .record(solve_time.as_secs_f64());
 }
 
-/// Records how long the price-impact walk took for one quote. It reads one spot price per swap,
-/// and a pool that derives its spot price by probing a swap pays for that probe here, so a route
-/// through such a pool costs as much as the extra hops it simulates.
-fn record_price_impact_duration(pool_name: &str, walk_time: Duration) {
+/// Records end-to-end price-impact calculation time, including protocol-specific spot-price
+/// probes, and how the calculation ended: `computed`, or the reason `price_impact_bps` was left
+/// off the quote.
+fn record_price_impact_metrics(pool_name: &str, duration: Duration, outcome: &'static str) {
     metrics::histogram!(
         "worker_pool_price_impact_duration_seconds",
         "pool" => pool_name.to_string()
     )
-    .record(walk_time.as_secs_f64());
+    .record(duration.as_secs_f64());
+    metrics::counter!(
+        "worker_pool_price_impact_total",
+        "pool" => pool_name.to_string(),
+        "outcome" => outcome
+    )
+    .increment(1);
 }
 
 /// A solver worker instance that maintains a market graph and processes solve requests.
@@ -634,21 +642,25 @@ where
                 };
 
                 let price_impact_started = Instant::now();
-                let spot_impact = super::price_impact::spot_price_impact(
-                    &route,
-                    &amount_in,
-                    &amount_out,
-                    &self.market_data,
+                let price_impact_result =
+                    super::price_impact::route_price_impact(&route, &amount_in, &amount_out);
+                let price_impact_outcome = match &price_impact_result {
+                    Ok(_) => "computed",
+                    Err(err) => err.outcome(),
+                };
+                record_price_impact_metrics(
+                    &self.pool_name,
+                    price_impact_started.elapsed(),
+                    price_impact_outcome,
                 );
-                record_price_impact_duration(&self.pool_name, price_impact_started.elapsed());
-                let price_impact_bps = match spot_impact {
+                let price_impact_bps = match price_impact_result {
                     Ok(impact) => Some((impact * 10_000.0).round() as i32),
                     Err(err) => {
                         debug!(
                             order_id = %order.id(),
                             algorithm = self.algorithm.name(),
                             error = %err,
-                            "quote carries no price impact"
+                            "price-impact calculation failed; omitting price_impact_bps from quote"
                         );
                         None
                     }
@@ -1285,8 +1297,14 @@ mod tests {
                 component("p2", &[token_a.clone(), token_b.clone()]),
                 Box::new(MockProtocolSim::new(2.0)),
             );
-            let route =
-                Route::new(vec![swap_p1, swap_p2], FxHashMap::default()).expect("non-empty route");
+            let route = Route::new(
+                vec![swap_p1, swap_p2],
+                [
+                    (token_a.address.clone(), token_a.clone()),
+                    (token_b.address.clone(), token_b.clone()),
+                ],
+            )
+            .expect("non-empty route");
             Ok(RouteResult::new(route, num_bigint::BigInt::from(192), BigUint::from(1u64)))
         }
 
@@ -2449,13 +2467,17 @@ mod tests {
     }
 
     #[test]
-    fn test_price_impact_duration_metric_recorded() {
+    fn test_price_impact_metrics_recorded() {
         use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         metrics::with_local_recorder(&recorder, || {
-            record_price_impact_duration("test_pool", std::time::Duration::from_micros(250));
+            record_price_impact_metrics(
+                "test_pool",
+                std::time::Duration::from_micros(250),
+                "unknown_token",
+            );
         });
 
         let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
@@ -2469,6 +2491,19 @@ mod tests {
         };
         assert_eq!(samples.len(), 1);
         assert!((samples[0].into_inner() - 0.000_25).abs() < 1e-12);
+
+        let (_, labels, value) = recorded
+            .iter()
+            .find(|(name, _, _)| name == "worker_pool_price_impact_total")
+            .expect("price impact outcome counter not recorded");
+        assert_eq!(
+            labels,
+            &vec!["pool=test_pool".to_string(), "outcome=unknown_token".to_string()]
+        );
+        let DebugValue::Counter(count) = value else {
+            panic!("expected counter, got {value:?}");
+        };
+        assert_eq!(*count, 1);
     }
 
     #[test]
