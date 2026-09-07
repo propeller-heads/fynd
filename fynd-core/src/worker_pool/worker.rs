@@ -831,7 +831,8 @@ mod tests {
         },
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
         propamm_fallback::{
-            FeeTiers, FALLBACK_PROTOCOL_SYSTEM, FEE_ATTRIBUTE, PROPAMM_FALLBACK_PREFIX,
+            manager::PammState, FeeTiers, FALLBACK_PROTOCOL_SYSTEM, FEE_ATTRIBUTE,
+            PROPAMM_FALLBACK_PREFIX,
         },
         types::{ComponentId, OrderSide, Route, RouteResult, Swap},
         AlgorithmError,
@@ -1400,16 +1401,16 @@ mod tests {
         let event = admit(&mut worker, &market, added_component_event(PAMM));
 
         assert!(added_ids(&event).is_empty(), "the unbacked pAMM must not be added");
-        assert!(worker
-            .pamm_admission
-            .admitted()
-            .is_empty());
-        assert!(
+        assert_eq!(
+            worker.pamm_admission.state_of(PAMM),
+            Some(PammState::Withheld),
+            "kept, so it can come back"
+        );
+        assert_eq!(
             worker
                 .pamm_admission
-                .withheld()
-                .contains(PAMM),
-            "kept, so it can come back"
+                .count_in(PammState::Admitted),
+            0
         );
     }
 
@@ -1423,10 +1424,7 @@ mod tests {
         let event = admit(&mut worker, &market, added_component_event(PAMM));
 
         assert_eq!(added_ids(&event), vec![PAMM.to_string()]);
-        assert!(worker
-            .pamm_admission
-            .admitted()
-            .contains(PAMM));
+        assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Admitted));
     }
 
     /// Without the router's tiers there is no tier to look up, and guessing one prices the wrong
@@ -1457,16 +1455,16 @@ mod tests {
             "the pAMM must leave with its fallback pool: {:?}",
             removed_ids(&event)
         );
-        assert!(worker
-            .pamm_admission
-            .admitted()
-            .is_empty());
-        assert!(
+        assert_eq!(
+            worker.pamm_admission.state_of(PAMM),
+            Some(PammState::Withheld),
+            "kept, so it can come back"
+        );
+        assert_eq!(
             worker
                 .pamm_admission
-                .withheld()
-                .contains(PAMM),
-            "kept, so it can come back"
+                .count_in(PammState::Admitted),
+            0
         );
     }
 
@@ -1479,11 +1477,9 @@ mod tests {
         let (mut worker, _shared_tiers) =
             admission_worker(market.clone(), Some(FeeTiers::new(ADMISSION_TIER)));
         admit(&mut worker, &market, added_component_event(PAMM));
-        assert!(
-            worker
-                .pamm_admission
-                .withheld()
-                .contains(PAMM),
+        assert_eq!(
+            worker.pamm_admission.state_of(PAMM),
+            Some(PammState::Withheld),
             "withheld while it was unbacked"
         );
 
@@ -1495,14 +1491,13 @@ mod tests {
             "the pAMM must join the graph with its fallback pool: {:?}",
             added_ids(&event)
         );
-        assert!(worker
-            .pamm_admission
-            .admitted()
-            .contains(PAMM));
-        assert!(worker
-            .pamm_admission
-            .withheld()
-            .is_empty());
+        assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Admitted));
+        assert_eq!(
+            worker
+                .pamm_admission
+                .count_in(PammState::Withheld),
+            0
+        );
     }
 
     /// A pAMM held out because nothing backs it can leave the market before the block that adds
@@ -1514,10 +1509,7 @@ mod tests {
         let (mut worker, _shared_tiers) =
             admission_worker(market.clone(), Some(FeeTiers::new(ADMISSION_TIER)));
         admit(&mut worker, &market, added_component_event(PAMM));
-        assert!(worker
-            .pamm_admission
-            .withheld()
-            .contains(PAMM));
+        assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Withheld));
 
         add_fallback_pool(&market);
         // The market has advanced past the pool's arrival before the worker processes it.
@@ -1528,10 +1520,7 @@ mod tests {
         let event = admit(&mut worker, &market, added_component_event(FALLBACK_POOL));
 
         assert_eq!(added_ids(&event), vec![FALLBACK_POOL.to_string()]);
-        assert!(worker
-            .pamm_admission
-            .withheld()
-            .contains(PAMM));
+        assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Withheld));
     }
 
     /// The index reads the event before the worker's filter, so a pAMM and the pool it falls back
@@ -1554,11 +1543,9 @@ mod tests {
 
         worker.process_event(event).await;
 
-        assert!(
-            worker
-                .pamm_admission
-                .admitted()
-                .contains(PAMM),
+        assert_eq!(
+            worker.pamm_admission.state_of(PAMM),
+            Some(PammState::Admitted),
             "the index must see the event before admission decides"
         );
     }
@@ -1570,11 +1557,11 @@ mod tests {
         let market = market_for_admission(true);
         let (mut worker, shared_tiers) = admission_worker(market.clone(), None);
         worker.initialize_graph().await;
-        assert!(
+        assert_eq!(
             worker
                 .pamm_admission
-                .admitted()
-                .is_empty(),
+                .count_in(PammState::Admitted),
+            0,
             "no tiers, no pAMM"
         );
 
@@ -1589,11 +1576,9 @@ mod tests {
                 .built_with_fee_tiers(),
             Some(&FeeTiers::new(ADMISSION_TIER))
         );
-        assert!(
-            worker
-                .pamm_admission
-                .admitted()
-                .contains(PAMM),
+        assert_eq!(
+            worker.pamm_admission.state_of(PAMM),
+            Some(PammState::Admitted),
             "the rebuild admits the backed pAMM"
         );
     }

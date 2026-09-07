@@ -5,7 +5,7 @@
 //! arrive and leave, tiers change — so it is re-decided on every market event.
 
 use metrics::counter;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
 
 use crate::{
@@ -13,6 +13,17 @@ use crate::{
     propamm_fallback::{is_pamm, is_unbacked_pamm, FallbackPoolIndex, FeeTiers, SharedFeeTiers},
     types::ComponentId,
 };
+
+/// Where one pAMM stands with a worker's graph.
+///
+/// One value per pAMM, so a pAMM can never be admitted and withheld at once.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PammState {
+    /// The graph holds it.
+    Admitted,
+    /// The graph left it out, because the market backs no Uniswap V3 pool it can fall back to.
+    Withheld,
+}
 
 /// Which pAMMs one worker's graph holds, and the market facts that decide it.
 ///
@@ -23,10 +34,8 @@ pub(crate) struct PammManager {
     fee_tiers: SharedFeeTiers,
     /// Uniswap V3 pools the PropAMMRouter can fall back to, kept current from market events.
     pools: FallbackPoolIndex,
-    /// The pAMMs the graph holds.
-    admitted: FxHashSet<ComponentId>,
-    /// The pAMMs the graph left out, because the market did not back them.
-    withheld: FxHashSet<ComponentId>,
+    /// Where each pAMM stands with the graph.
+    states: FxHashMap<ComponentId, PammState>,
     /// The fee tiers the graph was last filtered with, `None` before the first read.
     built_with_fee_tiers: Option<FeeTiers>,
     /// The worker pool this belongs to, as the `pool` label on the admission counter.
@@ -39,8 +48,7 @@ impl PammManager {
         Self {
             fee_tiers: SharedFeeTiers::default(),
             pools: FallbackPoolIndex::default(),
-            admitted: FxHashSet::default(),
-            withheld: FxHashSet::default(),
+            states: FxHashMap::default(),
             built_with_fee_tiers: None,
             pool_name,
         }
@@ -96,8 +104,7 @@ impl PammManager {
         kept: &FxHashMap<ComponentId, Vec<Bytes>>,
         fee_tiers: Option<FeeTiers>,
     ) {
-        self.admitted.clear();
-        self.withheld.clear();
+        self.states.clear();
         for component_id in market.component_topology().keys() {
             let is_pamm_component = market
                 .get_component(component_id)
@@ -105,12 +112,13 @@ impl PammManager {
             if !is_pamm_component {
                 continue;
             }
-            let set = if kept.contains_key(component_id) {
-                &mut self.admitted
+            let state = if kept.contains_key(component_id) {
+                PammState::Admitted
             } else {
-                &mut self.withheld
+                PammState::Withheld
             };
-            set.insert(component_id.clone());
+            self.states
+                .insert(component_id.clone(), state);
         }
         self.built_with_fee_tiers = fee_tiers;
     }
@@ -147,8 +155,8 @@ impl PammManager {
             return;
         }
 
-        // Destructured so the closure below can read the index while it writes the two sets.
-        let Self { pools, admitted, withheld, pool_name, .. } = self;
+        // Destructured so the closure below can read the index while it writes the states.
+        let Self { pools, states, pool_name, .. } = self;
         let unbacked = |component_id: &ComponentId| {
             market
                 .get_component(component_id)
@@ -160,8 +168,7 @@ impl PammManager {
         };
 
         for component_id in removed_components.iter() {
-            admitted.remove(component_id);
-            withheld.remove(component_id);
+            states.remove(component_id);
         }
 
         added_components.retain(|component_id, _| {
@@ -174,38 +181,38 @@ impl PammManager {
                 return true;
             }
             if is_unbacked_pamm(component, fee_tiers, pools) {
-                withheld.insert(component_id.clone());
+                states.insert(component_id.clone(), PammState::Withheld);
                 count("dropped");
                 return false;
             }
-            admitted.insert(component_id.clone());
+            states.insert(component_id.clone(), PammState::Admitted);
             count("admitted");
             true
         });
 
-        let readmitted: Vec<_> = withheld
+        let readmitted: Vec<_> = states
             .iter()
-            .filter_map(|component_id| {
+            .filter(|(_, state)| **state == PammState::Withheld)
+            .filter_map(|(component_id, _)| {
                 let component = market.get_component(component_id)?;
                 (!is_unbacked_pamm(component, fee_tiers, pools))
                     .then(|| (component_id.clone(), component.tokens.clone()))
             })
             .collect();
         for (component_id, tokens) in readmitted {
-            withheld.remove(&component_id);
-            admitted.insert(component_id.clone());
+            states.insert(component_id.clone(), PammState::Admitted);
             count("admitted");
             added_components.insert(component_id, tokens);
         }
 
-        let evicted: Vec<ComponentId> = admitted
-            .iter()
-            .filter(|component_id| unbacked(component_id))
-            .cloned()
-            .collect();
+        let mut evicted = Vec::new();
+        for (component_id, state) in states.iter() {
+            if *state == PammState::Admitted && unbacked(component_id) {
+                evicted.push(component_id.clone());
+            }
+        }
         for component_id in &evicted {
-            admitted.remove(component_id);
-            withheld.insert(component_id.clone());
+            states.insert(component_id.clone(), PammState::Withheld);
             count("evicted");
         }
         if !evicted.is_empty() {
@@ -219,13 +226,16 @@ impl PammManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn admitted(&self) -> &FxHashSet<ComponentId> {
-        &self.admitted
+    pub(crate) fn state_of(&self, component_id: &str) -> Option<PammState> {
+        self.states.get(component_id).copied()
     }
 
     #[cfg(test)]
-    pub(crate) fn withheld(&self) -> &FxHashSet<ComponentId> {
-        &self.withheld
+    pub(crate) fn count_in(&self, state: PammState) -> usize {
+        self.states
+            .values()
+            .filter(|recorded| **recorded == state)
+            .count()
     }
 
     #[cfg(test)]
@@ -235,12 +245,12 @@ impl PammManager {
 
     #[cfg(test)]
     pub(crate) fn admit_for_test(&mut self, component_id: ComponentId) {
-        self.admitted.insert(component_id);
+        self.states
+            .insert(component_id, PammState::Admitted);
     }
 
     #[cfg(test)]
     pub(crate) fn forget_for_test(&mut self) {
-        self.admitted.clear();
-        self.withheld.clear();
+        self.states.clear();
     }
 }
