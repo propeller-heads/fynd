@@ -216,18 +216,13 @@ where
             // fallback pool arrived between the two reads stays out until the next rebuild.
             let market = self.market_data.read().await;
             let topology = market.component_topology().clone(); // clone to avoid holding the lock
-            self.pamm_admission
-                .rebuild_pools(&market);
-            let fee_tiers = self.pamm_admission.fee_tiers();
             let Self { pamm_admission, liquidity_scope, exclude_protocols, .. } = self;
             let caller_drops = |component: &ProtocolComponent| {
                 should_drop_component(*liquidity_scope, exclude_protocols, component)
             };
-            // Decided first, so the filter below reads one recorded answer per pAMM instead of
-            // deciding each a second time.
-            pamm_admission.record_graph_build(&market, fee_tiers, &caller_drops);
+            let withheld_pamms = pamm_admission.withhold_from_graph(&market, &caller_drops);
             remove_components(market.base_market_state(), topology, &|component| {
-                caller_drops(component) || pamm_admission.is_withheld(&component.id)
+                caller_drops(component) || withheld_pamms.contains(&component.id)
             })
         };
 
