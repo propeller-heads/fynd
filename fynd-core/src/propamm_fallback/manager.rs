@@ -119,15 +119,6 @@ impl PammManager {
         withheld
     }
 
-    /// Updates the pool index from one market event, as the market broadcast it.
-    ///
-    /// Unfiltered, because the index describes the market rather than one worker's graph, and
-    /// before [`select_pamm_updates`](Self::select_pamm_updates), so a pAMM arriving in the same
-    /// block as its pool is judged against an index that holds it.
-    pub(crate) fn update_pools(&mut self, market: &MarketDataView<'_>, event: &MarketEvent) {
-        self.pools.apply_event(market, event);
-    }
-
     /// Rewrites `event`, as the market broadcast it, so that applying it leaves the graph holding
     /// exactly the pAMMs this market backs.
     ///
@@ -135,10 +126,11 @@ impl PammManager {
     /// removals. A pAMM withheld earlier joins the additions once the market backs it: the event
     /// names the pool that moved, never the pAMMs that fall back to it.
     ///
-    /// Takes the event the market broadcast, before the caller's own filter touches it. A pAMM
-    /// falls back to a pool its worker excludes just as well, so a block the caller's filter
-    /// empties can still change these answers. `caller_drops` is the caller's own rule, and this
-    /// leaves every component it drops for the caller's filter to remove, on no record of its own.
+    /// Takes the event the market broadcast, before the caller's own filter touches it. The pool
+    /// index describes the market rather than one worker's graph, so a pAMM falls back to a pool
+    /// its worker excludes just as well, and the pAMM and its pool can arrive in one block.
+    /// `caller_drops` is the caller's own rule, and this leaves every component it drops for the
+    /// caller's filter to remove, on no record of its own.
     ///
     /// `fee_tiers` is the one the caller tested with [`needs_rebuild`](Self::needs_rebuild), so
     /// both decisions read one value.
@@ -149,6 +141,8 @@ impl PammManager {
         caller_drops: &dyn Fn(&ProtocolComponent) -> bool,
         event: &mut MarketEvent,
     ) {
+        self.pools.apply_event(market, event);
+
         let MarketEvent::MarketUpdated { added_components, removed_components, .. } = event;
         // Only an added or removed component moves a pool in or out of the index, so a block that
         // carries neither cannot change any of these answers.

@@ -253,8 +253,6 @@ where
         let market_data = self.market_data.clone();
         let event = {
             let market = market_data.read().await;
-            self.pamm_admission
-                .update_pools(&market, &event);
             let Self { pamm_admission, liquidity_scope, exclude_protocols, .. } = self;
             let caller_drops = |component: &ProtocolComponent| {
                 should_drop_component(*liquidity_scope, exclude_protocols, component)
@@ -1377,9 +1375,6 @@ mod tests {
             .try_read_blocking()
             .expect("uncontended");
         let fee_tiers = worker.pamm_admission.fee_tiers();
-        worker
-            .pamm_admission
-            .update_pools(&view, &event);
         worker
             .pamm_admission
             .select_pamm_updates(&view, fee_tiers.as_ref(), &|_| false, &mut event);
