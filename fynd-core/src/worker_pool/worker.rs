@@ -31,8 +31,7 @@ use crate::{
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     propamm_fallback::{
-        admission::PammAdmission, fallback_amount_out, has_pamm_leg, FallbackAmountOut,
-        SharedFeeTiers,
+        fallback_amount_out, has_pamm_leg, manager::PammManager, FallbackAmountOut, SharedFeeTiers,
     },
     types::internal::{RouteRejection, SolveTask},
     worker_pool_router::LiquidityScope,
@@ -44,9 +43,9 @@ use crate::{
 /// system.
 ///
 /// Holds for the life of the worker, which is what lets it filter state updates and removals as
-/// well as additions. The pAMM rule in [`PammAdmission`] does not, and is applied beside this one.
+/// well as additions. The pAMM rule in [`PammManager`] does not, and is applied beside this one.
 ///
-/// A free function so [`PammAdmission`] can take it as the caller's half of the rule without
+/// A free function so [`PammManager`] can take it as the caller's half of the rule without
 /// borrowing the whole worker.
 fn should_drop_component(
     liquidity_scope: LiquidityScope,
@@ -101,7 +100,7 @@ where
     /// Whether the graph has been initialized.
     initialized: bool,
     /// Which pAMM components this worker's graph may hold, and the market facts that decide it.
-    pamm_admission: PammAdmission,
+    pamm_admission: PammManager,
     /// Worker identifier (for logging).
     worker_id: usize,
     /// Worker pool name (used as the `pool` metric label).
@@ -146,7 +145,7 @@ where
             readiness_tracker: ReadinessTracker::new(requirements),
             ready_notify: Arc::new(Notify::new()),
             initialized: false,
-            pamm_admission: PammAdmission::new(pool_name.clone()),
+            pamm_admission: PammManager::new(pool_name.clone()),
             worker_id,
             pool_name,
             liquidity_scope: LiquidityScope::default(),
@@ -228,7 +227,7 @@ where
                 })
             };
             self.pamm_admission
-                .record_build(&market, &kept, fee_tiers);
+                .record_graph_build(&market, &kept, fee_tiers);
             kept
         };
 

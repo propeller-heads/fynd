@@ -18,7 +18,7 @@ use crate::{
 ///
 /// Built for one worker, and only that worker reads it: two worker pools facing the same market
 /// hold different graphs, because they exclude different components.
-pub(crate) struct PammAdmission {
+pub(crate) struct PammManager {
     /// Fee tiers the PropAMMRouter falls back on, read from chain by `FeeTierFetcher`.
     fee_tiers: SharedFeeTiers,
     /// Uniswap V3 pools the PropAMMRouter can fall back to, kept current from market events.
@@ -33,7 +33,7 @@ pub(crate) struct PammAdmission {
     pool_name: String,
 }
 
-impl PammAdmission {
+impl PammManager {
     /// Starts with no tiers, no pools and no pAMMs on record.
     pub(crate) fn new(pool_name: String) -> Self {
         Self {
@@ -90,7 +90,7 @@ impl PammAdmission {
 
     /// Records what a graph build decided. `kept` is the topology it ended up with; every other
     /// pAMM in the market was left out.
-    pub(crate) fn record_build(
+    pub(crate) fn record_graph_build(
         &mut self,
         market: &MarketDataView<'_>,
         kept: &FxHashMap<ComponentId, Vec<Bytes>>,
