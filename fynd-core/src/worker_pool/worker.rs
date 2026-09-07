@@ -176,7 +176,7 @@ fn validate_route_filter(
 }
 
 /// Records per-worker-pool queue metrics at task pickup: how long the task waited in the
-/// queue and the depth left behind it. Queue wait growing while solve time stays
+/// queue and the depth left behind it. Queue wait growing while quote duration stays
 /// flat is the leading indicator of worker saturation.
 fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth: usize) {
     metrics::histogram!("worker_pool_queue_wait_seconds", "pool" => pool_name.to_string())
@@ -1275,9 +1275,9 @@ mod tests {
         ) -> Result<RouteResult, AlgorithmError> {
             let token_a = token(0x01, "A");
             let token_b = token(0x02, "B");
-            // Both pools report a spot price of 2.0. 60 A through p1 pays 114 (reference 120),
-            // and the remaining 40 A through p2 pays 78 (reference 80): 192 out of a reference
-            // output of 200, a 4% impact.
+            // Both pools report a spot price of 2.0. The spot reference is 120 for 60 A through p1,
+            // which pays 114, and 80 for the remaining 40 A through p2, which pays 78: 192 out
+            // of a total spot reference of 200, a 4% impact.
             let swap_p1 = Swap::new(
                 "p1".to_string(),
                 "mock".to_string(),

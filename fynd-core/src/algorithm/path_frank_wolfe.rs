@@ -78,8 +78,8 @@ impl Default for PathFrankWolfeAlgorithm {
 impl PathFrankWolfeAlgorithm {
     /// Computes the minimum probe amount from the current probe impact estimate.
     ///
-    /// Returns `None` when the probe exceeds `config.max_probe × total_amount`,
-    /// signalling that splitting is not worthwhile.
+    /// Returns `None` when `probe_impact` is non-positive or when the probe exceeds
+    /// `config.max_probe × total_amount`, signalling that splitting is not worthwhile.
     fn compute_probe_amount(
         &self,
         total_amount: &BigUint,
@@ -100,8 +100,8 @@ impl PathFrankWolfeAlgorithm {
         Some(probe_amount)
     }
 
-    /// Flow-fraction-weighted average of per-path impact estimates, used only to size the next
-    /// candidate probe.
+    /// Flow-fraction-weighted average of per-path impact estimates. This is used only to decide
+    /// whether the split search should continue and to size its next candidate probe.
     ///
     /// Each path's estimate compares its realized output with the output at the marginal price
     /// product it was last simulated against, and that product depends on the order the paths
@@ -507,8 +507,8 @@ impl PathFrankWolfeAlgorithm {
 
     /// Runs the Frank-Wolfe split search seeded from the single-path route.
     ///
-    /// Returns `Ok(None)` when the split search stops: the probe-impact estimate cannot justify
-    /// another path's gas cost, no second path is found, or the split route fails validation.
+    /// Returns `Ok(None)` when no split is retained or when the constructed split route fails
+    /// validation.
     fn optimize_split(
         &self,
         ctx: &BellmanFordContext,
@@ -523,7 +523,7 @@ impl PathFrankWolfeAlgorithm {
         let gas_cost = Self::gas_cost_output_tokens(single_path_result.route(), ctx)?;
         let total_amount = order.amount();
         let initial_probe_impact = Self::estimate_probe_impact(&allocations)?;
-        // Stop if the initial impact estimate cannot produce a probe within `max_probe`.
+        // Stop if the initial probe-impact estimate cannot produce a probe within the cap.
         if self
             .compute_probe_amount(total_amount, initial_probe_impact, gas_cost)
             .is_none()
@@ -549,7 +549,8 @@ impl PathFrankWolfeAlgorithm {
                 None => {
                     debug!(
                         iteration,
-                        probe_impact, "probe amount exceeds max_probe; stopping split search"
+                        probe_impact,
+                        "probe impact does not yield an amount within the configured cap; stopping split search"
                     );
                     break;
                 }

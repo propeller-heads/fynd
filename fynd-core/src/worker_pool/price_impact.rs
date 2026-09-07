@@ -9,7 +9,7 @@
 //! # Limitation: the reference is the reported spot price, not a marginal output rate
 //!
 //! Tycho documents `ProtocolSim::spot_price(base, quote)` as a fee-marked-up buy price, but its
-//! implementations do not follow one direction and fee convention. Fynd deliberately keeps the
+//! implementations do not use a consistent direction or fee convention. Fynd deliberately keeps the
 //! executed-direction call it has always made, `spot_price(token_in, token_out)`, so this module
 //! extends the existing behaviour to split routes without reversing it for any venue. The result
 //! can therefore carry a venue-dependent fee bias until Tycho exposes a consistent
@@ -486,8 +486,8 @@ mod tests {
 
     #[test]
     fn test_ungrouped_swap_order() {
-        // A valid route whose swaps are not grouped by input token: the second A swap is listed
-        // after the C->D swap that consumes what it produces. Walking collection by collection,
+        // A token-flow graph whose legs are not grouped by input token: the second A leg is listed
+        // after the C->D leg that consumes what it produces. Walking collection by collection,
         // C is seeded with both A->C and B->C (reference 100) before C->D runs: reference D =
         // 200, actual 190 => 5% impact. Walking in list order would seed C with 50 and report
         // -90%.
@@ -770,6 +770,6 @@ mod tests {
         let impact =
             route_price_impact(&route, &parse_biguint("1000000"), &parse_biguint("997000"))
                 .unwrap();
-        assert!(impact.abs() < 1e-9, "expected 0 bps, got {impact}");
+        assert!(impact.abs() < 1e-9, "expected zero impact, got {impact}");
     }
 }
