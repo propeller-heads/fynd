@@ -1,4 +1,22 @@
 
+## [0.103.0](https://github.com/propeller-heads/fynd/compare/0.102.3...0.103.0) (2026-09-08)
+
+### Features
+
+* support new Robinhood protocols ([f8537ea](https://github.com/propeller-heads/fynd/commit/f8537ea892f43f47d1caa7e7f3d48bf8737cba0b))
+* **ci:** tell the downstream deployment repository about a release ([bb48446](https://github.com/propeller-heads/fynd/commit/bb4844633ebe419ad8097eb5183953f0be6ec1e7))
+
+### Bug Fixes
+
+* **core:** give a simulated swap four times the estimated gas ([35d3136](https://github.com/propeller-heads/fynd/commit/35d31362bfa865576c8f44569232d7a38de3863a))
+* **core:** decide pAMMs against the event the market broadcast ([e0f0afb](https://github.com/propeller-heads/fynd/commit/e0f0afba59294e6fc261c1a2a82a17cccb93df2c))
+* **core:** withhold a pAMM only for the reason this rule owns ([714cd52](https://github.com/propeller-heads/fynd/commit/714cd52538f62e54bc14e3921d8054560a476b39))
+* **core:** give each pAMM one state, not two set memberships ([720ddbf](https://github.com/propeller-heads/fynd/commit/720ddbf2c6d7a5f47e237990319195646b066b7d))
+* **core:** keep a forgotten pAMM out of the graph ([91f61da](https://github.com/propeller-heads/fynd/commit/91f61da770d65017b12a0f676cea0209af008f25))
+* **core:** let a withheld pAMM back into the graph ([007ffcf](https://github.com/propeller-heads/fynd/commit/007ffcf7e2730708cba51cc7acd153dcd423e9b3))
+* **core:** keep an unbacked pAMM out of the worker's graph ([4d67050](https://github.com/propeller-heads/fynd/commit/4d67050532cfe922f710053b3f9e83f4ad2b41d2))
+
+
 ## [0.102.3](https://github.com/propeller-heads/fynd/compare/0.102.2...0.102.3) (2026-09-04)
 
 ### Bug Fixes
