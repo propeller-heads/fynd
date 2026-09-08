@@ -424,10 +424,17 @@ impl WorkerPoolRouter {
             return Err(SolveError::Internal("no solver pools configured".to_string()));
         }
 
-        let params = match request.options().state_label().cloned() {
-            Some(label) => SolveParams::default().with_state_label(label),
-            None => SolveParams::default(),
-        };
+        let mut params = SolveParams::default();
+        if let Some(label) = request.options().state_label().cloned() {
+            params = params.with_state_label(label);
+        }
+        if let Some(wei) = request
+            .options()
+            .gas_price_override()
+            .cloned()
+        {
+            params = params.with_gas_price_override(wei);
+        }
 
         counter!(
             "worker_router_exclusive_access_total",
@@ -1046,13 +1053,16 @@ fn combine_with_surplus(
 
 /// Restates an output-token `amount` of `quote` in wei.
 ///
-/// The quote states its gas cost in both units, so that pair is the rate. `None` when either side
-/// is zero, which is how an unpriced output token shows up.
+/// The quote nets its gas cost off the output at the solve price, so that cost in both units is
+/// the rate. `None` when either side is zero, which is how an unpriced output token shows up.
 fn to_gas_token_amount(quote: &OrderQuote, amount: &BigUint) -> Option<BigUint> {
     let gas_cost_out = quote
         .amount_out()
         .checked_sub(quote.amount_out_net_gas())?;
-    let gas_cost_wei = quote.gas_estimate() * quote.gas_price()?;
+    let solve_gas_price = quote
+        .solve_gas_price()
+        .or(quote.gas_price())?;
+    let gas_cost_wei = quote.gas_estimate() * solve_gas_price;
     if gas_cost_out == BigUint::ZERO || gas_cost_wei == BigUint::ZERO {
         return None;
     }
@@ -3578,6 +3588,20 @@ mod tests {
     fn test_to_gas_token_amount() {
         // 100 USDC at 2000 USDC per ETH is 0.05 ETH.
         let wei = to_gas_token_amount(&usdc_quote(), &BigUint::from(100_000_000u64));
+
+        assert_eq!(wei, Some(BigUint::from(50_000_000_000_000_000u64)));
+    }
+
+    #[test]
+    fn test_to_gas_token_amount_at_the_solve_gas_price() {
+        // The route was netted at an overridden 2.5 gwei: 300k gas is 0.00075 ETH, charged as
+        // 1.5 USDC, so the rate is still 2000 USDC per ETH. Converting at the 5 gwei the quote
+        // reports to the client would double it.
+        let quote = make_rate_quote(100_000_000, 98_500_000, 300_000)
+            .with_gas_price(BigUint::from(5_000_000_000u64))
+            .with_solve_gas_price(BigUint::from(2_500_000_000u64));
+
+        let wei = to_gas_token_amount(&quote, &BigUint::from(100_000_000u64));
 
         assert_eq!(wei, Some(BigUint::from(50_000_000_000_000_000u64)));
     }
