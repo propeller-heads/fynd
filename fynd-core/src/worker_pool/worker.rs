@@ -615,18 +615,14 @@ where
                 let amount_in_raw = if order.is_sell() {
                     order.amount().clone()
                 } else {
-                    route
-                        .swaps()
-                        .first()
-                        .map(|s| s.amount_in().clone())
-                        .ok_or_else(|| {
-                            error!(
-                                order_id = %order.id(),
-                                algorithm = self.algorithm.name(),
-                                "route missing first swap for buy order"
-                            );
-                            self.route_carries_no_swaps()
-                        })?
+                    route.input_amount().ok_or_else(|| {
+                        error!(
+                            order_id = %order.id(),
+                            algorithm = self.algorithm.name(),
+                            "route missing swaps for buy order"
+                        );
+                        self.route_carries_no_swaps()
+                    })?
                 };
                 let amount_out_raw = if order.is_sell() {
                     let output_token = route.output_token().ok_or_else(|| {
@@ -1373,6 +1369,72 @@ mod tests {
             .expect("split route must quote");
 
         assert_eq!(quote.order().price_impact_bps(), Some(400));
+    }
+
+    /// Mock algorithm that returns a route without a token map, which the price-impact
+    /// calculation cannot price.
+    struct UnpricedRouteAlgorithm;
+
+    impl Algorithm for UnpricedRouteAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "unpriced_route_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            _graph: &Self::GraphType,
+            _market: MarketData,
+            _label: Option<crate::feed::market_data::StateLabel>,
+            _derived: Option<SharedDerivedDataRef>,
+            _order: &Order,
+        ) -> Result<RouteResult, AlgorithmError> {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let swap = Swap::new(
+                "p1".to_string(),
+                "mock".to_string(),
+                token_a.address.clone(),
+                token_b.address.clone(),
+                BigUint::from(100u64),
+                BigUint::from(190u64),
+                BigUint::from(1u64),
+                component("p1", &[token_a.clone(), token_b.clone()]),
+                Box::new(MockProtocolSim::new(2.0)),
+            );
+            let route = Route::new(vec![swap], FxHashMap::default()).expect("non-empty route");
+            Ok(RouteResult::new(route, num_bigint::BigInt::from(190), BigUint::from(1u64)))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quote_omits_price_impact_when_route_cannot_be_priced() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) =
+            setup_market_weighted(vec![("p1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let derived = DerivedData::new_shared();
+        let mut worker =
+            SolverWorker::new(market, derived, UnpricedRouteAlgorithm, 0, "test_pool".to_string());
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let quote = worker
+            .quote(&ord, SolveParams::default())
+            .await
+            .expect("a route the calculation cannot price still quotes");
+
+        assert_eq!(quote.order().price_impact_bps(), None);
+        assert_eq!(quote.order().amount_out(), &BigUint::from(190u64));
     }
 
     /// Mock algorithm that returns a single-leg route through a pAMM executed via the
@@ -2440,7 +2502,7 @@ mod tests {
     }
 
     #[test]
-    fn quote_duration_metric_recorded() {
+    fn test_quote_duration_metric_recorded() {
         use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
         let recorder = DebuggingRecorder::new();

@@ -1629,6 +1629,23 @@ impl Route {
             .map(|s| s.token_in.clone())
     }
 
+    /// Total raw input the route consumes: the `amount_in` of every swap in the first branch
+    /// collection, the swaps that divide the input token's balance. `None` for an empty route.
+    ///
+    /// Exact for a validated route whose input and output tokens differ: `validate_cycles` then
+    /// forbids any swap from producing the input token, so nothing but the order's input feeds
+    /// that collection.
+    pub(crate) fn input_amount(&self) -> Option<BigUint> {
+        let (_, first_collection) = branch_collections(&self.swaps, |swap| &swap.token_in)
+            .into_iter()
+            .next()?;
+        Some(
+            first_collection
+                .iter()
+                .fold(BigUint::ZERO, |total, swap| total + &swap.amount_in),
+        )
+    }
+
     /// Returns the output token of the route (last swap's output).
     pub fn output_token(&self) -> Option<Address> {
         self.swaps
@@ -2494,6 +2511,22 @@ mod tests {
 
     fn make_split_swap(token_in: u8, token_out: u8, split: f64) -> Swap {
         make_swap(token_in, token_out, 1000, 990).with_split(split)
+    }
+
+    #[test]
+    fn test_input_amount_sums_first_branch_collection() {
+        //        ┌──[60%: 600]──┐
+        //   A ───┤              ├─── B ───[rem: 980]─── C
+        //        └──[rem: 400]──┘
+        // The A collection consumes 1000 in total; the downstream B swap does not count.
+        let swaps = vec![
+            make_swap(0x01, 0x02, 600, 590).with_split(0.6),
+            make_swap(0x01, 0x02, 400, 390),
+            make_swap(0x02, 0x03, 980, 970),
+        ];
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
+        assert!(route.validate().is_ok());
+        assert_eq!(route.input_amount(), Some(BigUint::from(1000u64)));
     }
 
     #[test]

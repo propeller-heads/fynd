@@ -25,7 +25,7 @@ use tycho_simulation::tycho_common::models::{token::Token, Address};
 
 use crate::types::{quote::branch_collections, ComponentId, Route, Swap};
 
-/// Identifies an amount that cannot be represented as a finite `f64`.
+/// Which amount in the price-impact calculation a value refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AmountSource {
     RouteInput,
@@ -149,13 +149,6 @@ fn spot_reference_output(
     legs: &[SpotLeg<'_>],
     inputs: &PriceImpactInputs<'_>,
 ) -> Result<f64, PriceImpactError> {
-    let mut consumed_raw_by_token: FxHashMap<&Address, f64> = FxHashMap::default();
-    for leg in legs {
-        *consumed_raw_by_token
-            .entry(leg.token_in)
-            .or_insert(0.0) += leg.amount_in_raw;
-    }
-
     let mut reference_human_by_token: FxHashMap<&Address, f64> = FxHashMap::default();
     reference_human_by_token.insert(
         inputs.token_in,
@@ -168,10 +161,10 @@ fn spot_reference_output(
             .get(&token_in)
             .copied()
             .ok_or_else(|| PriceImpactError::UnfedToken(token_in.clone()))?;
-        let consumed_input_raw_total = consumed_raw_by_token
-            .get(&token_in)
-            .copied()
-            .unwrap_or_default();
+        let consumed_input_raw_total: f64 = collection
+            .iter()
+            .map(|leg| leg.amount_in_raw)
+            .sum();
         if consumed_input_raw_total <= 0.0 {
             return Err(PriceImpactError::ZeroConsumedInput(token_in));
         }
@@ -259,7 +252,7 @@ pub(crate) fn route_price_impact(
     for swap in swaps {
         let reported_spot_price =
             reported_spot_price(swap, token_of(swap.token_in())?, token_of(swap.token_out())?)?;
-        let amount_in_raw = swap
+        let swap_amount_in_raw = swap
             .amount_in()
             .to_f64()
             .filter(|value| value.is_finite())
@@ -270,7 +263,7 @@ pub(crate) fn route_price_impact(
         legs.push(SpotLeg {
             token_in: swap.token_in(),
             token_out: swap.token_out(),
-            amount_in_raw,
+            amount_in_raw: swap_amount_in_raw,
             reported_spot_price,
         });
     }
@@ -525,6 +518,42 @@ mod tests {
             panic!("expected UnfedToken, got {err}");
         };
         assert_eq!(unfed, b);
+    }
+
+    #[test]
+    fn test_zero_consumed_input() {
+        // The only swap out of A consumes nothing, so no share can be attributed.
+        let a = addr(0x01);
+        let b = addr(0x02);
+        let legs =
+            [SpotLeg { token_in: &a, token_out: &b, amount_in_raw: 0.0, reported_spot_price: 1.0 }];
+        let (amount_in, amount_out) = (parse_biguint("100"), parse_biguint("100"));
+        let impact_inputs = inputs(&a, &b, &amount_in, &amount_out);
+        let err = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap_err();
+        let PriceImpactError::ZeroConsumedInput(token) = err else {
+            panic!("expected ZeroConsumedInput, got {err}");
+        };
+        assert_eq!(token, a);
+    }
+
+    #[test]
+    fn test_flow_that_never_reaches_output_token() {
+        // A->B is valid flow, but the route's output token is C, which nothing feeds.
+        let a = addr(0x01);
+        let b = addr(0x02);
+        let c = addr(0x03);
+        let legs = [SpotLeg {
+            token_in: &a,
+            token_out: &b,
+            amount_in_raw: 100.0,
+            reported_spot_price: 1.0,
+        }];
+        let (amount_in, amount_out) = (parse_biguint("100"), parse_biguint("100"));
+        let impact_inputs = inputs(&a, &c, &amount_in, &amount_out);
+        let err = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap_err();
+        let PriceImpactError::NoReferenceOutput = err else {
+            panic!("expected NoReferenceOutput, got {err}");
+        };
     }
 
     /// Builds a swap with the component state stored by the route. Price-impact calculation
