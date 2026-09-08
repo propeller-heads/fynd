@@ -69,9 +69,9 @@ fn test_envelope() -> SimulationEnvelope {
 }
 
 #[test]
-fn test_envelope_doubles_the_estimated_gas() {
+fn test_envelope_multiplies_the_estimated_gas() {
     let envelope = SimulationEnvelope::new(Some(1_000_000), Some(7));
-    assert_eq!(envelope.gas_limit, 2_000_000);
+    assert_eq!(envelope.gas_limit, 1_000_000 * SIMULATION_GAS_LIMIT_MULTIPLIER);
     assert_eq!(envelope.gas_price, 7);
 }
 
