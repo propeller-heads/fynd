@@ -102,20 +102,21 @@ impl<D> TopologyGraph<D> {
             .map_or(&[], PairEdge::pools)
     }
 
-    /// Whether any pool trading `from` for `to` is one this solve may use.
+    /// Whether the pair trades `from` for `to` through a pool this solve may use.
     ///
-    /// A pair whose every pool is excluded does not connect its two tokens for this query, so a
-    /// search steps over it rather than returning a route the caller refused.
+    /// `false` for a pair the graph does not hold, and for one whose every pool the request
+    /// excludes. Either way the pair does not connect its two tokens for this search.
     fn pair_has_allowed_pool(
         &self,
         from: NodeIndex,
         to: NodeIndex,
         exclusions: &RouteExclusions,
     ) -> bool {
+        let pools = self.pools_between(from, to);
         if exclusions.is_empty() {
-            return true;
+            return !pools.is_empty();
         }
-        self.pools_between(from, to)
+        pools
             .iter()
             .any(|pool| !exclusions.excludes_pool(&pool.component_id))
     }
