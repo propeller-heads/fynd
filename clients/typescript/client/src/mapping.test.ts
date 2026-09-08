@@ -59,6 +59,24 @@ describe('toWireRequest', () => {
     expect(order?.sender).toBe(SENDER);
   });
 
+  it('sends the route filter under snake_case wire names', () => {
+    const wire = toWireRequest({
+      ...baseParams,
+      options: {
+        routeFilter: {
+          excludePools: ['0xabc'],
+          excludeProtocols: ['uniswap_v2'],
+          excludeTokens: [TOKEN_OUT],
+        },
+      },
+    });
+    expect(wire.options?.route_filter).toEqual({
+      exclude_pools: ['0xabc'],
+      exclude_protocols: ['uniswap_v2'],
+      exclude_tokens: [TOKEN_OUT],
+    });
+  });
+
   it('omits receiver key when order.receiver is undefined', () => {
     const wire = toWireRequest(baseParams);
     expect(wire.orders[0]).not.toHaveProperty('receiver');

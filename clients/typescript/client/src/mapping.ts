@@ -14,6 +14,7 @@ import type {
     Quote,
     QuoteParams,
     Route,
+    RouteFilter,
     SimulationResult,
     Swap,
     Transaction,
@@ -35,6 +36,7 @@ type WirePermitDetails = components["schemas"]["PermitDetails"];
 type WireClientFeeParams = components["schemas"]["ClientFeeParams"];
 type WireFeeBreakdown = components["schemas"]["FeeBreakdown"];
 type WireSimulationResult = components["schemas"]["SimulationResult"];
+type WireRouteFilter = components["schemas"]["RouteFilter"];
 
 
 export function toWireRequest(params: QuoteParams): WireSolutionRequest {
@@ -61,11 +63,24 @@ export function toWireRequest(params: QuoteParams): WireSolutionRequest {
             ...(params.options.encodingOptions !== undefined
                 ? {encoding_options: toWireEncodingOptions(params.options.encodingOptions)}
                 : {}),
+            ...(params.options.routeFilter !== undefined
+                ? {route_filter: toWireRouteFilter(params.options.routeFilter)}
+                : {}),
         }
         : undefined;
     return {
         orders: [wireOrder],
         ...(wireOptions !== undefined ? {options: wireOptions} : {}),
+    };
+}
+
+function toWireRouteFilter(filter: RouteFilter): WireRouteFilter {
+    return {
+        ...(filter.excludePools !== undefined ? {exclude_pools: filter.excludePools} : {}),
+        ...(filter.excludeProtocols !== undefined
+            ? {exclude_protocols: filter.excludeProtocols}
+            : {}),
+        ...(filter.excludeTokens !== undefined ? {exclude_tokens: filter.excludeTokens} : {}),
     };
 }
 

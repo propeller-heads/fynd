@@ -137,6 +137,9 @@ impl TryFrom<QuoteOptions> for dto::QuoteOptions {
         if let Some(enc) = opts.encoding_options {
             dto_opts = dto_opts.with_encoding_options(dto::EncodingOptions::try_from(enc)?);
         }
+        if let Some(filter) = opts.route_filter {
+            dto_opts = dto_opts.with_route_filter(filter);
+        }
         Ok(dto_opts)
     }
 }
@@ -822,6 +825,23 @@ mod tests {
         let opts = EncodingOptions::new(0.005);
         let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
         assert!(dto_opts.client_fee_params().is_none());
+    }
+
+    #[test]
+    fn test_quote_options_to_dto_route_filter() {
+        use crate::types::{QuoteOptions, RouteFilter};
+
+        let opts = QuoteOptions::default().with_route_filter(
+            RouteFilter::default()
+                .with_pools(["pool-1".to_string()])
+                .with_protocols(["uniswap_v2".to_string()]),
+        );
+
+        let dto_opts = dto::QuoteOptions::try_from(opts).unwrap();
+        let filter = dto_opts.route_filter().unwrap();
+
+        assert_eq!(filter.exclude_pools(), ["pool-1".to_string()]);
+        assert_eq!(filter.exclude_protocols(), ["uniswap_v2".to_string()]);
     }
 
     // -----------------------------------------------------------------------
