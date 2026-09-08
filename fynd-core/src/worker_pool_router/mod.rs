@@ -36,7 +36,7 @@ pub use allocation::ExclusiveAccess;
 use allocation::{allocate, validate_pool_allowlist, Allocation, OrderClass};
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
-use instrumentation::{log_quote_comparison, solver_error_label};
+use instrumentation::{record_quote_comparison, solver_error_label};
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive};
@@ -519,7 +519,7 @@ impl WorkerPoolRouter {
             .iter()
             .zip(&order_responses)
         {
-            log_quote_comparison(order, responses, request.options());
+            record_quote_comparison(order, responses, request.options());
         }
 
         // Validate against external prices when the client explicitly enables it.

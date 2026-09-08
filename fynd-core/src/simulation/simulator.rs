@@ -53,9 +53,9 @@ const SIMULATION_FUNDING_VALUE: U256 =
 /// Gas limit for the simulated call, as a multiple of the gas the quote estimated.
 ///
 /// A call that sets no limit inherits the block's, and a pool that reads `gasleft()` can tell that
-/// budget apart from a real swap and answer differently. Twice the estimate covers the variance a
-/// real transaction meets while still reading like one.
-const SIMULATION_GAS_LIMIT_MULTIPLIER: u64 = 2;
+/// budget apart from a real swap and answer differently. Four times the estimate covers the
+/// variance a real transaction meets while still reading like one.
+const SIMULATION_GAS_LIMIT_MULTIPLIER: u64 = 4;
 
 /// Floor for the simulated call's gas limit, so a small estimate still leaves room to execute.
 const SIMULATION_MIN_GAS_LIMIT: u64 = 500_000;
