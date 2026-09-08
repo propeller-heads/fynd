@@ -20,6 +20,7 @@ use tycho_simulation::{
             fluid::FluidV1,
             lunarbase::state::LunarBaseState,
             pancakeswap_v2::state::PancakeswapV2State,
+            ramses_v3::state::RamsesV3State,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
             uniswap_v4::state::UniswapV4State,
@@ -318,6 +319,17 @@ pub(crate) fn register_exchanges(
                 builder =
                     builder.exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None);
             }
+            "sushiswap_v3" => {
+                builder =
+                    builder.exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None);
+            }
+            "robinswap_v3" => {
+                builder =
+                    builder.exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None);
+            }
+            "ramses_v3" => {
+                builder = builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None);
+            }
             "pancakeswap_v3" => {
                 builder =
                     builder.exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None);
@@ -559,9 +571,64 @@ fn get_env(var: &str) -> Result<String, DataFeedError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use tycho_simulation::price_level_stream::config::PRICE_LEVEL_STREAM_FAMILY;
 
     use super::*;
+
+    /// A writer that keeps every byte a subscriber formats, so a test can assert on the
+    /// rendered log lines.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogs;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Registers `entries` under a capturing subscriber and returns the protocol systems named
+    /// in `Skipping unknown protocol` warnings.
+    fn skipped_unknown_protocols(entries: &[&str]) -> Vec<String> {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .compact()
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = register(entries);
+        });
+        let rendered = String::from_utf8(std::mem::take(
+            &mut *logs
+                .0
+                .lock()
+                .expect("log buffer poisoned"),
+        ))
+        .expect("utf-8");
+        rendered
+            .lines()
+            .filter_map(|line| line.split_once("Skipping unknown protocol:"))
+            .map(|(_, payload)| payload.trim().to_string())
+            .collect()
+    }
 
     fn uniswap_v4_component(hook: Option<&str>) -> ComponentWithState {
         let mut static_attributes = HashMap::new();
@@ -730,6 +797,18 @@ mod tests {
     #[test]
     fn test_register_exchanges_skips_unknown_protocol() {
         assert!(register(&["not_a_protocol"]).is_ok());
+    }
+
+    #[test]
+    fn test_register_exchanges_registers_every_robinhood_protocol() {
+        let robinhood_protocols =
+            ["sushiswap_v3", "uniswap_v4", "robinswap_v3", "uniswap_v3", "ramses_v3", "uniswap_v2"];
+        let skipped = skipped_unknown_protocols(&robinhood_protocols);
+        assert!(
+            skipped.is_empty(),
+            "expected every Robinhood protocol to register, but got unknown-protocol warnings \
+             for: {skipped:?}"
+        );
     }
 
     #[test]
