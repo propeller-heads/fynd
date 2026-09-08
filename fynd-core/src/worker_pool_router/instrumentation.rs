@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use metrics::counter;
+use metrics::{counter, histogram};
 use num_traits::ToPrimitive;
 use tracing::{trace, Level};
 
@@ -37,22 +37,23 @@ struct OrderCoverage {
     responders: usize,
 }
 
-/// Emits one line per worker pool for an order: what it quoted, how long it took, and how far
-/// ahead of the weakest quote it landed.
+/// Records how far ahead of the weakest quote each worker pool landed, and emits one line per
+/// pool for an order: what it quoted, how long it took, and the same distance.
+///
+/// The `quote_improvement_bps` histogram carries the distance for every pool that ranked, so a
+/// deployment gets the per-algorithm comparison without turning the log on. The log stays behind
+/// its TRACE target because it prints one line per pool per order, several times the metric's
+/// cost, and carries the order and token detail the histogram cannot label.
 ///
 /// Covers every pool that answered, whatever its liquidity scope. `is_best` marks the pool whose
 /// quote had the highest output net of gas. The amounts are the ones each pool solved; on
 /// exclusive-liquidity deployments the amount finally quoted to the caller can be lower, because
 /// `combine_with_surplus` withholds part of it.
-pub(super) fn log_quote_comparison(
+pub(super) fn record_quote_comparison(
     order: &Order,
     responses: &OrderResponses,
     options: &QuoteOptions,
 ) {
-    if !tracing::enabled!(target: QUOTE_COMPARISON_TARGET, Level::TRACE) {
-        return;
-    }
-
     let mut ranked: Vec<&WorkerPoolQuote> = responses
         .quotes
         .iter()
@@ -77,6 +78,8 @@ pub(super) fn log_quote_comparison(
         responders: responses.quotes.len() + responses.failed_solvers.len(),
     };
 
+    let log_enabled = tracing::enabled!(target: QUOTE_COMPARISON_TARGET, Level::TRACE);
+
     for worker_quote in &responses.quotes {
         // Only ranked quotes have a comparable output; one that lost on status or `max_gas` is
         // not measured against a baseline it never competed for.
@@ -94,17 +97,30 @@ pub(super) fn log_quote_comparison(
             })
             .flatten();
 
-        log_quote(
-            order,
-            worker_quote,
-            coverage,
-            improvement,
-            best_pool == Some(worker_quote.worker_pool.as_str()),
-        );
+        if let Some(bps) = improvement {
+            histogram!(
+                "quote_improvement_bps",
+                "pool" => worker_quote.worker_pool.clone(),
+                "algorithm" => worker_quote.quote.algorithm().to_string()
+            )
+            .record(bps);
+        }
+
+        if log_enabled {
+            log_quote(
+                order,
+                worker_quote,
+                coverage,
+                improvement,
+                best_pool == Some(worker_quote.worker_pool.as_str()),
+            );
+        }
     }
 
-    for (worker_pool, error) in &responses.failed_solvers {
-        log_failure(order, worker_pool, error, coverage);
+    if log_enabled {
+        for (worker_pool, error) in &responses.failed_solvers {
+            log_failure(order, worker_pool, error, coverage);
+        }
     }
 }
 
@@ -434,14 +450,14 @@ mod tests {
         capture_comparison(&comparison_order(), responses, &QuoteOptions::default())
     }
 
-    /// Runs `log_quote_comparison` and returns the payload of each line it wrote.
+    /// Runs `record_quote_comparison` and returns the payload of each line it wrote.
     fn capture_comparison(
         order: &Order,
         responses: &OrderResponses,
         options: &QuoteOptions,
     ) -> Vec<String> {
         crate::worker_pool_router::log_capture::capture_payloads("quote_comparison ", || {
-            log_quote_comparison(order, responses, options);
+            record_quote_comparison(order, responses, options);
         })
     }
 
@@ -461,7 +477,7 @@ mod tests {
                 let request =
                     tracing::info_span!("HTTP request", request_id = "abcd", http.method = "POST");
                 let _entered = request.enter();
-                log_quote_comparison(&comparison_order(), &responses, &QuoteOptions::default());
+                record_quote_comparison(&comparison_order(), &responses, &QuoteOptions::default());
             });
 
         assert_eq!(payloads.len(), 1);
@@ -514,6 +530,77 @@ mod tests {
         assert!(payloads[0].contains("is_best=true"), "{}", payloads[0]);
         assert!(payloads[1].contains("improvement_bps=0.0000"), "{}", payloads[1]);
         assert!(payloads[1].contains("is_best=false"), "{}", payloads[1]);
+    }
+
+    /// Records the comparison with the TRACE target left off, so the histogram is proved to be
+    /// independent of the log. This is the whole point of moving the gate off the function: a
+    /// deployment reads per-algorithm bps from Prometheus without paying for a line per pool.
+    fn recorded_improvements(
+        responses: &OrderResponses,
+    ) -> Vec<(String, Vec<String>, metrics_util::debugging::DebugValue)> {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_quote_comparison(&comparison_order(), responses, &QuoteOptions::default());
+        });
+        crate::tests::metrics::recorded_metrics(&snapshotter)
+            .into_iter()
+            .filter(|(name, ..)| name == "quote_improvement_bps")
+            .collect()
+    }
+
+    #[test]
+    fn test_improvement_histogram_is_recorded_without_the_log() {
+        let responses = responses_with(vec![
+            comparison_quote("winner", 1_000, 3),
+            comparison_quote("laggard", 900, 11),
+        ]);
+        let recorded = recorded_improvements(&responses);
+
+        assert_eq!(recorded.len(), 2, "one series per pool: {recorded:?}");
+        let (_, labels, value) = recorded
+            .iter()
+            .find(|(_, labels, _)| labels.contains(&"pool=winner".to_string()))
+            .expect("the winning pool records its improvement");
+        assert!(
+            labels.contains(&"algorithm=winner_algo".to_string()),
+            "the algorithm is what the comparison groups by: {labels:?}"
+        );
+        // 1_000 over a 900 floor is 1_111.11 bps, the same figure the log prints.
+        assert!(
+            matches!(value, metrics_util::debugging::DebugValue::Histogram(values)
+                if values.len() == 1 && (values[0].into_inner() - 1_111.111_111_111_111).abs() < 1e-6),
+            "{value:?}"
+        );
+    }
+
+    /// A pool that never ranked has no baseline to be measured against, so it stays out of the
+    /// histogram rather than entering it at the floor and dragging its algorithm's mean down.
+    #[test]
+    fn test_unrankable_quote_records_no_improvement() {
+        let mut unranked = comparison_quote("no_route", 900, 4);
+        unranked.quote = OrderQuote::new(
+            "o1".to_string(),
+            QuoteStatus::NoRouteFound,
+            BigUint::from(1_000u64),
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BlockInfo::new(42, "0xabc".to_string(), 0),
+            "no_route_algo".to_string(),
+            Bytes::default(),
+            Bytes::default(),
+            "1".to_string(),
+        );
+        let responses = responses_with(vec![comparison_quote("winner", 1_000, 3), unranked]);
+
+        let recorded = recorded_improvements(&responses);
+        assert!(
+            !recorded
+                .iter()
+                .any(|(_, labels, _)| labels.contains(&"pool=no_route".to_string())),
+            "{recorded:?}"
+        );
     }
 
     /// The solve time is the reason the change exists, so it has to reach the payload per pool.
