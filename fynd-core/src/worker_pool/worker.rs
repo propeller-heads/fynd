@@ -33,12 +33,13 @@ use crate::{
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     propamm_fallback::{
-        fallback_amount_out, has_pamm_leg, manager::PammManager, FallbackAmountOut, SharedFeeTiers,
-        FALLBACK_PROTOCOL_SYSTEM, PROPAMM_FALLBACK_PREFIX,
+        fallback_amount_out, has_pamm_leg, manager::PammManager, FallbackAmountOut,
+        FallbackPoolIndex, FeeTiers, SharedFeeTiers, FALLBACK_PROTOCOL_SYSTEM,
+        PROPAMM_FALLBACK_PREFIX,
     },
     types::{
         internal::{RouteRejection, SolveTask},
-        Route, RouteExclusionFilter,
+        ComponentId, Route, RouteExclusionFilter, RouteExclusions,
     },
     worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
@@ -60,6 +61,65 @@ fn should_drop_component(
 ) -> bool {
     (liquidity_scope == LiquidityScope::PublicOnly && is_exclusive(component)) ||
         is_excluded_protocol(exclude_protocols, component)
+}
+
+/// The exclusions this request resolves to against `view`, resolved once and shared.
+///
+/// Every order of one request, in every pool it reaches, wants the same answer, and expanding a
+/// protocol system copies that system's whole component set. The market's component membership is
+/// what the answer depends on, so a cached one stands until a component is added or removed.
+fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<RouteExclusions> {
+    let generation = view
+        .base_market_state()
+        .component_generation();
+    let mut cache = params
+        .cached_exclusions()
+        .lock()
+        .expect("route exclusion cache lock poisoned");
+    if let Some((cached_generation, exclusions)) = cache.as_ref() {
+        if *cached_generation == generation {
+            return exclusions.clone();
+        }
+    }
+    let exclusions = Arc::new(
+        view.base_market_state()
+            .resolve_route_filter(params.route_filter()),
+    );
+    *cache = Some((generation, exclusions.clone()));
+    exclusions
+}
+
+/// The Uniswap V3 pool a pAMM leg would fall back to and the request excludes, if there is one.
+///
+/// A pAMM leg clears the filter under its own component id, then settles on chain through the
+/// fallback pool its fee tier selects. That pool is what the caller sees traded, so the filter has
+/// to reach it too.
+fn excluded_fallback_pool<'a>(
+    route: &Route,
+    fee_tiers: &FeeTiers,
+    fallback_pools: &'a FallbackPoolIndex,
+    filter: &RouteExclusionFilter,
+) -> Option<&'a ComponentId> {
+    let protocol_excluded = filter
+        .excluded_protocols()
+        .iter()
+        .any(|entry| protocol_matches(entry, FALLBACK_PROTOCOL_SYSTEM));
+    for swap in route.swaps() {
+        if !swap
+            .protocol()
+            .starts_with(PROPAMM_FALLBACK_PREFIX)
+        {
+            continue;
+        }
+        let tier = fee_tiers.resolved_tier(swap.token_in(), swap.token_out());
+        let Some(pool) = fallback_pools.pool_for(swap.token_in(), swap.token_out(), tier) else {
+            continue;
+        };
+        if protocol_excluded || filter.excluded_pools().contains(pool) {
+            return Some(pool);
+        }
+    }
+    None
 }
 
 /// Check every leg, including split branches, against the original request filter. Reading
@@ -391,30 +451,7 @@ where
                 .state_label()
                 .cloned()
                 .unwrap_or_else(|| last_block.number().to_string());
-            // Resolved under the read the worker already holds: an excluded protocol system
-            // becomes that system's pools, so the algorithm only ever checks pool ids.
-            let generation = view
-                .base_market_state()
-                .component_generation();
-            let exclusions = {
-                let mut cache = params
-                    .cached_exclusions()
-                    .lock()
-                    .expect("route exclusion cache lock poisoned");
-                match cache.as_ref() {
-                    Some((cached_generation, exclusions)) if *cached_generation == generation => {
-                        exclusions.clone()
-                    }
-                    _ => {
-                        let exclusions = Arc::new(
-                            view.base_market_state()
-                                .resolve_route_filter(params.route_filter()),
-                        );
-                        *cache = Some((generation, exclusions.clone()));
-                        exclusions
-                    }
-                }
-            };
+            let exclusions = resolve_exclusions(&view, &params);
             (block_info, solved_against, exclusions)
         };
 
@@ -477,33 +514,18 @@ where
                     let market = self
                         .read_market(params.state_label())
                         .await?;
-                    for swap in route.swaps() {
-                        if !swap
-                            .protocol()
-                            .starts_with(PROPAMM_FALLBACK_PREFIX)
-                        {
-                            continue;
-                        }
-                        let tier = fee_tiers.resolved_tier(swap.token_in(), swap.token_out());
-                        if let Some(pool) = self
-                            .pamm_admission
-                            .fallback_pools()
-                            .pool_for(swap.token_in(), swap.token_out(), tier)
-                        {
-                            let filter = params.route_filter();
-                            if filter.excluded_pools().contains(pool) ||
-                                filter.excluded_protocols().iter().any(|entry| {
-                                    protocol_matches(entry, FALLBACK_PROTOCOL_SYSTEM)
-                                })
-                            {
-                                debug!(order_id = %order.id(), fallback_pool = %pool,
-                                    "dropping pAMM route: request excludes its fallback pool");
-                                return Err(SolveError::route_rejected(
-                                    order.id(),
-                                    RouteRejection::PammFallbackExcluded,
-                                ));
-                            }
-                        }
+                    if let Some(pool) = excluded_fallback_pool(
+                        &route,
+                        &fee_tiers,
+                        self.pamm_admission.fallback_pools(),
+                        params.route_filter(),
+                    ) {
+                        debug!(order_id = %order.id(), fallback_pool = %pool,
+                            "dropping pAMM route: request excludes its fallback pool");
+                        return Err(SolveError::route_rejected(
+                            order.id(),
+                            RouteRejection::PammFallbackExcluded,
+                        ));
                     }
                     match fallback_amount_out(
                         &route,
@@ -1088,13 +1110,13 @@ mod tests {
     }
 
     #[rstest]
-    #[case::pool(RouteExclusionFilter::default().with_pools(["p2".to_string()]), Some("excluded pool p2"))]
-    #[case::protocol(RouteExclusionFilter::default().with_protocols(["uniswap_v2".to_string()]), Some("excluded protocol uniswap_v2"))]
-    #[case::protocol_prefix(RouteExclusionFilter::default().with_protocols(["uniswap:".to_string()]), None)]
-    #[case::intermediate(RouteExclusionFilter::default().with_tokens([token(0x02, "B").address]), Some("excluded intermediate token"))]
+    #[case::pool(RouteExclusionFilter::default().with_excluded_pools(["p2".to_string()]), Some("excluded pool p2"))]
+    #[case::protocol(RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v2".to_string()]), Some("excluded protocol uniswap_v2"))]
+    #[case::protocol_prefix(RouteExclusionFilter::default().with_excluded_protocols(["uniswap:".to_string()]), None)]
+    #[case::intermediate(RouteExclusionFilter::default().with_excluded_tokens([token(0x02, "B").address]), Some("excluded intermediate token"))]
     #[case::empty(RouteExclusionFilter::default(), None)]
-    #[case::unrelated(RouteExclusionFilter::default().with_pools(["other".to_string()]).with_protocols(["other".to_string()]).with_tokens([token(0x04, "D").address]), None)]
-    #[case::endpoints(RouteExclusionFilter::default().with_tokens([token(0x01, "A").address, token(0x03, "C").address]), None)]
+    #[case::unrelated(RouteExclusionFilter::default().with_excluded_pools(["other".to_string()]).with_excluded_protocols(["other".to_string()]).with_excluded_tokens([token(0x04, "D").address]), None)]
+    #[case::endpoints(RouteExclusionFilter::default().with_excluded_tokens([token(0x01, "A").address, token(0x03, "C").address]), None)]
     #[tokio::test]
     async fn test_quote_enforces_route_filter(
         #[case] filter: RouteExclusionFilter,
@@ -1211,7 +1233,7 @@ mod tests {
 
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
         let params = SolveParams::default().with_route_filter(
-            RouteExclusionFilter::default().with_protocols(["uniswap_v2".to_string()]),
+            RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v2".to_string()]),
         );
 
         let result = worker.quote(&ord, params).await;
@@ -1331,8 +1353,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case::pool(RouteExclusionFilter::default().with_pools(["fallback_pool".to_string()]))]
-    #[case::protocol(RouteExclusionFilter::default().with_protocols(["uniswap_v3".to_string()]))]
+    #[case::pool(RouteExclusionFilter::default().with_excluded_pools(["fallback_pool".to_string()]))]
+    #[case::protocol(RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v3".to_string()]))]
     #[tokio::test]
     async fn test_quote_pamm_route_with_excluded_fallback(#[case] filter: RouteExclusionFilter) {
         let tiers = SharedFeeTiers::default();
