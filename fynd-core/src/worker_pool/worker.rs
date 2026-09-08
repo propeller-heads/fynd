@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
 
 use crate::{
-    algorithm::Algorithm,
+    algorithm::{request::SolveRequest, Algorithm},
     derived::{
         computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
@@ -348,15 +348,15 @@ where
             (block_info, solved_against)
         };
 
+        let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
+            .with_derived(self.derived_data.clone());
+        if let Some(label) = params.state_label().cloned() {
+            request = request.with_label(label);
+        }
+
         let result = self
             .algorithm
-            .find_best_route(
-                graph,
-                self.market_data.clone(),
-                params.state_label().cloned(),
-                Some(self.derived_data.clone()),
-                order,
-            )
+            .find_best_route(request)
             .await;
 
         let order_quote = match result {
