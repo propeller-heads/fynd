@@ -103,49 +103,55 @@ impl RouteExclusionFilter {
     /// An entry matches a system exactly (`uniswap_v2`), or a family when it ends in `:`
     /// (`propammfallback:`). An entry matching no pools excludes nothing.
     #[must_use]
-    pub fn with_protocols(mut self, protocols: impl IntoIterator<Item = String>) -> Self {
-        self.protocols.extend(protocols);
+    pub fn with_excluded_protocols(mut self, protocols: impl IntoIterator<Item = String>) -> Self {
+        self.excluded_protocols
+            .extend(protocols);
         self
     }
 
     /// Excludes routes that pass through these tokens.
     #[must_use]
-    pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
-        self.tokens.extend(tokens);
+    pub fn with_excluded_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.excluded_tokens.extend(tokens);
         self
     }
 
     /// Whether nothing is excluded, so a caller can skip the checks.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pools.is_empty() && self.protocols.is_empty() && self.tokens.is_empty()
+        self.excluded_pools.is_empty() &&
+            self.excluded_protocols.is_empty() &&
+            self.excluded_tokens.is_empty()
     }
 
     /// The pools excluded, by component id.
     #[must_use]
-    pub fn pools(&self) -> &FxHashSet<ComponentId> {
-        &self.pools
+    pub fn excluded_pools(&self) -> &FxHashSet<ComponentId> {
+        &self.excluded_pools
     }
 
     /// The protocol systems excluded.
     #[must_use]
-    pub fn protocols(&self) -> &FxHashSet<String> {
-        &self.protocols
+    pub fn excluded_protocols(&self) -> &FxHashSet<String> {
+        &self.excluded_protocols
     }
 
     /// The tokens excluded as intermediates.
     #[must_use]
-    pub fn tokens(&self) -> &FxHashSet<Address> {
-        &self.tokens
+    pub fn excluded_tokens(&self) -> &FxHashSet<Address> {
+        &self.excluded_tokens
     }
 }
 
-/// The pools and tokens one solve must not use.
+/// The pools and tokens one solve must not use, with every protocol system already
+/// replaced by its pools.
 ///
-/// Algorithms must honour these exclusions during search and simulation. The worker rejects
-/// returned routes that violate the request filter.
+/// A graph knows a pool by its component id, so a search reads this rather than the
+/// [`RouteExclusionFilter`] the caller wrote. An algorithm honours it while it searches and
+/// simulates, and the worker checks the route it gets back.
 ///
-/// Tokens are excluded only as intermediates; the order's input and output remain allowed.
+/// A token here is excluded as an intermediate only: the order's own two tokens stay allowed,
+/// because every route touches them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteExclusions {
     pub(crate) pools: FxHashSet<ComponentId>,

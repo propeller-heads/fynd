@@ -358,7 +358,7 @@ impl MarketState {
                 );
             }
         }
-        RouteExclusions { pools, tokens: filter.tokens().clone() }
+        RouteExclusions { pools, tokens: filter.excluded_tokens().clone() }
     }
 
     /// Creates a new empty MarketState.
@@ -650,10 +650,11 @@ mod tests {
             component_with_protocol("v3", "uniswap_v3", &[a, b]),
         ]);
         let prefix = market.resolve_route_filter(
-            &RouteExclusionFilter::default().with_protocols(["propammfallback:".to_string()]),
+            &RouteExclusionFilter::default()
+                .with_excluded_protocols(["propammfallback:".to_string()]),
         );
         let partial = market.resolve_route_filter(
-            &RouteExclusionFilter::default().with_protocols(["propamm".to_string()]),
+            &RouteExclusionFilter::default().with_excluded_protocols(["propamm".to_string()]),
         );
         assert!(prefix.excludes_pool("pamm"));
         assert!(!prefix.excludes_pool("v3"));
@@ -673,9 +674,9 @@ mod tests {
         ]);
 
         let filter = RouteExclusionFilter::default()
-            .with_pools(["named_pool".to_string()])
-            .with_protocols(["uniswap_v2".to_string()])
-            .with_tokens([token_b.address.clone()]);
+            .with_excluded_pools(["named_pool".to_string()])
+            .with_excluded_protocols(["uniswap_v2".to_string()])
+            .with_excluded_tokens([token_b.address.clone()]);
         let exclusions = market.resolve_route_filter(&filter);
 
         assert!(exclusions.excludes_pool("v2_pool"), "the protocol's own pool is excluded");
@@ -685,7 +686,8 @@ mod tests {
         assert!(
             market
                 .resolve_route_filter(
-                    &RouteExclusionFilter::default().with_protocols(["not_a_protocol".to_string()])
+                    &RouteExclusionFilter::default()
+                        .with_excluded_protocols(["not_a_protocol".to_string()])
                 )
                 .is_empty(),
             "a system the market holds no pool of excludes nothing"

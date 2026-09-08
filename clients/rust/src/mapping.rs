@@ -833,15 +833,15 @@ mod tests {
 
         let opts = QuoteOptions::default().with_route_filter(
             RouteFilter::default()
-                .with_pools(["pool-1".to_string()])
-                .with_protocols(["uniswap_v2".to_string()]),
+                .with_excluded_pools(["pool-1".to_string()])
+                .with_excluded_protocols(["uniswap_v2".to_string()]),
         );
 
         let dto_opts = dto::QuoteOptions::try_from(opts).unwrap();
         let filter = dto_opts.route_filter().unwrap();
 
-        assert_eq!(filter.exclude_pools(), ["pool-1".to_string()]);
-        assert_eq!(filter.exclude_protocols(), ["uniswap_v2".to_string()]);
+        assert_eq!(filter.excluded_pools(), ["pool-1".to_string()]);
+        assert_eq!(filter.excluded_protocols(), ["uniswap_v2".to_string()]);
     }
 
     // -----------------------------------------------------------------------

@@ -305,7 +305,7 @@ mod tests {
             graph,
             &a,
             &c,
-            RouteSearch { filter: &hops(2, 2), exclusions: &RouteExclusions::default() },
+            RouteSearch { bounds: &hops(2, 2), exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();
@@ -333,7 +333,7 @@ mod tests {
             graph,
             &a,
             &b,
-            RouteSearch { filter: &hops(1, 1), exclusions: &RouteExclusions::default() },
+            RouteSearch { bounds: &hops(1, 1), exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();
@@ -361,7 +361,7 @@ mod tests {
             graph,
             &a,
             &a,
-            RouteSearch { filter: &hops(2, 2), exclusions: &RouteExclusions::default() },
+            RouteSearch { bounds: &hops(2, 2), exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();
@@ -392,7 +392,7 @@ mod tests {
             g,
             &from,
             &to,
-            RouteSearch { filter: &hops(1, 3), exclusions: &RouteExclusions::default() },
+            RouteSearch { bounds: &hops(1, 3), exclusions: &RouteExclusions::default() },
             None,
         );
 
@@ -423,7 +423,7 @@ mod tests {
             manager.graph(),
             &token_a.address,
             &token_b.address,
-            RouteSearch { filter: &filter, exclusions: &RouteExclusions::default() },
+            RouteSearch { bounds: &filter, exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();
@@ -459,7 +459,7 @@ mod tests {
             manager.graph(),
             &token_a.address,
             &token_c.address,
-            RouteSearch { filter: &filter, exclusions: &RouteExclusions::default() },
+            RouteSearch { bounds: &filter, exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();
@@ -502,7 +502,7 @@ mod tests {
             manager.graph(),
             &token_a.address,
             &token_a.address,
-            RouteSearch { filter: &filter, exclusions: &RouteExclusions::default() },
+            RouteSearch { bounds: &filter, exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();
@@ -555,7 +555,7 @@ mod tests {
             graph,
             &token_a.address,
             &token_c.address,
-            RouteSearch { filter: &filter, exclusions: &RouteExclusions::default() },
+            RouteSearch { bounds: &filter, exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();
@@ -588,7 +588,7 @@ mod tests {
             graph,
             &token_a.address,
             &token_b.address,
-            RouteSearch { filter: &filter, exclusions: &RouteExclusions::default() },
+            RouteSearch { bounds: &filter, exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();

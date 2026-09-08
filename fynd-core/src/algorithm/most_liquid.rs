@@ -750,7 +750,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 1: Find every route as a sequence of tokens. Pools are chosen per hop during
         // simulation.
-        let search = RouteSearch { filter: &self.query, exclusions: &exclusions };
+        let search = RouteSearch { bounds: &self.query, exclusions: &exclusions };
         let all_paths =
             paths::find_token_paths(graph, order.token_in(), order.token_out(), search)?;
         let n_paths = all_paths.len();

@@ -40,34 +40,40 @@ struct ReplayOptions {
 #[derive(Debug, Serialize)]
 struct ReplayExclusionRouteFilter {
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pools: Vec<String>,
+    exclude_pools: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    protocols: Vec<String>,
+    exclude_protocols: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    tokens: Vec<String>,
+    exclude_tokens: Vec<String>,
 }
 
 impl ReplayExclusionRouteFilter {
     fn capture(filter: &RouteExclusionFilter) -> Self {
-        let mut pools: Vec<String> = filter.pools().iter().cloned().collect();
+        let mut pools: Vec<String> = filter
+            .excluded_pools()
+            .iter()
+            .cloned()
+            .collect();
         let mut protocols: Vec<String> = filter
-            .protocols()
+            .excluded_protocols()
             .iter()
             .cloned()
             .collect();
         let mut tokens: Vec<String> = filter
-            .tokens()
+            .excluded_tokens()
             .iter()
             .map(ToString::to_string)
             .collect();
         pools.sort_unstable();
         protocols.sort_unstable();
         tokens.sort_unstable();
-        Self { pools, protocols, tokens }
+        Self { exclude_pools: pools, exclude_protocols: protocols, exclude_tokens: tokens }
     }
 
     fn is_empty(&self) -> bool {
-        self.pools.is_empty() && self.protocols.is_empty() && self.tokens.is_empty()
+        self.exclude_pools.is_empty() &&
+            self.exclude_protocols.is_empty() &&
+            self.exclude_tokens.is_empty()
     }
 }
 
@@ -430,8 +436,8 @@ mod tests {
     #[test]
     fn test_replay_json_with_a_route_filter() {
         let filter = fynd_rpc_types::RouteFilter::default()
-            .with_pools(["pool-1".to_string()])
-            .with_protocols(["uniswap_v2".to_string()]);
+            .with_excluded_pools(["pool-1".to_string()])
+            .with_excluded_protocols(["uniswap_v2".to_string()]);
         let options = QuoteOptions::default().with_route_filter(filter);
         let request = QuoteRequest::new(vec![order()]).with_options(options);
 
@@ -439,9 +445,9 @@ mod tests {
         let value: Value = serde_json::from_str(&json).unwrap();
         let captured = &value["options"]["route_filter"];
 
-        assert_eq!(captured["pools"], serde_json::json!(["pool-1"]));
-        assert_eq!(captured["protocols"], serde_json::json!(["uniswap_v2"]));
-        assert!(captured.get("tokens").is_none(), "an empty list is left out");
+        assert_eq!(captured["exclude_pools"], serde_json::json!(["pool-1"]));
+        assert_eq!(captured["exclude_protocols"], serde_json::json!(["uniswap_v2"]));
+        assert!(captured.get("exclude_tokens").is_none(), "an empty list is left out");
     }
 
     #[test]

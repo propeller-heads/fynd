@@ -170,20 +170,21 @@ pub struct GraphQueryFilter {
 #[derive(Debug, Clone, Copy)]
 pub struct RouteSearch<'a> {
     /// How long a route may be, and which tokens it may pass through.
-    pub filter: &'a GraphQueryFilter,
+    pub bounds: &'a GraphQueryFilter,
     /// Pools and tokens this request excludes.
     pub exclusions: &'a RouteExclusions,
 }
 
 impl RouteSearch<'_> {
-    /// Whether a token is an endpoint or an intermediate allowed by both filters.
+    /// Whether a route may pass through this token: an endpoint always may, and an
+    /// intermediate must clear both the connector list and the request's exclusions.
     #[must_use]
     pub fn allows_token(self, token: &Address, endpoints: (&Address, &Address)) -> bool {
         self.exclusions
             .allows_token(token, endpoints) &&
             (token == endpoints.0 ||
                 token == endpoints.1 ||
-                self.filter
+                self.bounds
                     .connector_tokens
                     .as_ref()
                     .is_none_or(|tokens| tokens.contains(token)))

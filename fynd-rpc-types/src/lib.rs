@@ -176,35 +176,35 @@ pub struct RouteFilter {
 
 impl RouteFilter {
     /// Excludes these pools, by component id.
-    pub fn with_pools(mut self, pools: impl IntoIterator<Item = String>) -> Self {
+    pub fn with_excluded_pools(mut self, pools: impl IntoIterator<Item = String>) -> Self {
         self.exclude_pools.extend(pools);
         self
     }
 
     /// Excludes every pool of these protocol systems.
-    pub fn with_protocols(mut self, protocols: impl IntoIterator<Item = String>) -> Self {
+    pub fn with_excluded_protocols(mut self, protocols: impl IntoIterator<Item = String>) -> Self {
         self.exclude_protocols.extend(protocols);
         self
     }
 
     /// Excludes routes that pass through these tokens.
-    pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+    pub fn with_excluded_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
         self.exclude_tokens.extend(tokens);
         self
     }
 
     /// The pools excluded, by component id.
-    pub fn exclude_pools(&self) -> &[String] {
+    pub fn excluded_pools(&self) -> &[String] {
         &self.exclude_pools
     }
 
     /// The protocol systems excluded.
-    pub fn exclude_protocols(&self) -> &[String] {
+    pub fn excluded_protocols(&self) -> &[String] {
         &self.exclude_protocols
     }
 
     /// The tokens excluded as intermediates.
-    pub fn exclude_tokens(&self) -> &[Address] {
+    pub fn excluded_tokens(&self) -> &[Address] {
         &self.exclude_tokens
     }
 }
@@ -1602,10 +1602,10 @@ mod wire_format_tests {
             let options: QuoteOptions = serde_json::from_str(json).unwrap();
             let filter = options.route_filter().unwrap();
 
-            assert_eq!(filter.exclude_pools(), ["0xabc".to_string()]);
-            assert_eq!(filter.exclude_protocols(), ["uniswap_v2".to_string()]);
+            assert_eq!(filter.excluded_pools(), ["0xabc".to_string()]);
+            assert_eq!(filter.excluded_protocols(), ["uniswap_v2".to_string()]);
             assert_eq!(
-                filter.exclude_tokens(),
+                filter.excluded_tokens(),
                 [Bytes::from(hex::decode("dAC17F958D2ee523a2206206994597C13D831ec7").unwrap())]
             );
         }
@@ -1825,9 +1825,9 @@ mod conversions {
     impl Into<fynd_core::RouteExclusionFilter> for RouteFilter {
         fn into(self) -> fynd_core::RouteExclusionFilter {
             fynd_core::RouteExclusionFilter::default()
-                .with_pools(self.exclude_pools)
-                .with_protocols(self.exclude_protocols)
-                .with_tokens(
+                .with_excluded_pools(self.exclude_pools)
+                .with_excluded_protocols(self.exclude_protocols)
+                .with_excluded_tokens(
                     self.exclude_tokens
                         .into_iter()
                         .map(Into::into),
@@ -2161,17 +2161,17 @@ mod conversions {
             let usdt = make_address(0xDA);
             let dto = QuoteOptions::default().with_route_filter(
                 RouteFilter::default()
-                    .with_pools(["pool-1".to_string()])
-                    .with_protocols(["uniswap_v2".to_string()])
-                    .with_tokens([usdt.clone()]),
+                    .with_excluded_pools(["pool-1".to_string()])
+                    .with_excluded_protocols(["uniswap_v2".to_string()])
+                    .with_excluded_tokens([usdt.clone()]),
             );
 
             let core: fynd_core::QuoteOptions = dto.into();
 
             let expected = fynd_core::RouteExclusionFilter::default()
-                .with_pools(["pool-1".to_string()])
-                .with_protocols(["uniswap_v2".to_string()])
-                .with_tokens([TychoBytes::from(usdt)]);
+                .with_excluded_pools(["pool-1".to_string()])
+                .with_excluded_protocols(["uniswap_v2".to_string()])
+                .with_excluded_tokens([TychoBytes::from(usdt)]);
             assert_eq!(core.route_filter(), &expected);
         }
 

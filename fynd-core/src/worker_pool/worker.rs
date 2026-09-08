@@ -75,7 +75,7 @@ fn validate_route_filter(
     }
     for swap in route.swaps() {
         if filter
-            .pools()
+            .excluded_pools()
             .contains(swap.component_id())
         {
             return Err(format!("route uses excluded pool {}", swap.component_id()));
@@ -84,7 +84,7 @@ fn validate_route_filter(
             .protocol_component()
             .protocol_system;
         if filter
-            .protocols()
+            .excluded_protocols()
             .iter()
             .any(|entry| protocol_matches(entry, protocol))
         {
@@ -93,7 +93,7 @@ fn validate_route_filter(
         for token in [swap.token_in(), swap.token_out()] {
             if token != order.token_in() &&
                 token != order.token_out() &&
-                filter.tokens().contains(token)
+                filter.excluded_tokens().contains(token)
             {
                 return Err(format!("route uses excluded intermediate token {token}"));
             }
@@ -491,8 +491,8 @@ where
                             .pool_for(swap.token_in(), swap.token_out(), tier)
                         {
                             let filter = params.route_filter();
-                            if filter.pools().contains(pool) ||
-                                filter.protocols().iter().any(|entry| {
+                            if filter.excluded_pools().contains(pool) ||
+                                filter.excluded_protocols().iter().any(|entry| {
                                     protocol_matches(entry, FALLBACK_PROTOCOL_SYSTEM)
                                 })
                             {

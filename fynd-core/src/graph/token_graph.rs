@@ -199,7 +199,7 @@ impl<D> TopologyGraph<D> {
         to: NodeIndex,
         search: RouteSearch<'_>,
     ) -> Vec<TokenPath> {
-        let filter = search.filter;
+        let filter = search.bounds;
         if filter.min_hops == 0 || filter.min_hops > filter.max_hops {
             return Vec::new();
         }
@@ -315,7 +315,7 @@ impl<D> TopologyGraph<D> {
         to: NodeIndex,
         search: RouteSearch<'_>,
     ) -> Vec<TokenPath> {
-        let filter = search.filter;
+        let filter = search.bounds;
         let endpoints = (from, to);
         let head_levels = self.walk_levels(from, filter.max_hops.div_ceil(2), endpoints, search);
         let tail_levels = self.walk_levels(to, filter.max_hops / 2, endpoints, search);
@@ -430,7 +430,7 @@ impl<D> TopologyGraph<D> {
     /// start and end on that token, which the no-revisit rule forbids. Searched from the one end
     /// instead, with the closing hop exempt from that rule.
     fn circular_token_paths(&self, target: NodeIndex, search: RouteSearch<'_>) -> Vec<TokenPath> {
-        let filter = search.filter;
+        let filter = search.bounds;
         let mut token_paths = Vec::new();
         let mut frontier = vec![TokenPath::from_slice(&[target])];
 
@@ -994,7 +994,7 @@ mod tests {
         };
         let filter = GraphQueryFilter { min_hops, max_hops, connector_tokens };
         let exclusions = RouteExclusions::default();
-        let search = RouteSearch { filter: &filter, exclusions: &exclusions };
+        let search = RouteSearch { bounds: &filter, exclusions: &exclusions };
         graph
             .paths_between_ix(from, to, search)
             .iter()
@@ -1201,7 +1201,7 @@ mod tests {
 
         let filter = GraphQueryFilter { min_hops, max_hops, connector_tokens: None };
         let exclusions = RouteExclusions::default();
-        let search = RouteSearch { filter: &filter, exclusions: &exclusions };
+        let search = RouteSearch { bounds: &filter, exclusions: &exclusions };
 
         assert!(g
             .paths_between_ix(from, to, search)
@@ -1227,7 +1227,7 @@ mod tests {
             start,
             start,
             RouteSearch {
-                filter: &GraphQueryFilter { min_hops: 1, max_hops: 4, connector_tokens: None },
+                bounds: &GraphQueryFilter { min_hops: 1, max_hops: 4, connector_tokens: None },
                 exclusions: &RouteExclusions::default(),
             },
         );
@@ -1253,7 +1253,7 @@ mod tests {
     ) -> FxHashSet<Vec<&'a str>> {
         let filter =
             GraphQueryFilter { min_hops: hops.0, max_hops: hops.1, connector_tokens: None };
-        let search = RouteSearch { filter: &filter, exclusions };
+        let search = RouteSearch { bounds: &filter, exclusions };
         all_ids(
             graph
                 .paths_between(from, to, search)

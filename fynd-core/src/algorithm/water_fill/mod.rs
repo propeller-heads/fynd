@@ -222,7 +222,7 @@ impl WaterFillAlgorithm {
         let (graph, order, market, label, derived, exclusions) = request.into_parts();
         // The hop bounds are this algorithm's, the exclusions are the request's; a search borrows
         // both.
-        let search = RouteSearch { filter: &self.query, exclusions: &exclusions };
+        let search = RouteSearch { bounds: &self.query, exclusions: &exclusions };
         let token_prices = if let Some(ref derived) = derived {
             derived
                 .read()
@@ -1369,7 +1369,7 @@ where
         amount_out: order.amount().clone(),
     }];
 
-    for _depth in 0..cfg.search.filter.max_hops {
+    for _depth in 0..cfg.search.bounds.max_hops {
         if cfg.deadline.expired() || frontier.is_empty() {
             break;
         }
@@ -1435,10 +1435,10 @@ fn expand_candidate_state<'a, W>(
             path: path.clone(),
             amount_out: candidate.amount_out,
         };
-        if candidate.target == target && path.len() >= cfg.search.filter.min_hops {
+        if candidate.target == target && path.len() >= cfg.search.bounds.min_hops {
             found.push((path.clone(), path_state.amount_out.clone()));
         }
-        if path.len() < cfg.search.filter.max_hops {
+        if path.len() < cfg.search.bounds.max_hops {
             next_by_node
                 .entry(candidate.target)
                 .or_default()
@@ -1549,7 +1549,7 @@ fn candidate_priority<W>(
     let token = &graph[node];
     match cfg
         .search
-        .filter
+        .bounds
         .connector_tokens
         .as_ref()
     {
@@ -2011,7 +2011,7 @@ mod tests {
             &mut SwapCache::new(),
             CandidateSearchConfig {
                 search: RouteSearch {
-                    filter: &GraphQueryFilter { min_hops: 1, max_hops: 3, connector_tokens: None },
+                    bounds: &GraphQueryFilter { min_hops: 1, max_hops: 3, connector_tokens: None },
                     exclusions: &exclusions,
                 },
                 max_candidates: 128,
