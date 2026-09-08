@@ -1,5 +1,7 @@
 //! What an algorithm is given to solve one order.
 
+use std::sync::Arc;
+
 use crate::{
     derived::SharedDerivedDataRef,
     feed::market_data::{MarketData, StateLabel},
@@ -16,7 +18,7 @@ pub struct SolveRequest<'a, G> {
     order: &'a Order,
     label: Option<StateLabel>,
     derived: Option<SharedDerivedDataRef>,
-    exclusions: RouteExclusions,
+    exclusions: Arc<RouteExclusions>,
 }
 
 impl<'a, G> SolveRequest<'a, G> {
@@ -34,7 +36,7 @@ impl<'a, G> SolveRequest<'a, G> {
         MarketData,
         Option<StateLabel>,
         Option<SharedDerivedDataRef>,
-        RouteExclusions,
+        Arc<RouteExclusions>,
     ) {
         (self.graph, self.order, self.market, self.label, self.derived, self.exclusions)
     }
@@ -47,7 +49,7 @@ impl<'a, G> SolveRequest<'a, G> {
             order,
             label: None,
             derived: None,
-            exclusions: RouteExclusions::default(),
+            exclusions: Arc::new(RouteExclusions::default()),
         }
     }
 
@@ -69,6 +71,11 @@ impl<'a, G> SolveRequest<'a, G> {
     /// Liquidity this solve must not route through.
     #[must_use]
     pub fn with_exclusions(mut self, exclusions: RouteExclusions) -> Self {
+        self.exclusions = Arc::new(exclusions);
+        self
+    }
+
+    pub(crate) fn with_shared_exclusions(mut self, exclusions: Arc<RouteExclusions>) -> Self {
         self.exclusions = exclusions;
         self
     }

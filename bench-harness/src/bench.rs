@@ -431,6 +431,7 @@ fn error_label(error: &SolveError) -> &'static str {
     match error {
         SolveError::NoRouteFound { reason, .. } => no_path_label(*reason),
         SolveError::RouteRejected { reason, .. } => match reason {
+            RouteRejection::PammFallbackExcluded => "route rejected: pAMM fallback excluded",
             RouteRejection::PammFeeTiersUnread => "route rejected: pAMM fee tiers not read",
             RouteRejection::PammFallbackPoolMissing => "route rejected: pAMM fallback pool missing",
             RouteRejection::PammFallbackUnpriceable => {

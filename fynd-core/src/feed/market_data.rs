@@ -331,6 +331,8 @@ pub struct MarketState {
     /// excludes a protocol names that system's pools without scanning the component map, and so
     /// the metrics sampler can count them without one either.
     components_by_protocol: FxHashMap<String, FxHashSet<ComponentId>>,
+    /// Changes only when a component is added or removed, not when its state changes.
+    component_generation: u64,
 }
 
 impl MarketState {
@@ -366,12 +368,18 @@ impl MarketState {
             protocol_sync_status: FxHashMap::default(),
             last_updated: None,
             components_by_protocol: FxHashMap::default(),
+            component_generation: 0,
         }
     }
 
     /// Returns the label identifying the block or overlay this state was produced from.
     pub fn label(&self) -> &StateLabel {
         &self.label
+    }
+
+    /// Returns the generation of the component membership index.
+    pub fn component_generation(&self) -> u64 {
+        self.component_generation
     }
 
     /// Returns the block info for the last update.
@@ -476,12 +484,20 @@ impl MarketState {
         for component in components {
             let protocol_system = component.protocol_system.clone();
             let component_id = component.id.clone();
+            let is_new = !self
+                .components
+                .contains_key(&component_id);
             self.components
                 .insert(component_id.clone(), Arc::new(component));
             self.components_by_protocol
                 .entry(protocol_system)
                 .or_default()
                 .insert(component_id);
+            if is_new {
+                self.component_generation = self
+                    .component_generation
+                    .wrapping_add(1);
+            }
         }
     }
 
@@ -508,6 +524,9 @@ impl MarketState {
     pub fn remove_components<'a>(&mut self, ids: impl IntoIterator<Item = &'a ComponentId>) {
         for id in ids {
             if let Some(component) = self.components.remove(id) {
+                self.component_generation = self
+                    .component_generation
+                    .wrapping_add(1);
                 if let Some(ids) = self
                     .components_by_protocol
                     .get_mut(&component.protocol_system)
@@ -588,6 +607,7 @@ impl MarketState {
             protocol_sync_status: FxHashMap::default(), // Not needed for simulation
             last_updated: self.last_updated.clone(),
             components_by_protocol,
+            component_generation: self.component_generation,
         }
     }
 }

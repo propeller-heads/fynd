@@ -14,7 +14,10 @@
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
@@ -311,6 +314,8 @@ impl QuoteOptions {
     }
 }
 
+type SharedExclusionCache = Arc<Mutex<Option<(u64, Arc<RouteExclusions>)>>>;
+
 /// Parameters for a single solve operation.
 ///
 /// Constructed from [`QuoteOptions`] and passed through the task pipeline down to the worker.
@@ -323,6 +328,39 @@ pub struct SolveParams {
     /// Liquidity the request will not route through. Resolved against the market by the worker,
     /// which is where the protocol systems it names become pools.
     route_filter: RouteExclusionFilter,
+    /// Per-request resolved exclusions shared by all cloned solve tasks.
+    #[doc(hidden)]
+    exclusion_cache: SharedExclusionCache,
+}
+
+impl Clone for SolveParams {
+    fn clone(&self) -> Self {
+        Self {
+            state_label: self.state_label.clone(),
+            route_filter: self.route_filter.clone(),
+            exclusion_cache: self.exclusion_cache.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for SolveParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SolveParams")
+            .field("state_label", &self.state_label)
+            .field("route_filter", &self.route_filter)
+            .finish()
+    }
+}
+
+impl Default for SolveParams {
+    fn default() -> Self {
+        Self {
+            state_label: None,
+            route_filter: RouteExclusionFilter::default(),
+            exclusion_cache: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 impl SolveParams {
@@ -335,6 +373,7 @@ impl SolveParams {
     /// Excludes the pools, protocol systems and tokens this filter names.
     pub fn with_route_filter(mut self, filter: RouteExclusionFilter) -> Self {
         self.route_filter = filter;
+        self.exclusion_cache = Arc::new(Mutex::new(None));
         self
     }
 
@@ -348,6 +387,43 @@ impl SolveParams {
         &self.route_filter
     }
 
+    pub(crate) fn cached_exclusions(&self) -> &SharedExclusionCache {
+        &self.exclusion_cache
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_exclusions_for_test(
+        &self,
+        generation: u64,
+        exclusions: RouteExclusions,
+    ) -> Arc<RouteExclusions> {
+        let exclusions = Arc::new(exclusions);
+        *self.exclusion_cache.lock().unwrap() = Some((generation, exclusions.clone()));
+        exclusions
+    }
+}
+
+#[cfg(test)]
+mod solve_params_tests {
+    use super::*;
+
+    #[test]
+    fn cloned_solve_params_share_exclusion_cache() {
+        let params = SolveParams::default();
+        let clone = params.clone();
+        let exclusions = params.cache_exclusions_for_test(
+            7,
+            RouteExclusions::default().with_pools(["pool".to_string()]),
+        );
+        let cached = clone
+            .cached_exclusions()
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap();
+        assert_eq!(cached.0, 7);
+        assert!(Arc::ptr_eq(&exclusions, &cached.1));
+    }
 }
 
 /// Client fee configuration for the Tycho Router.
