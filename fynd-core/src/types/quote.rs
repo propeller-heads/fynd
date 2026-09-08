@@ -76,23 +76,25 @@ impl QuoteRequest {
     }
 }
 
-/// Liquidity a request excludes from a route.
+/// What a caller names to keep out of a route: pools, protocol systems and tokens.
 ///
-/// It excludes pools by id, whole protocol systems, and tokens a route must not pass through.
+/// This is the request's own words. A solve reads [`RouteExclusions`] instead, which
+/// [`crate::feed::market_data::MarketState::resolve_route_filter`] builds from this by replacing
+/// each protocol system with the pools that system holds.
 ///
-/// Empty by default.
+/// Empty by default, so nothing is excluded unless the request names it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteExclusionFilter {
-    pools: FxHashSet<ComponentId>,
-    protocols: FxHashSet<String>,
-    tokens: FxHashSet<Address>,
+    excluded_pools: FxHashSet<ComponentId>,
+    excluded_protocols: FxHashSet<String>,
+    excluded_tokens: FxHashSet<Address>,
 }
 
 impl RouteExclusionFilter {
     /// Excludes these pools, by component id.
     #[must_use]
-    pub fn with_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
-        self.pools.extend(pools);
+    pub fn with_excluded_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
+        self.excluded_pools.extend(pools);
         self
     }
 

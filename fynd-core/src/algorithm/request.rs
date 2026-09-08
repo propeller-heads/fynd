@@ -9,9 +9,6 @@ use crate::{
 };
 
 /// One order to solve, and everything the algorithm reads to solve it.
-///
-/// Build one with [`SolveRequest::new`] and the `with_` methods. Read it through the getters or
-/// consume it with [`SolveRequest::into_parts`].
 pub struct SolveRequest<'a, G> {
     graph: &'a G,
     market: MarketData,
@@ -22,11 +19,7 @@ pub struct SolveRequest<'a, G> {
 }
 
 impl<'a, G> SolveRequest<'a, G> {
-    /// Consumes the request, returning its graph, order, market, label, derived data and
-    /// exclusions.
-    ///
-    /// Moves the owned fields without cloning them. The graph and order retain their original
-    /// borrow lifetime.
+    /// The graph, order, market, overlay label, derived data and exclusions, moved out.
     #[must_use]
     pub fn into_parts(
         self,

@@ -289,13 +289,6 @@ mod tests {
         GraphQueryFilter { min_hops, max_hops, connector_tokens: None }
     }
 
-    fn search<'a>(
-        filter: &'a GraphQueryFilter,
-        exclusions: &'a RouteExclusions,
-    ) -> RouteSearch<'a> {
-        RouteSearch { filter, exclusions }
-    }
-
     #[test]
     fn test_try_score_path_calculates_correctly() {
         let (a, b, c, _) = addrs();
@@ -308,9 +301,14 @@ mod tests {
             .unwrap();
 
         let graph = m.graph();
-        let paths =
-            find_paths(graph, &a, &c, search(&hops(2, 2), &RouteExclusions::default()), None)
-                .unwrap();
+        let paths = find_paths(
+            graph,
+            &a,
+            &c,
+            RouteSearch { filter: &hops(2, 2), exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
         assert_eq!(paths.len(), 1);
         let path = &paths[0];
 
@@ -331,9 +329,14 @@ mod tests {
         let (a, b, _, _) = addrs();
         let m = linear_graph();
         let graph = m.graph();
-        let paths =
-            find_paths(graph, &a, &b, search(&hops(1, 1), &RouteExclusions::default()), None)
-                .unwrap();
+        let paths = find_paths(
+            graph,
+            &a,
+            &b,
+            RouteSearch { filter: &hops(1, 1), exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
         assert_eq!(paths.len(), 1);
         assert!(try_score_path(&paths[0]).is_none());
     }
@@ -354,9 +357,14 @@ mod tests {
 
         let graph = m.graph();
         // Find A->B->A paths (circular, 2 hops)
-        let paths =
-            find_paths(graph, &a, &a, search(&hops(2, 2), &RouteExclusions::default()), None)
-                .unwrap();
+        let paths = find_paths(
+            graph,
+            &a,
+            &a,
+            RouteSearch { filter: &hops(2, 2), exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
 
         // Should find at least one path
         assert_eq!(paths.len(), 1);
@@ -380,8 +388,13 @@ mod tests {
         let from = if from_exists { a } else { non_existent.clone() };
         let to = if to_exists { b } else { non_existent };
 
-        let result =
-            find_paths(g, &from, &to, search(&hops(1, 3), &RouteExclusions::default()), None);
+        let result = find_paths(
+            g,
+            &from,
+            &to,
+            RouteSearch { filter: &hops(1, 3), exclusions: &RouteExclusions::default() },
+            None,
+        );
 
         assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
     }
@@ -410,7 +423,7 @@ mod tests {
             manager.graph(),
             &token_a.address,
             &token_b.address,
-            search(&filter, &RouteExclusions::default()),
+            RouteSearch { filter: &filter, exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();
@@ -446,7 +459,7 @@ mod tests {
             manager.graph(),
             &token_a.address,
             &token_c.address,
-            search(&filter, &RouteExclusions::default()),
+            RouteSearch { filter: &filter, exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();
@@ -489,7 +502,7 @@ mod tests {
             manager.graph(),
             &token_a.address,
             &token_a.address,
-            search(&filter, &RouteExclusions::default()),
+            RouteSearch { filter: &filter, exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();
@@ -542,7 +555,7 @@ mod tests {
             graph,
             &token_a.address,
             &token_c.address,
-            search(&filter, &RouteExclusions::default()),
+            RouteSearch { filter: &filter, exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();
@@ -575,7 +588,7 @@ mod tests {
             graph,
             &token_a.address,
             &token_b.address,
-            search(&filter, &RouteExclusions::default()),
+            RouteSearch { filter: &filter, exclusions: &RouteExclusions::default() },
             None,
         )
         .unwrap();

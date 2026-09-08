@@ -336,11 +336,15 @@ pub struct MarketState {
 }
 
 impl MarketState {
-    /// Resolves request protocol exclusions into component IDs from this market.
+    /// The pools and tokens `filter` excludes, with each protocol system it names replaced by
+    /// the components this market holds for that system.
+    ///
+    /// A protocol system matches exactly (`uniswap_v2`), or as a family when the entry ends in
+    /// `:` (`propammfallback:`). An entry this market holds no component for excludes nothing.
     #[must_use]
     pub fn resolve_route_filter(&self, filter: &RouteExclusionFilter) -> RouteExclusions {
-        let mut pools = filter.pools().clone();
-        for entry in filter.protocols() {
+        let mut pools = filter.excluded_pools().clone();
+        for entry in filter.excluded_protocols() {
             if entry.ends_with(':') {
                 for (system, ids) in &self.components_by_protocol {
                     if protocol_matches(entry, system) {
