@@ -158,8 +158,12 @@ metrics-exporter-prometheus = "0.16"
 metrics-util = "0.20"
 
 # Tycho
-tycho-execution = ">=0.382.0"
-tycho-simulation = ">=0.382.0"
+# 0.384.0 is the first release with Robinhood support for all of SushiSwap V3, RobinSwap V3,
+# and Ramses V3 (SushiSwap V3: 0.382.0, RobinSwap V3: 0.383.0, Ramses V3 + executor address:
+# 0.384.0). Both crates must move together: the simulation crate provides the RamsesV3State
+# decoder and the execution crate the swap encoders for the new systems.
+tycho-execution = ">=0.384.0"
+tycho-simulation = ">=0.384.0"
 typetag = "0.2"
 
 # Compression
