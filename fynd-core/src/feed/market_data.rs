@@ -27,7 +27,10 @@ use tycho_simulation::{
     tycho_ethereum::gas::BlockGasPrice,
 };
 
-use crate::types::{BlockInfo, ComponentId};
+use crate::{
+    feed::component_filter::protocol_matches,
+    types::{BlockInfo, ComponentId, RouteExclusionFilter, RouteExclusions},
+};
 
 /// A label identifying an overlay state layer.
 ///
@@ -331,6 +334,27 @@ pub struct MarketState {
 }
 
 impl MarketState {
+    /// Resolves request protocol exclusions into component IDs from this market.
+    #[must_use]
+    pub fn resolve_route_filter(&self, filter: &RouteExclusionFilter) -> RouteExclusions {
+        let mut pools = filter.pools().clone();
+        for entry in filter.protocols() {
+            if entry.ends_with(':') {
+                for (system, ids) in &self.components_by_protocol {
+                    if protocol_matches(entry, system) {
+                        pools.extend(ids.iter().cloned());
+                    }
+                }
+            } else {
+                pools.extend(
+                    self.components_by_protocol(entry)
+                        .cloned(),
+                );
+            }
+        }
+        RouteExclusions { pools, tokens: filter.tokens().clone() }
+    }
+
     /// Creates a new empty MarketState.
     pub fn new() -> Self {
         Self {
@@ -591,6 +615,58 @@ mod tests {
     use crate::algorithm::test_utils::{
         component, component_with_protocol, token, MockProtocolSim,
     };
+
+    #[test]
+    fn test_resolve_route_filter_with_protocol_prefix() {
+        let a = token(0x01, "A");
+        let b = token(0x02, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([
+            component_with_protocol("pamm", "propammfallback:fermiswap", &[a.clone(), b.clone()]),
+            component_with_protocol("v3", "uniswap_v3", &[a, b]),
+        ]);
+        let prefix = market.resolve_route_filter(
+            &RouteExclusionFilter::default().with_protocols(["propammfallback:".to_string()]),
+        );
+        let partial = market.resolve_route_filter(
+            &RouteExclusionFilter::default().with_protocols(["propamm".to_string()]),
+        );
+        assert!(prefix.excludes_pool("pamm"));
+        assert!(!prefix.excludes_pool("v3"));
+        assert!(partial.is_empty());
+    }
+
+    /// A filter names protocol systems; a solve reads pools, so resolving replaces each system
+    /// with that system's pools and leaves every other pool alone.
+    #[test]
+    fn test_resolve_route_filter_with_a_protocol() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([
+            component_with_protocol("v2_pool", "uniswap_v2", &[token_a.clone(), token_b.clone()]),
+            component_with_protocol("v3_pool", "uniswap_v3", &[token_a.clone(), token_b.clone()]),
+        ]);
+
+        let filter = RouteExclusionFilter::default()
+            .with_pools(["named_pool".to_string()])
+            .with_protocols(["uniswap_v2".to_string()])
+            .with_tokens([token_b.address.clone()]);
+        let exclusions = market.resolve_route_filter(&filter);
+
+        assert!(exclusions.excludes_pool("v2_pool"), "the protocol's own pool is excluded");
+        assert!(exclusions.excludes_pool("named_pool"), "a pool named directly stays excluded");
+        assert!(!exclusions.excludes_pool("v3_pool"), "another protocol's pool is untouched");
+        assert!(exclusions.excludes_token(&token_b.address));
+        assert!(
+            market
+                .resolve_route_filter(
+                    &RouteExclusionFilter::default().with_protocols(["not_a_protocol".to_string()])
+                )
+                .is_empty(),
+            "a system the market holds no pool of excludes nothing"
+        );
+    }
 
     #[test]
     fn component_counts_by_protocol_tracks_upserts_and_removals() {

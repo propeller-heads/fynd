@@ -73,6 +73,122 @@ impl QuoteRequest {
     }
 }
 
+/// Liquidity a request excludes from a route.
+///
+/// It excludes pools by id, whole protocol systems, and tokens a route must not pass through.
+///
+/// Empty by default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteExclusionFilter {
+    pools: FxHashSet<ComponentId>,
+    protocols: FxHashSet<String>,
+    tokens: FxHashSet<Address>,
+}
+
+impl RouteExclusionFilter {
+    /// Excludes these pools, by component id.
+    #[must_use]
+    pub fn with_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
+        self.pools.extend(pools);
+        self
+    }
+
+    /// Excludes every pool of these protocol systems.
+    ///
+    /// An entry matches a system exactly (`uniswap_v2`), or a family when it ends in `:`
+    /// (`propammfallback:`). An entry matching no pools excludes nothing.
+    #[must_use]
+    pub fn with_protocols(mut self, protocols: impl IntoIterator<Item = String>) -> Self {
+        self.protocols.extend(protocols);
+        self
+    }
+
+    /// Excludes routes that pass through these tokens.
+    #[must_use]
+    pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.tokens.extend(tokens);
+        self
+    }
+
+    /// Whether nothing is excluded, so a caller can skip the checks.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pools.is_empty() && self.protocols.is_empty() && self.tokens.is_empty()
+    }
+
+    /// The pools excluded, by component id.
+    #[must_use]
+    pub fn pools(&self) -> &FxHashSet<ComponentId> {
+        &self.pools
+    }
+
+    /// The protocol systems excluded.
+    #[must_use]
+    pub fn protocols(&self) -> &FxHashSet<String> {
+        &self.protocols
+    }
+
+    /// The tokens excluded as intermediates.
+    #[must_use]
+    pub fn tokens(&self) -> &FxHashSet<Address> {
+        &self.tokens
+    }
+}
+
+/// The pools and tokens one solve must not use.
+///
+/// Algorithms must honour these exclusions during search and simulation. The worker rejects
+/// returned routes that violate the request filter.
+///
+/// Tokens are excluded only as intermediates; the order's input and output remain allowed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteExclusions {
+    pub(crate) pools: FxHashSet<ComponentId>,
+    pub(crate) tokens: FxHashSet<Address>,
+}
+
+impl RouteExclusions {
+    /// Excludes these pools, by component id.
+    #[must_use]
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
+        self.pools.extend(pools);
+        self
+    }
+
+    /// Excludes routes that pass through these tokens.
+    #[must_use]
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.tokens.extend(tokens);
+        self
+    }
+
+    /// Whether a token is an endpoint or an allowed intermediate.
+    #[must_use]
+    pub fn allows_token(&self, token: &Address, endpoints: (&Address, &Address)) -> bool {
+        token == endpoints.0 || token == endpoints.1 || !self.excludes_token(token)
+    }
+
+    /// Whether nothing is excluded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pools.is_empty() && self.tokens.is_empty()
+    }
+
+    /// Whether this pool is excluded.
+    #[must_use]
+    pub fn excludes_pool(&self, component_id: &str) -> bool {
+        self.pools.contains(component_id)
+    }
+
+    /// Whether routes through this token are excluded.
+    #[must_use]
+    pub fn excludes_token(&self, token: &Address) -> bool {
+        self.tokens.contains(token)
+    }
+}
+
 /// Options to customize the solving behavior.
 #[must_use]
 #[serde_as]
@@ -102,6 +218,11 @@ pub struct QuoteOptions {
     /// `None` uses every pool that serves the request. Library-only: never on the wire.
     #[serde(skip)]
     worker_pools: Option<Vec<String>>,
+    /// Liquidity this request excludes from a route.
+    /// Filled from `options.route_filter` on the wire. Skipped during JSON serialization — the
+    /// wire type owns the request shape.
+    #[serde(skip)]
+    route_filter: RouteExclusionFilter,
 }
 
 impl QuoteOptions {
@@ -141,6 +262,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Excludes the pools, protocol systems and tokens this filter names.
+    pub fn with_route_filter(mut self, filter: RouteExclusionFilter) -> Self {
+        self.route_filter = filter;
+        self
+    }
+
     /// Returns the timeout in milliseconds.
     #[must_use]
     pub fn timeout_ms(&self) -> Option<u64> {
@@ -176,6 +303,12 @@ impl QuoteOptions {
     pub fn worker_pools(&self) -> Option<&[String]> {
         self.worker_pools.as_deref()
     }
+
+    /// Returns what this request excludes from a route. Empty unless one was set.
+    #[must_use]
+    pub fn route_filter(&self) -> &RouteExclusionFilter {
+        &self.route_filter
+    }
 }
 
 /// Parameters for a single solve operation.
@@ -184,10 +317,12 @@ impl QuoteOptions {
 /// Kept separate from [`QuoteOptions`] so solve-specific parameters can evolve independently
 /// of the HTTP request surface.
 #[must_use]
-#[derive(Debug, Clone, Default)]
 pub struct SolveParams {
     /// Solve against this labeled state overlay. `None` uses the base Tycho state.
     state_label: Option<StateLabel>,
+    /// Liquidity the request will not route through. Resolved against the market by the worker,
+    /// which is where the protocol systems it names become pools.
+    route_filter: RouteExclusionFilter,
 }
 
 impl SolveParams {
@@ -197,10 +332,22 @@ impl SolveParams {
         self
     }
 
+    /// Excludes the pools, protocol systems and tokens this filter names.
+    pub fn with_route_filter(mut self, filter: RouteExclusionFilter) -> Self {
+        self.route_filter = filter;
+        self
+    }
+
     /// Returns the overlay label, if one was set.
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.state_label.as_ref()
     }
+
+    /// Returns what the request excludes from a route. Empty unless one was set.
+    pub fn route_filter(&self) -> &RouteExclusionFilter {
+        &self.route_filter
+    }
+
 }
 
 /// Client fee configuration for the Tycho Router.
