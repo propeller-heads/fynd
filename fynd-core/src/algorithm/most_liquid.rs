@@ -492,6 +492,7 @@ impl MostLiquidAlgorithm {
         market: MarketData,
         label: Option<StateLabel>,
         scored_paths: &[(TokenPath, f64)],
+        exclusions: &RouteExclusions,
     ) -> Result<MarketState, AlgorithmError> {
         let mut pairs: FxHashSet<(NodeIndex, NodeIndex)> = FxHashSet::default();
         for (token_path, _) in scored_paths {
@@ -502,6 +503,9 @@ impl MostLiquidAlgorithm {
         let mut component_ids: FxHashSet<&ComponentId> = FxHashSet::default();
         for &(from, to) in &pairs {
             for pool in graph.pools_between(from, to) {
+                if exclusions.excludes_pool(&pool.component_id) {
+                    continue;
+                }
                 component_ids.insert(&pool.component_id);
             }
         }
@@ -728,8 +732,7 @@ impl Algorithm for MostLiquidAlgorithm {
         &self,
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let SolveParts { graph, order, market, label, derived, exclusions } =
-            request.into_parts();
+        let SolveParts { graph, order, market, label, derived, exclusions } = request.into_parts();
         let start = Instant::now();
 
         // Exact-out isn't supported yet
@@ -783,7 +786,8 @@ impl Algorithm for MostLiquidAlgorithm {
         report.paths_to_simulate = scored_paths.len();
 
         // Step 3: Fetch all pools in scored_paths.
-        let market = Self::snapshot_market_state(graph, market, label, &scored_paths).await?;
+        let market =
+            Self::snapshot_market_state(graph, market, label, &scored_paths, &exclusions).await?;
         let gas_price = paths::fetch_gas_price(&market)?;
 
         // Step 4: Solve all paths in score order and return the best one
