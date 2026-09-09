@@ -7,9 +7,10 @@
 //! block. Used by tooling (e.g. `hindsight`) to measure slippage between quote time and
 //! execution time.
 //!
-//! [`replay_route_at_quote_time`] answers a different question, for the quote path rather than for
-//! tooling: it runs the route on its own quote-time states with named swaps pinned to amounts a
-//! market maker signed for, which prices a route on committed liquidity instead of price levels.
+//! [`replay_route_at_quote_time`](crate::replay::replay_route_at_quote_time) answers a different
+//! question, for the quote path rather than for tooling: it runs the route on its own quote-time
+//! states with named swaps pinned to amounts a market maker signed for, which prices a route on
+//! committed liquidity instead of price levels.
 
 use std::collections::HashMap;
 
