@@ -83,8 +83,8 @@ pub use signing::{
 pub use types::{
     BackendKind, BatchQuoteParams, BlockInfo, ClientFeeParams, EncodingOptions, FeeBreakdown,
     HealthStatus, InstanceInfo, Order, OrderSide, PermitDetails, PermitSingle, PriceGuardConfig,
-    Quote, QuoteOptions, QuoteParams, QuoteStatus, Route, SimulationResult, Swap, Transaction,
-    UserTransferType,
+    Quote, QuoteOptions, QuoteParams, QuoteStatus, Route, RouteFilter, SimulationResult, Swap,
+    Transaction, UserTransferType,
 };
 
 mod client;

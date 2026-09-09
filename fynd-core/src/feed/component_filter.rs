@@ -25,12 +25,16 @@ pub(crate) fn is_excluded_protocol(
 ) -> bool {
     exclude_protocols
         .iter()
-        .any(|entry| match entry.ends_with(':') {
-            true => component
-                .protocol_system
-                .starts_with(entry.as_str()),
-            false => component.protocol_system == *entry,
-        })
+        .any(|entry| protocol_matches(entry, &component.protocol_system))
+}
+
+/// Matches an exact protocol system or a colon-terminated family prefix.
+pub(crate) fn protocol_matches(entry: &str, system: &str) -> bool {
+    if entry.ends_with(':') {
+        system.starts_with(entry)
+    } else {
+        system == entry
+    }
 }
 
 /// Removes from `topology` every component `drop` returns `true` for.

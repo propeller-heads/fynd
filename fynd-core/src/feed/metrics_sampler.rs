@@ -39,9 +39,7 @@ impl MetricsSampler {
             let Some(state) = self.market_data.try_read() else {
                 continue;
             };
-            let component_counts = state
-                .component_counts_by_protocol()
-                .clone();
+            let component_counts = state.component_counts_by_protocol();
             let sync_states = state.protocol_sync_states().clone();
             drop(state);
 

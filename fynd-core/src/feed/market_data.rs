@@ -27,7 +27,10 @@ use tycho_simulation::{
     tycho_ethereum::gas::BlockGasPrice,
 };
 
-use crate::types::{BlockInfo, ComponentId};
+use crate::{
+    feed::component_filter::protocol_matches,
+    types::{BlockInfo, ComponentId, RouteExclusionFilter, RouteExclusions},
+};
 
 /// A label identifying an overlay state layer.
 ///
@@ -324,12 +327,40 @@ pub struct MarketState {
     /// Block info for the last update (only updated when protocols reported "Ready" status).
     /// None if no block has been processed yet.
     last_updated: Option<BlockInfo>,
-    /// Number of components per protocol system, maintained incrementally on
-    /// upsert/remove so readers never scan the full component map.
-    component_counts: FxHashMap<String, u64>,
+    /// The components of each protocol system, maintained on upsert/remove so a quote that
+    /// excludes a protocol names that system's pools without scanning the component map, and so
+    /// the metrics sampler can count them without one either.
+    components_by_protocol: FxHashMap<String, FxHashSet<ComponentId>>,
+    /// Changes only when a component is added or removed, not when its state changes.
+    component_generation: u64,
 }
 
 impl MarketState {
+    /// The pools and tokens `filter` excludes, with each protocol system it names replaced by
+    /// the components this market holds for that system.
+    ///
+    /// A protocol system matches exactly (`uniswap_v2`), or as a family when the entry ends in
+    /// `:` (`propammfallback:`). An entry this market holds no component for excludes nothing.
+    #[must_use]
+    pub fn resolve_route_filter(&self, filter: &RouteExclusionFilter) -> RouteExclusions {
+        let mut pools = filter.excluded_pools().clone();
+        for entry in filter.excluded_protocols() {
+            if entry.ends_with(':') {
+                for (system, ids) in &self.components_by_protocol {
+                    if protocol_matches(entry, system) {
+                        pools.extend(ids.iter().cloned());
+                    }
+                }
+            } else {
+                pools.extend(
+                    self.components_by_protocol(entry)
+                        .cloned(),
+                );
+            }
+        }
+        RouteExclusions { pools, tokens: filter.excluded_tokens().clone() }
+    }
+
     /// Creates a new empty MarketState.
     pub fn new() -> Self {
         Self {
@@ -340,13 +371,19 @@ impl MarketState {
             gas_price: None,
             protocol_sync_status: FxHashMap::default(),
             last_updated: None,
-            component_counts: FxHashMap::default(),
+            components_by_protocol: FxHashMap::default(),
+            component_generation: 0,
         }
     }
 
     /// Returns the label identifying the block or overlay this state was produced from.
     pub fn label(&self) -> &StateLabel {
         &self.label
+    }
+
+    /// Returns the generation of the component membership index.
+    pub fn component_generation(&self) -> u64 {
+        self.component_generation
     }
 
     /// Returns the block info for the last update.
@@ -364,12 +401,15 @@ impl MarketState {
         self.tokens.len()
     }
 
-    /// Number of components (components) per protocol system.
+    /// Number of components per protocol system.
     ///
-    /// Entries stay present at zero after all of a protocol's components are
-    /// removed so exported gauges reset instead of freezing at the last value.
-    pub fn component_counts_by_protocol(&self) -> &FxHashMap<String, u64> {
-        &self.component_counts
+    /// Entries stay present at zero after all of a protocol's components are removed, so exported
+    /// gauges reset instead of freezing at the last value.
+    pub fn component_counts_by_protocol(&self) -> FxHashMap<String, u64> {
+        self.components_by_protocol
+            .iter()
+            .map(|(protocol_system, ids)| (protocol_system.clone(), ids.len() as u64))
+            .collect()
     }
 
     /// Returns the sync status of every protocol system.
@@ -395,6 +435,18 @@ impl MarketState {
     /// Gets a component by ID.
     pub fn get_component(&self, id: &str) -> Option<&ProtocolComponent> {
         self.components.get(id).map(Arc::as_ref)
+    }
+
+    /// The ids of every component this protocol system holds. Empty for a system the market does
+    /// not carry.
+    pub fn components_by_protocol(
+        &self,
+        protocol_system: &str,
+    ) -> impl Iterator<Item = &ComponentId> {
+        self.components_by_protocol
+            .get(protocol_system)
+            .into_iter()
+            .flatten()
     }
 
     /// Gets a component by ID as a shared handle, for callers that need to keep it.
@@ -435,14 +487,20 @@ impl MarketState {
     pub fn upsert_components(&mut self, components: impl IntoIterator<Item = ProtocolComponent>) {
         for component in components {
             let protocol_system = component.protocol_system.clone();
-            let previous = self
+            let component_id = component.id.clone();
+            let is_new = !self
                 .components
-                .insert(component.id.clone(), Arc::new(component));
-            if previous.is_none() {
-                *self
-                    .component_counts
-                    .entry(protocol_system)
-                    .or_default() += 1;
+                .contains_key(&component_id);
+            self.components
+                .insert(component_id.clone(), Arc::new(component));
+            self.components_by_protocol
+                .entry(protocol_system)
+                .or_default()
+                .insert(component_id);
+            if is_new {
+                self.component_generation = self
+                    .component_generation
+                    .wrapping_add(1);
             }
         }
     }
@@ -470,11 +528,14 @@ impl MarketState {
     pub fn remove_components<'a>(&mut self, ids: impl IntoIterator<Item = &'a ComponentId>) {
         for id in ids {
             if let Some(component) = self.components.remove(id) {
-                if let Some(count) = self
-                    .component_counts
+                self.component_generation = self
+                    .component_generation
+                    .wrapping_add(1);
+                if let Some(ids) = self
+                    .components_by_protocol
                     .get_mut(&component.protocol_system)
                 {
-                    *count = count.saturating_sub(1);
+                    ids.remove(id);
                 }
             }
             self.simulation_states.remove(id);
@@ -539,6 +600,8 @@ impl MarketState {
             }
         }
 
+        let components_by_protocol = index_by_protocol(&components);
+
         MarketState {
             label: self.label.clone(),
             components,
@@ -547,9 +610,24 @@ impl MarketState {
             gas_price: self.gas_price.clone(),
             protocol_sync_status: FxHashMap::default(), // Not needed for simulation
             last_updated: self.last_updated.clone(),
-            component_counts: FxHashMap::default(), // Not needed for simulation
+            components_by_protocol,
+            component_generation: self.component_generation,
         }
     }
+}
+
+/// Groups component ids by the protocol system their component carries.
+fn index_by_protocol(
+    components: &FxHashMap<ComponentId, Arc<ProtocolComponent>>,
+) -> FxHashMap<String, FxHashSet<ComponentId>> {
+    let mut index: FxHashMap<String, FxHashSet<ComponentId>> = FxHashMap::default();
+    for (id, component) in components {
+        index
+            .entry(component.protocol_system.clone())
+            .or_default()
+            .insert(id.clone());
+    }
+    index
 }
 
 #[cfg(test)]
@@ -561,6 +639,60 @@ mod tests {
     use crate::algorithm::test_utils::{
         component, component_with_protocol, token, MockProtocolSim,
     };
+
+    #[test]
+    fn test_resolve_route_filter_with_protocol_prefix() {
+        let a = token(0x01, "A");
+        let b = token(0x02, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([
+            component_with_protocol("pamm", "propammfallback:fermiswap", &[a.clone(), b.clone()]),
+            component_with_protocol("v3", "uniswap_v3", &[a, b]),
+        ]);
+        let prefix = market.resolve_route_filter(
+            &RouteExclusionFilter::default()
+                .with_excluded_protocols(["propammfallback:".to_string()]),
+        );
+        let partial = market.resolve_route_filter(
+            &RouteExclusionFilter::default().with_excluded_protocols(["propamm".to_string()]),
+        );
+        assert!(prefix.excludes_pool("pamm"));
+        assert!(!prefix.excludes_pool("v3"));
+        assert!(partial.is_empty());
+    }
+
+    /// A filter names protocol systems; a solve reads pools, so resolving replaces each system
+    /// with that system's pools and leaves every other pool alone.
+    #[test]
+    fn test_resolve_route_filter_with_a_protocol() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([
+            component_with_protocol("v2_pool", "uniswap_v2", &[token_a.clone(), token_b.clone()]),
+            component_with_protocol("v3_pool", "uniswap_v3", &[token_a.clone(), token_b.clone()]),
+        ]);
+
+        let filter = RouteExclusionFilter::default()
+            .with_excluded_pools(["named_pool".to_string()])
+            .with_excluded_protocols(["uniswap_v2".to_string()])
+            .with_excluded_tokens([token_b.address.clone()]);
+        let exclusions = market.resolve_route_filter(&filter);
+
+        assert!(exclusions.excludes_pool("v2_pool"), "the protocol's own pool is excluded");
+        assert!(exclusions.excludes_pool("named_pool"), "a pool named directly stays excluded");
+        assert!(!exclusions.excludes_pool("v3_pool"), "another protocol's pool is untouched");
+        assert!(exclusions.excludes_token(&token_b.address));
+        assert!(
+            market
+                .resolve_route_filter(
+                    &RouteExclusionFilter::default()
+                        .with_excluded_protocols(["not_a_protocol".to_string()])
+                )
+                .is_empty(),
+            "a system the market holds no pool of excludes nothing"
+        );
+    }
 
     #[test]
     fn component_counts_by_protocol_tracks_upserts_and_removals() {
