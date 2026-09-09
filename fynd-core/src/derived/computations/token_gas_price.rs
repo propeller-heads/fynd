@@ -234,18 +234,50 @@ impl TokenGasPriceComputation {
             .last_updated()
             .map_or(block, |b| b.number());
 
-        let buys = algorithm.reach_from_source_token(&ctx, &self.probe_amount);
+        // The buy pass and the sell loop are pure CPU work — every step simulates swaps against
+        // the owned snapshot and never awaits — so they run on a blocking thread instead of
+        // pinning one of the shared runtime's workers for the whole pass.
+        let computation = self.clone();
+        let span = Span::current();
+        tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
+            let graph = graph_manager.graph();
+            let buys = algorithm.reach_from_source_token(&ctx, &computation.probe_amount);
 
-        let gas_node = ctx.token_in_node;
-        let token_nodes = ctx
-            .node_address
-            .iter()
-            .map(|(&node, address)| (address.clone(), node))
-            .collect();
-        let hops_to_gas = BellmanFordAlgorithm::get_hops_to_reach(graph, gas_node, self.max_hops);
-        let mut pass =
-            PricingPass { algorithm: &algorithm, graph, ctx, gas_node, hops_to_gas, token_nodes };
+            let gas_node = ctx.token_in_node;
+            let token_nodes = ctx
+                .node_address
+                .iter()
+                .map(|(&node, address)| (address.clone(), node))
+                .collect();
+            let hops_to_gas =
+                BellmanFordAlgorithm::get_hops_to_reach(graph, gas_node, computation.max_hops);
+            let mut pass = PricingPass {
+                algorithm: &algorithm,
+                graph,
+                ctx,
+                gas_node,
+                hops_to_gas,
+                token_nodes,
+            };
+            computation.sell_loop(&mut pass, &buys, tokens_to_price, deadline, block)
+        })
+        .await
+        .map_err(|join_error| {
+            ComputationError::Internal(format!("token pricing pass did not complete: {join_error}"))
+        })
+    }
 
+    /// Prices every token the deadline allows, one sell relaxation each — the pass's dominant
+    /// cost. Pure CPU work: callers run it on a blocking thread.
+    fn sell_loop(
+        &self,
+        pass: &mut PricingPass<'_>,
+        buys: &FxHashMap<Address, ReachedToken>,
+        tokens_to_price: FxHashSet<Address>,
+        deadline: Instant,
+        block: u64,
+    ) -> SolvedPrices {
         let mut prices = FxHashMap::default();
         let mut failed_items = Vec::new();
         let mut unattempted = FxHashSet::default();
@@ -256,7 +288,7 @@ impl TokenGasPriceComputation {
                 unattempted.insert(token);
                 break;
             }
-            match self.price_token(&mut pass, &token, buys.get(&token)) {
+            match self.price_token(pass, &token, buys.get(&token)) {
                 Ok(priced) => {
                     prices.insert(token, priced);
                 }
@@ -284,7 +316,7 @@ impl TokenGasPriceComputation {
             "token pricing pass complete"
         );
 
-        Ok(SolvedPrices { prices, block, failed_items, unattempted })
+        SolvedPrices { prices, block, failed_items, unattempted }
     }
 
     /// Every token in the graph but the gas token, narrowed to `filter_tokens` when given.
