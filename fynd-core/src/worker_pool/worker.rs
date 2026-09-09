@@ -1385,11 +1385,7 @@ mod tests {
 
         async fn find_best_route(
             &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
+            _request: SolveRequest<'_, Self::GraphType>,
         ) -> Result<RouteResult, AlgorithmError> {
             let token_a = token(0x01, "A");
             let token_b = token(0x02, "B");
