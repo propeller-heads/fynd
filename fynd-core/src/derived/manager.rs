@@ -131,7 +131,7 @@ pub struct ComputationManagerConfig {
     /// Overrides the token pricing pass's sell-loop budget; `None` keeps the computation's
     /// default. The replay harness sets an effectively unbounded budget so integration tests
     /// can assert exact priced-token counts.
-    pass_budget: Option<Duration>,
+    pricing_pass_budget: Option<Duration>,
 }
 
 impl ComputationManagerConfig {
@@ -153,8 +153,8 @@ impl ComputationManagerConfig {
     }
 
     /// Overrides the wall-clock budget for the token pricing pass's sell loop.
-    pub fn with_pass_budget(mut self, pass_budget: Duration) -> Self {
-        self.pass_budget = Some(pass_budget);
+    pub fn with_pricing_pass_budget(mut self, pass_budget: Duration) -> Self {
+        self.pricing_pass_budget = Some(pass_budget);
         self
     }
 
@@ -189,7 +189,7 @@ impl Default for ComputationManagerConfig {
             gas_token: Address::zero(20),
             max_hop: crate::solver::defaults::POOL_MAX_HOPS,
             depth_slippage_threshold: 0.01,
-            pass_budget: None,
+            pricing_pass_budget: None,
         }
     }
 }
@@ -230,7 +230,7 @@ impl ComputationManager {
         let mut token_prices = TokenGasPriceComputation::default()
             .with_max_hops(config.max_hop)
             .with_gas_token(config.gas_token);
-        if let Some(pass_budget) = config.pass_budget {
+        if let Some(pass_budget) = config.pricing_pass_budget {
             token_prices = token_prices.with_pass_budget(pass_budget);
         }
         manager.register(token_prices)?;

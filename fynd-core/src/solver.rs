@@ -175,6 +175,17 @@ fn propamm_fee_tier_fetcher(
     .map_err(|e| SolverBuildError::FeeTierFetcher(e.to_string()))
 }
 
+/// The token pricing pass's hop budget, from the configured pools' `max_hops` values.
+///
+/// Pricing must reach every token a quote can route to — a token within some pool's `max_hops`
+/// but beyond pricing's hop budget would be quoted gas-blind — so the budget follows the deepest
+/// configured pool rather than any constant.
+fn pricing_max_hops(pool_max_hops: impl Iterator<Item = usize>) -> usize {
+    pool_max_hops
+        .max()
+        .unwrap_or(defaults::POOL_MAX_HOPS)
+}
+
 fn parse_connector_tokens(
     raw: Option<&[String]>,
 ) -> Result<Option<FxHashSet<Address>>, SolverBuildError> {
@@ -864,15 +875,11 @@ impl FyndBuilder {
         let market_event_tx = tycho_feed.event_sender();
 
         let gas_token = native_token(&self.chain).map_err(|_| SolverBuildError::GasToken)?;
-        // Pricing must reach every token a quote can route to — a token within some pool's
-        // max_hops but beyond pricing's hop budget would be quoted gas-blind — so that budget
-        // follows the deepest configured pool rather than any constant.
-        let pricing_max_hops = self
-            .pools
-            .iter()
-            .map(PoolEntry::max_hops)
-            .max()
-            .unwrap_or(defaults::POOL_MAX_HOPS);
+        let pricing_max_hops = pricing_max_hops(
+            self.pools
+                .iter()
+                .map(PoolEntry::max_hops),
+        );
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
             .with_max_hop(pricing_max_hops)
@@ -1502,14 +1509,12 @@ impl Solver {
             });
         }
 
-        // Computation manager. As in the live build, pricing's hop budget follows the deepest
-        // configured pool so every quotable token is priceable.
         let gas_token = native_token(&chain).map_err(|_| SolverBuildError::GasToken)?;
-        let pricing_max_hops = pools
-            .values()
-            .map(|pool_cfg| pool_cfg.max_hops())
-            .max()
-            .unwrap_or(defaults::POOL_MAX_HOPS);
+        let pricing_max_hops = pricing_max_hops(
+            pools
+                .values()
+                .map(|pool_cfg| pool_cfg.max_hops()),
+        );
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
             .with_max_hop(pricing_max_hops)
@@ -1517,7 +1522,7 @@ impl Solver {
             // Replay tests assert exact priced-token counts against a deterministic recording;
             // an effectively unbounded budget keeps a starved CI machine from cutting the
             // pricing pass short and failing the count.
-            .with_pass_budget(Duration::from_secs(24 * 60 * 60));
+            .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60));
         let (computation_manager, _) =
             ComputationManager::new(computation_config, market_data.clone())
                 .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
