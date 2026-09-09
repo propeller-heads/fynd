@@ -69,13 +69,39 @@ impl<D> PairEdge<D> {
 /// A route as a sequence of tokens, before the pools serving each leg are chosen.
 pub type TokenPath = SmallVec<[NodeIndex; INLINE_TOKENS]>;
 
-/// The pools of one leg a request allows, collected because a filtered subset of a pair's pools
-/// is not contiguous and so cannot stay a slice into the graph.
-type Leg<'a, D> = SmallVec<[&'a EdgeData<D>; INLINE_POOLS]>;
+/// The pools of one leg a solve may use.
+///
+/// A pair the request leaves alone stays a slice into the graph. One it excludes a pool from
+/// cannot, because what is left is not contiguous, so those pools are collected.
+enum Leg<'a, D> {
+    /// Every pool the pair holds.
+    All(&'a [EdgeData<D>]),
+    /// The pools the request allows.
+    Allowed(Vec<&'a EdgeData<D>>),
+}
 
-/// How many pools a [`Leg`] holds before it spills to the heap. Not measured against the market:
-/// it is the inline capacity, and a pair traded by more pools still works, on the heap.
-const INLINE_POOLS: usize = 8;
+impl<'a, D> Leg<'a, D> {
+    /// How many pools this leg may use.
+    fn len(&self) -> usize {
+        match self {
+            Self::All(pools) => pools.len(),
+            Self::Allowed(pools) => pools.len(),
+        }
+    }
+
+    /// Whether the leg has no pool a solve may use.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The `index`th pool this leg may use.
+    fn get(&self, index: usize) -> Option<&'a EdgeData<D>> {
+        match self {
+            Self::All(pools) => (*pools).get(index),
+            Self::Allowed(pools) => pools.get(index).copied(),
+        }
+    }
+}
 
 /// Tokens as nodes, one edge per directed token pair.
 pub type TokenGraph<D> = stable_graph::StableDiGraph<Address, PairEdge<D>>;
@@ -102,6 +128,31 @@ impl<D> TopologyGraph<D> {
             .get(&(from, to))
             .and_then(|&edge| self.graph.edge_weight(edge))
             .map_or(&[], PairEdge::pools)
+    }
+
+    /// The pools trading `from` for `to` that this solve may use.
+    ///
+    /// Collects only when the request excludes one of them.
+    fn leg_between(
+        &self,
+        from: NodeIndex,
+        to: NodeIndex,
+        exclusions: &RouteExclusions,
+    ) -> Leg<'_, D> {
+        let pools = self.pools_between(from, to);
+        if exclusions.is_empty() ||
+            !pools
+                .iter()
+                .any(|pool| exclusions.excludes_pool(&pool.component_id))
+        {
+            return Leg::All(pools);
+        }
+        Leg::Allowed(
+            pools
+                .iter()
+                .filter(|pool| !exclusions.excludes_pool(&pool.component_id))
+                .collect(),
+        )
     }
 
     /// Whether the pair trades `from` for `to` through a pool this solve may use.
@@ -228,18 +279,12 @@ impl<D> TopologyGraph<D> {
         max_paths: Option<usize>,
         exclusions: &RouteExclusions,
     ) -> Vec<Path<'_, D>> {
-        // Inline, like everything else in the search: this runs once per token sequence found, a
-        // route has at most `max_hops` legs, and a leg rarely carries more than `INLINE_POOLS`
-        // pools. Each leg holds only the pools the request allows, so an excluded one is not
-        // counted into the product either.
+        // Inline, like everything else in the search: this runs once per token sequence found and
+        // a route has at most `max_hops` legs. Each leg holds only the pools the request allows,
+        // so an excluded one is not counted into the product either.
         let legs: SmallVec<[Leg<'_, D>; INLINE_EDGES]> = token_path
             .windows(2)
-            .map(|pair| {
-                self.pools_between(pair[0], pair[1])
-                    .iter()
-                    .filter(|pool| !exclusions.excludes_pool(&pool.component_id))
-                    .collect()
-            })
+            .map(|pair| self.leg_between(pair[0], pair[1], exclusions))
             .collect();
 
         // A sequence of one token names no leg, and a leg with no pool names a pair the graph
