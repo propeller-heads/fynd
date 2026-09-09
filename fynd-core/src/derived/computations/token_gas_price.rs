@@ -293,14 +293,17 @@ impl TokenGasPriceComputation {
                 unattempted.insert(token);
                 break;
             }
-            match self.price_token(pass, &token, buys.get(&token)) {
+            // A token the buy pass never reached is counted, not failed: unreachable is the
+            // normal state of much of the topology, and a failed item each would be allocated,
+            // logged, and broadcast to every worker every block.
+            let Some(buy_leg) = buys.get(&token) else {
+                unreachable_tokens += 1;
+                continue;
+            };
+            match self.price_token(pass, &token, buy_leg) {
                 Ok(priced) => {
                     prices.insert(token, priced);
                 }
-                // Tokens with no route from the gas token are counted, not reported: they are
-                // the normal state of much of the topology, and a failed item each would be
-                // allocated, logged, and broadcast to every worker every block.
-                Err(FailedItemError::MissingBuyRoute) => unreachable_tokens += 1,
                 Err(error) => failed_items.push(FailedItem { key: token.to_string(), error }),
             }
         }
@@ -347,16 +350,14 @@ impl TokenGasPriceComputation {
     /// just the two chosen ones: a rival pool can move and become the better route, and only a
     /// full recompute would ever notice if it were not in the set.
     ///
-    /// A token missing either route is an error, not a price: a buy rate alone would flatter a
-    /// token that is expensive to exit, and prices must stay comparable across tokens.
+    /// A token that cannot be sold back is an error, not a price: a buy rate alone would flatter
+    /// a token that is expensive to exit, and prices must stay comparable across tokens.
     fn price_token(
         &self,
         pass: &mut PricingPass<'_>,
         token: &Address,
-        buy_leg: Option<&ReachedToken>,
+        buy_leg: &ReachedToken,
     ) -> Result<TokenPriceEntry, FailedItemError> {
-        let buy_leg = buy_leg.ok_or(FailedItemError::MissingBuyRoute)?;
-
         let (sell_out, mut components) = self.sell_leg(pass, token, buy_leg.amount_out.clone())?;
         // The legs are discarded after the mean; this is the only place their divergence —
         // sell_out under the probe amount is the round-trip loss — can be observed.
