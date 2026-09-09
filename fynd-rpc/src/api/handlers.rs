@@ -300,13 +300,12 @@ pub async fn get_prices(
     // The pricing pass cannot fail as a whole, so the block is set from the first run onward.
     // Until a token other than the gas token (priced 1:1 unconditionally) is in the map there
     // is no answer to serve, and a caller with retry-on-unavailable logic must keep retrying.
-    if store
-        .token_prices()
-        .is_none_or(|prices| {
-            prices
-                .keys()
-                .all(|token| token == &state.gas_token)
-        })
+    let Some(token_prices) = store.token_prices() else {
+        return Err(ApiError::StaleData { age_ms: u64::MAX });
+    };
+    if token_prices
+        .keys()
+        .all(|token| token == &state.gas_token)
     {
         return Err(ApiError::StaleData { age_ms: u64::MAX });
     }
@@ -318,14 +317,14 @@ pub async fn get_prices(
     }
     let spot_prices_block = store.spot_prices_block();
     let component_depths_block = store.component_depths_block();
-    let token_prices_data = store.token_prices().cloned();
+    let token_prices_data = token_prices.clone();
     let spot_prices_data = if want_spot { store.spot_prices().cloned() } else { None };
     let component_depths_data = if want_depths { store.component_depths().cloned() } else { None };
     drop(store);
 
     let mut prices = Vec::new();
     let mut skipped_tokens = 0usize;
-    for (address, price) in token_prices_data.into_iter().flatten() {
+    for (address, price) in token_prices_data {
         match price_to_decimal_string(&price.numerator, &price.denominator) {
             Some(price) => prices.push(TokenPriceEntry { token: address, price }),
             None => {

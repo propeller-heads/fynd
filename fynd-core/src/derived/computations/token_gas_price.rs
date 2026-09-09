@@ -67,8 +67,6 @@ use crate::{
     types::{ComponentId, Order, OrderSide},
 };
 
-type AlgorithmGraph = <BellmanFordAlgorithm as Algorithm>::GraphType;
-
 /// One pricing pass's solving state: a single market snapshot re-rooted for every sell.
 ///
 /// The context is built once around the gas token, and every solve — the buy pass and each
@@ -81,7 +79,7 @@ type AlgorithmGraph = <BellmanFordAlgorithm as Algorithm>::GraphType;
 struct PricingPass<'a> {
     /// The solving algorithm; its `max_hops` bounds route length within the wider subgraph.
     algorithm: &'a BellmanFordAlgorithm,
-    graph: &'a AlgorithmGraph,
+    graph: &'a <BellmanFordAlgorithm as Algorithm>::GraphType,
     /// The shared snapshot, re-rooted and re-pruned per sell.
     ctx: BellmanFordContext,
     /// The gas token's node, saved before the first reroot moves `ctx` off it.
@@ -93,7 +91,7 @@ struct PricingPass<'a> {
 }
 
 /// One pass's output: what was priced, against which block, and what was not.
-struct SolvedPrices {
+struct PricingPassOutcome {
     /// Priced tokens with the components that must re-price them when they change.
     prices: FxHashMap<Address, TokenPriceEntry>,
     /// The block the market snapshot was taken at.
@@ -169,7 +167,7 @@ impl TokenGasPriceComputation {
         &self,
         market: &MarketData,
         filter_tokens: Option<&FxHashSet<Address>>,
-    ) -> Result<SolvedPrices, ComputationError> {
+    ) -> Result<PricingPassOutcome, ComputationError> {
         let deadline = Instant::now() + self.pass_budget;
         let (topology, block) = {
             let guard = market.read().await;
@@ -197,7 +195,7 @@ impl TokenGasPriceComputation {
 
         let tokens_to_price = self.tokens_to_price(&topology, filter_tokens);
         if tokens_to_price.is_empty() {
-            return Ok(SolvedPrices {
+            return Ok(PricingPassOutcome {
                 prices: FxHashMap::default(),
                 block,
                 failed_items: Vec::new(),
@@ -225,7 +223,7 @@ impl TokenGasPriceComputation {
             // tokens come back unattempted so they keep their previous prices, exactly as if
             // the deadline had cut them off.
             debug!(unattempted = tokens_to_price.len(), "no subgraph around the gas token");
-            return Ok(SolvedPrices {
+            return Ok(PricingPassOutcome {
                 prices: FxHashMap::default(),
                 block,
                 failed_items: Vec::new(),
@@ -282,7 +280,7 @@ impl TokenGasPriceComputation {
         tokens_to_price: FxHashSet<Address>,
         deadline: Instant,
         block: u64,
-    ) -> SolvedPrices {
+    ) -> PricingPassOutcome {
         let mut prices = FxHashMap::default();
         let mut failed_items = Vec::new();
         let mut unattempted = FxHashSet::default();
@@ -324,7 +322,7 @@ impl TokenGasPriceComputation {
             "token pricing pass complete"
         );
 
-        SolvedPrices { prices, block, failed_items, unattempted }
+        PricingPassOutcome { prices, block, failed_items, unattempted }
     }
 
     /// Every token in the graph but the gas token, narrowed to `filter_tokens` when given.

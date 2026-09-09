@@ -1667,7 +1667,7 @@ impl Route {
             .iter()
             .filter(|swap| &swap.token_out == token_out)
             .map(|swap| &swap.amount_out)
-            .fold(BigUint::ZERO, |acc, amount| acc + amount)
+            .sum()
     }
 
     /// Returns the total gas estimate for all swaps in this route (naive approach).
