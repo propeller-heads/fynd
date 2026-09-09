@@ -30,10 +30,10 @@
 //! runs against one market snapshot taken when the pass starts, so both legs of every price and
 //! the block the result is stored under agree. A slow pass delays that block's component depths
 //! and the start of the next block's computations — spot prices run first and are unaffected —
-//! and a pass-wide deadline bounds that delay: tokens it cuts off keep their previous price and
-//! stay visible to invalidation. After the first full solve, recomputation is incremental: only
-//! tokens whose stored routes ran through a changed component are re-solved, which bounds the
-//! steady-state cost.
+//! and a deadline over the sell loop, where nearly all of a pass's time goes, bounds that delay:
+//! tokens it cuts off keep their previous price and stay visible to invalidation. After the first
+//! full solve, recomputation is incremental: only tokens whose stored routes ran through a changed
+//! component are re-solved, which bounds the steady-state cost.
 
 use std::time::{Duration, Instant};
 
@@ -114,10 +114,11 @@ pub struct TokenGasPriceComputation {
     max_hops: usize,
     /// Amount of gas token each probe buys with (affects slippage).
     probe_amount: BigUint,
-    /// Wall-clock budget for one whole pass. A full Ethereum-sized solve measures ~6 s, so
-    /// 30 s is margin, not target: it exists to stop a pathological block — per-solve
-    /// timeouts alone allow ~1 s per token — from stalling the derived chain for minutes.
-    /// Tokens not attempted before it expires keep their previous price.
+    /// Wall-clock budget for a pass's per-token sell loop, where nearly all of its time goes.
+    /// Checked before each token's sell — the snapshot and the buy pass ahead of the loop run
+    /// outside it, bounded only by the per-solve timeout. It exists to stop a pathological
+    /// block — per-solve timeouts alone allow ~1 s per token — from stalling the derived
+    /// chain for minutes. Tokens not attempted before it expires keep their previous price.
     pass_budget: Duration,
 }
 
@@ -139,7 +140,7 @@ impl TokenGasPriceComputation {
         Self { gas_token, max_hops, probe_amount, ..Self::default() }
     }
 
-    /// Sets the wall-clock budget for one pass.
+    /// Sets the wall-clock budget for a pass's sell loop.
     #[cfg(test)]
     pub fn with_pass_budget(self, pass_budget: Duration) -> Self {
         Self { pass_budget, ..self }
@@ -155,7 +156,8 @@ impl TokenGasPriceComputation {
         Self { gas_token, ..self }
     }
 
-    /// Solves every token, or only `filter_tokens` when given, within one wall-clock budget.
+    /// Solves every token, or only `filter_tokens` when given, with the per-token sell loop
+    /// under one wall-clock budget.
     ///
     /// Tokens that were bought but found no sell route back come back as failed items. Tokens
     /// the gas token cannot reach at all are only counted (logged at debug): unreachable is the
