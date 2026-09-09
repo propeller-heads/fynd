@@ -294,20 +294,12 @@ pub async fn get_prices(
 
     // Acquire read lock, check staleness first (avoid cloning if 503), then clone
     let store = state.derived_data.read().await;
-    let token_prices_block = store
-        .token_prices_block()
+    // The prices and their block are one store slot, written together when a pass lands, so
+    // one check covers both.
+    let (token_prices, token_prices_block) = store
+        .token_prices()
+        .zip(store.token_prices_block())
         .ok_or(ApiError::StaleData { age_ms: u64::MAX })?;
-    // The gas token is priced 1:1 unconditionally, so a map holding nothing else means no
-    // pricing pass has landed yet: there is no answer to serve.
-    let Some(token_prices) = store.token_prices() else {
-        return Err(ApiError::StaleData { age_ms: u64::MAX });
-    };
-    if token_prices
-        .keys()
-        .all(|token| token == &state.gas_token)
-    {
-        return Err(ApiError::StaleData { age_ms: u64::MAX });
-    }
     if want_spot && store.spot_prices_block().is_none() {
         return Err(ApiError::StaleData { age_ms: u64::MAX });
     }
@@ -694,12 +686,13 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 503);
     }
 
-    // The pricing pass cannot fail as a whole, so the block is set from its first run even
-    // when nothing but the gas token (priced 1:1 unconditionally) is in the map. That state
-    // is "no answer yet", not an empty answer: retry-on-unavailable callers rely on the 503.
+    // The pricing pass cannot fail as a whole, so its first run sets the block even when
+    // nothing but the gas token (priced 1:1 unconditionally) is in the map. That is a landed
+    // answer: on a market where no pool trades the gas token, the one-entry map is the honest
+    // response, and a 503 would never clear.
     #[cfg(feature = "experimental")]
     #[actix_web::test]
-    async fn test_prices_returns_503_until_more_than_the_gas_token_is_priced() {
+    async fn test_prices_with_only_the_gas_token_priced() {
         use num_bigint::BigUint;
         use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
@@ -729,7 +722,9 @@ mod tests {
                 .to_request(),
         )
         .await;
-        assert_eq!(resp.status().as_u16(), 503);
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = body_json(resp).await;
+        assert_eq!(body["prices"].as_array().map(Vec::len), Some(1), "body was: {body}");
     }
 
     #[cfg(feature = "experimental")]
