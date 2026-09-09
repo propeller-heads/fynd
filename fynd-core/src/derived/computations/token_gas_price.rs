@@ -79,12 +79,163 @@ struct PricingPass<'a> {
     graph: &'a <BellmanFordAlgorithm as Algorithm>::GraphType,
     /// The shared snapshot, re-rooted and re-pruned per sell.
     ctx: BellmanFordContext,
+    /// The gas token every price is quoted against.
+    gas_token: &'a Address,
+    /// Amount of gas token each probe buys with (affects slippage).
+    probe_amount: &'a BigUint,
+    /// Longest route a solve may build; also bounds each sell's pruned walk.
+    max_hops: usize,
     /// The gas token's node, saved before the first reroot moves `ctx` off it.
     gas_node: NodeIndex,
     /// Hops from each node to the gas token, computed once, pruning every sell's walk.
     hops_to_gas: FxHashMap<NodeIndex, usize>,
     /// Token address → graph node, inverted once from the context, for re-rooting sells.
     token_nodes: FxHashMap<Address, NodeIndex>,
+}
+
+/// One sell leg's result: what the route delivers and what the price depends on.
+struct SellLeg {
+    /// What selling back to the gas token returns; never zero.
+    amount_out: BigUint,
+    /// Every component on any candidate route between the token and the gas token, plus the
+    /// chosen route's own, defensively.
+    components: FxHashSet<ComponentId>,
+}
+
+impl PricingPass<'_> {
+    /// Prices every token the deadline allows, one sell relaxation each — the pass's dominant
+    /// cost. Pure CPU work: callers run it on a blocking thread.
+    fn sell_loop(
+        &mut self,
+        buys: &FxHashMap<Address, ReachedToken>,
+        tokens_to_price: FxHashSet<Address>,
+        deadline: Instant,
+        block: u64,
+    ) -> PricingPassOutcome {
+        let mut prices = FxHashMap::default();
+        let mut failed_items = Vec::new();
+        let mut unattempted = FxHashSet::default();
+        let mut unreachable_tokens = 0usize;
+        let mut remaining = tokens_to_price.into_iter();
+        for token in &mut remaining {
+            if Instant::now() >= deadline {
+                unattempted.insert(token);
+                break;
+            }
+            // A token the buy pass never reached is counted, not failed: unreachable is the
+            // normal state of much of the topology, and a failed item each would be allocated,
+            // logged, and broadcast to every worker every block.
+            let Some(buy_leg) = buys.get(&token) else {
+                unreachable_tokens += 1;
+                continue;
+            };
+            match self.price_token(&token, buy_leg) {
+                Ok(priced) => {
+                    prices.insert(token, priced);
+                }
+                Err(error) => failed_items.push(FailedItem { key: token.to_string(), error }),
+            }
+        }
+        unattempted.extend(remaining);
+        if !unattempted.is_empty() {
+            warn!(
+                unattempted = unattempted.len(),
+                priced = prices.len(),
+                "token pricing pass hit its deadline; unattempted tokens keep previous prices"
+            );
+        }
+        debug!(
+            priced = prices.len(),
+            failed = failed_items.len(),
+            unreachable = unreachable_tokens,
+            unattempted = unattempted.len(),
+            block,
+            "token pricing pass complete"
+        );
+
+        PricingPassOutcome { prices, block, failed_items, unattempted }
+    }
+
+    /// Prices one token as the arithmetic mean of its buy price and its sell price, kept as an
+    /// exact fraction, with the components that must re-price it when they change. The mean's
+    /// round-trip bias only ever prices a token low, hardest on thin pairs — see the module doc.
+    ///
+    /// The component set covers every candidate route between the token and the gas token, not
+    /// just the two chosen ones: a rival pool can move and become the better route, and only a
+    /// full recompute would ever notice if it were not in the set.
+    ///
+    /// A token that cannot be sold back is an error, not a price: a buy rate alone would flatter
+    /// a token that is expensive to exit, and prices must stay comparable across tokens.
+    fn price_token(
+        &mut self,
+        token: &Address,
+        buy_leg: &ReachedToken,
+    ) -> Result<TokenPriceEntry, FailedItemError> {
+        let SellLeg { amount_out: sell_out, mut components } =
+            self.solve_sell_leg(token, buy_leg.amount_out.clone())?;
+        // The legs are discarded after the mean; this is the only place their divergence —
+        // sell_out under the probe amount is the round-trip loss — can be observed.
+        trace!(%token, buy_out = %buy_leg.amount_out, sell_out = %sell_out, "token priced");
+        // The buy path is a candidate path, so extending is defensive: it keeps the stored
+        // dependencies correct even if the walk and the relaxation ever disagree.
+        components.extend(buy_leg.components.iter().cloned());
+
+        let mid_price = Price {
+            numerator: &buy_leg.amount_out * (self.probe_amount + &sell_out),
+            denominator: BigUint::from(2u8) * self.probe_amount * sell_out,
+        };
+        Ok(TokenPriceEntry { price: mid_price, path_components: components })
+    }
+
+    /// Solves the route selling `amount` of `token` back to the gas token, re-rooting the
+    /// pass's shared context at `token` first. Fails as `MissingSellRoute` carrying why: on a
+    /// block where many tokens fail at once, the distribution of reasons is the signal.
+    fn solve_sell_leg(
+        &mut self,
+        token: &Address,
+        amount: BigUint,
+    ) -> Result<SellLeg, FailedItemError> {
+        let token_node = *self
+            .token_nodes
+            .get(token)
+            .ok_or_else(|| {
+                FailedItemError::MissingSellRoute("token is not in the pass subgraph".into())
+            })?;
+        let candidate_components = self
+            .ctx
+            .reroot_toward(self.graph, token_node, self.gas_node, &self.hops_to_gas, self.max_hops)
+            .ok_or_else(|| {
+                FailedItemError::MissingSellRoute("no pruned subgraph toward the gas token".into())
+            })?;
+        let mut components: FxHashSet<ComponentId> = candidate_components
+            .into_iter()
+            .cloned()
+            .collect();
+
+        let order = Order::new(
+            token.clone(),
+            self.gas_token.clone(),
+            amount,
+            OrderSide::Sell,
+            Address::zero(20),
+        );
+        let result = self
+            .algorithm
+            .find_single_route(&self.ctx, &order, FindRouteOptions::default())
+            .map_err(|error| FailedItemError::MissingSellRoute(error.to_string()))?;
+        let route = result.route();
+        let amount_out = route.amount_out(self.gas_token);
+        if amount_out.is_zero() {
+            return Err(FailedItemError::MissingSellRoute("the sell route returns zero".into()));
+        }
+        components.extend(
+            route
+                .swaps()
+                .iter()
+                .map(|swap| swap.component_id().to_string()),
+        );
+        Ok(SellLeg { amount_out, components })
+    }
 }
 
 /// One pass's output: what was priced, against which block, and what was not.
@@ -255,70 +406,19 @@ impl TokenGasPriceComputation {
                 algorithm: &algorithm,
                 graph,
                 ctx,
+                gas_token: &computation.gas_token,
+                probe_amount: &computation.probe_amount,
+                max_hops: computation.max_hops,
                 gas_node,
                 hops_to_gas,
                 token_nodes,
             };
-            computation.sell_loop(&mut pass, &buys, tokens_to_price, deadline, block)
+            pass.sell_loop(&buys, tokens_to_price, deadline, block)
         })
         .await
         .map_err(|join_error| {
             ComputationError::Internal(format!("token pricing pass did not complete: {join_error}"))
         })
-    }
-
-    /// Prices every token the deadline allows, one sell relaxation each — the pass's dominant
-    /// cost. Pure CPU work: callers run it on a blocking thread.
-    fn sell_loop(
-        &self,
-        pass: &mut PricingPass<'_>,
-        buys: &FxHashMap<Address, ReachedToken>,
-        tokens_to_price: FxHashSet<Address>,
-        deadline: Instant,
-        block: u64,
-    ) -> PricingPassOutcome {
-        let mut prices = FxHashMap::default();
-        let mut failed_items = Vec::new();
-        let mut unattempted = FxHashSet::default();
-        let mut unreachable_tokens = 0usize;
-        let mut remaining = tokens_to_price.into_iter();
-        for token in &mut remaining {
-            if Instant::now() >= deadline {
-                unattempted.insert(token);
-                break;
-            }
-            // A token the buy pass never reached is counted, not failed: unreachable is the
-            // normal state of much of the topology, and a failed item each would be allocated,
-            // logged, and broadcast to every worker every block.
-            let Some(buy_leg) = buys.get(&token) else {
-                unreachable_tokens += 1;
-                continue;
-            };
-            match self.price_token(pass, &token, buy_leg) {
-                Ok(priced) => {
-                    prices.insert(token, priced);
-                }
-                Err(error) => failed_items.push(FailedItem { key: token.to_string(), error }),
-            }
-        }
-        unattempted.extend(remaining);
-        if !unattempted.is_empty() {
-            warn!(
-                unattempted = unattempted.len(),
-                priced = prices.len(),
-                "token pricing pass hit its deadline; unattempted tokens keep previous prices"
-            );
-        }
-        debug!(
-            priced = prices.len(),
-            failed = failed_items.len(),
-            unreachable = unreachable_tokens,
-            unattempted = unattempted.len(),
-            block,
-            "token pricing pass complete"
-        );
-
-        PricingPassOutcome { prices, block, failed_items, unattempted }
     }
 
     /// Every token in the graph but the gas token, narrowed to `filter_tokens` when given.
@@ -334,91 +434,6 @@ impl TokenGasPriceComputation {
             .filter(|token| filter_tokens.is_none_or(|filter| filter.contains(*token)))
             .cloned()
             .collect()
-    }
-
-    /// Prices one token as the arithmetic mean of its buy price and its sell price, kept as an
-    /// exact fraction, with the components that must re-price it when they change. The mean's
-    /// round-trip bias only ever prices a token low, hardest on thin pairs — see the module doc.
-    ///
-    /// The component set covers every candidate route between the token and the gas token, not
-    /// just the two chosen ones: a rival pool can move and become the better route, and only a
-    /// full recompute would ever notice if it were not in the set.
-    ///
-    /// A token that cannot be sold back is an error, not a price: a buy rate alone would flatter
-    /// a token that is expensive to exit, and prices must stay comparable across tokens.
-    fn price_token(
-        &self,
-        pass: &mut PricingPass<'_>,
-        token: &Address,
-        buy_leg: &ReachedToken,
-    ) -> Result<TokenPriceEntry, FailedItemError> {
-        let (sell_out, mut components) = self.sell_leg(pass, token, buy_leg.amount_out.clone())?;
-        // The legs are discarded after the mean; this is the only place their divergence —
-        // sell_out under the probe amount is the round-trip loss — can be observed.
-        trace!(%token, buy_out = %buy_leg.amount_out, sell_out = %sell_out, "token priced");
-        // The buy path is a candidate path, so extending is defensive: it keeps the stored
-        // dependencies correct even if the walk and the relaxation ever disagree.
-        components.extend(buy_leg.components.iter().cloned());
-
-        let mid_price = Price {
-            numerator: &buy_leg.amount_out * (&self.probe_amount + &sell_out),
-            denominator: BigUint::from(2u8) * &self.probe_amount * sell_out,
-        };
-        Ok(TokenPriceEntry { price: mid_price, path_components: components })
-    }
-
-    /// Solves the route selling `amount` of `token` back to the gas token, re-rooting the
-    /// pass's shared context at `token` first. Returns what the route delivers (never zero),
-    /// paired with the components the price depends on — every component on any candidate
-    /// route between the two, plus the chosen route's own, defensively. Fails as
-    /// `MissingSellRoute` carrying why: on a block where many tokens fail at once, the
-    /// distribution of reasons is the signal.
-    fn sell_leg(
-        &self,
-        pass: &mut PricingPass<'_>,
-        token: &Address,
-        amount: BigUint,
-    ) -> Result<(BigUint, FxHashSet<ComponentId>), FailedItemError> {
-        let token_node = *pass
-            .token_nodes
-            .get(token)
-            .ok_or_else(|| {
-                FailedItemError::MissingSellRoute("token is not in the pass subgraph".into())
-            })?;
-        let candidate_components = pass
-            .ctx
-            .reroot_toward(pass.graph, token_node, pass.gas_node, &pass.hops_to_gas, self.max_hops)
-            .ok_or_else(|| {
-                FailedItemError::MissingSellRoute("no pruned subgraph toward the gas token".into())
-            })?;
-        let mut components: FxHashSet<ComponentId> = candidate_components
-            .into_iter()
-            .cloned()
-            .collect();
-
-        let order = Order::new(
-            token.clone(),
-            self.gas_token.clone(),
-            amount,
-            OrderSide::Sell,
-            Address::zero(20),
-        );
-        let result = pass
-            .algorithm
-            .find_single_route(&pass.ctx, &order, FindRouteOptions::default())
-            .map_err(|error| FailedItemError::MissingSellRoute(error.to_string()))?;
-        let route = result.route();
-        let sell_out = route.amount_out(&self.gas_token);
-        if sell_out.is_zero() {
-            return Err(FailedItemError::MissingSellRoute("the sell route returns zero".into()));
-        }
-        components.extend(
-            route
-                .swaps()
-                .iter()
-                .map(|swap| swap.component_id().to_string()),
-        );
-        Ok((sell_out, components))
     }
 
     /// Re-solves only the tokens whose stored routes ran through a changed component.
