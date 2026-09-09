@@ -1,4 +1,26 @@
 
+## [0.104.0](https://github.com/propeller-heads/fynd/compare/0.103.0...0.104.0) (2026-09-09)
+
+### Features
+
+* **clients:** expose the route filter ([12d68e3](https://github.com/propeller-heads/fynd/commit/12d68e3966640ccc134e8bbfaa46abed7455f18e))
+* **rpc:** let a request say what it will not route through ([025ffe5](https://github.com/propeller-heads/fynd/commit/025ffe55712c734d83abf7998c761baccdd1106b))
+* **core:** give an algorithm one request that says what it may not use ([3ec9978](https://github.com/propeller-heads/fynd/commit/3ec9978d56b734b80079a190d9a4e66e73325dfc))
+* **core:** log what a request's route filter resolved to ([b702fed](https://github.com/propeller-heads/fynd/commit/b702fed55b0f48e5a788332d86522e53c9252088))
+* **core:** resolve and enforce a request's exclusions in the worker ([71772e8](https://github.com/propeller-heads/fynd/commit/71772e82628feaf3164015d255f4bd64c16a9ccb))
+* **core:** name the liquidity a request excludes from a route ([9423371](https://github.com/propeller-heads/fynd/commit/9423371e86e0d3ed4ad61c04ccbcefe540a2929f))
+* **core:** index market components by protocol system ([67eedcd](https://github.com/propeller-heads/fynd/commit/67eedcdbdc7543c0a8ea404c9ac605a5292aac30))
+
+### Bug Fixes
+
+* **core:** give pair_has_allowed_pool one answer for an unconnected pair ([682b014](https://github.com/propeller-heads/fynd/commit/682b0146c6bdad6e2370454fa4d346bc73966bfb))
+
+### Performance Improvements
+
+* **core:** keep a leg a slice unless the request excludes one of its pools ([ed5112f](https://github.com/propeller-heads/fynd/commit/ed5112f6c93342ad30ed59a70fa2ca13cdc66f2f))
+* **core:** skip snapshotting state for pools the solve refuses ([f1a72d3](https://github.com/propeller-heads/fynd/commit/f1a72d36ba768fac7ea7767d4ceb5438528d40f4))
+
+
 ## [0.103.0](https://github.com/propeller-heads/fynd/compare/0.102.3...0.103.0) (2026-09-08)
 
 ### Features
