@@ -1,16 +1,23 @@
-//! Re-execute an already-built [`Route`] against a (possibly newer)
-//! [`MarketState`](crate::feed::market_data::MarketState).
+//! Re-execute an already-built [`Route`], either against a (possibly newer)
+//! [`MarketState`](crate::feed::market_data::MarketState) or against the states it was quoted on.
 //!
 //! A route emitted by a solving algorithm pins pools, token order, and split fractions. Replaying
 //! it against a later block's pool states answers "what would this exact route have produced at
 //! that state" — the in-process equivalent of submitting the already-encoded transaction at that
 //! block. Used by tooling (e.g. `hindsight`) to measure slippage between quote time and
 //! execution time.
+//!
+//! [`replay_route_at_quote_time`] answers a different question, for the quote path rather than for
+//! tooling: it runs the route on its own quote-time states with named swaps pinned to amounts a
+//! market maker signed for, which prices a route on committed liquidity instead of price levels.
 
 use std::collections::HashMap;
 
 use num_bigint::BigUint;
-use tycho_simulation::tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim};
+use tycho_simulation::tycho_common::{
+    models::{token::Token, Address},
+    simulation::protocol_sim::ProtocolSim,
+};
 
 use crate::{
     algorithm::{sim_guard::GuardedProtocolSim, split_primitives::split_amount},
@@ -27,20 +34,34 @@ pub struct RouteReplay {
     pub gas: BigUint,
 }
 
-/// Why a route could not be replayed against a market state.
+/// Why a route could not be replayed against the states it was given.
 #[derive(Debug, thiserror::Error)]
 pub enum ReplayError {
     /// The route carries no swaps (only reachable via deserialization — [`Route::new`] rejects
     /// an empty swap list).
     #[error("route has no swaps")]
     EmptyRoute,
-    /// The market state carries no simulation state for a pool in the route (removed by the feed
-    /// or filtered out since the route was built).
+    /// No simulation state for a pool in the route (removed by the feed or filtered out since the
+    /// route was built).
     #[error("no simulation state for component {0}")]
     MissingState(ComponentId),
-    /// A token in the route is missing from the market state's token registry.
-    #[error("token {0} missing from the market state")]
+    /// A token in the route is missing from the token registry it was replayed against.
+    #[error("token {0} missing from the token registry")]
     MissingToken(Address),
+    /// A pinned swap was replayed with an input other than the one its quote was requested for.
+    #[error(
+        "pinned swap on {component_id} was quoted for {quoted_amount_in} but replayed with \
+         {replayed_amount_in}"
+    )]
+    PinnedAmountMismatch {
+        /// The pool whose pinned amount was quoted for a different input.
+        component_id: ComponentId,
+        /// The input the signed quote was requested for.
+        quoted_amount_in: BigUint,
+        /// The input the replay routed into the swap.
+        replayed_amount_in: BigUint,
+    },
+
     /// A pool simulation failed (e.g. the pool was paused or its liquidity vanished).
     #[error("simulation failed on component {component_id}: {error}")]
     Simulation {
@@ -66,6 +87,64 @@ pub enum ReplayError {
 /// Returns [`ReplayError`] when a pool's simulation state or a token is missing from `market`,
 /// or a pool simulation fails.
 pub fn replay_route(route: &Route, market: &MarketState) -> Result<RouteReplay, ReplayError> {
+    replay(route, &ReplaySource::Market(market), &HashMap::new())
+}
+
+/// Replay `route` against the states it was quoted on, pinning the output of the swaps in
+/// `pinned` to the amounts given there.
+///
+/// An indicatively priced leg is worth what the market maker signs, not what its price levels
+/// advertised, so pinning the signed amounts gives the output the route would have produced at
+/// quote time. Every other swap re-simulates on its own quote-time state, so the pinned legs
+/// account for the whole difference from the quoted output.
+///
+/// `pinned` is keyed by position in `route.swaps()`. A pinned swap contributes its recorded
+/// `gas_estimate` rather than a simulated one, and threads no post-swap state: a signed quote
+/// describes one fill, not a pool another swap can draw on again.
+///
+/// # Errors
+///
+/// As [`replay_route`], plus [`ReplayError::PinnedAmountMismatch`] when the replay routes a
+/// different input into a pinned swap than the amount its quote was requested for, which would
+/// make the pinned output describe a fill that was never priced.
+pub fn replay_route_at_quote_time(
+    route: &Route,
+    pinned: &HashMap<usize, BigUint>,
+) -> Result<RouteReplay, ReplayError> {
+    replay(route, &ReplaySource::QuoteTime(route), pinned)
+}
+
+/// Where a replay reads the simulation state and tokens it runs against.
+enum ReplaySource<'a> {
+    /// A market state: the swaps' embedded quote-time states are ignored so the route meets the
+    /// state being measured.
+    Market(&'a MarketState),
+    /// The route's own quote-time states and token map, for asking what the route would have
+    /// produced when it was built.
+    QuoteTime(&'a Route),
+}
+
+impl ReplaySource<'_> {
+    fn token(&self, address: &Address) -> Option<&Token> {
+        match self {
+            Self::Market(market) => market.get_token(address),
+            Self::QuoteTime(route) => route.tokens().get(address),
+        }
+    }
+
+    fn state<'a>(&'a self, swap: &'a Swap) -> Option<&'a dyn ProtocolSim> {
+        match self {
+            Self::Market(market) => market.get_simulation_state(swap.component_id()),
+            Self::QuoteTime(_) => Some(swap.protocol_state()),
+        }
+    }
+}
+
+fn replay(
+    route: &Route,
+    source: &ReplaySource<'_>,
+    pinned: &HashMap<usize, BigUint>,
+) -> Result<RouteReplay, ReplayError> {
     let swaps = route.swaps();
     let (Some(input_token), Some(output_token)) = (route.input_token(), route.output_token())
     else {
@@ -86,12 +165,12 @@ pub fn replay_route(route: &Route, market: &MarketState) -> Result<RouteReplay, 
     let mut post_swap: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
     let mut total_gas = BigUint::ZERO;
 
-    for swap in swaps {
-        let token_in = market
-            .get_token(swap.token_in())
+    for (index, swap) in swaps.iter().enumerate() {
+        let token_in = source
+            .token(swap.token_in())
             .ok_or_else(|| ReplayError::MissingToken(swap.token_in().clone()))?;
-        let token_out = market
-            .get_token(swap.token_out())
+        let token_out = source
+            .token(swap.token_out())
             .ok_or_else(|| ReplayError::MissingToken(swap.token_out().clone()))?;
 
         let branch_total = branch_totals
@@ -116,10 +195,27 @@ pub fn replay_route(route: &Route, market: &MarketState) -> Result<RouteReplay, 
         };
         *remaining -= &amount_in;
 
+        if let Some(amount) = pinned.get(&index) {
+            // The signed quote priced one input. Keeping its output for a different amount would
+            // invent liquidity the maker never offered.
+            if amount_in != *swap.amount_in() {
+                return Err(ReplayError::PinnedAmountMismatch {
+                    component_id: swap.component_id().to_string(),
+                    quoted_amount_in: swap.amount_in().clone(),
+                    replayed_amount_in: amount_in,
+                });
+            }
+            total_gas += swap.gas_estimate();
+            *available
+                .entry(swap.token_out().clone())
+                .or_default() += amount;
+            continue;
+        }
+
         let sim = post_swap
             .get(swap.component_id())
             .map(|state| state.as_ref())
-            .or_else(|| market.get_simulation_state(swap.component_id()))
+            .or_else(|| source.state(swap))
             .ok_or_else(|| ReplayError::MissingState(swap.component_id().to_string()))?;
         let result = sim
             .get_amount_out_guarded(amount_in, token_in, token_out)
@@ -144,6 +240,7 @@ pub fn replay_route(route: &Route, market: &MarketState) -> Result<RouteReplay, 
 #[cfg(test)]
 mod tests {
     use rustc_hash::FxHashMap;
+    use tycho_simulation::tycho_common::{models::token::Token, Bytes};
 
     use super::*;
     use crate::algorithm::test_utils::{component, token, ConstantProductSim, MockProtocolSim};
@@ -189,6 +286,108 @@ mod tests {
 
     fn route(swaps: Vec<Swap>) -> Route {
         Route::new(swaps, FxHashMap::default()).expect("test route must not be empty")
+    }
+
+    /// A route carrying its own token map, so the quote-time replay resolves tokens without a
+    /// market.
+    fn quote_time_route(swaps: Vec<Swap>, tokens: &[&Token]) -> Route {
+        let map: FxHashMap<Bytes, Token> = tokens
+            .iter()
+            .map(|t| (t.address.clone(), (*t).clone()))
+            .collect();
+        Route::new(swaps, map).expect("test route must not be empty")
+    }
+
+    /// A swap carrying a real quote-time state, which the quote-time replay simulates on.
+    fn quoted_swap(
+        pool_id: &str,
+        token_in: &Token,
+        token_out: &Token,
+        amount_in: u64,
+        sim: MockProtocolSim,
+    ) -> Swap {
+        Swap::new(
+            pool_id.to_string(),
+            "mock".to_string(),
+            token_in.address.clone(),
+            token_out.address.clone(),
+            BigUint::from(amount_in),
+            BigUint::ZERO,
+            BigUint::from(11_000u64),
+            component(pool_id, &[token_in.clone(), token_out.clone()]),
+            Box::new(sim),
+        )
+    }
+
+    /// Pinning the first leg re-prices everything downstream of it: the second leg is simulated
+    /// on the pinned output, not on the one its price levels advertised.
+    #[test]
+    fn test_replay_at_quote_time_pinned_leg() {
+        let (a, b, c) = (token(0x0A, "A"), token(0x0B, "B"), token(0x0C, "C"));
+        let route = quote_time_route(
+            vec![
+                quoted_swap("pool_ab", &a, &b, 1_000, MockProtocolSim::new(2.0)),
+                quoted_swap("pool_bc", &b, &c, 2_000, MockProtocolSim::new(3.0)),
+            ],
+            &[&a, &b, &c],
+        );
+
+        let unpinned = replay_route_at_quote_time(&route, &HashMap::new())
+            .expect("the route replays on its own states");
+        assert_eq!(unpinned.amount_out, BigUint::from(6_000u64));
+
+        // The maker signs for 1_800 rather than the 2_000 the levels promised: 10% less into the
+        // second leg is 10% less out of the route.
+        let pinned = HashMap::from([(0, BigUint::from(1_800u64))]);
+        let repriced =
+            replay_route_at_quote_time(&route, &pinned).expect("the pinned route replays");
+
+        assert_eq!(repriced.amount_out, BigUint::from(5_400u64));
+    }
+
+    /// A pinned leg contributes the gas the route recorded for it, not a simulated figure: no
+    /// simulation runs for a leg whose output is already committed.
+    #[test]
+    fn test_replay_at_quote_time_pinned_gas() {
+        let (a, b) = (token(0x0A, "A"), token(0x0B, "B"));
+        let route = quote_time_route(
+            vec![quoted_swap("pool_ab", &a, &b, 1_000, MockProtocolSim::new(2.0).with_gas(50_000))],
+            &[&a, &b],
+        );
+
+        let pinned = HashMap::from([(0, BigUint::from(1_800u64))]);
+        let repriced =
+            replay_route_at_quote_time(&route, &pinned).expect("the pinned route replays");
+
+        assert_eq!(repriced.amount_out, BigUint::from(1_800u64));
+        assert_eq!(repriced.gas, BigUint::from(11_000u64), "the swap's own estimate, not 50_000");
+    }
+
+    /// A signed quote prices one input. If the replay routes a different amount into that leg the
+    /// quoted output describes a fill nobody offered, so the replay refuses rather than reporting
+    /// an amount the maker never committed to.
+    #[test]
+    fn test_replay_at_quote_time_pinned_amount_mismatch() {
+        let (a, b, c) = (token(0x0A, "A"), token(0x0B, "B"), token(0x0C, "C"));
+        // The second leg is recorded as taking 2_000 but the first leg only yields 1_800 once
+        // pinned, so the pin no longer describes the amount that reaches it.
+        let route = quote_time_route(
+            vec![
+                quoted_swap("pool_ab", &a, &b, 1_000, MockProtocolSim::new(2.0)),
+                quoted_swap("pool_bc", &b, &c, 2_000, MockProtocolSim::new(3.0)),
+            ],
+            &[&a, &b, &c],
+        );
+
+        let pinned = HashMap::from([(0, BigUint::from(1_800u64)), (1, BigUint::from(5_400u64))]);
+        let error = replay_route_at_quote_time(&route, &pinned)
+            .expect_err("a pin fed an unquoted amount is refused");
+
+        assert!(
+            matches!(error, ReplayError::PinnedAmountMismatch { ref component_id, .. }
+                if component_id == "pool_bc"),
+            "{error:?}"
+        );
     }
 
     #[test]
