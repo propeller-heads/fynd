@@ -52,21 +52,20 @@ use crate::{
         computation::ComputationRequirements,
         types::{SpotPrices, TokenGasPrices},
     },
-    feed::market_data::{MarketData, MarketDataView, MarketState},
+    feed::market_data::{MarketData, MarketState},
     graph::{petgraph::StableDiGraph, EdgeData, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route, RouteExclusions, RouteResult, Swap},
 };
 
-/// BFS subgraph: adjacency list, token node set, and component ID set.
-///
-/// The component set borrows from the graph. It exists to ask for the market subset and is done
-/// with before the solve starts, unlike the adjacency list, which outlives the graph borrow inside
-/// [`BellmanFordContext`] and so owns its ids.
-type Subgraph<'a> = (
-    FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
-    FxHashSet<NodeIndex>,
-    FxHashSet<&'a ComponentId>,
-);
+/// One BFS walk's yield: the part of the graph a solve may route through.
+struct Subgraph<'a> {
+    adjacency: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
+    token_nodes: FxHashSet<NodeIndex>,
+    /// Borrows from the graph: it exists to ask for the market subset and is done with before
+    /// the solve starts, unlike the adjacency list, which outlives the graph borrow inside
+    /// [`BellmanFordContext`] and so owns its ids.
+    component_ids: FxHashSet<&'a ComponentId>,
+}
 
 /// Everything needed to call `find_single_route` repeatedly without redoing setup.
 ///
@@ -106,17 +105,27 @@ impl BellmanFordContext {
         hops_to_token_out: &FxHashMap<NodeIndex, usize>,
         max_hops: usize,
     ) -> Option<FxHashSet<&'a ComponentId>> {
-        let (adj, _, candidate_components) = BellmanFordAlgorithm::get_subgraph_with_hop_map(
+        let subgraph = BellmanFordAlgorithm::get_subgraph_with_hop_map(
             graph,
             token_in_node,
             Some(hops_to_token_out),
             max_hops,
         )?;
-        self.adj = adj;
+        self.adj = subgraph.adjacency;
         self.token_in_node = token_in_node;
         self.token_out_node = Some(token_out_node);
-        Some(candidate_components)
+        Some(subgraph.component_ids)
     }
+}
+
+/// Everything one relaxation from the source token reached, and whether it was cut short.
+pub(crate) struct ReachOutcome {
+    /// Destination address → what the best path there delivers. Tokens the relaxation left at
+    /// zero, and those whose path could not be reconstructed, are absent.
+    pub(crate) reached: FxHashMap<Address, ReachedToken>,
+    /// True when the relaxation broke on its timeout: a token absent from `reached` may merely
+    /// be unvisited, not unreachable.
+    pub(crate) timed_out: bool,
 }
 
 /// What one relaxation delivers at a destination the source token reaches: the output amount
@@ -158,6 +167,8 @@ struct SPFAResult {
     /// True if some hop's input couldn't cover that hop's own gas (gas-aware) or a sim
     /// produced a literal zero output (gas-unaware) — i.e. the amount is dust, not unroutable.
     input_below_hop_gas: bool,
+    /// True if the relaxation broke on its timeout, leaving some nodes unvisited.
+    timed_out: bool,
 }
 
 /// Bellman-Ford algorithm with SPFA optimisation for simulation-driven DEX routing.
@@ -186,6 +197,12 @@ impl BellmanFordAlgorithm {
             gas_aware: config.gas_aware(),
             connector_tokens: config.connector_tokens().cloned(),
         }
+    }
+
+    /// The longest route a solve may build. Callers bounding their own walks or pruning maps
+    /// read it here so the two bounds cannot drift apart.
+    pub(crate) fn max_hops(&self) -> usize {
+        self.max_hops
     }
 
     /// One-time async setup for repeated `find_single_route` calls.
@@ -235,12 +252,10 @@ impl BellmanFordAlgorithm {
             });
         }
 
-        // Bounded from both ends, so the adjacency and component set cover only what could carry a
-        // route rather than everything within reach of the source.
         let subgraph = Self::get_subgraph(
             graph,
             token_in_node,
-            Some(token_out_node),
+            token_out_node,
             self.max_hops,
             &exclusions,
         )
@@ -249,10 +264,14 @@ impl BellmanFordAlgorithm {
             to: order.token_out().clone(),
             reason: NoPathReason::NoGraphPath,
         })?;
+        // The view is acquired only after the walk: only the extraction needs the guard, and
+        // holding it through a walk would queue the feed's writer.
         let market_view = paths::read_market(&market, label).await?;
-        let mut ctx = self.snapshot_context(
+        let market_data = market_view.extract_subset_with_overlay(&subgraph.component_ids);
+        drop(market_view);
+        let mut ctx = self.context_from_snapshot(
             graph,
-            market_view,
+            market_data,
             subgraph,
             token_in_node,
             Some(token_out_node),
@@ -319,35 +338,17 @@ impl BellmanFordAlgorithm {
             &exclusions,
         )?;
         let market_data = market
-            .extract_subset_batched(&subgraph.2)
+            .extract_subset_batched(&subgraph.component_ids)
             .await;
         Some(self.context_from_snapshot(graph, market_data, subgraph, token_in_node, None))
     }
 
-    /// Snapshots everything a solve reads from the market — tokens, component states, gas price,
-    /// and scoring inputs — for a subgraph the caller has already walked. `market_view` should
-    /// be acquired after the walk: only the extraction here needs the guard, and holding it
-    /// through a walk would queue the feed's writer. The endpoints must be the pair the subgraph
+    /// Snapshots everything a solve reads — tokens, component states, gas price, and scoring
+    /// inputs — from a market subset already extracted, so no market lock is held here: the
+    /// caller controls how long its guard lives. The endpoints must be the pair the subgraph
     /// was walked with; the destination, when present, is carried for `find_single_route`'s
-    /// readout.
-    ///
-    /// Derived data starts empty; a caller that has token or spot prices sets the fields on the
-    /// returned context.
-    fn snapshot_context(
-        &self,
-        graph: &StableDiGraph<()>,
-        market_view: MarketDataView<'_>,
-        subgraph: Subgraph<'_>,
-        token_in_node: NodeIndex,
-        token_out_node: Option<NodeIndex>,
-    ) -> BellmanFordContext {
-        let market_data = market_view.extract_subset_with_overlay(&subgraph.2);
-        drop(market_view);
-        self.context_from_snapshot(graph, market_data, subgraph, token_in_node, token_out_node)
-    }
-
-    /// `snapshot_context` for a market subset already extracted: reads tokens and gas price from
-    /// the subset, so no market lock is held here — the caller controls how long the guard lives.
+    /// readout. Derived data starts empty; a caller that has token or spot prices sets the
+    /// fields on the returned context.
     ///
     /// The subset must cover the subgraph's components (`extract_subset` over its component ids
     /// does); a token node whose token the subset lacks silently gets no metadata, and solves
@@ -360,7 +361,7 @@ impl BellmanFordAlgorithm {
         token_in_node: NodeIndex,
         token_out_node: Option<NodeIndex>,
     ) -> BellmanFordContext {
-        let (adj, token_nodes, _) = subgraph;
+        let Subgraph { adjacency: adj, token_nodes, component_ids: _ } = subgraph;
 
         let token_map: FxHashMap<NodeIndex, Arc<Token>> = token_nodes
             .iter()
@@ -427,12 +428,12 @@ impl BellmanFordAlgorithm {
     /// destination prunes its subgraph.
     ///
     /// Tokens the source token cannot reach, and those whose path cannot be reconstructed, are
-    /// absent.
+    /// absent from `reached`; the outcome's `timed_out` says whether absence means unreachable.
     pub(crate) fn reach_from_source_token(
         &self,
         ctx: &BellmanFordContext,
         amount_in: &BigUint,
-    ) -> FxHashMap<Address, ReachedToken> {
+    ) -> ReachOutcome {
         let spfa = self.run_spfa(ctx, amount_in, &MarketOverrides::default(), Instant::now());
 
         let mut reached = FxHashMap::default();
@@ -469,9 +470,11 @@ impl BellmanFordAlgorithm {
 
         debug!(
             reached = reached.len(),
-            dropped, "found a route to every reachable destination from one relaxation"
+            dropped,
+            timed_out = spfa.timed_out,
+            "found a route to every reachable destination from one relaxation"
         );
-        reached
+        ReachOutcome { reached, timed_out: spfa.timed_out }
     }
 
     /// Runs the SPFA relaxation loop and reconstructs the best route from a pre-built context.
@@ -592,10 +595,12 @@ impl BellmanFordAlgorithm {
         }
 
         let mut active_nodes: Vec<NodeIndex> = vec![ctx.token_in_node];
+        let mut timed_out = false;
 
         for round in 0..self.max_hops {
             if start.elapsed() >= self.timeout {
                 debug!(round, "timeout during relaxation");
+                timed_out = true;
                 break;
             }
             if active_nodes.is_empty() {
@@ -733,7 +738,7 @@ impl BellmanFordAlgorithm {
             active_nodes.sort_unstable();
         }
 
-        SPFAResult { amount, predecessor, edge_gas, spot_product, input_below_hop_gas }
+        SPFAResult { amount, predecessor, edge_gas, spot_product, input_below_hop_gas, timed_out }
     }
 
     /// Whether the connector-token allowlist permits routing *into* node `v`.
@@ -959,39 +964,36 @@ impl BellmanFordAlgorithm {
     }
 
     /// Extracts the part of the graph that can carry a route from `token_in` to `token_out` in at
-    /// most `max_hops` — or, without a destination, everything within `max_hops` of `token_in`.
+    /// most `max_hops`. Returns `None` when no edge qualifies; the caller says what an empty
+    /// subgraph means for it.
     ///
-    /// Returns `(adjacency_list, token_nodes, component_ids)`, or `None` when no edge qualifies.
-    /// The caller says what an empty subgraph means for it.
+    /// Both ends bound the walk. A token reached in `d` hops is only worth keeping if the
+    /// destination is still `max_hops - d` hops away or nearer, and the same holds edge by edge.
+    /// The distances used are the shortest ones, so nothing that could appear on a route of legal
+    /// length is discarded.
     ///
     /// Drops excluded pools and intermediate tokens while retaining `token_in` and `token_out`.
     /// Filtering before relaxation also excludes that liquidity from the solve's market subset.
     ///
-    /// With a destination, both ends bound the walk. A token reached in `d` hops is only worth
-    /// keeping if the destination is still `max_hops - d` hops away or nearer, and the same holds
-    /// edge by edge. The distances used are the shortest ones, so nothing that could appear on a
-    /// route of legal length is discarded.
-    ///
-    /// Expanding from the source alone reaches most of the market. Every component it reaches gets
-    /// copied by the caller's `extract_subset`, held for the solve, and simulated during
-    /// relaxation, so bounding the walk bounds all three. Only a caller that reads every relaxed
-    /// node (`reach_from_source_token`) should pass `None` — it needs that full reach.
-    pub(crate) fn get_subgraph<'a>(
+    /// Expanding from the source alone reaches most of the market. Every component the walk
+    /// reaches gets copied by the caller's `extract_subset`, held for the solve, and simulated
+    /// during relaxation, so bounding the walk bounds all three.
+    fn get_subgraph<'a>(
         graph: &'a StableDiGraph<()>,
         token_in: NodeIndex,
-        token_out: Option<NodeIndex>,
+        token_out: NodeIndex,
         max_hops: usize,
         exclusions: &RouteExclusions,
     ) -> Option<Subgraph<'a>> {
         // Walked from the destination along outgoing edges, not incoming ones. Every pool in this
         // graph is entered as a pair of opposite edges, so the two walks cover the same tokens and
         // the outgoing one needs no reversed index.
-        let hops_to_token_out = token_out
-            .map(|token_out| Self::get_hops_to_reach(graph, token_in, token_out, max_hops, exclusions));
+        let hops_to_token_out =
+            Self::get_hops_to_reach(graph, token_in, token_out, max_hops, exclusions);
         Self::get_subgraph_with_hop_map(
             graph,
-            (token_in, token_out),
-            hops_to_token_out.as_ref(),
+            (token_in, Some(token_out)),
+            Some(&hops_to_token_out),
             max_hops,
             exclusions,
         )
@@ -999,7 +1001,9 @@ impl BellmanFordAlgorithm {
 
     /// `get_subgraph` with the target hop map supplied by the caller: the map costs a BFS over
     /// the graph, so a caller pruning many sources toward the same destination pays it once, and
-    /// a multi-source map prunes one walk toward a whole set of targets.
+    /// a multi-source map prunes one walk toward a whole set of targets. Without a map nothing
+    /// prunes the walk — everything within `max_hops` of `token_in` is kept, the full reach a
+    /// caller reading every relaxed node (`reach_from_source_token`) needs.
     fn get_subgraph_with_hop_map<'a>(
         graph: &'a StableDiGraph<()>,
         endpoints: (NodeIndex, Option<NodeIndex>),
@@ -1067,7 +1071,7 @@ impl BellmanFordAlgorithm {
             return None;
         }
 
-        Some((adj, token_nodes, component_ids))
+        Some(Subgraph { adjacency: adj, token_nodes, component_ids })
     }
 
     // Both walks exempt the order's token_in and token_out from token exclusions.
@@ -1373,10 +1377,10 @@ mod tests {
                 .find(|&n| &graph[n] == address)
                 .expect("token in graph")
         };
-        let (adj, _, component_ids) = BellmanFordAlgorithm::get_subgraph(
+        let Subgraph { adjacency: adj, component_ids, .. } = BellmanFordAlgorithm::get_subgraph(
             graph,
             node(&token_a.address),
-            Some(node(&token_c.address)),
+            node(&token_c.address),
             2,
             &RouteExclusions::default(),
         )
@@ -1442,10 +1446,10 @@ mod tests {
                 .find(|&n| &graph[n] == address)
                 .expect("token in graph")
         };
-        let (_, token_nodes, component_ids) = BellmanFordAlgorithm::get_subgraph(
+        let Subgraph { token_nodes, component_ids, .. } = BellmanFordAlgorithm::get_subgraph(
             graph,
             node(&token_a.address),
-            Some(node(&token_c.address)),
+            node(&token_c.address),
             2,
             &RouteExclusions::default(),
         )
@@ -1476,7 +1480,7 @@ mod tests {
     ///   G --[gb]-- B --[bc]-- C --[cd]-- D      D is three hops out, budget is two
     /// ```
     #[test]
-    fn test_get_subgraph_without_destination_stops_at_max_hops() {
+    fn test_get_subgraph_with_hop_map_without_destination_stops_at_max_hops() {
         let token_g = token(0x01, "G");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
@@ -1494,8 +1498,9 @@ mod tests {
                 .find(|&n| &graph[n] == address)
                 .expect("token in graph")
         };
-        let (_, token_nodes, component_ids) =
-            BellmanFordAlgorithm::get_subgraph(graph, node(&token_g.address), None, 2).unwrap();
+        let Subgraph { token_nodes, component_ids, .. } =
+            BellmanFordAlgorithm::get_subgraph_with_hop_map(graph, node(&token_g.address), None, 2)
+                .unwrap();
 
         let kept = |id: &str| {
             component_ids
@@ -1750,12 +1755,33 @@ mod tests {
             .expect("gas token has outgoing edges");
         let routes = algo.reach_from_source_token(&ctx, &BigUint::from(100u64));
 
-        let reached: FxHashSet<Address> = routes.keys().cloned().collect();
+        let reached: FxHashSet<Address> = routes.reached.keys().cloned().collect();
         let expected: FxHashSet<Address> = [&token_a, &token_b, &token_c]
             .into_iter()
             .map(|t| t.address.clone())
             .collect();
         assert_eq!(reached, expected);
+    }
+
+    #[tokio::test]
+    async fn test_reach_from_source_token_zero_timeout() {
+        // A zero timeout cuts the relaxation before its first round: nothing is reached, and
+        // the outcome must say the run was cut short rather than that nothing is reachable.
+        let token_g = token(0x01, "G");
+        let token_a = token(0x02, "A");
+        let (market, manager) =
+            setup_market_bf(vec![("component_ga", &token_g, &token_a, MockProtocolSim::new(2.0))]);
+
+        let algo = bf_algorithm(3, 0);
+        let ctx = algo
+            .build_context_from_source_token(manager.graph(), market, &token_g.address, 3, None)
+            .await
+            .expect("source has outgoing edges");
+
+        let routes = algo.reach_from_source_token(&ctx, &BigUint::from(100u64));
+
+        assert!(routes.timed_out, "a zero timeout must be reported as a cut-short relaxation");
+        assert!(routes.reached.is_empty());
     }
 
     #[tokio::test]
@@ -1804,7 +1830,7 @@ mod tests {
             .is_none());
 
         let routes = algo.reach_from_source_token(&ctx, &BigUint::from(100u64));
-        let reached: FxHashSet<Address> = routes.keys().cloned().collect();
+        let reached: FxHashSet<Address> = routes.reached.keys().cloned().collect();
         assert_eq!(reached, filter);
     }
 

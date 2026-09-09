@@ -46,7 +46,7 @@ use tycho_simulation::{
 
 use crate::{
     algorithm::{
-        bellman_ford::{BellmanFordContext, FindRouteOptions, ReachedToken},
+        bellman_ford::{BellmanFordContext, FindRouteOptions, ReachOutcome, ReachedToken},
         Algorithm, AlgorithmConfig, BellmanFordAlgorithm,
     },
     derived::{
@@ -74,17 +74,16 @@ use crate::{
 /// every edge it relaxes, and unpruned that is most of the market per token — but the pruning
 /// map (`hops_to_gas`) is a single BFS shared by all of them.
 struct PricingPass<'a> {
-    /// The solving algorithm; its `max_hops` bounds route length within the wider subgraph.
+    /// The solving algorithm; its `max_hops` bounds route length and each sell's pruned walk.
     algorithm: &'a BellmanFordAlgorithm,
     graph: &'a <BellmanFordAlgorithm as Algorithm>::GraphType,
     /// The shared snapshot, re-rooted and re-pruned per sell.
     ctx: BellmanFordContext,
-    /// The gas token every price is quoted against.
-    gas_token: &'a Address,
-    /// Amount of gas token each probe buys with (affects slippage).
-    probe_amount: &'a BigUint,
-    /// Longest route a solve may build; also bounds each sell's pruned walk.
-    max_hops: usize,
+    /// The computation whose parameters — gas token, probe amount, budget — the pass solves with.
+    computation: &'a TokenGasPriceComputation,
+    /// The buy pass's result, solved at construction: every token one probe of gas token
+    /// reaches, with what the best route delivers there.
+    buys: ReachOutcome,
     /// The gas token's node, saved before the first reroot moves `ctx` off it.
     gas_node: NodeIndex,
     /// Hops from each node to the gas token, computed once, pruning every sell's walk.
@@ -102,16 +101,32 @@ struct SellLeg {
     components: FxHashSet<ComponentId>,
 }
 
-impl PricingPass<'_> {
-    /// Prices every token the deadline allows, one sell relaxation each — the pass's dominant
+impl<'a> PricingPass<'a> {
+    /// Builds the pass and runs its buy pass. Construction owns the buy pass because it is only
+    /// valid before the first reroot replaces the context's subgraph — a pass in hand always
+    /// carries its buys.
+    fn new(
+        algorithm: &'a BellmanFordAlgorithm,
+        graph: &'a <BellmanFordAlgorithm as Algorithm>::GraphType,
+        ctx: BellmanFordContext,
+        computation: &'a TokenGasPriceComputation,
+    ) -> Self {
+        let buys = algorithm.reach_from_source_token(&ctx, &computation.probe_amount);
+        let gas_node = ctx.token_in_node;
+        let token_nodes = ctx
+            .node_address
+            .iter()
+            .map(|(&node, address)| (address.clone(), node))
+            .collect();
+        let hops_to_gas =
+            BellmanFordAlgorithm::get_hops_to_reach(graph, gas_node, algorithm.max_hops());
+        Self { algorithm, graph, ctx, computation, buys, gas_node, hops_to_gas, token_nodes }
+    }
+
+    /// Prices every token the budget allows, one sell relaxation each — the pass's dominant
     /// cost. Pure CPU work: callers run it on a blocking thread.
-    fn sell_loop(
-        &mut self,
-        buys: &FxHashMap<Address, ReachedToken>,
-        tokens_to_price: FxHashSet<Address>,
-        deadline: Instant,
-        block: u64,
-    ) -> PricingPassOutcome {
+    fn sell_loop(&mut self, tokens_to_price: FxHashSet<Address>, block: u64) -> PricingPassOutcome {
+        let deadline = Instant::now() + self.computation.pass_budget;
         let mut prices = FxHashMap::default();
         let mut failed_items = Vec::new();
         let mut unattempted = FxHashSet::default();
@@ -124,12 +139,18 @@ impl PricingPass<'_> {
             }
             // A token the buy pass never reached is counted, not failed: unreachable is the
             // normal state of much of the topology, and a failed item each would be allocated,
-            // logged, and broadcast to every worker every block.
-            let Some(buy_leg) = buys.get(&token) else {
-                unreachable_tokens += 1;
+            // logged, and broadcast to every worker every block. But a cut-short buy pass says
+            // nothing about reachability, so its missing tokens are carried exactly like a
+            // deadline cut-off — price and dependencies intact.
+            let Some(buy_leg) = self.buys.reached.remove(&token) else {
+                if self.buys.timed_out {
+                    unattempted.insert(token);
+                } else {
+                    unreachable_tokens += 1;
+                }
                 continue;
             };
-            match self.price_token(&token, buy_leg) {
+            match self.price_token(&token, &buy_leg) {
                 Ok(priced) => {
                     prices.insert(token, priced);
                 }
@@ -141,7 +162,8 @@ impl PricingPass<'_> {
             warn!(
                 unattempted = unattempted.len(),
                 priced = prices.len(),
-                "token pricing pass hit its deadline; unattempted tokens keep previous prices"
+                buy_pass_timed_out = self.buys.timed_out,
+                "token pricing pass cut short; unattempted tokens keep previous prices"
             );
         }
         debug!(
@@ -181,8 +203,8 @@ impl PricingPass<'_> {
         components.extend(buy_leg.components.iter().cloned());
 
         let mid_price = Price {
-            numerator: &buy_leg.amount_out * (self.probe_amount + &sell_out),
-            denominator: BigUint::from(2u8) * self.probe_amount * sell_out,
+            numerator: &buy_leg.amount_out * (&self.computation.probe_amount + &sell_out),
+            denominator: BigUint::from(2u8) * &self.computation.probe_amount * sell_out,
         };
         Ok(TokenPriceEntry { price: mid_price, path_components: components })
     }
@@ -203,7 +225,13 @@ impl PricingPass<'_> {
             })?;
         let candidate_components = self
             .ctx
-            .reroot_toward(self.graph, token_node, self.gas_node, &self.hops_to_gas, self.max_hops)
+            .reroot_toward(
+                self.graph,
+                token_node,
+                self.gas_node,
+                &self.hops_to_gas,
+                self.algorithm.max_hops(),
+            )
             .ok_or_else(|| {
                 FailedItemError::MissingSellRoute("no pruned subgraph toward the gas token".into())
             })?;
@@ -214,7 +242,7 @@ impl PricingPass<'_> {
 
         let order = Order::new(
             token.clone(),
-            self.gas_token.clone(),
+            self.computation.gas_token.clone(),
             amount,
             OrderSide::Sell,
             Address::zero(20),
@@ -224,7 +252,7 @@ impl PricingPass<'_> {
             .find_single_route(&self.ctx, &order, FindRouteOptions::default())
             .map_err(|error| FailedItemError::MissingSellRoute(error.to_string()))?;
         let route = result.route();
-        let amount_out = route.amount_out(self.gas_token);
+        let amount_out = route.amount_out(&self.computation.gas_token);
         if amount_out.is_zero() {
             return Err(FailedItemError::MissingSellRoute("the sell route returns zero".into()));
         }
@@ -262,10 +290,10 @@ pub struct TokenGasPriceComputation {
     /// Amount of gas token each probe buys with (affects slippage).
     probe_amount: BigUint,
     /// Wall-clock budget for a pass's per-token sell loop, where nearly all of its time goes.
-    /// Checked before each token's sell — the snapshot and the buy pass ahead of the loop run
-    /// outside it, bounded only by the per-solve timeout. Tokens not attempted before it
-    /// expires keep their previous price; the module's Cost section says what a slow pass
-    /// would otherwise delay.
+    /// The window opens when the sell loop starts and is checked before each token's sell — the
+    /// snapshot and the buy pass ahead of the loop run outside it, bounded only by the per-solve
+    /// timeout. Tokens not attempted before it expires keep their previous price; the module's
+    /// Cost section says what a slow pass would otherwise delay.
     pass_budget: Duration,
 }
 
@@ -318,7 +346,6 @@ impl TokenGasPriceComputation {
         market: &MarketData,
         filter_tokens: Option<&FxHashSet<Address>>,
     ) -> Result<PricingPassOutcome, ComputationError> {
-        let deadline = Instant::now() + self.pass_budget;
         let (topology, block) = {
             let guard = market.read().await;
             let block = guard
@@ -344,14 +371,6 @@ impl TokenGasPriceComputation {
         let algorithm = BellmanFordAlgorithm::with_config(config);
 
         let tokens_to_price = self.tokens_to_price(&topology, filter_tokens);
-        if tokens_to_price.is_empty() {
-            return Ok(PricingPassOutcome {
-                prices: FxHashMap::default(),
-                block,
-                failed_items: Vec::new(),
-                unattempted: tokens_to_price,
-            });
-        }
         let graph = graph_manager.graph();
 
         // One snapshot serves the buy pass and every sell. The subgraph is walked one hop
@@ -394,29 +413,8 @@ impl TokenGasPriceComputation {
         let span = Span::current();
         tokio::task::spawn_blocking(move || {
             let _entered = span.enter();
-            let graph = graph_manager.graph();
-            let buys = algorithm.reach_from_source_token(&ctx, &computation.probe_amount);
-
-            let gas_node = ctx.token_in_node;
-            let token_nodes = ctx
-                .node_address
-                .iter()
-                .map(|(&node, address)| (address.clone(), node))
-                .collect();
-            let hops_to_gas =
-                BellmanFordAlgorithm::get_hops_to_reach(graph, gas_node, computation.max_hops);
-            let mut pass = PricingPass {
-                algorithm: &algorithm,
-                graph,
-                ctx,
-                gas_token: &computation.gas_token,
-                probe_amount: &computation.probe_amount,
-                max_hops: computation.max_hops,
-                gas_node,
-                hops_to_gas,
-                token_nodes,
-            };
-            pass.sell_loop(&buys, tokens_to_price, deadline, block)
+            let mut pass = PricingPass::new(&algorithm, graph_manager.graph(), ctx, &computation);
+            pass.sell_loop(tokens_to_price, block)
         })
         .await
         .map_err(|join_error| {
