@@ -90,14 +90,32 @@ pub(crate) struct BellmanFordContext {
 }
 
 impl BellmanFordContext {
-    /// Re-points the context at new endpoints, so one snapshot can serve many solves.
+    /// Re-points the context at new endpoints behind a freshly pruned adjacency, in one step —
+    /// so one snapshot can serve many solves.
     ///
-    /// Everything else — subgraph, token metadata, market snapshot — is reused as-is, so the
-    /// caller must pick nodes inside the subgraph the context was built from. A node outside
-    /// it has no adjacency entries, so a solve from it finds no route rather than panicking.
-    pub(crate) fn reroot(&mut self, token_in_node: NodeIndex, token_out_node: Option<NodeIndex>) {
+    /// The subgraph walk and the endpoint switch belong together: re-pointing alone would leave
+    /// the solve running against the previous root's subgraph. Token metadata and the market
+    /// snapshot are reused as-is, so the new endpoints must lie inside the subgraph the context
+    /// was built from. Returns the walk's candidate component ids — every component on any
+    /// `token_in`-to-`token_out` path within `max_hops` — or `None` when no such path exists.
+    pub(crate) fn reroot_toward<'a>(
+        &mut self,
+        graph: &'a StableDiGraph<()>,
+        token_in_node: NodeIndex,
+        token_out_node: NodeIndex,
+        hops_to_token_out: &FxHashMap<NodeIndex, usize>,
+        max_hops: usize,
+    ) -> Option<FxHashSet<&'a ComponentId>> {
+        let (adj, _, candidate_components) = BellmanFordAlgorithm::get_subgraph_with_hop_map(
+            graph,
+            token_in_node,
+            Some(hops_to_token_out),
+            max_hops,
+        )?;
+        self.adj = adj;
         self.token_in_node = token_in_node;
-        self.token_out_node = token_out_node;
+        self.token_out_node = Some(token_out_node);
+        Some(candidate_components)
     }
 }
 
@@ -246,7 +264,7 @@ impl BellmanFordAlgorithm {
 
     /// A context whose subgraph is everything within `walk_hops` of `token_in` — no destination
     /// prunes it. Having no destination, it cannot serve `find_single_route` until
-    /// `reroot` gives it one.
+    /// `reroot_toward` gives it one.
     ///
     /// `walk_hops` bounds the subgraph, not route length — routes stay bounded by the
     /// algorithm's own `max_hops`. A caller that re-roots the context at tokens away from
@@ -984,7 +1002,7 @@ impl BellmanFordAlgorithm {
     /// `get_subgraph` with the target hop map supplied by the caller: the map costs a BFS over
     /// the graph, so a caller pruning many sources toward the same destination pays it once, and
     /// a multi-source map prunes one walk toward a whole set of targets.
-    pub(crate) fn get_subgraph_with_hop_map<'a>(
+    fn get_subgraph_with_hop_map<'a>(
         graph: &'a StableDiGraph<()>,
         endpoints: (NodeIndex, Option<NodeIndex>),
         hops_to_token_out: Option<&FxHashMap<NodeIndex, usize>>,
@@ -1842,7 +1860,9 @@ mod tests {
         };
 
         let gas_node = ctx.token_in_node;
-        ctx.reroot(node_of(&token_c.address), Some(gas_node));
+        let hops_to_gas = BellmanFordAlgorithm::get_hops_to_reach(graph, gas_node, 3);
+        ctx.reroot_toward(graph, node_of(&token_c.address), gas_node, &hops_to_gas, 3)
+            .expect("a C-to-G path exists");
         let ord = order(&token_c, &token_g, 100, OrderSide::Sell);
         let result = algo
             .find_single_route(&ctx, &ord, FindRouteOptions::default())

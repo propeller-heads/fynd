@@ -393,22 +393,16 @@ impl TokenGasPriceComputation {
             .ok_or_else(|| {
                 FailedItemError::MissingSellRoute("token is not in the pass subgraph".into())
             })?;
-        let (adj, _, candidate_components) = BellmanFordAlgorithm::get_subgraph_with_hop_map(
-            pass.graph,
-            token_node,
-            Some(&pass.hops_to_gas),
-            self.max_hops,
-        )
-        .ok_or_else(|| {
-            FailedItemError::MissingSellRoute("no pruned subgraph toward the gas token".into())
-        })?;
+        let candidate_components = pass
+            .ctx
+            .reroot_toward(pass.graph, token_node, pass.gas_node, &pass.hops_to_gas, self.max_hops)
+            .ok_or_else(|| {
+                FailedItemError::MissingSellRoute("no pruned subgraph toward the gas token".into())
+            })?;
         let mut components: FxHashSet<ComponentId> = candidate_components
             .into_iter()
             .cloned()
             .collect();
-        pass.ctx.adj = adj;
-        pass.ctx
-            .reroot(token_node, Some(pass.gas_node));
 
         let order = Order::new(
             token.clone(),
