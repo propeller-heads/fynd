@@ -100,8 +100,9 @@ struct SolvedPrices {
     block: u64,
     /// Tokens that were attempted and could not be priced: bought, but no sell route back.
     failed_items: Vec<FailedItem>,
-    /// Tokens never attempted because the pass deadline expired first. They keep their
-    /// previous price: unlike a failure, nothing is known about them this block.
+    /// Tokens never attempted — the deadline expired first, or the pass bailed out before
+    /// solving anything. They keep their previous price: unlike a failure, nothing is known
+    /// about them this block.
     unattempted: FxHashSet<Address>,
 }
 
@@ -200,7 +201,7 @@ impl TokenGasPriceComputation {
                 prices: FxHashMap::default(),
                 block,
                 failed_items: Vec::new(),
-                unattempted: FxHashSet::default(),
+                unattempted: tokens_to_price,
             });
         }
         let graph = graph_manager.graph();
@@ -220,13 +221,15 @@ impl TokenGasPriceComputation {
             )
             .await
         else {
-            // No subgraph around the gas token means nothing is priceable this block.
-            debug!(unreachable_tokens = tokens_to_price.len(), "no subgraph around the gas token");
+            // No subgraph around the gas token means nothing was attempted this block: the
+            // tokens come back unattempted so they keep their previous prices, exactly as if
+            // the deadline had cut them off.
+            debug!(unattempted = tokens_to_price.len(), "no subgraph around the gas token");
             return Ok(SolvedPrices {
                 prices: FxHashMap::default(),
                 block,
                 failed_items: Vec::new(),
-                unattempted: FxHashSet::default(),
+                unattempted: tokens_to_price,
             });
         };
         // Stamp the result with the snapshot's block, not the earlier topology read — the feed
@@ -780,6 +783,41 @@ mod tests {
                 .contains_key(&usdc.address),
             "carried tokens must stay visible to incremental invalidation"
         );
+    }
+
+    #[tokio::test]
+    async fn test_vanished_gas_subgraph_keeps_previous_prices() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+        let aaa = token(2, "AAA");
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0)),
+            ("usdc_aaa", &usdc, &aaa, MockProtocolSim::new(1.0)),
+        ]);
+        let store = DerivedData::new_shared();
+        computation_for(&eth.address)
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+
+        // The gas token's only pool disappears: the pass cannot start, so it must report the
+        // still-listed tokens as unattempted — keeping their previous prices — rather than as
+        // attempted and failed, which would drop them.
+        market
+            .write()
+            .await
+            .remove_components(["eth_usdc".to_string()].iter());
+        let output = computation_for(&eth.address)
+            .compute(
+                &market,
+                &store,
+                &ChangedComponents { is_full_recompute: true, ..ChangedComponents::default() },
+            )
+            .await
+            .expect("pricing must not fail");
+
+        assert!((ratio(&output.data[&usdc.address]) - 2000.0).abs() < 1e-6);
+        assert!((ratio(&output.data[&aaa.address]) - 2000.0).abs() < 1e-6);
     }
 
     #[tokio::test]
