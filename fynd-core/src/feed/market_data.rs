@@ -117,6 +117,50 @@ impl MarketData {
         self.data.write().await
     }
 
+    /// Extracts a base-data subset for `component_ids` without holding the read guard across the
+    /// whole clone.
+    ///
+    /// `extract_subset` deep-clones one simulation state per component, so one guard held over a
+    /// near-whole-market set stalls the feed's writer — and every reader queued behind it — for
+    /// the whole clone. This clones in batches of 512 components, releasing the guard between
+    /// batches. A batch whose label differs from the first batch's means the feed advanced
+    /// mid-clone; the clone restarts so the returned snapshot stays single-block consistent.
+    /// After three restarts it falls back to one guard for the full set: a feed advancing faster
+    /// than the batched clone completes would otherwise starve it forever.
+    ///
+    /// No overlay is applied — this reads base data only.
+    pub async fn extract_subset_batched(
+        &self,
+        component_ids: &FxHashSet<&ComponentId>,
+    ) -> MarketState {
+        let ids: Vec<&ComponentId> = component_ids.iter().copied().collect();
+        'attempt: for _ in 0..3 {
+            let mut merged: Option<MarketState> = None;
+            for chunk in ids.chunks(512) {
+                let chunk_ids: FxHashSet<&ComponentId> = chunk.iter().copied().collect();
+                let part = self
+                    .data
+                    .read()
+                    .await
+                    .extract_subset(&chunk_ids);
+                match &mut merged {
+                    None => merged = Some(part),
+                    Some(snapshot) => {
+                        if part.label != snapshot.label {
+                            continue 'attempt;
+                        }
+                        snapshot.merge_subset(part);
+                    }
+                }
+            }
+            return merged.unwrap_or_default();
+        }
+        self.data
+            .read()
+            .await
+            .extract_subset(component_ids)
+    }
+
     /// Attempts a non-blocking read of the base data store.
     ///
     /// Returns `None` if the lock is currently held for writing.
@@ -614,6 +658,16 @@ impl MarketState {
             component_generation: self.component_generation,
         }
     }
+
+    /// Absorbs another subset extracted from the same base state (the caller checks the labels
+    /// match), keeping this one's metadata. Component sets from `extract_subset` batches are
+    /// disjoint, so nothing is overwritten.
+    pub fn merge_subset(&mut self, other: MarketState) {
+        self.components.extend(other.components);
+        self.simulation_states
+            .extend(other.simulation_states);
+        self.tokens.extend(other.tokens);
+    }
 }
 
 /// Groups component ids by the protocol system their component carries.
@@ -812,6 +866,67 @@ mod tests {
         assert!(empty_subset
             .simulation_states
             .is_empty());
+    }
+
+    fn market_with_two_components() -> MarketState {
+        let mut market = MarketState::new();
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let token_c = token(0x0C, "C");
+        market.upsert_components([
+            component("component_ab", &[token_a.clone(), token_b.clone()]),
+            component("component_bc", &[token_b.clone(), token_c.clone()]),
+        ]);
+        market.upsert_tokens([token_a, token_b, token_c]);
+        market.update_states([
+            (
+                "component_ab".to_string(),
+                Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+            ),
+            (
+                "component_bc".to_string(),
+                Box::new(MockProtocolSim::new(3.0)) as Box<dyn ProtocolSim>,
+            ),
+        ]);
+        market.update_last_updated(BlockInfo::new(12345, "0xabc".to_string(), 0));
+        market
+    }
+
+    #[test]
+    fn test_merge_subset() {
+        let market = market_with_two_components();
+        let ab = "component_ab".to_string();
+        let bc = "component_bc".to_string();
+
+        let mut merged = market.extract_subset(&[&ab].into_iter().collect());
+        merged.merge_subset(market.extract_subset(&[&bc].into_iter().collect()));
+
+        let combined = market.extract_subset(&[&ab, &bc].into_iter().collect());
+        assert_eq!(merged.components.len(), combined.components.len());
+        assert_eq!(merged.simulation_states.len(), combined.simulation_states.len());
+        assert_eq!(merged.tokens.len(), combined.tokens.len());
+        assert_eq!(merged.label, combined.label);
+    }
+
+    #[tokio::test]
+    async fn test_extract_subset_batched() {
+        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
+        let ab = "component_ab".to_string();
+        let bc = "component_bc".to_string();
+        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
+
+        let batched = market_data
+            .extract_subset_batched(&ids)
+            .await;
+
+        let direct = market_data
+            .read()
+            .await
+            .extract_subset(&ids);
+        assert_eq!(batched.components.len(), direct.components.len());
+        assert_eq!(batched.simulation_states.len(), direct.simulation_states.len());
+        assert_eq!(batched.tokens.len(), direct.tokens.len());
+        assert_eq!(batched.label, direct.label);
     }
 
     // ==================== MarketData overlay tests ====================

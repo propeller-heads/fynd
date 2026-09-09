@@ -205,13 +205,16 @@ impl TokenGasPriceComputation {
 
         // One snapshot serves the buy pass and every sell. The subgraph is walked one hop
         // beyond `max_hops`: a sell route of `max_hops` hops can start from a token that far
-        // from the gas token, and the walk must include that token's outgoing edges.
+        // from the gas token, and the walk must include that token's outgoing edges. On a
+        // filtered (incremental) run the walk is also pruned toward the filter tokens, so
+        // re-solving a handful of tokens snapshots their candidate routes, not the market.
         let Some(ctx) = algorithm
             .build_context_from_source_token(
                 graph,
                 market.clone(),
                 &self.gas_token,
                 self.max_hops + 1,
+                filter_tokens,
             )
             .await
         else {
