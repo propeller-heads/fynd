@@ -69,10 +69,12 @@ impl<D> PairEdge<D> {
 /// A route as a sequence of tokens, before the pools serving each leg are chosen.
 pub type TokenPath = SmallVec<[NodeIndex; INLINE_TOKENS]>;
 
-/// Pools a leg may go through, held inline up to `INLINE_POOLS`.
+/// The pools of one leg a request allows, collected because a filtered subset of a pair's pools
+/// is not contiguous and so cannot stay a slice into the graph.
 type Leg<'a, D> = SmallVec<[&'a EdgeData<D>; INLINE_POOLS]>;
 
-/// Pools one leg holds before it spills to the heap. Most pairs are traded by fewer.
+/// How many pools a [`Leg`] holds before it spills to the heap. Not measured against the market:
+/// it is the inline capacity, and a pair traded by more pools still works, on the heap.
 const INLINE_POOLS: usize = 8;
 
 /// Tokens as nodes, one edge per directed token pair.
