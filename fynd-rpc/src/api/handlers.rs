@@ -297,9 +297,8 @@ pub async fn get_prices(
     let token_prices_block = store
         .token_prices_block()
         .ok_or(ApiError::StaleData { age_ms: u64::MAX })?;
-    // The pricing pass cannot fail as a whole, so the block is set from the first run onward.
-    // Until a token other than the gas token (priced 1:1 unconditionally) is in the map there
-    // is no answer to serve, and a caller with retry-on-unavailable logic must keep retrying.
+    // The gas token is priced 1:1 unconditionally, so a map holding nothing else means no
+    // pricing pass has landed yet: there is no answer to serve.
     let Some(token_prices) = store.token_prices() else {
         return Err(ApiError::StaleData { age_ms: u64::MAX });
     };

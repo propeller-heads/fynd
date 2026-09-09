@@ -325,13 +325,11 @@ impl BellmanFordAlgorithm {
     }
 
     /// Snapshots everything a solve reads from the market — tokens, component states, gas price,
-    /// and scoring inputs — for a subgraph the caller has already walked.
-    ///
-    /// The caller walks the subgraph *before* acquiring `market_view`: the walk needs only the
-    /// graph, and holding the read guard through it would queue the feed's writer — and every
-    /// quote's read behind that writer. The endpoints must be the pair the subgraph was walked
-    /// with; the destination, when present, is carried for
-    /// `find_single_route`'s readout.
+    /// and scoring inputs — for a subgraph the caller has already walked. `market_view` should
+    /// be acquired after the walk: only the extraction here needs the guard, and holding it
+    /// through a walk would queue the feed's writer. The endpoints must be the pair the subgraph
+    /// was walked with; the destination, when present, is carried for `find_single_route`'s
+    /// readout.
     ///
     /// Derived data starts empty; a caller that has token or spot prices sets the fields on the
     /// returned context.

@@ -863,9 +863,9 @@ impl FyndBuilder {
 
         let gas_token = native_token(&self.chain).map_err(|_| SolverBuildError::GasToken)?;
         // Pricing must reach every token a quote can route to — a token within some pool's
-        // max_hops but beyond pricing's reach would be quoted gas-blind — so its depth follows
-        // the deepest configured pool rather than any constant.
-        let pricing_reach = self
+        // max_hops but beyond pricing's hop budget would be quoted gas-blind — so that budget
+        // follows the deepest configured pool rather than any constant.
+        let pricing_max_hops = self
             .pools
             .iter()
             .map(PoolEntry::max_hops)
@@ -873,7 +873,7 @@ impl FyndBuilder {
             .unwrap_or(defaults::POOL_MAX_HOPS);
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
-            .with_max_hop(pricing_reach)
+            .with_max_hop(pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.
@@ -1500,17 +1500,17 @@ impl Solver {
             });
         }
 
-        // Computation manager. As in the live build, pricing's depth follows the deepest
+        // Computation manager. As in the live build, pricing's hop budget follows the deepest
         // configured pool so every quotable token is priceable.
         let gas_token = native_token(&chain).map_err(|_| SolverBuildError::GasToken)?;
-        let pricing_reach = pools
+        let pricing_max_hops = pools
             .values()
             .map(|pool_cfg| pool_cfg.max_hops())
             .max()
             .unwrap_or(defaults::POOL_MAX_HOPS);
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
-            .with_max_hop(pricing_reach)
+            .with_max_hop(pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD)
             // Replay tests assert exact priced-token counts against a deterministic recording;
             // an effectively unbounded budget keeps a starved CI machine from cutting the

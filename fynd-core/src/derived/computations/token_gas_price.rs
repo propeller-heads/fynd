@@ -8,15 +8,12 @@
 //! # Algorithm
 //!
 //! Routes are found with the same Bellman-Ford algorithm the solvers use to answer quotes, so a
-//! price reflects what a trade would actually get, slippage and fees included. Each token is bought
-//! with a fixed amount of gas token and sold back, and its price is the mean of the buy price and
-//! the sell price. The mean includes the round trip's fees and slippage — never gas, per the
-//! next paragraph — and its bias is one-sided: with a
-//! symmetric per-leg loss factor `k` the two implied rates are `p·k` and `p/k`, whose arithmetic
-//! mean `p·(k + 1/k)/2` is never below the loss-free rate `p`. In raw-token-units-per-gas-unit
-//! terms that understates a token's value, never overstates it — negligibly for deep pairs
-//! (+0.005% at `k` = 0.99), heavily for thin ones (+25% at `k` = 0.5). A geometric mean would be
-//! exact under symmetric loss, but it is irrational and cannot be an exact fraction.
+//! price reflects what a trade would actually get, slippage and fees included. Each token is
+//! bought with a fixed amount of gas token and sold back, and its price is the mean of the buy
+//! price and the sell price — fees and slippage in, gas out, per the next paragraph. The mean's
+//! round-trip bias is one-sided: it only ever understates a token's value, negligibly for deep
+//! pairs and heavily for thin ones. A geometric mean would be exact under symmetric loss, but it
+//! is irrational and prices are exact fractions.
 //!
 //! The algorithm runs with gas-aware scoring off. Off is what keeps this non-circular: gas-aware
 //! scoring converts a route's gas into output-token terms, which needs the prices this computation
@@ -115,9 +112,9 @@ pub struct TokenGasPriceComputation {
     probe_amount: BigUint,
     /// Wall-clock budget for a pass's per-token sell loop, where nearly all of its time goes.
     /// Checked before each token's sell — the snapshot and the buy pass ahead of the loop run
-    /// outside it, bounded only by the per-solve timeout. It exists to stop a pathological
-    /// block — per-solve timeouts alone allow ~1 s per token — from stalling the derived
-    /// chain for minutes. Tokens not attempted before it expires keep their previous price.
+    /// outside it, bounded only by the per-solve timeout. Tokens not attempted before it
+    /// expires keep their previous price; the module's Cost section says what a slow pass
+    /// would otherwise delay.
     pass_budget: Duration,
 }
 
@@ -370,15 +367,12 @@ impl TokenGasPriceComputation {
         Ok(TokenPriceEntry { price: mid_price, path_components: components })
     }
 
-    /// What selling `amount` of `token` back to the gas token returns (never zero), paired
-    /// with the components the price depends on: every component on any candidate route
-    /// between the two — the walk's component set, which pool edge pairs make the buy
-    /// direction's candidates too — plus the chosen sell route's own, defensively. Fails as
-    /// `MissingSellRoute` carrying why: on a block where many
-    /// tokens fail at once, the distribution of reasons is the signal.
-    ///
-    /// Re-roots the pass's shared context at `token` behind a freshly pruned adjacency before
-    /// solving.
+    /// Solves the route selling `amount` of `token` back to the gas token, re-rooting the
+    /// pass's shared context at `token` first. Returns what the route delivers (never zero),
+    /// paired with the components the price depends on — every component on any candidate
+    /// route between the two, plus the chosen route's own, defensively. Fails as
+    /// `MissingSellRoute` carrying why: on a block where many tokens fail at once, the
+    /// distribution of reasons is the signal.
     fn sell_leg(
         &self,
         pass: &mut PricingPass<'_>,
