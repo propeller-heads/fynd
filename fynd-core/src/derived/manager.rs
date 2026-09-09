@@ -8,7 +8,7 @@
 
 use std::{
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -128,6 +128,10 @@ pub struct ComputationManagerConfig {
     max_hop: usize,
     /// Slippage threshold for component depth computation (0.0 < threshold < 1.0).
     depth_slippage_threshold: f64,
+    /// Overrides the token pricing pass's sell-loop budget; `None` keeps the computation's
+    /// default. The replay harness sets an effectively unbounded budget so integration tests
+    /// can assert exact priced-token counts.
+    pass_budget: Option<Duration>,
 }
 
 impl ComputationManagerConfig {
@@ -145,6 +149,12 @@ impl ComputationManagerConfig {
     /// Sets the max hop count for token gas price computation.
     pub fn with_max_hop(mut self, hop_count: usize) -> Self {
         self.max_hop = hop_count;
+        self
+    }
+
+    /// Overrides the wall-clock budget for the token pricing pass's sell loop.
+    pub fn with_pass_budget(mut self, pass_budget: Duration) -> Self {
+        self.pass_budget = Some(pass_budget);
         self
     }
 
@@ -179,6 +189,7 @@ impl Default for ComputationManagerConfig {
             gas_token: Address::zero(20),
             max_hop: crate::solver::defaults::POOL_MAX_HOPS,
             depth_slippage_threshold: 0.01,
+            pass_budget: None,
         }
     }
 }
@@ -216,11 +227,13 @@ impl ComputationManager {
     ) -> Result<(Self, broadcast::Receiver<DerivedDataEvent>), ComputationError> {
         let (mut manager, event_rx) = Self::empty(market_data);
         manager.register(SpotPriceComputation::new())?;
-        manager.register(
-            TokenGasPriceComputation::default()
-                .with_max_hops(config.max_hop)
-                .with_gas_token(config.gas_token),
-        )?;
+        let mut token_prices = TokenGasPriceComputation::default()
+            .with_max_hops(config.max_hop)
+            .with_gas_token(config.gas_token);
+        if let Some(pass_budget) = config.pass_budget {
+            token_prices = token_prices.with_pass_budget(pass_budget);
+        }
+        manager.register(token_prices)?;
         manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
         Ok((manager, event_rx))
     }

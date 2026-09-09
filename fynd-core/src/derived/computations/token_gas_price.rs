@@ -140,7 +140,6 @@ impl TokenGasPriceComputation {
     }
 
     /// Sets the wall-clock budget for a pass's sell loop.
-    #[cfg(test)]
     pub fn with_pass_budget(self, pass_budget: Duration) -> Self {
         Self { pass_budget, ..self }
     }
@@ -604,11 +603,14 @@ mod tests {
     }
 
     fn ratio(price: &Price) -> f64 {
-        let (Some(numerator), Some(denominator)) =
-            (price.numerator.to_f64(), price.denominator.to_f64())
-        else {
-            return f64::NAN;
-        };
+        let numerator = price
+            .numerator
+            .to_f64()
+            .expect("price numerator fits in f64");
+        let denominator = price
+            .denominator
+            .to_f64()
+            .expect("price denominator fits in f64");
         numerator / denominator
     }
 
@@ -639,7 +641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gas_token_priced_one_to_one_at_the_probe_amount() {
+    async fn test_gas_token_price() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
 
@@ -743,7 +745,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_expired_deadline_keeps_previous_prices_on_full_solve() {
+    async fn test_full_solve_past_deadline() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
         let (market, _) =
@@ -779,7 +781,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vanished_gas_subgraph_keeps_previous_prices() {
+    async fn test_vanished_gas_subgraph() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
         let aaa = token(2, "AAA");
@@ -814,16 +816,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_expired_deadline_keeps_prices_on_incremental_solve() {
+    async fn test_incremental_solve_past_deadline() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
         let (market, _) =
             setup_market_weighted(vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]);
         let store = DerivedData::new_shared();
-        computation_for(&eth.address)
+        let full = computation_for(&eth.address)
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
+        // The manager persists between runs; without this the incremental path bails out on
+        // the missing stored prices and the test would exercise the full solve twice.
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
 
         // The pool's state changes, marking USDC for re-pricing, but the deadline expires
         // before it is attempted: the previous price must survive.
@@ -841,6 +846,14 @@ mod tests {
             .expect("pricing must not fail");
 
         assert!((ratio(&output.data[&usdc.address]) - 2000.0).abs() < 1e-6);
+        let guard = store.read().await;
+        assert!(
+            guard
+                .token_prices_deps()
+                .expect("deps are stored")
+                .contains_key(&usdc.address),
+            "a carried token must stay visible to incremental invalidation"
+        );
     }
 
     #[tokio::test]
@@ -962,6 +975,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_incremental_removes_unsellable_token() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let eth = token(0, "ETH");
+        let oneway = token(1, "ONEWAY");
+        let (market, _) =
+            setup_market_weighted(vec![("eth_oneway", &eth, &oneway, MockProtocolSim::new(0.5))]);
+        let store = DerivedData::new_shared();
+        let computation = computation_for(&eth.address);
+        let full = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+
+        // The pool turns one-way: the liquidity cap lets the 0.5e18 buy through but blocks the
+        // 1e18 sell back. A token that was priced and then lost its sell route must stop being
+        // served — dropped from the prices and from the dependency map both.
+        market.write().await.update_states([(
+            "eth_oneway".to_string(),
+            Box::new(MockProtocolSim::new(0.5).with_liquidity(600_000_000_000_000_000))
+                as Box<dyn ProtocolSim>,
+        )]);
+        let output = computation
+            .compute(
+                &market,
+                &store,
+                &ChangedComponents {
+                    updated: vec!["eth_oneway".to_string()],
+                    ..ChangedComponents::default()
+                },
+            )
+            .await
+            .expect("pricing must not fail");
+
+        assert!(
+            !output
+                .data
+                .contains_key(&oneway.address),
+            "an unsellable token has no price"
+        );
+        let guard = store.read().await;
+        assert!(
+            !guard
+                .token_prices_deps()
+                .expect("deps are stored")
+                .contains_key(&oneway.address),
+            "a dropped token must leave the dependency map too"
+        );
+    }
+
+    #[tokio::test]
     async fn test_deps_cover_rival_routes() {
         // USDC prices via the direct pool, but the worse ETH->MID->USDC route is a candidate:
         // its pools must be in USDC's dependency set, or a state change that makes it the
@@ -992,7 +1057,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_empty_market_prices_only_the_gas_token() {
+    async fn test_empty_market() {
         let eth = token(0, "ETH");
 
         let prices = prices_for(&eth, vec![]).await;
@@ -1004,7 +1069,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gas_token_outside_the_graph_prices_only_itself() {
+    async fn test_gas_token_outside_graph() {
         let eth = token(0, "ETH");
         let aaa = token(1, "AAA");
         let bbb = token(2, "BBB");

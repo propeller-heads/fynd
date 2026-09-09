@@ -1511,7 +1511,11 @@ impl Solver {
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
             .with_max_hop(pricing_reach)
-            .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
+            .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD)
+            // Replay tests assert exact priced-token counts against a deterministic recording;
+            // an effectively unbounded budget keeps a starved CI machine from cutting the
+            // pricing pass short and failing the count.
+            .with_pass_budget(Duration::from_secs(24 * 60 * 60));
         let (computation_manager, _) =
             ComputationManager::new(computation_config, market_data.clone())
                 .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;

@@ -19,8 +19,9 @@ async fn test_all_derived_fields_computed() {
 }
 
 /// Derived data metrics should exactly match the expected baseline.
-/// Since replay is deterministic (same recording + same code = same result),
-/// any deviation indicates a real bug, not expected variance.
+/// Replay is deterministic (same recording + same code = same result), and the replay solver
+/// runs the pricing pass with an effectively unbounded budget so a slow machine cannot cut
+/// the token count short — any deviation indicates a real bug, not expected variance.
 #[tokio::test]
 async fn test_derived_data_matches_expected() {
     let harness = TestHarness::from_fixture().await;
