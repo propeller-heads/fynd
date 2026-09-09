@@ -49,7 +49,7 @@ pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 pub use path_frank_wolfe::PathFrankWolfeAlgorithm;
 pub use registry::{AlgorithmRegistry, RegisterAlgorithmError};
-pub use request::SolveRequest;
+pub use request::{SolveParts, SolveRequest};
 use rustc_hash::FxHashSet;
 use tycho_simulation::tycho_core::models::Address;
 pub use water_fill::WaterFillAlgorithm;

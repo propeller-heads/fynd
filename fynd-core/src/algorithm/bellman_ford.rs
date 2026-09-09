@@ -43,7 +43,11 @@ use super::{
     split_primitives::MarketOverrides, Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason,
 };
 use crate::{
-    algorithm::{paths, request::SolveRequest, sim_guard::GuardedProtocolSim},
+    algorithm::{
+        paths,
+        request::{SolveParts, SolveRequest},
+        sim_guard::GuardedProtocolSim,
+    },
     derived::{
         computation::ComputationRequirements,
         types::{SpotPrices, TokenGasPrices},
@@ -153,7 +157,7 @@ impl BellmanFordAlgorithm {
         &self,
         request: SolveRequest<'_, StableDiGraph<()>>,
     ) -> Result<BellmanFordContext, AlgorithmError> {
-        let (graph, order, market, label, derived, exclusions) = request.into_parts();
+        let SolveParts { graph, order, market, label, derived, exclusions } = request.into_parts();
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }

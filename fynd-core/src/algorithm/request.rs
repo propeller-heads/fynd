@@ -8,6 +8,22 @@ use crate::{
     types::{quote::RouteExclusions, Order},
 };
 
+/// A [`SolveRequest`] taken apart, so an algorithm owns the market and the derived data.
+pub struct SolveParts<'a, G> {
+    /// The graph to search, in the algorithm's own `GraphType`.
+    pub graph: &'a G,
+    /// The order to solve.
+    pub order: &'a Order,
+    /// The market to read state from. An algorithm takes its own lock.
+    pub market: MarketData,
+    /// The overlay to read market state through, if the request named one.
+    pub label: Option<StateLabel>,
+    /// The derived data the algorithm declared it needs.
+    pub derived: Option<SharedDerivedDataRef>,
+    /// The pools and tokens this solve must not use.
+    pub exclusions: Arc<RouteExclusions>,
+}
+
 /// One order to solve, and everything the algorithm reads to solve it.
 pub struct SolveRequest<'a, G> {
     graph: &'a G,
@@ -19,19 +35,17 @@ pub struct SolveRequest<'a, G> {
 }
 
 impl<'a, G> SolveRequest<'a, G> {
-    /// The graph, order, market, overlay label, derived data and exclusions, moved out.
+    /// The request's parts, moved out of it.
     #[must_use]
-    pub fn into_parts(
-        self,
-    ) -> (
-        &'a G,
-        &'a Order,
-        MarketData,
-        Option<StateLabel>,
-        Option<SharedDerivedDataRef>,
-        Arc<RouteExclusions>,
-    ) {
-        (self.graph, self.order, self.market, self.label, self.derived, self.exclusions)
+    pub fn into_parts(self) -> SolveParts<'a, G> {
+        SolveParts {
+            graph: self.graph,
+            order: self.order,
+            market: self.market,
+            label: self.label,
+            derived: self.derived,
+            exclusions: self.exclusions,
+        }
     }
 
     /// A solve against the live market state, with no derived data and nothing excluded.

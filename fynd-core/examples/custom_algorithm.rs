@@ -22,8 +22,8 @@ use fynd_core::{
     graph::{PetgraphStableDiGraphManager, StableDiGraph},
     types::RouteResult,
     Algorithm, AlgorithmError, AlgorithmRegistry, ComputationRequirements, EncodingOptions,
-    FyndBuilder, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, SolveRequest,
-    Swap,
+    FyndBuilder, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, SolveParts,
+    SolveRequest, Swap,
 };
 use num_bigint::{BigInt, BigUint};
 use rustc_hash::FxHashMap;
@@ -64,7 +64,7 @@ impl Algorithm for DirectComponentAlgorithm {
         &self,
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let (graph, order, market, label, _derived, exclusions) = request.into_parts();
+        let SolveParts { graph, order, market, label, exclusions, .. } = request.into_parts();
         let market = match label.as_ref() {
             Some(l) => market
                 .read_labeled(l)

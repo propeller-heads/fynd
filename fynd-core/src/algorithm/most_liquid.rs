@@ -31,7 +31,7 @@ use crate::{
             PoolQuote,
         },
         paths,
-        request::SolveRequest,
+        request::{SolveParts, SolveRequest},
         sim_guard::GuardedProtocolSim,
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
     },
@@ -728,7 +728,8 @@ impl Algorithm for MostLiquidAlgorithm {
         &self,
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let (graph, order, market, label, derived, exclusions) = request.into_parts();
+        let SolveParts { graph, order, market, label, derived, exclusions } =
+            request.into_parts();
         let start = Instant::now();
 
         // Exact-out isn't supported yet
@@ -765,7 +766,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 2: Score and sort all paths by estimated output (higher score = better)
         // No lock needed — scoring uses only local graph data.
-        let mut scored_paths = rank_by_heuristic(graph, all_paths, search.exclusions);
+        let mut scored_paths = rank_by_heuristic(graph, all_paths, &exclusions);
         if scored_paths.is_empty() {
             return Err(no_path(NoPathReason::NoScorablePaths));
         }
@@ -793,7 +794,7 @@ impl Algorithm for MostLiquidAlgorithm {
             amount_in: &amount_in,
             gas_price: &gas_price,
             start,
-            exclusions: search.exclusions,
+            exclusions: &exclusions,
         };
 
         self.solve_for_best_path(&scored_paths, &mut report, &ctx)
