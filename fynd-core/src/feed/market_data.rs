@@ -125,7 +125,7 @@ impl MarketData {
     /// the whole clone. This clones in batches of 512 components, releasing the guard between
     /// batches. A batch whose label differs from the first batch's means the feed advanced
     /// mid-clone; the clone restarts so the returned snapshot stays single-block consistent.
-    /// After three restarts it falls back to one guard for the full set: a feed advancing faster
+    /// After three attempts it falls back to one guard for the full set: a feed advancing faster
     /// than the batched clone completes would otherwise starve it forever.
     ///
     /// No overlay is applied — this reads base data only.
@@ -133,10 +133,23 @@ impl MarketData {
         &self,
         component_ids: &FxHashSet<&ComponentId>,
     ) -> MarketState {
+        self.extract_subset_in_batches(component_ids, 512, || {})
+            .await
+    }
+
+    /// `extract_subset_batched` with the batch size injectable, plus a hook that runs after each
+    /// batch — the window where no guard is held and a feed write can land mid-clone. Tests use
+    /// the two to drive the merge, restart, and fallback paths deterministically.
+    async fn extract_subset_in_batches(
+        &self,
+        component_ids: &FxHashSet<&ComponentId>,
+        batch_size: usize,
+        between_batches: impl Fn(),
+    ) -> MarketState {
         let ids: Vec<&ComponentId> = component_ids.iter().copied().collect();
         'attempt: for _ in 0..3 {
             let mut merged: Option<MarketState> = None;
-            for chunk in ids.chunks(512) {
+            for chunk in ids.chunks(batch_size) {
                 let chunk_ids: FxHashSet<&ComponentId> = chunk.iter().copied().collect();
                 let part = self
                     .data
@@ -152,6 +165,7 @@ impl MarketData {
                         snapshot.merge_subset(part);
                     }
                 }
+                between_batches();
             }
             return merged.unwrap_or_default();
         }
@@ -661,8 +675,9 @@ impl MarketState {
 
     /// Absorbs another subset extracted from the same base state (the caller checks the labels
     /// match), keeping this one's metadata. Component sets from `extract_subset` batches are
-    /// disjoint, so nothing is overwritten.
-    pub fn merge_subset(&mut self, other: MarketState) {
+    /// disjoint, so components and simulation states are never overwritten; a token shared by
+    /// two batches is overwritten with an identical clone from the same base state.
+    fn merge_subset(&mut self, other: MarketState) {
         self.components.extend(other.components);
         self.simulation_states
             .extend(other.simulation_states);
@@ -927,6 +942,97 @@ mod tests {
         assert_eq!(batched.simulation_states.len(), direct.simulation_states.len());
         assert_eq!(batched.tokens.len(), direct.tokens.len());
         assert_eq!(batched.label, direct.label);
+    }
+
+    #[tokio::test]
+    async fn test_extract_subset_batched_multi_chunk() {
+        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
+        let ab = "component_ab".to_string();
+        let bc = "component_bc".to_string();
+        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
+
+        // Batch size 1 puts each component in its own chunk, so the merge path runs.
+        let batched = market_data
+            .extract_subset_in_batches(&ids, 1, || {})
+            .await;
+
+        let direct = market_data
+            .read()
+            .await
+            .extract_subset(&ids);
+        assert!(batched.components.contains_key(&ab));
+        assert!(batched.components.contains_key(&bc));
+        assert!(batched
+            .simulation_states
+            .contains_key(&ab));
+        assert!(batched
+            .simulation_states
+            .contains_key(&bc));
+        assert_eq!(batched.tokens.len(), direct.tokens.len());
+        assert_eq!(batched.label, direct.label);
+    }
+
+    #[tokio::test]
+    async fn test_extract_subset_batched_label_change_mid_clone() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
+        let ab = "component_ab".to_string();
+        let bc = "component_bc".to_string();
+        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
+        // The feed advances once, after the first batch of the first attempt: the second
+        // batch's label mismatch must restart the clone, and the second attempt must read one
+        // consistent post-advance state.
+        let batches_done = AtomicUsize::new(0);
+        let writer = market_data.clone();
+
+        let batched = market_data
+            .extract_subset_in_batches(&ids, 1, || {
+                if batches_done.fetch_add(1, Ordering::SeqCst) == 0 {
+                    writer
+                        .try_write()
+                        .expect("no guard is held between batches")
+                        .label = "advanced".to_string();
+                }
+            })
+            .await;
+
+        assert_eq!(batched.label, "advanced");
+        assert!(batched.components.contains_key(&ab));
+        assert!(batched.components.contains_key(&bc));
+    }
+
+    #[tokio::test]
+    async fn test_extract_subset_batched_fallback_after_three_attempts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
+        let ab = "component_ab".to_string();
+        let bc = "component_bc".to_string();
+        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
+        // The feed advances after every batch, so all three batched attempts restart and the
+        // full-set fallback must still deliver every component under one guard.
+        let bumps = AtomicUsize::new(0);
+        let writer = market_data.clone();
+
+        let batched = market_data
+            .extract_subset_in_batches(&ids, 1, || {
+                let bump = bumps.fetch_add(1, Ordering::SeqCst);
+                writer
+                    .try_write()
+                    .expect("no guard is held between batches")
+                    .label = format!("block_{bump}");
+            })
+            .await;
+
+        assert!(batched.components.contains_key(&ab));
+        assert!(batched.components.contains_key(&bc));
+        assert!(batched
+            .simulation_states
+            .contains_key(&ab));
+        assert!(batched
+            .simulation_states
+            .contains_key(&bc));
     }
 
     // ==================== MarketData overlay tests ====================
