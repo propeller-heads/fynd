@@ -68,6 +68,8 @@ fn should_drop_component(
 /// Every order of one request, in every pool it reaches, wants the same answer, and expanding a
 /// protocol system copies that system's whole component set. The market's component membership is
 /// what the answer depends on, so a cached one stands until a component is added or removed.
+///
+/// Logs what a non-empty filter resolved to, on the one call per generation that resolves it.
 fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<RouteExclusions> {
     let generation = view
         .base_market_state()
@@ -81,10 +83,21 @@ fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<Ro
             return exclusions.clone();
         }
     }
+    let filter = params.route_filter();
     let exclusions = Arc::new(
         view.base_market_state()
-            .resolve_route_filter(params.route_filter()),
+            .resolve_route_filter(filter),
     );
+    if !filter.is_empty() {
+        debug!(
+            component_generation = generation,
+            named_pools = filter.excluded_pools().len(),
+            named_protocols = filter.excluded_protocols().len(),
+            excluded_pools = exclusions.pools.len(),
+            excluded_tokens = exclusions.tokens.len(),
+            "resolved a request's route filter"
+        );
+    }
     *cache = Some((generation, exclusions.clone()));
     exclusions
 }
