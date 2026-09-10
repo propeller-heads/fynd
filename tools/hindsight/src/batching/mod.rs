@@ -394,16 +394,18 @@ impl RecordWriter {
 pub(crate) struct BatchingEngine {
     inputs_dir: PathBuf,
     blocks_captured: u64,
+    blocks_empty: u64,
+    skip_empty: bool,
     chain: ChainTokens,
 }
 
 impl BatchingEngine {
-    pub fn new(dir: &Path, chain: ChainTokens) -> anyhow::Result<Self> {
+    pub fn new(dir: &Path, chain: ChainTokens, skip_empty: bool) -> anyhow::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let inputs_dir = dir.join("inputs");
         std::fs::create_dir_all(&inputs_dir)?;
         std::fs::create_dir_all(dir.join("results"))?;
-        Ok(Self { inputs_dir, blocks_captured: 0, chain })
+        Ok(Self { inputs_dir, blocks_captured: 0, blocks_empty: 0, chain, skip_empty })
     }
 
     /// Capture one block. Must be called while the solver still holds top-of-block state N-1
@@ -415,6 +417,14 @@ impl BatchingEngine {
         trades: &[DecodedTrade],
         solver: &Solver,
     ) -> anyhow::Result<()> {
+        // Nothing decoded means nothing to batch, so the snapshot is pure cost — and on a fast
+        // chain it is the cost that makes the monitor fall behind. Counted, not silent, so the
+        // run still knows how much chain it walked past.
+        if self.skip_empty && trades.is_empty() {
+            self.blocks_empty += 1;
+            return Ok(());
+        }
+
         let market = solver.market_data();
         let derived = solver.derived_data();
 
@@ -441,6 +451,7 @@ impl BatchingEngine {
             orders = snapshot.prepared.len(),
             out_of_universe = snapshot.out_of_universe.len(),
             captured_total = self.blocks_captured,
+            empty_skipped = self.blocks_empty,
             "apex batching: block captured"
         );
         Ok(())

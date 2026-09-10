@@ -131,6 +131,18 @@ pub(crate) struct MonitorArgs {
     /// afterwards
     #[arg(long)]
     pub apex_batching_dir: Option<std::path::PathBuf>,
+
+    /// Capture only blocks whose settled trades the decoder could read, skipping the rest.
+    ///
+    /// A block with no decoded trade contributes nothing to the experiment but still costs a
+    /// snapshot, a ~1 MB dump and a row in every per-block table. On a chain where such blocks
+    /// are the overwhelming majority — Arbitrum runs at ~4 blocks/s and 6.7% of its blocks
+    /// carried a decodable trade over a 125k-block window — capturing them all is what makes the
+    /// queue and the report unusable, and the snapshot work is also what backs the market stream
+    /// up until `FEED_DEAD_TIMEOUT` has to rescue it. Off by default, so a run keeps the
+    /// whole-chain denominator unless it asks not to
+    #[arg(long)]
+    pub apex_skip_empty_blocks: bool,
 }
 
 /// Drives the in-process solver, stepping the chain one block per `SteppingSolver::advance`.
@@ -712,9 +724,10 @@ fn build_apex_batching(
     let Some(dir) = cfg.apex_batching_dir.as_ref() else {
         return Ok(None);
     };
-    let engine = crate::batching::BatchingEngine::new(dir, chain)?;
+    let engine = crate::batching::BatchingEngine::new(dir, chain, cfg.apex_skip_empty_blocks)?;
     info!(
         dir = %dir.display(),
+        skip_empty_blocks = cfg.apex_skip_empty_blocks,
         "apex batching capture enabled; solve the queue with `hindsight apex-solve`"
     );
     Ok(Some(engine))

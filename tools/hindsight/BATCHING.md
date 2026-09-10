@@ -39,6 +39,16 @@ RPC_URL=https://... TYCHO_API_KEY=... \
   --s2-deadline-ms 6000 --s1-deadline-ms 6000 --s1-workers 4 --follow
 ```
 
+On a fast chain, add `--apex-skip-empty-blocks` to A. A block whose settled trades the decoder
+could not read contributes nothing but still costs a snapshot, a ~1 MB dump and a row in every
+per-block table of the report. On Ethereum that is a minor waste; on Arbitrum, where blocks
+arrive ~4x a second and ~87% of them carry no decodable trade, it is the difference between a
+usable run and an unusable one — and the snapshot work is also what backs the market stream up
+until it unsubscribes ("Buffer full, unsubscribing!") and capture stalls, which is what happened
+to cycle8. It is off by default, so a run keeps the whole-chain denominator unless it asks not to;
+when it is on, each captured block's log line carries `empty_skipped`, the running count of blocks
+walked past.
+
 `--follow` keeps B polling for new dumps while A is still running; without it B exits once the
 queue is empty. B is resumable and idempotent: it reads `apex-blocks.jsonl` on startup and
 skips blocks that already have records, so it can be stopped and restarted freely, and a
