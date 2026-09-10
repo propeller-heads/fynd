@@ -462,7 +462,9 @@ impl FyndRPC {
                 computation_manager_handle.abort();
             }
             _ = &mut feed_handle => {
-                // Feed handle completed, which means it errored (feed.run() only returns on error)
+                // The feed task only ends when its stream died (run() returns Err on any stream
+                // end). It is never respawned, so exit non-zero like the computation-manager
+                // arm — k8s must record a crash, not `Completed`.
                 error!("Tycho feed error detected, shutting down solver");
                 server_handle.stop(true).await;
                 server_task.await.ok();
@@ -470,6 +472,7 @@ impl FyndRPC {
                 let _ = computation_shutdown_tx.send(());
                 computation_manager_handle.abort();
                 info!("shutting down: feed error path");
+                fatal_error = Some(std::io::Error::other("tycho feed stopped"));
             }
             _ = &mut gas_price_worker_handle => {
                 // Gas price worker completed, which means it errored
@@ -480,6 +483,7 @@ impl FyndRPC {
                 let _ = computation_shutdown_tx.send(());
                 computation_manager_handle.abort();
                 info!("shutting down: gas price error path");
+                fatal_error = Some(std::io::Error::other("gas price worker stopped"));
             }
             _ = &mut computation_manager_handle => {
                 // The derived-data pipeline task ended (event channel closed, shutdown, or a
