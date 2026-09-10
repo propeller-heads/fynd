@@ -90,6 +90,52 @@ hub_tokens = [
 "0xc873fecbd354f5a56e00e710b90ef4201db2448d" = "camelot"
 "0x1f721e2e82f6676fce4ea07a5958cf098d339e18" = "camelot"
 
+# --- Added 2026-09-08, from a measured coverage sweep -------------------------------------------
+# Method: over 3000 contiguous blocks (503100000-503102999) every transaction emitting a DEX swap
+# event was grouped by `tx.to` and split on whether the sender itself paid or received a token (a
+# user leg) — an arbitrage bot moves tokens pool-to-pool and never touches its sender. 2240 swap
+# transactions: 388 already matched this book, 1720 were bots, and 132 were user-leg swaps through
+# the entry points below. So the gap cycle8's README read as missing aggregators is mostly
+# arbitrage traffic, which this experiment does not want; what was genuinely missing is here.
+#
+# Each address was checked to have code, and identified by its own bytecode where it could be:
+# quoted strings are verbatim from the deployed contract.
+
+# Another Uniswap Universal Router deployment — its bytecode contains "UniversalRouter", and it
+# carried 12 user-leg swaps (11 senders) in the sweep, the largest single gap in mainstream tokens.
+"0x8b844f885672f333bc0042cb669255f93a4c1e6b" = "uniswap"
+# A further OKX DEX router: bytecode carries OKX's own markers ("v1.0.10-rfq-anti-arbitrage",
+# "invalid commission flag", "invalid referrer num"). 7 user-leg swaps, 6 senders.
+"0x09f94b5fc68e227c323a6fbae3bd98c97fd8c849" = "okx"
+# SushiSwap V2 Router02 — confirmed by `factory()` = 0xc35dadb6…, Sushi's V2 factory. 6 swaps.
+"0x1b02da8cb0d097eb8d57a175b88c7d8b47997506" = "sushiswap"
+# OpenOcean's exchange proxy, the same address it deploys on most chains (a
+# TransparentUpgradeableProxy here). Only 1 swap in the sweep, but the flow is real.
+"0x6352a56caadc4f1e25cd6c75970fa768a3304e64" = "openocean"
+# Aggregators and DEXes that carry Arbitrum volume but happened not to appear in the 12-minute
+# sweep. Each is deployed (checked), and named by bytecode where the bytecode says so; they only
+# add coverage, since an address nothing enters through costs nothing.
+"0xa669e7a0d4b3e4fa48af2de86bd4cd7126be4e13" = "odos"      # Odos router V2
+"0xb4315e873dbcf96ffd0acd8ea43f689d8c20fb30" = "lfj"       # LFJ (Trader Joe) LBRouter
+"0x88cbf433471a0cd8240d2a12354362988b4593e5" = "dodo"      # "DODOV2Proxy02" in bytecode
+"0xbbbbbbb520d69a9775e85b458c58c648259fad5f" = "bebop"     # Bebop RFQ settlement
+"0xaaa87963efeb6f7e0a2711f397663105acb1805e" = "ramses"    # Ramses (solidly fork) router proxy
+"0xb32c79a25291265ef240eb32e9fabbc6dcee3ce3" = "yieldyak"  # "YakRouter" in bytecode
+#
+# Deliberately NOT added, though they carry user-leg swaps:
+#   0x5eb6543d20015e68c4674fba2ce2273d16ad51b7 (51 swaps, 48 senders) and
+#   0x82dfd2b94222bdb603aa6b34a8d37311ab3db800 (5 swaps) are single-pair routers over launchpad
+#   AMMs (the first one's factory is a monolithic AMM whose bytecode says "No mint in same block
+#   as swap"; both traded exactly one pair against USD₮0). Tycho does not index those pools, so
+#   their trades would enter the batching experiment only as out-of-universe orders and would
+#   inflate the order count without adding anything to batch.
+#   0x97ccdbea4632140639ad5ea9b944aa034eb15fd4 (4 swaps) is Across Protocol's swap-and-bridge
+#   periphery ("SwapAndDepositData", "spokePool" in its bytecode) — the output leaves the chain,
+#   which is what the solver vetoes exist to exclude.
+#   0x9dda6ef3d919c9bc8885d5560999a3640431e8e6 (5 swaps) is an adapter-registry aggregator
+#   ("ADAPTER_EXISTS", "ADAPTER_REMOVED") that could not be tied to a named protocol; every other
+#   entry in this book is identified, so it stays out until it is.
+
 # Venues. Relay's Arbitrum contracts and fee collector are the same addresses as mainnet; its
 # routers are the Cancun-EVM deployment. Verified live: 106 fee legs to 0xf70da978… in a 20k-block
 # sample, and the router that funds Relay's fills is the same solver address as on mainnet.
