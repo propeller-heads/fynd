@@ -91,7 +91,6 @@ members = [
     "tools/common",
     "tools/fynd-swap-cli",
     "tools/fynd-gas-audit",
-    "tools/hindsight",
     "tools/record-market",
     "test-fixtures",
 ]
