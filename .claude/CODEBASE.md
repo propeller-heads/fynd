@@ -87,7 +87,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 5. `WorkerPoolRouter` collects results, ranks candidates by `amount_out_net_gas` descending; if price guard is enabled it validates in rank order
 6. If `EncodingOptions` provided, `Encoder` produces ABI-encoded calldata, one order at a time: an
    order that fails to encode gets `QuoteStatus::FailedEncoding` and no transaction, and the other
-   orders keep theirs. The call fails only when no order encodes at all
+   orders keep theirs. Callers read the per-order status, as they do for `NoRouteFound`
 7. Returns `Quote` response
 
 ### Threading Model
