@@ -246,8 +246,8 @@ impl Encoder {
     ///
     /// Each order is encoded on its own: an order that fails keeps its route and amounts, gets
     /// [`QuoteStatus::FailedEncoding`] and no transaction, while every other order in the request
-    /// keeps its calldata. When no order encodes at all, the first failure is returned as an error,
-    /// so a single-order request still fails the whole call.
+    /// keeps its calldata. A caller reads the per-order status, as it already does for
+    /// [`QuoteStatus::NoRouteFound`] and [`QuoteStatus::PriceCheckFailed`].
     ///
     /// # Arguments
     /// * `quotes` - The winning quote of every order in the request.
@@ -257,8 +257,8 @@ impl Encoder {
     /// The input quotes, with the encoded transaction added to each order that encoded.
     ///
     /// # Errors
-    /// Returns [`SolveError::EncodingUnavailable`] on a chain with no Tycho router, and
-    /// [`SolveError::FailedEncoding`] when every order that had a route failed to encode.
+    /// Returns [`SolveError::EncodingUnavailable`] on a chain with no Tycho router. A failure that
+    /// belongs to one order never fails the call.
     pub async fn encode(
         &self,
         mut quotes: Vec<OrderQuote>,
@@ -299,7 +299,6 @@ impl Encoder {
             .encode_prepared_solutions(tycho_encoder, &to_encode)
             .await?;
 
-        let mut encoded_count = 0usize;
         for (encoded_solution, (idx, solution, fee_breakdown, fee_rates)) in encoded_solutions
             .into_iter()
             .zip(to_encode)
@@ -320,26 +319,16 @@ impl Encoder {
                     quotes[idx].set_gas_estimate(gas_estimate);
                     quotes[idx].set_transaction(transaction);
                     quotes[idx].set_fee_breakdown(fee_breakdown);
-                    encoded_count += 1;
                 }
                 Err(e) => failures.push((idx, SolveError::FailedEncoding(e.to_string()))),
             }
-        }
-
-        // Nothing encoded: the caller asked for calldata and gets none, so report it as the error
-        // it has always been rather than as a quote with no transaction.
-        if encoded_count == 0 {
-            if let Some((_, first_failure)) = failures.into_iter().next() {
-                return Err(first_failure);
-            }
-            return Ok(quotes);
         }
 
         for (idx, error) in failures {
             tracing::warn!(
                 order_id = %quotes[idx].order_id(),
                 %error,
-                "encoding failed for this order; the other orders keep their calldata"
+                "encoding failed for this order; it is returned without a transaction"
             );
             counter!("encoding_failures_total").increment(1);
             quotes[idx].set_status(QuoteStatus::FailedEncoding);
@@ -1206,9 +1195,11 @@ mod tests {
 
         let result = encoder
             .encode(vec![quote], EncodingOptions::new(0.01))
-            .await;
+            .await
+            .expect("a failing order is reported on the order, not on the call");
 
-        assert!(result.is_err(), "expected fail-fast error for unsigned exclusive leg");
+        assert_eq!(result[0].status(), QuoteStatus::FailedEncoding);
+        assert!(result[0].transaction().is_none(), "an unsigned exclusive leg must not be encoded");
     }
 
     #[test]
@@ -1363,12 +1354,15 @@ mod tests {
             quote_on_protocol("also_fails", "no_such_protocol"),
         ];
 
-        let err = encoder
+        let result = encoder
             .encode(quotes, EncodingOptions::new(0.01))
             .await
-            .expect_err("a request that encodes nothing must fail");
+            .expect("a failing order is reported on the order, not on the call");
 
-        assert!(matches!(err, SolveError::FailedEncoding(_)), "{err:?}");
+        for quote in result {
+            assert_eq!(quote.status(), QuoteStatus::FailedEncoding);
+            assert!(quote.transaction().is_none());
+        }
     }
 
     #[tokio::test]
@@ -1452,16 +1446,21 @@ mod tests {
         let quote = make_order_quote(1_000_000_000)
             .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
 
+        let opts = EncodingOptions::new(1.0);
         let err = encoder
-            .encode(vec![quote], EncodingOptions::new(1.0))
-            .await
+            .prepare_solution(&quote, &opts, &encoder.router_fees().snapshot())
             .expect_err("100% slippage leaves nothing for the router's floor");
-
         assert!(
             err.to_string()
                 .contains("minimum amount out is zero"),
             "got {err:?}"
         );
+
+        let result = encoder
+            .encode(vec![quote], opts)
+            .await
+            .expect("a failing order is reported on the order, not on the call");
+        assert_eq!(result[0].status(), QuoteStatus::FailedEncoding);
     }
 
     #[tokio::test]
@@ -1739,15 +1738,20 @@ mod tests {
         let opts = EncodingOptions::new(0.01).with_disable_slippage_taking(true);
 
         let err = encoder
-            .encode(vec![quote], opts)
-            .await
-            .expect_err("encoding must fail fast without a signing key");
-
+            .prepare_solution(&quote, &opts, &encoder.router_fees().snapshot())
+            .expect_err("encoding must fail without a signing key");
         assert!(
             err.to_string()
                 .contains(ENV_DISABLE_SLIPPAGE_TAKING_KEY),
             "error must name the missing env var, got {err:?}"
         );
+
+        let result = encoder
+            .encode(vec![quote], opts)
+            .await
+            .expect("a failing order is reported on the order, not on the call");
+        assert_eq!(result[0].status(), QuoteStatus::FailedEncoding);
+        assert!(result[0].transaction().is_none());
     }
 
     #[tokio::test]
