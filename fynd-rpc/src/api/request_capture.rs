@@ -3,7 +3,7 @@
 
 use fynd_core::{
     types::RouteRejection, EncodingOptions, ExclusiveAccess, NoPathReason, OrderSide, QuoteRequest,
-    QuoteStatus, SolveError,
+    QuoteStatus, RouteExclusionFilter, SolveError,
 };
 use serde::Serialize;
 use tracing::{info, warn};
@@ -32,13 +32,56 @@ struct ReplayOptions {
     min_responses: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_gas: Option<String>,
+    #[serde(skip_serializing_if = "ReplayExclusionRouteFilter::is_empty")]
+    route_filter: ReplayExclusionRouteFilter,
+}
+
+/// The liquidity a captured request excluded, sorted so two captures of one request read alike.
+#[derive(Debug, Serialize)]
+struct ReplayExclusionRouteFilter {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    exclude_pools: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    exclude_protocols: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    exclude_tokens: Vec<String>,
+}
+
+impl ReplayExclusionRouteFilter {
+    fn capture(filter: &RouteExclusionFilter) -> Self {
+        let mut pools: Vec<String> = filter
+            .excluded_pools()
+            .iter()
+            .cloned()
+            .collect();
+        let mut protocols: Vec<String> = filter
+            .excluded_protocols()
+            .iter()
+            .cloned()
+            .collect();
+        let mut tokens: Vec<String> = filter
+            .excluded_tokens()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        pools.sort_unstable();
+        protocols.sort_unstable();
+        tokens.sort_unstable();
+        Self { exclude_pools: pools, exclude_protocols: protocols, exclude_tokens: tokens }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.exclude_pools.is_empty() &&
+            self.exclude_protocols.is_empty() &&
+            self.exclude_tokens.is_empty()
+    }
 }
 
 /// Owned, routing-essential view of a whole quote request.
 ///
 /// Captured (the fields that determine the route): per order `token_in`,
 /// `token_out`, `amount`, `side`; plus the solve options `timeout_ms`,
-/// `min_responses`, `max_gas`; plus `exclusive_access` — the access the
+/// `min_responses`, `max_gas`, `route_filter`; plus `exclusive_access` — the access the
 /// authenticating proxy granted, which decides the worker pool allocation —
 /// and `disable_slippage_taking`, which decides what the encoder signs into
 /// the calldata. Everything else is dropped: the rest of `encoding_options`
@@ -89,6 +132,7 @@ impl ReplayRequest {
                 max_gas: options
                     .max_gas()
                     .map(ToString::to_string),
+                route_filter: ReplayExclusionRouteFilter::capture(options.route_filter()),
             },
             exclusive_access: access == ExclusiveAccess::Granted,
             disable_slippage_taking: options
@@ -166,6 +210,7 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
             Some(_) | None => "graph/other",
         },
         SolveError::RouteRejected { reason, .. } => match reason {
+            RouteRejection::PammFallbackExcluded => "route/pamm_fallback_excluded",
             RouteRejection::PammFeeTiersUnread => "route/pamm_fee_tiers_unread",
             RouteRejection::PammFallbackPoolMissing => "route/pamm_fallback_pool_missing",
             RouteRejection::PammFallbackUnpriceable => "route/pamm_fallback_unpriceable",
@@ -387,6 +432,24 @@ mod tests {
         assert_eq!(options["max_gas"], "500000");
     }
 
+    /// The filter decides the route, so a replay has to see what the original request excluded.
+    #[test]
+    fn test_replay_json_with_a_route_filter() {
+        let filter = fynd_rpc_types::RouteFilter::default()
+            .with_excluded_pools(["pool-1".to_string()])
+            .with_excluded_protocols(["uniswap_v2".to_string()]);
+        let options = QuoteOptions::default().with_route_filter(filter);
+        let request = QuoteRequest::new(vec![order()]).with_options(options);
+
+        let json = replay_json(request, ExclusiveAccess::Denied);
+        let value: Value = serde_json::from_str(&json).unwrap();
+        let captured = &value["options"]["route_filter"];
+
+        assert_eq!(captured["exclude_pools"], serde_json::json!(["pool-1"]));
+        assert_eq!(captured["exclude_protocols"], serde_json::json!(["uniswap_v2"]));
+        assert!(captured.get("exclude_tokens").is_none(), "an empty list is left out");
+    }
+
     #[test]
     fn replay_json_output_keys_are_allowlisted() {
         let req = request_with_signatures();
@@ -415,7 +478,7 @@ mod tests {
             !options.contains_key("encoding_options"),
             "encoding_options leaked into replay log; json: {json}"
         );
-        let options_allowlist = ["timeout_ms", "min_responses", "max_gas"];
+        let options_allowlist = ["timeout_ms", "min_responses", "max_gas", "route_filter"];
         for key in options.keys() {
             assert!(
                 options_allowlist.contains(&key.as_str()),

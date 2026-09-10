@@ -18,7 +18,7 @@ use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
     derived::types::TokenGasPrices,
     feed::market_data::{MarketData, MarketDataView, MarketState},
-    graph::{GraphError, GraphQueryFilter, Path, TokenPath, TopologyGraph},
+    graph::{GraphError, Path, RouteSearch, TokenPath, TopologyGraph},
     types::{ComponentId, Route, RouteResult, Swap},
     AlgorithmError, StateLabel,
 };
@@ -31,19 +31,19 @@ use crate::{
 /// # Errors
 ///
 /// [`AlgorithmError::NoPath`] naming whichever of the two tokens the graph does not hold.
-#[instrument(level = "debug", skip(graph, filter))]
+#[instrument(level = "debug", skip(graph, search))]
 pub fn find_paths<'a, D>(
     graph: &'a TopologyGraph<D>,
     from: &Address,
     to: &Address,
-    filter: &GraphQueryFilter,
+    search: RouteSearch<'_>,
     max_paths_per_sequence: Option<usize>,
 ) -> Result<Vec<Path<'a, D>>, AlgorithmError> {
-    let token_paths = find_token_paths(graph, from, to, filter)?;
+    let token_paths = find_token_paths(graph, from, to, search)?;
 
     let mut paths = Vec::new();
     for token_path in &token_paths {
-        paths.extend(graph.expand_path(token_path, max_paths_per_sequence));
+        paths.extend(graph.expand_path(token_path, max_paths_per_sequence, search.exclusions));
     }
 
     Ok(paths)
@@ -61,10 +61,10 @@ pub fn find_token_paths<D>(
     graph: &TopologyGraph<D>,
     from: &Address,
     to: &Address,
-    filter: &GraphQueryFilter,
+    search: RouteSearch<'_>,
 ) -> Result<Vec<TokenPath>, AlgorithmError> {
     graph
-        .paths_between(from, to, filter)
+        .paths_between(from, to, search)
         .map_err(|error| AlgorithmError::NoPath {
             from: from.clone(),
             to: to.clone(),
@@ -280,7 +280,8 @@ mod tests {
             fixtures::{addrs, linear_graph},
             market_read, setup_market_weighted, token, MockProtocolSim,
         },
-        graph::{GraphManager, TopologyGraphManager},
+        graph::{GraphManager, GraphQueryFilter, TopologyGraphManager},
+        types::RouteExclusions,
     };
 
     /// A filter with the hop budget a case needs and no connector restriction.
@@ -300,7 +301,14 @@ mod tests {
             .unwrap();
 
         let graph = m.graph();
-        let paths = find_paths(graph, &a, &c, &hops(2, 2), None).unwrap();
+        let paths = find_paths(
+            graph,
+            &a,
+            &c,
+            RouteSearch { bounds: &hops(2, 2), exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
         assert_eq!(paths.len(), 1);
         let path = &paths[0];
 
@@ -321,7 +329,14 @@ mod tests {
         let (a, b, _, _) = addrs();
         let m = linear_graph();
         let graph = m.graph();
-        let paths = find_paths(graph, &a, &b, &hops(1, 1), None).unwrap();
+        let paths = find_paths(
+            graph,
+            &a,
+            &b,
+            RouteSearch { bounds: &hops(1, 1), exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
         assert_eq!(paths.len(), 1);
         assert!(try_score_path(&paths[0]).is_none());
     }
@@ -342,7 +357,14 @@ mod tests {
 
         let graph = m.graph();
         // Find A->B->A paths (circular, 2 hops)
-        let paths = find_paths(graph, &a, &a, &hops(2, 2), None).unwrap();
+        let paths = find_paths(
+            graph,
+            &a,
+            &a,
+            RouteSearch { bounds: &hops(2, 2), exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
 
         // Should find at least one path
         assert_eq!(paths.len(), 1);
@@ -366,7 +388,13 @@ mod tests {
         let from = if from_exists { a } else { non_existent.clone() };
         let to = if to_exists { b } else { non_existent };
 
-        let result = find_paths(g, &from, &to, &hops(1, 3), None);
+        let result = find_paths(
+            g,
+            &from,
+            &to,
+            RouteSearch { bounds: &hops(1, 3), exclusions: &RouteExclusions::default() },
+            None,
+        );
 
         assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
     }
@@ -391,8 +419,14 @@ mod tests {
         )]);
 
         let filter = hops(1, 1);
-        let paths =
-            find_paths(manager.graph(), &token_a.address, &token_b.address, &filter, None).unwrap();
+        let paths = find_paths(
+            manager.graph(),
+            &token_a.address,
+            &token_b.address,
+            RouteSearch { bounds: &filter, exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
         let path = paths.into_iter().next().unwrap();
 
         let result = simulate_pool_path(
@@ -421,8 +455,14 @@ mod tests {
         ]);
 
         let filter = hops(2, 2);
-        let paths =
-            find_paths(manager.graph(), &token_a.address, &token_c.address, &filter, None).unwrap();
+        let paths = find_paths(
+            manager.graph(),
+            &token_a.address,
+            &token_c.address,
+            RouteSearch { bounds: &filter, exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
         let path = paths.into_iter().next().unwrap();
 
         let result = simulate_pool_path(
@@ -458,8 +498,14 @@ mod tests {
         // A->B->A path requires min_hops=2, max_hops=2
         // Since the graph is bidirectional, we should get A->B->A path
         let filter = hops(2, 2);
-        let paths =
-            find_paths(manager.graph(), &token_a.address, &token_a.address, &filter, None).unwrap();
+        let paths = find_paths(
+            manager.graph(),
+            &token_a.address,
+            &token_a.address,
+            RouteSearch { bounds: &filter, exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
 
         // Should only contain the A->B->A path
         assert_eq!(paths.len(), 1);
@@ -505,7 +551,14 @@ mod tests {
 
         let graph = manager.graph();
         let filter = hops(2, 2);
-        let paths = find_paths(graph, &token_a.address, &token_c.address, &filter, None).unwrap();
+        let paths = find_paths(
+            graph,
+            &token_a.address,
+            &token_c.address,
+            RouteSearch { bounds: &filter, exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
         let path = paths.into_iter().next().unwrap();
 
         let result =
@@ -531,7 +584,14 @@ mod tests {
 
         let graph = manager.graph();
         let filter = hops(1, 1);
-        let paths = find_paths(graph, &token_a.address, &token_b.address, &filter, None).unwrap();
+        let paths = find_paths(
+            graph,
+            &token_a.address,
+            &token_b.address,
+            RouteSearch { bounds: &filter, exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
         let path = paths.into_iter().next().unwrap();
 
         let result = simulate_pool_path(

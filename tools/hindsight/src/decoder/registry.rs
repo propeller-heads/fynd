@@ -529,11 +529,12 @@ mod tests {
     }
 
     #[test]
-    fn test_binance_router_is_a_venue_on_ethereum_and_base() {
-        // The router is deployed at one address per chain and enters LiquidMesh's flow on both, so
-        // a book missing it labels those records with the raw address.
+    fn test_binance_router_is_a_venue_where_liquidmesh_settles() {
+        // The router is deployed at one address per chain and is the entry point for most of
+        // LiquidMesh's flow on each, so a book missing it labels those records with the raw
+        // address.
         let router = address!("0xb300000b72deaeb607a12d5f54773d1c19c7028d");
-        for chain in [Chain::Ethereum, Chain::Base] {
+        for chain in [Chain::Ethereum, Chain::Base, Chain::Arbitrum, Chain::Polygon] {
             let registry = Registry::builtin(chain).unwrap();
             assert_eq!(
                 registry.venue_name(router),
@@ -544,18 +545,65 @@ mod tests {
     }
 
     #[test]
-    fn test_client_fee_wallets_on_ethereum_and_base() {
-        // Trust Wallet, ShapeShift and Vultisig route through shared routers on both chains and
-        // use one fee wallet per venue across them, so a wallet listed on one book only would
-        // leave that chain's trades unlabelled and its fee inside the amounts.
-        let wallets = [
-            (address!("0x73691cee20db22f55a6fd0d5948ab00e0fb973b1"), "trustwallet"),
-            (address!("0xf5aa59151be6515c4ca68a0282cf68b3ea4846fc"), "shapeshift"),
-            (address!("0x8e247a480449c84a5fdd25974a8501f3efa4abb9"), "vultisig"),
+    fn test_shared_router_solvers_where_they_settle() {
+        // Both routers are deployed at one address per chain and neither declares its swap in
+        // calldata, so `solvers/liquidmesh.rs` and `solvers/butter.rs` read their events instead —
+        // which they only reach through the book. A chain missing the entry nets those trades or
+        // drops them: before Arbitrum was added, 1% of Butter's transactions and 6% of
+        // LiquidMesh's produced a record. Each list is the chains whose book carries the router;
+        // Polygon has no `butter` entry because that flow stopped there.
+        let routers = [
+            (
+                address!("0x3d90f66b534dd8482b181e24655a9e8265316be9"),
+                "liquidmesh",
+                &[Chain::Ethereum, Chain::Base, Chain::Arbitrum, Chain::Polygon][..],
+            ),
+            (
+                address!("0xee0319cf0bca5d09333f9f6277743e8de31bd69a"),
+                "butter",
+                &[Chain::Ethereum, Chain::Base, Chain::Arbitrum][..],
+            ),
         ];
-        for chain in [Chain::Ethereum, Chain::Base] {
-            let registry = Registry::builtin(chain).unwrap();
-            for (wallet, venue) in wallets {
+        for (router, name, chains) in routers {
+            for chain in chains {
+                let registry = Registry::builtin(*chain).unwrap();
+                assert_eq!(
+                    registry
+                        .solver(router)
+                        .map(|solver| solver.name.as_str()),
+                    Some(name),
+                    "{chain} does not name {router} as {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_client_fee_wallets_where_their_router_settles() {
+        // These venues route through shared routers and use one fee wallet each across chains, so
+        // a wallet missing from a book whose chain carries its flow leaves those trades unlabelled
+        // and the fee inside the amounts. Each list is the chains where the wallet was seen
+        // collecting; the other books omit it on purpose.
+        let wallets = [
+            (
+                address!("0x73691cee20db22f55a6fd0d5948ab00e0fb973b1"),
+                "trustwallet",
+                &[Chain::Ethereum, Chain::Base, Chain::Arbitrum, Chain::Polygon][..],
+            ),
+            (
+                address!("0xf5aa59151be6515c4ca68a0282cf68b3ea4846fc"),
+                "shapeshift",
+                &[Chain::Ethereum, Chain::Base][..],
+            ),
+            (
+                address!("0x8e247a480449c84a5fdd25974a8501f3efa4abb9"),
+                "vultisig",
+                &[Chain::Ethereum, Chain::Base][..],
+            ),
+        ];
+        for (wallet, venue, chains) in wallets {
+            for chain in chains {
+                let registry = Registry::builtin(*chain).unwrap();
                 assert!(
                     registry.is_fee_collector(wallet),
                     "{chain} does not know {wallet} as a fee wallet"

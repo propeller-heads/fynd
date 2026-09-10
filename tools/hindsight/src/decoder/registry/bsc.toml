@@ -63,6 +63,9 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x9008d19f58aabd9ed0d60971565aa8510560ab41" = "cow"
 # ParaSwap Augustus v6.2 (same address as mainnet)
 "0x6a000f20005980200259b80c5102003040001068" = "paraswap"
+# ParaSwap Augustus v5 (same address as mainnet) — 77 transactions in a one-day sample
+# (2026-09-08). `solvers/paraswap.rs` reads its four route entries.
+"0xdef171fe48cf0115b1d80b88dc8eab59176fee57" = "paraswap"
 # KyberSwap MetaAggregationRouter v2 (same address as mainnet)
 "0x6131b5fae19ea4f9d964eac0408e4408b66337b5" = "kyberswap"
 # LiFi Diamond (same address as mainnet)

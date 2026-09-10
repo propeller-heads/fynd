@@ -1,4 +1,44 @@
 
+## [0.104.0](https://github.com/propeller-heads/fynd/compare/0.103.0...0.104.0) (2026-09-09)
+
+### Features
+
+* **clients:** expose the route filter ([12d68e3](https://github.com/propeller-heads/fynd/commit/12d68e3966640ccc134e8bbfaa46abed7455f18e))
+* **rpc:** let a request say what it will not route through ([025ffe5](https://github.com/propeller-heads/fynd/commit/025ffe55712c734d83abf7998c761baccdd1106b))
+* **core:** give an algorithm one request that says what it may not use ([3ec9978](https://github.com/propeller-heads/fynd/commit/3ec9978d56b734b80079a190d9a4e66e73325dfc))
+* **core:** log what a request's route filter resolved to ([b702fed](https://github.com/propeller-heads/fynd/commit/b702fed55b0f48e5a788332d86522e53c9252088))
+* **core:** resolve and enforce a request's exclusions in the worker ([71772e8](https://github.com/propeller-heads/fynd/commit/71772e82628feaf3164015d255f4bd64c16a9ccb))
+* **core:** name the liquidity a request excludes from a route ([9423371](https://github.com/propeller-heads/fynd/commit/9423371e86e0d3ed4ad61c04ccbcefe540a2929f))
+* **core:** index market components by protocol system ([67eedcd](https://github.com/propeller-heads/fynd/commit/67eedcdbdc7543c0a8ea404c9ac605a5292aac30))
+
+### Bug Fixes
+
+* **core:** give pair_has_allowed_pool one answer for an unconnected pair ([682b014](https://github.com/propeller-heads/fynd/commit/682b0146c6bdad6e2370454fa4d346bc73966bfb))
+
+### Performance Improvements
+
+* **core:** keep a leg a slice unless the request excludes one of its pools ([ed5112f](https://github.com/propeller-heads/fynd/commit/ed5112f6c93342ad30ed59a70fa2ca13cdc66f2f))
+* **core:** skip snapshotting state for pools the solve refuses ([f1a72d3](https://github.com/propeller-heads/fynd/commit/f1a72d36ba768fac7ea7767d4ceb5438528d40f4))
+
+
+## [0.103.0](https://github.com/propeller-heads/fynd/compare/0.102.3...0.103.0) (2026-09-08)
+
+### Features
+
+* support new Robinhood protocols ([f8537ea](https://github.com/propeller-heads/fynd/commit/f8537ea892f43f47d1caa7e7f3d48bf8737cba0b))
+* **ci:** tell the downstream deployment repository about a release ([bb48446](https://github.com/propeller-heads/fynd/commit/bb4844633ebe419ad8097eb5183953f0be6ec1e7))
+
+### Bug Fixes
+
+* **core:** give a simulated swap four times the estimated gas ([35d3136](https://github.com/propeller-heads/fynd/commit/35d31362bfa865576c8f44569232d7a38de3863a))
+* **core:** decide pAMMs against the event the market broadcast ([e0f0afb](https://github.com/propeller-heads/fynd/commit/e0f0afba59294e6fc261c1a2a82a17cccb93df2c))
+* **core:** withhold a pAMM only for the reason this rule owns ([714cd52](https://github.com/propeller-heads/fynd/commit/714cd52538f62e54bc14e3921d8054560a476b39))
+* **core:** give each pAMM one state, not two set memberships ([720ddbf](https://github.com/propeller-heads/fynd/commit/720ddbf2c6d7a5f47e237990319195646b066b7d))
+* **core:** keep a forgotten pAMM out of the graph ([91f61da](https://github.com/propeller-heads/fynd/commit/91f61da770d65017b12a0f676cea0209af008f25))
+* **core:** let a withheld pAMM back into the graph ([007ffcf](https://github.com/propeller-heads/fynd/commit/007ffcf7e2730708cba51cc7acd153dcd423e9b3))
+* **core:** keep an unbacked pAMM out of the worker's graph ([4d67050](https://github.com/propeller-heads/fynd/commit/4d67050532cfe922f710053b3f9e83f4ad2b41d2))
+
+
 ## [0.102.3](https://github.com/propeller-heads/fynd/compare/0.102.2...0.102.3) (2026-09-04)
 
 ### Bug Fixes

@@ -86,11 +86,16 @@ pub enum RouteRejection {
     /// The route has a `propammfallback:` leg whose Uniswap V3 fallback exists but could not be
     /// simulated.
     PammFallbackUnpriceable,
+    /// The request excludes the Uniswap V3 pool used by a pAMM fallback.
+    PammFallbackExcluded,
 }
 
 impl std::fmt::Display for RouteRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PammFallbackExcluded => {
+                write!(f, "pAMM route dropped: request excludes its fallback pool")
+            }
             Self::PammFeeTiersUnread => write!(f, "pAMM route dropped: fee tiers not read yet"),
             Self::PammFallbackPoolMissing => {
                 write!(f, "pAMM route dropped: no Uniswap V3 pool at the fee tier")

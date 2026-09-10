@@ -53,6 +53,9 @@ batch_settlers = ["0x9008d19f58aabd9ed0d60971565aa8510560ab41"]
 "0x9008d19f58aabd9ed0d60971565aa8510560ab41" = "cow"
 # ParaSwap Augustus v6.2
 "0x6a000f20005980200259b80c5102003040001068" = "paraswap"
+# ParaSwap Augustus v5 — still live alongside v6.2: 62 transactions in a one-day sample
+# (2026-09-08). `solvers/paraswap.rs` reads its four route entries.
+"0xdef171fe48cf0115b1d80b88dc8eab59176fee57" = "paraswap"
 # Uniswap Universal Router v1.2, 2.0 and 2.1.1 (`execute`, selector 0x3593564c). Addresses per
 # chain from developers.uniswap.org's supported-chains table.
 "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad" = "uniswap"

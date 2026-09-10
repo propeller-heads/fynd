@@ -31,13 +31,16 @@ use crate::{
             PoolQuote,
         },
         paths,
+        request::{SolveParts, SolveRequest},
         sim_guard::GuardedProtocolSim,
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
     },
-    derived::{computation::ComputationRequirements, types::TokenGasPrices, SharedDerivedDataRef},
+    derived::{computation::ComputationRequirements, types::TokenGasPrices},
     feed::market_data::{MarketData, MarketState, StateLabel},
-    graph::{GraphQueryFilter, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES},
-    types::{ComponentId, Order, Route, RouteResult, Swap},
+    graph::{
+        GraphQueryFilter, RouteSearch, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES,
+    },
+    types::{ComponentId, Route, RouteExclusions, RouteResult, Swap},
     AlgorithmError,
 };
 
@@ -73,6 +76,8 @@ type LegTokens<'a> = (&'a Token, &'a Token, Option<&'a Price>);
 struct SolveContext<'a> {
     graph: &'a TopologyGraph<DepthAndPrice>,
     market: &'a MarketState,
+    /// The pools and tokens this request excludes, checked before a pool is simulated.
+    exclusions: &'a RouteExclusions,
     token_prices: Option<&'a TokenGasPrices>,
     amount_in: &'a BigUint,
     /// What a unit of gas costs, read once off the market snapshot.
@@ -487,6 +492,7 @@ impl MostLiquidAlgorithm {
         market: MarketData,
         label: Option<StateLabel>,
         scored_paths: &[(TokenPath, f64)],
+        exclusions: &RouteExclusions,
     ) -> Result<MarketState, AlgorithmError> {
         let mut pairs: FxHashSet<(NodeIndex, NodeIndex)> = FxHashSet::default();
         for (token_path, _) in scored_paths {
@@ -497,6 +503,9 @@ impl MostLiquidAlgorithm {
         let mut component_ids: FxHashSet<&ComponentId> = FxHashSet::default();
         for &(from, to) in &pairs {
             for pool in graph.pools_between(from, to) {
+                if exclusions.excludes_pool(&pool.component_id) {
+                    continue;
+                }
                 component_ids.insert(&pool.component_id);
             }
         }
@@ -631,6 +640,12 @@ impl MostLiquidAlgorithm {
 
         let scored =
             simulate_token_path(&legs, ctx.amount_in, winners, |leg, amount, component_id| {
+                if ctx
+                    .exclusions
+                    .excludes_pool(component_id)
+                {
+                    return None;
+                }
                 let (token_in, token_out, token_out_gas_price) = leg.data;
                 let paid = swaps.swap(
                     PoolDirection {
@@ -712,15 +727,12 @@ impl Algorithm for MostLiquidAlgorithm {
     }
 
     // TODO: Consider adding token pair symbols to the span for easier interpretation
-    #[instrument(level = "debug", skip_all, fields(order_id = %order.id()))]
+    #[instrument(level = "debug", skip_all, fields(order_id = %request.order().id()))]
     async fn find_best_route(
         &self,
-        graph: &Self::GraphType,
-        market: MarketData,
-        label: Option<StateLabel>,
-        derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
+        let SolveParts { graph, order, market, label, derived, exclusions } = request.into_parts();
         let start = Instant::now();
 
         // Exact-out isn't supported yet
@@ -742,8 +754,9 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 1: Find every route as a sequence of tokens. Pools are chosen per hop during
         // simulation.
+        let search = RouteSearch { bounds: &self.query, exclusions: &exclusions };
         let all_paths =
-            paths::find_token_paths(graph, order.token_in(), order.token_out(), &self.query)?;
+            paths::find_token_paths(graph, order.token_in(), order.token_out(), search)?;
         let n_paths = all_paths.len();
         let no_path = |reason| AlgorithmError::NoPath {
             from: order.token_in().clone(),
@@ -756,7 +769,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 2: Score and sort all paths by estimated output (higher score = better)
         // No lock needed — scoring uses only local graph data.
-        let mut scored_paths = rank_by_heuristic(graph, all_paths);
+        let mut scored_paths = rank_by_heuristic(graph, all_paths, &exclusions);
         if scored_paths.is_empty() {
             return Err(no_path(NoPathReason::NoScorablePaths));
         }
@@ -773,7 +786,8 @@ impl Algorithm for MostLiquidAlgorithm {
         report.paths_to_simulate = scored_paths.len();
 
         // Step 3: Fetch all pools in scored_paths.
-        let market = Self::snapshot_market_state(graph, market, label, &scored_paths).await?;
+        let market =
+            Self::snapshot_market_state(graph, market, label, &scored_paths, &exclusions).await?;
         let gas_price = paths::fetch_gas_price(&market)?;
 
         // Step 4: Solve all paths in score order and return the best one
@@ -784,6 +798,7 @@ impl Algorithm for MostLiquidAlgorithm {
             amount_in: &amount_in,
             gas_price: &gas_price,
             start,
+            exclusions: &exclusions,
         };
 
         self.solve_for_best_path(&scored_paths, &mut report, &ctx)
@@ -822,7 +837,7 @@ mod tests {
         derived::{
             computation::{FailedItem, FailedItemError},
             types::TokenGasPrices,
-            DerivedData,
+            DerivedData, SharedDerivedDataRef,
         },
         graph::GraphManager,
         types::OrderSide,
@@ -1107,6 +1122,58 @@ mod tests {
     // ==================== find_best_route Tests ====================
 
     #[tokio::test]
+    async fn test_find_best_route_with_excluded_endpoints() {
+        let a = token(0x01, "A");
+        let b = token(0x02, "B");
+        let c = token(0x03, "C");
+        let (market, manager) = setup_market_weighted(vec![
+            ("ab", &a, &b, MockProtocolSim::new(2.0)),
+            ("bc", &b, &c, MockProtocolSim::new(2.0)),
+        ]);
+        let order = order(&a, &c, 1000, OrderSide::Sell);
+        let result = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 2, Duration::from_secs(1), None).unwrap(),
+        )
+        .unwrap()
+        .find_best_route(SolveRequest::new(manager.graph(), market, &order).with_exclusions(
+            RouteExclusions::default().with_tokens([a.address.clone(), c.address.clone()]),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(result.route().swaps().len(), 2);
+        assert_eq!(result.route().swaps()[0].component_id(), "ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "bc");
+    }
+
+    /// A pool the request excludes is not offered to any hop, so the next best pool wins.
+    #[tokio::test]
+    async fn test_find_best_route_with_excluded_pool() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_weighted(vec![
+            ("best", &token_a, &token_b, MockProtocolSim::new(3.0)),
+            ("second", &token_a, &token_b, MockProtocolSim::new(2.0)),
+        ]);
+
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+        let result = algorithm
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &order)
+                    .with_exclusions(RouteExclusions::default().with_pools(["best".to_string()])),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.route().swaps()[0].component_id(), "second");
+    }
+
+    #[tokio::test]
     async fn test_find_best_route_single_path() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -1124,7 +1191,7 @@ mod tests {
         .unwrap();
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1164,7 +1231,9 @@ mod tests {
         let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, Some(derived), &order)
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &order).with_derived(derived),
+            )
             .await
             .unwrap();
 
@@ -1192,7 +1261,7 @@ mod tests {
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
         assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
     }
@@ -1215,7 +1284,7 @@ mod tests {
         let order = order(&token_a, &token_c, ONE_ETH, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1291,7 +1360,7 @@ mod tests {
         let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1328,7 +1397,7 @@ mod tests {
         let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
 
         assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
@@ -1399,7 +1468,7 @@ mod tests {
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
         let market = wrap_market(market);
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1451,7 +1520,7 @@ mod tests {
         let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .expect("an unranked route is still a route");
 
@@ -1494,7 +1563,9 @@ mod tests {
 
         // Route should still be returned, but with negative net_amount_out
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, Some(derived), &order)
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &order).with_derived(derived),
+            )
             .await
             .expect("should return route even with negative net_amount_out");
 
@@ -1524,7 +1595,7 @@ mod tests {
         let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell); // More than 1000 wei liquidity
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
         assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
     }
@@ -1567,7 +1638,7 @@ mod tests {
         let market = wrap_market(market);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
 
         // Should get DataNotFound for gas price, not InsufficientLiquidity
@@ -1597,7 +1668,7 @@ mod tests {
         let order = order(&token_a, &token_a, 100, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1641,7 +1712,7 @@ mod tests {
         let order = order(&token_a, &token_a, 100, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
 
         assert!(matches!(result, Err(AlgorithmError::InsufficientLiquidity)));
@@ -1675,7 +1746,9 @@ mod tests {
         let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, Some(derived), &order)
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &order).with_derived(derived),
+            )
             .await
             .unwrap();
 
@@ -1706,7 +1779,7 @@ mod tests {
         let order = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })),
@@ -1739,7 +1812,7 @@ mod tests {
         let order = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await;
 
         // With 0ms timeout, we either get:
@@ -1823,7 +1896,7 @@ mod tests {
         .unwrap();
         let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1873,7 +1946,7 @@ mod tests {
         .unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 
@@ -1903,7 +1976,7 @@ mod tests {
         .unwrap();
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
         let result = algorithm
-            .find_best_route(manager.graph(), market, None, None, &order)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order))
             .await
             .unwrap();
 

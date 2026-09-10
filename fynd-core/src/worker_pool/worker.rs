@@ -18,22 +18,29 @@ use tracing::{debug, error, info, warn};
 use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
 
 use crate::{
-    algorithm::Algorithm,
+    algorithm::{request::SolveRequest, Algorithm},
     derived::{
         computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
     },
     feed::{
-        component_filter::{filter_event, is_excluded_protocol, remove_components},
+        component_filter::{
+            filter_event, is_excluded_protocol, protocol_matches, remove_components,
+        },
         events::{MarketEvent, MarketEventHandler},
         exclusivity::is_exclusive,
         market_data::{MarketData, MarketDataView, StateLabel},
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     propamm_fallback::{
-        fallback_amount_out, has_pamm_leg, manager::PammManager, FallbackAmountOut, SharedFeeTiers,
+        fallback_amount_out, has_pamm_leg, manager::PammManager, FallbackAmountOut,
+        FallbackPoolIndex, FeeTiers, SharedFeeTiers, FALLBACK_PROTOCOL_SYSTEM,
+        PROPAMM_FALLBACK_PREFIX,
     },
-    types::internal::{RouteRejection, SolveTask},
+    types::{
+        internal::{RouteRejection, SolveTask},
+        ComponentId, Route, RouteExclusionFilter, RouteExclusions,
+    },
     worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
@@ -54,6 +61,118 @@ fn should_drop_component(
 ) -> bool {
     (liquidity_scope == LiquidityScope::PublicOnly && is_exclusive(component)) ||
         is_excluded_protocol(exclude_protocols, component)
+}
+
+/// The exclusions this request resolves to against `view`, resolved once and shared.
+///
+/// Every order of one request, in every pool it reaches, wants the same answer, and expanding a
+/// protocol system copies that system's whole component set. The market's component membership is
+/// what the answer depends on, so a cached one stands until a component is added or removed.
+///
+/// Logs what a non-empty filter resolved to, on the one call per generation that resolves it.
+fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<RouteExclusions> {
+    let generation = view
+        .base_market_state()
+        .component_generation();
+    let mut cache = params
+        .cached_exclusions()
+        .lock()
+        .expect("route exclusion cache lock poisoned");
+    if let Some((cached_generation, exclusions)) = cache.as_ref() {
+        if *cached_generation == generation {
+            return exclusions.clone();
+        }
+    }
+    let filter = params.route_filter();
+    let exclusions = Arc::new(
+        view.base_market_state()
+            .resolve_route_filter(filter),
+    );
+    if !filter.is_empty() {
+        debug!(
+            component_generation = generation,
+            named_pools = filter.excluded_pools().len(),
+            named_protocols = filter.excluded_protocols().len(),
+            excluded_pools = exclusions.pools.len(),
+            excluded_tokens = exclusions.tokens.len(),
+            "resolved a request's route filter"
+        );
+    }
+    *cache = Some((generation, exclusions.clone()));
+    exclusions
+}
+
+/// The Uniswap V3 pool a pAMM leg would fall back to and the request excludes, if there is one.
+///
+/// A pAMM leg clears the filter under its own component id, then settles on chain through the
+/// fallback pool its fee tier selects. That pool is what the caller sees traded, so the filter has
+/// to reach it too.
+fn excluded_fallback_pool<'a>(
+    route: &Route,
+    fee_tiers: &FeeTiers,
+    fallback_pools: &'a FallbackPoolIndex,
+    filter: &RouteExclusionFilter,
+) -> Option<&'a ComponentId> {
+    let protocol_excluded = filter
+        .excluded_protocols()
+        .iter()
+        .any(|entry| protocol_matches(entry, FALLBACK_PROTOCOL_SYSTEM));
+    for swap in route.swaps() {
+        if !swap
+            .protocol()
+            .starts_with(PROPAMM_FALLBACK_PREFIX)
+        {
+            continue;
+        }
+        let tier = fee_tiers.resolved_tier(swap.token_in(), swap.token_out());
+        let Some(pool) = fallback_pools.pool_for(swap.token_in(), swap.token_out(), tier) else {
+            continue;
+        };
+        if protocol_excluded || filter.excluded_pools().contains(pool) {
+            return Some(pool);
+        }
+    }
+    None
+}
+
+/// Check every leg, including split branches, against the original request filter. Reading
+/// protocol systems from the returned components also covers pools added after exclusions were
+/// resolved. The order's endpoints remain allowed by intermediate-token exclusions.
+fn validate_route_filter(
+    route: &Route,
+    order: &Order,
+    filter: &RouteExclusionFilter,
+) -> Result<(), String> {
+    if filter.is_empty() {
+        return Ok(());
+    }
+    for swap in route.swaps() {
+        if filter
+            .excluded_pools()
+            .contains(swap.component_id())
+        {
+            return Err(format!("route uses excluded pool {}", swap.component_id()));
+        }
+        let protocol = &swap
+            .protocol_component()
+            .protocol_system;
+        if filter
+            .excluded_protocols()
+            .iter()
+            .any(|entry| protocol_matches(entry, protocol))
+        {
+            return Err(format!("route uses excluded protocol {protocol}"));
+        }
+        for token in [swap.token_in(), swap.token_out()] {
+            if token != order.token_in() &&
+                token != order.token_out() &&
+                filter.excluded_tokens().contains(token)
+            {
+                return Err(format!("route uses excluded intermediate token {token}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Records per-worker-pool queue metrics at task pickup: how long the task waited in the
@@ -325,7 +444,7 @@ where
         // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
-        let (block_info, solved_against) = {
+        let (block_info, solved_against, exclusions) = {
             // Read briefly to capture block info; drop the lock before solving so it is not held
             // across the algorithm's own read call.
             let view = self
@@ -345,18 +464,19 @@ where
                 .state_label()
                 .cloned()
                 .unwrap_or_else(|| last_block.number().to_string());
-            (block_info, solved_against)
+            let exclusions = resolve_exclusions(&view, &params);
+            (block_info, solved_against, exclusions)
         };
 
+        let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
+            .with_derived(self.derived_data.clone())
+            .with_shared_exclusions(exclusions);
+        if let Some(label) = params.state_label().cloned() {
+            request = request.with_label(label);
+        }
         let result = self
             .algorithm
-            .find_best_route(
-                graph,
-                self.market_data.clone(),
-                params.state_label().cloned(),
-                Some(self.derived_data.clone()),
-                order,
-            )
+            .find_best_route(request)
             .await;
 
         let order_quote = match result {
@@ -370,7 +490,11 @@ where
                 let algo_price_impact = result.price_impact();
                 let mut route = result.into_route();
 
-                if let Err(err) = route.validate() {
+                if let Err(err) = route
+                    .validate()
+                    .map_err(|err| err.to_string())
+                    .and_then(|()| validate_route_filter(&route, order, params.route_filter()))
+                {
                     error!(
                         order_id = %order.id(),
                         algorithm = self.algorithm.name(),
@@ -403,6 +527,19 @@ where
                     let market = self
                         .read_market(params.state_label())
                         .await?;
+                    if let Some(pool) = excluded_fallback_pool(
+                        &route,
+                        &fee_tiers,
+                        self.pamm_admission.fallback_pools(),
+                        params.route_filter(),
+                    ) {
+                        debug!(order_id = %order.id(), fallback_pool = %pool,
+                            "dropping pAMM route: request excludes its fallback pool");
+                        return Err(SolveError::route_rejected(
+                            order.id(),
+                            RouteRejection::PammFallbackExcluded,
+                        ));
+                    }
                     match fallback_amount_out(
                         &route,
                         &market,
@@ -830,7 +967,7 @@ mod tests {
             manager::PammState, FeeTiers, FALLBACK_PROTOCOL_SYSTEM, FEE_ATTRIBUTE,
             PROPAMM_FALLBACK_PREFIX,
         },
-        types::{ComponentId, OrderSide, Route, RouteResult, Swap},
+        types::{ComponentId, OrderSide, Route, RouteExclusionFilter, RouteResult, Swap},
         AlgorithmError,
     };
 
@@ -862,11 +999,7 @@ mod tests {
 
         async fn find_best_route(
             &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
+            _request: SolveRequest<'_, Self::GraphType>,
         ) -> Result<crate::types::RouteResult, crate::AlgorithmError> {
             Err(crate::AlgorithmError::Other("not implemented".to_string()))
         }
@@ -895,11 +1028,7 @@ mod tests {
 
         async fn find_best_route(
             &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
+            _request: SolveRequest<'_, Self::GraphType>,
         ) -> Result<RouteResult, AlgorithmError> {
             let token_a = token(0x01, "A");
             let token_b = token(0x02, "B");
@@ -966,6 +1095,170 @@ mod tests {
         }
     }
 
+    /// Deliberately ignores exclusions so the worker must enforce them on the result.
+    struct FilterIgnoringAlgorithm(Route);
+
+    impl Algorithm for FilterIgnoringAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "filter_ignoring_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            _request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<RouteResult, AlgorithmError> {
+            Ok(RouteResult::new(self.0.clone(), num_bigint::BigInt::from(0), BigUint::from(1u64)))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    #[rstest]
+    #[case::pool(RouteExclusionFilter::default().with_excluded_pools(["p2".to_string()]), Some("excluded pool p2"))]
+    #[case::protocol(RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v2".to_string()]), Some("excluded protocol uniswap_v2"))]
+    #[case::protocol_prefix(RouteExclusionFilter::default().with_excluded_protocols(["uniswap:".to_string()]), None)]
+    #[case::intermediate(RouteExclusionFilter::default().with_excluded_tokens([token(0x02, "B").address]), Some("excluded intermediate token"))]
+    #[case::empty(RouteExclusionFilter::default(), None)]
+    #[case::unrelated(RouteExclusionFilter::default().with_excluded_pools(["other".to_string()]).with_excluded_protocols(["other".to_string()]).with_excluded_tokens([token(0x04, "D").address]), None)]
+    #[case::endpoints(RouteExclusionFilter::default().with_excluded_tokens([token(0x01, "A").address, token(0x03, "C").address]), None)]
+    #[tokio::test]
+    async fn test_quote_enforces_route_filter(
+        #[case] filter: RouteExclusionFilter,
+        #[case] rejection: Option<&str>,
+        #[values(false, true)] split: bool,
+    ) {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let make_swap = |id: &str,
+                         token_in: &tycho_simulation::tycho_common::models::token::Token,
+                         token_out: &tycho_simulation::tycho_common::models::token::Token,
+                         amount_in: u64,
+                         amount_out: u64| {
+            Swap::new(
+                id.to_string(),
+                "uniswap_v2".to_string(),
+                token_in.address.clone(),
+                token_out.address.clone(),
+                BigUint::from(amount_in),
+                BigUint::from(amount_out),
+                BigUint::from(1u64),
+                component(id, &[token_in.clone(), token_out.clone()]),
+                Box::new(MockProtocolSim::new(2.0)),
+            )
+        };
+        let swaps = if split {
+            vec![
+                make_swap("direct", &token_a, &token_c, 50, 40).with_split(0.5),
+                make_swap("p1", &token_a, &token_b, 50, 45),
+                make_swap("p2", &token_b, &token_c, 45, 40),
+            ]
+        } else {
+            vec![
+                make_swap("p1", &token_a, &token_b, 100, 90),
+                make_swap("p2", &token_b, &token_c, 90, 80),
+            ]
+        };
+        let route = Route::new(swaps, FxHashMap::default()).unwrap();
+        route.validate().unwrap();
+        // The returned pools are absent from this market: protocol validation must inspect the
+        // actual route rather than relying on the pool IDs resolved before the algorithm ran.
+        let (market, _) = setup_market_weighted(vec![]);
+        let mut worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            FilterIgnoringAlgorithm(route),
+            0,
+            "test_pool".to_string(),
+        );
+        let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
+        let result = worker
+            .quote(&ord, SolveParams::default().with_route_filter(filter))
+            .await;
+        match (rejection, result) {
+            (Some(expected), Err(SolveError::AlgorithmError(msg))) => {
+                assert!(msg.contains(expected), "unexpected message: {msg}");
+            }
+            (None, Ok(quote)) => assert_eq!(quote.order().status(), QuoteStatus::Success),
+            (expected, result) => panic!("expected rejection {expected:?}, got {result:?}"),
+        }
+    }
+
+    /// Always fails, with an error message listing the pools the worker resolved the request's
+    /// filter into.
+    struct ReportExclusionsAlgorithm;
+
+    impl Algorithm for ReportExclusionsAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "report_exclusions_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<RouteResult, AlgorithmError> {
+            let mut excluded: Vec<&str> = ["p1", "p2"]
+                .into_iter()
+                .filter(|id| request.exclusions().excludes_pool(id))
+                .collect();
+            excluded.sort_unstable();
+            Err(AlgorithmError::Other(format!("excluded: {}", excluded.join(","))))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    /// The request names a protocol system; the worker hands the algorithm that system's pools.
+    #[tokio::test]
+    async fn test_quote_resolves_the_route_filter_against_the_market() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted(vec![
+            ("p1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("p2", &token_a, &token_b, MockProtocolSim::new(2.0)),
+        ]);
+        let derived = DerivedData::new_shared();
+        let mut worker = SolverWorker::new(
+            market,
+            derived,
+            ReportExclusionsAlgorithm,
+            0,
+            "test_pool".to_string(),
+        );
+
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let params = SolveParams::default().with_route_filter(
+            RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v2".to_string()]),
+        );
+
+        let result = worker.quote(&ord, params).await;
+
+        match result {
+            Err(SolveError::AlgorithmError(msg)) => {
+                assert!(msg.contains("excluded: p1,p2"), "unexpected message: {msg}");
+            }
+            other => panic!("expected the algorithm's report, got {other:?}"),
+        }
+    }
+
     /// Mock algorithm that returns a single-leg route through a pAMM executed via the
     /// PropAMMRouter. The market holds no Uniswap V3 pool for the pair, so the router's fallback
     /// would revert and the worker must drop the route.
@@ -981,11 +1274,7 @@ mod tests {
 
         async fn find_best_route(
             &self,
-            _graph: &Self::GraphType,
-            _market: MarketData,
-            _label: Option<crate::feed::market_data::StateLabel>,
-            _derived: Option<SharedDerivedDataRef>,
-            _order: &Order,
+            _request: SolveRequest<'_, Self::GraphType>,
         ) -> Result<RouteResult, AlgorithmError> {
             let token_a = token(0x01, "A");
             let token_b = token(0x02, "B");
@@ -1074,6 +1363,37 @@ mod tests {
             )]);
         }
         market
+    }
+
+    #[rstest]
+    #[case::pool(RouteExclusionFilter::default().with_excluded_pools(["fallback_pool".to_string()]))]
+    #[case::protocol(RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v3".to_string()]))]
+    #[tokio::test]
+    async fn test_quote_pamm_route_with_excluded_fallback(#[case] filter: RouteExclusionFilter) {
+        let tiers = SharedFeeTiers::default();
+        tiers.set(FeeTiers::new(FALLBACK_FEE_TIER));
+        let mut worker = SolverWorker::new(
+            market_with_unpriceable_fallback_pool(),
+            DerivedData::new_shared(),
+            PropAMMRouteAlgorithm,
+            0,
+            "test_pool".to_string(),
+        )
+        .with_fallback_fee_tiers(tiers);
+        worker.initialize_graph().await;
+        let a = token(0x01, "A");
+        let b = token(0x02, "B");
+        let order = order(&a, &b, 100, OrderSide::Sell);
+        let result = worker
+            .quote(&order, SolveParams::default().with_route_filter(filter))
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(SolveError::RouteRejected { reason: RouteRejection::PammFallbackExcluded, .. })
+            ),
+            "expected rejection before fallback simulation, got {result:?}"
+        );
     }
 
     /// Without a Uniswap V3 pool at the router's fee tier the fallback reverts too, so there is no

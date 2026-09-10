@@ -14,7 +14,7 @@ use crate::{
     },
     derived::TokenGasPrices,
     feed::market_data::{MarketDataView, MarketState},
-    graph::{EdgeData, GraphQueryFilter, Path, TopologyGraph},
+    graph::{EdgeData, Path, RouteSearch, TopologyGraph},
     types::RouteResult,
     ComponentId, Order, Route,
 };
@@ -127,8 +127,8 @@ pub struct ScoredEdge<'a, W> {
 /// Parameters for one bounded candidate-discovery run.
 #[derive(Clone, Copy)]
 pub struct CandidateSearchConfig<'a> {
-    /// The same hop bounds and connector set every other route search runs under.
-    pub query: &'a GraphQueryFilter,
+    /// The same bounds and exclusions every other route search runs under.
+    pub search: RouteSearch<'a>,
     pub max_candidates: usize,
     pub anchor_tokens: &'a FxHashSet<Address>,
     pub source_token: &'a Address,
