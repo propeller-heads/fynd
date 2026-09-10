@@ -85,7 +85,9 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 3. Each pool's `TaskQueue` dispatches to a `SolverWorker` on a dedicated OS thread
 4. Worker resolves request exclusions with `MarketState::resolve_route_filter`, then calls `Algorithm::find_best_route` with a `SolveRequest` carrying its local graph, shared market/derived data, and resolved pools/tokens. It rejects returned routes that violate the request filter, including excluded pAMM fallback pools
 5. `WorkerPoolRouter` collects results, ranks candidates by `amount_out_net_gas` descending; if price guard is enabled it validates in rank order
-6. If `EncodingOptions` provided, `Encoder` produces ABI-encoded calldata
+6. If `EncodingOptions` provided, `Encoder` produces ABI-encoded calldata, one order at a time: an
+   order that fails to encode gets `QuoteStatus::FailedEncoding` and no transaction, and the other
+   orders keep theirs. The call fails only when no order encodes at all
 7. Returns `Quote` response
 
 ### Threading Model

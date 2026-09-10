@@ -213,7 +213,7 @@ Pluggable interface for route-finding algorithms:
 
 **Crate:** `fynd-core` **Location:** `fynd-core/src/encoding/`
 
-Encodes solved routes into on-chain transactions. When `EncodingOptions` are provided, delegates to `TychoEncoder` to produce ABI-encoded calldata for the appropriate router function (`singleSwap`, `sequentialSwap`, `splitSwap`, and their Permit2/Vault variants). Supports optional `ClientFeeParams` for client fee configuration.
+Encodes solved routes into on-chain transactions. When `EncodingOptions` are provided, delegates to `TychoEncoder` to produce ABI-encoded calldata for the appropriate router function (`singleSwap`, `sequentialSwap`, `splitSwap`, and their Permit2/Vault variants). Supports optional `ClientFeeParams` for client fee configuration. Orders encode independently: an order that fails to encode is returned with status `failed_encoding` and no transaction, while the other orders in the request keep their calldata. The request fails with `FAILED_ENCODING` only when no order encodes.
 
 ***
 

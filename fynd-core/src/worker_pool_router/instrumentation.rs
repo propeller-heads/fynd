@@ -204,6 +204,7 @@ fn quote_status_label(status: QuoteStatus) -> &'static str {
         QuoteStatus::Timeout => "timeout",
         QuoteStatus::NotReady => "not_ready",
         QuoteStatus::PriceCheckFailed => "price_check_failed",
+        QuoteStatus::FailedEncoding => "failed_encoding",
     }
 }
 

@@ -5,7 +5,8 @@ export type SolutionStatus =
   | 'insufficient_liquidity'
   | 'timeout'
   | 'not_ready'
-  | 'price_check_failed';
+  | 'price_check_failed'
+  | 'failed_encoding';
 
 /** Routing backend that produced a quote. */
 export type BackendKind = 'fynd' | 'turbine';
