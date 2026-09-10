@@ -4,6 +4,7 @@ use alloy::{
     primitives::{aliases::U48, keccak256, Address, Keccak256, U160, U256},
     sol_types::SolValue,
 };
+use futures::{StreamExt, TryStreamExt};
 use metrics::counter;
 use num_bigint::BigUint;
 use tycho_execution::encoding::{
@@ -34,6 +35,14 @@ use crate::{
 
 /// Canonical Permit2 contract address — identical on all EVM chains.
 pub const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+
+/// How many orders of one request encode at the same time.
+///
+/// Matches `tycho-execution`'s `MAX_ENCODING_THREADS`, which caps the same fan-out when it encodes
+/// a batch itself. Encoding one order per call takes that crate's single-item path, so the cap has
+/// to be applied here. An encoding task blocks on the RFQ round trip and holds a thread of the
+/// runtime's blocking pool for it, and that pool is shared with every other request.
+const MAX_CONCURRENT_ENCODES: usize = 32;
 
 /// Encodes solution into tycho compatible transactions.
 ///
@@ -385,43 +394,55 @@ impl Encoder {
     /// Encodes each prepared solution into router swap calldata, one result per solution in the
     /// same order.
     ///
-    /// Every solution gets its own blocking task. `encode_solutions` blocks: an RFQ swap fetches
-    /// its signed quote over the network and waits for it, so on the runtime a single task would
-    /// park a worker for a whole round trip, and every task sharing that worker -- the market feed
-    /// included -- would wait with it. One task per solution also keeps a failing solution from
-    /// discarding the calldata of the others, and the round trips still overlap.
+    /// Every solution gets its own blocking task, [`MAX_CONCURRENT_ENCODES`] of them at a time.
+    /// `encode_solutions` blocks: an RFQ swap fetches its signed quote over the network and waits
+    /// for it, so on the runtime a single task would park a worker for a whole round trip, and
+    /// every task sharing that worker -- the market feed included -- would wait with it. One task
+    /// per solution also keeps a failing solution from discarding the calldata of the others, and
+    /// the round trips still overlap.
     async fn encode_prepared_solutions(
         &self,
         tycho_encoder: &Arc<dyn TychoEncoder>,
         to_encode: &[(usize, Solution, FeeBreakdown, FeeRates)],
     ) -> Result<Vec<Result<EncodedSolution, EncodingError>>, SolveError> {
-        let tasks = to_encode
+        // Owned clones, so no task borrows from `to_encode`: a future that holds such a borrow
+        // is not general enough over its lifetime for an async caller further up.
+        let solutions: Vec<Solution> = to_encode
             .iter()
-            .map(|(_, solution, _, _)| {
-                let encoder = Arc::clone(tycho_encoder);
-                let solution = solution.clone();
-                tokio::task::spawn_blocking(move || {
-                    encoder
-                        .encode_solutions(vec![solution])?
-                        .pop()
-                        .ok_or_else(|| {
-                            EncodingError::FatalError(
-                                "the encoder returned no encoded solution".to_string(),
-                            )
-                        })
-                })
-            })
-            .collect::<Vec<_>>();
+            .map(|(_, solution, _, _)| solution.clone())
+            .collect();
 
-        futures::future::join_all(tasks)
-            .await
+        let tycho_encoder = Arc::clone(tycho_encoder);
+        let tasks = solutions
             .into_iter()
+            .map(move |solution| {
+                let encoder = Arc::clone(&tycho_encoder);
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        encoder
+                            .encode_solutions(vec![solution])?
+                            .pop()
+                            .ok_or_else(|| {
+                                EncodingError::FatalError(
+                                    "the encoder returned no encoded solution".to_string(),
+                                )
+                            })
+                    })
+                    .await
+                }
+            });
+
+        // `buffered` keeps the results in solution order and spawns no more than the limit at a
+        // time; the rest wait for a permit rather than for a thread.
+        futures::stream::iter(tasks)
+            .buffered(MAX_CONCURRENT_ENCODES)
             .map(|joined| {
                 joined.map_err(|e| {
                     SolveError::FailedEncoding(format!("the encoding task failed: {e}"))
                 })
             })
-            .collect()
+            .try_collect()
+            .await
     }
 
     /// Predicts which client address the on-chain FeeCalculator will charge fees for, so the
@@ -1027,6 +1048,10 @@ mod tests {
     }
 
     fn mock_encoder(chain: Chain) -> Encoder {
+        encoder_with(chain, Arc::new(MockTychoEncoder))
+    }
+
+    fn encoder_with(chain: Chain, tycho_encoder: Arc<dyn TychoEncoder>) -> Encoder {
         let router_fees = SharedRouterFees::default();
         router_fees.set(RouterFees::new(
             FEE_SCALE,
@@ -1035,7 +1060,7 @@ mod tests {
             rustc_hash::FxHashMap::default(),
         ));
         Encoder {
-            tycho_encoder: Some(Arc::new(MockTychoEncoder)),
+            tycho_encoder: Some(tycho_encoder),
             chain,
             router_address: Some(Bytes::from([0u8; 20].as_ref())),
             router_fees,
@@ -1325,6 +1350,54 @@ mod tests {
             "1".to_string(),
         )
         .with_route(route)
+    }
+
+    /// Counts how many encodes run at the same time. Every call fails, which is all the encoder
+    /// needs here: the count is taken before the failure.
+    struct ConcurrencyProbe {
+        running: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    impl TychoEncoder for ConcurrencyProbe {
+        fn encode_solutions(
+            &self,
+            _solutions: Vec<Solution>,
+        ) -> Result<Vec<EncodedSolution>, EncodingError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let running = self.running.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(running, SeqCst);
+            // Long enough for the tasks that share a window to overlap in it.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.running.fetch_sub(1, SeqCst);
+            Err(EncodingError::FatalError("probe".to_string()))
+        }
+
+        fn validate_solution(&self, _solution: &Solution) -> Result<(), EncodingError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_encode_concurrency_stays_within_the_limit() {
+        let probe = Arc::new(ConcurrencyProbe {
+            running: std::sync::atomic::AtomicUsize::new(0),
+            peak: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let encoder = encoder_with(Chain::Ethereum, Arc::clone(&probe) as Arc<dyn TychoEncoder>);
+        let quotes = (0..MAX_CONCURRENT_ENCODES * 2)
+            .map(|i| quote_on_protocol(&format!("order-{i}"), "uniswap_v2"))
+            .collect();
+
+        encoder
+            .encode(quotes, EncodingOptions::new(0.01))
+            .await
+            .expect("failing orders are reported on the orders");
+
+        let peak = probe
+            .peak
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert!(peak <= MAX_CONCURRENT_ENCODES, "{peak} encodes ran at once");
     }
 
     #[tokio::test]
