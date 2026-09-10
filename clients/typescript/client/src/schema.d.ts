@@ -637,7 +637,7 @@ export interface components {
          * @description Status of an order quote.
          * @enum {string}
          */
-        QuoteStatus: "success" | "no_route_found" | "insufficient_liquidity" | "timeout" | "not_ready" | "price_check_failed";
+        QuoteStatus: "success" | "no_route_found" | "insufficient_liquidity" | "timeout" | "not_ready" | "price_check_failed" | "failed_encoding";
         /**
          * @description A route consisting of one or more sequential swaps.
          *

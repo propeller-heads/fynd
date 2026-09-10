@@ -130,7 +130,10 @@ pub fn fynd_status_to_agg(status: QuoteStatus) -> AggregatorStatus {
     match status {
         QuoteStatus::Success => AggregatorStatus::Success,
         QuoteStatus::NoRouteFound | QuoteStatus::InsufficientLiquidity => AggregatorStatus::NoRoute,
-        QuoteStatus::Timeout | QuoteStatus::NotReady => AggregatorStatus::Unavailable,
+        // A route was found but produced no calldata: a solver-side failure, not a market one.
+        QuoteStatus::Timeout | QuoteStatus::NotReady | QuoteStatus::FailedEncoding => {
+            AggregatorStatus::Unavailable
+        }
         QuoteStatus::PriceCheckFailed => AggregatorStatus::NoAmount,
     }
 }

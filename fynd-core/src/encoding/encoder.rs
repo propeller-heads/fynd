@@ -4,6 +4,7 @@ use alloy::{
     primitives::{aliases::U48, keccak256, Address, Keccak256, U160, U256},
     sol_types::SolValue,
 };
+use metrics::counter;
 use num_bigint::BigUint;
 use tycho_execution::encoding::{
     errors::EncodingError,
@@ -26,7 +27,7 @@ use crate::{
             DisableSlippageTakingSigner, SwapIntent, ENV_DISABLE_SLIPPAGE_TAKING_KEY,
         },
         exclusive_swap::ExclusiveSwapSigner,
-        router_fees::{FeeRates, SharedRouterFees},
+        router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, SolveError, Transaction,
 };
@@ -243,12 +244,21 @@ impl Encoder {
 
     /// Encodes order solutions for execution.
     ///
+    /// Each order is encoded on its own: an order that fails keeps its route and amounts, gets
+    /// [`QuoteStatus::FailedEncoding`] and no transaction, while every other order in the request
+    /// keeps its calldata. When no order encodes at all, the first failure is returned as an error,
+    /// so a single-order request still fails the whole call.
+    ///
     /// # Arguments
-    /// * `solutions` - Array containing order solutions.
+    /// * `quotes` - The winning quote of every order in the request.
     /// * `encoding_options` - Additional context needed for encoding.
     ///
     /// # Returns
-    /// Input order solutions with the encoded transaction added to each successful solution.
+    /// The input quotes, with the encoded transaction added to each order that encoded.
+    ///
+    /// # Errors
+    /// Returns [`SolveError::EncodingUnavailable`] on a chain with no Tycho router, and
+    /// [`SolveError::FailedEncoding`] when every order that had a route failed to encode.
     pub async fn encode(
         &self,
         mut quotes: Vec<OrderQuote>,
@@ -271,81 +281,158 @@ impl Encoder {
 
         let router_fees = self.router_fees.snapshot();
         let mut to_encode: Vec<(usize, Solution, FeeBreakdown, FeeRates)> = Vec::new();
+        let mut failures: Vec<(usize, SolveError)> = Vec::new();
 
-        for (i, quote) in quotes.iter_mut().enumerate() {
+        for (i, quote) in quotes.iter().enumerate() {
             if quote.status() != QuoteStatus::Success {
                 continue;
             }
-
-            let fee_client = self.fee_client(&encoding_options, quote)?;
-            let fee_rates = router_fees.fees_for(&fee_client);
-            let fee_breakdown = Self::calculate_fee_breakdown(
-                quote.amount_out(),
-                encoding_options
-                    .client_fee_params()
-                    .map_or(0, |f| f.bps()),
-                slippage,
-                fee_rates,
-            )?;
-            Self::check_min_amount_out(fee_breakdown.min_amount_received())?;
-
-            let solution = solution_from_quote(
-                quote,
-                fee_breakdown
-                    .min_amount_received()
-                    .clone(),
-            )?
-            .with_user_transfer_type(encoding_options.transfer_type().clone());
-            let solution = match &self.exclusive_swap_signer {
-                Some(signer) => Self::stamp_exclusive_swaps(solution, quote, signer)?,
-                None => {
-                    // Fail fast rather than emit on-chain-invalid unsigned calldata for an
-                    // exclusive leg: an exclusive route requires a signature.
-                    if has_exclusive_leg(quote) {
-                        return Err(SolveError::FailedEncoding(
-                            "quote routes through an exclusive pool but no signing key is \
-                             configured (set EXCLUSIVE_SWAP_CONTROLLER_KEY)"
-                                .to_string(),
-                        ));
-                    }
-                    solution
+            match self.prepare_solution(quote, &encoding_options, &router_fees) {
+                Ok((solution, fee_breakdown, fee_rates)) => {
+                    to_encode.push((i, solution, fee_breakdown, fee_rates));
                 }
-            };
-            to_encode.push((i, solution, fee_breakdown, fee_rates));
+                Err(e) => failures.push((i, e)),
+            }
         }
 
-        let solutions: Vec<Solution> = to_encode
-            .iter()
-            .map(|(_, s, _, _)| s.clone())
-            .collect();
-        // `encode_solutions` blocks. An RFQ swap fetches its signed quote over the network and
-        // waits for it, so on the runtime this would park a worker for a whole round trip, and
-        // every task sharing that worker -- the market feed included -- waits with it.
-        let encoder = Arc::clone(tycho_encoder);
-        let encoded_solutions =
-            tokio::task::spawn_blocking(move || encoder.encode_solutions(solutions))
-                .await
-                .map_err(|e| {
-                    SolveError::FailedEncoding(format!("the encoding task failed: {e}"))
-                })??;
+        let encoded_solutions = self
+            .encode_prepared_solutions(tycho_encoder, &to_encode)
+            .await?;
 
+        let mut encoded_count = 0usize;
         for (encoded_solution, (idx, solution, fee_breakdown, fee_rates)) in encoded_solutions
             .into_iter()
             .zip(to_encode)
         {
-            quotes[idx].set_gas_estimate(encoded_solution.estimated_gas().clone());
-            let (transaction, fee_breakdown) = self.encode_tycho_router_call(
-                encoded_solution,
-                &solution,
-                &encoding_options,
-                fee_breakdown,
-                fee_rates,
-            )?;
-            quotes[idx].set_transaction(transaction);
-            quotes[idx].set_fee_breakdown(fee_breakdown);
+            let encoded = encoded_solution.and_then(|encoded_solution| {
+                let gas_estimate = encoded_solution.estimated_gas().clone();
+                let (transaction, fee_breakdown) = self.encode_tycho_router_call(
+                    encoded_solution,
+                    &solution,
+                    &encoding_options,
+                    fee_breakdown,
+                    fee_rates,
+                )?;
+                Ok((gas_estimate, transaction, fee_breakdown))
+            });
+            match encoded {
+                Ok((gas_estimate, transaction, fee_breakdown)) => {
+                    quotes[idx].set_gas_estimate(gas_estimate);
+                    quotes[idx].set_transaction(transaction);
+                    quotes[idx].set_fee_breakdown(fee_breakdown);
+                    encoded_count += 1;
+                }
+                Err(e) => failures.push((idx, SolveError::FailedEncoding(e.to_string()))),
+            }
+        }
+
+        // Nothing encoded: the caller asked for calldata and gets none, so report it as the error
+        // it has always been rather than as a quote with no transaction.
+        if encoded_count == 0 {
+            if let Some((_, first_failure)) = failures.into_iter().next() {
+                return Err(first_failure);
+            }
+            return Ok(quotes);
+        }
+
+        for (idx, error) in failures {
+            tracing::warn!(
+                order_id = %quotes[idx].order_id(),
+                %error,
+                "encoding failed for this order; the other orders keep their calldata"
+            );
+            counter!("encoding_failures_total").increment(1);
+            quotes[idx].set_status(QuoteStatus::FailedEncoding);
         }
 
         Ok(quotes)
+    }
+
+    /// Builds the encodable solution for one quote, with the fee-adjusted floor the router checks
+    /// and any signature an exclusive leg needs.
+    fn prepare_solution(
+        &self,
+        quote: &OrderQuote,
+        encoding_options: &EncodingOptions,
+        router_fees: &RouterFees,
+    ) -> Result<(Solution, FeeBreakdown, FeeRates), SolveError> {
+        let fee_client = self.fee_client(encoding_options, quote)?;
+        let fee_rates = router_fees.fees_for(&fee_client);
+        let fee_breakdown = Self::calculate_fee_breakdown(
+            quote.amount_out(),
+            encoding_options
+                .client_fee_params()
+                .map_or(0, |f| f.bps()),
+            encoding_options.slippage(),
+            fee_rates,
+        )?;
+        Self::check_min_amount_out(fee_breakdown.min_amount_received())?;
+
+        let solution = solution_from_quote(
+            quote,
+            fee_breakdown
+                .min_amount_received()
+                .clone(),
+        )?
+        .with_user_transfer_type(encoding_options.transfer_type().clone());
+        let solution = match &self.exclusive_swap_signer {
+            Some(signer) => Self::stamp_exclusive_swaps(solution, quote, signer)?,
+            None => {
+                // Fail fast rather than emit on-chain-invalid unsigned calldata for an
+                // exclusive leg: an exclusive route requires a signature.
+                if has_exclusive_leg(quote) {
+                    return Err(SolveError::FailedEncoding(
+                        "quote routes through an exclusive pool but no signing key is \
+                         configured (set EXCLUSIVE_SWAP_CONTROLLER_KEY)"
+                            .to_string(),
+                    ));
+                }
+                solution
+            }
+        };
+        Ok((solution, fee_breakdown, fee_rates))
+    }
+
+    /// Encodes each prepared solution into router swap calldata, one result per solution in the
+    /// same order.
+    ///
+    /// Every solution gets its own blocking task. `encode_solutions` blocks: an RFQ swap fetches
+    /// its signed quote over the network and waits for it, so on the runtime a single task would
+    /// park a worker for a whole round trip, and every task sharing that worker -- the market feed
+    /// included -- would wait with it. One task per solution also keeps a failing solution from
+    /// discarding the calldata of the others, and the round trips still overlap.
+    async fn encode_prepared_solutions(
+        &self,
+        tycho_encoder: &Arc<dyn TychoEncoder>,
+        to_encode: &[(usize, Solution, FeeBreakdown, FeeRates)],
+    ) -> Result<Vec<Result<EncodedSolution, EncodingError>>, SolveError> {
+        let tasks = to_encode
+            .iter()
+            .map(|(_, solution, _, _)| {
+                let encoder = Arc::clone(tycho_encoder);
+                let solution = solution.clone();
+                tokio::task::spawn_blocking(move || {
+                    encoder
+                        .encode_solutions(vec![solution])?
+                        .pop()
+                        .ok_or_else(|| {
+                            EncodingError::FatalError(
+                                "the encoder returned no encoded solution".to_string(),
+                            )
+                        })
+                })
+            })
+            .collect::<Vec<_>>();
+
+        futures::future::join_all(tasks)
+            .await
+            .into_iter()
+            .map(|joined| {
+                joined.map_err(|e| {
+                    SolveError::FailedEncoding(format!("the encoding task failed: {e}"))
+                })
+            })
+            .collect()
     }
 
     /// Predicts which client address the on-chain FeeCalculator will charge fees for, so the
@@ -858,7 +945,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{component, MockProtocolSim},
+        algorithm::test_utils::{component, component_with_protocol, MockProtocolSim},
         encoding::{
             disable_slippage_taking::router_signing_hash, router_fees::RouterFees,
             DEFAULT_DEADLINE_WINDOW_SECS,
@@ -1208,6 +1295,80 @@ mod tests {
             .router_fees()
             .set(RouterFees::new(FEE_SCALE, 100_000, 20_000_000, rustc_hash::FxHashMap::default()));
         encoder
+    }
+
+    /// A quote whose single leg swaps on `protocol`. No swap encoder is registered for a protocol
+    /// the router does not know, so such a quote fails inside `encode_solutions` — the same place
+    /// an RFQ leg fails when its signed quote does not arrive.
+    fn quote_on_protocol(order_id: &str, protocol: &str) -> OrderQuote {
+        let (token_in, token_out) = (make_address(0x01), make_address(0x02));
+        let (tin, tout) = (make_token(token_in.clone()), make_token(token_out.clone()));
+        let mut tokens = rustc_hash::FxHashMap::default();
+        tokens.insert(token_in.clone(), tin.clone());
+        tokens.insert(token_out.clone(), tout.clone());
+        // Component ID must be a valid address for the USV2 swap encoder
+        let component_addr = "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc";
+        let swap = crate::types::Swap::new(
+            component_addr.to_string(),
+            protocol.to_string(),
+            token_in,
+            token_out,
+            BigUint::from(1000u64),
+            BigUint::from(990u64),
+            BigUint::from(50_000u64),
+            component_with_protocol(component_addr, protocol, &[tin, tout]),
+            Box::new(MockProtocolSim::default()),
+        );
+        let route = crate::types::Route::new(vec![swap], tokens).expect("non-empty route");
+        OrderQuote::new(
+            order_id.to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1000u64),
+            BigUint::from(990u64),
+            BigUint::from(100_000u64),
+            BigUint::from(990u64),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
+        )
+        .with_route(route)
+    }
+
+    #[tokio::test]
+    async fn test_encode_one_order_failing_of_two() {
+        let encoder = real_encoder();
+        let quotes = vec![
+            quote_on_protocol("encodes", "uniswap_v2"),
+            quote_on_protocol("fails", "no_such_protocol"),
+        ];
+
+        let result = encoder
+            .encode(quotes, EncodingOptions::new(0.01))
+            .await
+            .expect("one failing order must not discard the other");
+
+        assert_eq!(result[0].status(), QuoteStatus::Success);
+        assert!(result[0].transaction().is_some());
+        assert_eq!(result[1].status(), QuoteStatus::FailedEncoding);
+        assert!(result[1].transaction().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_encode_every_order_failing() {
+        let encoder = real_encoder();
+        let quotes = vec![
+            quote_on_protocol("fails", "no_such_protocol"),
+            quote_on_protocol("also_fails", "no_such_protocol"),
+        ];
+
+        let err = encoder
+            .encode(quotes, EncodingOptions::new(0.01))
+            .await
+            .expect_err("a request that encodes nothing must fail");
+
+        assert!(matches!(err, SolveError::FailedEncoding(_)), "{err:?}");
     }
 
     #[tokio::test]
