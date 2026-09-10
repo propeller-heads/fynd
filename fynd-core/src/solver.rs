@@ -96,10 +96,8 @@ pub mod defaults {
     pub const POOL_TASK_QUEUE_CAPACITY: usize = 1000;
     /// Minimum number of hops allowed in a route.
     pub const POOL_MIN_HOPS: usize = 1;
-    /// Maximum number of hops allowed in a route. Matches the shipped `worker_pools.toml`;
-    /// pricing follows the deepest pool, and measured across chains the third hop prices at
-    /// most ~2.5% more tokens for a 9-60x slower pass.
-    pub const POOL_MAX_HOPS: usize = 2;
+    /// Maximum number of hops allowed in a route.
+    pub const POOL_MAX_HOPS: usize = 3;
     /// Per-worker-pool solve timeout in milliseconds.
     pub const POOL_TIMEOUT_MS: u64 = 100;
     /// Limits each simulation RPC request so optional quote simulation cannot delay quotes.
