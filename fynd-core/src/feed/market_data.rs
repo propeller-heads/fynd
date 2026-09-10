@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
+use tracing::warn;
 use tycho_simulation::{
     tycho_client::feed::SynchronizerState,
     tycho_common::{
@@ -146,6 +147,15 @@ impl MarketData {
         batch_size: usize,
         between_batches: impl Fn(),
     ) -> MarketState {
+        if component_ids.is_empty() {
+            // The chunk loop would yield a blank default; extract_subset carries the label,
+            // block, and gas price even for an empty set.
+            return self
+                .data
+                .read()
+                .await
+                .extract_subset(component_ids);
+        }
         let ids: Vec<&ComponentId> = component_ids.iter().copied().collect();
         'attempt: for _ in 0..3 {
             let mut merged: Option<MarketState> = None;
@@ -169,6 +179,11 @@ impl MarketData {
             }
             return merged.unwrap_or_default();
         }
+        warn!(
+            components = ids.len(),
+            "batched market snapshot restarted three times; falling back to one guard over the \
+             full set"
+        );
         self.data
             .read()
             .await

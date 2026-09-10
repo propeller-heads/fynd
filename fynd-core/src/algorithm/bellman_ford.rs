@@ -424,8 +424,7 @@ impl BellmanFordAlgorithm {
     /// rather than one per destination. Deliberately not a [`Route`] per destination:
     /// `build_route` deep-clones each swap's component, tokens, and simulation state, and a
     /// caller pricing every reachable destination reads none of that. Build `ctx` with
-    /// `build_context_from_source_token`, so that no
-    /// destination prunes its subgraph.
+    /// `build_context_from_source_token`, so that no destination prunes its subgraph.
     ///
     /// Tokens the source token cannot reach, and those whose path cannot be reconstructed, are
     /// absent from `reached`; the outcome's `timed_out` says whether absence means unreachable.
@@ -496,6 +495,13 @@ impl BellmanFordAlgorithm {
                 "find_single_route needs a context built with a destination".to_string(),
             ));
         };
+        // A re-rooted context paired with a stale order would report a solve for one pair as a
+        // solve for another; the endpoints come from `ctx`, the amount from `order`.
+        debug_assert!(
+            ctx.node_address.get(&ctx.token_in_node) == Some(order.token_in()) &&
+                ctx.node_address.get(&token_out_node) == Some(order.token_out()),
+            "context endpoints do not match the order's token pair"
+        );
 
         let spfa = self.run_spfa(ctx, order.amount(), &opts.overrides, start);
 
@@ -1480,7 +1486,7 @@ mod tests {
     ///   G --[gb]-- B --[bc]-- C --[cd]-- D      D is three hops out, budget is two
     /// ```
     #[test]
-    fn test_get_subgraph_with_hop_map_without_destination_stops_at_max_hops() {
+    fn test_subgraph_without_destination() {
         let token_g = token(0x01, "G");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");

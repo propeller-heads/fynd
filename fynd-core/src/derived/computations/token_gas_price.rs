@@ -25,12 +25,13 @@
 //! dominates: each token needs its own relaxation, because each sell starts from a different
 //! amount and slippage makes routes amount-dependent. All of it — the buy pass and every sell —
 //! runs against one market snapshot taken when the pass starts, so both legs of every price and
-//! the block the result is stored under agree. A slow pass delays that block's component depths
-//! and the start of the next block's computations — spot prices run first and are unaffected —
-//! and a deadline over the sell loop, where nearly all of a pass's time goes, bounds that delay:
-//! tokens it cuts off keep their previous price and stay visible to invalidation. After the first
-//! full solve, recomputation is incremental: only tokens whose stored routes ran through a changed
-//! component are re-solved, which bounds the steady-state cost.
+//! the block the result is stored under agree. Token prices run in the same stage as spot prices
+//! and a stage's outputs are stored once every computation in it returns, so a slow pass delays
+//! that block's spot prices as well as its component depths and the start of the next block's
+//! computations. A deadline over the sell loop, where nearly all of a pass's time goes, bounds
+//! that delay: tokens it cuts off keep their previous price and stay visible to invalidation. After
+//! the first full solve, recomputation is incremental: only tokens whose stored routes ran through
+//! a changed component are re-solved, which bounds the steady-state cost.
 
 use std::time::{Duration, Instant};
 
@@ -158,22 +159,25 @@ impl<'a> PricingPass<'a> {
             }
         }
         unattempted.extend(remaining);
-        if !unattempted.is_empty() {
-            warn!(
-                unattempted = unattempted.len(),
+        if unattempted.is_empty() {
+            debug!(
                 priced = prices.len(),
+                failed = failed_items.len(),
+                unreachable = unreachable_tokens,
+                block,
+                "token pricing pass complete"
+            );
+        } else {
+            warn!(
+                priced = prices.len(),
+                failed = failed_items.len(),
+                unreachable = unreachable_tokens,
+                unattempted = unattempted.len(),
                 buy_pass_timed_out = self.buys.timed_out,
+                block,
                 "token pricing pass cut short; unattempted tokens keep previous prices"
             );
         }
-        debug!(
-            priced = prices.len(),
-            failed = failed_items.len(),
-            unreachable = unreachable_tokens,
-            unattempted = unattempted.len(),
-            block,
-            "token pricing pass complete"
-        );
 
         PricingPassOutcome { prices, block, failed_items, unattempted }
     }
@@ -391,7 +395,7 @@ impl TokenGasPriceComputation {
             // No subgraph around the gas token means nothing was attempted this block: the
             // tokens come back unattempted so they keep their previous prices, exactly as if
             // the deadline had cut them off.
-            debug!(unattempted = tokens_to_price.len(), "no subgraph around the gas token");
+            warn!(unattempted = tokens_to_price.len(), "no subgraph around the gas token");
             return Ok(PricingPassOutcome {
                 prices: FxHashMap::default(),
                 block,
@@ -876,7 +880,7 @@ mod tests {
         let aaa = token(1, "AAA");
         let bbb = token(2, "BBB");
         // Rates whose reciprocals are exact in the mock's 1e12 fixed-point scaling, so the
-        // sell leg introduces no rounding and prices compare exactly.
+        // sell leg introduces no rounding.
         let (market, _) = setup_market_weighted(vec![
             ("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0)),
             ("eth_bbb", &eth, &bbb, MockProtocolSim::new(2500.0)),
