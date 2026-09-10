@@ -15,14 +15,19 @@ type, and card treatment mirror that app (carbon #1D2021, cloud text, cloud-100 
 with 1px-gap dividers, aquamarine/folly accents, the explorer's per-protocol colors) so
 the two read the same.
 
-Usage: apex_block_explorer.py <data-dir> [...]
+Usage: apex_block_explorer.py <data-dir> [...] [--partial-remainder MODE]
+
+`--partial-remainder` mirrors `apex_batching_report.py`: it picks how a partial fill's unfilled
+remainder is accounted for, and each mode writes its own directory (`explorer/` for the batcher
+top-up, `explorer-original-route/` for the remainder at the original route) so the two sets
+coexist and each report links to the matching one.
 """
 
+import argparse
 import html
 import json
 import os
 import shutil
-import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -48,7 +53,7 @@ UNKNOWN_COLOR = "#6e7681"
 
 STATUS_META = {
     "cleared": ("Cleared", "#00FFBB"),
-    "partial": ("Partial + top-up", "#00cfff"),
+    "partial": ("Partial", "#00cfff"),  # the label is completed per accounting mode, see w()
     "unfilled": ("Unfilled", "#FFCC00"),
     "out_of_universe": ("Out of universe", "#FF3366"),
 }
@@ -178,13 +183,75 @@ def load_jsonl(path: Path) -> list[dict]:
     return records
 
 
+# How a partial fill's un-batched remainder is accounted for, set from --partial-remainder. The
+# two modes and their wording mirror apex_batching_report.py, which is the reference for what each
+# one means; keep them in step.
+PARTIAL_REMAINDER = "batcher"
+
+REMAINDER_WORDS = {
+    "batcher": {
+        "dir": "explorer",
+        "report": "report.html",
+        "badge": "",
+        "partial_pill": "top-up",
+        "topup_col": "batcher top-up",
+        "topup_title": "the buy-token remainder the batcher supplies so the order fills in full",
+    },
+    "original_route": {
+        "dir": "explorer-original-route",
+        "report": "report-original-route.html",
+        "badge": "remainder at the original route",
+        "partial_pill": "routed",
+        "topup_col": "remainder routed",
+        "topup_title": "the buy-token remainder the original route fills, at its settled price",
+    },
+}
+
+
+def w(key: str) -> str:
+    return REMAINDER_WORDS[PARTIAL_REMAINDER][key]
+
+
+def route_remainder_raw(rec: dict) -> int:
+    """Raw buy-token amount for the part APEX did not fill, at the original route's settled
+    average price. Floored, the convention for what a user receives."""
+    amount_in = int(rec["amount_in"])
+    if amount_in <= 0:
+        return 0
+    unsold = amount_in - int(rec["apex_sold"])
+    return unsold * int(rec["settled_amount_out"]) // amount_in
+
+
+def remainder_raw(rec: dict) -> int:
+    """The buy-token remainder a partial fill needs from outside the batch."""
+    if rec["status"] != "partial":
+        return 0
+    if PARTIAL_REMAINDER == "original_route":
+        return route_remainder_raw(rec)
+    return int(rec["batcher_sold"])
+
+
 def user_out_raw(rec: dict) -> int:
     """What the user receives under the batch scenario, raw buy-token units."""
     if rec["status"] == "cleared":
         return int(rec["apex_bought"])
     if rec["status"] == "partial":
-        return int(rec["apex_bought"]) + int(rec["batcher_sold"])
+        return int(rec["apex_bought"]) + remainder_raw(rec)
     return 0
+
+
+def effective_out_eth(rec: dict) -> float:
+    """The same outcome in ETH, at the block's derived prices. Orders APEX did not clear count at
+    their settled outcome, as in the report."""
+    if rec["status"] == "cleared":
+        return rec["apex_bought_eth"]
+    if rec["status"] == "partial":
+        if PARTIAL_REMAINDER == "original_route":
+            settled = int(rec["settled_amount_out"])
+            price = rec["settled_amount_out_eth"] / settled if settled > 0 else 0.0
+            return rec["apex_bought_eth"] + route_remainder_raw(rec) * price
+        return rec["apex_bought_eth"] + rec["batcher_sold_eth"]
+    return rec["settled_amount_out_eth"]
 
 
 def delta_bps(rec: dict) -> float | None:
@@ -273,6 +340,8 @@ def proto_of(address: str, meta: dict) -> str:
 
 def status_pill(status: str) -> str:
     label, color = STATUS_META.get(status, (status, UNKNOWN_COLOR))
+    if status == "partial":
+        label = f'{label} + {w("partial_pill")}'
     return f'<span class="pill" style="background:{color}">{esc(label)}</span>'
 
 
@@ -308,7 +377,7 @@ def orders_table(name: str, orders: list[dict], s1_by_id: dict, meta: dict) -> s
         s1 = s1_by_id.get(rec["order_id"])
         s1_status = s1["status"] if s1 else "—"
         topup = (
-            f'{fmt_amount(rec["batcher_sold"], rec["buy_decimals"])} {esc(rec["buy_symbol"])}'
+            f'{fmt_amount(str(remainder_raw(rec)), rec["buy_decimals"])} {esc(rec["buy_symbol"])}'
             if rec["status"] == "partial"
             else ""
         )
@@ -337,7 +406,8 @@ def orders_table(name: str, orders: list[dict], s1_by_id: dict, meta: dict) -> s
         ' user_limit">limit amount</th>'
         "<th>settled out (S0)</th><th>batch out (S2)</th>"
         '<th title="batch execution vs settled output">Δ bps</th>'
-        '<th class="l">S1 status</th><th class="l">batcher top-up</th>'
+        '<th class="l">S1 status</th>'
+        f'<th class="l" title="{esc(w("topup_title"))}">{esc(w("topup_col"))}</th>'
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
     )
 
@@ -473,13 +543,13 @@ def variant_section(name: str, s2_orders: list[dict], s1_by_id: dict, block_rec:
     for rec in s2_orders:
         counts[rec["status"]] += 1
     settled_eth = sum(r["settled_amount_out_eth"] for r in s2_orders)
-    effective_eth = sum(
-        r["apex_bought_eth"] + r["batcher_sold_eth"]
-        if r["status"] == "partial"
-        else (r["apex_bought_eth"] if r["status"] == "cleared" else r["settled_amount_out_eth"])
-        for r in s2_orders
-    )
+    effective_eth = sum(effective_out_eth(r) for r in s2_orders)
     delta = effective_eth - settled_eth
+    # The batch's own buy side: what APEX cleared, with no top-up for partials and no S0 fallback
+    # for what it did not clear. Matches the report's "batch buy volume" tiles.
+    batch_buy_eth = sum(
+        r["apex_bought_eth"] for r in s2_orders if r["status"] in ("cleared", "partial")
+    )
     stats = [
         (len(s2_orders), "orders"),
         (counts["cleared"], "cleared"),
@@ -499,6 +569,11 @@ def variant_section(name: str, s2_orders: list[dict], s1_by_id: dict, block_rec:
             f'<span class="{"pos" if delta >= 0 else "neg"}">{fmt_eth(effective_eth)} ETH '
             f"({delta:+.4f})</span>",
         ),
+        (
+            "Apex-cleared buy volume",
+            f"{fmt_eth(batch_buy_eth)} ETH",
+            "buy volume, excluding the non-cleared remainder of partial fills",
+        ),
     ]
     if block_rec:
         details += [
@@ -512,9 +587,11 @@ def variant_section(name: str, s2_orders: list[dict], s1_by_id: dict, block_rec:
             ("Universe tokens", block_rec["universe_tokens"]),
             ("Sandwiched excluded", block_rec["sandwiched_excluded"]),
         ]
+    # A row may carry a third element: a tooltip for rows whose label needs one.
     detail_html = "".join(
-        f'<div class="block detail"><span class="k">{esc(k)}</span><span class="v">{v}</span></div>'
-        for k, v in details
+        f'<div class="block detail"{f" title=\"{esc(row[2])}\"" if len(row) > 2 else ""}>'
+        f'<span class="k">{esc(row[0])}</span><span class="v">{row[1]}</span></div>'
+        for row in details
     )
     pool_volumes = block_rec["s2_pool_volumes"] if block_rec else []
     graph = flow_graph(s2_orders, pool_volumes, meta, symbols)
@@ -576,8 +653,8 @@ def render_block(block: int, orders: list[dict], block_recs: dict, meta: dict,
 <script>const FLOW_DATA = {{}}, FLOWS = {{}};</script>
 <body>
 <div class="top">
-  <a class="back" href="../report.html">← report</a>
-  <h1>APEX batch · block {block:,}</h1>
+  <a class="back" href="../{w("report")}">← report</a>
+  <h1>APEX batch · block {block:,}{f" · {w('badge')}" if w("badge") else ""}</h1>
   <a class="ext" href="https://etherscan.io/block/{block}" target="_blank" rel="noopener">etherscan ↗</a>
 </div>
 {tab_html}
@@ -639,7 +716,7 @@ def generate(data_dir: Path) -> int:
     if not orders:
         print(f"{data_dir}: no order records, skipped")
         return 0
-    out_dir = data_dir / "explorer"
+    out_dir = data_dir / w("dir")
     out_dir.mkdir(exist_ok=True)
     vis_src = copy_assets(out_dir)
 
@@ -661,11 +738,23 @@ def generate(data_dir: Path) -> int:
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        raise SystemExit(__doc__)
-    for directory in sys.argv[1:]:
-        count = generate(Path(directory))
-        print(f"{directory}: {count} block pages")
+    global PARTIAL_REMAINDER
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("dirs", nargs="+", type=Path, help="one or more --apex-batching-dir runs")
+    ap.add_argument(
+        "--partial-remainder",
+        choices=("batcher", "original-route"),
+        default="batcher",
+        help="how a partial fill's unfilled remainder is accounted for: the batcher supplies it"
+        " at the clearing price (default), or the original route fills it at its settled price",
+    )
+    args = ap.parse_args()
+    PARTIAL_REMAINDER = args.partial_remainder.replace("-", "_")
+
+    for directory in args.dirs:
+        count = generate(directory)
+        print(f"{directory}/{w('dir')}: {count} block pages")
 
 
 if __name__ == "__main__":

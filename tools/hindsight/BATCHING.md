@@ -109,21 +109,61 @@ python3 tools/hindsight/scripts/apex_batching_report.py ./poc-results   # writes
 ```
 
 Prints the headline numbers and writes a self-contained interactive HTML report, one
-section per variant: stat tiles (S2−S1, S2−S0, fill rate, win rate, CoW potential and
-realized netting, batcher inventory), per-block charts, per-order improvement
-distribution, sortable per-block / per-token-volume / per-order tables, and the
-accounting rules.
+section per variant: stat tiles (S2−S1, S2−S0, fill rate, win rate, batch buy volume, CoW
+potential and realized netting, batcher inventory), per-block charts, per-order improvement
+distribution, sortable per-block / per-order tables, side-by-side traded volume by sell token
+and by buy token (one block selector drives both), and the accounting rules.
+
+Two buy-side quantities appear, and they are not the same thing:
+
+- **Batch buy volume** (tiles) is what APEX itself cleared: Σ the buy amounts of cleared and
+  partial orders. A partial's top-up is excluded, whether the batcher supplies it or the
+  original route fills it, and so are orders that fell back to S0 — so this figure does not move
+  with `--partial-remainder`. Its companion figure, over blocks with 2+ executed orders, reads
+  as what a Vault would need to provide to enable batching. Each block page in the explorer
+  carries the same quantity for its own block.
+- **Traded volume by buy token** (table) is the whole S2 scenario payout, uncleared orders at S0
+  included, so it does follow the partial-fill rule. Its sell-side neighbour is what users put
+  in, identical in S0 and S2 — an order sells its full size either way.
+
+The volume section's first dropdown switches both tables between those two bases: *traded
+volume* (every order, as above) and *batch volume* (only what APEX cleared, both sides — the
+sell side is the filled part of each order). The second dropdown narrows both to one block, and
+offers that block's explorer page beside it. The max-batch-buy-volume tile links to its block
+too, and its companion links to its own — the largest of the real batches, a different block.
+
+`--partial-remainder original-route` re-reads the same records under a different rule for the
+part of a partial fill APEX did not fill: instead of the batcher supplying it at the clearing
+price, the remainder goes back down the route the trade actually took, at that route's settled
+price. The user then gets the clearing price on APEX's fill and S0 on the rest, so a partial's
+delta versus S0 is its batcher-mode delta scaled by the fill fraction — which also makes the
+accounting continuous, since an `unfilled` order already counts at S0 (the same rule at a zero
+fill). No batcher inventory is involved, so those tiles become the volume the original routes
+had to fill. It writes `report-original-route.html` by default, so both reports of a run
+coexist. Solve output is untouched: this is a re-read of the JSONL, not a re-solve.
 
 ## Block explorer
 
 ```bash
 python3 tools/hindsight/scripts/apex_block_explorer.py ./poc-results   # writes ./poc-results/explorer/
+python3 tools/hindsight/scripts/apex_block_explorer.py ./poc-results \
+  --partial-remainder original-route   # writes ./poc-results/explorer-original-route/
 ```
 
 One page per block, styled after the Turbine settlement explorer: summary and initial
-prices, the orders list, the S2 AMM legs, and the batch's Token Flow graph. The report's
+prices (including that block's **Apex-cleared buy volume** — buy volume excluding the
+non-cleared remainder of partial fills, the same quantity as the report's batch-buy-volume
+tiles), the orders list, the S2 AMM legs, and the batch's Token Flow graph. The report's
 block numbers link here, carrying the variant they were clicked in as the URL fragment
 (`block_<N>.html#anchored`), which selects that variant's tab.
+
+The pages take the same `--partial-remainder` flag as the report and each mode writes its own
+directory, so both sets coexist and the links line up: `report.html` ↔ `explorer/`,
+`report-original-route.html` ↔ `explorer-original-route/`, with each page's back link pointing
+at its own report. The mode shows in the page heading, in the partial-fill status pill
+(*Partial + top-up* vs *Partial + routed*) and in the orders table's last column (*batcher
+top-up* vs *remainder routed*). Generate the explorer set for a mode whenever you generate that
+mode's report — a report links to pages the explorer has to have written.
 
 The graph runs the frontend's own engine: `token_flow.js` (a port of
 propellerswap-frontend's `TokenFlow/visNetwork.ts`, copied next to the pages) on top of

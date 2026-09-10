@@ -5,12 +5,14 @@ Reads a monitor run's `apex-orders.jsonl` and `apex-blocks.jsonl` (written by
 `hindsight monitor --apex-batching-dir <dir>`) and writes one self-contained
 interactive HTML file.
 
-Usage: apex_batching_report.py <dir> [-o report.html]
+Usage: apex_batching_report.py <dir> [-o report.html] [--partial-remainder MODE]
 
 Accounting (matches the experiment plan):
 - S0 is the settled on-chain outcome. Unfilled and out-of-universe orders count at S0.
 - Schema-2 records (current): a partial fill executes fully at the clearing price —
   the batcher supplies the buy-token remainder and receives the unsold sell amount.
+  `--partial-remainder original-route` prices that remainder at the original route
+  instead; see PARTIAL_REMAINDER.
 - Schema-1 records (old runs): a partial fill counted at S0, with the batcher
   absorbing the cleared slice.
 - All cross-token aggregation uses ETH valuations at each block's derived
@@ -42,13 +44,53 @@ def load_jsonl(path: Path) -> list[dict]:
     return records
 
 
+# How a partial fill's un-batched remainder is accounted for; set from --partial-remainder.
+#
+# "batcher" — the batcher is the missing liquidity source: it supplies the buy-token remainder
+# and receives the unsold sell amount, so the user's full size executes at the clearing price.
+#
+# "original_route" — the remainder goes back down the route the trade actually took, at that
+# route's settled price. The user gets the clearing price on APEX's fill and S0 on the rest, so
+# a partial's delta versus S0 is its batcher-mode delta scaled by the fill fraction. This makes
+# the accounting continuous in that fraction: an `unfilled` order already counts at S0, which is
+# this same rule at a zero fill. Caveat: the settled price is the average over the order's full
+# size, so pricing a smaller remainder at it understates the user's output (less slippage), while
+# ignoring that the batch already moved those pools overstates it.
+PARTIAL_REMAINDER = "batcher"
+
+
+def reinterpretable_partial(rec: dict) -> bool:
+    """Whether a record is a partial whose remainder PARTIAL_REMAINDER applies to. Schema-1
+    partials counted at S0 with the batcher absorbing the cleared slice — a different model, not
+    a remainder rule — so they keep counting at S0 in either mode."""
+    return rec["status"] == "partial" and rec.get("schema", 1) >= 2
+
+
+def route_remainder_raw(rec: dict) -> int:
+    """Raw buy-token amount for the part APEX did not fill, at the original route's settled
+    average price. Floored: the convention for what a user receives."""
+    amount_in = int(rec["amount_in"])
+    if amount_in <= 0:
+        return 0
+    unsold = amount_in - int(rec["apex_sold"])
+    return unsold * int(rec["settled_amount_out"]) // amount_in
+
+
+def buy_price_eth(rec: dict) -> float:
+    """ETH per raw buy-token unit, at the block's derived prices."""
+    settled = int(rec["settled_amount_out"])
+    return rec["settled_amount_out_eth"] / settled if settled > 0 else 0.0
+
+
 def effective_out_eth(rec: dict) -> float:
     """The scenario outcome for one order in ETH. Cleared: the batch fill. Partial under
-    schema 2: APEX's fill plus the batcher's buy-token top-up (a full fill at clearing
-    price). Everything else (and schema-1 partials) counts at S0."""
+    schema 2: APEX's fill plus its remainder, priced per PARTIAL_REMAINDER. Everything else
+    (and schema-1 partials) counts at S0."""
     if rec["status"] == "cleared":
         return rec["apex_bought_eth"]
-    if rec["status"] == "partial" and rec.get("schema", 1) >= 2:
+    if reinterpretable_partial(rec):
+        if PARTIAL_REMAINDER == "original_route":
+            return rec["apex_bought_eth"] + route_remainder_raw(rec) * buy_price_eth(rec)
         return rec["apex_bought_eth"] + rec["batcher_sold_eth"]
     return rec["settled_amount_out_eth"]
 
@@ -57,9 +99,27 @@ def user_bought_raw(rec: dict) -> int | None:
     """What the user receives in raw buy-token units, when the order executes in the batch."""
     if rec["status"] == "cleared":
         return int(rec["apex_bought"])
-    if rec["status"] == "partial" and rec.get("schema", 1) >= 2:
+    if reinterpretable_partial(rec):
+        if PARTIAL_REMAINDER == "original_route":
+            return int(rec["apex_bought"]) + route_remainder_raw(rec)
         return int(rec["apex_bought"]) + int(rec["batcher_sold"])
     return None
+
+
+def remainder_eth(rec: dict) -> float:
+    """ETH value of the buy-token remainder that does not come out of the batch: the inventory
+    the batcher must hold, or the volume the original route has to fill."""
+    if PARTIAL_REMAINDER == "original_route":
+        return route_remainder_raw(rec) * buy_price_eth(rec) if reinterpretable_partial(rec) else 0.0
+    return rec["batcher_sold_eth"]
+
+
+def remainder_sell_eth(rec: dict) -> float:
+    """ETH value of the sell-token remainder the user does not sell into the batch: what the
+    batcher receives, or what goes down the original route."""
+    if PARTIAL_REMAINDER == "original_route" and not reinterpretable_partial(rec):
+        return 0.0
+    return rec["batcher_bought_eth"]
 
 
 def order_improvement_bps(rec: dict) -> float | None:
@@ -126,8 +186,8 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
     agg["win_rate"] = wins / in_universe if in_universe else 0.0
     agg["median_improvement_bps"] = statistics.median(imps) if imps else 0.0
 
-    agg["batcher_gross_eth"] = sum(r["batcher_sold_eth"] for r in s2)
-    agg["batcher_bought_eth"] = sum(r["batcher_bought_eth"] for r in s2)
+    agg["remainder_gross_eth"] = sum(remainder_eth(r) for r in s2)
+    agg["remainder_sell_eth"] = sum(remainder_sell_eth(r) for r in s2)
 
     # CoW share: cleared volume that never touched an AMM pool. Pool volumes come from the
     # block records (S2 pool clearings, valued at the same derived prices).
@@ -191,7 +251,8 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
             "s3_delta_bps": 0.0,
             "s2_surplus_eth": 0.0,
             "settled_eth": 0.0,
-            "batcher_eth": 0.0,
+            "remainder_eth": 0.0,
+            "batch_buy_eth": 0.0,
             "statuses": defaultdict(int),
         }
     for run in ("s1", "s2"):
@@ -201,7 +262,9 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
                 continue
             if run == "s2":
                 blk["settled_eth"] += r["settled_amount_out_eth"]
-                blk["batcher_eth"] += r["batcher_sold_eth"]
+                blk["remainder_eth"] += remainder_eth(r)
+                if r["status"] in ("cleared", "partial"):
+                    blk["batch_buy_eth"] += r["apex_bought_eth"]
                 blk["statuses"][r["status"]] += 1
     for run, out_eth in (("s1", effective_out_eth), ("s2", effective_out_eth), ("s3", s3_out_eth)):
         source = runs["s2"] if run == "s3" else runs[run]
@@ -212,6 +275,7 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
             by_block_eff[r["block"]] += out_eth(r)
         for block_num, blk in per_block.items():
             settled = by_block_settled.get(block_num, 0.0)
+            blk[f"{run}_effective_eth"] = by_block_eff[block_num]
             blk[f"{run}_surplus_eth"] = by_block_eff[block_num] - settled
             if settled > 0:
                 blk[f"{run}_delta_bps"] = (by_block_eff[block_num] - settled) / settled * 10_000
@@ -222,56 +286,106 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
     agg["blocks_won"] = sum(1 for b in agg["per_block"] if b["s2_delta_bps"] > 0)
     agg["blocks_lost"] = sum(1 for b in agg["per_block"] if b["s2_delta_bps"] < 0)
 
-    # Per-block inventory demand. Most blocks need none at all, so the distribution is
+    # Per-block remainder demand. Most blocks have none at all, so the distribution is
     # zero-inflated and very long-tailed — the spread matters more than any single figure.
-    batcher_blocks = sorted(b["batcher_eth"] for b in agg["per_block"])
-    agg["batcher_median_eth"] = statistics.median(batcher_blocks) if batcher_blocks else 0.0
-    agg["batcher_mean_eth"] = statistics.fmean(batcher_blocks) if batcher_blocks else 0.0
-    agg["batcher_p05_eth"] = percentile(batcher_blocks, 0.05)
-    agg["batcher_p95_eth"] = percentile(batcher_blocks, 0.95)
-    agg["batcher_blocks_none"] = sum(1 for x in batcher_blocks if x == 0.0)
+    rem_blocks = sorted(b["remainder_eth"] for b in agg["per_block"])
+    agg["remainder_median_eth"] = statistics.median(rem_blocks) if rem_blocks else 0.0
+    agg["remainder_mean_eth"] = statistics.fmean(rem_blocks) if rem_blocks else 0.0
+    agg["remainder_p05_eth"] = percentile(rem_blocks, 0.05)
+    agg["remainder_p95_eth"] = percentile(rem_blocks, 0.95)
+    agg["remainder_blocks_none"] = sum(1 for x in rem_blocks if x == 0.0)
 
-    # The same distribution with the zero mass dropped: what a block that actually needs
-    # inventory needs. The all-blocks median sits at zero whenever most blocks need none, so
+    # The same distribution with the zero mass dropped: what a block that actually has a
+    # remainder needs. The all-blocks median sits at zero whenever most blocks have none, so
     # this is the one that describes the demand rather than its frequency.
-    used = [x for x in batcher_blocks if x > 0.0]
-    agg["batcher_used_blocks"] = len(used)
-    agg["batcher_used_median_eth"] = statistics.median(used) if used else 0.0
-    agg["batcher_used_mean_eth"] = statistics.fmean(used) if used else 0.0
-    agg["batcher_used_p05_eth"] = percentile(used, 0.05)
-    agg["batcher_used_p95_eth"] = percentile(used, 0.95)
+    used = [x for x in rem_blocks if x > 0.0]
+    agg["remainder_used_blocks"] = len(used)
+    agg["remainder_used_median_eth"] = statistics.median(used) if used else 0.0
+    agg["remainder_used_mean_eth"] = statistics.fmean(used) if used else 0.0
+    agg["remainder_used_p05_eth"] = percentile(used, 0.05)
+    agg["remainder_used_p95_eth"] = percentile(used, 0.95)
 
-    # The batcher only ever settles one batch at a time, so the inventory it must hold is
-    # the largest single block's top-up total, not the run's sum.
-    peak = max(agg["per_block"], key=lambda b: b["batcher_eth"], default=None)
-    agg["batcher_peak_eth"] = peak["batcher_eth"] if peak else 0.0
-    agg["batcher_peak_block"] = peak["block"] if peak else None
+    # Only one batch settles at a time, so the demand a single block puts on the remainder
+    # source is the largest single block's total, not the run's sum.
+    peak = max(agg["per_block"], key=lambda b: b["remainder_eth"], default=None)
+    agg["remainder_peak_eth"] = peak["remainder_eth"] if peak else 0.0
+    agg["remainder_peak_block"] = peak["block"] if peak else None
 
-    # Sell-token volume, overall and per block (the report's per-token view).
-    token_volume: dict[tuple, dict] = {}
-    for r in s2:
-        key = (r["sell_symbol"], r["sell_token"])
-        entry = token_volume.setdefault(
-            key, {"symbol": r["sell_symbol"], "token": r["sell_token"], "orders": 0, "eth": 0.0, "by_block": defaultdict(float)}
-        )
-        entry["orders"] += 1
-        entry["eth"] += r["amount_in_eth"]
-        entry["by_block"][r["block"]] += r["amount_in_eth"]
-    vols = sorted(token_volume.values(), key=lambda e: -e["eth"])
-    for v in vols:
-        v["by_block"] = dict(v["by_block"])
-    agg["token_volumes"] = vols
+    # Traded volume per token, overall and per block (the report's per-token views). The sell side
+    # is what users put in, which every scenario shares: an order sells its full size in S0 and in
+    # S2 alike (a partial fill's unsold part still leaves the user, whichever rule absorbs it). The
+    # buy side is the S2 outcome, so it moves with the batch — and with the partial-fill rule.
+    def volumes(symbol_key: str, token_key: str, value, keep=None) -> list[dict]:
+        token_volume: dict[tuple, dict] = {}
+        for r in s2:
+            if keep and not keep(r):
+                continue
+            key = (r[symbol_key], r[token_key])
+            entry = token_volume.setdefault(
+                key,
+                {
+                    "symbol": r[symbol_key],
+                    "token": r[token_key],
+                    "orders": 0,
+                    "eth": 0.0,
+                    "by_block": defaultdict(float),
+                    "orders_by_block": defaultdict(int),
+                },
+            )
+            eth = value(r)
+            entry["orders"] += 1
+            entry["eth"] += eth
+            entry["by_block"][r["block"]] += eth
+            entry["orders_by_block"][r["block"]] += 1
+        vols = sorted(token_volume.values(), key=lambda e: -e["eth"])
+        for v in vols:
+            v["by_block"] = dict(v["by_block"])
+            v["orders_by_block"] = dict(v["orders_by_block"])
+        return vols
 
-    # Batcher inventory per token (gross sold = what it must hold; net = sold - bought).
+    agg["token_volumes"] = volumes("sell_symbol", "sell_token", lambda r: r["amount_in_eth"])
+    agg["buy_token_volumes"] = volumes("buy_symbol", "buy_token", effective_out_eth)
+
+    # The same two views over the batch alone: what APEX actually cleared, both sides. The sell
+    # side has no ETH field of its own on the record, so it comes from the order's own sell price
+    # (one price per token per block, so this is exact).
+    def executed(r: dict) -> bool:
+        return r["status"] in ("cleared", "partial")
+
+    def apex_sold_eth(r: dict) -> float:
+        amount_in = int(r["amount_in"])
+        return r["amount_in_eth"] * int(r["apex_sold"]) / amount_in if amount_in > 0 else 0.0
+
+    agg["cleared_token_volumes"] = volumes("sell_symbol", "sell_token", apex_sold_eth, keep=executed)
+    agg["cleared_buy_token_volumes"] = volumes(
+        "buy_symbol", "buy_token", lambda r: r["apex_bought_eth"], keep=executed
+    )
+
+    # Batch buy volume per block: only what APEX itself cleared, on the buy side. The top-up a
+    # partial fill needs (batcher inventory or a routed remainder) and orders that fell back to S0
+    # are not part of the batch, so neither counts here — which also makes this the one buy-side
+    # figure that does not move with the partial-fill rule.
+    batch_blocks = sorted(b["batch_buy_eth"] for b in agg["per_block"])
+    agg["batch_buy_eth"] = sum(batch_blocks)
+    agg["batch_buy_median_eth"] = statistics.median(batch_blocks) if batch_blocks else 0.0
+    agg["batch_buy_mean_eth"] = statistics.fmean(batch_blocks) if batch_blocks else 0.0
+    agg["batch_buy_p05_eth"] = percentile(batch_blocks, 0.05)
+    agg["batch_buy_p95_eth"] = percentile(batch_blocks, 0.95)
+    agg["batch_buy_blocks_none"] = sum(1 for x in batch_blocks if x == 0.0)
+    peak_buy = max(agg["per_block"], key=lambda b: b["batch_buy_eth"], default=None)
+    agg["batch_buy_peak_eth"] = peak_buy["batch_buy_eth"] if peak_buy else 0.0
+    agg["batch_buy_peak_block"] = peak_buy["block"] if peak_buy else None
+
+    # Remainder demand per token (in batcher mode: the gross inventory it must hold).
     inv: dict[tuple, dict] = {}
     for r in s2:
         if r["status"] != "partial":
             continue
         key = (r["sell_symbol"], r["sell_token"])
         e = inv.setdefault(key, {"symbol": r["sell_symbol"], "token": r["sell_token"], "sold_eth": 0.0, "orders": 0})
-        e["sold_eth"] += r["batcher_sold_eth"]
+        e["sold_eth"] += remainder_eth(r)
         e["orders"] += 1
-    agg["batcher_by_token"] = sorted(inv.values(), key=lambda e: -e["sold_eth"])
+    agg["remainder_by_token"] = sorted(inv.values(), key=lambda e: -e["sold_eth"])
 
     # Order explorer: every S2 order, with its S1 outcome joined by order_id.
     s1_by_id = {r["order_id"]: r for r in runs["s1"]}
@@ -292,7 +406,7 @@ def aggregate(orders: list[dict], blocks: list[dict]) -> dict:
                 "s1_status": s1r["status"] if s1r else "?",
                 "s2_bps": order_improvement_bps(r),
                 "s1_bps": order_improvement_bps(s1r) if s1r else None,
-                "batcher_eth": r["batcher_sold_eth"],
+                "remainder_eth": remainder_eth(r),
             }
         )
     agg["explorer"] = explorer
@@ -352,6 +466,7 @@ h1, h2 { scroll-margin-top: 14px; }
 .tile.sub { padding: 7px 14px 8px; }
 .tile.sub .v { font-size: 15px; font-weight: 600; }
 .tile.sub .l { font-size: 10.5px; margin-top: 0; }
+.tile.sub .d { font-size: 10px; }
 .pos { color: var(--good); } .neg { color: var(--bad); }
 .chart-box { background: var(--surface-2); border-radius: 8px; padding: 14px; margin-top: 8px; }
 .legend { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; flex-wrap: wrap; }
@@ -366,7 +481,14 @@ th { color: var(--text-secondary); font-weight: 600; cursor: pointer; user-selec
 th.asc::after { content: " ↑"; } th.desc::after { content: " ↓"; }
 tr:hover td { background: var(--surface-2); }
 .scroll { overflow-x: auto; max-height: 480px; overflow-y: auto; border: 1px solid var(--grid); border-radius: 8px; }
-.filters { display: flex; gap: 10px; margin: 8px 0; flex-wrap: wrap; }
+/* Side-by-side panels that fall back to stacking; each needs min-width:0 or its table's
+   nowrap cells would push the column wider than its share. */
+.cols { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.cols > * { flex: 1 1 380px; min-width: 0; }
+.colh { color: var(--text-secondary); font-size: 12.5px; font-weight: 600; margin-bottom: 5px; }
+.filters { display: flex; gap: 10px; margin: 8px 0; flex-wrap: wrap; align-items: center; }
+.filters a { color: var(--s1); text-decoration: none; font-size: 13px; }
+.filters a:hover { text-decoration: underline; }
 select, input[type=text] {
   background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--grid);
   border-radius: 6px; padding: 5px 8px; font-size: 13px;
@@ -552,7 +674,7 @@ function scatter(el, points, opts = {}) {
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   if (!points.length) { el.textContent = 'No blocks to plot.'; return; }
 
-  // x is signed (surplus can be negative), y is not (batcher inventory is a magnitude). The
+  // x is signed (surplus can be negative), y is not (the remainder is a magnitude). The
   // two sides of x are scaled independently: anchored has almost no negative surplus, and a
   // symmetric axis would spend half the plot on empty space.
   const negX = Math.max(0, -Math.min(...points.map(p => p.x)));
@@ -601,7 +723,7 @@ function scatter(el, points, opts = {}) {
     c.setAttribute('fill-opacity', '0.55');
     c.style.cursor = 'pointer';
     c.addEventListener('mousemove', e => showTT(e,
-      `block ${p.block}\nS2 surplus: ${p.x >= 0 ? '+' : ''}${p.x.toPrecision(3)} ETH\nbatcher: ${p.y.toPrecision(3)} ETH`));
+      `block ${p.block}\nS2 surplus: ${p.x >= 0 ? '+' : ''}${p.x.toPrecision(3)} ETH\n${opts.yLabel || 'y'}: ${p.y.toPrecision(3)} ETH`));
     c.addEventListener('mouseleave', hideTT);
     c.addEventListener('click', () => window.open(p.href, '_blank', 'noopener'));
     svg.appendChild(c);
@@ -639,6 +761,98 @@ function sortable(table, data, render, defaultKey) {
 VARIANT_ORDER = ("anchored", "user_limit", "permissive")
 
 
+# Wording for the un-batched remainder of a partial fill. Both accounting modes measure the same
+# quantity — the buy-token slice that does not come out of the batch — but it is batcher inventory
+# in one and volume the original route has to fill in the other, so every label naming it, and
+# every definition describing the rule, comes from here.
+REMAINDER_WORDS = {
+    "batcher": {
+        "mode_title": "",
+        "header_rule": "a partial fill executes fully at the clearing price, with the batcher"
+                       " supplying the buy-token remainder as the missing liquidity source",
+        "partial_short": "partial fills count at the full clearing-price execution"
+                         " (batcher-topped-up)",
+        "executed_paren": "cleared, or partial with batcher top-up",
+        "executed_title": "orders APEX executed in S2: fully cleared + partially filled (topped up)",
+        "col": "batcher ETH",
+        "col_title": "ETH-valued sum of this block's batcher top-ups: the inventory the batcher"
+                     " has to hold to settle it",
+        "scatter_h2": "Batcher inventory vs surplus",
+        "scatter_toc": "Batcher vs surplus",
+        "scatter_y": "batcher",
+        "scatter_note": "how much buy-token inventory the batcher had to supply",
+        "total_label": "total batcher inventory used",
+        "total_detail": "received",
+        "total_def": "Σ buy-token remainders the batcher supplies on partial fills (full"
+                     " clearing-price output minus APEX's fill), ETH-valued, over every block;"
+                     " in return it receives the unsold sell amounts.",
+        "median_label": "median required batcher inventory",
+        "median_def": "Median over blocks of that block's top-up total.",
+        "none_phrase": "need no inventory at all",
+        "used_label": "median required batcher inventory in blocks with partial fills",
+        "used_def": "This is what a block that needs inventory actually needs; the tile before"
+                    " it mixes that with how often none is needed at all.",
+        "peak_label": "max required batcher inventory",
+        "peak_def": "The largest single block's top-up total: max over blocks of Σ that block's"
+                    " buy-token remainders, ETH-valued. Batches settle one at a time, so this is"
+                    " the inventory the batcher has to hold to run any block in the run.",
+        # Each mode's block pages get their own directory (see apex_block_explorer.py), so a
+        # report links to the explorer that shares its accounting.
+        "explorer_dir": "explorer",
+        "note": 'Partial fills: the user executes their full size at the clearing price'
+                ' (originals are fill-or-kill, so no partial user execution exists). The batcher'
+                ' completes the fill as a liquidity source: it supplies the buy-token remainder'
+                ' ("Batcher ETH") and receives the unsold sell amount. Old (schema-1) records'
+                ' instead counted partials at S0.',
+    },
+    "original_route": {
+        "mode_title": " — remainder at the original route",
+        "header_rule": "a partial fill pays the clearing price on the part APEX filled and the"
+                       " original route's settled price on the remainder",
+        "partial_short": "partial fills count at the clearing price on APEX's fill and at the"
+                         " original route's settled price on the remainder",
+        "executed_paren": "cleared, or partial with its remainder routed",
+        "executed_title": "orders APEX executed in S2: fully cleared + partially filled (remainder"
+                          " routed at the original price)",
+        "col": "remainder ETH",
+        "col_title": "ETH-valued sum of this block's partial-fill remainders, priced at the"
+                     " original routes: volume the batch left for those routes to fill",
+        "scatter_h2": "Routed remainder vs surplus",
+        "scatter_toc": "Remainder vs surplus",
+        "scatter_y": "remainder",
+        "scatter_note": "how much buy-token volume the original routes had to fill",
+        "total_label": "total remainder routed",
+        "total_detail": "for",
+        "total_def": "Σ buy-token remainders of partial fills, valued at the original routes'"
+                     " settled prices, over every block — the volume the batch did not fill and"
+                     " the original routes did; against it the user spends the unsold sell amounts.",
+        "median_label": "median routed remainder per block",
+        "median_def": "Median over blocks of that block's routed-remainder total.",
+        "none_phrase": "have no remainder at all",
+        "used_label": "median routed remainder in blocks with partial fills",
+        "used_def": "This is what a block with a partial fill actually leaves to the original"
+                    " routes; the tile before it mixes that with how often there is none.",
+        "peak_label": "max routed remainder in one block",
+        "peak_def": "The largest single block's routed-remainder total: max over blocks of Σ that"
+                    " block's remainders, ETH-valued at the original prices.",
+        "explorer_dir": "explorer-original-route",
+        "note": "Partial fills: the user pays the clearing price on the size APEX filled and the"
+                " original route's settled price on the rest, so a partial's Δ versus S0 is its"
+                " full-size-at-clearing-price Δ scaled by the fill fraction. No batcher inventory"
+                " is involved. This makes the accounting continuous in the fill fraction — an"
+                " unfilled order already counts at S0, which is the same rule at a zero fill."
+                " Two errors it cannot avoid, pointing opposite ways: the settled price is the"
+                " average over the order's full size, so a smaller remainder would really slip"
+                " less (understates the user), and the batch has already moved the pools that"
+                " route uses (overstates it).",
+    },
+}
+
+
+def w(key: str) -> str:
+    return REMAINDER_WORDS[PARTIAL_REMAINDER][key]
+
+
 def esc(x):
     return html.escape(str(x))
 
@@ -652,26 +866,32 @@ def short_label(text: str) -> str:
 
 
 BLOCK_ROWS_JS = """
-  r => `<tr><td><a href="explorer/block_${r.block}.html#${name}" target="_blank" rel="noopener">${r.block}</a></td><td>${r.orders}</td><td>${r.executed}</td><td>${r.oou}</td><td>${r.sandwiched}</td>
+  r => `<tr><td><a href="EXPLORER_DIR/block_${r.block}.html#${name}" target="_blank" rel="noopener">${r.block}</a></td><td>${r.orders}</td><td>${r.executed}</td><td>${r.oou}</td><td>${r.sandwiched}</td>
   <td>${r.pools} <span class="badge">${r.pools_split}</span></td>
   <td class="${bpsCls(r.s1_delta_bps)}">${fmt(r.s1_delta_bps)}</td>
   <td class="${bpsCls(r.s2_delta_bps)}">${fmt(r.s2_delta_bps)}</td>
   ${name === 'permissive' ? `<td class="${bpsCls(r.s3_delta_bps)}">${fmt(r.s3_delta_bps)}</td>` : ''}
   <td class="${bpsCls(r.s2_surplus_eth)}">${fmt(r.s2_surplus_eth,6)}</td>
-  <td>${fmt(r.settled_eth,3)}</td><td>${fmt(r.batcher_eth,4)}</td>
+  <td>${fmt(r.settled_eth,3)}</td><td>${fmt(r.remainder_eth,4)}</td>
   <td>${fmt(r.s2_ms,0)}</td><td>${fmt(r.s1_ms,0)}</td><td>${r.deadline?'⚠':''}</td></tr>`
 """
 EXPLORER_ROWS_JS = """
-  r => `<tr><td><a href="explorer/block_${r.block}.html#${name}" target="_blank" rel="noopener">${r.block}</a></td><td><a href="https://etherscan.io/tx/${r.tx}" target="_blank" rel="noopener" title="${r.tx}">${r.tx.slice(0,10)}…</a></td><td title="${esc(r.venue_full)}">${esc(r.venue)}</td>
+  r => `<tr><td><a href="EXPLORER_DIR/block_${r.block}.html#${name}" target="_blank" rel="noopener">${r.block}</a></td><td><a href="https://etherscan.io/tx/${r.tx}" target="_blank" rel="noopener" title="${r.tx}">${r.tx.slice(0,10)}…</a></td><td title="${esc(r.venue_full)}">${esc(r.venue)}</td>
   <td title="${esc(r.pair_full)}">${esc(r.pair)}</td><td>${fmt(r.in_eth,4)}</td><td>${r.status}</td><td>${r.s1_status}</td>
   <td class="${bpsCls(r.s2_bps)}">${fmt(r.s2_bps)}</td>
   <td class="${bpsCls(r.s1_bps)}">${fmt(r.s1_bps)}</td>
-  <td>${fmt(r.batcher_eth,4)}</td></tr>`
+  <td>${fmt(r.remainder_eth,4)}</td></tr>`
 """
 TOKEN_ROWS_JS = """
   r => `<tr><td>${r.symbol} <span class="badge" title="${r.token}">${r.token.slice(0,8)}…</span></td>
   <td>${r.orders}</td><td>${fmt(r.eth,4)}</td></tr>`
 """
+
+
+def rows_js(template: str) -> str:
+    """Row renderers link to the block explorer, and each accounting mode has its own set of
+    pages — the templates are module constants, so the directory is patched in at render time."""
+    return template.replace("EXPLORER_DIR/", f'{w("explorer_dir")}/')
 
 
 # Every variant's sections, as (anchor slug, heading, sidebar label). One source for both the
@@ -681,8 +901,8 @@ SECTIONS = [
     ("hist", "Per-order S2 improvement distribution (cleared orders, bps vs settled)", "S2 Δbps distribution"),
     ("status", "Order status mix per block", "Status mix"),
     ("blocks", "Blocks", "Blocks"),
-    ("scatter", "Batcher inventory vs surplus, per block", "Batcher vs surplus"),
-    ("tokens", "Traded volume by sell token", "Token volume"),
+    ("scatter", "{scatter_h2}, per block", "{scatter_toc}"),
+    ("tokens", "Traded volume by token", "Token volume"),
     ("orders", "Order explorer (all S2 orders; S1 columns joined)", "Order explorer"),
 ]
 HEADINGS = {slug: heading for slug, heading, _ in SECTIONS}
@@ -690,20 +910,29 @@ HEADINGS = {slug: heading for slug, heading, _ in SECTIONS}
 # One bar per block, so past this many blocks the per-block status chart is a solid smear.
 MAX_STATUS_CHART_BLOCKS = 100
 
+# What the batch-buy-volume companions measure once they are restricted to real batches.
+VAULT_CAPTION = "What a Vault would need to provide to enable batching."
+
 
 def sections_for(n_blocks: int) -> list:
     return [s for s in SECTIONS if s[0] != "status" or n_blocks <= MAX_STATUS_CHART_BLOCKS]
 
 
+def fill_words(text: str) -> str:
+    """Headings and sidebar labels carry `{...}` placeholders for the remainder wording, which
+    only the chosen accounting mode fixes; everything else passes through unchanged."""
+    return text.format(**REMAINDER_WORDS[PARTIAL_REMAINDER])
+
+
 def h2(name: str, slug: str) -> str:
-    return f'<h2 id="{name}-{slug}">{esc(HEADINGS[slug])}</h2>'
+    return f'<h2 id="{name}-{slug}">{esc(fill_words(HEADINGS[slug]))}</h2>'
 
 
 def toc(variants: list) -> str:
     items = ['<a class="toc-top" href="#top">Overview</a>']
     for name, agg, _sub in variants:
         items.append(f'<a class="toc-v" href="#v-{name}">{esc(name)}</a>')
-        items += [f'<a class="toc-s" href="#{name}-{slug}">{esc(label)}</a>'
+        items += [f'<a class="toc-s" href="#{name}-{slug}">{esc(fill_words(label))}</a>'
                   for slug, _, label in sections_for(len(agg["per_block"]))]
     items.append('<a class="toc-v" href="#notes">Accounting &amp; caveats</a>')
     return f'<nav class="toc">{"".join(items)}</nav>'
@@ -733,20 +962,27 @@ def variant_section(name: str, agg: dict, sub: dict | None) -> str:
     # the rest would just repeat it a dozen times down the row.
     labelled = []
 
-    def tile(fmt, label, detail="", definition=""):
+    def tile(fmt, label, detail="", definition="", sub_label="", sub_detail=None):
         """`fmt` renders one metric from an aggregate, so the main tile and its companion are
-        the same computation over different block sets and cannot drift apart."""
+        the same computation over different block sets and cannot drift apart.
+
+        `sub_label` names the companion figure where restricting it to real batches gives it a
+        meaning of its own, rather than just being the same metric on fewer blocks; `sub_detail`
+        renders the companion's own spread from the same aggregate."""
         companion = ""
         if sub:
             caption = (
-                '<div class="l">counting only blocks with 2+ executed orders in S2</div>'
+                f'<div class="l">{esc(sub_label)}</div>'
+                if sub_label
+                else '<div class="l">counting only blocks with 2+ executed orders in S2</div>'
                 if not labelled
                 else ""
             )
             labelled.append(True)
+            spread = f'<div class="d">{sub_detail(sub)}</div>' if sub_detail else ""
             companion = (
                 f'<div class="tile sub" title="counting only blocks with 2+ executed orders'
-                f' in S2"><div class="v">{fmt(sub)}</div>{caption}</div>'
+                f' in S2"><div class="v">{fmt(sub)}</div>{caption}{spread}</div>'
             )
         # Values and details are markup (signed_bps spans, explorer links); all are built here
         # from the run's own numbers, never from decoded token or venue strings.
@@ -757,7 +993,7 @@ def variant_section(name: str, agg: dict, sub: dict | None) -> str:
         )
 
     def block_link(block: int) -> str:
-        return (f'<a href="explorer/block_{block}.html#{name}"'
+        return (f'<a href="{w("explorer_dir")}/block_{block}.html#{name}"'
                 f' target="_blank" rel="noopener">{block}</a>')
 
     def pct(x):
@@ -769,6 +1005,10 @@ def variant_section(name: str, agg: dict, sub: dict | None) -> str:
 
     def eth(key):
         return lambda a: f'{a[key]:.4f} ETH'
+
+    def spread(prefix):
+        return lambda a: (f'p05 {a[f"{prefix}_p05_eth"]:.4f} · mean {a[f"{prefix}_mean_eth"]:.4f}'
+                          f' · p95 {a[f"{prefix}_p95_eth"]:.4f} ETH')
 
     tiles = [
         tile(
@@ -783,10 +1023,33 @@ def variant_section(name: str, agg: dict, sub: dict | None) -> str:
             "One order per decoded, non-sandwiched settled swap; the total INCLUDES the out-of-universe ones. Out-of-universe = a trade token has no derived price; those never enter APEX and count at S0.",
         ),
         tile(
+            eth("batch_buy_median_eth"),
+            "median batch buy volume",
+            spread("batch_buy")(agg),
+            "Median over blocks of Σ the buy amounts APEX cleared in S2.",
+            sub_label=VAULT_CAPTION,
+            sub_detail=spread("batch_buy"),
+        ),
+        tile(
+            eth("batch_buy_peak_eth"),
+            "max batch buy volume",
+            f'block {block_link(agg["batch_buy_peak_block"])}' if agg["batch_buy_peak_block"] else "",
+            "The largest single block's cleared buy volume, out of"
+            f' {agg["batch_buy_eth"]:.2f} ETH over the whole run. Same definition as the tile'
+            " beside it.",
+            sub_label=VAULT_CAPTION,
+            # The companion's peak is a different block from the main tile's — the largest of the
+            # real batches — so it carries its own link.
+            sub_detail=lambda a: (f'block {block_link(a["batch_buy_peak_block"])}'
+                                  if a["batch_buy_peak_block"] else ""),
+        ),
+        tile(
             lambda a: signed_bps(a["s2_delta_bps"]),
             "S2 vs S0 (batch vs settled)",
             f'{agg["s2_delta_eth"]:+.4f} ETH on {agg["s2_settled_eth"]:.2f} ETH',
-            "(Σ effective output − Σ settled output) ÷ Σ settled output, ETH-valued at block prices, over all orders. Unfilled/out-of-universe orders count at S0; partial fills count at the full clearing-price execution (batcher-topped-up).",
+            "(Σ effective output − Σ settled output) ÷ Σ settled output, ETH-valued at block"
+            " prices, over all orders. Unfilled/out-of-universe orders count at S0; "
+            f'{w("partial_short")}.',
         ),
         tile(
             lambda a: signed_bps(a["s1_delta_bps"]),
@@ -810,7 +1073,8 @@ def variant_section(name: str, agg: dict, sub: dict | None) -> str:
             lambda a: pct(a["win_rate"]),
             "per-order improve rate (S2)",
             f'{agg["wins"]} improved, median {agg["median_improvement_bps"]:+.2f} bps among executed',
-            "S2 orders executed (cleared, or partial with batcher top-up) above their settled output ÷ all in-universe orders.",
+            f'S2 orders executed ({w("executed_paren")}) above their settled output'
+            " ÷ all in-universe orders.",
         ),
         tile(
             lambda a: pct(a["blocks_won"] / max(1, len(a["per_block"]))),
@@ -819,36 +1083,35 @@ def variant_section(name: str, agg: dict, sub: dict | None) -> str:
             "Blocks whose S2 effective output total (ETH-valued, uncleared orders at S0) exceeds their settled total ÷ blocks processed.",
         ),
         tile(
-            eth("batcher_gross_eth"),
-            "total batcher inventory used",
-            f'received {agg["batcher_bought_eth"]:.4f} ETH',
-            "Σ buy-token remainders the batcher supplies on partial fills (full clearing-price output minus APEX's fill), ETH-valued, over every block; in return it receives the unsold sell amounts.",
+            eth("remainder_gross_eth"),
+            w("total_label"),
+            f'{w("total_detail")} {agg["remainder_sell_eth"]:.4f} ETH',
+            w("total_def"),
         ),
         tile(
-            eth("batcher_median_eth"),
-            "median required batcher inventory",
-            f'p05 {agg["batcher_p05_eth"]:.4f} · mean {agg["batcher_mean_eth"]:.4f} · '
-            f'p95 {agg["batcher_p95_eth"]:.4f} ETH',
-            "Median over blocks of that block's top-up total. The distribution is zero-inflated — "
-            f'{agg["batcher_blocks_none"]} of {len(blocks)} blocks need no inventory at all, so the '
+            eth("remainder_median_eth"),
+            w("median_label"),
+            f'p05 {agg["remainder_p05_eth"]:.4f} · mean {agg["remainder_mean_eth"]:.4f} · '
+            f'p95 {agg["remainder_p95_eth"]:.4f} ETH',
+            f'{w("median_def")} The distribution is zero-inflated — '
+            f'{agg["remainder_blocks_none"]} of {len(blocks)} blocks {w("none_phrase")}, so the '
             "median sits at zero whenever that is over half — and long-tailed, so the mean can "
             "exceed p95. Read it against the max below.",
         ),
         tile(
-            eth("batcher_used_median_eth"),
-            "median required batcher inventory in blocks with partial fills",
-            f'p05 {agg["batcher_used_p05_eth"]:.4f} · mean {agg["batcher_used_mean_eth"]:.4f} · '
-            f'p95 {agg["batcher_used_p95_eth"]:.4f} ETH',
+            eth("remainder_used_median_eth"),
+            w("used_label"),
+            f'p05 {agg["remainder_used_p05_eth"]:.4f} · mean {agg["remainder_used_mean_eth"]:.4f} · '
+            f'p95 {agg["remainder_used_p95_eth"]:.4f} ETH',
             f'The same per-block figure as the tile before it, over only the '
-            f'{agg["batcher_used_blocks"]} blocks with a partial fill — the zero mass dropped. '
-            "This is what a block that needs inventory actually needs; the tile before it mixes "
-            "that with how often none is needed at all.",
+            f'{agg["remainder_used_blocks"]} blocks with a partial fill — the zero mass dropped. '
+            f'{w("used_def")}',
         ),
         tile(
-            eth("batcher_peak_eth"),
-            "max required batcher inventory",
-            f'block {block_link(agg["batcher_peak_block"])}' if agg["batcher_peak_block"] else "",
-            "The largest single block's top-up total: max over blocks of Σ that block's buy-token remainders, ETH-valued. Batches settle one at a time, so this is the inventory the batcher has to hold to run any block in the run.",
+            eth("remainder_peak_eth"),
+            w("peak_label"),
+            f'block {block_link(agg["remainder_peak_block"])}' if agg["remainder_peak_block"] else "",
+            w("peak_def"),
         ),
     ]
 
@@ -897,11 +1160,11 @@ single-order solve beat the settled output.</div></div>
   </label>
 </div>
 <div class="scroll"><table id="t-blocks-{name}"><thead><tr>
-<th data-k="block">block</th><th data-k="orders">orders</th><th data-k="executed" title="orders APEX executed in S2: fully cleared + partially filled (topped up)">executed</th><th data-k="oou">o-o-u</th><th data-k="sandwiched">sandw.</th>
+<th data-k="block">block</th><th data-k="orders">orders</th><th data-k="executed" title="{esc(w('executed_title'))}">executed</th><th data-k="oou">o-o-u</th><th data-k="sandwiched">sandw.</th>
 <th data-k="pools">pools (v2/v3/wrap)</th><th data-k="s1_delta_bps">S1 Δbps</th><th data-k="s2_delta_bps">S2 Δbps</th>{s3_th}
 <th data-k="s2_surplus_eth" title="the block's S2 surplus over the settled outcome: Σ (effective output − settled output), ETH-valued at the block's prices">S2 surplus ETH</th>
 <th data-k="settled_eth">settled ETH</th>
-<th data-k="batcher_eth" title="ETH-valued sum of this block's batcher top-ups: the inventory the batcher has to hold to settle it">batcher ETH</th>
+<th data-k="remainder_eth" title="{esc(w('col_title'))}">{esc(w('col'))}</th>
 <th data-k="s2_ms">S2 ms</th><th data-k="s1_ms">S1 ms</th><th data-k="deadline">deadline</th>
 </tr></thead><tbody></tbody></table></div>
 
@@ -912,17 +1175,36 @@ single-order solve beat the settled output.</div></div>
     <span><span class="k" style="background:var(--bad)"></span>surplus &lt; 0</span>
   </div>
   <div id="chart-scatter-{name}"></div>
-  <div class="note">One point per block: how much buy-token inventory the batcher had to supply
+  <div class="note">One point per block: {w('scatter_note')}
   (y) against what the batch gained over the settled outcome (x). Both axes are symmetric-log —
   linear inside ±1e−6 ETH, logarithmic beyond — because most blocks sit at the origin while a
   few span hundreds of ETH. Click a point to open that block.</div>
 </div>
 
 {h2(name, 'tokens')}
-<div class="filters"><select id="vol-block-{name}"><option value="">all blocks</option></select></div>
-<div class="scroll"><table id="t-tokens-{name}"><thead><tr>
-<th data-k="symbol">sell token</th><th data-k="orders">orders</th><th data-k="eth">volume (ETH)</th>
-</tr></thead><tbody></tbody></table></div>
+<div class="filters">
+  <select id="vol-basis-{name}">
+    <option value="traded">traded volume — every order</option>
+    <option value="cleared">batch volume — cleared by APEX</option>
+  </select>
+  <select id="vol-block-{name}"><option value="">all blocks</option></select>
+  <span id="vol-link-{name}"></span>
+</div>
+<div class="cols">
+  <div>
+    <div class="colh" id="colh-sell-{name}"></div>
+    <div class="scroll"><table id="t-tokens-{name}"><thead><tr>
+    <th data-k="symbol">sell token</th><th data-k="orders">orders</th><th data-k="eth">volume (ETH)</th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>
+  <div>
+    <div class="colh" id="colh-buy-{name}"></div>
+    <div class="scroll"><table id="t-buytokens-{name}"><thead><tr>
+    <th data-k="symbol">buy token</th><th data-k="orders">orders</th><th data-k="eth">volume (ETH)</th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>
+</div>
+<div class="note" id="vol-note-{name}"></div>
 
 {h2(name, 'orders')}
 <div class="filters">
@@ -935,7 +1217,7 @@ single-order solve beat the settled output.</div></div>
 <th data-k="in_eth">in (ETH)</th><th data-k="status">S2 status</th><th data-k="s1_status">S1 status</th>
 <th data-k="s2_bps" title="batch execution output vs settled on-chain output, in bps">S2 vs S0 Δbps</th>
 <th data-k="s1_bps" title="single-order solve output vs settled on-chain output, in bps">S1 vs S0 Δbps</th>
-<th data-k="batcher_eth">batcher ETH</th>
+<th data-k="remainder_eth">{esc(w('col'))}</th>
 </tr></thead><tbody></tbody></table></div>
 """
 
@@ -974,6 +1256,9 @@ def render(variants: list, out: Path, data_dir: Path) -> None:
             "s1_improvements": agg["s1_improvements_bps"],
             "explorer": agg["explorer"],
             "token_volumes": agg["token_volumes"],
+            "buy_token_volumes": agg["buy_token_volumes"],
+            "cleared_token_volumes": agg["cleared_token_volumes"],
+            "cleared_buy_token_volumes": agg["cleared_buy_token_volumes"],
         }
     data_json = json.dumps(data, default=str)
     first = variants[0][1]["per_block"] if variants else []
@@ -987,16 +1272,15 @@ def render(variants: list, out: Path, data_dir: Path) -> None:
 
     page = f"""<!doctype html>
 <meta charset="utf-8">
-<title>APEX Batching Validation</title>
+<title>APEX Batching Validation{w("mode_title")}</title>
 <style>{CSS}</style>
 <body class="viz-root">
 <div id="tooltip"></div>
 {toc(variants)}
-<h1 id="top">APEX batching validation — proof of concept</h1>
+<h1 id="top">APEX batching validation — proof of concept{w("mode_title")}</h1>
 <div class="sub">{span} ·
 S0 = settled on-chain, S1 = APEX per order (control), S2 = APEX whole-block batch (treatment).
-Unfilled and out-of-universe orders count at S0; a partial fill executes fully at the clearing
-price, with the batcher supplying the buy-token remainder as the missing liquidity source.
+Unfilled and out-of-universe orders count at S0; {w("header_rule")}.
 Variants: <b>permissive</b> (limit ≈ 0, every order may fill), <b>anchored</b> (limit = actual
 settled price, APEX must beat reality to fill), and <b>user_limit</b> (limit = the user's signed
 minimum buy amount recovered from calldata; anchored fallback where unrecoverable).</div>
@@ -1007,8 +1291,8 @@ minimum buy amount recovered from calldata; anchored fallback where unrecoverabl
 <b>Accounting & caveats.</b>
 <ul>
 <li>Gas is out of scope: every comparison is gross. Sandwiched trades are excluded before batch construction.</li>
-<li>An order APEX did not clear (out-of-universe / unfilled) counts at its settled outcome S0; per-order Δbps is defined for executed orders (cleared, or partial with top-up).</li>
-<li>Partial fills: the user executes their full size at the clearing price (originals are fill-or-kill, so no partial user execution exists). The batcher completes the fill as a liquidity source: it supplies the buy-token remainder ("Batcher ETH") and receives the unsold sell amount. Old (schema-1) records instead counted partials at S0.</li>
+<li>An order APEX did not clear (out-of-universe / unfilled) counts at its settled outcome S0; per-order Δbps is defined for executed orders ({esc(w("executed_paren"))}).</li>
+<li>{esc(w("note"))}</li>
 <li>S1 lets every order see untouched pools (liquidity is double-spent across orders), so S2 − S1 understates the batching benefit.</li>
 <li>ETH valuations use each block's derived (top-of-block) prices; tokens without a price value at 0 and are excluded from bps denominators.</li>
 <li>S3 (permissive section only) is an unrealistic optimistic bound: per order it takes the better of the S2 permissive execution and the settled outcome. Cherry-picking per order breaks batch consistency — removing the losing orders would change the clearing — so S3 is a ceiling, not an executable scenario.</li>
@@ -1022,9 +1306,9 @@ const DATA = {data_json};
 for (const [name, d] of Object.entries(DATA)) {{
   histogram($('#chart-s1hist-'+name), d.s1_improvements, 'var(--s2)');
   scatter($('#chart-scatter-'+name), d.per_block.map(b => ({{
-    x: b.s2_surplus_eth, y: b.batcher_eth, block: b.block,
-    href: 'explorer/block_' + b.block + '.html#' + name,
-  }})), {{xLabel: 'S2 surplus (ETH)  →'}});
+    x: b.s2_surplus_eth, y: b.remainder_eth, block: b.block,
+    href: '{w("explorer_dir")}/block_' + b.block + '.html#' + name,
+  }})), {{xLabel: 'S2 surplus (ETH)  →', yLabel: '{w("scatter_y")}'}});
   histogram($('#chart-hist-'+name), d.improvements, 'var(--s1)');
   // Dropped past MAX_STATUS_CHART_BLOCKS: one bar per block stops being readable.
   if ($('#chart-status-'+name)) {{
@@ -1039,32 +1323,69 @@ for (const [name, d] of Object.entries(DATA)) {{
   // A block where only one order executed is not a batch — its clearing is what that order
   // would have got alone, so 2+ is where batching can actually do something.
   const fExecuted = $('#f-executed-'+name), fAmm = $('#f-amm-'+name);
-  // Every executed order cleared in full, so the block needed no batcher inventory at all.
+  // Every executed order cleared in full, so the block left no remainder to account for.
   const fNoPartial = $('#f-nopartial-'+name);
   const drawBlocks = sortable($('#t-blocks-'+name), () => d.per_block.filter(b =>
     (!fExecuted.checked || b.executed >= 2) &&
     (!fAmm.checked || b.amm_legs > 0) &&
     (!fNoPartial.checked || !(b.statuses.partial > 0))
-  ), {BLOCK_ROWS_JS}, 'block');
+  ), {rows_js(BLOCK_ROWS_JS)}, 'block');
   for (const f of [fExecuted, fAmm, fNoPartial]) f.addEventListener('change', drawBlocks);
 
-  const volSel = $('#vol-block-'+name);
+  const volSel = $('#vol-block-'+name), volBasis = $('#vol-basis-'+name);
   d.per_block.forEach(b => {{ const o=document.createElement('option'); o.textContent=b.block; volSel.appendChild(o); }});
-  const drawTokens = sortable($('#t-tokens-'+name), () => {{
+  // One block selector and one basis drive both sides, so the two columns always show the same
+  // orders measured the same way.
+  const forBlock = rows => {{
     const blk = volSel.value;
-    if (!blk) return d.token_volumes;
-    return d.token_volumes
-      .map(t => ({{...t, eth: t.by_block[blk] || 0}}))
+    if (!blk) return rows;
+    return rows
+      .map(t => ({{...t, eth: t.by_block[blk] || 0, orders: t.orders_by_block[blk] || 0}}))
       .filter(t => t.eth > 0);
-  }}, {TOKEN_ROWS_JS}, 'eth');
-  volSel.addEventListener('change', drawTokens);
+  }};
+  const BASIS = {{
+    traded: {{
+      sell: d.token_volumes, buy: d.buy_token_volumes,
+      sellHead: 'Traded volume by sell token — what users put in (same in S0 and S2)',
+      buyHead: 'Traded volume by buy token — what S2 pays them out',
+      note: 'Every order in the block counts, including the ones APEX did not clear — those pay'
+          + ' out at S0, as everywhere else in the report.',
+    }},
+    cleared: {{
+      sell: d.cleared_token_volumes, buy: d.cleared_buy_token_volumes,
+      sellHead: 'Batch volume by sell token — what APEX cleared in S2',
+      buyHead: 'Batch volume by buy token — what APEX cleared in S2',
+      note: 'Only what the batch itself cleared: cleared and partial orders, and on a partial only'
+          + ' the filled part. The top-up a partial needs and orders that fell back to S0 are'
+          + ' excluded, so these are the volumes behind the batch-buy-volume tiles.',
+    }},
+  }};
+  const basis = () => BASIS[volBasis.value] || BASIS.traded;
+  const drawTokens = sortable($('#t-tokens-'+name), () => forBlock(basis().sell), {TOKEN_ROWS_JS}, 'eth');
+  const drawBuyTokens = sortable($('#t-buytokens-'+name), () => forBlock(basis().buy), {TOKEN_ROWS_JS}, 'eth');
+  const drawVolumes = () => {{
+    const b = basis();
+    $('#colh-sell-'+name).textContent = b.sellHead;
+    $('#colh-buy-'+name).textContent = b.buyHead;
+    $('#vol-note-'+name).textContent = b.note;
+    // Only one block on screen: offer its page, so the tokens can be read against the batch.
+    const blk = volSel.value;
+    $('#vol-link-'+name).innerHTML = blk
+      ? '<a href="{w("explorer_dir")}/block_' + blk + '.html#' + name
+        + '" target="_blank" rel="noopener">open block ' + blk + ' ↗</a>'
+      : '';
+    drawTokens(); drawBuyTokens();
+  }};
+  drawVolumes();
+  volSel.addEventListener('change', drawVolumes);
+  volBasis.addEventListener('change', drawVolumes);
 
   const fStatus = $('#f-status-'+name), fSearch = $('#f-search-'+name), fBlock = $('#f-block-'+name);
   const drawOrders = sortable($('#t-orders-'+name), () => d.explorer.filter(r =>
     (!fStatus.value || r.status === fStatus.value) &&
     (!fBlock.value || String(r.block).startsWith(fBlock.value.trim())) &&
     (!fSearch.value || (r.pair_full + r.venue_full + r.tx).toLowerCase().includes(fSearch.value.toLowerCase()))
-  ), {EXPLORER_ROWS_JS}, 'in_eth');
+  ), {rows_js(EXPLORER_ROWS_JS)}, 'in_eth');
   fStatus.addEventListener('change', drawOrders);
   fBlock.addEventListener('input', drawOrders);
   fSearch.addEventListener('input', drawOrders);
@@ -1076,10 +1397,20 @@ initTocSpy();
 
 
 def main() -> None:
+    global PARTIAL_REMAINDER
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("dir", type=Path, help="the --apex-batching-dir of a monitor run")
     ap.add_argument("-o", "--out", type=Path, default=None)
+    ap.add_argument(
+        "--partial-remainder",
+        choices=("batcher", "original-route"),
+        default="batcher",
+        help="how a partial fill's unfilled remainder is accounted for: the batcher supplies it"
+        " at the clearing price (default), or the original route fills it at its settled price",
+    )
     args = ap.parse_args()
+    PARTIAL_REMAINDER = args.partial_remainder.replace("-", "_")
 
     orders = load_jsonl(args.dir / "apex-orders.jsonl")
     blocks = load_jsonl(args.dir / "apex-blocks.jsonl")
@@ -1100,9 +1431,12 @@ def main() -> None:
             sub = aggregate(ov_sub, bv_sub) if ov_sub and bv_sub else None
             variants.append((v, aggregate(ov, bv), sub))
 
-    out = args.out or (args.dir / "report.html")
+    # The two modes are two reports of the same run, so their defaults must not collide.
+    default_name = "report.html" if PARTIAL_REMAINDER == "batcher" else "report-original-route.html"
+    out = args.out or (args.dir / default_name)
     render(variants, out, args.dir)
 
+    print(f"partial-fill remainder: {args.partial_remainder}")
     for name, agg, sub in variants:
         print(f"[{name}] blocks: {len(agg['blocks'])}  orders: {agg['orders_total']}")
         s3_note = f"   S3 vs S0: {agg['s3_delta_bps']:+.2f} bps" if name == "permissive" else ""
