@@ -136,7 +136,10 @@ fn solution_from_quote(
         quote.amount_out().clone(),
         min_amount_out,
         swaps,
-    ))
+    )
+    // Scopes the solution's RFQ quotes (Hashflow effective trader) to this quote request, so
+    // concurrent requests get independent nonce sequences.
+    .with_quote_request_id(quote.order_id().to_string()))
 }
 
 impl Encoder {
