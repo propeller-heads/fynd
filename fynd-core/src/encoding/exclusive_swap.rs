@@ -12,6 +12,12 @@
 //! `EkuboV3SwapEncoder` uses to rebuild the hop's poolConfig. The encoder appends the 2-byte
 //! `sigLen` before the signature, so this module does not.
 //!
+//! `minBalanceUpdate` pins the payload to the amounts it was quoted for. The swap the extension
+//! performs is described by `swapParameters`, which the executor passes outside the signature, so
+//! these two balance minimums are the only signed constraint on size and direction. What stays
+//! spendable is the band the two tolerances leave around the quote — see
+//! `pinned_min_balance_update`.
+//!
 //! Requires the Ekubo `user_data` support added in `tycho-execution` 0.338.0 (the workspace pins
 //! `>= 0.338.0`). All byte layouts and the EIP-712 digest are mirrored from the Ekubo contracts.
 
@@ -22,15 +28,81 @@ use alloy::{
     signers::{local::PrivateKeySigner, SignerSync},
 };
 use num_bigint::BigUint;
+use num_traits::ToPrimitive;
+use tracing::warn;
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
 use crate::{
+    bps,
     encoding::{now_unix_secs, DEFAULT_DEADLINE_WINDOW_SECS},
     SolveError, Swap,
 };
 
 /// Environment variable holding the pool controller's private key (hex, with or without `0x`).
 pub(crate) const ENV_CONTROLLER_KEY: &str = "EXCLUSIVE_SWAP_CONTROLLER_KEY";
+
+/// Environment variable overriding [`DEFAULT_OUTPUT_CAP_TOLERANCE_BPS`], read when the signer is
+/// built from the environment.
+pub(crate) const ENV_OUTPUT_CAP_TOLERANCE_BPS: &str = "EXCLUSIVE_SWAP_OUTPUT_CAP_BPS";
+
+/// Output the pinned cap allows above the quoted amount, in basis points.
+///
+/// The cap has to survive a pool move in the taker's favour between quoting and execution, or the
+/// taker's own swap reverts on it. Every basis point is equally room a copycat can work with, so
+/// the two costs trade directly against each other and the right value is the favourable drift a
+/// deployment actually sees — hence the override.
+const DEFAULT_OUTPUT_CAP_TOLERANCE_BPS: u32 = 100;
+
+/// Reads the cap tolerance from the environment, falling back to
+/// [`DEFAULT_OUTPUT_CAP_TOLERANCE_BPS`] when the variable is unset or unusable.
+fn output_cap_tolerance_bps_env() -> u32 {
+    let Ok(raw) = std::env::var(ENV_OUTPUT_CAP_TOLERANCE_BPS) else {
+        return DEFAULT_OUTPUT_CAP_TOLERANCE_BPS;
+    };
+    match parse_output_cap_tolerance_bps(&raw) {
+        Some(tolerance_bps) => tolerance_bps,
+        None => {
+            let denominator = bps::DENOMINATOR;
+            warn!(
+                value = %raw,
+                default_bps = DEFAULT_OUTPUT_CAP_TOLERANCE_BPS,
+                "{ENV_OUTPUT_CAP_TOLERANCE_BPS} must be an integer from 0 to \
+                 {denominator} basis points; using the default",
+            );
+            DEFAULT_OUTPUT_CAP_TOLERANCE_BPS
+        }
+    }
+}
+
+/// Parses a cap tolerance in basis points, rejecting anything above the whole — a tolerance over
+/// `10_000` bps would let a payload move twice the output it was quoted for.
+fn parse_output_cap_tolerance_bps(raw: &str) -> Option<u32> {
+    raw.trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|tolerance_bps| *tolerance_bps <= bps::DENOMINATOR)
+}
+
+/// Converts a request's slippage into the basis-point factor the input floor scales by.
+///
+/// The floor tracks the request's own slippage rather than a fixed tolerance, so the extension
+/// never rejects input drift the router's `min_amount_out` would have accepted. That amount is the
+/// route's floor in its terminal token and cannot bound a leg's input, but the fraction behind it
+/// is unit-free and applies to any leg quantity.
+///
+/// Slippage is rounded up and clamped to the whole, which loosens the floor rather than tightening
+/// it; a non-finite or non-positive value leaves no tolerance at all. The factor never goes below
+/// zero, so the floor stays non-negative and keeps rejecting the reverse swap — whose `token_in`
+/// delta is negative — however much slippage a request asks for.
+fn input_floor_factor_bps(slippage: f64) -> u32 {
+    if !slippage.is_finite() || slippage <= 0.0 {
+        return bps::DENOMINATOR;
+    }
+    let whole = f64::from(bps::DENOMINATOR);
+    // Clamped to `[0, whole]` before the cast, so the conversion cannot truncate or wrap.
+    let tolerance_bps = (slippage * whole).ceil().min(whole) as u32;
+    bps::DENOMINATOR - tolerance_bps
+}
 
 /// Produces controller-signed `user_data` payloads for exclusive swaps.
 ///
@@ -48,6 +120,7 @@ pub struct ExclusiveSwapSigner {
     nonce_counter: AtomicU32,
     deadline_window_secs: u32,
     authorized_locker: Address,
+    output_cap_tolerance_bps: u32,
 }
 
 impl ExclusiveSwapSigner {
@@ -57,7 +130,7 @@ impl ExclusiveSwapSigner {
     /// `router_address` becomes the payload's authorized locker — see [`Self::new`].
     ///
     /// The nonce prefix is random, so no state has to persist across restarts and replicas need no
-    /// coordination.
+    /// coordination. The cap tolerance comes from `EXCLUSIVE_SWAP_OUTPUT_CAP_BPS`.
     pub fn from_env(chain_id: u64, router_address: &Bytes) -> Result<Option<Self>, SolveError> {
         let Ok(key) = std::env::var(ENV_CONTROLLER_KEY) else {
             return Ok(None);
@@ -69,7 +142,10 @@ impl ExclusiveSwapSigner {
             })?;
         let locker = crate::rpc::to_address(router_address, "router address")
             .map_err(SolveError::FailedEncoding)?;
-        Ok(Some(Self::new(signer, chain_id, rand::random(), DEFAULT_DEADLINE_WINDOW_SECS, locker)))
+        Ok(Some(
+            Self::new(signer, chain_id, rand::random(), DEFAULT_DEADLINE_WINDOW_SECS, locker)
+                .with_output_cap_tolerance_bps(output_cap_tolerance_bps_env()),
+        ))
     }
 
     /// Creates a signer from explicit parts.
@@ -94,7 +170,18 @@ impl ExclusiveSwapSigner {
             nonce_counter: AtomicU32::new(0),
             deadline_window_secs,
             authorized_locker,
+            output_cap_tolerance_bps: DEFAULT_OUTPUT_CAP_TOLERANCE_BPS,
         }
+    }
+
+    /// Overrides how far above the quoted output the pinned cap sits, in basis points.
+    ///
+    /// [`Self::from_env`] sets this from `EXCLUSIVE_SWAP_OUTPUT_CAP_BPS`; this is the in-code path
+    /// for a test or an embedder that configures the signer itself.
+    #[must_use]
+    pub fn with_output_cap_tolerance_bps(mut self, tolerance_bps: u32) -> Self {
+        self.output_cap_tolerance_bps = tolerance_bps;
+        self
     }
 
     /// The locker every payload from this signer authorizes.
@@ -131,11 +218,14 @@ impl ExclusiveSwapSigner {
     /// so a native-ETH pool (whose on-chain `PoolKey` uses `address(0)`) would yield a mismatched
     /// signature and revert.
     ///
+    /// The payload is pinned to the leg's quoted amounts, with the input floor scaled by
+    /// `slippage` — the request's own tolerance — see `pinned_min_balance_update`.
+    ///
     /// # Errors
     /// Errors if the leg lacks a committed amount, the component is missing Ekubo pool attributes,
-    /// a token address exceeds 32 bytes, the deadline overflows `u32`, the nonce counter is
-    /// exhausted, or signing fails.
-    pub fn build_user_data(&self, swap: &Swap) -> Result<Bytes, SolveError> {
+    /// a token address exceeds 32 bytes, the deadline overflows `u32`, a quoted amount overflows
+    /// the extension's `i128` delta, the nonce counter is exhausted, or signing fails.
+    pub(crate) fn build_user_data(&self, swap: &Swap, slippage: f64) -> Result<Bytes, SolveError> {
         let committed = swap
             .committed_amount_out()
             .ok_or_else(|| {
@@ -152,9 +242,14 @@ impl ExclusiveSwapSigner {
         })?;
 
         // The extension's `isAuthorized` accepts only this locker, so a third party that lifts the
-        // signed bytes cannot execute them through its own contract.
+        // signed bytes cannot execute them through its own contract. The locker is the router,
+        // which anyone may call, so the pinned balance minimums do the rest of the work.
         let meta = signed_swap_meta(deadline, fee, nonce, self.authorized_locker);
-        let min_balance_update = min_balance_update_accept_any();
+        let min_balance_update = pinned_min_balance_update(
+            swap,
+            input_floor_factor_bps(slippage),
+            bps::DENOMINATOR.saturating_add(self.output_cap_tolerance_bps),
+        )?;
 
         let component = swap.protocol_component();
         let extension = pool_extension(component)?;
@@ -194,12 +289,59 @@ fn signed_swap_meta(deadline: u32, fee: u32, nonce: u64, authorized_locker: Addr
     B256::from(word)
 }
 
-/// Returns the `PoolBalanceUpdate` that accepts any swap output (`delta0 = delta1 = i128::MIN`).
-fn min_balance_update_accept_any() -> B256 {
+/// Builds the `PoolBalanceUpdate` that pins a swap to the amounts it was quoted for.
+///
+/// The extension compares the realized pool balance deltas against these minimums, and applies its
+/// own fee only after that check. The pool gains `token_in`, so a minimum there floors what the
+/// taker pays in; it loses `token_out`, so a negative minimum there caps the pool's gross outflow —
+/// the taker receives that minus the fee. The two bounds fail in opposite directions, which is why
+/// both are set: the cap rejects an oversized swap, and the floor rejects the reverse swap, whose
+/// `token_in` delta is negative and can never clear a positive floor.
+///
+/// `floor_factor_bps` scales the quoted input into the floor and comes from the request's slippage
+/// (see `input_floor_factor_bps`), so the floor never rejects drift the router would accept. The
+/// cap is a fixed `OUTPUT_CAP_TOLERANCE_BPS` above the quoted output, because slippage bounds how
+/// much less a taker will accept and says nothing about how much more.
+///
+/// Deltas are ordered by token address to match the on-chain `PoolKey`. Both bounds are widened and
+/// truncated, so the floor lands looser and the cap tighter by up to one base unit.
+///
+/// # Errors
+/// Errors if either pinned amount overflows the extension's `i128` delta.
+fn pinned_min_balance_update(
+    swap: &Swap,
+    floor_factor_bps: u32,
+    cap_factor_bps: u32,
+) -> Result<B256, SolveError> {
+    let pool_token_in_delta =
+        pinned_delta(swap.amount_in(), floor_factor_bps).ok_or_else(|| {
+            SolveError::FailedEncoding(
+                "pinned input floor overflows the extension's i128 balance delta".to_string(),
+            )
+        })?;
+    let pool_token_out_delta =
+        -pinned_delta(swap.amount_out(), cap_factor_bps).ok_or_else(|| {
+            SolveError::FailedEncoding(
+                "pinned output cap overflows the extension's i128 balance delta".to_string(),
+            )
+        })?;
+
+    let (delta0, delta1) = if token_in_sorts_first(swap.token_in(), swap.token_out()) {
+        (pool_token_in_delta, pool_token_out_delta)
+    } else {
+        (pool_token_out_delta, pool_token_in_delta)
+    };
+
     let mut word = [0u8; 32];
-    word[0] = 0x80;
-    word[16] = 0x80;
-    B256::from(word)
+    word[0..16].copy_from_slice(&delta0.to_be_bytes());
+    word[16..32].copy_from_slice(&delta1.to_be_bytes());
+    Ok(B256::from(word))
+}
+
+/// Scales `amount` by `factor_bps` and converts it to an `i128` delta magnitude; the caller applies
+/// the sign the pool's side of the swap calls for. `None` when the result exceeds `i128::MAX`.
+fn pinned_delta(amount: &BigUint, factor_bps: u32) -> Option<i128> {
+    bps::scale_truncating(amount, factor_bps).to_i128()
 }
 
 /// Derives the extension's 0.32 fixed-point fee so the taker's realized output tracks `committed`.
@@ -271,9 +413,18 @@ fn pool_id(token0: &[u8], token1: &[u8], config: B256) -> Result<B256, SolveErro
     Ok(keccak256(buf))
 }
 
+/// Whether `token_in` is the pool's `token0`, the lower of the two addresses.
+///
+/// The `poolId` the signature covers and the delta halves it pins both order by this rule, so it
+/// lives in one place: if the two ever disagreed, the extension would check the input floor against
+/// the output token.
+fn token_in_sorts_first(token_in: &[u8], token_out: &[u8]) -> bool {
+    token_in <= token_out
+}
+
 /// Orders two token addresses so `token0 < token1`, matching the on-chain `PoolKey`.
 fn sorted_tokens<'a>(token_in: &'a [u8], token_out: &'a [u8]) -> (&'a [u8], &'a [u8]) {
-    if token_in <= token_out {
+    if token_in_sorts_first(token_in, token_out) {
         (token_in, token_out)
     } else {
         (token_out, token_in)
@@ -331,7 +482,7 @@ fn attribute<'a>(component: &'a ProtocolComponent, key: &str) -> Result<&'a [u8]
 mod tests {
     use std::{collections::HashMap, str::FromStr};
 
-    use alloy::primitives::{Address as EvmAddress, Signature};
+    use alloy::primitives::{b256, Address as EvmAddress, Signature};
     use chrono::NaiveDateTime;
     use rstest::rstest;
     use tycho_simulation::tycho_common::models::Chain as CommonChain;
@@ -370,10 +521,182 @@ mod tests {
         assert_eq!(&bytes[16..32], &[0xABu8; 16]);
     }
 
+    /// A 3% input floor — `input_floor_factor_bps(0.03)` — which the expectations below are
+    /// written against.
+    const FLOOR_FACTOR_3PCT: u32 = 9_700;
+
+    /// The default 1% output cap, as the factor the packer takes.
+    const CAP_FACTOR_1PCT: u32 = 10_100;
+
+    /// The fixed `minBalanceUpdate` word the known-answer digests below were computed over.
+    const FIXED_MIN_BALANCE_UPDATE: B256 =
+        b256!("0x8000000000000000000000000000000080000000000000000000000000000000");
+
+    /// Splits a packed `minBalanceUpdate` word into its two `i128` deltas.
+    fn split_min_balance_update(word: B256) -> (i128, i128) {
+        let halve = |bytes: &[u8]| i128::from_be_bytes(bytes.try_into().expect("16 bytes"));
+        (halve(&word.as_slice()[0..16]), halve(&word.as_slice()[16..32]))
+    }
+
+    /// Mirrors the extension's own check: every realized delta must clear its minimum.
+    ///
+    /// Deltas are the pool's, so the token it gains is positive and the token it gives up is
+    /// negative — the same frame `pinned_min_balance_update` packs.
+    fn extension_accepts(min_balance_update: B256, realized: (i128, i128)) -> bool {
+        let (min0, min1) = split_min_balance_update(min_balance_update);
+        realized.0 >= min0 && realized.1 >= min1
+    }
+
+    #[rstest]
+    #[case::one_percent(0.01, 9_900)]
+    #[case::three_percent(0.03, FLOOR_FACTOR_3PCT)]
+    #[case::no_slippage(0.0, 10_000)]
+    // A request accepting everything leaves no floor on size — the sign still rejects the reverse.
+    #[case::all_of_it(1.0, 0)]
+    #[case::beyond_the_whole(5.0, 0)]
+    // Rounded up, so the floor loosens rather than tightening onto a revert.
+    #[case::rounds_up(0.000_05, 9_999)]
+    #[case::negative_is_no_tolerance(-0.5, 10_000)]
+    #[case::nan_is_no_tolerance(f64::NAN, 10_000)]
+    fn test_input_floor_factor_bps(#[case] slippage: f64, #[case] expected: u32) {
+        assert_eq!(input_floor_factor_bps(slippage), expected);
+    }
+
+    #[rstest]
+    #[case::plain("250", Some(250))]
+    #[case::whitespace_trimmed("  250  ", Some(250))]
+    #[case::zero("0", Some(0))]
+    #[case::the_whole("10000", Some(bps::DENOMINATOR))]
+    // Above the whole would let a payload move twice the output it was quoted for.
+    #[case::beyond_the_whole("10001", None)]
+    #[case::not_a_number("loose", None)]
+    #[case::negative("-100", None)]
+    fn test_parse_output_cap_tolerance_bps(#[case] raw: &str, #[case] expected: Option<u32>) {
+        assert_eq!(parse_output_cap_tolerance_bps(raw), expected);
+    }
+
     #[test]
-    fn test_min_balance_update_accepts_any_output() {
-        let expected = "8000000000000000000000000000000080000000000000000000000000000000";
-        assert_eq!(alloy::hex::encode(min_balance_update_accept_any()), expected);
+    fn test_output_cap_tolerance_widens_the_cap() {
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER)
+            .with_output_cap_tolerance_bps(500);
+        let swap = swap_with_amounts(0x11, 0x22, 4_000_000, 3_000_000);
+        let mut swap = swap;
+        swap.set_committed_amount_out(BigUint::from(2_900_000u64));
+
+        let user_data = signer
+            .build_user_data(&swap, 0.03)
+            .unwrap();
+
+        // 5% above the quoted output instead of the default 1%.
+        let (_, cap) = split_min_balance_update(B256::from_slice(&user_data.as_ref()[40..72]));
+        assert_eq!(cap, -3_150_000);
+    }
+
+    #[test]
+    fn test_input_floor_tracks_the_request_slippage() {
+        let swap = swap_with_amounts(0x11, 0x22, 4_000_000, 3_000_000);
+
+        let tight = pinned_min_balance_update(&swap, input_floor_factor_bps(0.01), CAP_FACTOR_1PCT)
+            .unwrap();
+        let loose = pinned_min_balance_update(&swap, input_floor_factor_bps(0.10), CAP_FACTOR_1PCT)
+            .unwrap();
+
+        // A request accepting more slippage gets a floor further below the quoted input.
+        assert_eq!(split_min_balance_update(tight).0, 3_960_000);
+        assert_eq!(split_min_balance_update(loose).0, 3_600_000);
+        // The reverse swap stays rejected either way, whatever the floor.
+        assert!(!extension_accepts(loose, (-3_000_000, 4_000_000)));
+    }
+
+    #[rstest]
+    // token_in sorts first, so the input floor lands in delta0.
+    #[case::token_in_is_token0(0x11, 0x22, 3_880_000, -3_030_000)]
+    // token_out sorts first, so the halves swap.
+    #[case::token_out_is_token0(0x22, 0x11, -3_030_000, 3_880_000)]
+    fn test_pinned_min_balance_update_orders_and_signs_deltas(
+        #[case] token_in: u8,
+        #[case] token_out: u8,
+        #[case] expected_delta0: i128,
+        #[case] expected_delta1: i128,
+    ) {
+        // Distinct amounts, so each case pins which amount feeds which bound as well as the order.
+        let swap = swap_with_amounts(token_in, token_out, 4_000_000, 3_000_000);
+
+        let word = pinned_min_balance_update(&swap, FLOOR_FACTOR_3PCT, CAP_FACTOR_1PCT).unwrap();
+
+        assert_eq!(split_min_balance_update(word), (expected_delta0, expected_delta1));
+    }
+
+    #[test]
+    fn test_pinned_min_balance_update_brackets_the_quote() {
+        let swap = swap_with_amounts(0x11, 0x22, 4_000_000, 3_000_000);
+
+        let (floor, cap) = split_min_balance_update(
+            pinned_min_balance_update(&swap, FLOOR_FACTOR_3PCT, CAP_FACTOR_1PCT).unwrap(),
+        );
+
+        // The floor never demands more than the quoted input, and the cap never allows less than
+        // the quoted output; either would revert the taker's own swap.
+        assert!(floor <= 4_000_000, "floor exceeds the quoted input");
+        assert!(-cap >= 3_000_000, "cap is below the quoted output");
+        // 3% of tolerance below the input, 1% above the output.
+        assert_eq!(floor, 3_880_000);
+        assert_eq!(cap, -3_030_000);
+    }
+
+    #[rstest]
+    // The quoted trade itself: the pool gains the input and gives up the output.
+    #[case::the_quoted_trade(4_000_000, -3_000_000, true)]
+    // Twice the size breaches the cap on the pool's outflow.
+    #[case::oversized(8_000_000, -6_000_000, false)]
+    // The reverse direction cannot clear a positive floor on the input token.
+    #[case::reversed(-3_000_000, 4_000_000, false)]
+    // Drift inside both tolerances still clears.
+    #[case::drift_within_tolerance(3_900_000, -3_020_000, true)]
+    fn test_pinned_bounds_accept_the_quote_and_reject_the_rest(
+        #[case] realized_delta0: i128,
+        #[case] realized_delta1: i128,
+        #[case] accepted: bool,
+    ) {
+        let swap = swap_with_amounts(0x11, 0x22, 4_000_000, 3_000_000);
+        let word = pinned_min_balance_update(&swap, FLOOR_FACTOR_3PCT, CAP_FACTOR_1PCT).unwrap();
+
+        assert_eq!(extension_accepts(word, (realized_delta0, realized_delta1)), accepted);
+    }
+
+    #[rstest]
+    #[case::input_over_i128(u128::MAX, 3_000_000, "pinned input floor")]
+    #[case::output_over_i128(4_000_000, u128::MAX, "pinned output cap")]
+    fn test_pinned_min_balance_update_rejects_amount_over_i128(
+        #[case] amount_in: u128,
+        #[case] amount_out: u128,
+        #[case] expected_bound: &str,
+    ) {
+        let swap = swap_with_amounts(0x11, 0x22, amount_in, amount_out);
+
+        let error = pinned_min_balance_update(&swap, FLOOR_FACTOR_3PCT, CAP_FACTOR_1PCT)
+            .expect_err("an amount over i128::MAX cannot be pinned")
+            .to_string();
+
+        assert!(error.contains(expected_bound), "{error} does not name the failing bound");
+    }
+
+    #[rstest]
+    // Truncation erases the cap's 1% below 100 output units, leaving no room for a favourable
+    // move — the cap lands exactly on the quote.
+    #[case::headroom_truncated_away(99, -99)]
+    #[case::zero_output(0, 0)]
+    fn test_pinned_cap_headroom_truncates_at_small_amounts(
+        #[case] amount_out: u128,
+        #[case] expected_cap: i128,
+    ) {
+        let swap = swap_with_amounts(0x11, 0x22, 4_000_000, amount_out);
+
+        let (_, cap) = split_min_balance_update(
+            pinned_min_balance_update(&swap, FLOOR_FACTOR_3PCT, CAP_FACTOR_1PCT).unwrap(),
+        );
+
+        assert_eq!(cap, expected_cap);
     }
 
     #[rstest]
@@ -456,7 +779,7 @@ mod tests {
             extension,
             keccak256(b"pool"),
             signed_swap_meta(1_000, 42, 7, EvmAddress::ZERO),
-            min_balance_update_accept_any(),
+            FIXED_MIN_BALANCE_UPDATE,
         );
 
         let signature = signer.sign_hash_sync(&digest).unwrap();
@@ -478,7 +801,7 @@ mod tests {
         let extension = EvmAddress::from_str(EXTENSION).unwrap();
         let pool_id = B256::from([0x11u8; 32]);
         let meta = signed_swap_meta(1_000, 42, 7, EvmAddress::ZERO);
-        let min_bu = min_balance_update_accept_any();
+        let min_bu = FIXED_MIN_BALANCE_UPDATE;
 
         let digest = eip712_digest(1, extension, pool_id, meta, min_bu);
 
@@ -488,20 +811,22 @@ mod tests {
         assert_eq!(digest, expected);
     }
 
-    fn signed_swap(committed: Option<u64>) -> Swap {
-        let token_in = tycho_simulation::tycho_common::Bytes::from([0x11u8; 20].as_ref());
-        let token_out = tycho_simulation::tycho_common::Bytes::from([0x22u8; 20].as_ref());
-        let mut swap = Swap::new(
+    fn swap_with_amounts(token_in: u8, token_out: u8, amount_in: u128, amount_out: u128) -> Swap {
+        Swap::new(
             "ekubo-signed-pool".to_string(),
             "ekubo_v3".to_string(),
-            token_in,
-            token_out,
-            BigUint::from(1_000_000u64),
-            BigUint::from(1_000_000u64),
+            Bytes::from([token_in; 20].as_ref()),
+            Bytes::from([token_out; 20].as_ref()),
+            BigUint::from(amount_in),
+            BigUint::from(amount_out),
             BigUint::from(50_000u64),
             ekubo_component(),
             Box::new(MockProtocolSim::default()),
-        );
+        )
+    }
+
+    fn signed_swap(committed: Option<u64>) -> Swap {
+        let mut swap = swap_with_amounts(0x11, 0x22, 1_000_000, 1_000_000);
         if let Some(committed) = committed {
             swap.set_committed_amount_out(BigUint::from(committed));
         }
@@ -513,7 +838,9 @@ mod tests {
         let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
         let swap = signed_swap(Some(990_000));
 
-        let user_data = signer.build_user_data(&swap).unwrap();
+        let user_data = signer
+            .build_user_data(&swap, 0.03)
+            .unwrap();
         let bytes = user_data.as_ref();
 
         // Offsets mirror tycho `EkuboV3SwapEncoder::parse_signed_user_data`:
@@ -521,7 +848,12 @@ mod tests {
         assert_eq!(bytes.len(), 8 + 32 + 32 + 65);
         let config = pool_config_word(swap.protocol_component()).unwrap();
         assert_eq!(&bytes[0..8], &config.as_slice()[20..28]); // pool config fee
-        assert_eq!(&bytes[40..72], min_balance_update_accept_any().as_slice());
+                                                              // Pinned against literals, not a second call to the packer: the fixture quotes 1_000_000
+                                                              // in and out, so the floor is 3% below and the cap 1% above.
+        assert_eq!(
+            split_min_balance_update(B256::from_slice(&bytes[40..72])),
+            (970_000, -1_010_000)
+        );
 
         // The signature recovers over the digest rebuilt from the payload's meta and minBU.
         let extension = EvmAddress::from_str(EXTENSION).unwrap();
@@ -544,7 +876,7 @@ mod tests {
     fn test_build_user_data_requires_committed_amount() {
         let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
         assert!(signer
-            .build_user_data(&signed_swap(None))
+            .build_user_data(&signed_swap(None), 0.03)
             .is_err());
     }
 
@@ -563,8 +895,12 @@ mod tests {
         let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 42, 7, 120, LOCKER);
         let swap = signed_swap(Some(990_000));
 
-        let first = signer.build_user_data(&swap).unwrap();
-        let second = signer.build_user_data(&swap).unwrap();
+        let first = signer
+            .build_user_data(&swap, 0.03)
+            .unwrap();
+        let second = signer
+            .build_user_data(&swap, 0.03)
+            .unwrap();
 
         assert_eq!(payload_nonce(&first), 7 << 32);
         assert_eq!(payload_nonce(&second), (7 << 32) + 1);
@@ -580,8 +916,16 @@ mod tests {
 
         let mut nonces = Vec::new();
         for _ in 0..4 {
-            nonces.push(payload_nonce(&first.build_user_data(&swap).unwrap()));
-            nonces.push(payload_nonce(&second.build_user_data(&swap).unwrap()));
+            nonces.push(payload_nonce(
+                &first
+                    .build_user_data(&swap, 0.03)
+                    .unwrap(),
+            ));
+            nonces.push(payload_nonce(
+                &second
+                    .build_user_data(&swap, 0.03)
+                    .unwrap(),
+            ));
         }
 
         let unique: std::collections::HashSet<u64> = nonces.iter().copied().collect();
@@ -593,7 +937,7 @@ mod tests {
         let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
 
         let user_data = signer
-            .build_user_data(&signed_swap(Some(990_000)))
+            .build_user_data(&signed_swap(Some(990_000)), 0.03)
             .unwrap();
 
         // meta starts after the fee(8) prefix; its low 128 bits carry the locker's last 16 bytes.
@@ -613,8 +957,17 @@ mod tests {
             .nonce_counter
             .store(u32::MAX - 1, Ordering::Relaxed);
 
-        assert_eq!(payload_nonce(&signer.build_user_data(&swap).unwrap()), u64::MAX - 1);
-        assert!(signer.build_user_data(&swap).is_err());
+        assert_eq!(
+            payload_nonce(
+                &signer
+                    .build_user_data(&swap, 0.03)
+                    .unwrap()
+            ),
+            u64::MAX - 1
+        );
+        assert!(signer
+            .build_user_data(&swap, 0.03)
+            .is_err());
     }
 
     #[test]
@@ -626,7 +979,11 @@ mod tests {
             .store(u32::MAX, Ordering::Relaxed);
 
         // The counter must stop rather than wrap onto nonces this prefix already spent.
-        assert!(signer.build_user_data(&swap).is_err());
-        assert!(signer.build_user_data(&swap).is_err());
+        assert!(signer
+            .build_user_data(&swap, 0.03)
+            .is_err());
+        assert!(signer
+            .build_user_data(&swap, 0.03)
+            .is_err());
     }
 }

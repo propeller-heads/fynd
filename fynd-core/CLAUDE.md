@@ -222,3 +222,19 @@ The authorization names the Tycho router (the address `Encoder` resolves for the
 authorized locker, and the extension accepts no other caller. Authorizing every locker
 (`Address::ZERO`) would let a third party that reads the signed bytes execute the swap from its own
 contract and spend the nonce, which reverts the original transaction with `NonceAlreadyUsed`.
+
+That locker is a router anyone may call, so it is not enough on its own: a copycat can wrap a router
+call in its own contract and spend the payload at an amount nobody quoted. `pinned_min_balance_update`
+narrows that by filling in the payload's `minBalanceUpdate` — two `i128` minimums the extension
+checks against the pool's realized balance deltas, before applying its own fee. The pool's gain of
+`token_in` floors what the taker pays and its loss of `token_out` caps the pool's gross outflow
+(`EXCLUSIVE_SWAP_OUTPUT_CAP_BPS`, default 100 bps above the quote — `from_env` reads it, and
+`with_output_cap_tolerance_bps` is the in-code path). The floor scales by the request's own slippage
+(`input_floor_factor_bps`), so a mid-route leg — which swaps whatever the previous hop delivered —
+never reverts on drift the router's `min_amount_out` would have accepted. The cap does not use
+slippage: that bounds how much less a taker will take, not how much more. The two fail in opposite directions: the cap
+rejects an oversized swap, the floor rejects the reverse one. `swapParameters` travels outside the
+signature, so these minimums are the only signed constraint on size and direction, and what remains
+spendable is the band the two tolerances leave around the quote. Narrowing that band to the quoted
+trade alone needs the payload to name the taker, and the extension has no field for anyone but the
+locker.

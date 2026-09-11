@@ -20,9 +20,9 @@ use tracing::{trace, Level};
 
 use super::{
     is_rankable, Order, OrderQuote, OrderResponses, OrderSide, QuoteOptions, QuoteStatus,
-    SolveError, WorkerPoolQuote, BPS_DENOMINATOR,
+    SolveError, WorkerPoolQuote,
 };
-use crate::{simulation::deviation::deviation_bps, SimulationResult};
+use crate::{bps, simulation::deviation::deviation_bps, SimulationResult};
 
 /// Target for the per-quote comparison log. Emitted at TRACE so a plain `RUST_LOG=info` leaves
 /// it off; a deployment that wants it sets `RUST_LOG=...,fynd::quote_comparison=trace`.
@@ -255,7 +255,7 @@ fn improvement_bps(baseline_net: Option<f64>, net: Option<f64>) -> Option<f64> {
     if baseline <= 0.0 || !baseline.is_finite() || !net.is_finite() {
         return None;
     }
-    Some((net - baseline) / baseline * f64::from(BPS_DENOMINATOR))
+    Some((net - baseline) / baseline * f64::from(bps::DENOMINATOR))
 }
 
 /// Target for the winning-quote protocol log. Emitted at TRACE, like the comparison log, so a

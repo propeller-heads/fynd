@@ -50,10 +50,11 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
-    encoding::encoder::Encoder, feed::exclusivity::is_exclusive, price_guard::guard::PriceGuard,
-    simulation::simulator::QuoteSimulator, worker_pool::task_queue::TaskQueueHandle, BlockInfo,
-    EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus,
-    SolveError, SolveParams, SurplusInfo, Swap,
+    bps, encoding::encoder::Encoder, feed::exclusivity::is_exclusive,
+    price_guard::guard::PriceGuard, simulation::simulator::QuoteSimulator,
+    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote,
+    OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
+    SurplusInfo, Swap,
 };
 
 /// Reported when a request asks for simulation on a server started without `--enable-simulation`.
@@ -67,9 +68,6 @@ const ENV_USER_IMPROVEMENT_SHARE_BPS: &str = "EXCLUSIVE_ROUTE_USER_SHARE_BPS";
 /// Share of an exclusive route's improvement over the public market that is handed to the user,
 /// in basis points of that improvement: `1_000` gives the user a tenth of it.
 const DEFAULT_USER_IMPROVEMENT_SHARE_BPS: u32 = 1_000;
-
-/// Basis-point denominator: `10_000` bps is the whole improvement.
-const BPS_DENOMINATOR: u32 = 10_000;
 
 /// Wei per whole gas token. The exclusive metrics report whole gas tokens, not wei.
 const WEI_PER_GAS_TOKEN: f64 = 1e18;
@@ -86,11 +84,12 @@ fn user_improvement_share_bps_env() -> u32 {
     match parse_user_improvement_share_bps(&raw) {
         Some(bps) => bps,
         None => {
+            let denominator = bps::DENOMINATOR;
             warn!(
                 value = %raw,
                 default_bps = DEFAULT_USER_IMPROVEMENT_SHARE_BPS,
                 "{ENV_USER_IMPROVEMENT_SHARE_BPS} must be an integer from 0 to \
-                 {BPS_DENOMINATOR} basis points; using the default",
+                 {denominator} basis points; using the default",
             );
             DEFAULT_USER_IMPROVEMENT_SHARE_BPS
         }
@@ -103,7 +102,7 @@ fn parse_user_improvement_share_bps(raw: &str) -> Option<u32> {
     raw.trim()
         .parse::<u32>()
         .ok()
-        .filter(|bps| *bps <= BPS_DENOMINATOR)
+        .filter(|share| *share <= bps::DENOMINATOR)
 }
 
 /// Returns the part of `improvement` handed to the user, `user_share_bps` of it.
@@ -112,7 +111,7 @@ fn parse_user_improvement_share_bps(raw: &str) -> Option<u32> {
 /// favour. Never exceeds `improvement`, so the commitment it feeds stays within what the route
 /// produces.
 fn user_margin(improvement: &BigUint, user_share_bps: u32) -> BigUint {
-    let denominator = BigUint::from(BPS_DENOMINATOR);
+    let denominator = BigUint::from(bps::DENOMINATOR);
     (improvement * BigUint::from(user_share_bps) + (&denominator - 1u32)) / denominator
 }
 
@@ -1198,8 +1197,7 @@ fn default_fee_commitment(exclusive_candidate: &OrderQuote) -> Option<BigUint> {
         .amount_out();
 
     let realized_amount_out = exclusive_candidate.amount_out();
-    let fee = exclusive_leg_amount_out * BigUint::from(NO_PUBLIC_ROUTE_FEE_BPS) /
-        BigUint::from(BPS_DENOMINATOR);
+    let fee = bps::scale_truncating(exclusive_leg_amount_out, NO_PUBLIC_ROUTE_FEE_BPS);
     let committed_amount_out = realized_amount_out - fee;
 
     let gas_cost = realized_amount_out - exclusive_candidate.amount_out_net_gas();
