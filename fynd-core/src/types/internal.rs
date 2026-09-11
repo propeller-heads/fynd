@@ -76,17 +76,13 @@ impl SolveTask {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteRejection {
-    /// The route has a `propammfallback:` leg, and the PropAMMRouter's fee tiers have not been
-    /// read yet. Transient: the tiers arrive on a timer, and a solve before the first read drops
-    /// every pAMM route.
-    PammFeeTiersUnread,
-    /// The route has a `propammfallback:` leg whose fee tier has no Uniswap V3 pool to fall back
-    /// on, so the amount the leg would deliver on a fallback cannot be known.
+    /// The route has a `propammfallback:` leg whose pair has no fallback pool in this market, so
+    /// the amount the leg would deliver on a fallback cannot be known.
     PammFallbackPoolMissing,
-    /// The route has a `propammfallback:` leg whose Uniswap V3 fallback exists but could not be
-    /// simulated.
+    /// The route has a `propammfallback:` leg whose fallback exists but could not be simulated.
     PammFallbackUnpriceable,
-    /// The request excludes the Uniswap V3 pool used by a pAMM fallback.
+    /// The route has a `propammfallback:` leg whose every candidate fallback pool the request
+    /// excludes, so no fallback may be selected for it.
     PammFallbackExcluded,
 }
 
@@ -96,12 +92,11 @@ impl std::fmt::Display for RouteRejection {
             Self::PammFallbackExcluded => {
                 write!(f, "pAMM route dropped: request excludes its fallback pool")
             }
-            Self::PammFeeTiersUnread => write!(f, "pAMM route dropped: fee tiers not read yet"),
             Self::PammFallbackPoolMissing => {
-                write!(f, "pAMM route dropped: no Uniswap V3 pool at the fee tier")
+                write!(f, "pAMM route dropped: no fallback pool for the pair")
             }
             Self::PammFallbackUnpriceable => {
-                write!(f, "pAMM route dropped: the Uniswap V3 fallback could not be simulated")
+                write!(f, "pAMM route dropped: the fallback could not be simulated")
             }
         }
     }
