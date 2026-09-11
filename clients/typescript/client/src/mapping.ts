@@ -159,9 +159,9 @@ function toWireClientFeeParams(p: ClientFeeParams): WireClientFeeParams {
         receiver: p.receiver,
         max_contribution: p.maxContribution.toString(),
         deadline: p.deadline,
-        // The wire field is required; empty bytes tell the server to encode a placeholder
+        // The wire field is required. Empty bytes tell the server to encode a placeholder that
         // the client patches after signing.
-        signature: p.signature ?? '0x',
+        signature: '0x',
     };
 }
 

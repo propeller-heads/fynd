@@ -71,8 +71,6 @@ export interface ClientFeeParams {
   maxContribution: bigint;
   /** Unix timestamp after which the signature is invalid. */
   deadline: number;
-  /** 65-byte EIP-712 ECDSA signature by `receiver`. Usually left unset. */
-  signature?: Hex;
 }
 
 /** Controls how the solver encodes the settlement transaction. */

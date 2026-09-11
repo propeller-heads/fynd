@@ -122,44 +122,40 @@ impl PermitSingle {
 /// scaled value that ends up in the calldata.
 const CLIENT_FEE_UNITS_PER_BPS: u64 = 10_000;
 
+/// Length of the client fee ECDSA signature (r, s, v) in bytes.
+const CLIENT_FEE_SIGNATURE_BYTES: usize = 65;
+
 /// Client fee configuration for the Tycho Router.
 ///
 /// When attached to [`EncodingOptions`] via [`EncodingOptions::with_client_fee`], the router
-/// charges a client fee on the swap output. The `signature` must be an EIP-712 signature by the
-/// `receiver` over the `ClientFee` typed data — compute the hash with
-/// [`ClientFeeParams::eip712_signing_hash`].
+/// charges a client fee on the swap output.
+///
+/// Send these params unsigned. The signature covers the quoted swap, so it can only be produced
+/// after the quote comes back — compute the hash with [`ClientFeeParams::eip712_signing_hash`]
+/// and patch the result into the calldata with [`Quote::with_client_fee_signature`].
 #[derive(Debug, Clone)]
 pub struct ClientFeeParams {
     pub(crate) bps: u16,
     pub(crate) receiver: Bytes,
     pub(crate) max_contribution: BigUint,
     pub(crate) deadline: u64,
-    pub(crate) signature: Option<Bytes>,
 }
 
 impl ClientFeeParams {
     /// Create client fee params.
-    ///
-    /// `signature` must be a 65-byte EIP-712 signature by `receiver`.
     pub fn new(bps: u16, receiver: Bytes, max_contribution: BigUint, deadline: u64) -> Self {
-        Self { bps, receiver, max_contribution, deadline, signature: None }
-    }
-
-    /// Set the EIP-712 signature.
-    pub fn with_signature(mut self, signature: Bytes) -> Self {
-        self.signature = Some(signature);
-        self
+        Self { bps, receiver, max_contribution, deadline }
     }
 
     /// Compute the EIP-712 signing hash for the client fee params.
     ///
-    /// Pass the returned hash to the fee receiver's signer, then supply the
-    /// 65-byte result to [`ClientFeeParams::with_signature`].
+    /// Pass the returned hash to the fee receiver's signer, then patch the 65-byte result into
+    /// the quote's calldata with [`Quote::with_client_fee_signature`].
     ///
     /// The hash covers all 11 `ClientFee` fields. The swap-specific inputs
     /// (`amount_in`, `token_in`, `token_out`, `expected_amount_out`, `min_amount_out`,
-    /// `receiver`, `swaps_hash`) come from a prior unsigned quote request — see
-    /// [`FeeBreakdown`] and the `swap_client_fee` example for the two-step flow.
+    /// `receiver`, `swaps_hash`) come from the quote requested with unsigned params — see
+    /// [`FeeBreakdown`] and the `swap_client_fee` example for the flow.
     ///
     /// - `router_address`: 20-byte address of the TychoRouter contract.
     /// - `amount_in`: exact input amount from the order.
@@ -376,7 +372,9 @@ impl EncodingOptions {
         self
     }
 
-    /// Attach client fee configuration with a pre-signed EIP-712 signature.
+    /// Attach client fee configuration.
+    ///
+    /// Sign after quoting — see [`Quote::with_client_fee_signature`].
     pub fn with_client_fee(mut self, params: ClientFeeParams) -> Self {
         self.client_fee_params = Some(params);
         self
@@ -996,7 +994,7 @@ impl Quote {
     ///
     /// Use this after a single quote request:
     ///
-    /// 1. Request a quote with unsigned [`ClientFeeParams`] (empty signature).
+    /// 1. Request a quote with unsigned [`ClientFeeParams`].
     /// 2. Read [`FeeBreakdown::swaps_hash`] from the response.
     /// 3. Sign the 11-field EIP-712 hash using [`ClientFeeParams::eip712_signing_hash`].
     /// 4. Call this method to patch the signature into the calldata.
@@ -1004,9 +1002,16 @@ impl Quote {
     ///
     /// # Errors
     ///
-    /// Returns [`FyndError::Protocol`] if the quote has no transaction or no
-    /// `client_fee_signature_offset`.
+    /// Returns [`FyndError::Protocol`] if the quote has no transaction, has no
+    /// `client_fee_signature_offset`, if `signature` is not 65 bytes, if the offset does not
+    /// fit the calldata, or if the bytes at the offset are not the zeroed placeholder.
     pub fn with_client_fee_signature(mut self, signature: &[u8]) -> Result<Self, FyndError> {
+        if signature.len() != CLIENT_FEE_SIGNATURE_BYTES {
+            return Err(FyndError::Protocol(format!(
+                "client fee signature must be exactly {CLIENT_FEE_SIGNATURE_BYTES} bytes, got {}",
+                signature.len()
+            )));
+        }
         let tx = self
             .transaction
             .as_mut()
@@ -1020,7 +1025,25 @@ impl Quote {
                     "client_fee_signature_offset required for signature patching".into(),
                 )
             })?;
-        tx.data[offset..offset + signature.len()].copy_from_slice(signature);
+        let calldata_len = tx.data.len();
+        let slot = tx
+            .data
+            .get_mut(offset..offset + CLIENT_FEE_SIGNATURE_BYTES)
+            .ok_or_else(|| {
+                FyndError::Protocol(format!(
+                    "client fee signature at offset {offset} does not fit \
+                     {calldata_len}-byte calldata"
+                ))
+            })?;
+        // A wrong offset would silently overwrite an adjacent ABI field — amounts, receiver,
+        // route — and return a quote that still looks valid. The placeholder is always zeroed,
+        // so anything else here means the server and the client disagree about where it sits.
+        if slot.iter().any(|byte| *byte != 0) {
+            return Err(FyndError::Protocol(format!(
+                "client fee signature offset {offset} does not point at the zeroed placeholder"
+            )));
+        }
+        slot.copy_from_slice(signature);
         Ok(self)
     }
 
@@ -1167,6 +1190,87 @@ mod tests {
 
     fn addr(bytes: &[u8; 20]) -> Bytes {
         Bytes::copy_from_slice(bytes)
+    }
+
+    /// Quote whose calldata is `prefix` + a zeroed 65-byte placeholder + `suffix`, with the
+    /// placeholder offset reported as `offset`.
+    fn quote_with_placeholder(offset: Option<usize>, prefix: &[u8], suffix: &[u8]) -> Quote {
+        let mut data = prefix.to_vec();
+        data.extend_from_slice(&[0u8; CLIENT_FEE_SIGNATURE_BYTES]);
+        data.extend_from_slice(suffix);
+        let mut tx = Transaction::new(addr(&[0x11; 20]), BigUint::from(0u32), data);
+        tx.client_fee_signature_offset = offset;
+        Quote::new(
+            "order-1".to_string(),
+            QuoteStatus::Success,
+            BackendKind::Fynd,
+            None,
+            BigUint::from(1_000u32),
+            BigUint::from(2_000u32),
+            BigUint::from(150_000u32),
+            BigUint::from(2_000u32),
+            None,
+            BlockInfo {
+                number: 21_000_000,
+                hash: "0xabcdef".to_string(),
+                timestamp: 1_730_000_000,
+            },
+            addr(&[0x22; 20]),
+            addr(&[0x33; 20]),
+            Some(tx),
+            None,
+        )
+    }
+
+    #[test]
+    fn test_with_client_fee_signature_patches_the_placeholder() {
+        let quote = quote_with_placeholder(Some(2), &[0xde, 0xad], &[0xbe, 0xef]);
+        let patched = quote
+            .with_client_fee_signature(&[0xab; CLIENT_FEE_SIGNATURE_BYTES])
+            .unwrap();
+
+        let data = &patched.transaction().unwrap().data;
+        assert_eq!(&data[..2], &[0xde, 0xad]);
+        assert_eq!(&data[2..2 + CLIENT_FEE_SIGNATURE_BYTES], &[0xab; CLIENT_FEE_SIGNATURE_BYTES]);
+        assert_eq!(&data[2 + CLIENT_FEE_SIGNATURE_BYTES..], &[0xbe, 0xef]);
+    }
+
+    /// Patches `quote` with a valid-length signature and returns the rejection message.
+    fn patch_error(quote: Quote) -> String {
+        quote
+            .with_client_fee_signature(&[0xab; CLIENT_FEE_SIGNATURE_BYTES])
+            .expect_err("expected the patch to be rejected")
+            .to_string()
+    }
+
+    #[test]
+    fn test_with_client_fee_signature_rejects_wrong_length() {
+        let quote = quote_with_placeholder(Some(2), &[0xde, 0xad], &[0xbe, 0xef]);
+        let err = quote
+            .with_client_fee_signature(&[0xab; 64])
+            .expect_err("expected the patch to be rejected")
+            .to_string();
+        assert!(err.contains("must be exactly 65 bytes"), "{err}");
+    }
+
+    #[test]
+    fn test_with_client_fee_signature_rejects_offset_past_the_calldata() {
+        // 69-byte calldata, so a 65-byte signature at byte 5 runs one byte past the end.
+        let err = patch_error(quote_with_placeholder(Some(5), &[0xde, 0xad], &[0xbe, 0xef]));
+        assert!(err.contains("does not fit 69-byte calldata"), "{err}");
+    }
+
+    #[test]
+    fn test_with_client_fee_signature_rejects_offset_off_the_placeholder() {
+        // Offset 0 points at the prefix, not the zeroed placeholder that starts at byte 2.
+        let err = patch_error(quote_with_placeholder(Some(0), &[0xde, 0xad], &[0xbe, 0xef]));
+        assert!(err.contains("does not point at the zeroed placeholder"), "{err}");
+    }
+
+    #[test]
+    fn test_with_client_fee_signature_rejects_missing_offset() {
+        let err = patch_error(quote_with_placeholder(None, &[0xde, 0xad], &[0xbe, 0xef]));
+        assert!(err.contains("client_fee_signature_offset required"), "{err}");
     }
 
     #[test]

@@ -164,7 +164,6 @@ describe('toWireRequest', () => {
             receiver: '0x4444444444444444444444444444444444444444' as Address,
             maxContribution: 500000n,
             deadline: 1893456000,
-            signature: `0x${'ab'.repeat(65)}` as Hex,
           },
         },
       },
@@ -176,26 +175,8 @@ describe('toWireRequest', () => {
     expect(fee?.receiver).toBe('0x4444444444444444444444444444444444444444');
     expect(fee?.max_contribution).toBe('500000');
     expect(fee?.deadline).toBe(1893456000);
-    expect(fee?.signature).toBe(`0x${'ab'.repeat(65)}`);
-  });
-
-  it('sends empty signature bytes for unsigned clientFeeParams', () => {
-    const params: QuoteParams = {
-      ...baseParams,
-      options: {
-        encodingOptions: {
-          slippage: 0.01,
-          clientFeeParams: {
-            bps: 100,
-            receiver: '0x4444444444444444444444444444444444444444' as Address,
-            maxContribution: 0n,
-            deadline: 1893456000,
-          },
-        },
-      },
-    };
-    const wire = toWireRequest(params);
-    expect(wire.options?.encoding_options?.client_fee_params?.signature).toBe('0x');
+    // Unsigned on the wire — the server encodes a placeholder for the client to patch.
+    expect(fee?.signature).toBe('0x');
   });
 
   it('omits client_fee_params when not provided', () => {
