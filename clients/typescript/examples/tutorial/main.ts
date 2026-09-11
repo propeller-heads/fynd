@@ -29,7 +29,7 @@ const publicClient = createPublicClient({ chain: mainnet, transport: http(rpcUrl
 const client = new FyndClient({
   baseUrl: FYND_URL,
   sender: account.address,
-  provider: viemProvider(publicClient, account.address),
+  provider: viemProvider(publicClient),
   fetchRevertReason: true,
 });
 

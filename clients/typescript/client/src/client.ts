@@ -335,6 +335,7 @@ export class FyndClient {
     }
 
     const txBase = {
+      from: sender,
       chainId,
       nonce,
       maxFeePerGas,
@@ -572,6 +573,7 @@ export class FyndClient {
     }) as Hex;
 
     const tx: Eip1559Transaction = {
+      from: sender,
       chainId,
       nonce,
       maxFeePerGas,

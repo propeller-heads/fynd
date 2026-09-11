@@ -8,6 +8,7 @@ const SENDER = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045' as Address;
 const ROUTER = '0x1111111111111111111111111111111111111111' as Address;
 
 const TX: Eip1559Transaction = {
+  from: SENDER,
   chainId: 1,
   nonce: 5,
   maxFeePerGas: 20n,
@@ -31,23 +32,21 @@ function makeMockViemClient(): ViemPublicClient & { [K in 'call' | 'estimateGas'
 }
 
 describe('viemProvider', () => {
-  // A call without `account` runs from the zero address, so routers that pull funds with
-  // `transferFrom(msg.sender, ...)` revert during simulation.
   it('sends the sender as the caller of eth_call', async () => {
     const viem = makeMockViemClient();
-    await viemProvider(viem, SENDER).call(TX);
+    await viemProvider(viem).call(TX);
     expect(viem.call).toHaveBeenCalledWith(expect.objectContaining({ account: SENDER }));
   });
 
   it('sends the sender as the caller of eth_estimateGas', async () => {
     const viem = makeMockViemClient();
-    await viemProvider(viem, SENDER).estimateGas(TX);
+    await viemProvider(viem).estimateGas(TX);
     expect(viem.estimateGas).toHaveBeenCalledWith(expect.objectContaining({ account: SENDER }));
   });
 
   it('forwards the transaction fields to eth_call', async () => {
     const viem = makeMockViemClient();
-    await viemProvider(viem, SENDER).call(TX);
+    await viemProvider(viem).call(TX);
     expect(viem.call).toHaveBeenCalledWith({
       account: SENDER,
       to: TX.to,
@@ -62,13 +61,13 @@ describe('viemProvider', () => {
   it('returns the call result data when present', async () => {
     const viem = makeMockViemClient();
     viem.call.mockResolvedValueOnce({ data: '0x01' as Hex });
-    const result = await viemProvider(viem, SENDER).call(TX);
+    const result = await viemProvider(viem).call(TX);
     expect(result).toEqual({ data: '0x01' });
   });
 
   it('omits data when the call returns none', async () => {
     const viem = makeMockViemClient();
-    const result = await viemProvider(viem, SENDER).call(TX);
+    const result = await viemProvider(viem).call(TX);
     expect(result).toEqual({});
   });
 });
