@@ -1078,10 +1078,7 @@ pub enum QuoteStatus {
     EncodingFailed,
 }
 
-/// Block information at which a quote was computed.
-///
-/// Quotes are only valid for the block at which they were computed. Market
-/// conditions may change in subsequent blocks.
+/// Source-chain block identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BlockInfo {

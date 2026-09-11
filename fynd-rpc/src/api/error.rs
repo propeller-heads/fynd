@@ -21,6 +21,10 @@ pub enum ApiError {
     #[error("service overloaded, try again later")]
     ServiceOverloaded,
 
+    /// Required service data has not been initialized yet.
+    #[error("data not ready: {0}")]
+    NotReady(String),
+
     /// Internal server error.
     #[error("internal error: {0}")]
     Internal(String),
@@ -80,6 +84,7 @@ impl ResponseError for ApiError {
                 _ => StatusCode::UNPROCESSABLE_ENTITY,
             },
             ApiError::ServiceOverloaded => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::NotReady(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::StaleData { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
@@ -90,6 +95,7 @@ impl ResponseError for ApiError {
             ApiError::BadRequest(_) => "BAD_REQUEST",
             ApiError::SolveFailed(e) => solve_error_code(e),
             ApiError::ServiceOverloaded => "SERVICE_OVERLOADED",
+            ApiError::NotReady(_) => "NOT_READY",
             ApiError::Internal(_) => "INTERNAL_ERROR",
             ApiError::StaleData { .. } => "STALE_DATA",
         };
@@ -181,6 +187,15 @@ mod tests {
         let (status, body) = json_body(ApiError::ServiceOverloaded).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "SERVICE_OVERLOADED");
+    }
+
+    #[actix_web::test]
+    async fn test_not_ready() {
+        let (status, body) =
+            json_body(ApiError::NotReady("Tycho head is unavailable".into())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "NOT_READY");
+        assert_eq!(body["error"], "data not ready: Tycho head is unavailable");
     }
 
     #[actix_web::test]
