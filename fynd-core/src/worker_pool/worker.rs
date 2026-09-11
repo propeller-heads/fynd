@@ -618,12 +618,7 @@ where
                         );
                         self.route_carries_no_swaps()
                     })?;
-                    route
-                        .swaps()
-                        .iter()
-                        .filter(|s| *s.token_out() == output_token)
-                        .map(|s| s.amount_out().clone())
-                        .fold(BigUint::ZERO, |acc, x| acc + x)
+                    route.amount_out(&output_token)
                 } else {
                     order.amount().clone()
                 };

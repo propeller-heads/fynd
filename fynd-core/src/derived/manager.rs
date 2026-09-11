@@ -2,13 +2,13 @@
 //!
 //! The ComputationManager:
 //! - Subscribes to MarketEvents from TychoFeed
-//! - Runs derived computations (token prices, spot prices, component depths)
-//! - Updates DerivedDataStore (exclusive write access)
+//! - Runs derived computations (spot prices, token prices, component depths) and updates the
+//!   DerivedData store
 //! - Provides read access to workers via shared store reference
 
 use std::{
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -128,6 +128,10 @@ pub struct ComputationManagerConfig {
     max_hop: usize,
     /// Slippage threshold for component depth computation (0.0 < threshold < 1.0).
     depth_slippage_threshold: f64,
+    /// Overrides the token pricing pass's sell-loop budget; `None` keeps the computation's
+    /// default. The replay harness sets an effectively unbounded budget so integration tests
+    /// can assert exact priced-token counts.
+    pricing_pass_budget: Option<Duration>,
 }
 
 impl ComputationManagerConfig {
@@ -145,6 +149,12 @@ impl ComputationManagerConfig {
     /// Sets the max hop count for token gas price computation.
     pub fn with_max_hop(mut self, hop_count: usize) -> Self {
         self.max_hop = hop_count;
+        self
+    }
+
+    /// Overrides the wall-clock budget for the token pricing pass's sell loop.
+    pub fn with_pricing_pass_budget(mut self, pass_budget: Duration) -> Self {
+        self.pricing_pass_budget = Some(pass_budget);
         self
     }
 
@@ -172,7 +182,15 @@ impl ComputationManagerConfig {
 
 impl Default for ComputationManagerConfig {
     fn default() -> Self {
-        Self { gas_token: Address::zero(20), max_hop: 2, depth_slippage_threshold: 0.01 }
+        // FyndBuilder overrides max_hop with the deepest configured pool's max_hops, so that
+        // every quotable token is priceable; the default only serves manual construction and
+        // matches the default pool max_hops.
+        Self {
+            gas_token: Address::zero(20),
+            max_hop: crate::solver::defaults::POOL_MAX_HOPS,
+            depth_slippage_threshold: 0.01,
+            pricing_pass_budget: None,
+        }
     }
 }
 
@@ -197,7 +215,8 @@ struct ComputationSchedule {
 }
 
 impl ComputationManager {
-    /// Creates a new ComputationManager.
+    /// Creates a manager with the default computation set: spot prices, token prices, and
+    /// component depths, run for every block by [`run`](Self::run).
     ///
     /// Returns the manager and a receiver for derived data events.
     /// Workers can subscribe to the event sender via `event_sender()` to track
@@ -208,11 +227,13 @@ impl ComputationManager {
     ) -> Result<(Self, broadcast::Receiver<DerivedDataEvent>), ComputationError> {
         let (mut manager, event_rx) = Self::empty(market_data);
         manager.register(SpotPriceComputation::new())?;
-        manager.register(
-            TokenGasPriceComputation::default()
-                .with_max_hops(config.max_hop)
-                .with_gas_token(config.gas_token),
-        )?;
+        let mut token_prices = TokenGasPriceComputation::default()
+            .with_max_hops(config.max_hop)
+            .with_gas_token(config.gas_token);
+        if let Some(pass_budget) = config.pricing_pass_budget {
+            token_prices = token_prices.with_pass_budget(pass_budget);
+        }
+        manager.register(token_prices)?;
         manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
         Ok((manager, event_rx))
     }
@@ -743,6 +764,7 @@ mod tests {
         let guard = store.read().await;
         assert!(guard.spot_prices().is_some());
         assert!(guard.token_prices().is_some());
+        assert!(guard.component_depths().is_some());
         drop(guard);
         // ...and the receiver is back at the live tail (buffer drained).
         assert!(matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
@@ -889,8 +911,9 @@ mod tests {
 
         let store = manager.store();
         let guard = store.read().await;
-        assert!(guard.token_prices().is_some());
         assert!(guard.spot_prices().is_some());
+        assert!(guard.component_depths().is_some());
+        assert!(guard.token_prices().is_some());
     }
 
     #[tokio::test]
@@ -1293,9 +1316,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_computations_cascade_failure_in_registration_order() {
-        // Real fynd flow: a full recompute with no sim state makes spot prices fail
-        // outright, cascading ComputationFailed to every dependent in registration order.
+    async fn test_spot_price_failure_cascade() {
+        // Real fynd flow: a full recompute with no sim state makes spot prices fail outright.
+        // Pool depths depend on them and fail with them. Token prices read no derived data,
+        // so they still complete.
         let (manager, _event_rx) = ComputationManager::new(
             ComputationManagerConfig::new(),
             market_with_component_no_sim_state(),
@@ -1309,7 +1333,7 @@ mod tests {
             vec![
                 ("new_block", ""),
                 ("failed", "spot_prices"),
-                ("failed", "token_prices"),
+                ("complete", "token_prices"),
                 ("failed", "pool_depths"),
             ]
         );
@@ -1352,27 +1376,6 @@ mod tests {
         MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
 
-    /// Creates a market WITH sim_state but WITHOUT gas_price.
-    ///
-    /// Spot price computation succeeds (MockProtocolSim works), but token_price
-    /// computation fails with `MissingDependency("gas_price")`.
-    fn market_with_sim_state_no_gas_price() -> MarketData {
-        let eth = token(1, "ETH");
-        let usdc = token(2, "USDC");
-        let component = component("component", &[eth.clone(), usdc.clone()]);
-
-        let mut market = MarketState::new();
-        // Note: no update_gas_price() — gas price is intentionally absent
-        market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
-        market.upsert_components(std::iter::once(component));
-        market.update_states([(
-            "component".to_string(),
-            Box::new(MockProtocolSim::new(2000.0)) as _,
-        )]);
-        market.upsert_tokens([eth, usdc]);
-        MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
-    }
-
     #[tokio::test]
     async fn test_spot_price_failure_broadcasts_computation_failed() {
         let market = market_with_component_no_sim_state();
@@ -1391,38 +1394,6 @@ mod tests {
                 DerivedDataEvent::ComputationFailed { computation_id: "spot_prices", .. }
             )),
             "expected ComputationFailed(spot_prices) in events: {events:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_token_price_failure_broadcasts_computation_failed() {
-        let eth = token(1, "ETH");
-        let usdc = token(2, "USDC");
-        let market = market_with_sim_state_no_gas_price();
-        let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
-        let (mut manager, mut event_rx) = ComputationManager::new(config, market).unwrap();
-
-        // handle_event with added components — spot_price succeeds, token_price fails
-        let event = MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter([(
-                "component".to_string(),
-                vec![eth.address.clone(), usdc.address.clone()],
-            )]),
-            removed_components: vec![],
-            updated_components: vec![],
-        };
-        manager
-            .handle_event(&event)
-            .await
-            .unwrap();
-
-        let events = drain_events(&mut event_rx);
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                DerivedDataEvent::ComputationFailed { computation_id: "token_prices", .. }
-            )),
-            "expected ComputationFailed(token_prices) in events: {events:?}"
         );
     }
 

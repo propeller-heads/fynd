@@ -251,12 +251,12 @@ const DEFAULT_PRICES_LIMIT: usize = 1000;
 const MAX_PRICES_LIMIT: usize = 1000;
 
 #[cfg(feature = "experimental")]
-/// GET /v1/prices - Return derived token prices and optional market data.
+/// GET /v1/prices - Return per-token mid prices and optional market data.
 ///
-/// By default returns token gas prices only. Each `prices[].price` is a plain decimal string
-/// holding raw target-token units divided by raw gas-token units; consumers must normalize
-/// both tokens' decimals before using it. Use `include` query parameter to add spot prices
-/// and/or component depths.
+/// Returns 503 until the first token-price solve has landed. Each `prices[].price` is a
+/// plain decimal string holding raw target-token units divided by raw gas-token units;
+/// consumers must normalize both tokens' decimals before using it. Use the `include` query
+/// parameter to add spot prices and/or component depths.
 ///
 /// # Query Parameters
 ///
@@ -294,8 +294,11 @@ pub async fn get_prices(
 
     // Acquire read lock, check staleness first (avoid cloning if 503), then clone
     let store = state.derived_data.read().await;
-    let token_prices_block = store
-        .token_prices_block()
+    // The prices and their block are one store slot, written together when a pass lands, so
+    // one check covers both.
+    let (token_prices, token_prices_block) = store
+        .token_prices()
+        .zip(store.token_prices_block())
         .ok_or(ApiError::StaleData { age_ms: u64::MAX })?;
     if want_spot && store.spot_prices_block().is_none() {
         return Err(ApiError::StaleData { age_ms: u64::MAX });
@@ -305,27 +308,22 @@ pub async fn get_prices(
     }
     let spot_prices_block = store.spot_prices_block();
     let component_depths_block = store.component_depths_block();
-    let token_prices = store.token_prices().cloned();
+    let token_prices_data = token_prices.clone();
     let spot_prices_data = if want_spot { store.spot_prices().cloned() } else { None };
     let component_depths_data = if want_depths { store.component_depths().cloned() } else { None };
     drop(store);
 
-    // Convert token gas prices
     let mut prices = Vec::new();
     let mut skipped_tokens = 0usize;
-    if let Some(token_prices) = &token_prices {
-        for (address, price) in token_prices {
-            match price_to_decimal_string(&price.numerator, &price.denominator) {
-                Some(price) => {
-                    prices.push(TokenPriceEntry { token: address.clone(), price });
-                }
-                None => {
-                    debug!(
-                        token = %address,
-                        "cannot serialize token price (zero or oversized numerator/denominator)"
-                    );
-                    skipped_tokens += 1;
-                }
+    for (address, price) in token_prices_data {
+        match price_to_decimal_string(&price.numerator, &price.denominator) {
+            Some(price) => prices.push(TokenPriceEntry { token: address, price }),
+            None => {
+                debug!(
+                    token = %address,
+                    "cannot serialize token price (zero or oversized numerator/denominator)"
+                );
+                skipped_tokens += 1;
             }
         }
     }
@@ -665,6 +663,108 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 400);
         let body = body_json(resp).await;
         assert_eq!(body["code"], "BAD_REQUEST", "body was: {body}");
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_returns_503_before_derived_data() {
+        let state = make_test_state();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 503);
+    }
+
+    // The pricing pass cannot fail as a whole, so its first run sets the block even when
+    // nothing but the gas token (priced 1:1 unconditionally) is in the map. That is a landed
+    // answer: on a market where no pool trades the gas token, the one-entry map is the honest
+    // response, and a 503 would never clear.
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_with_only_the_gas_token_priced() {
+        use num_bigint::BigUint;
+        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
+
+        let state = make_test_state();
+        {
+            let mut store = state.derived_data.write().await;
+            store.set_token_prices(
+                [(test_addr(0x00), Price::new(BigUint::from(1u8), BigUint::from(1u8)))]
+                    .into_iter()
+                    .collect(),
+                vec![],
+                19_000_000,
+                true,
+            );
+        }
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = body_json(resp).await;
+        assert_eq!(body["prices"].as_array().map(Vec::len), Some(1), "body was: {body}");
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_returns_200_once_a_token_is_priced() {
+        use num_bigint::BigUint;
+        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
+
+        let state = make_test_state();
+        {
+            let mut store = state.derived_data.write().await;
+            store.set_token_prices(
+                [
+                    (test_addr(0x00), Price::new(BigUint::from(1u8), BigUint::from(1u8))),
+                    (test_addr(0x0b), Price::new(BigUint::from(2u8), BigUint::from(1u8))),
+                ]
+                .into_iter()
+                .collect(),
+                vec![],
+                19_000_000,
+                true,
+            );
+        }
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = body_json(resp).await;
+        assert_eq!(body["prices"].as_array().map(Vec::len), Some(2), "body was: {body}");
     }
 
     #[cfg(feature = "experimental")]

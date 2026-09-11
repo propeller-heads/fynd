@@ -196,12 +196,13 @@ impl PathFrankWolfeAlgorithm {
                 id: Some(format!("{:?}", ctx.token_in_node)),
             })?;
         let token_out = ctx
-            .node_address
-            .get(&ctx.token_out_node)
-            .cloned()
+            .token_out_node
+            .and_then(|node| ctx.node_address.get(&node).cloned())
             .ok_or_else(|| AlgorithmError::DataNotFound {
                 kind: "token_out node index",
-                id: Some(format!("{:?}", ctx.token_out_node)),
+                id: ctx
+                    .token_out_node
+                    .map(|node| format!("{node:?}")),
             })?;
         let probe_order = Order::new(
             token_in,
@@ -622,12 +623,7 @@ impl PathFrankWolfeAlgorithm {
             .last()
             .ok_or_else(|| AlgorithmError::Other("route has no swaps".to_string()))?;
         let output_token = last_swap.token_out();
-        let total_out: BigUint = route
-            .swaps()
-            .iter()
-            .filter(|s| s.token_out() == output_token)
-            .map(|s| s.amount_out().clone())
-            .fold(BigUint::zero(), |acc, x| acc + x);
+        let total_out = route.amount_out(output_token);
 
         let gas_cost = Self::gas_cost_output_tokens(route, ctx)?;
         let gas_cost_tokens = BigUint::from(gas_cost.ceil() as u128);
