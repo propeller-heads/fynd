@@ -62,7 +62,7 @@ use crate::{
     },
     feed::market_data::MarketData,
     graph::{GraphManager, PetgraphStableDiGraphManager},
-    types::{ComponentId, Order, OrderSide},
+    types::{ComponentId, Order, OrderSide, RouteExclusions},
 };
 
 /// One pricing pass's solving state: a single market snapshot re-rooted for every sell.
@@ -119,8 +119,15 @@ impl<'a> PricingPass<'a> {
             .iter()
             .map(|(&node, address)| (address.clone(), node))
             .collect();
-        let hops_to_gas =
-            BellmanFordAlgorithm::get_hops_to_reach(graph, gas_node, algorithm.max_hops());
+        // Pricing carries no request, so nothing is excluded and the gas token stands in for
+        // both exempt endpoints.
+        let hops_to_gas = BellmanFordAlgorithm::get_hops_to_reach(
+            graph,
+            gas_node,
+            gas_node,
+            algorithm.max_hops(),
+            &RouteExclusions::default(),
+        );
         Self { algorithm, graph, ctx, computation, buys, gas_node, hops_to_gas, token_nodes }
     }
 

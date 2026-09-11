@@ -107,9 +107,10 @@ impl BellmanFordContext {
     ) -> Option<FxHashSet<&'a ComponentId>> {
         let subgraph = BellmanFordAlgorithm::get_subgraph_with_hop_map(
             graph,
-            token_in_node,
+            (token_in_node, Some(token_out_node)),
             Some(hops_to_token_out),
             max_hops,
+            &RouteExclusions::default(),
         )?;
         self.adj = subgraph.adjacency;
         self.token_in_node = token_in_node;
@@ -252,18 +253,13 @@ impl BellmanFordAlgorithm {
             });
         }
 
-        let subgraph = Self::get_subgraph(
-            graph,
-            token_in_node,
-            token_out_node,
-            self.max_hops,
-            &exclusions,
-        )
-        .ok_or_else(|| AlgorithmError::NoPath {
-            from: order.token_in().clone(),
-            to: order.token_out().clone(),
-            reason: NoPathReason::NoGraphPath,
-        })?;
+        let subgraph =
+            Self::get_subgraph(graph, token_in_node, token_out_node, self.max_hops, &exclusions)
+                .ok_or_else(|| AlgorithmError::NoPath {
+                    from: order.token_in().clone(),
+                    to: order.token_out().clone(),
+                    reason: NoPathReason::NoGraphPath,
+                })?;
         // The view is acquired only after the walk: only the extraction needs the guard, and
         // holding it through a walk would queue the feed's writer.
         let market_view = paths::read_market(&market, label).await?;
@@ -1505,8 +1501,14 @@ mod tests {
                 .expect("token in graph")
         };
         let Subgraph { token_nodes, component_ids, .. } =
-            BellmanFordAlgorithm::get_subgraph_with_hop_map(graph, node(&token_g.address), None, 2)
-                .unwrap();
+            BellmanFordAlgorithm::get_subgraph_with_hop_map(
+                graph,
+                (node(&token_g.address), None),
+                None,
+                2,
+                &RouteExclusions::default(),
+            )
+            .unwrap();
 
         let kept = |id: &str| {
             component_ids
@@ -1887,7 +1889,13 @@ mod tests {
         };
 
         let gas_node = ctx.token_in_node;
-        let hops_to_gas = BellmanFordAlgorithm::get_hops_to_reach(graph, gas_node, 3);
+        let hops_to_gas = BellmanFordAlgorithm::get_hops_to_reach(
+            graph,
+            gas_node,
+            gas_node,
+            3,
+            &RouteExclusions::default(),
+        );
         ctx.reroot_toward(graph, node_of(&token_c.address), gas_node, &hops_to_gas, 3)
             .expect("a C-to-G path exists");
         let ord = order(&token_c, &token_g, 100, OrderSide::Sell);
