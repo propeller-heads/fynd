@@ -60,7 +60,7 @@ min_amount_received  = 994,990 - 9,949                   = 985,041
 ## Setting up client fees
 
 1. Set a fee in basis points (e.g. `50` = 0.5%), a receiver address, and a `maxClientContribution`.
-2. Request a quote with those params and **no signature**, via `EncodingOptions.clientFeeParams`. The
+2. Put those params in `EncodingOptions.clientFeeParams` with **no signature** and request a quote. The
    response holds the encoded transaction with a zeroed 65-byte signature placeholder, plus
    `fee_breakdown.swaps_hash` and `transaction.client_fee_signature_offset`.
 3. Have the fee receiver sign the EIP-712 `ClientFee` message, which binds the fee params to the
@@ -68,8 +68,7 @@ min_amount_received  = 994,990 - 9,949                   = 985,041
 4. Patch the signature into the calldata at `client_fee_signature_offset` and submit the transaction.
 5. The router verifies the signature on-chain and deducts the fee. Fees go to the receiver's vault balance.
 
-One quote request per swap is enough — the signature is patched into the calldata you already
-have. Do not re-quote after signing: the signature covers `expectedAmountOut` and the quoted
+Do not re-quote after signing: the signature covers `expectedAmountOut` and the quoted
 swaps, so a fresh quote invalidates it.
 
 Without `ClientFeeParams`, no client fee is charged. [Fynd fees](router-fees.md) still apply.
@@ -119,8 +118,8 @@ client library helpers sign the scaled value rather than the raw bps.
 ```typescript
 // Step 1: request a quote using unsigned client fee params. The server encodes the full
 // calldata with a 65-byte signature placeholder and returns `swapsHash` in the fee breakdown
-// plus `clientFeeSignatureOffset` in the transaction, so the client can patch the real
-// signature in.
+// plus `clientFeeSignatureOffset` in the transaction. Patch the real signature in at that
+// offset.
 const feeParams: ClientFeeParams = {
   bps: FEE_BPS,
   receiver: feeAccount.address,
