@@ -297,7 +297,12 @@ impl Encoder {
             )?
             .with_user_transfer_type(encoding_options.transfer_type().clone());
             let solution = match &self.exclusive_swap_signer {
-                Some(signer) => Self::stamp_exclusive_swaps(solution, quote, signer)?,
+                Some(signer) => Self::stamp_exclusive_swaps(
+                    solution,
+                    quote,
+                    signer,
+                    encoding_options.slippage(),
+                )?,
                 None => {
                     // Fail fast rather than emit on-chain-invalid unsigned calldata for an
                     // exclusive leg: an exclusive route requires a signature.
@@ -387,6 +392,7 @@ impl Encoder {
         solution: Solution,
         quote: &OrderQuote,
         signer: &ExclusiveSwapSigner,
+        slippage: f64,
     ) -> Result<Solution, SolveError> {
         let route = quote.route().ok_or_else(|| {
             SolveError::FailedEncoding("successful quote must have a route".to_string())
@@ -418,7 +424,7 @@ impl Encoder {
                     .committed_amount_out()
                     .is_some()
                 {
-                    let user_data = signer.build_user_data(route_swap)?;
+                    let user_data = signer.build_user_data(route_swap, slippage)?;
                     Ok(solution_swap.with_user_data(user_data))
                 } else {
                     Ok(solution_swap)
@@ -1097,9 +1103,13 @@ mod tests {
             make_order_quote(990_000).with_route(single_swap_route(ekubo_signed_swap(committed)));
         let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
 
-        let solution =
-            Encoder::stamp_exclusive_swaps(Solution::try_from(&quote).unwrap(), &quote, &signer)
-                .unwrap();
+        let solution = Encoder::stamp_exclusive_swaps(
+            Solution::try_from(&quote).unwrap(),
+            &quote,
+            &signer,
+            0.01,
+        )
+        .unwrap();
 
         assert_eq!(
             solution.swaps()[0]
