@@ -10,9 +10,9 @@
 //   3. Patch the signature into the calldata with `patchClientFeeSignature`.
 //   4. Execute.
 //
-// Two keys are used: the dev key as the sender, and a random ephemeral key as the fee
-// receiver (in production this is the integrator's key). The fee receiver needs no funds —
-// fees accrue to its vault balance, and `maxContribution: 0n` means it subsidizes nothing.
+// The example uses two keys: the dev key as the sender, and a throwaway key generated per run
+// as the fee receiver (in production this is the integrator's key). The fee receiver needs no
+// funds — fees accrue to its vault balance, and `maxContribution: 0n` means it subsidizes nothing.
 //
 // Run with Anvil (mocked accounts), which needs TYCHO_API_KEY (and optionally TYCHO_URL):
 //   ./scripts/run-all-examples.sh
@@ -64,7 +64,7 @@ if (info.routerAddress === null) {
 const routerAddress = info.routerAddress;
 const chainId = info.chainId;
 
-// Approve the router to spend WETH if the current allowance is insufficient.
+// Approve the router to spend WETH when the allowance is too small.
 const approvalPayload = await client.approval({
   token: WETH,
   amount: SELL_AMOUNT,
@@ -80,8 +80,8 @@ if (approvalPayload !== null) {
 // [doc:start client-fee-typescript]
 // Step 1: request a quote using unsigned client fee params. The server encodes the full
 // calldata with a 65-byte signature placeholder and returns `swapsHash` in the fee breakdown
-// plus `clientFeeSignatureOffset` in the transaction, so the client can patch the real
-// signature in.
+// plus `clientFeeSignatureOffset` in the transaction. Patch the real signature in at that
+// offset.
 const feeParams: ClientFeeParams = {
   bps: FEE_BPS,
   receiver: feeAccount.address,
@@ -127,7 +127,6 @@ console.log(`amount_in:  ${signed.amountIn}`);
 console.log(`amount_out: ${signed.amountOut}`);
 console.log(`client_fee: ${feeBreakdown.clientFee}`);
 
-// Sign and execute the swap.
 const payload = await client.swapPayload(signed, { simulate: true });
 const txSig = await account.sign({ hash: swapSigningHash(payload) });
 const settled = await (await client.executeSwap(assembleSignedSwap(payload, txSig))).settle();

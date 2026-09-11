@@ -189,7 +189,7 @@ describe('approvalSigningHash', () => {
 describe('assertSignatureLength', () => {
   const VALID = `0x${'ab'.repeat(65)}` as Hex;
 
-  it('accepts a 65-byte signature', () => {
+  it('checks a 65-byte signature', () => {
     expect(() => assertSignatureLength(VALID, 'Client fee')).not.toThrow();
   });
 

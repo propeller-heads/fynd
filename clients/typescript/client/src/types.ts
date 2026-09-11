@@ -60,10 +60,7 @@ export interface PermitSingle {
  *
  * When provided, the router charges a fee in basis points on the swap output.
  *
- * The signature covers the quoted swap, so it can only be produced after the quote comes
- * back. Send these params unsigned, then patch the signature into the returned calldata with
- * `patchClientFeeSignature` — no second quote request needed. Set `signature` only if you
- * already hold a signature valid for this exact swap.
+ * Send these params unsigned; see `patchClientFeeSignature` for the signing flow.
  */
 export interface ClientFeeParams {
   /** Fee in basis points (0–10,000). 100 = 1%. */
@@ -103,7 +100,7 @@ export interface Transaction {
    * Byte offset of the client fee signature placeholder within `data`.
    *
    * Present only when `clientFeeParams` was set on the quote request. Pass the quote to
-   * `patchClientFeeSignature` to overwrite the placeholder with the real signature.
+   * `patchClientFeeSignature`, which overwrites the placeholder at this offset.
    */
   clientFeeSignatureOffset?: number;
 }
@@ -163,9 +160,9 @@ export interface FeeBreakdown {
   /** Minimum amount the user receives on-chain (the min_amount_out in the tx). */
   minAmountReceived: bigint;
   /**
-   * keccak256 of the ABI-encoded swap bytes.
+   * keccak256 of the encoded swaps bytes.
    *
-   * Present only when `clientFeeParams` was set on the quote request. Feed it to
+   * Present only when `clientFeeParams` was set on the quote request. Pass it to
    * `clientFeeSigningHash` as `ClientFeeSwapContext.swapsHash`.
    */
   swapsHash?: Hex;

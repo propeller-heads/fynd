@@ -43,8 +43,8 @@ Single file: `src/lib.rs`. All types derive `Serialize + Deserialize`.
 When types change here, regenerate the OpenAPI spec and TypeScript types:
 
 1. Update the OpenAPI spec: `./scripts/update-openapi.sh`
-2. This regenerates `clients/openapi.json` from Rust types and `autogen/src/schema.d.ts` via
-   `openapi-typescript`
+2. This regenerates `clients/openapi.json` from Rust types and
+   `clients/typescript/client/src/schema.d.ts` via `openapi-typescript`
 
 CI checks for drift in both the OpenAPI spec and the generated TypeScript types.
 

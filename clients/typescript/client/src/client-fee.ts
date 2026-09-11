@@ -36,6 +36,12 @@ const EIP712_DOMAIN_TYPEHASH = keccak256(
   )
 );
 
+/** Must match the EIP-712 domain `name` in `TychoRouter.sol`. */
+const EIP712_DOMAIN_NAME_HASH = keccak256(stringToHex('TychoRouter'));
+
+/** Must match the EIP-712 domain `version` in `TychoRouter.sol`. */
+const EIP712_DOMAIN_VERSION_HASH = keccak256(stringToHex('1'));
+
 /** Swap-specific inputs the router binds the client fee signature to. */
 export interface ClientFeeSwapContext {
   /** Exact input amount from the order. */
@@ -82,8 +88,8 @@ export function clientFeeSigningHash(
       ],
       [
         EIP712_DOMAIN_TYPEHASH,
-        keccak256(stringToHex('TychoRouter')),
-        keccak256(stringToHex('1')),
+        EIP712_DOMAIN_NAME_HASH,
+        EIP712_DOMAIN_VERSION_HASH,
         BigInt(chainId),
         routerAddress,
       ]

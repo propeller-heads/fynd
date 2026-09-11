@@ -429,7 +429,7 @@ describe('fromWireQuote', () => {
     expect(quote.feeBreakdown?.swapsHash).toBe(`0x${'11'.repeat(32)}`);
   });
 
-  it('client fee signing fields are undefined without a client fee', () => {
+  it('maps client fee signing fields when the wire values are null', () => {
     const wire: WireSolution = {
       ...baseWireSolution,
       orders: [
