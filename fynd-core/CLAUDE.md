@@ -61,7 +61,8 @@ Price guard methods: `price_guard_enabled(bool)`, `register_price_provider(Box<d
 
 Additional builder methods: `partial_blocks(bool)` (enable flashblock/partial-block updates),
 `with_pending_indexer(...)` (attach a pending-block indexer), `build_with_pending()` (build with
-pending-block support). `Solver::subscribe_market_events()` returns a broadcast receiver for
+pending-block support), `build_with_pending_and_step_controller()` (the same, plus a
+`BlockStepController` that gates each block; feature `experimental`). `Solver::subscribe_market_events()` returns a broadcast receiver for
 `MarketEvent`s.
 
 ## Adding a Custom Algorithm
