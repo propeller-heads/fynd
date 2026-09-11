@@ -113,49 +113,20 @@ describe('clientFeeSigningHash', () => {
 });
 
 describe('withClientFee', () => {
-  const validParams: ClientFeeParams = {
-    ...baseParams(),
-    signature: `0x${'ab'.repeat(65)}` as Hex,
-  };
+  const params: ClientFeeParams = baseParams();
 
   it('attaches client fee params to encoding options', () => {
     const base = encodingOptions(0.01);
-    const result = withClientFee(base, validParams);
-    expect(result.clientFeeParams).toBe(validParams);
+    const result = withClientFee(base, params);
+    expect(result.clientFeeParams).toBe(params);
     expect(result.slippage).toBe(0.01);
   });
 
   it('preserves existing encoding options fields', () => {
     const base = encodingOptions(0.005);
-    const result = withClientFee(base, validParams);
+    const result = withClientFee(base, params);
     expect(result.slippage).toBe(0.005);
     expect(result.transferType).toBe('transfer_from');
-  });
-
-  it('accepts params without a signature', () => {
-    const base = encodingOptions(0.01);
-    const result = withClientFee(base, baseParams());
-    expect(result.clientFeeParams?.signature).toBeUndefined();
-  });
-
-  it('throws on wrong signature length (too short)', () => {
-    const base = encodingOptions(0.01);
-    const badParams = { ...validParams, signature: '0xabcd' as Hex };
-    expect(() => withClientFee(base, badParams)).toThrow(FyndError);
-  });
-
-  it('throws on wrong signature length (too long)', () => {
-    const base = encodingOptions(0.01);
-    const badParams = { ...validParams, signature: `0x${'ab'.repeat(66)}` as Hex };
-    expect(() => withClientFee(base, badParams)).toThrow(FyndError);
-  });
-
-  it('accepts exactly 65 bytes (132 hex chars)', () => {
-    const base = encodingOptions(0.01);
-    const exactSig = `0x${'00'.repeat(65)}` as Hex;
-    const params = { ...validParams, signature: exactSig };
-    const result = withClientFee(base, params);
-    expect(result.clientFeeParams?.signature).toBe(exactSig);
   });
 });
 
@@ -210,13 +181,15 @@ describe('patchClientFeeSignature', () => {
   });
 
   it('patches at offset 0', () => {
-    const patched = patchClientFeeSignature(quoteWithOffset(0), SIG);
+    const data = `0x${'00'.repeat(65)}0000${SUFFIX}` as Hex;
+    const patched = patchClientFeeSignature(quoteWithOffset(0, data), SIG);
     expect(patched.transaction?.data).toBe(`0x${SIG.slice(2)}0000${SUFFIX}`);
   });
 
   it('patches at the last offset that fits', () => {
-    // Calldata holds 69 bytes, so a 65-byte signature starting at byte 4 ends exactly at the end.
-    const patched = patchClientFeeSignature(quoteWithOffset(4), SIG);
+    // The calldata holds 69 bytes, so a 65-byte signature at byte 4 fills it to the last byte.
+    const data = `0x${PREFIX}0000${'00'.repeat(65)}` as Hex;
+    const patched = patchClientFeeSignature(quoteWithOffset(4, data), SIG);
     expect(patched.transaction?.data).toBe(`0x${PREFIX}0000${SIG.slice(2)}`);
   });
 
@@ -233,5 +206,13 @@ describe('patchClientFeeSignature', () => {
 
   it.each(rejected)('throws when %s', (_case, quote, signature) => {
     expect(() => patchClientFeeSignature(quote, signature)).toThrow(FyndError);
+  });
+
+  // A stale offset would otherwise overwrite a live ABI field instead of the placeholder. Offset 0
+  // is in bounds and the signature is valid, so only the placeholder check can reject it.
+  it('throws when the offset does not point at the placeholder', () => {
+    expect(() => patchClientFeeSignature(quoteWithOffset(0), SIG)).toThrow(
+      /does not point at the zeroed placeholder/
+    );
   });
 });

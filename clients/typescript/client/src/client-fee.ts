@@ -135,18 +135,12 @@ export function clientFeeSigningHash(
 /**
  * Attach client fee configuration to encoding options.
  *
- * `params.signature` is optional: the signature covers the quoted swap, so the usual flow is
- * to quote with unsigned params and patch the signature into the returned calldata with
- * `patchClientFeeSignature`. When a signature is set it must be exactly 65 bytes
- * (130 hex chars + '0x' prefix).
+ * Sign after quoting — see `patchClientFeeSignature`.
  */
 export function withClientFee(
   opts: EncodingOptions,
   params: ClientFeeParams,
 ): EncodingOptions {
-  if (params.signature !== undefined) {
-    assertSignatureLength(params.signature, 'Client fee');
-  }
   return { ...opts, clientFeeParams: params };
 }
 
@@ -158,10 +152,15 @@ export function withClientFee(
  * hash from `clientFeeSigningHash`, patch it in here, and submit the transaction. The Rust
  * client calls this same step `Quote::with_client_fee_signature`.
  *
- * Returns a new quote; the input is left untouched. Throws when the quote carries no encoded
- * transaction (set `encodingOptions` on the request), when it carries no signature offset
- * (set `clientFeeParams` too), when `signature` is not 65 bytes, when either the signature or
- * the calldata is not valid hex, or when the offset does not fit the calldata.
+ * Returns a new quote and leaves the input untouched.
+ *
+ * Throws when:
+ * - the quote carries no encoded transaction — set `encodingOptions` on the request;
+ * - the quote carries no signature offset — set `clientFeeParams` on the request too;
+ * - `signature` is not 65 bytes;
+ * - the signature or the calldata is not valid hex;
+ * - the offset does not fit the calldata;
+ * - the bytes at the offset are not the zeroed placeholder.
  */
 export function patchClientFeeSignature(quote: Quote, signature: Hex): Quote {
   const tx = quote.transaction;
@@ -177,25 +176,34 @@ export function patchClientFeeSignature(quote: Quote, signature: Hex): Quote {
     );
   }
   assertSignatureLength(signature, 'Client fee');
-  const calldata = toBytes(tx.data, 'Quote calldata');
+  const calldata = parseHexBytes(tx.data, 'Quote calldata');
   if (offset < 0 || offset + SIGNATURE_BYTES > calldata.length) {
     throw FyndError.config(
       `Client fee signature at offset ${String(offset)} does not fit ${String(calldata.length)}-byte calldata`
     );
   }
-  calldata.set(toBytes(signature, 'Client fee signature'), offset);
+  // A wrong offset would silently overwrite an adjacent ABI field — amounts, receiver, route —
+  // and return a quote that still looks valid. The placeholder is always zeroed, so anything
+  // else at this offset means the server and the client disagree about where it sits.
+  const placeholder = calldata.subarray(offset, offset + SIGNATURE_BYTES);
+  if (placeholder.some((byte) => byte !== 0)) {
+    throw FyndError.config(
+      `Client fee signature offset ${String(offset)} does not point at the zeroed placeholder`
+    );
+  }
+  calldata.set(parseHexBytes(signature, 'Client fee signature'), offset);
   return { ...quote, transaction: { ...tx, data: bytesToHex(calldata) } };
 }
 
 /**
- * Converts a hex string to bytes, rejecting anything `hexToBytes` would mangle.
+ * Converts a hex string to bytes, rejecting input `hexToBytes` would misread.
  *
  * viem throws its own error type on invalid characters and silently left-pads an odd number
  * of digits, which would shift every byte of the calldata by a nibble.
  */
-function toBytes(value: Hex, label: string): Uint8Array {
+function parseHexBytes(value: Hex, label: string): Uint8Array {
   if (!isHex(value, { strict: true }) || value.length % 2 !== 0) {
-    throw FyndError.config(`${label} is not valid hex: ${value.slice(0, 12)}`);
+    throw FyndError.config(`${label} is not valid hex: ${value.slice(0, 12)}...`);
   }
   return hexToBytes(value);
 }
