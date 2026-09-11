@@ -46,14 +46,13 @@ const fyndUrl = process.env['FYND_URL'] ?? 'http://localhost:3000';
 const rpcUrl = process.env['RPC_URL'] ?? 'http://localhost:8545';
 const account = privateKeyToAccount(process.env['PRIVATE_KEY'] as `0x${string}`);
 
-// Separate fee receiver key — in production this is the integrator's key.
 const feeAccount = privateKeyToAccount(generatePrivateKey());
 
 const publicClient = createPublicClient({ chain: mainnet, transport: http(rpcUrl) });
 const client = new FyndClient({
   baseUrl: fyndUrl,
   sender: account.address,
-  provider: viemProvider(publicClient, account.address),
+  provider: viemProvider(publicClient),
   fetchRevertReason: true,
 });
 

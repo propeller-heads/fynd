@@ -25,6 +25,14 @@ export interface TxReceipt {
 
 /** An unsigned EIP-1559 transaction ready for signing. */
 export interface Eip1559Transaction {
+  /**
+   * Address the transaction will be sent from.
+   *
+   * Not part of the signed payload — the chain recovers it from the signature. It travels with
+   * the transaction so `eth_call` and `eth_estimateGas` run from the same address that will
+   * send it, which matters when {@link SigningHints.sender} overrides the client default.
+   */
+  from: Address;
   chainId: number;
   nonce: number;
   maxFeePerGas: bigint;

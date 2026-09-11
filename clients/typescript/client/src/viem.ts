@@ -71,15 +71,17 @@ export interface ViemPublicClient {
 /**
  * Adapts a viem `PublicClient` into an {@link EthProvider} for use with {@link FyndClient}.
  *
+ * `eth_call` and `eth_estimateGas` run from `Eip1559Transaction.from`, so the provider needs no
+ * sender of its own.
+ *
  * @example
  * ```ts
- * const provider = viemProvider(publicClient, senderAddress);
- * const client = new FyndClient({ baseUrl, provider });
+ * const provider = viemProvider(publicClient);
+ * const client = new FyndClient({ baseUrl, sender: senderAddress, provider });
  * ```
  */
 export function viemProvider(
   client: ViemPublicClient,
-  sender: Address,
 ): EthProvider {
   return {
     async getTransactionCount(args) {
@@ -96,7 +98,7 @@ export function viemProvider(
       // Without `account` the node runs the call from the zero address, and any router that
       // pulls funds with `transferFrom(msg.sender, ...)` reverts.
       const result = await client.call({
-        account: sender,
+        account: tx.from,
         to: tx.to,
         data: tx.data,
         value: tx.value,
@@ -108,7 +110,7 @@ export function viemProvider(
     },
     async estimateGas(tx) {
       return client.estimateGas({
-        account: sender,
+        account: tx.from,
         to: tx.to,
         data: tx.data,
         value: tx.value,
