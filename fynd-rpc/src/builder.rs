@@ -12,9 +12,10 @@ use fynd_core::{
 use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{error, info};
 use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Chain};
+use utoipa::openapi::OpenApi;
 
 use crate::{
-    api::{configure_app, AppState, HealthTracker, RouteConfigurator},
+    api::{configure_app, docs::OpenApiConfigurator, AppState, HealthTracker, RouteConfigurator},
     config::{defaults, PoolConfig},
 };
 
@@ -33,6 +34,8 @@ pub struct FyndRPCBuilder {
     hosted_swagger_url: Option<String>,
     /// Caller routes registered before the defaults; see [`Self::configure_routes`].
     route_overrides: Option<RouteConfigurator>,
+    /// Rewrites the OpenAPI document before it is served. Unset by default.
+    openapi_overrides: Option<OpenApiConfigurator>,
 }
 
 impl FyndRPCBuilder {
@@ -74,6 +77,7 @@ impl FyndRPCBuilder {
             gas_price_stale_threshold: None,
             hosted_swagger_url: None,
             route_overrides: None,
+            openapi_overrides: None,
         })
     }
 
@@ -229,7 +233,8 @@ impl FyndRPCBuilder {
     /// cannot add or shadow a route outside `/v1`. A route it adds for a path and method that
     /// fynd also serves shadows the default; everything else (remaining endpoints, error
     /// handlers, docs, 404) is unchanged. Shadowing a default route does not change the OpenAPI
-    /// spec served at `/docs/`. Calling this more than once replaces the earlier configurator
+    /// spec served at `/docs/`; pair it with [`Self::configure_openapi`] to describe the
+    /// replacement. Calling this more than once replaces the earlier configurator
     /// rather than combining them — the last call wins. For example:
     ///
     /// ```no_run
@@ -261,6 +266,22 @@ impl FyndRPCBuilder {
         F: Fn(actix_web::Scope, &AppState) -> actix_web::Scope + Send + Sync + 'static,
     {
         self.route_overrides = Some(Arc::new(f));
+        self
+    }
+
+    /// Rewrites the OpenAPI document served at `/api-docs/openapi.json` (and, derived from it,
+    /// the hosted variant) before it is published.
+    ///
+    /// Without it fynd documents the routes it serves itself. A binary that replaces one of those
+    /// routes uses this hook to publish a document that matches its handler, typically by removing
+    /// the replaced path and merging its own `#[derive(OpenApi)]` document with
+    /// [`OpenApi::merge`](utoipa::openapi::OpenApi::merge). Calling this more than once replaces
+    /// the earlier hook; the last call wins.
+    pub fn configure_openapi<F>(mut self, f: F) -> Self
+    where
+        F: Fn(OpenApi) -> OpenApi + Send + Sync + 'static,
+    {
+        self.openapi_overrides = Some(Arc::new(f));
         self
     }
 
@@ -366,6 +387,7 @@ impl FyndRPCBuilder {
 
         let hosted_swagger_url = self.hosted_swagger_url;
         let route_overrides = self.route_overrides;
+        let openapi_overrides = self.openapi_overrides;
         let server = HttpServer::new(move || {
             App::new()
                 .wrap(tracing_actix_web::TracingLogger::default())
@@ -378,6 +400,7 @@ impl FyndRPCBuilder {
                         app_state.clone(),
                         hosted_swagger_url.clone(),
                         route_overrides.as_ref(),
+                        openapi_overrides.as_ref(),
                     )
                 })
         })

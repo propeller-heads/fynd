@@ -23,8 +23,10 @@
 //!
 //! Binaries that embed `fynd-rpc` can replace one endpoint while keeping the rest via
 //! [`FyndRPCBuilder::configure_routes`](builder::FyndRPCBuilder::configure_routes). Overrides can
-//! only add or shadow routes under `/v1`, and shadowing a default route does not change the
-//! OpenAPI spec served at `/docs/`:
+//! only add or shadow routes under `/v1`. Shadowing a default route does not change the OpenAPI
+//! spec served at `/docs/` by itself; use
+//! [`FyndRPCBuilder::configure_openapi`](builder::FyndRPCBuilder::configure_openapi) to publish
+//! a spec that describes the replacement:
 //!
 //! ```text
 //! builder.configure_routes(|scope, _state| {
