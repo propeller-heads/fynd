@@ -1,4 +1,49 @@
 
+## [0.104.1](https://github.com/propeller-heads/fynd/compare/0.104.0...0.104.1) (2026-09-11)
+
+### Features
+
+* **token-prices:** run mean pricing in the per-block manager ([b5479b1](https://github.com/propeller-heads/fynd/commit/b5479b1997ed74b482c1f2fd0c0b11d27dd9e331))
+* **token-prices:** price at the mean, solve on a throttled loop ([b731c45](https://github.com/propeller-heads/fynd/commit/b731c454198d645a63048be346413095c66f71d2))
+* default pool depth to 2 hops, matching the shipped config ([72f98c0](https://github.com/propeller-heads/fynd/commit/72f98c0d791e6aaeea2f1c639ca3b3d8195b23c9))
+* **token-prices:** opt-in buy+sell pricing behind an interval ([78ff01d](https://github.com/propeller-heads/fynd/commit/78ff01d19154d729e8c924ca16e02aa59cf64832))
+* **derived:** distinguish unreachable tokens in price failures ([6ca7b28](https://github.com/propeller-heads/fynd/commit/6ca7b28303ca4e520d3e6ae94cccc9652e378222))
+* **token-prices:** derive token prices by solving with the router ([53c9ca4](https://github.com/propeller-heads/fynd/commit/53c9ca46753e6a3c34d2f429f370d9098fb22254))
+* **rpc:** serve mid prices from GET /v1/prices ([ac9173c](https://github.com/propeller-heads/fynd/commit/ac9173c83dff17f7682022b3f8d0c53bd5636b4b))
+
+### Bug Fixes
+
+* apply review cleanups to pricing docs, logs, and snapshot edges ([8bd9e38](https://github.com/propeller-heads/fynd/commit/8bd9e388746767c5341427124ee6250ccfd21a6c))
+* adapt pricing walks to route exclusions from main ([4dad2b6](https://github.com/propeller-heads/fynd/commit/4dad2b68c69695a7de3aa140538d15eecd7f731a))
+* **token-prices:** carry tokens past a timed-out buy pass as unattempted ([faae9fd](https://github.com/propeller-heads/fynd/commit/faae9fd8388c6efaf6cb0299348f883b68a9985d))
+* **token-prices:** report a pass that cannot start as unattempted ([82f9bf1](https://github.com/propeller-heads/fynd/commit/82f9bf1d62a9f66a93c4491e01b5a8bc1bcce78e))
+* **token-prices:** derive pricing depth from the deepest configured pool ([9cc22d3](https://github.com/propeller-heads/fynd/commit/9cc22d3d4f829074d0ac1f954be2bb079b408e72))
+* **token-prices:** carry the cause inside NoSellRoute ([3d5d1c4](https://github.com/propeller-heads/fynd/commit/3d5d1c4b19ae28442098f24c27b844d27d33f359))
+* **token-prices:** log why a token drops out of pricing ([efb0f1e](https://github.com/propeller-heads/fynd/commit/efb0f1e84e2086a006faf0579a5969161d71b162))
+* **token-prices:** bound the pricing pass, carry prices it cuts off ([45d4c9b](https://github.com/propeller-heads/fynd/commit/45d4c9b2ed703f40a9b15b4616595fd8f792224e))
+* **token-prices:** invalidate prices on any candidate route's pools ([e80f0ee](https://github.com/propeller-heads/fynd/commit/e80f0ee2a0b387f1f956206e386eb15134369cbb))
+* **token-prices:** give background solves their own 1s timeout ([e98928f](https://github.com/propeller-heads/fynd/commit/e98928f8713ac26feaf10b508d042ad9a27595d0))
+* **token-prices:** count unreachable tokens instead of reporting failed items ([7c626ec](https://github.com/propeller-heads/fynd/commit/7c626ec01f250f8aeba1c938b924af231e3d8a35))
+* **token-prices:** price every token in reach, not just probe paths ([e09c797](https://github.com/propeller-heads/fynd/commit/e09c79769aa12d643151104b936bbed8c25989d2))
+* **token-prices:** use Fx hash collections after rebase onto main ([72fc665](https://github.com/propeller-heads/fynd/commit/72fc6653f2257b72d5f16ae47aac3e029a462335))
+* **prices:** serve the gas-token-only map instead of a permanent 503 ([a17ffb5](https://github.com/propeller-heads/fynd/commit/a17ffb5ba977467a00ca2f8b018d22ea7fce07a4))
+* **prices:** 503 until more than the gas token is priced ([ad992d6](https://github.com/propeller-heads/fynd/commit/ad992d66c4e3619b6eb622fd7673176367b8cbd5))
+* slugify non-conforming User-Identity metric labels ([5999e8f](https://github.com/propeller-heads/fynd/commit/5999e8f8a47d8d75a1dcde4ea7b707631139a100))
+
+### Performance Improvements
+
+* **token-prices:** run the pricing pass on a blocking thread ([9c4eeab](https://github.com/propeller-heads/fynd/commit/9c4eeabc499759626d94c8e8156516139fea9baf))
+* **token-prices:** bound the snapshot to filtered routes, clone in batches ([62d3e47](https://github.com/propeller-heads/fynd/commit/62d3e473ecaea633b075a4d47396a0dec8e11611))
+* **token-prices:** read buy amounts without building routes ([489dfb1](https://github.com/propeller-heads/fynd/commit/489dfb1e2f72731c7a2f2030c2c38307fee338bf))
+* **token-prices:** solve every sell against one shared market snapshot ([da19e82](https://github.com/propeller-heads/fynd/commit/da19e82fddc8047d21efe17adaf00929b9c0c73f))
+* **token-prices:** price from the buy route alone ([7159d61](https://github.com/propeller-heads/fynd/commit/7159d61b3ba3b2f958116ccd8dde7d17fd7b2b4b))
+* **token-prices:** take every buy route from one relaxation ([cc708b5](https://github.com/propeller-heads/fynd/commit/cc708b557de4d885e3250697ed3dc8b1677d305b))
+
+### Reverts
+
+* keep the 3-hop routing default; cap pricing in a follow-up ([b40629b](https://github.com/propeller-heads/fynd/commit/b40629bd26da78a8b3edeeb349b7d301cb02381a))
+
+
 ## [0.104.0](https://github.com/propeller-heads/fynd/compare/0.103.0...0.104.0) (2026-09-09)
 
 ### Features
