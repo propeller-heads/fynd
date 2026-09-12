@@ -1,0 +1,69 @@
+{
+  "timestamp_unix": 1783978571,
+  "target_url": "http://ethereum-fynd.staging-fynd.svc.cluster.local:3000",
+  "target_label": "E1 baseline 0.90.0-rc.1 / 2vcpu / 2x1 workers / encoding=off",
+  "requests_file": "/tmp/trades.json",
+  "requests_sha256": "7bec74375dd9b7445791110a6d15b89a6c045016d9b3b233018cb378d56ea8aa",
+  "encoding": false,
+  "timeout_ms": 5000,
+  "step_duration_secs": 60,
+  "slo": {
+    "p95_multiplier": 1.2,
+    "max_http_error_rate": 0.001,
+    "max_excess_unsolved_rate": 0.001
+  },
+  "baseline": {
+    "requests": 50,
+    "unsolved_rate": 0.4,
+    "round_trip": {
+      "min": 1,
+      "max": 40,
+      "mean": 20,
+      "median": 30,
+      "p95": 36,
+      "p99": 40,
+      "std_dev": 15.344054223053305
+    },
+    "solve_time": {
+      "min": 0,
+      "max": 39,
+      "mean": 19,
+      "median": 29,
+      "p95": 35,
+      "p99": 39,
+      "std_dev": 15.33101431738944
+    }
+  },
+  "steps": [
+    {
+      "target_rps": 5,
+      "achieved_rps": 5.01353654868144,
+      "requests_sent": 300,
+      "requests_succeeded": 300,
+      "orders_solved": 206,
+      "orders_unsolved": 94,
+      "http_error_rate": 0.0,
+      "unsolved_rate": 0.31333333333333335,
+      "round_trip": {
+        "min": 1,
+        "max": 89,
+        "mean": 26,
+        "median": 32,
+        "p95": 48,
+        "p99": 72,
+        "std_dev": 17.67286054944134
+      },
+      "solve_time": {
+        "min": 1,
+        "max": 88,
+        "mean": 25,
+        "median": 31,
+        "p95": 47,
+        "p99": 71,
+        "std_dev": 17.636798651304797
+      },
+      "passed": false
+    }
+  ],
+  "capacity_rps": null
+}
