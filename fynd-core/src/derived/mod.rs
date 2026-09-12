@@ -64,5 +64,5 @@ pub mod types;
 // map aliases the store getters already expose in their signatures
 pub use computation::FailedItemError;
 pub use manager::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef};
-pub use store::DerivedData;
+pub use store::{ComputationStatus, DerivedData};
 pub use types::{ComponentDepths, TokenGasPrices};
