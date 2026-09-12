@@ -3942,34 +3942,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hindsight"
-version = "0.104.0"
-dependencies = [
- "actix-web",
- "alloy",
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "futures 0.3.32",
- "fynd-client",
- "fynd-core",
- "fynd-rpc",
- "fynd-tools-common",
- "metrics",
- "metrics-exporter-prometheus",
- "num-bigint",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber 0.3.23",
- "tycho-simulation",
-]
-
-[[package]]
 name = "hmac"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
