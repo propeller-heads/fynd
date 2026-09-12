@@ -206,10 +206,9 @@ impl MarketData {
 
     /// Attempts a non-blocking read and wraps the result in a `MarketDataView`.
     ///
-    /// The overlay is not applied, so this only exposes the base market state. Suitable for
-    /// callers that read base data (e.g. token decimals) and do not depend on overlay state,
-    /// such as the quote price-impact fallback. Returns `None` if the lock is currently held
-    /// for writing (callers must treat that as "data unavailable", not an error).
+    /// The overlay is not applied, so this only exposes the base market state. Returns `None`
+    /// if the lock is currently held for writing. Callers must treat this as unavailable data,
+    /// not as an error.
     pub fn try_read_blocking(&self) -> Option<MarketDataView<'_>> {
         self.data
             .try_read()
