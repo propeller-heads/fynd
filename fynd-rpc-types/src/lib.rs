@@ -1073,6 +1073,9 @@ pub enum QuoteStatus {
     NotReady,
     /// The solution failed external price validation.
     PriceCheckFailed,
+    /// A route was found, but it could not be encoded into router calldata. The quote carries no
+    /// transaction. Other orders in the same request keep theirs.
+    FailedEncoding,
 }
 
 /// Block information at which a quote was computed.
@@ -2026,6 +2029,7 @@ mod conversions {
                 fynd_core::QuoteStatus::Timeout => Self::Timeout,
                 fynd_core::QuoteStatus::NotReady => Self::NotReady,
                 fynd_core::QuoteStatus::PriceCheckFailed => Self::PriceCheckFailed,
+                fynd_core::QuoteStatus::FailedEncoding => Self::FailedEncoding,
                 // Fallback for future variants added to fynd_core::QuoteStatus.
                 _ => Self::NotReady,
             }
@@ -2328,6 +2332,7 @@ mod conversions {
                 (fynd_core::QuoteStatus::InsufficientLiquidity, QuoteStatus::InsufficientLiquidity),
                 (fynd_core::QuoteStatus::Timeout, QuoteStatus::Timeout),
                 (fynd_core::QuoteStatus::NotReady, QuoteStatus::NotReady),
+                (fynd_core::QuoteStatus::FailedEncoding, QuoteStatus::FailedEncoding),
             ];
 
             for (core, expected) in cases {

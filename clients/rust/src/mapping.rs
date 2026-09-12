@@ -327,6 +327,7 @@ impl From<dto::QuoteStatus> for QuoteStatus {
             dto::QuoteStatus::Timeout => Self::Timeout,
             dto::QuoteStatus::NotReady => Self::NotReady,
             dto::QuoteStatus::PriceCheckFailed => Self::PriceCheckFailed,
+            dto::QuoteStatus::FailedEncoding => Self::FailedEncoding,
             _ => Self::NotReady,
         }
     }
@@ -577,6 +578,7 @@ mod tests {
         assert!(matches!(QuoteStatus::from(Dto::Timeout), QuoteStatus::Timeout));
         assert!(matches!(QuoteStatus::from(Dto::NotReady), QuoteStatus::NotReady));
         assert!(matches!(QuoteStatus::from(Dto::PriceCheckFailed), QuoteStatus::PriceCheckFailed));
+        assert!(matches!(QuoteStatus::from(Dto::FailedEncoding), QuoteStatus::FailedEncoding));
     }
 
     // -----------------------------------------------------------------------
