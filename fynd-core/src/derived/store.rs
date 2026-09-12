@@ -43,7 +43,7 @@ impl ComputationStatus {
     /// elapsed millisecond count cannot fit in a `u64`.
     pub fn age_ms_at(&self, now: Instant) -> u64 {
         let elapsed = now.saturating_duration_since(self.updated_at);
-        u64::try_from(elapsed.as_millis()).unwrap_or({
+        u64::try_from(elapsed.as_millis()).unwrap_or_else(|_| {
             warn!("Failed to compute age_ms at {:?}", elapsed);
             u64::MAX
         })
