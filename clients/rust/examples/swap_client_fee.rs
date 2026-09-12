@@ -12,7 +12,7 @@
 //! `swaps_hash` in the fee breakdown and `signature_offset` in the transaction so the client can
 //! sign and patch the calldata locally:
 //!
-//! 1. Request a quote with unsigned client fee params (empty signature).
+//! 1. Request a quote with unsigned client fee params.
 //! 2. Sign the full 11-field EIP-712 hash using `swaps_hash` from the response.
 //! 3. Patch the signature into the calldata via `quote.with_client_fee_signature()`.
 //! 4. Execute.

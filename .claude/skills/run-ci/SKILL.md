@@ -89,7 +89,7 @@ Report pass/fail. If drift is detected, tell the user to run `./scripts/update-o
 #### TypeScript checks (if TypeScript files changed)
 
 ```bash
-pnpm --dir clients/typescript install --frozen-lockfile && pnpm --dir clients/typescript --filter @fynd/autogen run build && pnpm --dir clients/typescript --filter @kayibal/fynd-client run typecheck && pnpm --dir clients/typescript --filter @kayibal/fynd-client run lint && pnpm --dir clients/typescript --filter @kayibal/fynd-client run test
+pnpm --dir clients/typescript install --frozen-lockfile && pnpm --dir clients/typescript --filter @kayibal/fynd-client run typecheck && pnpm --dir clients/typescript --filter @kayibal/fynd-client run lint && pnpm --dir clients/typescript --filter @kayibal/fynd-client run test
 ```
 
 Report pass/fail. If pnpm is not available, skip and note it.

@@ -8,7 +8,7 @@
 #
 # What it does:
 #   1. Builds the server binary and exports the OpenAPI spec to clients/openapi.json
-#   2. Regenerates clients/typescript/autogen/src/schema.d.ts via openapi-typescript
+#   2. Regenerates clients/typescript/client/src/schema.d.ts via openapi-typescript
 #
 # Requirements:
 #   - Rust toolchain (cargo)

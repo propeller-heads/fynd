@@ -19,7 +19,7 @@ set -euo pipefail
 source "$(dirname "$0")/_env-setup.sh"
 
 RUST_EXAMPLES=(swap_erc20 swap_permit2 swap_client_fee)
-TS_EXAMPLES=(tutorial)
+TS_EXAMPLES=(tutorial swap-client-fee)
 
 check_deps
 build_ts

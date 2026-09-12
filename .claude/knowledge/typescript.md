@@ -1,7 +1,7 @@
 # TypeScript Client (`@kayibal/fynd-client`)
 
 TypeScript client for the Fynd RPC API. Lives in `clients/typescript/` as a pnpm workspace with
-two packages: `client` and `examples/tutorial`.
+three packages: `client`, `examples/tutorial`, and `examples/swap-client-fee`.
 
 ## Workspace Structure
 
@@ -11,7 +11,7 @@ clients/typescript/
   pnpm-lock.yaml
   client/                     # @kayibal/fynd-client — typed HTTP client
     src/
-      autogen.ts              # Typed fetch client generated from OpenAPI spec (replaces @fynd/autogen)
+      autogen.ts              # Typed fetch client generated from OpenAPI spec
       schema.d.ts             # Auto-generated OpenAPI types from clients/openapi.json
       client.ts               # FyndClient — main client class
       types.ts                # Public types (QuoteRequest, QuoteResponse, etc.)
@@ -41,9 +41,13 @@ pnpm --dir clients/typescript --filter @kayibal/fynd-client run test
 Examples live in `clients/typescript/examples/<name>/main.ts` and run against a local
 Anvil fork + Fynd instance.
 
-**Adding a new example:**
-1. Create `clients/typescript/examples/<name>/main.ts`
-2. Add `<name>` to the `TS_EXAMPLES` array in `scripts/run-all-examples.sh`
+**Adding a new example:** use `clients/typescript/examples/swap-client-fee/` as the reference layout.
+1. Create `clients/typescript/examples/<name>/` with `main.ts`, `package.json` and `tsconfig.json`
+2. Add `examples/<name>` to `packages` in `clients/typescript/pnpm-workspace.yaml`, or pnpm never
+   installs it
+3. Add `<name>` to the `TS_EXAMPLES` array in `scripts/run-all-examples.sh`
+4. If a guide embeds a snippet from the example, wrap it in `[doc:start <id>]` / `[doc:end <id>]`
+   and add a `<main.ts>:<id>:<doc path>` entry to `scripts/check-doc-snippets.sh`
 
 The CI script (`scripts/run-all-examples.sh`) shares a single Anvil + Fynd instance across
 all Rust and TS examples to keep load on the Tycho service low. TS packages are built once

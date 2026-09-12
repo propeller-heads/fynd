@@ -348,7 +348,7 @@ const client = new FyndClient({
   apiKey: process.env.FYND_API_KEY!, // sent raw as the Authorization header
   chain: 'ethereum',                 // routes to /v1/ethereum/*
   sender: account.address,
-  provider: viemProvider(publicClient, account.address),
+  provider: viemProvider(publicClient),
   fetchRevertReason: true,
 });
 

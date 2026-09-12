@@ -12,6 +12,7 @@ SNIPPETS=(
     "fynd-core/examples/custom_algorithm.rs:custom-algo-impl:docs/guides/custom-algorithm.md"
     "fynd-core/examples/custom_algorithm.rs:custom-algo-wire:docs/guides/custom-algorithm.md"
     "clients/rust/examples/swap_client_fee.rs:client-fee-rust:docs/guides/client-fees.md"
+    "clients/typescript/examples/swap-client-fee/main.ts:client-fee-typescript:docs/guides/client-fees.md"
 )
 
 exit_code=0

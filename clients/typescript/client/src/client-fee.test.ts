@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { clientFeeSigningHash, withClientFee } from './client-fee.js';
+import { clientFeeSigningHash, patchClientFeeSignature, withClientFee } from './client-fee.js';
 import type { ClientFeeSwapContext } from './client-fee.js';
 import { encodingOptions } from './permit2.js';
 import { FyndError } from './error.js';
-import type { Address, ClientFeeParams, Hex } from './types.js';
+import type { Address, ClientFeeParams, Hex, Quote } from './types.js';
 
 const ROUTER = '0x3333333333333333333333333333333333333333' as Address;
 const FEE_RECEIVER = '0x4444444444444444444444444444444444444444' as Address;
@@ -113,47 +113,106 @@ describe('clientFeeSigningHash', () => {
 });
 
 describe('withClientFee', () => {
-  const validParams: ClientFeeParams = {
-    ...baseParams(),
-    signature: `0x${'ab'.repeat(65)}` as Hex,
-  };
+  const params: ClientFeeParams = baseParams();
 
   it('attaches client fee params to encoding options', () => {
     const base = encodingOptions(0.01);
-    const result = withClientFee(base, validParams);
-    expect(result.clientFeeParams).toBe(validParams);
+    const result = withClientFee(base, params);
+    expect(result.clientFeeParams).toBe(params);
     expect(result.slippage).toBe(0.01);
   });
 
   it('preserves existing encoding options fields', () => {
     const base = encodingOptions(0.005);
-    const result = withClientFee(base, validParams);
+    const result = withClientFee(base, params);
     expect(result.slippage).toBe(0.005);
     expect(result.transferType).toBe('transfer_from');
   });
+});
 
-  it('throws when signature is missing', () => {
-    const base = encodingOptions(0.01);
-    expect(() => withClientFee(base, baseParams())).toThrow(FyndError);
+describe('patchClientFeeSignature', () => {
+  const SIG = `0x${'ab'.repeat(65)}` as Hex;
+  const PREFIX = 'dead';
+  const SUFFIX = 'beef';
+  /** Calldata with a zeroed 65-byte placeholder at byte offset 2. */
+  const CALLDATA = `0x${PREFIX}${'00'.repeat(65)}${SUFFIX}` as Hex;
+
+  function quoteWithOffset(offset: number | undefined, data: Hex = CALLDATA): Quote {
+    return {
+      orderId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+      status: 'success',
+      backend: 'fynd',
+      amountIn: 1000n,
+      amountOut: 2000n,
+      gasEstimate: 150000n,
+      block: { number: 21000000, hash: '0xabcdef', timestamp: 1730000000 },
+      tokenOut: '0x2222222222222222222222222222222222222222' as Address,
+      receiver: '0x7777777777777777777777777777777777777777' as Address,
+      transaction: {
+        to: ROUTER,
+        value: 0n,
+        data,
+        ...(offset !== undefined ? { clientFeeSignatureOffset: offset } : {}),
+      },
+    };
+  }
+
+  function quoteWithoutTransaction(): Quote {
+    const { transaction: _tx, ...rest } = quoteWithOffset(2);
+    return rest;
+  }
+
+  it('replaces the placeholder at the reported offset', () => {
+    const patched = patchClientFeeSignature(quoteWithOffset(2), SIG);
+    expect(patched.transaction?.data).toBe(`0x${PREFIX}${SIG.slice(2)}${SUFFIX}`);
   });
 
-  it('throws on wrong signature length (too short)', () => {
-    const base = encodingOptions(0.01);
-    const badParams = { ...validParams, signature: '0xabcd' as Hex };
-    expect(() => withClientFee(base, badParams)).toThrow(FyndError);
+  it('leaves the input quote untouched', () => {
+    const quote = quoteWithOffset(2);
+    patchClientFeeSignature(quote, SIG);
+    expect(quote.transaction?.data).toBe(CALLDATA);
   });
 
-  it('throws on wrong signature length (too long)', () => {
-    const base = encodingOptions(0.01);
-    const badParams = { ...validParams, signature: `0x${'ab'.repeat(66)}` as Hex };
-    expect(() => withClientFee(base, badParams)).toThrow(FyndError);
+  it('preserves the other transaction fields', () => {
+    const patched = patchClientFeeSignature(quoteWithOffset(2), SIG);
+    expect(patched.transaction?.to).toBe(ROUTER);
+    expect(patched.transaction?.clientFeeSignatureOffset).toBe(2);
+    expect(patched.amountOut).toBe(2000n);
   });
 
-  it('accepts exactly 65 bytes (132 hex chars)', () => {
-    const base = encodingOptions(0.01);
-    const exactSig = `0x${'00'.repeat(65)}` as Hex;
-    const params = { ...validParams, signature: exactSig };
-    const result = withClientFee(base, params);
-    expect(result.clientFeeParams?.signature).toBe(exactSig);
+  it('patches at offset 0', () => {
+    const data = `0x${'00'.repeat(65)}0000${SUFFIX}` as Hex;
+    const patched = patchClientFeeSignature(quoteWithOffset(0, data), SIG);
+    expect(patched.transaction?.data).toBe(`0x${SIG.slice(2)}0000${SUFFIX}`);
+  });
+
+  it('patches at the last offset that fits', () => {
+    // The calldata holds 69 bytes, so a 65-byte signature at byte 4 fills it to the last byte.
+    const data = `0x${PREFIX}0000${'00'.repeat(65)}` as Hex;
+    const patched = patchClientFeeSignature(quoteWithOffset(4, data), SIG);
+    expect(patched.transaction?.data).toBe(`0x${PREFIX}0000${SIG.slice(2)}`);
+  });
+
+  const rejected: [string, Quote, Hex][] = [
+    ['the offset is absent', quoteWithOffset(undefined), SIG],
+    ['the offset is negative', quoteWithOffset(-1), SIG],
+    ['the signature does not fit the calldata', quoteWithOffset(5), SIG],
+    ['the quote has no transaction', quoteWithoutTransaction(), SIG],
+    ['the signature is the wrong length', quoteWithOffset(2), '0xabcd' as Hex],
+    ['the signature is not hex', quoteWithOffset(2), `0x${'zz'.repeat(65)}` as Hex],
+    ['the calldata is not hex', quoteWithOffset(2, `0x${'zz'.repeat(69)}` as Hex), SIG],
+    ['the calldata has an odd digit count', quoteWithOffset(2, `0x${'00'.repeat(69)}0` as Hex), SIG],
+  ];
+
+  it.each(rejected)('throws when %s', (_case, quote, signature) => {
+    expect(() => patchClientFeeSignature(quote, signature)).toThrow(FyndError);
+  });
+
+  // A stale offset would otherwise overwrite a live ABI field instead of the placeholder. Offset 0
+  // is in bounds and the signature is valid, so only the placeholder check can reject it.
+  it('throws when the offset does not point at the placeholder', () => {
+    expect(() => patchClientFeeSignature(quoteWithOffset(0), SIG)).toThrow(
+      /does not point at the zeroed placeholder/
+    );
   });
 });
