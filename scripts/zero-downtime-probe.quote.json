@@ -1,0 +1,18 @@
+{
+  "orders": [
+    {
+      "id": "",
+      "token_in": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "token_out": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "amount": "1000000000000000000",
+      "side": "sell",
+      "sender": "0x0000000000000000000000000000000000000001",
+      "receiver": null
+    }
+  ],
+  "options": {
+    "timeout_ms": 10000,
+    "min_responses": null,
+    "max_gas": null
+  }
+}
