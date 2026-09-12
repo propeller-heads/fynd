@@ -308,11 +308,13 @@ pub async fn get_prices(
         let now = Instant::now();
         let token_prices_status = store
             .token_prices_status()
-            .ok_or(ApiError::StaleData { age_ms: u64::MAX })?;
+            .ok_or_else(|| ApiError::NotReady("Token prices have not been computed".to_string()))?;
         let token_prices = store
             .token_prices()
             .cloned()
-            .ok_or(ApiError::StaleData { age_ms: u64::MAX })?;
+            .ok_or_else(|| {
+                ApiError::Internal("Token price status exists without output".to_string())
+            })?;
         let spot_prices_status = store
             .spot_prices_status()
             .map(|status| ComputationDataStatus {
@@ -320,14 +322,16 @@ pub async fn get_prices(
                 last_update_ms: status.age_ms_at(now),
             });
         if want_spot && spot_prices_status.is_none() {
-            return Err(ApiError::StaleData { age_ms: u64::MAX });
+            return Err(ApiError::NotReady("Spot prices have not been computed".to_string()));
         }
         let spot_prices_data = if want_spot {
             Some(
                 store
                     .spot_prices()
                     .cloned()
-                    .ok_or(ApiError::StaleData { age_ms: u64::MAX })?,
+                    .ok_or_else(|| {
+                        ApiError::Internal("Spot price status exists without output".to_string())
+                    })?,
             )
         } else {
             None
@@ -339,14 +343,18 @@ pub async fn get_prices(
                 last_update_ms: status.age_ms_at(now),
             });
         if want_depths && component_depths_status.is_none() {
-            return Err(ApiError::StaleData { age_ms: u64::MAX });
+            return Err(ApiError::NotReady("Component depths have not been computed".to_string()));
         }
         let component_depths_data = if want_depths {
             Some(
                 store
                     .component_depths()
                     .cloned()
-                    .ok_or(ApiError::StaleData { age_ms: u64::MAX })?,
+                    .ok_or_else(|| {
+                        ApiError::Internal(
+                            "Component depth status exists without output".to_string(),
+                        )
+                    })?,
             )
         } else {
             None
@@ -773,7 +781,7 @@ mod tests {
 
     #[cfg(feature = "experimental")]
     #[actix_web::test]
-    async fn test_prices_handler_preserves_derived_data_error_precedence() {
+    async fn test_prices_handler_preserves_token_not_ready_error_precedence() {
         let state = make_test_state();
         let app = test::init_service(
             App::new()
@@ -791,7 +799,11 @@ mod tests {
         .await;
         assert_eq!(resp.status().as_u16(), 503);
         let body = body_json(resp).await;
-        assert_eq!(body["code"], "STALE_DATA", "body was: {body}");
+        assert_eq!(body["code"], "NOT_READY", "body was: {body}");
+        assert_eq!(
+            body["error"], "data not ready: Token prices have not been computed",
+            "body was: {body}"
+        );
     }
 
     // The pricing pass cannot fail as a whole, so its first run sets the block even when
@@ -879,7 +891,7 @@ mod tests {
 
     #[cfg(feature = "experimental")]
     #[actix_web::test]
-    async fn test_prices_handler_returns_stale_data_without_token_prices() {
+    async fn test_prices_handler_returns_not_ready_without_token_prices() {
         let state = make_test_state();
         seed_tycho_head(&state).await;
         let app = test::init_service(
@@ -898,8 +910,52 @@ mod tests {
         .await;
         assert_eq!(resp.status().as_u16(), 503);
         let body = body_json(resp).await;
-        assert_eq!(body["code"], "STALE_DATA", "body was: {body}");
-        assert_eq!(body["error"], format!("market data stale: last update {}ms ago", u64::MAX));
+        assert_eq!(body["code"], "NOT_READY", "body was: {body}");
+        assert_eq!(
+            body["error"], "data not ready: Token prices have not been computed",
+            "body was: {body}"
+        );
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_returns_not_ready_for_requested_uncomputed_data() {
+        for (uri, expected_error) in [
+            (
+                "/v1/prices?include=spot_prices",
+                "data not ready: Spot prices have not been computed",
+            ),
+            (
+                "/v1/prices?include=depths",
+                "data not ready: Component depths have not been computed",
+            ),
+        ] {
+            let state = make_test_state();
+            seed_tycho_head(&state).await;
+            state
+                .derived_data
+                .write()
+                .await
+                .set_token_prices(Default::default(), vec![], 19_000_000, true);
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(state))
+                    .route("/v1/prices", web::get().to(super::get_prices)),
+            )
+            .await;
+
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri(uri)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status().as_u16(), 503);
+            let body = body_json(resp).await;
+            assert_eq!(body["code"], "NOT_READY", "body was: {body}");
+            assert_eq!(body["error"], expected_error, "body was: {body}");
+        }
     }
 
     #[cfg(feature = "experimental")]

@@ -124,15 +124,13 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     openapi
 }
 
-fn block_age_ms_at(timestamp_secs: u64, now_secs: u64) -> u64 {
-    now_secs
-        .saturating_sub(timestamp_secs)
-        .saturating_mul(1000)
-}
-
 fn block_age_ms_at_time(timestamp_secs: u64, now: SystemTime) -> u64 {
     now.duration_since(UNIX_EPOCH)
-        .map_or(u64::MAX, |now| block_age_ms_at(timestamp_secs, now.as_secs()))
+        .map_or(u64::MAX, |now| {
+            now.as_secs()
+                .saturating_sub(timestamp_secs)
+                .saturating_mul(1000)
+        })
 }
 
 fn tycho_head_status_at(head: BlockInfo, now: SystemTime) -> TychoHeadStatus {
@@ -363,9 +361,11 @@ mod health_tracker_tests {
     }
 
     #[test]
-    fn test_block_age_ms_at() {
-        assert_eq!(block_age_ms_at(1_000, 1_042), 42_000);
-        assert_eq!(block_age_ms_at(1_042, 1_000), 0);
+    fn test_block_age_ms_at_time() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_042);
+
+        assert_eq!(block_age_ms_at_time(1_000, now), 42_000);
+        assert_eq!(block_age_ms_at_time(1_043, now), 0);
     }
 
     #[test]
