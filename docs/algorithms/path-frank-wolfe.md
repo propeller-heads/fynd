@@ -23,7 +23,7 @@ Two properties hold throughout the optimization:
 
 ## When does splitting help?
 
-The algorithm computes a **price impact estimate** before attempting any split. If price impact is negligible relative to gas costs, splitting can't pay for itself — extra swaps cost gas, and the marginal gain from reducing impact is too small. The algorithm skips the Frank-Wolfe loop and returns the single-path result directly.
+The algorithm computes a **probe impact estimate** before attempting any split. This sizing heuristic is not the quote's `price_impact_bps`. If probe impact is negligible relative to gas costs, splitting can't pay for itself — extra swaps cost gas, and the marginal gain from reducing impact is too small. The algorithm skips the Frank-Wolfe loop and returns the single-path result directly.
 
 Splitting is most valuable when:
 
@@ -39,7 +39,7 @@ Bellman-Ford (BF) runs at the full order amount to find the best single-path rou
 
 ### Probe amount
 
-Before each iteration, the algorithm computes a **probe amount**: the minimum trade size where an additional path would pay for its gas cost. This is `gas_cost / price_impact`. If price impact has fallen enough (because prior splits already reduced it), the probe exceeds the configured `max_probe` cap and the loop stops.
+Before each iteration, the algorithm computes a **probe amount**: the minimum trade size where an additional path would pay for its gas cost. This is `gas_cost / probe_impact`. If probe impact has fallen enough (because prior splits already reduced it), the probe exceeds the configured `max_probe` cap and the loop stops.
 
 ### Finding a candidate path
 
@@ -78,7 +78,7 @@ The loop then repeats with the updated allocation as the new starting point.
 
 ## Stage 3: Final comparison
 
-After the loop completes (due to `max_paths`, timeout, price impact exit, or duplicate detection), the algorithm builds the full split route, validates it, and compares it against the initial single-path result by **net amount out** (gross output minus gas cost). The better result is returned.
+After the loop completes (due to `max_paths`, timeout, probe-impact exit, or duplicate detection), the algorithm builds the full split route, validates it, and compares it against the initial single-path result by **net amount out** (gross output minus gas cost). The better result is returned.
 
 If only one path survived (because all splits were too small), the initial single-path result is returned directly without building a split route.
 

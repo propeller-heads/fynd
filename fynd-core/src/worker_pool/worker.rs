@@ -639,12 +639,13 @@ where
                 };
 
                 let price_impact_started = Instant::now();
-                let price_impact_result = super::price_impact::route_price_impact(
+                let price_impact_bps_result = super::price_impact::route_price_impact(
                     &route,
                     &amount_in_raw,
                     &amount_out_raw,
-                );
-                let price_impact_outcome = match &price_impact_result {
+                )
+                .and_then(super::price_impact::price_impact_to_basis_points);
+                let price_impact_outcome = match &price_impact_bps_result {
                     Ok(_) => "computed",
                     Err(err) => err.outcome(),
                 };
@@ -653,8 +654,8 @@ where
                     price_impact_started.elapsed(),
                     price_impact_outcome,
                 );
-                let price_impact_bps = match price_impact_result {
-                    Ok(impact) => Some((impact * 10_000.0).round() as i32),
+                let price_impact_bps = match price_impact_bps_result {
+                    Ok(basis_points) => Some(basis_points),
                     Err(err) => {
                         debug!(
                             order_id = %order.id(),
@@ -1255,7 +1256,9 @@ mod tests {
 
     /// Mock algorithm that returns a two-branch A→B route. This models the split-route shape
     /// that `water_fill` returns. The worker calculates the quote's price impact.
-    struct SplitRouteAlgorithm;
+    struct SplitRouteAlgorithm {
+        reported_spot_price: f64,
+    }
 
     impl Algorithm for SplitRouteAlgorithm {
         type GraphType = StableDiGraph<DepthAndPrice>;
@@ -1283,7 +1286,7 @@ mod tests {
                 BigUint::from(114u64),
                 BigUint::from(1u64),
                 component("p1", &[token_a.clone(), token_b.clone()]),
-                Box::new(MockProtocolSim::new(2.0)),
+                Box::new(MockProtocolSim::new(self.reported_spot_price)),
             )
             .with_split(0.6);
             let swap_p2 = Swap::new(
@@ -1295,7 +1298,7 @@ mod tests {
                 BigUint::from(78u64),
                 BigUint::from(1u64),
                 component("p2", &[token_a.clone(), token_b.clone()]),
-                Box::new(MockProtocolSim::new(2.0)),
+                Box::new(MockProtocolSim::new(self.reported_spot_price)),
             );
             let route = Route::new(
                 vec![swap_p1, swap_p2],
@@ -1359,8 +1362,13 @@ mod tests {
             ("p2", &token_a, &token_b, MockProtocolSim::new(2.0)),
         ]);
         let derived = DerivedData::new_shared();
-        let mut worker =
-            SolverWorker::new(market, derived, SplitRouteAlgorithm, 0, "test_pool".to_string());
+        let mut worker = SolverWorker::new(
+            market,
+            derived,
+            SplitRouteAlgorithm { reported_spot_price: 2.0 },
+            0,
+            "test_pool".to_string(),
+        );
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let quote = worker
@@ -1369,6 +1377,33 @@ mod tests {
             .expect("split route must quote");
 
         assert_eq!(quote.order().price_impact_bps(), Some(400));
+    }
+
+    #[tokio::test]
+    async fn test_quote_omits_unrepresentable_price_impact() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted(vec![
+            ("p1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("p2", &token_a, &token_b, MockProtocolSim::new(2.0)),
+        ]);
+        let derived = DerivedData::new_shared();
+        let mut worker = SolverWorker::new(
+            market,
+            derived,
+            SplitRouteAlgorithm { reported_spot_price: 1e-300 },
+            0,
+            "test_pool".to_string(),
+        );
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let quote = worker
+            .quote(&ord, SolveParams::default())
+            .await
+            .expect("an unrepresentable price impact must not fail the quote");
+
+        assert_eq!(quote.order().price_impact_bps(), None);
+        assert_eq!(quote.order().amount_out(), &BigUint::from(192u64));
     }
 
     /// Mock algorithm that returns a route without a token map, which the price-impact

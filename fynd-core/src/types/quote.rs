@@ -1778,9 +1778,9 @@ impl Route {
 ///
 /// Each group is one branch collection: the swaps that divide the balance standing at a token,
 /// whether one swap takes it all or several split it. The route validator checks a split route
-/// collection by collection, and the price-impact walk visits them in the same order. The
-/// helper itself only preserves first-seen order; that every producer of a token comes before
-/// its consumers is a property of a validated route, guaranteed by `validate_cycles`.
+/// collection by collection, and `spot_reference_output` visits them in the same order. The helper
+/// itself only preserves first-seen order; that every producer of a token comes before its
+/// consumers is a property of a validated route, guaranteed by `validate_cycles`.
 pub(crate) fn branch_collections<'a, T>(
     items: &'a [T],
     token_in: impl Fn(&'a T) -> &'a Address,

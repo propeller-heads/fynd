@@ -8,13 +8,10 @@
 //!
 //! # Limitation: the reference is the reported spot price, not a marginal output rate
 //!
-//! Tycho documents `ProtocolSim::spot_price(base, quote)` as a fee-marked-up buy price, but its
-//! implementations do not use a consistent direction or fee convention. Fynd deliberately keeps the
-//! executed-direction call it has always made, `spot_price(token_in, token_out)`, so this module
-//! extends the existing behaviour to split routes without reversing it for any venue. The result
-//! can therefore carry a venue-dependent fee bias until Tycho exposes a consistent
-//! execution-direction marginal-output rate; [`reported_spot_price`] is the one place to adjust
-//! when it does.
+//! Tycho documents `ProtocolSim::spot_price(base, quote)` as a fee-marked-up buy price. Fynd calls
+//! `ProtocolSim::spot_price(token_in, token_out)` in the executed direction. Tycho implementations
+//! differ in direction and fee convention, so `price_impact_bps` can carry a venue-dependent fee
+//! bias.
 
 use std::fmt;
 
@@ -76,6 +73,8 @@ pub(crate) enum PriceImpactError {
     InvalidSpotPrice { token_in: Address, token_out: Address, price: f64 },
     #[error("the route's output at spot prices is not a positive finite number")]
     NoReferenceOutput,
+    #[error("price impact {impact} cannot be represented as basis points in an i32")]
+    BasisPointsOutOfRange { impact: f64 },
 }
 
 impl PriceImpactError {
@@ -90,11 +89,12 @@ impl PriceImpactError {
             PriceImpactError::ZeroConsumedInput(_) => "zero_consumed_input",
             PriceImpactError::InvalidSpotPrice { .. } => "invalid_spot_price",
             PriceImpactError::NoReferenceOutput => "no_reference_output",
+            PriceImpactError::BasisPointsOutOfRange { .. } => "basis_points_out_of_range",
         }
     }
 }
 
-/// One swap as the price-impact walk sees it.
+/// One swap processed by [`spot_reference_output`].
 pub(crate) struct SpotLeg<'a> {
     pub token_in: &'a Address,
     pub token_out: &'a Address,
@@ -118,9 +118,9 @@ pub(crate) struct PriceImpactInputs<'a> {
 /// Computes signed price impact as `1 - executed_output / spot_reference_output`; negative
 /// values represent favorable execution.
 ///
-/// The walk seeds the input token with the route's input and visits the legs one branch
-/// collection at a time. Each leg takes its share of the reference amount standing at its input
-/// token — its share of what the route actually consumed there — and multiplies it by its
+/// [`spot_reference_output`] seeds the input token with the route's input and visits the legs one
+/// branch collection at a time. Each leg takes its share of the reference amount standing at its
+/// input token — its share of what the route actually consumed there — and multiplies it by its
 /// reported spot price into its output token. Legs into the route's output token accumulate the
 /// reference output. On a linear route every share is one and the reference is the input times the
 /// product of the spot prices; on a split route a deviation at an earlier hop compounds through the
@@ -142,6 +142,18 @@ pub(crate) fn price_impact_from_spot_legs(
         AmountSource::RouteOutput,
     )?;
     Ok(1.0 - executed_output_human / spot_reference_output_human)
+}
+
+/// Converts signed price impact to basis points without saturating the wire-format `i32`.
+pub(crate) fn price_impact_to_basis_points(impact: f64) -> Result<i32, PriceImpactError> {
+    let rounded_basis_points = (impact * 10_000.0).round();
+    if !rounded_basis_points.is_finite() ||
+        rounded_basis_points < f64::from(i32::MIN) ||
+        rounded_basis_points > f64::from(i32::MAX)
+    {
+        return Err(PriceImpactError::BasisPointsOutOfRange { impact });
+    }
+    Ok(rounded_basis_points as i32)
 }
 
 /// What the route would pay at spot prices, in human units of its output token.
@@ -382,6 +394,31 @@ mod tests {
     }
 
     #[test]
+    fn test_basis_points_conversion_rejects_unrepresentable_impact() {
+        // Favorable execution below -100% is mathematically valid and must not be clipped.
+        assert_eq!(price_impact_to_basis_points(-1.5).unwrap(), -15_000);
+
+        let a = addr(0x01);
+        let b = addr(0x02);
+        let legs = [SpotLeg {
+            token_in: &a,
+            token_out: &b,
+            amount_in_raw: 1.0,
+            reported_spot_price: 1e-300,
+        }];
+        let (amount_in, amount_out) = (parse_biguint("1"), parse_biguint("1"));
+        let impact_inputs = inputs(&a, &b, &amount_in, &amount_out);
+        let impact = price_impact_from_spot_legs(&legs, &impact_inputs).unwrap();
+
+        let err = price_impact_to_basis_points(impact).unwrap_err();
+        assert_eq!(err.outcome(), "basis_points_out_of_range");
+        let PriceImpactError::BasisPointsOutOfRange { impact: rejected } = err else {
+            panic!("expected BasisPointsOutOfRange, got {err}");
+        };
+        assert_eq!(rejected, impact);
+    }
+
+    #[test]
     fn test_zero_reported_spot_price() {
         let a = addr(0x01);
         let b = addr(0x02);
@@ -424,8 +461,8 @@ mod tests {
 
     #[test]
     fn test_amount_beyond_f64_names_its_source() {
-        // A 1e400 amount cannot be represented as a finite f64; the walk must refuse it rather
-        // than divide by inf.
+        // A 1e400 amount cannot be represented as a finite f64; the calculation must refuse it
+        // rather than divide by inf.
         let a = addr(0x01);
         let b = addr(0x02);
         let huge = "1".to_string() + &"0".repeat(400);
@@ -687,7 +724,8 @@ mod tests {
 
     /// A no-slippage pool for exercising Fynd's own math: `get_amount_out` pays
     /// `amount_in * mid * (1 - fee)` and `spot_price` reports that same rate, so any impact comes
-    /// from what the route paid against what the walk expected. It models no real venue.
+    /// from what the route paid against what `spot_reference_output` expected. It models no real
+    /// venue.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     struct SellRateSim {
         mid: f64,
