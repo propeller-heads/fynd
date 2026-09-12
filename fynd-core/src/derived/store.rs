@@ -1,14 +1,10 @@
 //! Typed storage for derived data.
 
-use std::{
-    any::Any,
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{any::Any, str::FromStr, sync::Arc, time::Instant};
 
 use rustc_hash::FxHashMap;
 use tokio::sync::RwLock;
+use tracing::warn;
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
@@ -20,10 +16,6 @@ use super::{
     },
 };
 use crate::derived::SharedDerivedDataRef;
-
-fn duration_as_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
 
 /// A computed value paired with the block it was computed for.
 #[derive(Debug)]
@@ -51,7 +43,10 @@ impl ComputationStatus {
     /// elapsed millisecond count cannot fit in a `u64`.
     pub fn age_ms_at(&self, now: Instant) -> u64 {
         let elapsed = now.saturating_duration_since(self.updated_at);
-        duration_as_millis(elapsed)
+        u64::try_from(elapsed.as_millis()).unwrap_or({
+            warn!("Failed to compute age_ms at {:?}", elapsed);
+            u64::MAX
+        })
     }
 }
 
@@ -560,11 +555,6 @@ mod tests {
                 .age_ms_at(compared_at),
             0
         );
-    }
-
-    #[test]
-    fn test_duration_as_millis_overflow() {
-        assert_eq!(duration_as_millis(Duration::MAX), u64::MAX);
     }
 
     #[test]
