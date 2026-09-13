@@ -2,7 +2,7 @@
 //! in dry-run mode. With `max_fee_per_gas` pinned to a known constant, the
 //! returned `SettledOrder::gas_cost()` divides exactly to the raw `gas_used`.
 //!
-//! Storage-slot detection (balance + allowance) is delegated to `erc20-overrides`;
+//! Storage-slot detection (balance + allowance) is delegated to `fynd-core`;
 //! we still keep a local alloy provider for the probe `eth_call`s.
 
 use alloy::{
@@ -11,10 +11,10 @@ use alloy::{
     providers::{Provider, RootProvider},
 };
 use bytes::Bytes;
-use erc20_overrides::{find_allowance_slot, find_balance_slot};
 use fynd_client::{
     ExecutionOptions, FyndClient, Quote, SignedSwap, SigningHints, StorageOverrides,
 };
+use fynd_core::simulation::token_layout::discover_layout;
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 
@@ -29,7 +29,7 @@ fn huge_balance() -> B256 {
     B256::from(U256::MAX >> 1)
 }
 
-/// Probe slots for `token_in`, then build `StorageOverrides` that give `sender`
+/// Discover the storage layout of `token_in`, then build `StorageOverrides` that give `sender`
 /// a huge ERC-20 balance + allowance to `router`, plus a huge native-ETH balance
 /// so the node accepts the `gas_limit * max_fee_per_gas` affordability check.
 async fn build_fynd_overrides(
@@ -38,24 +38,25 @@ async fn build_fynd_overrides(
     token_in: Address,
     router: Address,
 ) -> anyhow::Result<StorageOverrides> {
-    let (balance_slot, allowance_slot) = tokio::join!(
-        find_balance_slot(provider, token_in, sender),
-        find_allowance_slot(provider, token_in, sender, router),
-    );
-    let balance_slot = balance_slot?;
-    let allowance_slot = allowance_slot?;
+    let layout = discover_layout(provider, token_in, sender, router).await?;
 
     let huge = huge_balance();
     let mut overrides = StorageOverrides::default();
-    let token_addr = Bytes::copy_from_slice(token_in.as_slice());
+    // A proxy keeps its balances somewhere other than the address the swap calls, so the write
+    // goes to the contract discovery named rather than to the token.
+    let storage = Bytes::copy_from_slice(layout.storage_contract().as_slice());
     overrides.insert(
-        token_addr.clone(),
-        Bytes::copy_from_slice(balance_slot.as_slice()),
+        storage.clone(),
+        Bytes::copy_from_slice(layout.balance_slot(sender).as_slice()),
         Bytes::copy_from_slice(huge.as_slice()),
     );
     overrides.insert(
-        token_addr,
-        Bytes::copy_from_slice(allowance_slot.as_slice()),
+        storage,
+        Bytes::copy_from_slice(
+            layout
+                .allowance_slot(sender, router)
+                .as_slice(),
+        ),
         Bytes::copy_from_slice(huge.as_slice()),
     );
     overrides.set_native_balance(

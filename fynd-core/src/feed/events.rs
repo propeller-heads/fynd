@@ -3,9 +3,8 @@
 //! The indexer broadcasts these events when market data changes.
 //! Solvers subscribe to these events to keep their local graph in sync.
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
+use rustc_hash::FxHashMap;
 use thiserror::Error;
 use tycho_simulation::tycho_common::models::Address;
 
@@ -18,7 +17,7 @@ pub enum MarketEvent {
     /// Market was updated.
     MarketUpdated {
         /// Components added in this update, keyed by component ID.
-        added_components: HashMap<ComponentId, Vec<Address>>,
+        added_components: FxHashMap<ComponentId, Vec<Address>>,
         /// Component IDs that were removed.
         removed_components: Vec<ComponentId>,
         /// Component IDs whose state changed.

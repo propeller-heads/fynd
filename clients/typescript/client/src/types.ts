@@ -87,6 +87,8 @@ export interface EncodingOptions {
   permit2Signature?: Hex;
   /** Client fee configuration. When absent, no fee is charged. */
   clientFeeParams?: ClientFeeParams;
+  /** Simulate the encoded transaction against the latest block. Defaults to `false`. */
+  simulate?: boolean;
 }
 
 /** An encoded on-chain transaction returned by the solver. */
@@ -94,6 +96,23 @@ export interface Transaction {
   to: Address;
   value: bigint;
   data: Hex;
+}
+
+/**
+ * Liquidity a request excludes from a route.
+ *
+ * The pools, protocols and tokens it names are excluded from every route.
+ */
+export interface RouteFilter {
+  /** Pools to exclude, by component id. */
+  excludePools?: string[];
+  /** Protocol systems to exclude: exact names (`uniswap_v2`) or family prefixes (`propammfallback:`). */
+  excludeProtocols?: string[];
+  /**
+   * Tokens to exclude as intermediates. The order's own two tokens are always allowed, so
+   * naming one of them changes nothing.
+   */
+  excludeTokens?: Address[];
 }
 
 /** Optional parameters for a quote request. */
@@ -106,6 +125,8 @@ export interface QuoteOptions {
   maxGas?: bigint;
   /** Encoding options; when set, the response includes a ready-to-sign transaction. */
   encodingOptions?: EncodingOptions;
+  /** Liquidity this request excludes from a route. */
+  routeFilter?: RouteFilter;
 }
 
 /** Input parameters for {@link FyndClient.quote}. */
@@ -122,10 +143,10 @@ export interface BlockInfo {
   timestamp: number;
 }
 
-/** A single pool-level swap within a route. */
+/** A single component-level (liquidity pool) swap within a route. */
 export interface Swap {
-  /** Unique pool identifier (wire name: `component_id`). */
-  poolId: string;
+  /** Unique component identifier (wire name: `component_id`). */
+  componentId: string;
   /** Protocol name (e.g. "uniswap_v3", "balancer_v2"). */
   protocol: string;
   tokenIn: Address;
@@ -152,6 +173,11 @@ export interface FeeBreakdown {
   minAmountReceived: bigint;
 }
 
+/** Outcome of simulating an encoded quote against the latest block. */
+export type SimulationResult =
+  | { status: "success"; amountOut: bigint; gasUsed: number }
+  | { status: "failure"; reason: string };
+
 /** A solver quote containing the best route, amounts, and optional encoded transaction. */
 export interface Quote {
   orderId: string;
@@ -163,6 +189,8 @@ export interface Quote {
   gasEstimate: bigint;
   /** Price impact in basis points (1 bp = 0.01%). */
   priceImpactBps?: number;
+  /** Routing algorithm that produced this quote. */
+  algorithm?: string;
   block: BlockInfo;
   /** Output token address from the original order; used internally for settlement parsing. */
   tokenOut: Address;
@@ -172,6 +200,8 @@ export interface Quote {
   transaction?: Transaction;
   /** Fee breakdown; present only when `encodingOptions` was set in the quote request. */
   feeBreakdown?: FeeBreakdown;
+  /** Simulation outcome; present when `encodingOptions.simulate` was set. */
+  simulationResult?: SimulationResult;
 }
 
 /** Solver health status and readiness information. */
@@ -179,14 +209,15 @@ export interface HealthStatus {
   healthy: boolean;
   /** Milliseconds since the last state update. */
   lastUpdateMs: number;
-  /** Number of liquidity pools tracked by the solver. */
+  /** Number of active solver worker pools. */
   numSolverPools: number;
   gasPriceAgeMs?: number;
 }
 
 /** Static metadata about a Fynd server instance. */
 export interface InstanceInfo {
-  routerAddress: Address;
+  /** Tycho Router contract address, or `null` on a quote-only chain. */
+  routerAddress: Address | null;
   permit2Address: Address;
   chainId: number;
 }

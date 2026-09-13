@@ -2,17 +2,16 @@
 //! [`SharedRouterFees`].
 //!
 //! On start-up and on every refresh tick the fetcher resolves the FeeCalculator address
-//! from the Tycho Router (`getFeeCalculator`), then reads its precision scale (`MAX_FEE_BPS`),
+//! from the Tycho Router (`getFeeCalculator`), then reads its precision scale (`MAX_BPS`),
 //! the default router fees, and all per-client overrides. Failed fetches keep the previously
 //! stored values, so the encoder always has a usable fee configuration.
 
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use alloy::{
     network::Ethereum,
-    primitives::{Address, Bytes as AlloyBytes, TxKind, U256},
-    providers::{Provider, ProviderBuilder, RootProvider},
-    rpc::types::TransactionRequest,
+    primitives::{Address, U256},
+    providers::{ProviderBuilder, RootProvider},
     sol,
     sol_types::SolCall,
 };
@@ -20,7 +19,10 @@ use tokio::time::{interval, MissedTickBehavior};
 use tracing::{info, warn};
 use tycho_simulation::tycho_common::Bytes;
 
-use crate::encoding::router_fees::{RouterFees, SharedRouterFees};
+use crate::{
+    encoding::router_fees::{RouterFees, SharedRouterFees},
+    rpc,
+};
 
 sol! {
     /// Mirror of the FeeCalculator's `CustomFees` storage struct.
@@ -36,7 +38,7 @@ sol! {
     }
 
     interface IFeeCalculator {
-        function MAX_FEE_BPS() external view returns (uint32);
+        function MAX_BPS() external view returns (uint32);
         function getRouterFeeOnOutput() external view returns (uint32);
         function getRouterFeeOnClientFee() external view returns (uint32);
         function getAllClientFees(uint256 start, uint256 count)
@@ -91,14 +93,10 @@ impl RouterFeeFetcher {
         let url = rpc_url.parse().map_err(|e| {
             RouterFeeFetchError::Config(format!("invalid RPC URL {rpc_url:?}: {e}"))
         })?;
-        if router_address.len() != 20 {
-            return Err(RouterFeeFetchError::Config(format!(
-                "router address {router_address:?} is not 20 bytes"
-            )));
-        }
         Ok(Self {
             provider: ProviderBuilder::default().connect_http(url),
-            router_address: Address::from_slice(router_address.as_ref()),
+            router_address: rpc::to_address(router_address, "router address")
+                .map_err(RouterFeeFetchError::Config)?,
             shared_fees,
             refresh_interval,
         })
@@ -149,15 +147,15 @@ impl RouterFeeFetcher {
             .await?;
 
         let max_fee_units = self
-            .eth_call::<IFeeCalculator::MAX_FEE_BPSCall>(
+            .eth_call::<IFeeCalculator::MAX_BPSCall>(
                 fee_calculator,
-                "MAX_FEE_BPS",
-                IFeeCalculator::MAX_FEE_BPSCall {}.abi_encode(),
+                "MAX_BPS",
+                IFeeCalculator::MAX_BPSCall {}.abi_encode(),
             )
             .await?;
         if max_fee_units == 0 {
             return Err(RouterFeeFetchError::Call {
-                method: "MAX_FEE_BPS",
+                method: "MAX_BPS",
                 contract: fee_calculator,
                 reason: "fee precision scale is zero".to_string(),
             });
@@ -179,7 +177,7 @@ impl RouterFeeFetcher {
             )
             .await?;
 
-        let mut custom_fees = HashMap::new();
+        let mut custom_fees = rustc_hash::FxHashMap::default();
         let mut start = 0usize;
         loop {
             let page = self
@@ -233,20 +231,9 @@ impl RouterFeeFetcher {
         method: &'static str,
         calldata: Vec<u8>,
     ) -> Result<C::Return, RouterFeeFetchError> {
-        let response = self
-            .provider
-            .call(TransactionRequest {
-                to: Some(TxKind::Call(contract)),
-                input: AlloyBytes::from(calldata).into(),
-                ..Default::default()
-            })
+        rpc::eth_call::<C>(&self.provider, contract, calldata)
             .await
-            .map_err(|e| RouterFeeFetchError::Call { method, contract, reason: e.to_string() })?;
-        C::abi_decode_returns(&response).map_err(|e| RouterFeeFetchError::Call {
-            method,
-            contract,
-            reason: format!("failed to decode response: {e}"),
-        })
+            .map_err(|reason| RouterFeeFetchError::Call { method, contract, reason })
     }
 }
 
@@ -254,7 +241,9 @@ impl RouterFeeFetcher {
 mod tests {
     use std::str::FromStr;
 
-    use alloy::{rpc::client::RpcClient, transports::mock::Asserter};
+    use alloy::{
+        primitives::Bytes as AlloyBytes, rpc::client::RpcClient, transports::mock::Asserter,
+    };
 
     use super::*;
 
@@ -278,7 +267,7 @@ mod tests {
 
     fn push_defaults(asserter: &Asserter, fee_on_output: u32, fee_on_client_fee: u32) {
         push_return::<ITychoRouter::getFeeCalculatorCall>(asserter, &CALCULATOR);
-        push_return::<IFeeCalculator::MAX_FEE_BPSCall>(asserter, &MAX_FEE_UNITS);
+        push_return::<IFeeCalculator::MAX_BPSCall>(asserter, &MAX_FEE_UNITS);
         push_return::<IFeeCalculator::getRouterFeeOnOutputCall>(asserter, &fee_on_output);
         push_return::<IFeeCalculator::getRouterFeeOnClientFeeCall>(asserter, &fee_on_client_fee);
     }
@@ -327,14 +316,14 @@ mod tests {
     async fn test_fetch_fees_rejects_zero_precision_scale() {
         let asserter = Asserter::new();
         push_return::<ITychoRouter::getFeeCalculatorCall>(&asserter, &CALCULATOR);
-        push_return::<IFeeCalculator::MAX_FEE_BPSCall>(&asserter, &0u32);
+        push_return::<IFeeCalculator::MAX_BPSCall>(&asserter, &0u32);
 
         let err = fetcher_with(&asserter)
             .fetch_fees()
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("MAX_FEE_BPS"));
+        assert!(err.to_string().contains("MAX_BPS"));
     }
 
     #[tokio::test]

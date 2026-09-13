@@ -9,8 +9,8 @@
 //! # Use cases
 //!
 //! - **Standalone routing** — embed Fynd's algorithms directly without running an HTTP server.
-//! - **Custom algorithms** — implement the [`Algorithm`] trait and plug in via
-//!   [`FyndBuilder::with_algorithm`](solver::FyndBuilder).
+//! - **Custom algorithms** — implement the [`Algorithm`] trait and register it in an
+//!   [`AlgorithmRegistry`], which [`FyndBuilder::with_algorithms`](solver::FyndBuilder) takes.
 //! - **HTTP server** — use the [`fynd-rpc`](https://crates.io/crates/fynd-rpc) crate, which wraps
 //!   this crate with Actix Web.
 //!
@@ -21,10 +21,10 @@
 //! to implement your own routing strategy.
 
 /// Route-finding algorithms. Includes [`MostLiquidAlgorithm`],
-/// [`algorithm::BellmanFordAlgorithm`], [`PathFrankWolfeAlgorithm`], and the
-/// pluggable [`Algorithm`] trait.
+/// [`algorithm::BellmanFordAlgorithm`], [`PathFrankWolfeAlgorithm`],
+/// [`algorithm::WaterFillAlgorithm`], and the pluggable [`Algorithm`] trait.
 pub mod algorithm;
-/// Derived data computations: spot prices, pool depths, and gas prices.
+/// Derived data computations: spot prices, component depths, and gas prices.
 pub mod derived;
 /// Encodes solved routes into ABI-encoded on-chain calldata via Tycho's router contracts.
 pub mod encoding;
@@ -35,6 +35,15 @@ pub mod feed;
 pub mod graph;
 /// External price validation for quotes.
 pub mod price_guard;
+/// Computes the amount out a route delivers when its pAMM legs fall back to Uniswap V3, so the
+/// encoder can drop a quote whose fallback pays less than `min_amount_out`.
+pub mod propamm_fallback;
+/// Re-execute an already-built route against a (possibly newer) market state.
+pub mod replay;
+/// `eth_call` plumbing shared by the tasks that read contract state.
+mod rpc;
+/// On-chain quote simulation and state override helpers.
+pub mod simulation;
 /// [`FyndBuilder`](solver::FyndBuilder) assembles the full pipeline and returns a
 /// [`Solver`](solver::Solver).
 pub mod solver;
@@ -46,9 +55,13 @@ pub mod worker_pool;
 /// Request orchestration: fans out orders to all solver pools and selects the best result.
 pub mod worker_pool_router;
 
+#[cfg(test)]
+mod tests;
+
 // Re-export commonly used types for convenience
 pub use algorithm::{
-    Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm, PathFrankWolfeAlgorithm,
+    registry::AlgorithmRegistry, Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm,
+    NoPathReason, PathFrankWolfeAlgorithm, SolveParts, SolveRequest,
 };
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
@@ -57,6 +70,11 @@ pub use price_guard::{
     config::PriceGuardConfig,
     provider::{ExternalPrice, PriceProvider, PriceProviderError},
 };
+pub use replay::{replay_route, ReplayError, RouteReplay};
+// `GraphManager`, `Route` and the market data readers take `FxHashMap`/`FxHashSet`.
+// Re-exported so an external implementor names the same types without matching our
+// `rustc-hash` version itself.
+pub use rustc_hash;
 pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
 /// Processes ephemeral pending bundles against live Tycho market state. Obtained by calling
 /// [`FyndBuilder::build_with_pending`](solver::FyndBuilder::build_with_pending).
@@ -76,12 +94,16 @@ pub use tycho_simulation::tycho_common::traits::TxDeltaIndexer;
 pub use types::{
     BlockInfo, ClientFeeParams, ComponentId, EncodingOptions, FeeBreakdown, Order, OrderQuote,
     OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions,
-    QuoteRequest, QuoteStatus, Route, RouteValidationError, SingleOrderQuote, SolveError,
-    SolveParams, SolveResult, Swap, TaskId, Transaction, UserTransferType,
+    QuoteRequest, QuoteStatus, Route, RouteExclusionFilter, RouteExclusions, RouteValidationError,
+    SimulationResult, SingleOrderQuote, SolveError, SolveParams, SolveResult, SurplusInfo, Swap,
+    TaskId, Transaction, UserTransferType,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},
     registry::UnknownAlgorithmError,
     TaskQueueHandle,
 };
-pub use worker_pool_router::{config::WorkerPoolRouterConfig, SolverPoolHandle, WorkerPoolRouter};
+pub use worker_pool_router::{
+    config::WorkerPoolRouterConfig, encode_quotes, finalize_quote, ExclusiveAccess, LiquidityScope,
+    RankedQuotes, SolverPoolHandle, WorkerPoolRouter,
+};

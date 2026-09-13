@@ -7,5 +7,5 @@
 pub use fynd_rpc_types::{
     BlockInfo, EncodingOptions, ErrorResponse, HealthStatus, InstanceInfo, Order, OrderQuote,
     OrderSide, PermitDetails, PermitSingle, PriceGuardConfig, Quote, QuoteOptions, QuoteRequest,
-    QuoteStatus, Route, Swap, Transaction, UserTransferType,
+    QuoteStatus, Route, RouteFilter, Swap, Transaction, UserTransferType,
 };

@@ -14,6 +14,8 @@ import type {
     Quote,
     QuoteParams,
     Route,
+    RouteFilter,
+    SimulationResult,
     Swap,
     Transaction,
 } from "./types.js";
@@ -33,6 +35,8 @@ type WirePermitSingle = components["schemas"]["PermitSingle"];
 type WirePermitDetails = components["schemas"]["PermitDetails"];
 type WireClientFeeParams = components["schemas"]["ClientFeeParams"];
 type WireFeeBreakdown = components["schemas"]["FeeBreakdown"];
+type WireSimulationResult = components["schemas"]["SimulationResult"];
+type WireRouteFilter = components["schemas"]["RouteFilter"];
 
 
 export function toWireRequest(params: QuoteParams): WireSolutionRequest {
@@ -59,11 +63,24 @@ export function toWireRequest(params: QuoteParams): WireSolutionRequest {
             ...(params.options.encodingOptions !== undefined
                 ? {encoding_options: toWireEncodingOptions(params.options.encodingOptions)}
                 : {}),
+            ...(params.options.routeFilter !== undefined
+                ? {route_filter: toWireRouteFilter(params.options.routeFilter)}
+                : {}),
         }
         : undefined;
     return {
         orders: [wireOrder],
         ...(wireOptions !== undefined ? {options: wireOptions} : {}),
+    };
+}
+
+function toWireRouteFilter(filter: RouteFilter): WireRouteFilter {
+    return {
+        ...(filter.excludePools !== undefined ? {exclude_pools: filter.excludePools} : {}),
+        ...(filter.excludeProtocols !== undefined
+            ? {exclude_protocols: filter.excludeProtocols}
+            : {}),
+        ...(filter.excludeTokens !== undefined ? {exclude_tokens: filter.excludeTokens} : {}),
     };
 }
 
@@ -84,8 +101,12 @@ export function fromWireQuote(
         ? fromWireTransaction(orderSolution.transaction)
         : undefined;
     const priceImpactBps = orderSolution.price_impact_bps ?? undefined;
+    const algorithm = orderSolution.algorithm ?? undefined;
     const feeBreakdown = orderSolution.fee_breakdown != null
         ? fromWireFeeBreakdown(orderSolution.fee_breakdown)
+        : undefined;
+    const simulationResult = orderSolution.simulation_result != null
+        ? fromWireSimulationResult(orderSolution.simulation_result)
         : undefined;
     return {
         orderId: orderSolution.order_id,
@@ -101,7 +122,9 @@ export function fromWireQuote(
         ...(route !== undefined ? {route} : {}),
         ...(transaction !== undefined ? {transaction} : {}),
         ...(priceImpactBps !== undefined ? {priceImpactBps} : {}),
+        ...(algorithm !== undefined ? {algorithm} : {}),
         ...(feeBreakdown !== undefined ? {feeBreakdown} : {}),
+        ...(simulationResult !== undefined ? {simulationResult} : {}),
     };
 }
 
@@ -111,7 +134,7 @@ function fromWireRoute(wire: WireRoute): Route {
 
 function fromWireSwap(wire: WireSwap): Swap {
     return {
-        poolId: wire.component_id,
+        componentId: wire.component_id,
         protocol: wire.protocol,
         tokenIn: wire.token_in as Address,
         tokenOut: wire.token_out as Address,
@@ -141,6 +164,7 @@ function toWireEncodingOptions(opts: EncodingOptions): WireEncodingOptions {
         ...(opts.clientFeeParams !== undefined
             ? {client_fee_params: toWireClientFeeParams(opts.clientFeeParams)}
             : {}),
+        ...(opts.simulate === true ? {simulate: true} : {}),
     };
 }
 
@@ -180,6 +204,13 @@ function fromWireFeeBreakdown(wire: WireFeeBreakdown): FeeBreakdown {
     };
 }
 
+function fromWireSimulationResult(wire: WireSimulationResult): SimulationResult {
+    if (wire.status === "success") {
+        return {status: "success", amountOut: BigInt(wire.amount_out), gasUsed: wire.gas_used};
+    }
+    return {status: "failure", reason: wire.reason};
+}
+
 function fromWireTransaction(wire: WireTransaction): Transaction {
     return {
         to: wire.to as Address,
@@ -199,7 +230,7 @@ export function fromWireHealth(wire: WireHealthStatus): HealthStatus {
 
 export function fromWireInstanceInfo(wire: WireInstanceInfo): InstanceInfo {
   return {
-    routerAddress:  wire.router_address as Address,
+    routerAddress:  (wire.router_address ?? null) as Address | null,
     permit2Address: wire.permit2_address as Address,
     chainId:        wire.chain_id,
   };

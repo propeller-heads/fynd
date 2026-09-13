@@ -1,7 +1,12 @@
 //! Tycho protocol system discovery.
 
+use std::collections::HashSet;
+
 use anyhow::{bail, Result};
-use tracing::info;
+use fynd_core::feed::protocol_registry::{
+    is_tycho_system, parse_exclusion, ProtocolSpec, EXCLUDE_PREFIX,
+};
+use tracing::{info, warn};
 use tycho_simulation::{
     tycho_client::rpc::{HttpRPCClient, HttpRPCClientOptions, ProtocolSystemsParams, RPCClient},
     tycho_common::models::Chain,
@@ -47,9 +52,26 @@ pub async fn fetch_protocol_systems(
 /// - `native_onchain` → fetch every on-chain protocol system, then drop the VM-simulated ones
 ///   (those prefixed `vm:`), keeping only native-Rust protocols.
 ///
-/// Explicit entries other than the expansion tokens (e.g. `rfq:bebop`, `uniswap_v3`) are appended
-/// if not already present. When no expansion token is given the list is returned unchanged.
-/// Returns an error if the resolved list is empty.
+/// Explicit entries other than the expansion tokens (e.g. `rfq:bebop`, `uniswap_v3`,
+/// `exclusive:ekubo_v3`) are merged in by protocol system, so `all_onchain,exclusive:ekubo_v3`
+/// streams `ekubo_v3` exactly once — with its exclusive pools included. Requesting a protocol both
+/// with and without the `exclusive:` prefix streams it with exclusive pools included.
+///
+/// An `exclude:` entry drops that protocol system from the resolved list, so
+/// `all_onchain,exclude:vm:fermiswap` streams everything on-chain except FermiSwap. This is how a
+/// venue reached through a second integration path — the pAMM price level stream, say — is kept
+/// from being streamed twice and having its liquidity double-counted. An exclusion that matches
+/// nothing is logged as a warning and otherwise ignored.
+///
+/// Every resolved protocol system is checked against the ones Tycho serves, and an entry naming a
+/// system that is gone is warned about and dropped. A list of RFQ and price level stream entries
+/// only skips the check along with the fetch, since it needs no Tycho protocol stream.
+///
+/// # Errors
+///
+/// Returns an error if an entry requests exclusive liquidity for a protocol that has no exclusive
+/// variant, if a protocol is both requested and excluded, if an exclusion names nothing, if the
+/// protocol systems cannot be fetched, or if the resolved list is empty.
 pub async fn resolve_protocols(
     tycho_url: &str,
     auth_key: Option<&str>,
@@ -57,6 +79,10 @@ pub async fn resolve_protocols(
     chain: Chain,
     requested: &[String],
 ) -> Result<Vec<String>> {
+    // Parsed before the RPC call so a malformed entry fails without waiting on Tycho.
+    let (explicit, excluded) = split_requested(requested)?;
+    reject_requested_and_excluded(&explicit, &excluded)?;
+
     let want_native = requested
         .iter()
         .any(|p| p == NATIVE_ONCHAIN);
@@ -65,23 +91,374 @@ pub async fn resolve_protocols(
             .iter()
             .any(|p| p == ALL_ONCHAIN);
 
-    let protocols = if want_all || want_native {
-        let mut fetched = fetch_protocol_systems(tycho_url, auth_key, use_tls, chain).await?;
-        if want_native {
-            fetched.retain(|p| !p.starts_with(VM_PREFIX));
-        }
-        for p in requested {
-            if p != ALL_ONCHAIN && p != NATIVE_ONCHAIN && !fetched.contains(p) {
-                fetched.push(p.clone());
-            }
-        }
-        fetched
+    // Fetched for a list that needs no expansion too, so its entries can be checked against what
+    // Tycho actually serves. A list of RFQ and price level stream entries only names no Tycho
+    // system, so it skips the fetch and needs no reachable Tycho.
+    let names_tycho_system = explicit
+        .iter()
+        .any(|protocol| is_tycho_system(&protocol.system));
+    let want_expansion = want_all || want_native;
+    let check_availability = want_expansion || names_tycho_system;
+    let systems = if check_availability {
+        fetch_protocol_systems(tycho_url, auth_key, use_tls, chain).await?
     } else {
-        requested.to_vec()
+        Vec::new()
     };
+
+    let mut protocols: Vec<ProtocolSpec> = if want_expansion {
+        systems
+            .iter()
+            .filter(|system| !(want_native && system.starts_with(VM_PREFIX)))
+            .map(ProtocolSpec::public)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    merge_explicit(&mut protocols, explicit);
+    apply_exclusions(&mut protocols, &excluded);
+    if check_availability {
+        drop_unserved(&mut protocols, &systems);
+    }
 
     if protocols.is_empty() {
         bail!("no supported protocols found. Provide --protocols or check Tycho connectivity.");
     }
-    Ok(protocols)
+    Ok(protocols
+        .iter()
+        .map(ProtocolSpec::to_string)
+        .collect())
+}
+
+/// Splits the requested entries into the protocols to stream and the systems to drop, skipping
+/// the expansion tokens.
+///
+/// One pass over the entries, so the two halves cannot disagree about which entry is which.
+fn split_requested(entries: &[String]) -> Result<(Vec<ProtocolSpec>, Vec<String>)> {
+    let mut streamed = Vec::new();
+    let mut excluded = Vec::new();
+    for entry in entries {
+        if entry == ALL_ONCHAIN || entry == NATIVE_ONCHAIN {
+            continue;
+        }
+        match parse_exclusion(entry) {
+            Some(system) => {
+                let system = system?;
+                if system.is_empty() {
+                    bail!("'{entry}' names no protocol system to exclude");
+                }
+                excluded.push(system);
+            }
+            None => streamed.push(ProtocolSpec::parse(entry)?),
+        }
+    }
+    Ok((streamed, excluded))
+}
+
+/// Rejects a list naming the same protocol system as both streamed and excluded.
+fn reject_requested_and_excluded(streamed: &[ProtocolSpec], excluded: &[String]) -> Result<()> {
+    for protocol in streamed {
+        if excluded.contains(&protocol.system) {
+            bail!(
+                "protocol '{}' is both requested and excluded with '{EXCLUDE_PREFIX}'",
+                protocol.system
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Drops every excluded protocol system from `protocols`.
+///
+/// An exclusion that matches nothing is a warning, not an error: a protocol dropped from Tycho
+/// leaves every deployment that excluded it with a stale entry, and refusing to start over one is
+/// a worse outcome than streaming exactly the list that was asked for.
+fn apply_exclusions(protocols: &mut Vec<ProtocolSpec>, excluded: &[String]) {
+    for system in excluded {
+        let before = protocols.len();
+        protocols.retain(|protocol| &protocol.system != system);
+        if protocols.len() == before {
+            warn!(
+                "excluded protocol '{system}' is not in the resolved list; available: {}",
+                protocols
+                    .iter()
+                    .map(|protocol| protocol.system.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+}
+
+/// Drops every requested protocol system Tycho does not serve.
+///
+/// A warning rather than an error, for the same reason a stale exclusion is: a protocol dropped
+/// upstream would otherwise take down every deployment still naming it. Keeping the entry is worse
+/// than dropping it — the stream registers a synchronizer for a system nothing will ever publish,
+/// which spends the whole startup timeout before going stale.
+///
+/// RFQ and price level stream entries are left alone: they are served from their own endpoints and
+/// so never appear among Tycho's protocol systems.
+fn drop_unserved(protocols: &mut Vec<ProtocolSpec>, available: &[String]) {
+    let served: HashSet<&str> = available
+        .iter()
+        .map(String::as_str)
+        .collect();
+    protocols.retain(|protocol| {
+        if !is_tycho_system(&protocol.system) || served.contains(protocol.system.as_str()) {
+            return true;
+        }
+        warn!(
+            "requested protocol '{}' is not served by Tycho and will not be streamed; available: \
+             {}",
+            protocol.system,
+            available.join(", ")
+        );
+        false
+    });
+}
+
+/// Merges the explicitly requested protocols into `protocols`, one entry per protocol system.
+///
+/// A protocol requested with the `exclusive:` prefix keeps its exclusive pools no matter how the
+/// other entries for the same system are written, so no ordering silently downgrades it.
+fn merge_explicit(protocols: &mut Vec<ProtocolSpec>, explicit: Vec<ProtocolSpec>) {
+    for protocol in explicit {
+        match protocols
+            .iter_mut()
+            .find(|existing| existing.system == protocol.system)
+        {
+            Some(existing) => existing.exclusive |= protocol.exclusive,
+            None => protocols.push(protocol),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(entries: &[&str]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|e| (*e).to_string())
+            .collect()
+    }
+
+    /// Resolves `requested` the way `resolve_protocols` does, against a fixed expansion.
+    fn merge(expanded: &[&str], requested: &[&str]) -> Result<Vec<String>> {
+        let mut protocols = expanded
+            .iter()
+            .map(|system| ProtocolSpec::public(*system))
+            .collect();
+        let (explicit, excluded) = split_requested(&strings(requested))?;
+        reject_requested_and_excluded(&explicit, &excluded)?;
+        merge_explicit(&mut protocols, explicit);
+        apply_exclusions(&mut protocols, &excluded);
+        Ok(protocols
+            .iter()
+            .map(ProtocolSpec::to_string)
+            .collect())
+    }
+
+    #[test]
+    fn test_merge_exclusive_replaces_expanded() {
+        let merged =
+            merge(&["uniswap_v3", "ekubo_v3"], &[ALL_ONCHAIN, "exclusive:ekubo_v3"]).unwrap();
+        assert_eq!(merged, strings(&["uniswap_v3", "exclusive:ekubo_v3"]));
+    }
+
+    #[test]
+    fn test_merge_appends_unexpanded_entries() {
+        let merged = merge(&["uniswap_v3"], &[ALL_ONCHAIN, "rfq:bebop"]).unwrap();
+        assert_eq!(merged, strings(&["uniswap_v3", "rfq:bebop"]));
+    }
+
+    #[test]
+    fn test_merge_keeps_exclusive_regardless_of_order() {
+        for requested in [["ekubo_v3", "exclusive:ekubo_v3"], ["exclusive:ekubo_v3", "ekubo_v3"]] {
+            assert_eq!(merge(&[], &requested).unwrap(), strings(&["exclusive:ekubo_v3"]));
+        }
+    }
+
+    #[test]
+    fn test_merge_without_expansion() {
+        let merged = merge(&[], &["uniswap_v2", "uniswap_v3"]).unwrap();
+        assert_eq!(merged, strings(&["uniswap_v2", "uniswap_v3"]));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_protocols_rejects_unsupported_exclusive() {
+        let result = resolve_protocols(
+            "localhost:0",
+            None,
+            false,
+            Chain::Ethereum,
+            &strings(&["exclusive:uniswap_v3"]),
+        )
+        .await;
+        let Err(err) = result else {
+            panic!("expected `exclusive:uniswap_v3` to be rejected");
+        };
+        assert!(err
+            .to_string()
+            .contains("has no exclusive-liquidity variant"));
+    }
+
+    #[test]
+    fn test_exclusion_drops_expanded_protocol() {
+        let merged = merge(
+            &["uniswap_v3", "vm:fermiswap"],
+            &[ALL_ONCHAIN, "exclude:vm:fermiswap", "pricelevelstream:fermiswap"],
+        )
+        .unwrap();
+        assert_eq!(merged, strings(&["uniswap_v3", "pricelevelstream:fermiswap"]));
+    }
+
+    #[test]
+    fn test_requesting_and_excluding_one_system_is_rejected() {
+        let merged = merge(&["uniswap_v3"], &["exclusive:ekubo_v3", "exclude:ekubo_v3"]);
+        let Err(err) = merged else {
+            panic!("expected requesting and excluding one system to be rejected");
+        };
+        assert!(
+            err.to_string()
+                .contains("both requested and excluded"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn test_exclusion_matches_an_expanded_exclusive_protocol() {
+        let merged =
+            merge(&["ekubo_v3", "uniswap_v3"], &[ALL_ONCHAIN, "exclude:exclusive:ekubo_v3"])
+                .unwrap();
+        assert_eq!(merged, strings(&["uniswap_v3"]));
+    }
+
+    /// Applies `drop_unserved` to `requested`, against a fixed set of served systems.
+    fn filter_by_availability(available: &[&str], requested: &[&str]) -> Vec<String> {
+        let mut protocols = requested
+            .iter()
+            .map(|entry| ProtocolSpec::parse(entry).unwrap())
+            .collect();
+        drop_unserved(&mut protocols, &strings(available));
+        protocols
+            .iter()
+            .map(ProtocolSpec::to_string)
+            .collect()
+    }
+
+    #[rstest::rstest]
+    #[case::unserved(&["uniswap_v3", "ekubo_v2"], &["uniswap_v3", "vm:fermiswap"], &["uniswap_v3"])]
+    #[case::exclusive(&["ekubo_v3"], &["exclusive:ekubo_v3"], &["exclusive:ekubo_v3"])]
+    #[case::non_tycho(
+        &["uniswap_v3"],
+        &["rfq:bebop", "pricelevelstream:fermiswap"],
+        &["rfq:bebop", "pricelevelstream:fermiswap"]
+    )]
+    fn test_drop_unserved(
+        #[case] available: &[&str],
+        #[case] requested: &[&str],
+        #[case] expected: &[&str],
+    ) {
+        assert_eq!(filter_by_availability(available, requested), strings(expected));
+    }
+
+    /// A Tycho serving `systems` from the protocol systems endpoint `resolve_protocols` calls.
+    async fn mock_tycho(systems: &[&str]) -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        let body = serde_json::json!({
+            "protocol_systems": systems,
+            "dci_protocols": [],
+            "pagination": { "page": 0, "page_size": 100, "total": systems.len() },
+        });
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/protocol_systems"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn test_resolve_protocols_drops_an_unserved_entry() {
+        let tycho = mock_tycho(&["uniswap_v3", "ekubo_v2"]).await;
+        let resolved = resolve_protocols(
+            &tycho.address().to_string(),
+            None,
+            false,
+            Chain::Ethereum,
+            &strings(&["uniswap_v3", "vm:fermiswap", "rfq:bebop"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved, strings(&["uniswap_v3", "rfq:bebop"]));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_protocols_expands_all_onchain() {
+        let tycho = mock_tycho(&["uniswap_v3", "vm:curve"]).await;
+        let resolved = resolve_protocols(
+            &tycho.address().to_string(),
+            None,
+            false,
+            Chain::Ethereum,
+            &strings(&[NATIVE_ONCHAIN, "exclude:vm:fermiswap"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved, strings(&["uniswap_v3"]));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_protocols_without_tycho_entries_skips_the_fetch() {
+        let resolved = resolve_protocols(
+            "localhost:0",
+            None,
+            false,
+            Chain::Ethereum,
+            &strings(&["rfq:bebop", "pricelevelstream:fermiswap"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved, strings(&["rfq:bebop", "pricelevelstream:fermiswap"]));
+    }
+
+    #[test]
+    fn test_exclusion_of_absent_protocol_is_ignored() {
+        let merged = merge(&["uniswap_v3"], &[ALL_ONCHAIN, "exclude:vm:fermiswap"]).unwrap();
+        assert_eq!(merged, strings(&["uniswap_v3"]));
+    }
+
+    #[test]
+    fn test_exclusion_without_protocol_is_rejected() {
+        let Err(err) = merge(&["uniswap_v3"], &[ALL_ONCHAIN, "exclude:"]) else {
+            panic!("expected an exclusion naming nothing to be rejected");
+        };
+        assert!(
+            err.to_string()
+                .contains("names no protocol system"),
+            "got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_protocols_rejects_requested_and_excluded() {
+        let result = resolve_protocols(
+            "localhost:0",
+            None,
+            false,
+            Chain::Ethereum,
+            &strings(&["vm:fermiswap", "exclude:vm:fermiswap"]),
+        )
+        .await;
+        let Err(err) = result else {
+            panic!("expected a protocol that is both requested and excluded to be rejected");
+        };
+        assert!(
+            err.to_string()
+                .contains("both requested and excluded"),
+            "got {err}"
+        );
+    }
 }

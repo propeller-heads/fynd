@@ -32,5 +32,7 @@ When spawning subagents, pass the relevant knowledge document contents to them.
 - `plan`: Guided feature planning with iterative user input. Gathers requirements, validates assumptions, proposes a
   solution. **Always use this skill** when the user wants to plan, design, or architect a feature before coding. Trigger
   words: "plan", "design", "architect", "think through", "figure out how to".
-- `run-ci`: Run all CI checks locally (format, clippy, tests, OpenAPI drift).
+- `run-ci`: Run all CI checks locally (format, clippy, tests, OpenAPI drift). Use it for PRs and
+  workspace-wide changes, not for routine pushes — those need only a format run and the tests
+  covering the change.
 - `sync-docs`: Review all codebase documentation and update claude docs

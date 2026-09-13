@@ -14,10 +14,14 @@
 //! - [`Route`] - Sequence of swaps to execute
 //! - [`Swap`] - A single swap on a specific protocol
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::Zero;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 pub use tycho_execution::encoding::models::UserTransferType;
@@ -28,8 +32,11 @@ use tycho_simulation::tycho_common::{
 };
 use uuid::Uuid;
 
-use super::primitives::ComponentId;
-use crate::{feed::market_data::StateLabel, price_guard::config::PriceGuardConfig, AlgorithmError};
+use super::{internal::SolveError, primitives::ComponentId};
+use crate::{
+    algorithm::NoPathReason, feed::market_data::StateLabel, price_guard::config::PriceGuardConfig,
+    AlgorithmError,
+};
 
 // ============================================================================
 // REQUEST TYPES
@@ -60,6 +67,137 @@ impl QuoteRequest {
     pub fn options(&self) -> &QuoteOptions {
         &self.options
     }
+
+    /// Replaces the solving options, keeping the orders.
+    #[must_use]
+    pub fn with_options(mut self, options: QuoteOptions) -> Self {
+        self.options = options;
+        self
+    }
+}
+
+/// What a caller names to keep out of a route: pools, protocol systems and tokens.
+///
+/// This is the request's own words. A solve reads [`RouteExclusions`] instead, which
+/// [`crate::feed::market_data::MarketState::resolve_route_filter`] builds from this by replacing
+/// each protocol system with the pools that system holds.
+///
+/// Empty by default, so nothing is excluded unless the request names it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteExclusionFilter {
+    excluded_pools: FxHashSet<ComponentId>,
+    excluded_protocols: FxHashSet<String>,
+    excluded_tokens: FxHashSet<Address>,
+}
+
+impl RouteExclusionFilter {
+    /// Excludes these pools, by component id.
+    #[must_use]
+    pub fn with_excluded_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
+        self.excluded_pools.extend(pools);
+        self
+    }
+
+    /// Excludes every pool of these protocol systems.
+    ///
+    /// An entry matches a system exactly (`uniswap_v2`), or a family when it ends in `:`
+    /// (`propammfallback:`). An entry matching no pools excludes nothing.
+    #[must_use]
+    pub fn with_excluded_protocols(mut self, protocols: impl IntoIterator<Item = String>) -> Self {
+        self.excluded_protocols
+            .extend(protocols);
+        self
+    }
+
+    /// Excludes routes that pass through these tokens.
+    #[must_use]
+    pub fn with_excluded_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.excluded_tokens.extend(tokens);
+        self
+    }
+
+    /// Whether nothing is excluded, so a caller can skip the checks.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.excluded_pools.is_empty() &&
+            self.excluded_protocols.is_empty() &&
+            self.excluded_tokens.is_empty()
+    }
+
+    /// The pools excluded, by component id.
+    #[must_use]
+    pub fn excluded_pools(&self) -> &FxHashSet<ComponentId> {
+        &self.excluded_pools
+    }
+
+    /// The protocol systems excluded.
+    #[must_use]
+    pub fn excluded_protocols(&self) -> &FxHashSet<String> {
+        &self.excluded_protocols
+    }
+
+    /// The tokens excluded as intermediates.
+    #[must_use]
+    pub fn excluded_tokens(&self) -> &FxHashSet<Address> {
+        &self.excluded_tokens
+    }
+}
+
+/// The pools and tokens one solve must not use, with every protocol system already
+/// replaced by its pools.
+///
+/// A graph knows a pool by its component id, so a search reads this rather than the
+/// [`RouteExclusionFilter`] the caller wrote. An algorithm honours it while it searches and
+/// simulates, and the worker checks the route it gets back.
+///
+/// A token here is excluded as an intermediate only: the order's own two tokens stay allowed,
+/// because every route touches them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteExclusions {
+    pub(crate) pools: FxHashSet<ComponentId>,
+    pub(crate) tokens: FxHashSet<Address>,
+}
+
+impl RouteExclusions {
+    /// Excludes these pools, by component id.
+    #[must_use]
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
+        self.pools.extend(pools);
+        self
+    }
+
+    /// Excludes routes that pass through these tokens.
+    #[must_use]
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.tokens.extend(tokens);
+        self
+    }
+
+    /// Whether a token is an endpoint or an allowed intermediate.
+    #[must_use]
+    pub fn allows_token(&self, token: &Address, endpoints: (&Address, &Address)) -> bool {
+        token == endpoints.0 || token == endpoints.1 || !self.excludes_token(token)
+    }
+
+    /// Whether nothing is excluded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pools.is_empty() && self.tokens.is_empty()
+    }
+
+    /// Whether this pool is excluded.
+    #[must_use]
+    pub fn excludes_pool(&self, component_id: &str) -> bool {
+        self.pools.contains(component_id)
+    }
+
+    /// Whether routes through this token are excluded.
+    #[must_use]
+    pub fn excludes_token(&self, token: &Address) -> bool {
+        self.tokens.contains(token)
+    }
 }
 
 /// Options to customize the solving behavior.
@@ -87,6 +225,15 @@ pub struct QuoteOptions {
     /// Skipped during JSON serialization — only meaningful when calling Fynd as a Rust library.
     #[serde(skip)]
     state_label: Option<StateLabel>,
+    /// Restrict solving to these named worker pools (as configured in `worker_pools.toml`).
+    /// `None` uses every pool that serves the request. Library-only: never on the wire.
+    #[serde(skip)]
+    worker_pools: Option<Vec<String>>,
+    /// Liquidity this request excludes from a route.
+    /// Filled from `options.route_filter` on the wire. Skipped during JSON serialization — the
+    /// wire type owns the request shape.
+    #[serde(skip)]
+    route_filter: RouteExclusionFilter,
 }
 
 impl QuoteOptions {
@@ -120,31 +267,62 @@ impl QuoteOptions {
         self
     }
 
+    /// Restricts solving to the named worker pools. Unknown names fail the request.
+    pub fn with_worker_pools(mut self, pools: Vec<String>) -> Self {
+        self.worker_pools = Some(pools);
+        self
+    }
+
+    /// Excludes the pools, protocol systems and tokens this filter names.
+    pub fn with_route_filter(mut self, filter: RouteExclusionFilter) -> Self {
+        self.route_filter = filter;
+        self
+    }
+
     /// Returns the timeout in milliseconds.
+    #[must_use]
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
     }
 
     /// Returns the minimum number of solver responses.
+    #[must_use]
     pub fn min_responses(&self) -> Option<usize> {
         self.min_responses
     }
 
     /// Returns the maximum gas cost constraint.
+    #[must_use]
     pub fn max_gas(&self) -> Option<&BigUint> {
         self.max_gas.as_ref()
     }
 
     /// Returns the encoding options.
+    #[must_use]
     pub fn encoding_options(&self) -> Option<&EncodingOptions> {
         self.encoding_options.as_ref()
     }
 
     /// Returns the overlay label, if one was set.
+    #[must_use]
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.state_label.as_ref()
     }
+
+    /// Returns the worker-pool allowlist, if one was set.
+    #[must_use]
+    pub fn worker_pools(&self) -> Option<&[String]> {
+        self.worker_pools.as_deref()
+    }
+
+    /// Returns what this request excludes from a route. Empty unless one was set.
+    #[must_use]
+    pub fn route_filter(&self) -> &RouteExclusionFilter {
+        &self.route_filter
+    }
 }
+
+type SharedExclusionCache = Arc<Mutex<Option<(u64, Arc<RouteExclusions>)>>>;
 
 /// Parameters for a single solve operation.
 ///
@@ -152,10 +330,45 @@ impl QuoteOptions {
 /// Kept separate from [`QuoteOptions`] so solve-specific parameters can evolve independently
 /// of the HTTP request surface.
 #[must_use]
-#[derive(Debug, Clone, Default)]
 pub struct SolveParams {
     /// Solve against this labeled state overlay. `None` uses the base Tycho state.
     state_label: Option<StateLabel>,
+    /// Liquidity the request will not route through. Resolved against the market by the worker,
+    /// which is where the protocol systems it names become pools.
+    route_filter: RouteExclusionFilter,
+    /// Per-request resolved exclusions shared by all cloned solve tasks.
+    #[doc(hidden)]
+    exclusion_cache: SharedExclusionCache,
+}
+
+impl Clone for SolveParams {
+    fn clone(&self) -> Self {
+        Self {
+            state_label: self.state_label.clone(),
+            route_filter: self.route_filter.clone(),
+            exclusion_cache: self.exclusion_cache.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for SolveParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SolveParams")
+            .field("state_label", &self.state_label)
+            .field("route_filter", &self.route_filter)
+            .finish()
+    }
+}
+
+impl Default for SolveParams {
+    fn default() -> Self {
+        Self {
+            state_label: None,
+            route_filter: RouteExclusionFilter::default(),
+            exclusion_cache: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 impl SolveParams {
@@ -165,9 +378,59 @@ impl SolveParams {
         self
     }
 
+    /// Excludes the pools, protocol systems and tokens this filter names.
+    pub fn with_route_filter(mut self, filter: RouteExclusionFilter) -> Self {
+        self.route_filter = filter;
+        self.exclusion_cache = Arc::new(Mutex::new(None));
+        self
+    }
+
     /// Returns the overlay label, if one was set.
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.state_label.as_ref()
+    }
+
+    /// Returns what the request excludes from a route. Empty unless one was set.
+    pub fn route_filter(&self) -> &RouteExclusionFilter {
+        &self.route_filter
+    }
+
+    pub(crate) fn cached_exclusions(&self) -> &SharedExclusionCache {
+        &self.exclusion_cache
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_exclusions_for_test(
+        &self,
+        generation: u64,
+        exclusions: RouteExclusions,
+    ) -> Arc<RouteExclusions> {
+        let exclusions = Arc::new(exclusions);
+        *self.exclusion_cache.lock().unwrap() = Some((generation, exclusions.clone()));
+        exclusions
+    }
+}
+
+#[cfg(test)]
+mod solve_params_tests {
+    use super::*;
+
+    #[test]
+    fn cloned_solve_params_share_exclusion_cache() {
+        let params = SolveParams::default();
+        let clone = params.clone();
+        let exclusions = params.cache_exclusions_for_test(
+            7,
+            RouteExclusions::default().with_pools(["pool".to_string()]),
+        );
+        let cached = clone
+            .cached_exclusions()
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap();
+        assert_eq!(cached.0, 7);
+        assert!(Arc::ptr_eq(&exclusions, &cached.1));
     }
 }
 
@@ -251,7 +514,7 @@ pub struct FeeBreakdown {
     #[serde_as(as = "DisplayFromStr")]
     min_amount_received: BigUint,
     /// keccak256 of the ABI-encoded swap bytes, present when client fee params were provided.
-    /// Clients use this to compute the 10-field EIP-712 signing hash for the client fee.
+    /// Clients use this to compute the 11-field EIP-712 signing hash for the client fee.
     #[serde(skip)]
     swaps_hash: Option<[u8; 32]>,
 }
@@ -294,7 +557,7 @@ impl FeeBreakdown {
     }
 
     /// keccak256 of the ABI-encoded swap bytes.
-    /// Used by clients to construct the full 10-field EIP-712 `ClientFee` signing hash.
+    /// Used by clients to construct the full 11-field EIP-712 `ClientFee` signing hash.
     pub fn swaps_hash(&self) -> Option<&[u8; 32]> {
         self.swaps_hash.as_ref()
     }
@@ -318,9 +581,17 @@ pub struct EncodingOptions {
     /// Client fee configuration. When absent, no client fee is charged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_fee_params: Option<ClientFeeParams>,
+    /// Attach server-signed zero-fee client params so the FeeCalculator applies the deployment
+    /// signer's positive-slippage exemption. Defaults to `false`. When `client_fee_params` are
+    /// also set, encoding prefers the explicit client fee.
+    #[serde(default)]
+    disable_slippage_taking: bool,
     /// Per-request price guard configuration. Defaults to disabled.
     #[serde(default)]
     price_guard: PriceGuardConfig,
+    /// Whether to simulate encoded transactions against the latest block. Defaults to disabled.
+    #[serde(default)]
+    simulate: bool,
 }
 
 impl EncodingOptions {
@@ -332,7 +603,9 @@ impl EncodingOptions {
             permit: None,
             permit2_signature: None,
             client_fee_params: None,
+            disable_slippage_taking: false,
             price_guard: PriceGuardConfig::default(),
+            simulate: false,
         }
     }
 
@@ -364,6 +637,17 @@ impl EncodingOptions {
         &self.transfer_type
     }
 
+    /// Enables simulation of the encoded transaction against the latest block.
+    pub fn with_simulation(mut self) -> Self {
+        self.simulate = true;
+        self
+    }
+
+    /// Returns whether simulation of the encoded transaction was requested.
+    pub fn simulate(&self) -> bool {
+        self.simulate
+    }
+
     /// Returns the permit2 authorization, if set.
     pub fn permit(&self) -> Option<&PermitSingle> {
         self.permit.as_ref()
@@ -383,6 +667,25 @@ impl EncodingOptions {
     /// Returns the client fee params, if set.
     pub fn client_fee_params(&self) -> Option<&ClientFeeParams> {
         self.client_fee_params.as_ref()
+    }
+
+    /// Sets whether the encoder attaches server-signed zero-fee client params.
+    pub fn with_disable_slippage_taking(mut self, disable_slippage_taking: bool) -> Self {
+        self.disable_slippage_taking = disable_slippage_taking;
+        self
+    }
+
+    /// Returns whether disable-slippage-taking encoding is requested.
+    pub fn disable_slippage_taking(&self) -> bool {
+        self.disable_slippage_taking
+    }
+
+    /// Whether encoding should attach server-signed zero-fee client params.
+    ///
+    /// Explicit [`Self::client_fee_params`] take precedence over the API-key default, so this
+    /// returns `false` when both are set.
+    pub fn applies_disable_slippage_taking(&self) -> bool {
+        self.disable_slippage_taking && self.client_fee_params.is_none()
     }
 
     /// Sets per-request price guard configuration.
@@ -498,6 +801,10 @@ pub struct Quote {
 }
 
 impl Quote {
+    /// Assembles a quote from per-order results, a total gas estimate and the solve time.
+    ///
+    /// Crate-internal: [`finalize_quote`](crate::finalize_quote) is the public way to build a
+    /// `Quote`; it keeps `total_gas_estimate` equal to the sum of the per-order gas estimates.
     pub(crate) fn new(
         orders: Vec<OrderQuote>,
         total_gas_estimate: BigUint,
@@ -701,6 +1008,42 @@ impl SingleOrderQuote {
     }
 }
 
+/// Order-level surplus summary for a quote routed through an exclusive component:
+/// `surplus_amount` is what the protocol captures (realized output minus the committed output
+/// the user is quoted), in the order's `token_out`.
+///
+/// The committed output is `max(public_amount_out, public_net + exclusive_gas)` — never below
+/// the public market's displayed amount, and high enough that the user still nets the public
+/// route's value after paying the exclusive route's gas.
+///
+/// Informational only (observability). The value the encoder acts on is the per-leg
+/// [`Swap::committed_amount_out`], since surplus is captured per component on-chain.
+#[derive(Debug, Clone)]
+pub struct SurplusInfo {
+    /// Surplus captured by the protocol: realized surplus-route output minus the committed
+    /// output.
+    surplus_amount: BigUint,
+    /// The output the user is committed to (the quoted `amount_out`).
+    committed_amount_out: BigUint,
+}
+
+impl SurplusInfo {
+    /// Creates surplus info from the captured surplus and the committed output.
+    pub fn new(surplus_amount: BigUint, committed_amount_out: BigUint) -> Self {
+        Self { surplus_amount, committed_amount_out }
+    }
+
+    /// Returns the surplus amount captured by the protocol.
+    pub fn surplus_amount(&self) -> &BigUint {
+        &self.surplus_amount
+    }
+
+    /// Returns the committed output the user is quoted.
+    pub fn committed_amount_out(&self) -> &BigUint {
+        &self.committed_amount_out
+    }
+}
+
 /// Quote for a single [`Order`].
 ///
 /// Contains the route to execute (if found), along with expected amounts,
@@ -734,9 +1077,15 @@ pub struct OrderQuote {
     amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
     block: BlockInfo,
-    /// Algorithm that found this solution (internal use only).
+    /// Algorithm that found this solution.
     #[serde(skip)]
     algorithm: String,
+    /// Worker pool that produced this solution (internal use only).
+    ///
+    /// Empty until the router receives the quote from a worker pool, and on a quote the router
+    /// builds itself, such as the `NoRouteFound` placeholder.
+    #[serde(skip)]
+    worker_pool: String,
     /// Effective gas price (in wei) at the time the route was computed.
     #[serde_as(as = "Option<DisplayFromStr>")]
     gas_price: Option<BigUint>,
@@ -745,6 +1094,9 @@ pub struct OrderQuote {
     /// Fee breakdown (populated when encoding options are provided).
     #[serde(skip_serializing_if = "Option::is_none")]
     fee_breakdown: Option<FeeBreakdown>,
+    /// Result of an optional on-chain simulation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    simulation_result: Option<SimulationResult>,
     /// Address of the sender.
     sender: Bytes,
     /// Address of the receiver.
@@ -752,6 +1104,18 @@ pub struct OrderQuote {
     /// The state overlay this quote was computed against.
     /// When no overlay was requested this is the block number of the base state at solve time.
     solved_against: StateLabel,
+    /// Why this order failed (internal use only; set by the router fallback,
+    /// skipped during serialization).
+    #[serde(skip)]
+    no_route_cause: Option<SolveError>,
+    /// Order-level surplus summary, populated when this quote executes through an exclusive
+    /// component.
+    ///
+    /// Informational only (observability); the value the encoder acts on is the per-leg
+    /// [`Swap::committed_amount_out`]. `None` for pure public quotes. `#[serde(skip)]` — internal
+    /// reporting data, not part of the wire format.
+    #[serde(skip)]
+    surplus: Option<SurplusInfo>,
 }
 
 impl OrderQuote {
@@ -780,13 +1144,41 @@ impl OrderQuote {
             amount_out_net_gas,
             block,
             algorithm,
+            worker_pool: String::new(),
             gas_price: None,
             transaction: None,
             fee_breakdown: None,
+            simulation_result: None,
             sender,
             receiver,
             solved_against,
+            no_route_cause: None,
+            surplus: None,
         }
+    }
+
+    /// Attaches the order-level surplus summary (committed output + captured surplus).
+    ///
+    /// Set by the router when a surplus route is selected, for observability. The per-leg
+    /// [`Swap::committed_amount_out`] (not this) is what the encoder acts on.
+    pub(crate) fn with_surplus(mut self, surplus: SurplusInfo) -> Self {
+        self.surplus = Some(surplus);
+        self
+    }
+
+    /// Returns the captured surplus amount, if this quote routes through an exclusive component.
+    pub fn surplus_amount(&self) -> Option<&BigUint> {
+        self.surplus
+            .as_ref()
+            .map(SurplusInfo::surplus_amount)
+    }
+
+    /// Returns the committed public-market output, if this quote routes through an exclusive
+    /// component.
+    pub fn committed_amount_out(&self) -> Option<&BigUint> {
+        self.surplus
+            .as_ref()
+            .map(SurplusInfo::committed_amount_out)
     }
 
     /// Sets the status of this quote.
@@ -822,6 +1214,13 @@ impl OrderQuote {
         self.gas_estimate = gas_estimate;
     }
 
+    /// Overrides the output amount (used by `combine_with_surplus` to pin to the committed
+    /// reference).
+    pub(crate) fn set_amount_out(&mut self, value: BigUint) {
+        self.amount_out = value;
+    }
+
+    /// Overrides the gas-adjusted net output (used by gas refinement and surplus overlay).
     pub(crate) fn set_amount_out_net_gas(&mut self, value: BigUint) {
         self.amount_out_net_gas = value;
     }
@@ -839,6 +1238,11 @@ impl OrderQuote {
     /// Returns the route, if a valid route was found.
     pub fn route(&self) -> Option<&Route> {
         self.route.as_ref()
+    }
+
+    /// Returns a mutable reference to the route.
+    pub(crate) fn route_mut(&mut self) -> Option<&mut Route> {
+        self.route.as_mut()
     }
 
     /// Consumes this solution and returns the route.
@@ -881,6 +1285,21 @@ impl OrderQuote {
         &self.algorithm
     }
 
+    /// Returns the name of the worker pool that produced this solution.
+    ///
+    /// Empty on a quote the router builds itself, such as the `NoRouteFound` placeholder.
+    pub fn worker_pool(&self) -> &str {
+        &self.worker_pool
+    }
+
+    /// Names the worker pool that produced this solution.
+    ///
+    /// Set by the router when it receives the quote, so that attribution survives ranking, the
+    /// price guard and encoding — the stages after which the winner is finally known.
+    pub(crate) fn set_worker_pool(&mut self, worker_pool: String) {
+        self.worker_pool = worker_pool;
+    }
+
     /// Returns the effective gas price at the time the route was computed.
     pub fn gas_price(&self) -> Option<&BigUint> {
         self.gas_price.as_ref()
@@ -894,6 +1313,16 @@ impl OrderQuote {
     /// Returns the fee breakdown, if encoding was requested.
     pub fn fee_breakdown(&self) -> Option<&FeeBreakdown> {
         self.fee_breakdown.as_ref()
+    }
+
+    /// Returns the optional on-chain simulation result.
+    pub fn simulation_result(&self) -> Option<&SimulationResult> {
+        self.simulation_result.as_ref()
+    }
+
+    /// Sets the on-chain simulation result in place.
+    pub fn set_simulation_result(&mut self, result: SimulationResult) {
+        self.simulation_result = Some(result);
     }
 
     /// Sets the fee breakdown in place.
@@ -915,6 +1344,45 @@ impl OrderQuote {
     pub fn solved_against(&self) -> &StateLabel {
         &self.solved_against
     }
+
+    /// Records why this order failed. Internal; skipped during serialization.
+    pub(crate) fn set_no_route_cause(&mut self, cause: Option<SolveError>) {
+        self.no_route_cause = cause;
+    }
+
+    /// Returns the recorded failure cause, if any.
+    pub fn no_route_cause(&self) -> Option<&SolveError> {
+        self.no_route_cause.as_ref()
+    }
+
+    /// Returns the no-route path reason, when the failure cause was a
+    /// route-finding failure that reported one.
+    pub fn no_route_reason(&self) -> Option<NoPathReason> {
+        match self.no_route_cause.as_ref() {
+            Some(SolveError::NoRouteFound { reason, .. }) => *reason,
+            _ => None,
+        }
+    }
+}
+
+/// Outcome of simulating an encoded quote on the latest block.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SimulationResult {
+    /// The simulated router call returned an amount and consumed gas.
+    Success {
+        /// Amount returned by the router call.
+        #[serde_as(as = "DisplayFromStr")]
+        amount_out: BigUint,
+        /// Gas consumed by the simulated call.
+        gas_used: u64,
+    },
+    /// The simulated router call could not complete.
+    Failure {
+        /// Readable reason the simulated call failed.
+        reason: String,
+    },
 }
 
 /// Status of an order solution.
@@ -993,7 +1461,7 @@ impl BlockInfo {
 
 /// A route consisting of one or more swaps, either sequential or split.
 ///
-/// A route describes the path through liquidity pools to execute a swap.
+/// A route describes the path through components (liquidity pools) to execute a swap.
 /// For sequential (multi-hop) swaps, the output of each swap becomes the input
 /// of the next. For split swaps, the input is divided across multiple parallel
 /// paths (each swap carries a `split` fraction).
@@ -1002,27 +1470,51 @@ impl BlockInfo {
 pub struct Route {
     /// Ordered sequence of swaps to execute.
     swaps: Vec<Swap>,
-    /// Full `Token` objects keyed by address, populated by the algorithm that
-    /// built the route. Skipped during (de)serialization — only the in-process
-    /// encoding path consumes it.
+    /// Full `Token` objects keyed by address.
+    ///
+    /// Built-in algorithms add every token referenced by the swaps. Price-impact calculation
+    /// and in-process encoding use this map. Serialization omits it, so a deserialized route
+    /// has an empty map.
     #[serde(skip, default)]
-    tokens: HashMap<Bytes, Token>,
+    tokens: FxHashMap<Bytes, Token>,
+    /// Amount out this route delivers if its pAMM legs fall back to Uniswap V3.
+    ///
+    /// Set by the worker for routes that contain a `propammfallback:` leg; `None` for every other
+    /// route. The router drops the candidate when this amount cannot clear `min_amount_out`,
+    /// which stays derived from the pAMM quote and the user's slippage. In-process only —
+    /// `#[serde(skip)]`, so it never enters the wire format.
+    #[serde(skip, default)]
+    fallback_amount_out: Option<BigUint>,
 }
 
 impl Route {
     /// Creates a new route from an ordered sequence of swaps.
+    ///
+    /// `tokens` is anything that yields address/token pairs -- a map of either hasher, or a
+    /// sequence -- so building a route does not commit the caller to ours.
     ///
     /// # Errors
     ///
     /// Returns [`RouteValidationError::EmptyRoute`] if `swaps` is empty.
     pub fn new(
         swaps: Vec<Swap>,
-        tokens: HashMap<Bytes, Token>,
+        tokens: impl IntoIterator<Item = (Bytes, Token)>,
     ) -> Result<Self, RouteValidationError> {
         if swaps.is_empty() {
             return Err(RouteValidationError::EmptyRoute);
         }
-        Ok(Self { swaps, tokens })
+        Ok(Self { swaps, tokens: tokens.into_iter().collect(), fallback_amount_out: None })
+    }
+
+    /// Sets the amount out this route delivers if its pAMM legs fall back to Uniswap V3.
+    pub(crate) fn set_fallback_amount_out(&mut self, amount_out: BigUint) {
+        self.fallback_amount_out = Some(amount_out);
+    }
+
+    /// Amount out this route delivers if its pAMM legs fall back to Uniswap V3. `None` unless the
+    /// worker computed one, which it does only for routes with a `propammfallback:` leg.
+    pub fn fallback_amount_out(&self) -> Option<&BigUint> {
+        self.fallback_amount_out.as_ref()
     }
 
     /// Returns the swaps in this route.
@@ -1030,15 +1522,32 @@ impl Route {
         &self.swaps
     }
 
+    /// Returns a mutable reference to the swaps in this route.
+    pub(crate) fn swaps_mut(&mut self) -> &mut [Swap] {
+        &mut self.swaps
+    }
+
     /// Consumes the route and returns its swaps.
     pub fn into_swaps(self) -> Vec<Swap> {
         self.swaps
     }
 
-    /// Returns the token map attached to this route. Empty unless populated via
-    /// [`Route::with_tokens`].
-    pub(crate) fn tokens(&self) -> &HashMap<Bytes, Token> {
+    /// Returns the route's token map.
+    ///
+    /// Built-in algorithms add every token referenced by the swaps. Custom, deserialized,
+    /// test, and replay routes can have missing entries.
+    pub(crate) fn tokens(&self) -> &FxHashMap<Bytes, Token> {
         &self.tokens
+    }
+
+    /// Returns the symbol for `address` from this route's token map. Returns `None` when the
+    /// map has no entry for the address.
+    ///
+    /// This lets an external caller render a human-readable route without a separate token table.
+    pub fn token_symbol(&self, address: &Address) -> Option<&str> {
+        self.tokens
+            .get(address)
+            .map(|token| token.symbol.as_str())
     }
 }
 
@@ -1055,29 +1564,16 @@ pub struct RouteResult {
     net_amount_out: BigInt,
     /// Effective gas price (in wei) at the time the route was computed.
     gas_price: BigUint,
-    /// Price impact as a signed fraction (e.g. 0.0016 = 16 bps, -0.001 = favorable).
-    /// `None` when the algorithm did not compute one.
-    price_impact: Option<f64>,
 }
 
 impl RouteResult {
     /// Creates a new route result.
     pub fn new(route: Route, net_amount_out: BigInt, gas_price: BigUint) -> Self {
-        Self { route, net_amount_out, gas_price, price_impact: None }
+        Self { route, net_amount_out, gas_price }
     }
 
-    /// Attaches an algorithm-computed price impact (signed fraction).
-    pub fn with_price_impact(mut self, price_impact: f64) -> Self {
-        self.price_impact = Some(price_impact);
-        self
-    }
-
-    /// Returns the algorithm-computed price impact (signed fraction), if any.
-    pub(crate) fn price_impact(&self) -> Option<f64> {
-        self.price_impact
-    }
-
-    pub(crate) fn route(&self) -> &Route {
+    /// The route this result carries.
+    pub fn route(&self) -> &Route {
         &self.route
     }
 
@@ -1085,7 +1581,9 @@ impl RouteResult {
         self.route
     }
 
-    pub(crate) fn net_amount_out(&self) -> &BigInt {
+    /// Output less gas, priced in the output token.
+    #[must_use]
+    pub fn net_amount_out(&self) -> &BigInt {
         &self.net_amount_out
     }
 
@@ -1103,7 +1601,7 @@ impl Route {
     /// Returns a human-readable path description (e.g., "WETH -> USDC -> DAI").
     ///
     /// Falls back to token address if token not found in the provided map.
-    pub fn path_description(&self, tokens: &HashMap<Address, Token>) -> String {
+    pub fn path_description(&self, tokens: &FxHashMap<Address, Arc<Token>>) -> String {
         let mut symbols = Vec::with_capacity(self.swaps.len() + 1);
 
         for (i, swap) in self.swaps.iter().enumerate() {
@@ -1131,6 +1629,23 @@ impl Route {
             .map(|s| s.token_in.clone())
     }
 
+    /// Total raw input the route consumes: the `amount_in` of every swap in the first branch
+    /// collection, the swaps that divide the input token's balance. `None` for an empty route.
+    ///
+    /// Exact for a validated route whose input and output tokens differ: `validate_cycles` then
+    /// forbids any swap from producing the input token, so nothing but the order's input feeds
+    /// that collection.
+    pub(crate) fn input_amount(&self) -> Option<BigUint> {
+        let (_, first_collection) = branch_collections(&self.swaps, |swap| &swap.token_in)
+            .into_iter()
+            .next()?;
+        Some(
+            first_collection
+                .iter()
+                .fold(BigUint::ZERO, |total, swap| total + &swap.amount_in),
+        )
+    }
+
     /// Returns the output token of the route (last swap's output).
     pub fn output_token(&self) -> Option<Address> {
         self.swaps
@@ -1148,6 +1663,16 @@ impl Route {
             .iter()
             .map(|s| s.token_out.clone())
             .collect()
+    }
+
+    /// What the route delivers in `token_out`, summed over the swaps that end there so a split
+    /// route reports its whole output rather than one leg's.
+    pub fn amount_out(&self, token_out: &Address) -> BigUint {
+        self.swaps
+            .iter()
+            .filter(|swap| &swap.token_out == token_out)
+            .map(|swap| &swap.amount_out)
+            .sum()
     }
 
     /// Returns the total gas estimate for all swaps in this route (naive approach).
@@ -1198,7 +1723,7 @@ impl Route {
         let first_token = &self.swaps[0].token_in;
         let last_token = &self.swaps[self.swaps.len() - 1].token_out;
 
-        let mut seen = HashSet::new();
+        let mut seen = FxHashSet::default();
         seen.insert(first_token.clone());
         let last_idx = self.swaps.len() - 1;
         for (i, swap) in self.swaps.iter().enumerate() {
@@ -1232,19 +1757,12 @@ impl Route {
     ///   must have `split == 0.0` (remainder), and the sum must be strictly less than `1.0`
     /// - BFS connectivity: outputs of each branch collection connect to inputs of the next
     fn validate_split_route(&self) -> Result<(), RouteValidationError> {
-        // Collect swaps into branch collections by their input token. Each
-        // branch collection represents a split (parallel branches sharing the
-        // same token_in), not a sequential path.
-        let mut token_in_to_index: HashMap<Address, usize> = HashMap::new();
-        let mut swaps_by_token_in: Vec<(Address, Vec<&Swap>)> = Vec::new();
-        for swap in &self.swaps {
-            if let Some(&idx) = token_in_to_index.get(&swap.token_in) {
-                swaps_by_token_in[idx].1.push(swap);
-            } else {
-                token_in_to_index.insert(swap.token_in.clone(), swaps_by_token_in.len());
-                swaps_by_token_in.push((swap.token_in.clone(), vec![swap]));
-            }
-        }
+        let swaps_by_token_in = branch_collections(&self.swaps, |swap| &swap.token_in);
+        let token_in_to_index: FxHashMap<Address, usize> = swaps_by_token_in
+            .iter()
+            .enumerate()
+            .map(|(index, (token_in, _))| (token_in.clone(), index))
+            .collect();
 
         validate_split_amounts(&swaps_by_token_in)?;
         validate_bfs_connectivity(&swaps_by_token_in, &token_in_to_index)?;
@@ -1254,6 +1772,32 @@ impl Route {
 
         Ok(())
     }
+}
+
+/// Groups `items` by the token each consumes, in order of first appearance.
+///
+/// Each group is one branch collection: the swaps that divide the balance standing at a token,
+/// whether one swap takes it all or several split it. The route validator checks a split route
+/// collection by collection, and `spot_reference_output` visits them in the same order. The helper
+/// itself only preserves first-seen order; that every producer of a token comes before its
+/// consumers is a property of a validated route, guaranteed by `validate_cycles`.
+pub(crate) fn branch_collections<'a, T>(
+    items: &'a [T],
+    token_in: impl Fn(&'a T) -> &'a Address,
+) -> Vec<(Address, Vec<&'a T>)> {
+    let mut index_by_token: FxHashMap<&'a Address, usize> = FxHashMap::default();
+    let mut collections: Vec<(Address, Vec<&'a T>)> = Vec::new();
+    for item in items {
+        let token = token_in(item);
+        match index_by_token.get(token) {
+            Some(&index) => collections[index].1.push(item),
+            None => {
+                index_by_token.insert(token, collections.len());
+                collections.push((token.clone(), vec![item]));
+            }
+        }
+    }
+    collections
 }
 
 fn validate_split_amounts(
@@ -1315,10 +1859,10 @@ fn validate_split_amounts(
 /// reachable.
 fn validate_bfs_connectivity(
     swaps_by_token_in: &[(Address, Vec<&Swap>)],
-    token_in_to_index: &HashMap<Address, usize>,
+    token_in_to_index: &FxHashMap<Address, usize>,
 ) -> Result<(), RouteValidationError> {
     let first_token = &swaps_by_token_in[0].0;
-    let mut reachable: HashSet<&Address> = HashSet::new();
+    let mut reachable: FxHashSet<&Address> = FxHashSet::default();
     reachable.insert(first_token);
     let mut tokens_to_visit: VecDeque<&Address> = VecDeque::new();
     tokens_to_visit.push_back(first_token);
@@ -1352,7 +1896,7 @@ fn validate_dead_ends(
         .last()
         .ok_or(RouteValidationError::EmptyRoute)?
         .token_out;
-    let non_first_input_tokens: HashSet<&Address> = swaps_by_token_in
+    let non_first_input_tokens: FxHashSet<&Address> = swaps_by_token_in
         .iter()
         .skip(1)
         .map(|(token_in, _)| token_in)
@@ -1392,7 +1936,7 @@ fn validate_cycles(
             last: terminal_token.clone(),
         });
     }
-    let mut earlier_inputs: HashSet<&Address> = HashSet::new();
+    let mut earlier_inputs: FxHashSet<&Address> = FxHashSet::default();
     for (token_in, branch_collection) in swaps_by_token_in {
         earlier_inputs.insert(token_in);
         for swap in branch_collection {
@@ -1477,11 +2021,11 @@ pub enum RouteValidationError {
 
 /// A single swap within a route.
 ///
-/// Represents an atomic swap on a specific liquidity pool (component).
+/// Represents an atomic swap on a specific component (liquidity pool).
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Swap {
-    /// Identifier of the liquidity pool component.
+    /// Identifier of the component (liquidity pool).
     component_id: ComponentId,
     /// Protocol system identifier (e.g., "uniswap_v2", "uniswap_v3", "vm:balancer").
     protocol: String,
@@ -1505,6 +2049,15 @@ pub struct Swap {
     /// Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)
     #[serde_as(as = "DisplayFromStr")]
     split: f64,
+    /// Per-leg committed output for an exclusive swap.
+    ///
+    /// Set only on the single exclusive leg of a surplus route. The encoding layer turns it into
+    /// the protocol's exclusive-swap payload, which limits the taker's output to the committed
+    /// amount; the component then captures `amount_out - committed_amount_out` as surplus,
+    /// denominated in this swap's `token_out`. `None` for ordinary public swaps. In-process only —
+    /// consumed by the encoder; `#[serde(skip)]` so it never enters the wire format.
+    #[serde(skip)]
+    committed_amount_out: Option<BigUint>,
 }
 
 impl Swap {
@@ -1532,6 +2085,7 @@ impl Swap {
             protocol_component,
             protocol_state,
             split: 0.0,
+            committed_amount_out: None,
         }
     }
     /// Sets the split fraction for this swap (e.g. 0.5 means 50% of a split route).
@@ -1540,7 +2094,15 @@ impl Swap {
         self
     }
 
-    /// Returns the component ID of the liquidity pool.
+    /// Sets the per-leg committed output for an exclusive swap.
+    ///
+    /// The router stamps this onto the single exclusive leg of a surplus route so the encoding
+    /// layer can build the leg's exclusive-swap payload. See [`Swap::committed_amount_out`].
+    pub(crate) fn set_committed_amount_out(&mut self, committed_amount_out: BigUint) {
+        self.committed_amount_out = Some(committed_amount_out);
+    }
+
+    /// Returns the component ID (liquidity pool) of the swap.
     pub fn component_id(&self) -> &str {
         &self.component_id
     }
@@ -1588,6 +2150,14 @@ impl Swap {
     /// Returns the split of this swap.
     pub fn split(&self) -> &f64 {
         &self.split
+    }
+
+    /// Returns the per-leg committed output, if this is the exclusive leg of a surplus route.
+    ///
+    /// `None` for ordinary public swaps. When `Some`, the encoding layer derives the leg's
+    /// exclusive-swap payload from this and the leg's `amount_out`.
+    pub fn committed_amount_out(&self) -> Option<&BigUint> {
+        self.committed_amount_out.as_ref()
     }
 }
 
@@ -1661,6 +2231,34 @@ mod tests {
     use super::*;
     use crate::algorithm::test_utils::{component, token, MockProtocolSim};
 
+    #[test]
+    fn test_no_route_reason_shim_extracts_nested_path_reason() {
+        let mut quote = OrderQuote::new(
+            "o1".to_string(),
+            QuoteStatus::NoRouteFound,
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BlockInfo::new(0, String::new(), 0),
+            String::new(),
+            Bytes::default(),
+            Bytes::default(),
+            "0".to_string(),
+        );
+        assert_eq!(quote.no_route_reason(), None);
+
+        quote.set_no_route_cause(Some(SolveError::no_route_found_with_reason(
+            "o1",
+            NoPathReason::NoGraphPath,
+        )));
+        assert_eq!(quote.no_route_reason(), Some(NoPathReason::NoGraphPath));
+
+        quote.set_no_route_cause(Some(SolveError::QueueFull));
+        assert_eq!(quote.no_route_reason(), None);
+        assert!(matches!(quote.no_route_cause(), Some(SolveError::QueueFull)));
+    }
+
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
     }
@@ -1679,14 +2277,14 @@ mod tests {
         let token_in = token(token_in_byte, "TIN");
         let token_out = token(token_out_byte, "TOUT");
         Swap::new(
-            "pool-1".to_string(),
+            "component-1".to_string(),
             "uniswap_v2".to_string(),
             make_address(token_in_byte),
             make_address(token_out_byte),
             BigUint::from(amount_in),
             BigUint::from(amount_out),
             BigUint::from(100_000u64),
-            component("test-pool", &[token_in, token_out]),
+            component("test-component", &[token_in, token_out]),
             Box::new(MockProtocolSim::default()),
         )
     }
@@ -1745,6 +2343,40 @@ mod tests {
         assert!(id.contains('-')); // UUIDs contain dashes
     }
 
+    fn make_quote(amount_out: u64) -> OrderQuote {
+        OrderQuote::new(
+            "order-1".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1_000u64),
+            BigUint::from(amount_out),
+            BigUint::from(100_000u64),
+            BigUint::from(amount_out),
+            BlockInfo::new(1, "0x1".to_string(), 1),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_surplus_round_trips_through_getters() {
+        let committed = BigUint::from(990u64);
+        let surplus = BigUint::from(15u64);
+        let quote =
+            make_quote(990).with_surplus(SurplusInfo::new(surplus.clone(), committed.clone()));
+
+        assert_eq!(quote.surplus_amount(), Some(&surplus));
+        assert_eq!(quote.committed_amount_out(), Some(&committed));
+    }
+
+    #[test]
+    fn public_quote_has_no_surplus() {
+        let quote = make_quote(990);
+        assert_eq!(quote.surplus_amount(), None);
+        assert_eq!(quote.committed_amount_out(), None);
+    }
+
     // -------------------------------------------------------------------------
     // Route Tests
     // -------------------------------------------------------------------------
@@ -1753,7 +2385,27 @@ mod tests {
             .into_iter()
             .map(|(a, b)| make_swap(a, b, 1000, 990))
             .collect();
-        Route::new(swaps, HashMap::new()).unwrap()
+        Route::new(swaps, FxHashMap::default()).unwrap()
+    }
+
+    #[test]
+    fn test_route_token_symbol_resolves_from_own_map() {
+        let token_in = token(0x01, "TIN");
+        let token_out = token(0x02, "TOUT");
+        let tokens = FxHashMap::from_iter([
+            (token_in.address.clone(), token_in.clone()),
+            (token_out.address.clone(), token_out.clone()),
+        ]);
+        let route = Route::new(vec![make_swap(0x01, 0x02, 1000, 990)], tokens).unwrap();
+        assert_eq!(route.token_symbol(&make_address(0x01)), Some("TIN"));
+        assert_eq!(route.token_symbol(&make_address(0x02)), Some("TOUT"));
+    }
+
+    #[test]
+    fn test_route_token_symbol_missing_returns_none() {
+        // `make_route` builds with an empty token map: any address is unresolved.
+        let route = make_route(vec![(0x01, 0x02)]);
+        assert_eq!(route.token_symbol(&make_address(0x01)), None);
     }
 
     #[rstest]
@@ -1805,13 +2457,13 @@ mod tests {
         let swaps: Vec<Swap> = (0..num_swaps)
             .map(|i| make_swap(i as u8, (i + 1) as u8, 1000, 990))
             .collect();
-        let route = Route { swaps, tokens: HashMap::new() };
+        let route = Route { swaps, tokens: FxHashMap::default(), fallback_amount_out: None };
         assert_eq!(route.total_gas(), BigUint::from(expected_gas));
     }
 
     #[test]
     fn test_route_new_rejects_empty() {
-        let result = Route::new(vec![], HashMap::new());
+        let result = Route::new(vec![], FxHashMap::default());
         assert!(matches!(result, Err(RouteValidationError::EmptyRoute)));
     }
 
@@ -1854,24 +2506,27 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // RouteResult Tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn route_result_price_impact_defaults_none_and_sets() {
-        let route = make_route(vec![(0x01, 0x02)]);
-        let rr = RouteResult::new(route.clone(), BigInt::from(0), BigUint::from(0u8));
-        assert_eq!(rr.price_impact(), None);
-        let rr2 = rr.with_price_impact(0.0025);
-        assert_eq!(rr2.price_impact(), Some(0.0025));
-    }
-
-    // -------------------------------------------------------------------------
     // Split Route Validation Tests
     // -------------------------------------------------------------------------
 
     fn make_split_swap(token_in: u8, token_out: u8, split: f64) -> Swap {
         make_swap(token_in, token_out, 1000, 990).with_split(split)
+    }
+
+    #[test]
+    fn test_input_amount_sums_first_branch_collection() {
+        //        ┌──[60%: 600]──┐
+        //   A ───┤              ├─── B ───[rem: 980]─── C
+        //        └──[rem: 400]──┘
+        // The A collection consumes 1000 in total; the downstream B swap does not count.
+        let swaps = vec![
+            make_swap(0x01, 0x02, 600, 590).with_split(0.6),
+            make_swap(0x01, 0x02, 400, 390),
+            make_swap(0x02, 0x03, 980, 970),
+        ];
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
+        assert!(route.validate().is_ok());
+        assert_eq!(route.input_amount(), Some(BigUint::from(1000u64)));
     }
 
     #[test]
@@ -1884,7 +2539,7 @@ mod tests {
             make_split_swap(0x02, 0x03, 0.5),
             make_split_swap(0x02, 0x03, 0.0),
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -1898,7 +2553,7 @@ mod tests {
             make_split_swap(0x02, 0x03, 0.5),
             make_split_swap(0x02, 0x03, 0.3),
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::InvalidSplit { .. }));
     }
@@ -1914,7 +2569,7 @@ mod tests {
             make_split_swap(0x02, 0x03, 0.5),
             make_split_swap(0x02, 0x03, 0.0),
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::InvalidSplit { .. }));
     }
@@ -1930,7 +2585,7 @@ mod tests {
             make_swap(0x02, 0x04, 490, 480),
             make_swap(0x03, 0x04, 490, 480),
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -1938,7 +2593,7 @@ mod tests {
     fn test_validate_split_single_swap_nonzero_split() {
         // A ──[50%]── B   ERROR: single swap must have split=0.0
         let swaps = vec![make_split_swap(0x01, 0x02, 0.5)];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::InvalidSplit { .. }));
     }
@@ -1953,7 +2608,7 @@ mod tests {
             make_split_swap(0x01, 0x02, 0.0), // A→B (remainder)
             make_swap(0x03, 0x04, 490, 480),  // C→D (unreachable)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::DisconnectedSplitStart { .. }));
     }
@@ -1969,7 +2624,7 @@ mod tests {
             make_swap(0x02, 0x04, 490, 480),  // B→D (dead end)
             make_swap(0x03, 0x05, 490, 480),  // C→E (terminal)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::DisconnectedSplitEnd { .. }));
     }
@@ -1986,7 +2641,7 @@ mod tests {
             make_swap(0x03, 0x02, 980, 970),                 // C→B (cycle)
             make_swap(0x04, 0x02, 480, 470),                 // D→B (cycle)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::UnsupportedCycle { .. }));
     }
@@ -2003,7 +2658,7 @@ mod tests {
             make_swap(0x03, 0x04, 490, 480),  // C→D
             make_swap(0x04, 0x01, 960, 950),  // D→A (round-trip)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -2019,7 +2674,7 @@ mod tests {
             make_swap(0x03, 0x01, 960, 950),  // C→A (round-trip)
             make_swap(0x04, 0x01, 960, 950),  // D→A (round-trip)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         assert!(route.validate().is_ok());
     }
 
@@ -2032,7 +2687,7 @@ mod tests {
             make_split_swap(0x01, 0x01, 0.5), // A→A
             make_split_swap(0x01, 0x01, 0.0), // A→A (remainder)
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         let err = route.validate().unwrap_err();
         assert!(matches!(err, RouteValidationError::UnsupportedCycle { .. }));
     }
@@ -2077,7 +2732,7 @@ mod tests {
     #[test]
     fn test_swap_deserializes_amounts_from_strings() {
         let json = r#"{
-            "component_id": "pool-1",
+            "component_id": "component-1",
             "protocol": "uniswap_v2",
             "token_in": "0x0101010101010101010101010101010101010101",
             "token_out": "0x0202020202020202020202020202020202020202",
@@ -2086,7 +2741,7 @@ mod tests {
             "gas_estimate": "150000",
             "split": "0",
             "protocol_component": {
-                "id": "test-pool",
+                "id": "test-component",
                 "protocol_system": "uniswap_v2",
                 "protocol_type_name": "swap",
                 "chain": "ethereum",
@@ -2192,11 +2847,11 @@ mod tests {
         #[case] expected: &str,
     ) {
         let route = make_route(swaps);
-        let tokens: HashMap<Address, Token> = token_data
+        let tokens: FxHashMap<Address, Arc<Token>> = token_data
             .into_iter()
             .map(|(byte, symbol)| {
                 let t = make_token(byte, symbol);
-                (t.address.clone(), t)
+                (t.address.clone(), Arc::new(t))
             })
             .collect();
 
@@ -2215,6 +2870,18 @@ mod tests {
             1_893_456_000u64,
             Bytes::from(vec![0xAB; 65]),
         )
+    }
+
+    #[test]
+    fn test_encoding_options_disable_slippage_taking_precedence() {
+        let with_client_fee = EncodingOptions::new(0.01)
+            .with_client_fee_params(make_client_fee_params())
+            .with_disable_slippage_taking(true);
+        assert!(with_client_fee.disable_slippage_taking());
+        assert!(!with_client_fee.applies_disable_slippage_taking());
+
+        let flag_only = EncodingOptions::new(0.01).with_disable_slippage_taking(true);
+        assert!(flag_only.applies_disable_slippage_taking());
     }
 
     #[test]
@@ -2265,7 +2932,7 @@ mod tests {
             make_swap(0x02, 0x04, 490, 480),  // B→D
             make_swap(0x03, 0x04, 490, 480),  // C→D
         ];
-        let route = Route::new(swaps, HashMap::new()).expect("non-empty route");
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
         assert!(matches!(route.validate(), Err(RouteValidationError::DisconnectedSwaps { .. })));
     }
 
@@ -2287,7 +2954,8 @@ mod tests {
             make_swap(0x02, 0x03, 594, 580).with_split(0.6), // B→C via P2, 60%
             make_swap(0x02, 0x03, 396, 385),                 // B→C via P3, remainder
         ];
-        let route_interior = Route::new(swaps_interior, HashMap::new()).expect("non-empty route");
+        let route_interior =
+            Route::new(swaps_interior, FxHashMap::default()).expect("non-empty route");
         assert!(route_interior.is_split());
 
         //   ┌──[60%]── B ──┐
@@ -2299,7 +2967,7 @@ mod tests {
             make_swap(0x01, 0x04, 400, 390),                 // A→D, remainder
             make_swap(0x04, 0x03, 390, 380),                 // D→C
         ];
-        let route_source = Route::new(swaps_source, HashMap::new()).expect("non-empty route");
+        let route_source = Route::new(swaps_source, FxHashMap::default()).expect("non-empty route");
         assert!(route_source.is_split());
     }
 
@@ -2314,5 +2982,17 @@ mod tests {
         assert!(deserialized
             .client_fee_params()
             .is_none());
+    }
+
+    #[test]
+    fn test_encoding_options_simulation_defaults_to_disabled() {
+        assert!(!EncodingOptions::new(0.01).simulate());
+    }
+
+    #[test]
+    fn test_encoding_options_with_simulation_enables_simulation() {
+        assert!(EncodingOptions::new(0.01)
+            .with_simulation()
+            .simulate());
     }
 }

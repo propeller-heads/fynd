@@ -9,17 +9,16 @@
 //!
 //! # Overlay design
 //!
-//! Labeled overlay states (used by solver pools to inject per-request pool states) are stored in a
-//! separate `Arc<RwLock<...>>` on `MarketData` rather than inside the main
+//! Labeled overlay states (used by solver components to inject per-request component states) are
+//! stored in a separate `Arc<RwLock<...>>` on `MarketData` rather than inside the main
 //! `MarketState` lock. This decouples overlay writes from base-state reads: a TychoFeed block
 //! update no longer stalls overlay registrations and vice versa.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::sync::Arc;
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
+use tracing::warn;
 use tycho_simulation::{
     tycho_client::feed::SynchronizerState,
     tycho_common::{
@@ -29,20 +28,23 @@ use tycho_simulation::{
     tycho_ethereum::gas::BlockGasPrice,
 };
 
-use crate::types::{BlockInfo, ComponentId};
+use crate::{
+    feed::component_filter::protocol_matches,
+    types::{BlockInfo, ComponentId, RouteExclusionFilter, RouteExclusions},
+};
 
 /// A label identifying an overlay state layer.
 ///
-/// Each labeled overlay is an independent snapshot of pool states that can be layered
-/// on top of the base market state for a specific worker pool or request context.
+/// Each labeled overlay is an independent snapshot of component states that can be layered
+/// on top of the base market state for a specific worker component or request context.
 pub type StateLabel = String;
 
 /// An immutable snapshot of per-component simulation states for one overlay layer.
-pub type OverlayStates = Arc<HashMap<ComponentId, Box<dyn ProtocolSim>>>;
+pub type OverlayStates = Arc<FxHashMap<ComponentId, Box<dyn ProtocolSim>>>;
 
 /// A named simulation-state overlay with a block-number expiry.
 pub struct OverlayEntry {
-    /// The overlay pool states (only pools that differ from base state).
+    /// The overlay component states (only components that differ from base state).
     pub states: OverlayStates,
     /// Last block number for which this overlay is valid.
     /// The overlay is automatically evicted before block `valid_until + 1` is applied.
@@ -50,7 +52,7 @@ pub struct OverlayEntry {
 }
 
 /// The shared overlay registry: maps each label to its snapshot.
-type OverlayRegistry = Arc<RwLock<HashMap<StateLabel, OverlayEntry>>>;
+type OverlayRegistry = Arc<RwLock<FxHashMap<StateLabel, OverlayEntry>>>;
 
 /// Error returned by [`MarketData::read_labeled`] when the requested label cannot be resolved.
 #[derive(Debug, thiserror::Error)]
@@ -75,7 +77,7 @@ pub struct MarketData {
 impl MarketData {
     /// Creates a new handle wrapping the given data store.
     pub fn new(data: Arc<RwLock<MarketState>>) -> Self {
-        Self { data, overlays: Arc::new(RwLock::new(HashMap::new())) }
+        Self { data, overlays: Arc::new(RwLock::new(FxHashMap::default())) }
     }
 
     /// Creates a new empty market data store wrapped in a `MarketData`.
@@ -116,6 +118,78 @@ impl MarketData {
         self.data.write().await
     }
 
+    /// Extracts a base-data subset for `component_ids` without holding the read guard across the
+    /// whole clone.
+    ///
+    /// `extract_subset` deep-clones one simulation state per component, so one guard held over a
+    /// near-whole-market set stalls the feed's writer — and every reader queued behind it — for
+    /// the whole clone. This clones in batches of 512 components, releasing the guard between
+    /// batches. A batch whose label differs from the first batch's means the feed advanced
+    /// mid-clone; the clone restarts so the returned snapshot stays single-block consistent.
+    /// After three attempts it falls back to one guard for the full set: a feed advancing faster
+    /// than the batched clone completes would otherwise starve it forever.
+    ///
+    /// No overlay is applied — this reads base data only.
+    pub async fn extract_subset_batched(
+        &self,
+        component_ids: &FxHashSet<&ComponentId>,
+    ) -> MarketState {
+        self.extract_subset_in_batches(component_ids, 512, || {})
+            .await
+    }
+
+    /// `extract_subset_batched` with the batch size injectable, plus a hook that runs after each
+    /// batch — the window where no guard is held and a feed write can land mid-clone. Tests use
+    /// the two to drive the merge, restart, and fallback paths deterministically.
+    async fn extract_subset_in_batches(
+        &self,
+        component_ids: &FxHashSet<&ComponentId>,
+        batch_size: usize,
+        between_batches: impl Fn(),
+    ) -> MarketState {
+        if component_ids.is_empty() {
+            // The chunk loop would yield a blank default; extract_subset carries the label,
+            // block, and gas price even for an empty set.
+            return self
+                .data
+                .read()
+                .await
+                .extract_subset(component_ids);
+        }
+        let ids: Vec<&ComponentId> = component_ids.iter().copied().collect();
+        'attempt: for _ in 0..3 {
+            let mut merged: Option<MarketState> = None;
+            for chunk in ids.chunks(batch_size) {
+                let chunk_ids: FxHashSet<&ComponentId> = chunk.iter().copied().collect();
+                let part = self
+                    .data
+                    .read()
+                    .await
+                    .extract_subset(&chunk_ids);
+                match &mut merged {
+                    None => merged = Some(part),
+                    Some(snapshot) => {
+                        if part.label != snapshot.label {
+                            continue 'attempt;
+                        }
+                        snapshot.merge_subset(part);
+                    }
+                }
+                between_batches();
+            }
+            return merged.unwrap_or_default();
+        }
+        warn!(
+            components = ids.len(),
+            "batched market snapshot restarted three times; falling back to one guard over the \
+             full set"
+        );
+        self.data
+            .read()
+            .await
+            .extract_subset(component_ids)
+    }
+
     /// Attempts a non-blocking read of the base data store.
     ///
     /// Returns `None` if the lock is currently held for writing.
@@ -132,10 +206,9 @@ impl MarketData {
 
     /// Attempts a non-blocking read and wraps the result in a `MarketDataView`.
     ///
-    /// The overlay is not applied, so this only exposes the base market state. Suitable for
-    /// callers that read base data (e.g. token decimals) and do not depend on overlay state,
-    /// such as the quote price-impact fallback. Returns `None` if the lock is currently held
-    /// for writing (callers must treat that as "data unavailable", not an error).
+    /// The overlay is not applied, so this only exposes the base market state. Returns `None`
+    /// if the lock is currently held for writing. Callers must treat this as unavailable data,
+    /// not as an error.
     pub fn try_read_blocking(&self) -> Option<MarketDataView<'_>> {
         self.data
             .try_read()
@@ -149,7 +222,7 @@ impl MarketData {
     pub async fn register_labeled_state(
         &self,
         label: StateLabel,
-        states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
+        states: FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
         valid_until: u64,
     ) {
         self.overlays
@@ -205,7 +278,7 @@ impl MarketData {
 /// An overlay-aware view of the market data, held for the duration of a read lock.
 ///
 /// Holds a read lock on the base `MarketState` and an optional overlay snapshot.
-/// Use `get_simulation_state` for overlay-aware pool lookups. All other accessors
+/// Use `get_simulation_state` for overlay-aware component lookups. All other accessors
 /// delegate to the base data.
 pub struct MarketDataView<'a> {
     guard: tokio::sync::RwLockReadGuard<'a, MarketState>,
@@ -234,7 +307,10 @@ impl<'a> MarketDataView<'a> {
     /// on top by replacing any simulation states found in both the subset and the overlay.
     ///
     /// If no overlay is active, this is equivalent to `self.extract_subset(component_ids)`.
-    pub fn extract_subset_with_overlay(&self, component_ids: &HashSet<ComponentId>) -> MarketState {
+    pub fn extract_subset_with_overlay(
+        &self,
+        component_ids: &FxHashSet<&ComponentId>,
+    ) -> MarketState {
         let mut subset = self.guard.extract_subset(component_ids);
         if let Some((ref label, ref states)) = self.overlay {
             for (id, state) in states.iter() {
@@ -253,17 +329,17 @@ impl<'a> MarketDataView<'a> {
     }
 
     /// Returns the component topology from the base data.
-    pub fn component_topology(&self) -> HashMap<ComponentId, Vec<Address>> {
+    pub fn component_topology(&self) -> FxHashMap<ComponentId, Vec<Address>> {
         self.guard.component_topology()
     }
 
     /// Extracts a base-data subset for the given component IDs (no overlay applied).
-    pub fn extract_subset(&self, component_ids: &HashSet<ComponentId>) -> MarketState {
+    pub fn extract_subset(&self, component_ids: &FxHashSet<&ComponentId>) -> MarketState {
         self.guard.extract_subset(component_ids)
     }
 
     /// Returns a reference to the token registry from the base data.
-    pub fn token_registry_ref(&self) -> &HashMap<Address, Token> {
+    pub fn token_registry_ref(&self) -> &FxHashMap<Address, Arc<Token>> {
         self.guard.token_registry_ref()
     }
 
@@ -280,6 +356,11 @@ impl<'a> MarketDataView<'a> {
     /// Returns a token by address from the base data.
     pub fn get_token(&self, address: &Address) -> Option<&Token> {
         self.guard.get_token(address)
+    }
+
+    /// Returns a token by address from the base data, to be held rather than copied.
+    pub fn get_token_shared(&self, address: &Address) -> Option<&Arc<Token>> {
+        self.guard.get_token_shared(address)
     }
 
     /// Returns a component by ID from the base data.
@@ -306,31 +387,64 @@ pub struct MarketState {
     /// is applied.
     label: StateLabel,
     /// All components indexed by their ID.
-    components: HashMap<ComponentId, ProtocolComponent>,
+    components: FxHashMap<ComponentId, Arc<ProtocolComponent>>,
     /// All states indexed by their component ID.
-    simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
-    /// All tokens indexed by their address.
-    tokens: HashMap<Address, Token>,
+    simulation_states: FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
+    /// All tokens indexed by their address. Shared for the same reason as `components`.
+    tokens: FxHashMap<Address, Arc<Token>>,
     /// Current gas price. None if not fetched yet.
     gas_price: Option<BlockGasPrice>,
     /// Protocol sync status indexed by their protocol system name.
-    protocol_sync_status: HashMap<String, SynchronizerState>,
+    protocol_sync_status: FxHashMap<String, SynchronizerState>,
     /// Block info for the last update (only updated when protocols reported "Ready" status).
     /// None if no block has been processed yet.
     last_updated: Option<BlockInfo>,
+    /// The components of each protocol system, maintained on upsert/remove so a quote that
+    /// excludes a protocol names that system's pools without scanning the component map, and so
+    /// the metrics sampler can count them without one either.
+    components_by_protocol: FxHashMap<String, FxHashSet<ComponentId>>,
+    /// Changes only when a component is added or removed, not when its state changes.
+    component_generation: u64,
 }
 
 impl MarketState {
+    /// The pools and tokens `filter` excludes, with each protocol system it names replaced by
+    /// the components this market holds for that system.
+    ///
+    /// A protocol system matches exactly (`uniswap_v2`), or as a family when the entry ends in
+    /// `:` (`propammfallback:`). An entry this market holds no component for excludes nothing.
+    #[must_use]
+    pub fn resolve_route_filter(&self, filter: &RouteExclusionFilter) -> RouteExclusions {
+        let mut pools = filter.excluded_pools().clone();
+        for entry in filter.excluded_protocols() {
+            if entry.ends_with(':') {
+                for (system, ids) in &self.components_by_protocol {
+                    if protocol_matches(entry, system) {
+                        pools.extend(ids.iter().cloned());
+                    }
+                }
+            } else {
+                pools.extend(
+                    self.components_by_protocol(entry)
+                        .cloned(),
+                );
+            }
+        }
+        RouteExclusions { pools, tokens: filter.excluded_tokens().clone() }
+    }
+
     /// Creates a new empty MarketState.
     pub fn new() -> Self {
         Self {
             label: String::new(),
-            components: HashMap::new(),
-            simulation_states: HashMap::new(),
-            tokens: HashMap::new(),
+            components: FxHashMap::default(),
+            simulation_states: FxHashMap::default(),
+            tokens: FxHashMap::default(),
             gas_price: None,
-            protocol_sync_status: HashMap::new(),
+            protocol_sync_status: FxHashMap::default(),
             last_updated: None,
+            components_by_protocol: FxHashMap::default(),
+            component_generation: 0,
         }
     }
 
@@ -339,9 +453,40 @@ impl MarketState {
         &self.label
     }
 
+    /// Returns the generation of the component membership index.
+    pub fn component_generation(&self) -> u64 {
+        self.component_generation
+    }
+
     /// Returns the block info for the last update.
     pub fn last_updated(&self) -> Option<&BlockInfo> {
         self.last_updated.as_ref()
+    }
+
+    /// Number of protocol components (components) currently tracked.
+    pub fn component_count(&self) -> usize {
+        self.components.len()
+    }
+
+    /// Number of tokens currently tracked.
+    pub fn token_count(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Number of components per protocol system.
+    ///
+    /// Entries stay present at zero after all of a protocol's components are removed, so exported
+    /// gauges reset instead of freezing at the last value.
+    pub fn component_counts_by_protocol(&self) -> FxHashMap<String, u64> {
+        self.components_by_protocol
+            .iter()
+            .map(|(protocol_system, ids)| (protocol_system.clone(), ids.len() as u64))
+            .collect()
+    }
+
+    /// Returns the sync status of every protocol system.
+    pub fn protocol_sync_states(&self) -> &FxHashMap<String, SynchronizerState> {
+        &self.protocol_sync_status
     }
 
     /// Returns the protocol sync status indexed by their protocol system name.
@@ -352,7 +497,7 @@ impl MarketState {
 
     /// Returns the component topology.
     /// This is a simple mapping from component ID to their token addresses.
-    pub fn component_topology(&self) -> HashMap<ComponentId, Vec<Address>> {
+    pub fn component_topology(&self) -> FxHashMap<ComponentId, Vec<Address>> {
         self.components
             .iter()
             .map(|(id, component)| (id.clone(), component.tokens.clone()))
@@ -361,6 +506,23 @@ impl MarketState {
 
     /// Gets a component by ID.
     pub fn get_component(&self, id: &str) -> Option<&ProtocolComponent> {
+        self.components.get(id).map(Arc::as_ref)
+    }
+
+    /// The ids of every component this protocol system holds. Empty for a system the market does
+    /// not carry.
+    pub fn components_by_protocol(
+        &self,
+        protocol_system: &str,
+    ) -> impl Iterator<Item = &ComponentId> {
+        self.components_by_protocol
+            .get(protocol_system)
+            .into_iter()
+            .flatten()
+    }
+
+    /// Gets a component by ID as a shared handle, for callers that need to keep it.
+    pub fn get_component_shared(&self, id: &str) -> Option<&Arc<ProtocolComponent>> {
         self.components.get(id)
     }
 
@@ -373,6 +535,13 @@ impl MarketState {
 
     /// Gets a token by address.
     pub fn get_token(&self, address: &Address) -> Option<&Token> {
+        self.tokens
+            .get(address)
+            .map(Arc::as_ref)
+    }
+
+    /// Gets a token as a shared handle, for callers that need to keep it.
+    pub fn get_token_shared(&self, address: &Address) -> Option<&Arc<Token>> {
         self.tokens.get(address)
     }
 
@@ -382,16 +551,29 @@ impl MarketState {
     }
 
     /// Returns a reference to the token registry.
-    pub fn token_registry_ref(&self) -> &HashMap<Address, Token> {
+    pub fn token_registry_ref(&self) -> &FxHashMap<Address, Arc<Token>> {
         &self.tokens
     }
 
     /// Inserts or updates a component.
     pub fn upsert_components(&mut self, components: impl IntoIterator<Item = ProtocolComponent>) {
-        // Store component data in components map
         for component in components {
+            let protocol_system = component.protocol_system.clone();
+            let component_id = component.id.clone();
+            let is_new = !self
+                .components
+                .contains_key(&component_id);
             self.components
-                .insert(component.id.clone(), component);
+                .insert(component_id.clone(), Arc::new(component));
+            self.components_by_protocol
+                .entry(protocol_system)
+                .or_default()
+                .insert(component_id);
+            if is_new {
+                self.component_generation = self
+                    .component_generation
+                    .wrapping_add(1);
+            }
         }
     }
 
@@ -399,7 +581,7 @@ impl MarketState {
     pub fn upsert_tokens(&mut self, tokens: impl IntoIterator<Item = Token>) {
         for token in tokens {
             self.tokens
-                .insert(token.address.clone(), token);
+                .insert(token.address.clone(), Arc::new(token));
         }
     }
 
@@ -417,7 +599,17 @@ impl MarketState {
     /// Removes a component.
     pub fn remove_components<'a>(&mut self, ids: impl IntoIterator<Item = &'a ComponentId>) {
         for id in ids {
-            self.components.remove(id);
+            if let Some(component) = self.components.remove(id) {
+                self.component_generation = self
+                    .component_generation
+                    .wrapping_add(1);
+                if let Some(ids) = self
+                    .components_by_protocol
+                    .get_mut(&component.protocol_system)
+                {
+                    ids.remove(id);
+                }
+            }
             self.simulation_states.remove(id);
         }
     }
@@ -450,36 +642,37 @@ impl MarketState {
     /// - Simulation states for those components (cloned via `clone_box`)
     /// - Tokens referenced by those components
     /// - Gas price and block info
-    pub fn extract_subset(&self, component_ids: &HashSet<ComponentId>) -> MarketState {
-        // Filter components
-        let components: HashMap<ComponentId, ProtocolComponent> = self
-            .components
-            .iter()
-            .filter(|(id, _)| component_ids.contains(*id))
-            .map(|(id, component)| (id.clone(), component.clone()))
-            .collect();
+    pub fn extract_subset(&self, component_ids: &FxHashSet<&ComponentId>) -> MarketState {
+        let mut components =
+            FxHashMap::with_capacity_and_hasher(component_ids.len(), rustc_hash::FxBuildHasher);
+        let mut simulation_states =
+            FxHashMap::with_capacity_and_hasher(component_ids.len(), rustc_hash::FxBuildHasher);
+        // Tokens are shared between components, so this collects addresses first and resolves
+        // them once each rather than per component that mentions them.
+        let mut token_addresses: FxHashSet<&Address> =
+            FxHashSet::with_capacity_and_hasher(component_ids.len() * 2, rustc_hash::FxBuildHasher);
 
-        // Collect all token addresses from the filtered components
-        let token_addresses: HashSet<&Address> = components
-            .values()
-            .flat_map(|c| &c.tokens)
-            .collect();
+        for &id in component_ids {
+            if let Some(component) = self.components.get(id) {
+                token_addresses.extend(&component.tokens);
+                components.insert(id.clone(), component.clone());
+            }
+            // A component without a simulation state is legitimate: the recording skips `vm:*`
+            // states, and a component can be announced a block before its first state arrives.
+            if let Some(state) = self.simulation_states.get(id) {
+                simulation_states.insert(id.clone(), state.clone_box());
+            }
+        }
 
-        // Filter tokens
-        let tokens: HashMap<Address, Token> = self
-            .tokens
-            .iter()
-            .filter(|(addr, _)| token_addresses.contains(addr))
-            .map(|(addr, token)| (addr.clone(), token.clone()))
-            .collect();
+        let mut tokens =
+            FxHashMap::with_capacity_and_hasher(token_addresses.len(), rustc_hash::FxBuildHasher);
+        for address in token_addresses {
+            if let Some(token) = self.tokens.get(address) {
+                tokens.insert(address.clone(), token.clone());
+            }
+        }
 
-        // Clone simulation states using clone_box
-        let simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>> = self
-            .simulation_states
-            .iter()
-            .filter(|(id, _)| component_ids.contains(*id))
-            .map(|(id, state)| (id.clone(), state.clone_box()))
-            .collect();
+        let components_by_protocol = index_by_protocol(&components);
 
         MarketState {
             label: self.label.clone(),
@@ -487,10 +680,37 @@ impl MarketState {
             simulation_states,
             tokens,
             gas_price: self.gas_price.clone(),
-            protocol_sync_status: HashMap::new(), // Not needed for simulation
+            protocol_sync_status: FxHashMap::default(), // Not needed for simulation
             last_updated: self.last_updated.clone(),
+            components_by_protocol,
+            component_generation: self.component_generation,
         }
     }
+
+    /// Absorbs another subset extracted from the same base state (the caller checks the labels
+    /// match), keeping this one's metadata. Component sets from `extract_subset` batches are
+    /// disjoint, so components and simulation states are never overwritten; a token shared by
+    /// two batches is overwritten with an identical clone from the same base state.
+    fn merge_subset(&mut self, other: MarketState) {
+        self.components.extend(other.components);
+        self.simulation_states
+            .extend(other.simulation_states);
+        self.tokens.extend(other.tokens);
+    }
+}
+
+/// Groups component ids by the protocol system their component carries.
+fn index_by_protocol(
+    components: &FxHashMap<ComponentId, Arc<ProtocolComponent>>,
+) -> FxHashMap<String, FxHashSet<ComponentId>> {
+    let mut index: FxHashMap<String, FxHashSet<ComponentId>> = FxHashMap::default();
+    for (id, component) in components {
+        index
+            .entry(component.protocol_system.clone())
+            .or_default()
+            .insert(id.clone());
+    }
+    index
 }
 
 #[cfg(test)]
@@ -499,11 +719,113 @@ mod tests {
     use tycho_simulation::tycho_ethereum::gas::GasPrice;
 
     use super::*;
-    use crate::algorithm::test_utils::{component, token, MockProtocolSim};
+    use crate::algorithm::test_utils::{
+        component, component_with_protocol, token, MockProtocolSim,
+    };
+
+    #[test]
+    fn test_resolve_route_filter_with_protocol_prefix() {
+        let a = token(0x01, "A");
+        let b = token(0x02, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([
+            component_with_protocol("pamm", "propammfallback:fermiswap", &[a.clone(), b.clone()]),
+            component_with_protocol("v3", "uniswap_v3", &[a, b]),
+        ]);
+        let prefix = market.resolve_route_filter(
+            &RouteExclusionFilter::default()
+                .with_excluded_protocols(["propammfallback:".to_string()]),
+        );
+        let partial = market.resolve_route_filter(
+            &RouteExclusionFilter::default().with_excluded_protocols(["propamm".to_string()]),
+        );
+        assert!(prefix.excludes_pool("pamm"));
+        assert!(!prefix.excludes_pool("v3"));
+        assert!(partial.is_empty());
+    }
+
+    /// A filter names protocol systems; a solve reads pools, so resolving replaces each system
+    /// with that system's pools and leaves every other pool alone.
+    #[test]
+    fn test_resolve_route_filter_with_a_protocol() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([
+            component_with_protocol("v2_pool", "uniswap_v2", &[token_a.clone(), token_b.clone()]),
+            component_with_protocol("v3_pool", "uniswap_v3", &[token_a.clone(), token_b.clone()]),
+        ]);
+
+        let filter = RouteExclusionFilter::default()
+            .with_excluded_pools(["named_pool".to_string()])
+            .with_excluded_protocols(["uniswap_v2".to_string()])
+            .with_excluded_tokens([token_b.address.clone()]);
+        let exclusions = market.resolve_route_filter(&filter);
+
+        assert!(exclusions.excludes_pool("v2_pool"), "the protocol's own pool is excluded");
+        assert!(exclusions.excludes_pool("named_pool"), "a pool named directly stays excluded");
+        assert!(!exclusions.excludes_pool("v3_pool"), "another protocol's pool is untouched");
+        assert!(exclusions.excludes_token(&token_b.address));
+        assert!(
+            market
+                .resolve_route_filter(
+                    &RouteExclusionFilter::default()
+                        .with_excluded_protocols(["not_a_protocol".to_string()])
+                )
+                .is_empty(),
+            "a system the market holds no pool of excludes nothing"
+        );
+    }
+
+    #[test]
+    fn component_counts_by_protocol_tracks_upserts_and_removals() {
+        let mut market = MarketState::new();
+        let component_tokens = [token(0x0A, "A"), token(0x0B, "B")];
+
+        market.upsert_components([
+            component_with_protocol("component_1", "uniswap_v2", &component_tokens),
+            component_with_protocol("component_2", "uniswap_v2", &component_tokens),
+            component_with_protocol("component_3", "uniswap_v3", &component_tokens),
+        ]);
+        let counts = market.component_counts_by_protocol();
+        assert_eq!(counts.get("uniswap_v2"), Some(&2));
+        assert_eq!(counts.get("uniswap_v3"), Some(&1));
+
+        // Re-upserting an existing component is an update, not a new component.
+        market.upsert_components([component_with_protocol(
+            "component_1",
+            "uniswap_v2",
+            &component_tokens,
+        )]);
+        assert_eq!(
+            market
+                .component_counts_by_protocol()
+                .get("uniswap_v2"),
+            Some(&2)
+        );
+
+        // Removals decrement; the entry stays at zero so exported gauges reset
+        // instead of freezing at the last non-zero value.
+        let removed_ids = ["component_1".to_string(), "component_3".to_string()];
+        market.remove_components(removed_ids.iter());
+        let counts = market.component_counts_by_protocol();
+        assert_eq!(counts.get("uniswap_v2"), Some(&1));
+        assert_eq!(counts.get("uniswap_v3"), Some(&0));
+
+        // Removing an unknown id leaves counts untouched.
+        let unknown_ids = ["unknown_component".to_string()];
+        market.remove_components(unknown_ids.iter());
+        assert_eq!(
+            market
+                .component_counts_by_protocol()
+                .get("uniswap_v2"),
+            Some(&1)
+        );
+    }
 
     #[test]
     fn extract_subset_filters_by_component_ids() {
-        // Setup: market with 2 pools (A-B, B-C) and 3 tokens
+        // Setup: market with 2 components (A-B, B-C) and 3 tokens
         let mut market = MarketState::new();
 
         let token_a = token(0x0A, "A");
@@ -511,13 +833,19 @@ mod tests {
         let token_c = token(0x0C, "C");
 
         market.upsert_components([
-            component("pool_ab", &[token_a.clone(), token_b.clone()]),
-            component("pool_bc", &[token_b.clone(), token_c.clone()]),
+            component("component_ab", &[token_a.clone(), token_b.clone()]),
+            component("component_bc", &[token_b.clone(), token_c.clone()]),
         ]);
         market.upsert_tokens([token_a.clone(), token_b.clone(), token_c.clone()]);
         market.update_states([
-            ("pool_ab".to_string(), Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>),
-            ("pool_bc".to_string(), Box::new(MockProtocolSim::new(3.0)) as Box<dyn ProtocolSim>),
+            (
+                "component_ab".to_string(),
+                Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+            ),
+            (
+                "component_bc".to_string(),
+                Box::new(MockProtocolSim::new(3.0)) as Box<dyn ProtocolSim>,
+            ),
         ]);
         market.update_gas_price(BlockGasPrice {
             block_number: 1,
@@ -527,19 +855,18 @@ mod tests {
         });
         market.update_last_updated(BlockInfo::new(12345, "0xabc".to_string(), 0));
 
-        // Extract only pool_ab
-        let ids: HashSet<_> = ["pool_ab".to_string()]
-            .into_iter()
-            .collect();
+        // Extract only component_ab
+        let component_ab = "component_ab".to_string();
+        let ids: FxHashSet<&ComponentId> = [&component_ab].into_iter().collect();
         let subset = market.extract_subset(&ids);
 
-        // Components: only pool_ab
+        // Components: only component_ab
         assert_eq!(subset.components.len(), 1);
         assert!(subset
             .components
-            .contains_key("pool_ab"));
+            .contains_key("component_ab"));
 
-        // Tokens: only A and B (referenced by pool_ab), not C
+        // Tokens: only A and B (referenced by component_ab), not C
         assert_eq!(subset.tokens.len(), 2);
         assert!(subset
             .tokens
@@ -551,23 +878,175 @@ mod tests {
             .tokens
             .contains_key(&token_c.address));
 
-        // Simulation states: only pool_ab
+        // Simulation states: only component_ab
         assert_eq!(subset.simulation_states.len(), 1);
         assert!(subset
             .simulation_states
-            .contains_key("pool_ab"));
+            .contains_key("component_ab"));
 
         // Gas price and block info are copied
         assert_eq!(subset.gas_price, market.gas_price);
         assert!(subset.last_updated.is_some());
 
         // Empty IDs returns empty subset
-        let empty_subset = market.extract_subset(&HashSet::new());
+        let empty_subset = market.extract_subset(&FxHashSet::default());
         assert!(empty_subset.components.is_empty());
         assert!(empty_subset.tokens.is_empty());
         assert!(empty_subset
             .simulation_states
             .is_empty());
+    }
+
+    fn market_with_two_components() -> MarketState {
+        let mut market = MarketState::new();
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let token_c = token(0x0C, "C");
+        market.upsert_components([
+            component("component_ab", &[token_a.clone(), token_b.clone()]),
+            component("component_bc", &[token_b.clone(), token_c.clone()]),
+        ]);
+        market.upsert_tokens([token_a, token_b, token_c]);
+        market.update_states([
+            (
+                "component_ab".to_string(),
+                Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+            ),
+            (
+                "component_bc".to_string(),
+                Box::new(MockProtocolSim::new(3.0)) as Box<dyn ProtocolSim>,
+            ),
+        ]);
+        market.update_last_updated(BlockInfo::new(12345, "0xabc".to_string(), 0));
+        market
+    }
+
+    #[test]
+    fn test_merge_subset() {
+        let market = market_with_two_components();
+        let ab = "component_ab".to_string();
+        let bc = "component_bc".to_string();
+
+        let mut merged = market.extract_subset(&[&ab].into_iter().collect());
+        merged.merge_subset(market.extract_subset(&[&bc].into_iter().collect()));
+
+        let combined = market.extract_subset(&[&ab, &bc].into_iter().collect());
+        assert_eq!(merged.components.len(), combined.components.len());
+        assert_eq!(merged.simulation_states.len(), combined.simulation_states.len());
+        assert_eq!(merged.tokens.len(), combined.tokens.len());
+        assert_eq!(merged.label, combined.label);
+    }
+
+    #[tokio::test]
+    async fn test_extract_subset_batched() {
+        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
+        let ab = "component_ab".to_string();
+        let bc = "component_bc".to_string();
+        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
+
+        let batched = market_data
+            .extract_subset_batched(&ids)
+            .await;
+
+        let direct = market_data
+            .read()
+            .await
+            .extract_subset(&ids);
+        assert_eq!(batched.components.len(), direct.components.len());
+        assert_eq!(batched.simulation_states.len(), direct.simulation_states.len());
+        assert_eq!(batched.tokens.len(), direct.tokens.len());
+        assert_eq!(batched.label, direct.label);
+    }
+
+    #[tokio::test]
+    async fn test_extract_subset_batched_multi_chunk() {
+        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
+        let ab = "component_ab".to_string();
+        let bc = "component_bc".to_string();
+        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
+
+        // Batch size 1 puts each component in its own chunk, so the merge path runs.
+        let batched = market_data
+            .extract_subset_in_batches(&ids, 1, || {})
+            .await;
+
+        let direct = market_data
+            .read()
+            .await
+            .extract_subset(&ids);
+        assert!(batched.components.contains_key(&ab));
+        assert!(batched.components.contains_key(&bc));
+        assert!(batched
+            .simulation_states
+            .contains_key(&ab));
+        assert!(batched
+            .simulation_states
+            .contains_key(&bc));
+        assert_eq!(batched.tokens.len(), direct.tokens.len());
+        assert_eq!(batched.label, direct.label);
+    }
+
+    #[tokio::test]
+    async fn test_extract_subset_batched_label_change_mid_clone() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
+        let ab = "component_ab".to_string();
+        let bc = "component_bc".to_string();
+        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
+        // The feed advances once, after the first batch of the first attempt: the second
+        // batch's label mismatch must restart the clone, and the second attempt must read one
+        // consistent post-advance state.
+        let batches_done = AtomicUsize::new(0);
+        let writer = market_data.clone();
+
+        let batched = market_data
+            .extract_subset_in_batches(&ids, 1, || {
+                if batches_done.fetch_add(1, Ordering::SeqCst) == 0 {
+                    writer
+                        .try_write()
+                        .expect("no guard is held between batches")
+                        .label = "advanced".to_string();
+                }
+            })
+            .await;
+
+        assert_eq!(batched.label, "advanced");
+        assert!(batched.components.contains_key(&ab));
+        assert!(batched.components.contains_key(&bc));
+    }
+
+    #[tokio::test]
+    async fn test_extract_subset_batched_fallback_after_three_attempts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
+        let ab = "component_ab".to_string();
+        let bc = "component_bc".to_string();
+        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
+        // The feed advances after every batch, so all three batched attempts restart and the
+        // full-set fallback must still deliver every component under one guard.
+        let bumps = AtomicUsize::new(0);
+        let writer = market_data.clone();
+
+        let batched = market_data
+            .extract_subset_in_batches(&ids, 1, || {
+                let bump = bumps.fetch_add(1, Ordering::SeqCst);
+                writer
+                    .try_write()
+                    .expect("no guard is held between batches")
+                    .label = format!("block_{bump}");
+            })
+            .await;
+
+        assert!(batched.components.contains_key(&ab));
+        assert!(batched.components.contains_key(&bc));
+        assert!(batched
+            .simulation_states
+            .contains_key(&ab));
+        assert!(batched
+            .simulation_states
+            .contains_key(&bc));
     }
 
     // ==================== MarketData overlay tests ====================
@@ -577,9 +1056,9 @@ mod tests {
         let market_ref = MarketData::new_shared();
 
         let label = "test_label".to_string();
-        let mut states: HashMap<ComponentId, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut states: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
         states.insert(
-            "pool_ab".to_string(),
+            "component_ab".to_string(),
             Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
         );
 
@@ -592,7 +1071,7 @@ mod tests {
             .await
             .expect("label was just registered");
         // Base data is empty — overlay provides the state
-        let sim = guard.get_simulation_state("pool_ab");
+        let sim = guard.get_simulation_state("component_ab");
         assert!(sim.is_some());
     }
 
@@ -603,8 +1082,8 @@ mod tests {
         market_ref
             .register_labeled_state(
                 "my_label".to_string(),
-                HashMap::from([(
-                    "pool1".to_string(),
+                FxHashMap::from_iter([(
+                    "component1".to_string(),
                     Box::new(MockProtocolSim::new(5.0)) as Box<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
@@ -614,7 +1093,7 @@ mod tests {
         // A handle with no label must not see the overlay
         let guard = market_ref.read().await;
         assert!(guard
-            .get_simulation_state("pool1")
+            .get_simulation_state("component1")
             .is_none());
     }
 
@@ -626,8 +1105,8 @@ mod tests {
         market_ref
             .register_labeled_state(
                 label.clone(),
-                HashMap::from([(
-                    "pool".to_string(),
+                FxHashMap::from_iter([(
+                    "component".to_string(),
                     Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
@@ -650,8 +1129,8 @@ mod tests {
             market_ref
                 .register_labeled_state(
                     format!("label_{i}"),
-                    HashMap::from([(
-                        format!("pool_{i}"),
+                    FxHashMap::from_iter([(
+                        format!("component_{i}"),
                         Box::new(MockProtocolSim::new(f64::from(i))) as Box<dyn ProtocolSim>,
                     )]),
                     u64::MAX,
@@ -676,8 +1155,8 @@ mod tests {
 
         base.register_labeled_state(
             "shared".to_string(),
-            HashMap::from([(
-                "pool_x".to_string(),
+            FxHashMap::from_iter([(
+                "component_x".to_string(),
                 Box::new(MockProtocolSim::new(7.0)) as Box<dyn ProtocolSim>,
             )]),
             u64::MAX,
@@ -690,7 +1169,7 @@ mod tests {
             .await
             .expect("label was just registered");
         assert!(guard_a
-            .get_simulation_state("pool_x")
+            .get_simulation_state("component_x")
             .is_some());
         drop(guard_a);
 
@@ -699,7 +1178,7 @@ mod tests {
             .await
             .expect("label was just registered");
         assert!(guard_b
-            .get_simulation_state("pool_x")
+            .get_simulation_state("component_x")
             .is_some());
     }
 
@@ -714,10 +1193,10 @@ mod tests {
 
         {
             let mut data = market_ref.write().await;
-            data.upsert_components([mk_component("pool_ab", &[tok_a.clone(), tok_b.clone()])]);
+            data.upsert_components([mk_component("component_ab", &[tok_a.clone(), tok_b.clone()])]);
             data.upsert_tokens([tok_a.clone(), tok_b.clone()]);
             data.update_states([(
-                "pool_ab".to_string(),
+                "component_ab".to_string(),
                 Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
             )]);
         }
@@ -726,8 +1205,8 @@ mod tests {
         market_ref
             .register_labeled_state(
                 label.clone(),
-                HashMap::from([(
-                    "pool_ab".to_string(),
+                FxHashMap::from_iter([(
+                    "component_ab".to_string(),
                     Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
@@ -738,13 +1217,12 @@ mod tests {
             .read_labeled(&label)
             .await
             .expect("label was just registered");
-        let ids: HashSet<ComponentId> = ["pool_ab".to_string()]
-            .into_iter()
-            .collect();
+        let component_ab = "component_ab".to_string();
+        let ids: FxHashSet<&ComponentId> = [&component_ab].into_iter().collect();
         let subset = guard.extract_subset_with_overlay(&ids);
 
         let sim = subset
-            .get_simulation_state("pool_ab")
+            .get_simulation_state("component_ab")
             .unwrap();
         let mock = sim
             .as_any()
@@ -761,8 +1239,8 @@ mod tests {
         market_ref
             .register_labeled_state(
                 "stale".to_string(),
-                HashMap::from([(
-                    "pool_stale".to_string(),
+                FxHashMap::from_iter([(
+                    "component_stale".to_string(),
                     Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
                 )]),
                 10,
@@ -771,8 +1249,8 @@ mod tests {
         market_ref
             .register_labeled_state(
                 "fresh".to_string(),
-                HashMap::from([(
-                    "pool_fresh".to_string(),
+                FxHashMap::from_iter([(
+                    "component_fresh".to_string(),
                     Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
                 )]),
                 20,
@@ -806,6 +1284,49 @@ mod tests {
                 .expect("last_updated must be set")
                 .number(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn component_and_token_counts_track_upserts_and_removals() {
+        let market = MarketData::new_shared();
+        let tok_a = token(1, "A");
+        let tok_b = token(2, "B");
+
+        market
+            .apply_block_update(1, |data| {
+                data.upsert_components([component(
+                    "component_ab",
+                    &[tok_a.clone(), tok_b.clone()],
+                )]);
+                data.upsert_tokens([tok_a.clone(), tok_b.clone()]);
+            })
+            .await;
+        {
+            let data = market.read().await;
+            assert_eq!(
+                data.base_market_state()
+                    .component_count(),
+                1
+            );
+            assert_eq!(data.base_market_state().token_count(), 2);
+        }
+
+        market
+            .apply_block_update(2, |data| {
+                data.remove_components(["component_ab".to_string()].iter());
+            })
+            .await;
+        let data = market.read().await;
+        assert_eq!(
+            data.base_market_state()
+                .component_count(),
+            0
+        );
+        assert_eq!(
+            data.base_market_state().token_count(),
+            2,
+            "tokens are not removed with their components"
         );
     }
 }

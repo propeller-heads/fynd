@@ -36,6 +36,8 @@ fynd serve \
 
 See the full [list of available protocols](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols).
 
+Every named protocol is checked against the ones your Tycho endpoint serves. A protocol that is not served logs a warning and is dropped from the list rather than stopping the solver.
+
 ### Including RFQ Protocols
 
 Include RFQ (Request-for-Quote) protocols alongside on-chain protocols. Use the `all_onchain` keyword to combine auto-fetched on-chain protocols with specific RFQ protocols:
@@ -61,6 +63,61 @@ fynd serve \
 
 * RFQ protocols require API keys passed via environment variables. Check the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the specific variables each protocol needs.
 
+### pAMM Price Level Stream
+
+Serve a proprietary AMM from Titan's pAMM price level stream instead of simulating it in the EVM. Titan publishes a quote ladder per pair every block, so quotes come from interpolating those levels — much cheaper than a VM simulation.
+
+Name a venue with the `pricelevelstream:` prefix. The served venues are `fermiswap`, `kipseli`, `metric`, `bebop`, and `taurusfi`:
+
+```bash
+fynd serve \
+  --protocols all_onchain,exclude:vm:fermiswap,pricelevelstream:fermiswap
+```
+
+The `exclude:` prefix drops a protocol from the list. It matters here: `vm:fermiswap` and `pricelevelstream:fermiswap` price the same maker inventory, so streaming both double-counts that liquidity. Drop the Tycho-streamed one whenever you serve the same venue from the price level stream. An `exclude:` entry that matches no streamed protocol logs a warning and is otherwise ignored, so a protocol Tycho has dropped does not stop the solver from starting.
+
+**Limitations:**
+
+* Ethereum mainnet only — the venue addresses are mainnet deployments.
+* Quotes below the smallest ladder level are rejected rather than extrapolated, and quotes above the largest come back as a partial fill at the limit.
+* A quote executes only in the block it was quoted for. The venue rejects a fill priced off a stale reading, so a quote that misses its block reverts rather than filling at the old price.
+
+### Self-hosted Tycho
+
+By default `--tycho-url` points at the [Fynd hosted endpoint](https://docs.propellerheads.xyz/tycho/for-solvers/hosted-endpoints#tycho-fynd) for the selected chain. Fynd talks to Tycho purely over its RPC/WebSocket API, so whether that Tycho is PropellerHeads-hosted or one you run yourself is transparent to Fynd — you only change where it points.
+
+Run your own Tycho when a chain has no hosted Substreams endpoint. The Tycho Indexer can stream from a self-hosted Firehose + Substreams stack; see [Self-Hosted EVM Chain](https://docs.propellerheads.xyz/tycho/for-solvers/self-hosted-evm-chain) for how to stand it up. Once it is serving, point Fynd at it:
+
+```bash
+fynd serve \
+  --chain base \
+  --tycho-url your-self-hosted-tycho.example.com \
+  --rpc-url https://your-node
+```
+
+Notes:
+
+* **TLS** — hosted endpoints use TLS; a local or plain-HTTP Tycho does not. Add `--disable-tls` when your endpoint is not served over TLS.
+* **API key** — the self-hosted indexer's RPC key is its `AUTH_API_KEY` (default `local-dev-key`). Pass it with `--tycho-api-key` / `TYCHO_API_KEY` if your deployment sets one.
+* **Built-in chains** — Fynd's built-in chains are `ethereum`, `base`, `unichain`, `arbitrum`, `polygon`, `bsc`, `robinhood`, `starknet`, `zksync`. Self-hosting Tycho for one of these works out of the box.
+
+#### Custom chains
+
+Fynd can also run against a chain that isn't one of Tycho's built-ins, as long as your self-hosted Tycho indexer declares it. Point Fynd at the same `chains.yaml` the indexer uses with `--chains-config` / `TYCHO_CHAINS_CONFIG`, and pass `--tycho-url` and `--rpc-url` explicitly — custom chains have no built-in defaults, so omitting either is an error:
+
+```bash
+fynd serve \
+  --chain tempo \
+  --chains-config ./chains.yaml \
+  --tycho-url your-self-hosted-tycho.example.com \
+  --rpc-url https://your-node \
+  --disable-tls
+```
+
+See Tycho's [Self-Hosted EVM Chain](https://docs.propellerheads.xyz/tycho/for-solvers/self-hosted-evm-chain) guide for the "Declaring a custom chain" (`chains.yaml`) and "Consuming the custom chain" sections.
+
+**Quote-only until the router is deployed** — a custom chain has no Tycho router/executor contracts until ops deploys them. Until then, Fynd runs quote-only for that chain: `GET /v1/info` reports `router_address: null`, and a quote request with `encoding_options` set returns `501 Not Implemented`. Once the router/executor contracts are deployed, encoding works as usual.
+
 ## Flag reference
 
 Run `fynd serve --help` for the full list.
@@ -78,7 +135,8 @@ Run `fynd serve --help` for the full list.
 | `--rpc-url`                        | `RPC_URL`             | `https://eth.llamarpc.com` | Node RPC endpoint for the target chain. Use a dedicated endpoint in production.                                                                                                                                |
 | `--tycho-url`                      | `TYCHO_URL`           | _(chain-specific)_         | Tycho URL. Defaults to the [Fynd hosted endpoint](https://docs.propellerheads.xyz/tycho/for-solvers/hosted-endpoints#tycho-fynd) for the selected chain.                                                       |
 | `--chain`                          | —                     | `Ethereum`                 | Target chain                                                                                                                                                                                                   |
-| `-p, --protocols`                  | —                     | _(all on-chain)_           | Protocols to index (comma-separated). If omitted, all on-chain protocols available on your configured Tycho endpoint are fetched. Use `all_onchain` to combine auto-fetched protocols with explicit entries (e.g. `all_onchain,rfq:bebop`). |
+| `--chains-config`                  | `TYCHO_CHAINS_CONFIG` | _(none)_                   | Path to the custom-chains `chains.yaml`. Required for a chain Tycho does not know as a built-in.                                                                                                              |
+| `-p, --protocols`                  | —                     | _(all on-chain)_           | Protocols to index (comma-separated). If omitted, all on-chain protocols available on your configured Tycho endpoint are fetched. Use `all_onchain` to combine auto-fetched protocols with explicit entries (e.g. `all_onchain,rfq:bebop`), and the `exclude:` prefix to drop one (e.g. `all_onchain,exclude:vm:fermiswap`). |
 | `--http-host`                      | `HTTP_HOST`           | `0.0.0.0`                  | HTTP bind address                                                                                                                                                                                              |
 | `--http-port`                      | `HTTP_PORT`           | `3000`                     | API port                                                                                                                                                                                                       |
 | `--min-tvl`                        | —                     | `10.0`                     | Minimum pool TVL in native token (ETH)                                                                                                                                                                         |
@@ -95,6 +153,7 @@ Run `fynd serve --help` for the full list.
 | `--gas-price-stale-threshold-secs` | —                     | _(disabled)_               | Health returns 503 when gas price exceeds this age. Disabled by default.                                                                                                                                       |
 | `--partial-blocks`                           | —        | `false`      | Enable partial block (flashblock) updates from the Tycho stream. Pool state updates are delivered mid-block rather than only at finalization, reducing latency. Only applies to on-chain protocols. |
 | `--enable-price-guard`                       | —        | `false`      | Enable [price guard](price-guard.md) validation against external price sources.                                                                                        |
+| `--enable-simulation`                        | —        | `false`      | Enable simulation of encoded quotes against the latest block. Requires an RPC endpoint serving `eth_simulateV1` and `debug_traceCall`. |
 | `--price-guard-lower-tolerance-bps`          | —        | `300`        | Max allowed deviation (bps) when the quote's output is below the provider's expected amount.                                                                           |
 | `--price-guard-upper-tolerance-bps`          | —        | `10000`      | Max allowed deviation (bps) when the quote's output is above the provider's expected amount.                                                                           |
 | `--price-guard-fail-on-provider-error`       | —        | `false`      | Reject quotes when all price providers fail with infrastructure errors.                                                                                                |
@@ -121,7 +180,7 @@ All pools solve every incoming order in parallel. Fynd picks the best result acr
 
 | Field | Default | <div style="width:40%">Description</div> |
 | ----- | ------- | ---------------------------------------- |
-| `algorithm`           | _(required)_    | Algorithm used for the pool (`"most_liquid"`, `"bellman_ford"`, or `"path_frank_wolfe"`) |
+| `algorithm`           | _(required)_    | Algorithm used for the pool: `"most_liquid"`, `"bellman_ford"`, `"path_frank_wolfe"`, `"water_fill"`, or any name an embedding binary registered through `AlgorithmRegistry` |
 | `num_workers`         | CPU count       | Number of OS threads dedicated to this pool                            |
 | `task_queue_capacity` | `1000`          | Maximum number of orders that can be queued simultaneously             |
 | `min_hops`            | `1`             | Minimum number of hops required for routing                            |
@@ -150,6 +209,11 @@ connector_tokens = [
     "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",  # wstETH
 ]
 ```
+
+> **Anchor tokens are not configured.** The `water_fill` algorithm's discovery uses a soft anchor
+> preference when no `connector_tokens` allowlist is set — it prefers to route through the most
+> connected tokens plus the native-ETH sentinel. This set is derived per solve from the live graph,
+> so it stays correct on every chain automatically and needs no configuration.
 
 Use `fynd derive-connector-tokens` to generate a ranked list for your chain from live Tycho data:
 
@@ -183,6 +247,10 @@ components = [
     "0x86d257cdb7bc9c0df10e84c8709697f92770b335",
 ]
 ```
+
+Uniswap V4 pools are also filtered by hook contract: `BLOCKED_UNISWAP_V4_HOOKS` in
+`fynd-core/src/feed/protocol_registry.rs` drops every `uniswap_v4_hooks` component
+whose `hooks` static attribute matches a listed address, regardless of pool ID.
 
 ## Logging and monitoring
 

@@ -1,11 +1,10 @@
 //! Custom algorithm example for fynd-core
 //!
 //! Demonstrates how to implement the [`Algorithm`] trait from scratch and plug it
-//! into [`FyndBuilder`] via [`FyndBuilder::with_algorithm`], without modifying
-//! fynd-core itself.
+//! into [`FyndBuilder`] via [`AlgorithmRegistry`], without modifying fynd-core itself.
 //!
-//! [`DirectPoolAlgorithm`] is a naive algorithm that finds a single pool containing
-//! both the input and output tokens, simulates the swap, and returns the result.
+//! [`DirectComponentAlgorithm`] is a naive algorithm that finds a single component (liquidity pool)
+//! containing both the input and output tokens, simulates the swap, and returns the result.
 //! It only finds direct (1-hop) routes — no multi-hop routing.
 //!
 //! # Prerequisites
@@ -17,41 +16,40 @@
 //! cargo run --package fynd-core --example custom_algorithm
 //! ```
 
-use std::{collections::HashMap, env, str::FromStr, time::Duration};
+use std::{env, str::FromStr, time::Duration};
 
 use fynd_core::{
-    derived::SharedDerivedDataRef,
-    feed::market_data::{MarketData, StateLabel},
     graph::{PetgraphStableDiGraphManager, StableDiGraph},
     types::RouteResult,
-    Algorithm, AlgorithmError, ComputationRequirements, EncodingOptions, FyndBuilder, Order,
-    OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, Swap,
+    Algorithm, AlgorithmError, AlgorithmRegistry, ComputationRequirements, EncodingOptions,
+    FyndBuilder, Order, OrderQuote, OrderSide, QuoteOptions, QuoteRequest, Route, SolveParts,
+    SolveRequest, Swap,
 };
 use num_bigint::{BigInt, BigUint};
+use rustc_hash::FxHashMap;
 use tracing_subscriber::EnvFilter;
 use tycho_simulation::{evm::tycho_models::Chain, tycho_core::Bytes};
-
 // =============================================================================
 // Custom algorithm implementation
 // =============================================================================
 
 // [doc:start custom-algo-impl]
-/// A naive algorithm that finds a direct pool between two tokens.
+/// A naive algorithm that finds a direct component (liquidity pool) between two tokens.
 ///
 /// This iterates through all edges in the routing graph, finds one that
 /// connects `token_in` to `token_out`, simulates the swap, and returns
 /// the first successful result. It only supports single-hop (direct) routes.
-struct DirectPoolAlgorithm {
+struct DirectComponentAlgorithm {
     timeout: Duration,
 }
 
-impl DirectPoolAlgorithm {
+impl DirectComponentAlgorithm {
     fn new(_config: fynd_core::AlgorithmConfig) -> Self {
         Self { timeout: Duration::from_millis(100) }
     }
 }
 
-impl Algorithm for DirectPoolAlgorithm {
+impl Algorithm for DirectComponentAlgorithm {
     // Reuse the built-in petgraph manager — it handles graph initialization and
     // market event updates automatically. We just need a simple graph with no
     // edge weights (unit `()` type).
@@ -64,12 +62,9 @@ impl Algorithm for DirectPoolAlgorithm {
 
     async fn find_best_route(
         &self,
-        graph: &Self::GraphType,
-        market: MarketData,
-        label: Option<StateLabel>,
-        _derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
+        let SolveParts { graph, order, market, label, exclusions, .. } = request.into_parts();
         let market = match label.as_ref() {
             Some(l) => market
                 .read_labeled(l)
@@ -99,6 +94,10 @@ impl Algorithm for DirectPoolAlgorithm {
                 .edge_weight(edge_idx)
                 .expect("edge exists")
                 .component_id;
+
+            if exclusions.excludes_pool(component_id) {
+                continue;
+            }
 
             // Look up component metadata and simulation state.
             let Some(component) = market.get_component(component_id) else {
@@ -132,14 +131,15 @@ impl Algorithm for DirectPoolAlgorithm {
                 state.clone_box(),
             );
 
-            let route = Route::new(vec![swap], HashMap::new())?;
+            let route = Route::new(vec![swap], FxHashMap::default())?;
 
             // Validate every candidate route before returning it. The solver worker rejects
             // invalid routes (disconnected swaps, repeated tokens, malformed splits) and that
             // failure drops the whole solution for this worker pool. Skipping invalid candidates
-            // here lets a later pool be chosen instead. Any custom algorithm should validate the
-            // routes it might return, and — when it ranks multiple candidates — fall through to
-            // the next-best valid one rather than returning the invalid route.
+            // here lets a later component be chosen instead. Any custom algorithm should validate
+            // the routes it might return, and — when it ranks multiple candidates —
+            // fall through to the next-best valid one rather than returning the invalid
+            // route.
             if let Err(e) = route.validate() {
                 eprintln!("skipping invalid route: {e}");
                 continue;
@@ -151,7 +151,7 @@ impl Algorithm for DirectPoolAlgorithm {
         }
 
         Err(AlgorithmError::Other(format!(
-            "no direct pool from {:?} to {:?}",
+            "no direct component from {:?} to {:?}",
             order.token_in(),
             order.token_out()
         )))
@@ -192,7 +192,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         10.0,
     )
     .tycho_api_key(tycho_api_key)
-    .with_algorithm("direct_pool", DirectPoolAlgorithm::new)
+    .algorithm("direct_pool")
+    .with_algorithms(
+        AlgorithmRegistry::new().with_algorithm("direct_pool", DirectComponentAlgorithm::new)?,
+    )
     .build()?;
     // [doc:end custom-algo-wire]
 

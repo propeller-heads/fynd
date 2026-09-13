@@ -17,7 +17,8 @@ pub enum ErrorCode {
     /// Server code: `NO_ROUTE_FOUND`.
     NoRouteFound,
 
-    /// A route exists but available pool liquidity is too shallow for the requested amount.
+    /// A route exists but available component liquidity is too shallow for the
+    /// requested amount.
     ///
     /// Server code: `INSUFFICIENT_LIQUIDITY`.
     InsufficientLiquidity,

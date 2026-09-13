@@ -72,8 +72,8 @@
 //! ```
 
 pub use client::{
-    AllowanceCheck, ApprovalParams, ExecutionOptions, FyndClient, FyndClientBuilder, RetryConfig,
-    SigningHints, StorageOverrides,
+    AllowanceCheck, ApprovalParams, ExecutionOptions, FyndClient, FyndClientBuilder, HostedConfig,
+    RetryConfig, SigningHints, StorageOverrides,
 };
 pub use error::{ErrorCode, FyndError};
 pub use signing::{
@@ -83,7 +83,8 @@ pub use signing::{
 pub use types::{
     BackendKind, BatchQuoteParams, BlockInfo, ClientFeeParams, EncodingOptions, FeeBreakdown,
     HealthStatus, InstanceInfo, Order, OrderSide, PermitDetails, PermitSingle, PriceGuardConfig,
-    Quote, QuoteOptions, QuoteParams, QuoteStatus, Route, Swap, Transaction, UserTransferType,
+    Quote, QuoteOptions, QuoteParams, QuoteStatus, Route, RouteFilter, SimulationResult, Swap,
+    Transaction, UserTransferType,
 };
 
 mod client;

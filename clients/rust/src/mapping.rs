@@ -11,7 +11,7 @@ use crate::{
     types::{
         BackendKind, BatchQuoteParams, BlockInfo, EncodingOptions, FeeBreakdown, HealthStatus,
         Order, OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams,
-        QuoteStatus, Route, Swap, Transaction, UserTransferType,
+        QuoteStatus, Route, SimulationResult, Swap, Transaction, UserTransferType,
     },
 };
 // ============================================================================
@@ -137,6 +137,9 @@ impl TryFrom<QuoteOptions> for dto::QuoteOptions {
         if let Some(enc) = opts.encoding_options {
             dto_opts = dto_opts.with_encoding_options(dto::EncodingOptions::try_from(enc)?);
         }
+        if let Some(filter) = opts.route_filter {
+            dto_opts = dto_opts.with_route_filter(filter);
+        }
         Ok(dto_opts)
     }
 }
@@ -171,6 +174,9 @@ impl TryFrom<EncodingOptions> for dto::EncodingOptions {
         }
         if let Some(pg) = opts.price_guard {
             dto_opts = dto_opts.with_price_guard(pg);
+        }
+        if opts.simulate {
+            dto_opts = dto_opts.with_simulation();
         }
         Ok(dto_opts)
     }
@@ -238,7 +244,7 @@ fn order_quote_to_quote(
             swaps_hash,
         )
     });
-    Ok(Quote::new(
+    let mut quote = Quote::new(
         order_quote.order_id().to_string(),
         status,
         BackendKind::Fynd,
@@ -253,7 +259,20 @@ fn order_quote_to_quote(
         receiver,
         transaction,
         fee_breakdown,
-    ))
+    );
+    quote.algorithm = order_quote
+        .algorithm()
+        .map(str::to_string);
+    quote.simulation_result = order_quote
+        .simulation_result()
+        .cloned()
+        .map(|result| match result {
+            dto::SimulationResult::Success { amount_out, gas_used } => {
+                SimulationResult::Success { amount_out, gas_used }
+            }
+            dto::SimulationResult::Failure { reason } => SimulationResult::Failure { reason },
+        });
+    Ok(quote)
 }
 
 impl From<dto::Transaction> for Transaction {
@@ -355,13 +374,17 @@ impl TryFrom<fynd_rpc_types::InstanceInfo> for crate::types::InstanceInfo {
     type Error = FyndError;
 
     fn try_from(dto: fynd_rpc_types::InstanceInfo) -> Result<Self, Self::Error> {
-        let router = bytes::Bytes::copy_from_slice(dto.router_address().as_ref());
+        let router = dto
+            .router_address()
+            .map(|r| bytes::Bytes::copy_from_slice(r.as_ref()));
         let permit2 = bytes::Bytes::copy_from_slice(dto.permit2_address().as_ref());
-        if router.len() != 20 {
-            return Err(FyndError::Protocol(format!(
-                "router_address must be 20 bytes, got {}",
-                router.len()
-            )));
+        if let Some(router) = &router {
+            if router.len() != 20 {
+                return Err(FyndError::Protocol(format!(
+                    "router_address must be 20 bytes, got {}",
+                    router.len()
+                )));
+            }
         }
         if permit2.len() != 20 {
             return Err(FyndError::Protocol(format!(
@@ -369,7 +392,12 @@ impl TryFrom<fynd_rpc_types::InstanceInfo> for crate::types::InstanceInfo {
                 permit2.len()
             )));
         }
-        Ok(crate::types::InstanceInfo::new(router, permit2, dto.chain_id()))
+        Ok(crate::types::InstanceInfo::new(
+            router,
+            permit2,
+            dto.chain_id(),
+            dto.version().to_string(),
+        ))
     }
 }
 
@@ -404,7 +432,7 @@ mod tests {
     fn sample_dto_swap() -> dto::Swap {
         serde_json::from_str(
             r#"{
-            "component_id": "pool-1",
+            "component_id": "component-1",
             "protocol": "uniswap-v3",
             "token_in": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "token_out": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -442,6 +470,27 @@ mod tests {
         }"#,
         )
         .expect("valid order quote JSON")
+    }
+
+    // -----------------------------------------------------------------------
+    // InstanceInfo conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn instance_info_maps_version() {
+        let dto: fynd_rpc_types::InstanceInfo = serde_json::from_str(
+            r#"{
+            "version": "9.9.9",
+            "chain_id": 1,
+            "router_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "permit2_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }"#,
+        )
+        .expect("valid instance info JSON");
+
+        let mapped: crate::types::InstanceInfo = dto.try_into().expect("maps");
+        assert_eq!(mapped.version(), "9.9.9");
+        assert_eq!(mapped.chain_id(), 1);
     }
 
     // -----------------------------------------------------------------------
@@ -503,7 +552,7 @@ mod tests {
     #[test]
     fn swap_try_from_dto_happy_path() {
         let client_swap = Swap::try_from(sample_dto_swap()).unwrap();
-        assert_eq!(client_swap.component_id(), "pool-1");
+        assert_eq!(client_swap.component_id(), "component-1");
         assert_eq!(client_swap.protocol(), "uniswap-v3");
         assert_eq!(client_swap.token_in(), &Bytes::copy_from_slice(&[0xaa; 20]));
         assert_eq!(client_swap.token_out(), &Bytes::copy_from_slice(&[0xbb; 20]));
@@ -562,6 +611,28 @@ mod tests {
         // token_out and receiver are left empty until populated by quote()
         assert!(quote.token_out().is_empty());
         assert!(quote.receiver().is_empty());
+        // The sample response omits the field, as a no-route placeholder does.
+        assert_eq!(quote.algorithm(), None);
+    }
+
+    #[test]
+    fn quote_from_dto_algorithm() {
+        let ds: dto::OrderQuote = serde_json::from_str(
+            r#"{
+            "order_id": "test-order-id",
+            "status": "success",
+            "amount_in": "1000",
+            "amount_out": "999",
+            "gas_estimate": "100000",
+            "amount_out_net_gas": "998",
+            "algorithm": "bellman_ford",
+            "block": {"number": 21000000, "hash": "0xdeadbeef", "timestamp": 1730000000}
+        }"#,
+        )
+        .expect("valid order quote JSON");
+
+        let quote = order_quote_to_quote(ds, Bytes::new(), Bytes::new()).unwrap();
+        assert_eq!(quote.algorithm(), Some("bellman_ford"));
     }
 
     // -----------------------------------------------------------------------
@@ -754,6 +825,23 @@ mod tests {
         let opts = EncodingOptions::new(0.005);
         let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
         assert!(dto_opts.client_fee_params().is_none());
+    }
+
+    #[test]
+    fn test_quote_options_to_dto_route_filter() {
+        use crate::types::{QuoteOptions, RouteFilter};
+
+        let opts = QuoteOptions::default().with_route_filter(
+            RouteFilter::default()
+                .with_excluded_pools(["pool-1".to_string()])
+                .with_excluded_protocols(["uniswap_v2".to_string()]),
+        );
+
+        let dto_opts = dto::QuoteOptions::try_from(opts).unwrap();
+        let filter = dto_opts.route_filter().unwrap();
+
+        assert_eq!(filter.excluded_pools(), ["pool-1".to_string()]);
+        assert_eq!(filter.excluded_protocols(), ["uniswap_v2".to_string()]);
     }
 
     // -----------------------------------------------------------------------

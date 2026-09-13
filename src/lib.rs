@@ -14,6 +14,56 @@
 //! use fynd::rpc::builder::FyndRPCBuilder;
 //! use fynd::core::algorithm::Algorithm;
 //! ```
+//!
+//! To run Fynd's own command line with an algorithm of your own, parse [`cli::Cli`] and hand
+//! [`serve::run_solver`] a registry — the binary keeps every flag `fynd serve` has:
+//!
+//! ```rust,ignore
+//! let algorithms = fynd::core::AlgorithmRegistry::new().with_algorithm("mine", Mine::new)?;
+//! match fynd::cli::Cli::parse().command {
+//!     fynd::cli::Commands::Serve(args) => fynd::serve::run_solver(*args, algorithms)?,
+//!     _ => {}
+//! }
+//! ```
+//!
+//! To also change what the server serves, use [`serve::run_solver_with`]: it hands you the
+//! builder the CLI configured, so an embedder can override a route or rewrite the OpenAPI
+//! document without restating a single flag.
+//!
+//! ```rust,ignore
+//! fynd::serve::run_solver_with(*args, algorithms, |builder| {
+//!     builder.configure_routes(my_routes::configure)
+//! })?;
+//! ```
+//!
+//! # Features
+//!
+//! - `metrics` (default): a Prometheus metrics exporter on a separate HTTP server.
+//! - `experimental`: forwards [`fynd_rpc`]'s feature of the same name, which serves `GET
+//!   /v1/{chain}/prices` and `GET /v1/{chain}/tokens`. Off by default, because both endpoints and
+//!   their response shapes can change in any release.
 
 pub use fynd_core as core;
 pub use fynd_rpc as rpc;
+
+/// Command-line arguments, so a binary embedding Fynd can parse the same ones.
+pub mod cli;
+/// Subcommands other than `serve`.
+pub mod commands;
+/// Running the solver, as `fynd serve` does.
+pub mod serve;
+
+#[cfg(test)]
+mod tests {
+    /// `fynd_rpc` declares `api::prices` under the same cfg that registers the two
+    /// experimental routes, so this import resolves only when the feature reached it. A
+    /// dependant gets at those endpoints through this crate alone, and no longer has to
+    /// depend on `fynd-rpc` itself to switch the feature on.
+    #[cfg(feature = "experimental")]
+    #[test]
+    fn test_experimental_forwards_to_fynd_rpc() {
+        use crate::rpc::api::prices::PricesQuery;
+
+        assert!(std::any::type_name::<PricesQuery>().ends_with("PricesQuery"));
+    }
+}

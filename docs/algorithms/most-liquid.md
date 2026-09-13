@@ -8,22 +8,22 @@ The Most Liquid algorithm finds swap routes by enumerating candidate paths, scor
 
 ## Overview
 
-The algorithm runs in four phases:
+The algorithm runs in four stages:
 
 1. **Enumerate** all simple paths up to `max_hops` using BFS
 2. **Score and sort** paths by a heuristic (spot price and liquidity depth)
 3. **Simulate** the top-N paths using actual pool math
 4. **Rank** by net output after gas cost deduction
 
-The key insight is that phases 1-2 are cheap (graph traversal and arithmetic), while phase 3 is expensive (full AMM simulation per hop). The heuristic in phase 2 acts as a filter, ensuring simulation budget is spent on paths most likely to win.
+The key insight is that stages 1-2 are cheap (graph traversal and arithmetic), while stage 3 is expensive (full AMM simulation per hop). The heuristic in stage 2 acts as a filter, ensuring simulation budget is spent on paths most likely to win.
 
-## Phase 1: Path enumeration
+## Stage 1: Path enumeration
 
 Starting from the source token, BFS explores all outgoing edges up to `max_hops` depth. At each step it follows every edge (including parallel edges between the same token pair from different pools), building complete paths from source to destination.
 
 The result is a list of all simple paths (no repeated tokens) from source to destination within the hop limit.
 
-## Phase 2: Heuristic scoring
+## Stage 2: Heuristic scoring
 
 Each path is scored without simulation using two derived data values per edge:
 
@@ -38,11 +38,11 @@ score = (product of spot prices along the route) × min(depth along the route)
 
 The spot price product estimates the exchange rate. The minimum depth acts as a bottleneck indicator: a path is only as liquid as its shallowest pool. Paths through deep, well-priced pools score highest.
 
-This scoring is approximate. It ignores price impact (the spot price assumes infinitesimal trade size) and doesn't account for how liquidity changes after each hop. But it's fast and good enough to rank tens of thousands of candidates so the expensive simulation phase focuses on the right ones.
+This scoring is approximate. It ignores price impact (the spot price assumes infinitesimal trade size) and doesn't account for how liquidity changes after each hop. But it's fast and good enough to rank tens of thousands of candidates so the expensive simulation stage focuses on the right ones.
 
 Paths are sorted by score descending. If `max_routes` is configured, only the top-N proceed to simulation.
 
-## Phase 3: Simulation
+## Stage 3: Simulation
 
 Each surviving path is simulated end-to-end. For every hop, the algorithm calls `get_amount_out()` on the actual pool state with the running amount from the previous hop. This accounts for:
 
@@ -53,7 +53,7 @@ Each surviving path is simulated end-to-end. For every hop, the algorithm calls 
 
 If a simulation fails (e.g., insufficient liquidity in a pool), the path is discarded. Otherwise, the final output amount is recorded.
 
-## Phase 4: Gas-adjusted ranking
+## Stage 4: Gas-adjusted ranking
 
 Each simulated path's output is adjusted for gas cost:
 
@@ -77,6 +77,33 @@ The path with the highest `net_output` wins.
 
 * **High hop counts** (4+): the number of candidate paths grows exponentially. Even with `max_routes` capping simulation, the heuristic may not surface the best path.
 * **Exotic pairs**: tokens with thin liquidity often have non-obvious routes where the spot price heuristic misjudges the actual output. The Bellman-Ford algorithm, which simulates every edge without a heuristic filter, handles these better.
+
+## Suggested configuration
+
+```toml
+[pools.most_liquid_3_hops]
+algorithm = "most_liquid"
+num_workers = 3
+task_queue_capacity = 1000
+max_hops = 3
+timeout_ms = 500
+max_routes = 50
+```
+
+* `max_hops = 3` keeps enumeration tractable. At 4+ hops the candidate path count explodes and the
+  heuristic filter starts dropping good routes.
+* `max_routes = 50` caps the simulation stage. Without it every enumerated path is simulated, which
+  is what makes high hop counts expensive.
+* `timeout_ms = 500` leaves headroom for the simulation stage on VM-simulated protocols. Lower it if
+  you run this pool purely as a latency-sensitive baseline.
+
+{% hint style="warning" %}
+**Set connector tokens.** With `connector_tokens` unset, routes can pass through illiquid long-tail
+intermediates, which raises reversion risk. Restrict intermediate hops to a small trusted set —
+generate one for your chain with `fynd derive-connector-tokens --chain Ethereum --top-n 10 --output
+toml` and paste it into the pool. See
+[Connector tokens](../guides/server-configuration.md#connector-tokens).
+{% endhint %}
 
 ## Source reference
 

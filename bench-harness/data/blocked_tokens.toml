@@ -1,0 +1,32 @@
+# Tokens excluded from the benchmark market.
+#
+# Every pool holding one of these is dropped from the recording before any solver is built, and any
+# order naming one as an endpoint is dropped from the dataset. Removing them at the market level
+# rather than through `connector_tokens` is deliberate: `path_frank_wolfe` does not read
+# `connector_tokens`, so a routing-level filter would apply to some algorithms and not others, and
+# the comparison would stop being fair.
+#
+# The bar for adding one: the recorded state prices it inconsistently against the rest of the
+# market, so a router that exploits the inconsistency scores a win it could never realise. That is
+# a fault in the snapshot, not in the algorithm, and leaving it in rewards whichever algorithm
+# searches deepest.
+
+[[tokens]]
+address = "0xd46ba6d942050d489dbd938a2c909a5d5039a161"
+symbol = "AMPL"
+reason = """
+Rebasing. Uniswap V2 pairs store reserves that only update on sync or a swap, so after a rebase the
+stored reserves no longer match the balances, and the simulator prices off the reserves. In this
+fixture AMPL is worth $1.26 through its WETH pools and $0.42 through the SPOT pools — a 3x
+disagreement inside one snapshot. Order 911 (1,090 USDC -> WETH) turns that into a 2.8x "win" for
+every three-hop config: USDC -> SPOT -> AMPL -> WETH, +18,000 bps that no one could execute.
+"""
+
+[[tokens]]
+address = "0xc1f33e0cf7e40a67375007104b929e49a581bafe"
+symbol = "SPOT"
+reason = """
+The other side of the same inconsistency: an AMPL derivative whose USDC pools price it at $0.50
+while its AMPL pool implies $1.52. Blocked with AMPL because the loop needs both, and leaving one
+leg reachable leaves a smaller version of the same fiction.
+"""

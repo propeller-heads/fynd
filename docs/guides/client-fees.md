@@ -76,14 +76,24 @@ See [Tycho encoding docs](https://docs.propellerheads.xyz/tycho/for-solvers/exec
 
 ## EIP-712 signing
 
-The fee receiver signs a typed data hash:
+The fee receiver signs a typed data hash binding the fee params to the swap they were quoted for:
 
-| Field                   | Type      | Description                       |
-| ----------------------- | --------- | --------------------------------- |
-| `clientFeeBps`          | `uint16`  | Fee in basis points (0-10,000)    |
-| `clientFeeReceiver`     | `address` | Address receiving the fee         |
-| `maxClientContribution` | `uint256` | Maximum subsidy from client vault |
-| `deadline`              | `uint256` | Signature expiry (Unix timestamp) |
+| Field                   | Type      | Description                                            |
+| ----------------------- | --------- | ------------------------------------------------------ |
+| `clientFeeBps`          | `uint32`  | Fee in fee units (100,000,000 = 100%; 1 bps = 10,000)  |
+| `clientFeeReceiver`     | `address` | Address receiving the fee                              |
+| `maxClientContribution` | `uint256` | Maximum subsidy from client vault                      |
+| `deadline`              | `uint256` | Signature expiry (Unix timestamp)                      |
+| `amountIn`              | `uint256` | Exact input amount from the order                      |
+| `tokenIn`               | `address` | Input token                                            |
+| `tokenOut`              | `address` | Output token                                           |
+| `expectedAmountOut`     | `uint256` | Quoted output (`amount_out` of the unsigned quote)     |
+| `minAmountOut`          | `uint256` | `fee_breakdown.min_amount_received`                    |
+| `receiver`              | `address` | Address receiving the swap output                      |
+| `swaps`                 | `bytes`   | Encoded swaps — hashed as `fee_breakdown.swaps_hash`   |
+
+The API takes the client fee in basis points and scales it into the router's fee units, so the
+client library helpers sign the scaled value rather than the raw bps.
 
 **EIP-712 domain:**
 
@@ -107,8 +117,17 @@ const feeParams: ClientFeeParams = {
     deadline: 1893456000, // Unix timestamp
 };
 
-// Compute the EIP-712 hash and sign with the fee receiver's wallet.
-const hash = clientFeeSigningHash(feeParams, 1, routerAddress);
+// Compute the EIP-712 hash and sign with the fee receiver's wallet. The swap context comes
+// from a prior unsigned quote.
+const hash = clientFeeSigningHash(feeParams, 1, routerAddress, {
+    amountIn: quote.amountIn,
+    tokenIn: sellToken,
+    tokenOut: buyToken,
+    expectedAmountOut: quote.amountOut,
+    minAmountOut: quote.feeBreakdown.minAmountReceived,
+    receiver: sender,
+    swapsHash: quote.feeBreakdown.swapsHash,
+});
 const signature = await account.signMessage({message: {raw: hash}});
 
 // Attach signature and wire into encoding options.
@@ -152,7 +171,7 @@ const opts = withClientFee(encodingOptions(0.005), {...feeParams, signature});
         .swaps_hash()
         .ok_or("no swaps_hash — server must support client fee signing")?;
 
-    // Step 2: sign the full 10-field EIP-712 ClientFee hash.
+    // Step 2: sign the full 11-field EIP-712 ClientFee hash.
     // receiver defaults to sender when the order has no explicit receiver.
     let hash = fee.eip712_signing_hash(
         chain_id,
@@ -160,6 +179,7 @@ const opts = withClientFee(encodingOptions(0.005), {...feeParams, signature});
         quote.amount_in(),
         &Bytes::copy_from_slice(sell_token.as_slice()),
         &Bytes::copy_from_slice(buy_token.as_slice()),
+        quote.amount_out(),
         fee_breakdown.min_amount_received(),
         &Bytes::copy_from_slice(sender.as_slice()),
         swaps_hash,

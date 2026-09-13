@@ -42,6 +42,12 @@ const baseWireSolution: WireSolution = {
 };
 
 describe('toWireRequest', () => {
+  it('serializes simulation only when requested', () => {
+    const enabled = toWireRequest({ ...baseParams, options: { encodingOptions: { slippage: 0.01, simulate: true } } });
+    const disabled = toWireRequest({ ...baseParams, options: { encodingOptions: { slippage: 0.01, simulate: false } } });
+    expect(enabled.options?.encoding_options?.simulate).toBe(true);
+    expect(disabled.options?.encoding_options).not.toHaveProperty('simulate');
+  });
   it('converts a basic sell order', () => {
     const wire = toWireRequest(baseParams);
     expect(wire.orders).toHaveLength(1);
@@ -51,6 +57,24 @@ describe('toWireRequest', () => {
     expect(order?.amount).toBe('1000');
     expect(order?.side).toBe('sell');
     expect(order?.sender).toBe(SENDER);
+  });
+
+  it('sends the route filter under snake_case wire names', () => {
+    const wire = toWireRequest({
+      ...baseParams,
+      options: {
+        routeFilter: {
+          excludePools: ['0xabc'],
+          excludeProtocols: ['uniswap_v2'],
+          excludeTokens: [TOKEN_OUT],
+        },
+      },
+    });
+    expect(wire.options?.route_filter).toEqual({
+      exclude_pools: ['0xabc'],
+      exclude_protocols: ['uniswap_v2'],
+      exclude_tokens: [TOKEN_OUT],
+    });
   });
 
   it('omits receiver key when order.receiver is undefined', () => {
@@ -188,6 +212,30 @@ describe('toWireRequest', () => {
   });
 });
 
+describe('fromWireQuote simulation results', () => {
+  const withSimulationResult = (simulation_result: unknown): WireSolution => ({
+    ...baseWireSolution,
+    orders: [{ ...baseWireSolution.orders[0]!, simulation_result } as WireSolution['orders'][0]],
+  });
+
+  it('decodes a successful simulation with its gas', () => {
+    const wire = withSimulationResult({ status: 'success', amount_out: '7', gas_used: 123 });
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.simulationResult).toEqual({ status: 'success', amountOut: 7n, gasUsed: 123 });
+  });
+
+  it('decodes a failed simulation with its reason', () => {
+    const wire = withSimulationResult({ status: 'failure', reason: 'reverted' });
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.simulationResult).toEqual({ status: 'failure', reason: 'reverted' });
+  });
+
+  it('leaves simulationResult unset when the quote carries none', () => {
+    const quote = fromWireQuote(baseWireSolution, TOKEN_OUT, SENDER);
+    expect(quote.simulationResult).toBeUndefined();
+  });
+});
+
 describe('fromWireQuote', () => {
   it('maps all fields correctly on happy path', () => {
     const quote = fromWireQuote(baseWireSolution, TOKEN_OUT, SENDER);
@@ -261,14 +309,14 @@ describe('fromWireQuote', () => {
     expect(quote.route).toBeDefined();
     expect(quote.route?.swaps).toHaveLength(1);
     const swap = quote.route?.swaps[0];
-    expect(swap?.poolId).toBe('0xpool');
+    expect(swap?.componentId).toBe('0xpool');
     expect(swap?.protocol).toBe('uniswap_v2');
     expect(swap?.amountIn).toBe(1000n);
     expect(swap?.amountOut).toBe(3500n);
     expect(swap?.gasEstimate).toBe(80000n);
   });
 
-  it('maps component_id to poolId', () => {
+  it('maps component_id to componentId', () => {
     const wire: WireSolution = {
       ...baseWireSolution,
       orders: [
@@ -291,7 +339,7 @@ describe('fromWireQuote', () => {
       ],
     };
     const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
-    expect(quote.route?.swaps[0]?.poolId).toBe('0xpool123');
+    expect(quote.route?.swaps[0]?.componentId).toBe('0xpool123');
   });
 
   it('priceImpactBps is undefined when wire value is null', () => {

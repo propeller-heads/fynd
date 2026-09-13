@@ -58,8 +58,10 @@ Fynd currently supports **sell orders** only (exact input amount). You specify t
 * Ethereum Mainnet
 * Base
 * Unichain
-
-_Coming soon_: Arbitrum, Polygon, and BSC.
+* Arbitrum
+* Polygon
+* BNB Smart Chain
+* Robinhood Chain
 
 ### Supported Protocols
 

@@ -63,6 +63,9 @@ If on-chain execution produces less than `minAmountOut`, the transaction reverts
 
 Typical values are `0.005` (0.5%) for stablecoin pairs and `0.01` (1%) for volatile pairs.
 
+The router rejects a `minAmountOut` of zero, so fees plus slippage may not eat the whole quoted
+output. Encoding fails with an error rather than returning calldata that would revert.
+
 ## The response transaction
 
 When encoding options are present and the quote succeeds, the response includes a `transaction`

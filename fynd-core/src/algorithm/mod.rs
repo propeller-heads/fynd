@@ -16,31 +16,46 @@
 //! **Built-in:** To add an algorithm to the built-in registry:
 //! 1. Create a new module with your algorithm implementation
 //! 2. Implement the `Algorithm` trait
-//! 3. Register it in `registry.rs`
+//! 3. Register it in `worker_pool/registry.rs`
+//!
+//! **From outside this crate:** implement the trait and bring it in with
+//! [`AlgorithmRegistry`](crate::algorithm::registry::AlgorithmRegistry); no change here is needed.
 
 pub mod bellman_ford;
 pub mod most_liquid;
 pub mod path_frank_wolfe;
-#[allow(dead_code)]
-pub(crate) mod split_primitives;
+pub(crate) mod path_scoring;
+/// Enumerating and simulating routes between two tokens.
+pub mod paths;
+pub mod registry;
+/// What an algorithm is given to solve one order.
+pub mod request;
+pub(crate) mod sim_guard;
+pub mod sim_meter;
+/// Shared machinery for algorithms that divide an order across several paths.
+pub mod split_primitives;
+pub mod water_fill;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod split_test_harness;
-#[cfg(test)]
+/// Remembers what a pool paid, so one solve asks it once per amount.
+pub mod swap_cache;
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
-use std::{collections::HashSet, time::Duration};
+use std::time::Duration;
 
 pub use bellman_ford::BellmanFordAlgorithm;
 pub use most_liquid::MostLiquidAlgorithm;
 pub use path_frank_wolfe::PathFrankWolfeAlgorithm;
+pub use registry::{AlgorithmRegistry, RegisterAlgorithmError};
+pub use request::{SolveParts, SolveRequest};
+use rustc_hash::FxHashSet;
 use tycho_simulation::tycho_core::models::Address;
+pub use water_fill::WaterFillAlgorithm;
 
 use crate::{
-    derived::{computation::ComputationRequirements, SharedDerivedDataRef},
-    feed::market_data::{MarketData, StateLabel},
-    graph::GraphManager,
-    types::{quote::Order, RouteResult},
+    derived::computation::ComputationRequirements, graph::GraphManager, types::RouteResult,
 };
 
 /// Configuration for an Algorithm instance.
@@ -60,7 +75,7 @@ pub struct AlgorithmConfig {
     gas_aware: bool,
     /// Tokens allowed as intermediate hops. `None` = no restriction (all tokens reachable).
     /// `token_in` and `token_out` for a given order are always allowed regardless.
-    connector_tokens: Option<HashSet<Address>>,
+    connector_tokens: Option<FxHashSet<Address>>,
 }
 
 impl AlgorithmConfig {
@@ -139,13 +154,13 @@ impl AlgorithmConfig {
     /// When set, only these tokens may appear between `token_in` and `token_out`
     /// in a multi-hop route. The order endpoints are always allowed regardless.
     /// Pass an empty set to disallow all intermediate hops (only 1-hop routes possible).
-    pub fn with_connector_tokens(mut self, tokens: HashSet<Address>) -> Self {
-        self.connector_tokens = Some(tokens);
+    pub fn with_connector_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.connector_tokens = Some(tokens.into_iter().collect());
         self
     }
 
     /// Returns the connector token allowlist, or `None` if all tokens are permitted.
-    pub fn connector_tokens(&self) -> Option<&HashSet<Address>> {
+    pub fn connector_tokens(&self) -> Option<&FxHashSet<Address>> {
         self.connector_tokens.as_ref()
     }
 }
@@ -182,17 +197,14 @@ pub trait Algorithm: Send + Sync {
     /// Returns the algorithm's name.
     fn name(&self) -> &str;
 
-    /// Finds the best route for the given order.
+    /// Finds the best route for the order the request carries.
     ///
-    /// # Arguments
+    /// [`SolveRequest`] holds the graph, the market, the order, the overlay to read state through,
+    /// the derived data, and what the caller excludes from a route. Read these through the getters
+    /// or move them out with [`SolveRequest::into_parts`].
     ///
-    /// * `graph` - The algorithm's preferred graph type (e.g., petgraph::Graph)
-    /// * `market` - Shared reference to market data for state lookups (algorithms acquire their own
-    ///   locks)
-    /// * `label` - Optional overlay label; when `Some`, the algorithm reads market state through
-    ///   the named overlay so per-request pool overrides are applied during solving
-    /// * `derived` - Optional shared reference to derived data (token prices, etc.)
-    /// * `order` - The order to solve
+    /// Honour [`SolveRequest::exclusions`] during search and simulation. The worker rejects
+    /// returned routes that violate the request filter.
     ///
     /// # Returns
     ///
@@ -200,11 +212,7 @@ pub trait Algorithm: Send + Sync {
     /// found.
     async fn find_best_route(
         &self,
-        graph: &Self::GraphType,
-        market: MarketData,
-        label: Option<StateLabel>,
-        derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError>;
 
     /// Returns the derived data computation requirements for this algorithm.
@@ -270,7 +278,7 @@ pub enum AlgorithmError {
     #[non_exhaustive]
     #[error("simulation failed for {component_id}: {error}")]
     SimulationFailed {
-        /// ID of the pool component that failed.
+        /// ID of the component (liquidity pool) that failed.
         component_id: String,
         /// Underlying simulation error message.
         error: String,
@@ -309,6 +317,49 @@ pub enum NoPathReason {
     NoGraphPath,
     /// Paths exist but none could be scored (e.g., missing edge weights).
     NoScorablePaths,
+    /// The requested amount is too small to route (dust). Detection depends
+    /// on scoring mode: gas-unaware scoring reports this when an explored
+    /// hop's output floors to zero; gas-aware scoring reports it when an
+    /// explored hop's input cannot cover that hop's gas cost. The signal
+    /// latches on any explored edge, so a usable path to the destination may
+    /// not have existed.
+    AmountTooSmall,
+}
+
+/// Constructors for the variants that carry fields.
+///
+/// Those variants are `#[non_exhaustive]`, so a crate outside this one cannot build them with a
+/// struct expression. This is how an algorithm implemented elsewhere reports what it found.
+impl AlgorithmError {
+    /// No path exists between the two tokens.
+    #[must_use]
+    pub fn no_path(from: Address, to: Address, reason: NoPathReason) -> Self {
+        Self::NoPath { from, to, reason }
+    }
+
+    /// The search ran out of time.
+    #[must_use]
+    pub fn timeout(elapsed_ms: u64) -> Self {
+        Self::Timeout { elapsed_ms }
+    }
+
+    /// A component refused a swap.
+    #[must_use]
+    pub fn simulation_failed(component_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self::SimulationFailed { component_id: component_id.into(), error: error.into() }
+    }
+
+    /// The market does not hold something the algorithm needs.
+    #[must_use]
+    pub fn data_not_found(kind: &'static str, id: impl Into<Option<String>>) -> Self {
+        Self::DataNotFound { kind, id: id.into() }
+    }
+
+    /// The algorithm was built with settings it cannot work under.
+    #[must_use]
+    pub fn invalid_configuration(reason: impl Into<String>) -> Self {
+        Self::InvalidConfiguration { reason: reason.into() }
+    }
 }
 
 impl std::fmt::Display for NoPathReason {
@@ -318,6 +369,7 @@ impl std::fmt::Display for NoPathReason {
             Self::DestinationTokenNotInGraph => write!(f, "destination token not in graph"),
             Self::NoGraphPath => write!(f, "no connecting path in graph"),
             Self::NoScorablePaths => write!(f, "no paths with valid scores"),
+            Self::AmountTooSmall => write!(f, "amount too small to route"),
         }
     }
 }
@@ -325,6 +377,41 @@ impl std::fmt::Display for NoPathReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two same-typed arguments in a row is where an argument swap hides, and these constructors
+    /// are the only way an algorithm outside this crate reports a failure.
+    #[test]
+    fn test_error_constructors_put_each_argument_where_its_name_says() {
+        let from = Address::from(vec![0x0Au8]);
+        let to = Address::from(vec![0x0Bu8]);
+
+        match AlgorithmError::no_path(from.clone(), to.clone(), NoPathReason::NoGraphPath) {
+            AlgorithmError::NoPath { from: f, to: t, reason } => {
+                assert_eq!((f, t, reason), (from, to, NoPathReason::NoGraphPath));
+            }
+            other => panic!("expected NoPath, got {other:?}"),
+        }
+
+        match AlgorithmError::simulation_failed("pool-1", "reverted") {
+            AlgorithmError::SimulationFailed { component_id, error } => {
+                assert_eq!((component_id.as_str(), error.as_str()), ("pool-1", "reverted"));
+            }
+            other => panic!("expected SimulationFailed, got {other:?}"),
+        }
+
+        match AlgorithmError::data_not_found("token", "0x0a".to_string()) {
+            AlgorithmError::DataNotFound { kind, id } => {
+                assert_eq!((kind, id.as_deref()), ("token", Some("0x0a")));
+            }
+            other => panic!("expected DataNotFound, got {other:?}"),
+        }
+
+        assert!(matches!(AlgorithmError::timeout(42), AlgorithmError::Timeout { elapsed_ms: 42 }));
+        assert!(matches!(
+            AlgorithmError::invalid_configuration("bad"),
+            AlgorithmError::InvalidConfiguration { .. }
+        ));
+    }
 
     #[test]
     fn test_connector_tokens_default_is_none() {
@@ -336,7 +423,7 @@ mod tests {
     #[test]
     fn test_with_connector_tokens_sets_field() {
         let addr = Address::from([0x01u8; 20]);
-        let tokens: HashSet<Address> = [addr.clone()].into();
+        let tokens: FxHashSet<Address> = FxHashSet::from_iter([addr.clone()]);
         let config = AlgorithmConfig::default().with_connector_tokens(tokens);
         let stored = config
             .connector_tokens()
@@ -347,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_with_connector_tokens_empty_set() {
-        let config = AlgorithmConfig::default().with_connector_tokens(HashSet::new());
+        let config = AlgorithmConfig::default().with_connector_tokens(FxHashSet::default());
         assert_eq!(
             config
                 .connector_tokens()

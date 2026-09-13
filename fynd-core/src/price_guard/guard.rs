@@ -209,7 +209,7 @@ impl PriceGuard {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, str::FromStr};
+    use std::str::FromStr;
 
     use num_bigint::BigUint;
     use rstest::rstest;
@@ -307,14 +307,14 @@ mod tests {
         let weth_token = make_token(weth_addr.clone(), "WETH");
         let usdc_token = make_token(usdc_addr.clone(), "USDC");
         Swap::new(
-            "weth-usdc-pool".to_string(),
+            "weth-usdc-component".to_string(),
             "uniswap_v2".to_string(),
             weth_addr,
             usdc_addr,
             BigUint::from(1000u64),
             BigUint::from(950u64),
             BigUint::from(100_000u64),
-            component("weth-usdc-pool", &[weth_token, usdc_token]),
+            component("weth-usdc-component", &[weth_token, usdc_token]),
             Box::new(MockProtocolSim::default()),
         )
     }
@@ -333,7 +333,10 @@ mod tests {
             Bytes::from([0xBB; 20].as_slice()),
             "1".to_string(),
         )
-        .with_route(Route::new(vec![weth_usdc_swap()], HashMap::new()).expect("non-empty route"))
+        .with_route(
+            Route::new(vec![weth_usdc_swap()], rustc_hash::FxHashMap::default())
+                .expect("non-empty route"),
+        )
     }
 
     fn price_guard(providers: Vec<Box<dyn PriceProvider>>) -> PriceGuard {

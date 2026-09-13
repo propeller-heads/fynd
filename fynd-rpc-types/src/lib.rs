@@ -145,6 +145,70 @@ impl QuoteRequest {
     }
 }
 
+/// Liquidity a request excludes from a route.
+///
+/// Every field is optional. The pools, protocol systems and tokens it names are excluded from
+/// every route.
+#[must_use]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RouteFilter {
+    /// Pools to exclude, by component id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    exclude_pools: Vec<String>,
+    /// Protocol systems to exclude. Matches exact names (`uniswap_v2`) or a family prefix
+    /// ending in `:` (`propammfallback:`). An entry matching no pools excludes nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "openapi", schema(example = json!(["uniswap_v2"])))]
+    exclude_protocols: Vec<String>,
+    /// Tokens to exclude as intermediates. The order's own two tokens are always allowed, so
+    /// naming one of them changes nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(
+            value_type = Vec<String>,
+            example = json!(["0xdAC17F958D2ee523a2206206994597C13D831ec7"])
+        )
+    )]
+    exclude_tokens: Vec<Address>,
+}
+
+impl RouteFilter {
+    /// Excludes these pools, by component id.
+    pub fn with_excluded_pools(mut self, pools: impl IntoIterator<Item = String>) -> Self {
+        self.exclude_pools.extend(pools);
+        self
+    }
+
+    /// Excludes every pool of these protocol systems.
+    pub fn with_excluded_protocols(mut self, protocols: impl IntoIterator<Item = String>) -> Self {
+        self.exclude_protocols.extend(protocols);
+        self
+    }
+
+    /// Excludes routes that pass through these tokens.
+    pub fn with_excluded_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.exclude_tokens.extend(tokens);
+        self
+    }
+
+    /// The pools excluded, by component id.
+    pub fn excluded_pools(&self) -> &[String] {
+        &self.exclude_pools
+    }
+
+    /// The protocol systems excluded.
+    pub fn excluded_protocols(&self) -> &[String] {
+        &self.exclude_protocols
+    }
+
+    /// The tokens excluded as intermediates.
+    pub fn excluded_tokens(&self) -> &[Address] {
+        &self.exclude_tokens
+    }
+}
+
 /// Options to customize the solving behavior.
 #[must_use]
 #[serde_as]
@@ -168,6 +232,9 @@ pub struct QuoteOptions {
     max_gas: Option<BigUint>,
     /// Options during encoding. If None, quote will be returned without calldata.
     encoding_options: Option<EncodingOptions>,
+    /// Liquidity this request excludes from a route. If None, nothing is excluded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route_filter: Option<RouteFilter>,
 }
 
 impl QuoteOptions {
@@ -195,6 +262,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Excludes the pools, protocol systems and tokens this filter names.
+    pub fn with_route_filter(mut self, filter: RouteFilter) -> Self {
+        self.route_filter = Some(filter);
+        self
+    }
+
     /// Timeout in milliseconds, if set.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -213,6 +286,11 @@ impl QuoteOptions {
     /// Encoding options, if set.
     pub fn encoding_options(&self) -> Option<&EncodingOptions> {
         self.encoding_options.as_ref()
+    }
+
+    /// What this request excludes from a route, if set.
+    pub fn route_filter(&self) -> Option<&RouteFilter> {
+        self.route_filter.as_ref()
     }
 }
 
@@ -406,8 +484,9 @@ pub struct FeeBreakdown {
     min_amount_received: BigUint,
     /// keccak256 of the ABI-encoded swap bytes, as a 0x-prefixed hex string.
     /// Present only when client fee params were included in the request.
-    /// Use this with `amount_in`, `token_in`, `token_out`, `min_amount_received`, and `receiver`
-    /// to compute the 10-field EIP-712 `ClientFee` signing hash (see client library helpers).
+    /// Use this with `amount_in`, `token_in`, `token_out`, `amount_out`, `min_amount_received`,
+    /// and `receiver` to compute the 11-field EIP-712 `ClientFee` signing hash (see client library
+    /// helpers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, example = json!(null)))]
     swaps_hash: Option<Bytes>,
@@ -466,6 +545,10 @@ pub struct EncodingOptions {
     /// Per-request price guard configuration. If `None`, struct defaults are used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     price_guard: Option<PriceGuardConfig>,
+    /// Whether to simulate encoded transactions against the latest block. Defaults to `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "openapi", schema(example = false))]
+    simulate: bool,
 }
 
 impl EncodingOptions {
@@ -478,6 +561,7 @@ impl EncodingOptions {
             permit2_signature: None,
             client_fee_params: None,
             price_guard: None,
+            simulate: false,
         }
     }
 
@@ -534,6 +618,17 @@ impl EncodingOptions {
     /// Per-request price guard config, if set.
     pub fn price_guard(&self) -> Option<&PriceGuardConfig> {
         self.price_guard.as_ref()
+    }
+
+    /// Enables simulation of the encoded transaction against the latest block.
+    pub fn with_simulation(mut self) -> Self {
+        self.simulate = true;
+        self
+    }
+
+    /// Returns whether simulation of the encoded transaction was requested.
+    pub fn simulate(&self) -> bool {
+        self.simulate
     }
 }
 
@@ -850,6 +945,15 @@ pub struct OrderQuote {
     /// Fee breakdown (populated when encoding options are provided).
     #[serde(skip_serializing_if = "Option::is_none")]
     fee_breakdown: Option<FeeBreakdown>,
+    /// Result of an optional on-chain simulation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    simulation_result: Option<SimulationResult>,
+    /// Routing algorithm that produced this quote.
+    ///
+    /// Absent on a quote no algorithm produced, such as a no-route placeholder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = "bellman_ford"))]
+    algorithm: Option<String>,
 }
 
 impl OrderQuote {
@@ -893,6 +997,11 @@ impl OrderQuote {
         &self.amount_out_net_gas
     }
 
+    /// Routing algorithm that produced this quote.
+    pub fn algorithm(&self) -> Option<&str> {
+        self.algorithm.as_deref()
+    }
+
     /// Block at which this quote was computed.
     pub fn block(&self) -> &BlockInfo {
         &self.block
@@ -912,6 +1021,38 @@ impl OrderQuote {
     pub fn fee_breakdown(&self) -> Option<&FeeBreakdown> {
         self.fee_breakdown.as_ref()
     }
+
+    /// Result of the optional on-chain simulation, if requested.
+    pub fn simulation_result(&self) -> Option<&SimulationResult> {
+        self.simulation_result.as_ref()
+    }
+}
+
+/// Outcome of simulating an encoded quote on the latest block.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SimulationResult {
+    /// The simulated router call returned an amount and consumed gas.
+    Success {
+        /// Amount returned by the router call.
+        #[serde_as(as = "DisplayFromStr")]
+        #[cfg_attr(feature = "openapi", schema(value_type = String, example = "3500000000"))]
+        amount_out: BigUint,
+        /// Gas consumed by the simulated call.
+        #[cfg_attr(feature = "openapi", schema(example = 150000))]
+        gas_used: u64,
+    },
+    /// The simulated router call could not complete.
+    Failure {
+        /// Readable reason the simulated call failed.
+        #[cfg_attr(
+            feature = "openapi",
+            schema(example = "execution reverted: insufficient output")
+        )]
+        reason: String,
+    },
 }
 
 /// Status of an order quote.
@@ -983,7 +1124,7 @@ impl BlockInfo {
 
 /// A route consisting of one or more sequential swaps.
 ///
-/// A route describes the path through liquidity pools to execute a swap.
+/// A route describes the path through components (liquidity pools) to execute a swap.
 /// For multi-hop swaps, the output of each swap becomes the input of the next.
 #[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1012,12 +1153,12 @@ impl Route {
 
 /// A single swap within a route.
 ///
-/// Represents an atomic swap on a specific liquidity pool (component).
+/// Represents an atomic swap on a specific component (liquidity pool).
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Swap {
-    /// Identifier of the liquidity pool component.
+    /// Identifier of the component (liquidity pool).
     #[cfg_attr(
         feature = "openapi",
         schema(example = "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc")
@@ -1084,7 +1225,7 @@ impl Swap {
         }
     }
 
-    /// Liquidity pool component identifier.
+    /// Component (liquidity pool) identifier.
     pub fn component_id(&self) -> &str {
         &self.component_id
     }
@@ -1139,7 +1280,10 @@ pub struct HealthStatus {
     /// Time since last market update in milliseconds.
     #[cfg_attr(feature = "openapi", schema(example = 1250))]
     last_update_ms: u64,
-    /// Number of active solver pools.
+    /// Number of solver pools configured at startup.
+    ///
+    /// This is the configured/registered count, not a live count of healthy worker
+    /// threads — it does not decrease if individual workers stop or panic.
     #[cfg_attr(feature = "openapi", schema(example = 2))]
     num_solver_pools: usize,
     /// Whether derived data has been computed at least once.
@@ -1195,30 +1339,49 @@ impl HealthStatus {
 }
 
 /// Static metadata about this Fynd instance, returned by `GET /v1/info`.
+//
+// Dev note (source-only, deliberately not a doc comment so it stays out of the wire schema):
+// `/v1/info` is a public wire contract. When extending this type, add the field with
+// `#[serde(default)]` and a builder setter — additive, so older clients ignore it and newer
+// clients still deserialize responses from older servers. Never rename, remove, or retype an
+// existing field: that breaks the contract. Every shape change is surfaced by the OpenAPI/TS
+// drift check (regenerate via `./scripts/update-openapi.sh`) and the semver gate, so it cannot
+// merge unnoticed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[non_exhaustive]
 pub struct InstanceInfo {
     /// EIP-155 chain ID (e.g. 1 for Ethereum mainnet).
     #[cfg_attr(feature = "openapi", schema(example = 1))]
     chain_id: u64,
-    /// Address of the Tycho Router contract on this chain.
+    /// Address of the Tycho Router contract on this chain; `null` on a quote-only chain.
     #[cfg_attr(
         feature = "openapi",
-        schema(value_type = String, example = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35")
+        schema(value_type = Option<String>, example = "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35")
     )]
-    router_address: Bytes,
+    router_address: Option<Bytes>,
     /// Address of the canonical Permit2 contract (same on all EVM chains).
     #[cfg_attr(
         feature = "openapi",
         schema(value_type = String, example = "0x000000000022D473030F116dDEE9F6B43aC78BA3")
     )]
     permit2_address: Bytes,
+    /// Fynd binary version (Cargo package version, e.g. "0.89.1").
+    ///
+    /// Defaults to empty when absent so newer clients tolerate older servers that predate it.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(example = "0.89.1"))]
+    version: String,
 }
 
 impl InstanceInfo {
-    /// Creates a new instance info.
-    pub fn new(chain_id: u64, router_address: Bytes, permit2_address: Bytes) -> Self {
-        Self { chain_id, router_address, permit2_address }
+    /// Starts building an instance info from the required immutable fields.
+    pub fn builder(
+        chain_id: u64,
+        router_address: Option<Bytes>,
+        permit2_address: Bytes,
+    ) -> InstanceInfoBuilder {
+        InstanceInfoBuilder { chain_id, router_address, permit2_address, version: String::new() }
     }
 
     /// EIP-155 chain ID.
@@ -1226,14 +1389,46 @@ impl InstanceInfo {
         self.chain_id
     }
 
-    /// Address of the Tycho Router contract.
-    pub fn router_address(&self) -> &Bytes {
-        &self.router_address
+    /// Address of the Tycho Router contract, or `None` on a quote-only chain.
+    pub fn router_address(&self) -> Option<&Bytes> {
+        self.router_address.as_ref()
     }
 
     /// Address of the canonical Permit2 contract.
     pub fn permit2_address(&self) -> &Bytes {
         &self.permit2_address
+    }
+
+    /// Fynd binary version.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+/// Builder for [`InstanceInfo`]. Keeps future `/v1/info` fields cheap to add.
+#[derive(Debug, Clone)]
+pub struct InstanceInfoBuilder {
+    chain_id: u64,
+    router_address: Option<Bytes>,
+    permit2_address: Bytes,
+    version: String,
+}
+
+impl InstanceInfoBuilder {
+    /// Sets the Fynd binary version.
+    pub fn version(mut self, version: impl Into<String>) -> Self {
+        self.version = version.into();
+        self
+    }
+
+    /// Finalizes into an [`InstanceInfo`].
+    pub fn build(self) -> InstanceInfo {
+        InstanceInfo {
+            chain_id: self.chain_id,
+            router_address: self.router_address,
+            permit2_address: self.permit2_address,
+            version: self.version,
+        }
     }
 }
 
@@ -1389,6 +1584,33 @@ mod wire_format_tests {
         assert_eq!(b.as_ref(), [0xDE, 0xAD, 0xBE, 0xEF]);
     }
 
+    /// The field names a caller writes, and what an unset filter serializes to.
+    mod route_filter {
+        use super::*;
+
+        #[test]
+        fn test_route_filter_deserializes_from_request_json() {
+            let json = r#"{
+                "timeout_ms": 2000,
+                "route_filter": {
+                    "exclude_pools": ["0xabc"],
+                    "exclude_protocols": ["uniswap_v2"],
+                    "exclude_tokens": ["0xdAC17F958D2ee523a2206206994597C13D831ec7"]
+                }
+            }"#;
+
+            let options: QuoteOptions = serde_json::from_str(json).unwrap();
+            let filter = options.route_filter().unwrap();
+
+            assert_eq!(filter.excluded_pools(), ["0xabc".to_string()]);
+            assert_eq!(filter.excluded_protocols(), ["uniswap_v2".to_string()]);
+            assert_eq!(
+                filter.excluded_tokens(),
+                [Bytes::from(hex::decode("dAC17F958D2ee523a2206206994597C13D831ec7").unwrap())]
+            );
+        }
+    }
+
     // ── Order: full request JSON shape ────────────────────────────────────────
     //
     // Verifies field names, side as "sell" (not "Sell"), amount as decimal
@@ -1437,7 +1659,7 @@ mod wire_format_tests {
             "price_impact_bps": 5,
             "block": { "number": 21000000, "hash": "0xdeadbeef", "timestamp": 1700000000 },
             "route": { "swaps": [{
-                "component_id": "pool-1",
+                "component_id": "component-1",
                 "protocol": "uniswap_v3",
                 "token_in":  "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "token_out": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1487,6 +1709,7 @@ mod wire_format_tests {
     #[test]
     fn instance_info_deserializes_and_ignores_unknown_fields() {
         let json = r#"{
+            "version": "1.2.3",
             "chain_id": 1,
             "router_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "permit2_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1494,9 +1717,37 @@ mod wire_format_tests {
         }"#;
 
         let info: InstanceInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.version(), "1.2.3");
         assert_eq!(info.chain_id(), 1);
-        assert_eq!(info.router_address().as_ref(), [0xAAu8; 20]);
+        assert_eq!(info.router_address().unwrap().as_ref(), [0xAAu8; 20]);
         assert_eq!(info.permit2_address().as_ref(), [0xBBu8; 20]);
+    }
+
+    #[test]
+    fn instance_info_builder_sets_fields() {
+        let info =
+            InstanceInfo::builder(1, Some(Bytes::from([0xAAu8; 20])), Bytes::from([0xBBu8; 20]))
+                .version("0.1.0")
+                .build();
+
+        assert_eq!(info.version(), "0.1.0");
+        assert_eq!(info.chain_id(), 1);
+        assert_eq!(info.router_address().unwrap().as_ref(), [0xAAu8; 20]);
+        assert_eq!(info.permit2_address().as_ref(), [0xBBu8; 20]);
+    }
+
+    #[test]
+    fn instance_info_deserializes_without_version() {
+        // A new client talking to an older server (no `version` field) must still deserialize.
+        let json = r#"{
+            "chain_id": 1,
+            "router_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "permit2_address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }"#;
+
+        let info: InstanceInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.version(), "");
+        assert_eq!(info.chain_id(), 1);
     }
 }
 
@@ -1564,7 +1815,23 @@ mod conversions {
             if let Some(enc) = self.encoding_options {
                 opts = opts.with_encoding_options(enc.into());
             }
+            if let Some(filter) = self.route_filter {
+                opts = opts.with_route_filter(filter.into());
+            }
             opts
+        }
+    }
+
+    impl Into<fynd_core::RouteExclusionFilter> for RouteFilter {
+        fn into(self) -> fynd_core::RouteExclusionFilter {
+            fynd_core::RouteExclusionFilter::default()
+                .with_excluded_pools(self.exclude_pools)
+                .with_excluded_protocols(self.exclude_protocols)
+                .with_excluded_tokens(
+                    self.exclude_tokens
+                        .into_iter()
+                        .map(Into::into),
+                )
         }
     }
 
@@ -1604,6 +1871,9 @@ mod conversions {
             }
             if let Some(pg) = self.price_guard {
                 opts = opts.with_price_guard(pg.into());
+            }
+            if self.simulate {
+                opts = opts.with_simulation();
             }
             opts
         }
@@ -1700,6 +1970,10 @@ mod conversions {
     }
 
     impl From<fynd_core::OrderQuote> for OrderQuote {
+        // NOTE: `surplus_amount` and `committed_amount_out` (exclusive-component surplus) are
+        // intentionally NOT mapped onto this public response DTO — they are internal (the per-leg
+        // committed amount reaches the encoder; the order-level surplus is for observability).
+        // Exposing them would leak the captured surplus to clients.
         fn from(core: fynd_core::OrderQuote) -> Self {
             let order_id = core.order_id().to_string();
             let status = core.status().into();
@@ -1718,6 +1992,11 @@ mod conversions {
                 .fee_breakdown()
                 .cloned()
                 .map(Into::into);
+            let simulation_result = core
+                .simulation_result()
+                .cloned()
+                .map(Into::into);
+            let algorithm = (!core.algorithm().is_empty()).then(|| core.algorithm().to_string());
             let route = core.into_route().map(Into::into);
             Self {
                 order_id,
@@ -1732,6 +2011,8 @@ mod conversions {
                 gas_price,
                 transaction,
                 fee_breakdown,
+                simulation_result,
+                algorithm,
             }
         }
     }
@@ -1814,6 +2095,17 @@ mod conversions {
         }
     }
 
+    impl From<fynd_core::SimulationResult> for SimulationResult {
+        fn from(core: fynd_core::SimulationResult) -> Self {
+            match core {
+                fynd_core::SimulationResult::Success { amount_out, gas_used } => {
+                    Self::Success { amount_out, gas_used }
+                }
+                fynd_core::SimulationResult::Failure { reason } => Self::Failure { reason },
+            }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use num_bigint::BigUint;
@@ -1841,6 +2133,7 @@ mod conversions {
                     min_responses: None,
                     max_gas: None,
                     encoding_options: None,
+                    route_filter: None,
                 },
             };
 
@@ -1860,6 +2153,26 @@ mod conversions {
             let dto = Quote::from(core);
             assert_eq!(dto.total_gas_estimate, BigUint::from(100_000u64));
             assert_eq!(dto.solve_time_ms, 50);
+        }
+
+        /// A request's filter reaches the core options.
+        #[test]
+        fn test_route_filter_into_core() {
+            let usdt = make_address(0xDA);
+            let dto = QuoteOptions::default().with_route_filter(
+                RouteFilter::default()
+                    .with_excluded_pools(["pool-1".to_string()])
+                    .with_excluded_protocols(["uniswap_v2".to_string()])
+                    .with_excluded_tokens([usdt.clone()]),
+            );
+
+            let core: fynd_core::QuoteOptions = dto.into();
+
+            let expected = fynd_core::RouteExclusionFilter::default()
+                .with_excluded_pools(["pool-1".to_string()])
+                .with_excluded_protocols(["uniswap_v2".to_string()])
+                .with_excluded_tokens([TychoBytes::from(usdt)]);
+            assert_eq!(core.route_filter(), &expected);
         }
 
         #[test]
@@ -1900,6 +2213,21 @@ mod conversions {
             let core_fee = core.client_fee_params().unwrap();
             assert_eq!(core_fee.bps(), 100);
             assert_eq!(*core_fee.max_contribution(), BigUint::from(500u64));
+        }
+
+        /// `disable_slippage_taking` is set from a proxy-injected header, never from the request
+        /// body, so no wire field may reach it. Adding one to the DTO fails here.
+        #[test]
+        fn test_encoding_options_into_core_never_disables_slippage_taking() {
+            let json = serde_json::json!({
+                "slippage": "0.005",
+                "disable_slippage_taking": true
+            });
+            let dto: EncodingOptions = serde_json::from_value(json).expect("unknown field ignored");
+
+            let core: fynd_core::EncodingOptions = dto.into();
+
+            assert!(!core.disable_slippage_taking());
         }
 
         #[test]
@@ -1959,6 +2287,37 @@ mod conversions {
                 .expect("encoding_options should be set")
                 .price_guard();
             assert!(!config.enabled());
+        }
+
+        #[test]
+        fn test_encoding_options_omits_disabled_simulation() {
+            let json = serde_json::to_string(&EncodingOptions::new(0.01)).unwrap();
+            assert!(!json.contains("simulate"));
+        }
+
+        #[test]
+        fn test_simulation_result_success_serde_roundtrip() {
+            let result = SimulationResult::Success {
+                amount_out: BigUint::from(3_500_000_000_u64),
+                gas_used: 150_000,
+            };
+            let json = serde_json::to_string(&result).unwrap();
+            assert_eq!(json, r#"{"status":"success","amount_out":"3500000000","gas_used":150000}"#);
+            let decoded: SimulationResult = serde_json::from_str(&json).unwrap();
+            assert!(
+                matches!(decoded, SimulationResult::Success { amount_out, gas_used } if amount_out == BigUint::from(3_500_000_000_u64) && gas_used == 150_000)
+            );
+        }
+
+        #[test]
+        fn test_simulation_result_failure_serde_roundtrip() {
+            let result = SimulationResult::Failure { reason: "execution reverted".to_string() };
+            let json = serde_json::to_string(&result).unwrap();
+            assert_eq!(json, r#"{"status":"failure","reason":"execution reverted"}"#);
+            let decoded: SimulationResult = serde_json::from_str(&json).unwrap();
+            assert!(
+                matches!(decoded, SimulationResult::Failure { reason } if reason == "execution reverted")
+            );
         }
 
         #[test]

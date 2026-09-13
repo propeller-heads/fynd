@@ -192,7 +192,7 @@ async fn regenerate_expected_outputs() {
     let derived_metrics = {
         let derived_ref = harness.solver().derived_data();
         let d = derived_ref.read().await;
-        let spot_price_pools = d
+        let components_with_spot_prices = d
             .spot_prices()
             .map(|sp| {
                 sp.keys()
@@ -201,8 +201,8 @@ async fn regenerate_expected_outputs() {
                     .len()
             })
             .unwrap_or(0);
-        let pool_depth_pools = d
-            .pool_depths()
+        let components_with_depths = d
+            .component_depths()
             .map(|pd| {
                 pd.keys()
                     .map(|(id, _, _)| id.clone())
@@ -214,7 +214,11 @@ async fn regenerate_expected_outputs() {
             .token_prices()
             .map(|tp| tp.len())
             .unwrap_or(0);
-        fynd_test_fixtures::DerivedDataMetrics { spot_price_pools, pool_depth_pools, token_prices }
+        fynd_test_fixtures::DerivedDataMetrics {
+            components_with_spot_prices,
+            components_with_depths,
+            token_prices,
+        }
     };
 
     let market_ref = harness.solver().market_data();
@@ -225,14 +229,14 @@ async fn regenerate_expected_outputs() {
         .last_updated()
         .map(|block| block.number())
         .unwrap_or(0);
-    let num_pools = market.component_topology().len();
+    let num_components = market.component_topology().len();
     let num_tokens = market.token_registry_ref().len();
     drop(market);
 
     let expected_file = fynd_test_fixtures::ExpectedFile {
         metadata: fynd_test_fixtures::ExpectedMetadata {
             block_number,
-            num_pools,
+            num_components,
             num_tokens,
             fynd_version: env!("CARGO_PKG_VERSION").to_string(),
             derived_data: Some(derived_metrics),

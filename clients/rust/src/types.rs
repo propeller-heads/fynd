@@ -115,6 +115,13 @@ impl PermitSingle {
     }
 }
 
+/// Fee units per basis point in the router's `ClientFeeParams.clientFeeBps`.
+///
+/// Fynd's API takes the client fee in basis points, while the router takes it in the
+/// FeeCalculator's fee units (`MAX_BPS` = 100,000,000 = 100%). Signatures must cover the
+/// scaled value that ends up in the calldata.
+const CLIENT_FEE_UNITS_PER_BPS: u64 = 10_000;
+
 /// Client fee configuration for the Tycho Router.
 ///
 /// When attached to [`EncodingOptions`] via [`EncodingOptions::with_client_fee`], the router
@@ -149,18 +156,24 @@ impl ClientFeeParams {
     /// Pass the returned hash to the fee receiver's signer, then supply the
     /// 65-byte result to [`ClientFeeParams::with_signature`].
     ///
-    /// The hash covers all 10 `ClientFee` fields. The swap-specific inputs
-    /// (`amount_in`, `token_in`, `token_out`, `min_amount_out`, `receiver`,
-    /// `swaps_hash`) come from a prior unsigned quote request — see
+    /// The hash covers all 11 `ClientFee` fields. The swap-specific inputs
+    /// (`amount_in`, `token_in`, `token_out`, `expected_amount_out`, `min_amount_out`,
+    /// `receiver`, `swaps_hash`) come from a prior unsigned quote request — see
     /// [`FeeBreakdown`] and the `swap_client_fee` example for the two-step flow.
     ///
     /// - `router_address`: 20-byte address of the TychoRouter contract.
     /// - `amount_in`: exact input amount from the order.
     /// - `token_in`: 20-byte input token address.
     /// - `token_out`: 20-byte output token address.
+    /// - `expected_amount_out`: quoted output amount — use `Quote::amount_out`.
     /// - `min_amount_out`: minimum output after fees — use [`FeeBreakdown::min_amount_received`].
     /// - `receiver`: 20-byte address receiving the swap output.
     /// - `swaps_hash`: keccak256 of the encoded swaps bytes — use [`FeeBreakdown::swaps_hash`].
+    ///
+    /// The type hash, domain (`TychoRouter`/`1`), and field order must match
+    /// `TychoRouterV3.CLIENT_FEE_TYPEHASH`. The same shape is encoded via `sol!` in
+    /// `fynd-core/src/encoding/disable_slippage_taking.rs` for server-side signing; keep both in
+    /// sync if the contract type changes.
     #[allow(clippy::too_many_arguments)]
     pub fn eip712_signing_hash(
         &self,
@@ -169,6 +182,7 @@ impl ClientFeeParams {
         amount_in: &num_bigint::BigUint,
         token_in: &Bytes,
         token_out: &Bytes,
+        expected_amount_out: &num_bigint::BigUint,
         min_amount_out: &num_bigint::BigUint,
         receiver: &Bytes,
         swaps_hash: &[u8; 32],
@@ -180,15 +194,16 @@ impl ClientFeeParams {
         let amount_in_u256 = biguint_to_u256(amount_in);
         let token_in_addr = p2_bytes_to_address(token_in, "token_in")?;
         let token_out_addr = p2_bytes_to_address(token_out, "token_out")?;
+        let expected_amount_out_u256 = biguint_to_u256(expected_amount_out);
         let min_amount_out_u256 = biguint_to_u256(min_amount_out);
         let receiver_addr = p2_bytes_to_address(receiver, "receiver")?;
         let swaps_b256 = alloy::primitives::B256::from(*swaps_hash);
 
         let type_hash = keccak256(
-            b"ClientFee(uint16 clientFeeBps,address clientFeeReceiver,\
+            b"ClientFee(uint32 clientFeeBps,address clientFeeReceiver,\
 uint256 maxClientContribution,uint256 deadline,\
 uint256 amountIn,address tokenIn,address tokenOut,\
-uint256 minAmountOut,address receiver,bytes swaps)",
+uint256 expectedAmountOut,uint256 minAmountOut,address receiver,bytes swaps)",
         );
 
         let domain_type_hash = keccak256(
@@ -209,13 +224,14 @@ uint256 chainId,address verifyingContract)",
         let struct_hash = keccak256(
             (
                 type_hash,
-                U256::from(self.bps),
+                U256::from(self.bps as u64 * CLIENT_FEE_UNITS_PER_BPS),
                 fee_receiver,
                 max_contrib,
                 dl,
                 amount_in_u256,
                 token_in_addr,
                 token_out_addr,
+                expected_amount_out_u256,
                 min_amount_out_u256,
                 receiver_addr,
                 swaps_b256,
@@ -309,6 +325,7 @@ pub struct EncodingOptions {
     pub(crate) permit2_signature: Option<Bytes>,
     pub(crate) client_fee_params: Option<ClientFeeParams>,
     pub(crate) price_guard: Option<PriceGuardConfig>,
+    pub(crate) simulate: bool,
 }
 
 impl EncodingOptions {
@@ -324,6 +341,7 @@ impl EncodingOptions {
             permit2_signature: None,
             client_fee_params: None,
             price_guard: None,
+            simulate: false,
         }
     }
 
@@ -361,6 +379,12 @@ impl EncodingOptions {
     /// Attach client fee configuration with a pre-signed EIP-712 signature.
     pub fn with_client_fee(mut self, params: ClientFeeParams) -> Self {
         self.client_fee_params = Some(params);
+        self
+    }
+
+    /// Enables simulation of the encoded transaction against the latest block.
+    pub fn with_simulation(mut self) -> Self {
+        self.simulate = true;
         self
     }
 
@@ -504,6 +528,12 @@ impl Order {
 /// All fields are optional. When `None`, struct defaults are used.
 /// Re-exported from `fynd-rpc-types` for wire compatibility.
 pub use fynd_rpc_types::PriceGuardConfig;
+/// Liquidity a request excludes from a route.
+///
+/// The pools, protocol systems and tokens it names are excluded from every route. Nothing is
+/// excluded unless the request names it. Re-exported from `fynd-rpc-types` for wire
+/// compatibility.
+pub use fynd_rpc_types::RouteFilter;
 
 /// Optional parameters that tune solving behaviour for a [`QuoteParams`] request.
 ///
@@ -514,6 +544,7 @@ pub struct QuoteOptions {
     pub(crate) min_responses: Option<usize>,
     pub(crate) max_gas: Option<BigUint>,
     pub(crate) encoding_options: Option<EncodingOptions>,
+    pub(crate) route_filter: Option<RouteFilter>,
 }
 
 impl QuoteOptions {
@@ -545,6 +576,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Exclude the pools, protocol systems and tokens this filter names from every route.
+    pub fn with_route_filter(mut self, filter: RouteFilter) -> Self {
+        self.route_filter = Some(filter);
+        self
+    }
+
     /// The configured timeout in milliseconds, or `None` if using the server default.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -558,6 +595,11 @@ impl QuoteOptions {
     /// The configured gas cap, or `None` if no cap was set.
     pub fn max_gas(&self) -> Option<&BigUint> {
         self.max_gas.as_ref()
+    }
+
+    /// What this request excludes from a route, or `None` if nothing is excluded.
+    pub fn route_filter(&self) -> Option<&RouteFilter> {
+        self.route_filter.as_ref()
     }
 }
 
@@ -613,7 +655,7 @@ pub enum BackendKind {
 pub enum QuoteStatus {
     /// A valid route was found and `route`, `amount_out`, and `gas_estimate` are populated.
     Success,
-    /// No swap path exists between the requested token pair on any available pool.
+    /// No swap path exists between the requested token pair on available swap components (pools).
     NoRouteFound,
     /// A path exists but available liquidity is too low for the requested amount.
     InsufficientLiquidity,
@@ -658,7 +700,7 @@ impl BlockInfo {
     }
 }
 
-/// A single atomic swap on one liquidity pool within a [`Route`].
+/// A single atomic swap on one component (liquidity pool) within a [`Route`].
 #[derive(Debug, Clone)]
 pub struct Swap {
     component_id: String,
@@ -673,7 +715,7 @@ pub struct Swap {
 }
 
 impl Swap {
-    /// The identifier of the liquidity pool component (e.g. a pool address).
+    /// The identifier of the component (e.g. a liquidity pool address).
     pub fn component_id(&self) -> &str {
         &self.component_id
     }
@@ -766,6 +808,23 @@ pub struct FeeBreakdown {
     swaps_hash: Option<[u8; 32]>,
 }
 
+/// Outcome of simulating an encoded quote against the latest block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SimulationResult {
+    /// The simulated router call returned an amount and consumed gas.
+    Success {
+        /// Amount returned by the router call.
+        amount_out: BigUint,
+        /// Gas consumed by the simulated call.
+        gas_used: u64,
+    },
+    /// The simulated router call could not complete.
+    Failure {
+        /// Readable reason the simulated call failed.
+        reason: String,
+    },
+}
+
 impl FeeBreakdown {
     pub(crate) fn new(
         router_fee: BigUint,
@@ -833,6 +892,11 @@ pub struct Quote {
     transaction: Option<Transaction>,
     /// Fee breakdown. Present only when [`EncodingOptions`] was set in the request.
     fee_breakdown: Option<FeeBreakdown>,
+    /// Simulation result, present when requested with [`EncodingOptions::with_simulation`].
+    pub(crate) simulation_result: Option<SimulationResult>,
+    /// Routing algorithm that produced this quote.
+    /// Populated by [`FyndClient::quote`](crate::FyndClient::quote) from the response.
+    pub(crate) algorithm: Option<String>,
     /// Wall-clock time the server spent solving this request, in milliseconds.
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote).
     pub(crate) solve_time_ms: u64,
@@ -926,6 +990,18 @@ impl Quote {
         self.fee_breakdown.as_ref()
     }
 
+    /// Simulation result, present when requested with [`EncodingOptions::with_simulation`].
+    pub fn simulation_result(&self) -> Option<&SimulationResult> {
+        self.simulation_result.as_ref()
+    }
+
+    /// Routing algorithm that produced this quote.
+    ///
+    /// `None` on a quote no algorithm produced, such as a no-route placeholder.
+    pub fn algorithm(&self) -> Option<&str> {
+        self.algorithm.as_deref()
+    }
+
     /// Wall-clock time the server spent solving this request, in milliseconds.
     ///
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote). Returns `0` if not set.
@@ -940,7 +1016,7 @@ impl Quote {
     ///
     /// 1. Request a quote with unsigned [`ClientFeeParams`] (empty signature).
     /// 2. Read [`FeeBreakdown::swaps_hash`] from the response.
-    /// 3. Sign the 10-field EIP-712 hash using [`ClientFeeParams::eip712_signing_hash`].
+    /// 3. Sign the 11-field EIP-712 hash using [`ClientFeeParams::eip712_signing_hash`].
     /// 4. Call this method to patch the signature into the calldata.
     /// 5. Execute the transaction.
     ///
@@ -999,6 +1075,8 @@ impl Quote {
             receiver,
             transaction,
             fee_breakdown,
+            simulation_result: None,
+            algorithm: None,
             solve_time_ms: 0,
         }
     }
@@ -1007,26 +1085,29 @@ impl Quote {
 /// Static metadata about this Fynd instance, returned by `GET /v1/info`.
 #[derive(Debug, Clone)]
 pub struct InstanceInfo {
-    /// Router contract address (20 raw bytes).
-    router_address: bytes::Bytes,
+    /// Router contract address (20 raw bytes), or `None` on a quote-only chain.
+    router_address: Option<bytes::Bytes>,
     /// Permit2 contract address (20 raw bytes).
     permit2_address: bytes::Bytes,
     /// Chain ID of the network this instance is deployed on.
     chain_id: u64,
+    /// Fynd binary version reported by the server.
+    version: String,
 }
 
 impl InstanceInfo {
     pub(crate) fn new(
-        router_address: bytes::Bytes,
+        router_address: Option<bytes::Bytes>,
         permit2_address: bytes::Bytes,
         chain_id: u64,
+        version: String,
     ) -> Self {
-        Self { router_address, permit2_address, chain_id }
+        Self { router_address, permit2_address, chain_id, version }
     }
 
-    /// Router contract address (20 raw bytes).
-    pub fn router_address(&self) -> &bytes::Bytes {
-        &self.router_address
+    /// Router contract address (20 raw bytes), or `None` on a quote-only chain.
+    pub fn router_address(&self) -> Option<&bytes::Bytes> {
+        self.router_address.as_ref()
     }
 
     /// Permit2 contract address (20 raw bytes).
@@ -1037,6 +1118,11 @@ impl InstanceInfo {
     /// Chain ID of the network this instance is deployed on.
     pub fn chain_id(&self) -> u64 {
         self.chain_id
+    }
+
+    /// Fynd binary version reported by the server.
+    pub fn version(&self) -> &str {
+        &self.version
     }
 }
 
@@ -1333,6 +1419,10 @@ mod tests {
         BigUint::from(1_000_000u64)
     }
 
+    fn sample_expected_amount_out() -> BigUint {
+        BigUint::from(1_010_000u64)
+    }
+
     fn sample_amount_in() -> BigUint {
         BigUint::from(1_000_000_000_000_000_000u64)
     }
@@ -1366,6 +1456,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1385,6 +1476,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1397,6 +1489,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1415,6 +1508,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1427,6 +1521,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1444,6 +1539,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1456,12 +1552,45 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
             )
             .unwrap();
         assert_ne!(h100, h200);
+    }
+
+    #[test]
+    fn client_fee_signing_hash_differs_by_expected_amount_out() {
+        let fee = sample_fee_params(100, sample_fee_receiver());
+        let quoted = fee
+            .eip712_signing_hash(
+                1,
+                &sample_router_address(),
+                &sample_amount_in(),
+                &sample_token_in(),
+                &sample_token_out(),
+                &sample_expected_amount_out(),
+                &sample_min_amount_out(),
+                &sample_swap_receiver(),
+                &sample_swaps_hash(),
+            )
+            .unwrap();
+        let higher = fee
+            .eip712_signing_hash(
+                1,
+                &sample_router_address(),
+                &sample_amount_in(),
+                &sample_token_in(),
+                &sample_token_out(),
+                &(sample_expected_amount_out() + BigUint::from(1u32)),
+                &sample_min_amount_out(),
+                &sample_swap_receiver(),
+                &sample_swaps_hash(),
+            )
+            .unwrap();
+        assert_ne!(quoted, higher);
     }
 
     #[test]
@@ -1474,6 +1603,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1486,6 +1616,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1505,6 +1636,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),
@@ -1524,6 +1656,7 @@ mod tests {
                 &sample_amount_in(),
                 &sample_token_in(),
                 &sample_token_out(),
+                &sample_expected_amount_out(),
                 &sample_min_amount_out(),
                 &sample_swap_receiver(),
                 &sample_swaps_hash(),

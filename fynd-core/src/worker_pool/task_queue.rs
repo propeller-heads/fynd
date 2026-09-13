@@ -275,7 +275,7 @@ mod tests {
                 .recv()
                 .await
                 .expect("should receive task");
-            task.respond(Err(SolveError::NoRouteFound { order_id: "test".to_string() }));
+            task.respond(Err(SolveError::no_route_found("test")));
         });
 
         let result = handle

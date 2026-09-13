@@ -6,6 +6,9 @@ use fynd_rpc::config::defaults;
 #[cfg(feature = "metrics")]
 pub(crate) const METRICS_PORT: u16 = 9898;
 
+#[cfg(feature = "metrics")]
+pub(crate) const METRICS_HOST: &str = "0.0.0.0";
+
 use crate::commands::derive_connector_tokens::DeriveConnectorTokensArgs;
 
 /// Fynd - High-performance DEX solver built on Tycho
@@ -26,7 +29,7 @@ pub enum Commands {
     /// Print the OpenAPI spec as JSON to stdout
     Openapi,
     /// Analyze live Tycho market data and suggest connector tokens for routing
-    DeriveConnectorTokens(DeriveConnectorTokensArgs),
+    DeriveConnectorTokens(Box<DeriveConnectorTokensArgs>),
 }
 
 /// Arguments for the `serve` subcommand.
@@ -64,6 +67,12 @@ pub struct ServeArgs {
     /// If omitted, all on-chain protocols are fetched from Tycho RPC.
     /// Use "all_onchain" to fetch all on-chain protocols and combine with explicit entries,
     /// e.g., --protocols all_onchain,rfq:bebop.
+    /// Prefix a protocol with "exclusive:" to also stream its exclusive pools,
+    /// e.g., --protocols all_onchain,exclusive:ekubo_v3.
+    /// Prefix a protocol with "exclude:" to drop it from the list,
+    /// e.g., --protocols all_onchain,exclude:vm:fermiswap.
+    /// Use "pricelevelstream:<venue>" to serve a pAMM from the Titan price level stream,
+    /// e.g., --protocols all_onchain,exclude:vm:fermiswap,pricelevelstream:fermiswap.
     #[arg(short, long, value_delimiter = ',', value_name = "PROTO1,PROTO2")]
     pub protocols: Vec<String>,
 
@@ -112,13 +121,18 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub blocklist_config: Option<PathBuf>,
 
+    /// Path to the custom-chains config (chains.yaml). Required to run a chain that Tycho does
+    /// not know as a built-in. Uses the same file the indexer reads.
+    #[arg(long, env = "TYCHO_CHAINS_CONFIG")]
+    pub chains_config: Option<PathBuf>,
+
     /// Gas price staleness threshold in seconds. Health returns 503 when exceeded.
     /// Disabled by default.
     #[arg(long)]
     pub gas_price_stale_threshold_secs: Option<u64>,
 
     /// Enable partial block (flashblock) updates from the Tycho stream.
-    /// When enabled, pool state updates arrive mid-block rather than only at finalization,
+    /// When enabled, component state updates arrive mid-block rather than only at finalization,
     /// reducing latency. Only applies to on-chain protocols.
     #[arg(long)]
     pub partial_blocks: bool,
@@ -128,10 +142,34 @@ pub struct ServeArgs {
     #[arg(long)]
     pub enable_price_guard: bool,
 
+    /// Enable simulation of encoded quotes against the latest block.
+    /// Disabled by default.
+    #[arg(long)]
+    pub enable_simulation: bool,
+
+    /// Watermark appended to every encoded transaction's calldata (e.g. "fynd"), so on-chain
+    /// observers can attribute router calls to this deployment. The EVM ignores calldata past
+    /// the ABI-encoded arguments, so the watermark does not change execution. Disabled by
+    /// default.
+    #[arg(long, env)]
+    pub calldata_watermark: Option<String>,
+
+    /// URL of the hosted gateway fronting this instance. When set, a second Swagger UI is served
+    /// at /docs/hosted/, describing the gateway's per-chain paths and API-key auth. When unset,
+    /// only the self-hosted /docs/ is served.
+    #[arg(long, env = "FYND_HOSTED_SWAGGER_URL")]
+    pub hosted_swagger_url: Option<String>,
+
     /// Port for the Prometheus metrics HTTP server (requires `metrics` feature).
     #[cfg(feature = "metrics")]
     #[arg(long, default_value_t = METRICS_PORT, env)]
     pub metrics_port: u16,
+
+    /// Host/address the Prometheus metrics HTTP server binds to (requires `metrics` feature).
+    /// Defaults to all interfaces; set to `127.0.0.1` to expose metrics on loopback only.
+    #[cfg(feature = "metrics")]
+    #[arg(long, default_value = METRICS_HOST, env)]
+    pub metrics_host: String,
 }
 
 #[cfg(test)]
@@ -161,6 +199,8 @@ mod cli_tests {
             "20.0",
             "--worker-pools-config",
             "new_worker_pools.toml",
+            "--hosted-swagger-url",
+            "https://gateway.example.com",
         ])
         .expect("parse errored");
 
@@ -177,6 +217,7 @@ mod cli_tests {
         assert_eq!(args.min_tvl, Some(20.0));
         assert_eq!(args.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
         assert_eq!(args.blocklist_config, None);
+        assert_eq!(args.hosted_swagger_url, Some("https://gateway.example.com".to_string()));
     }
 
     #[test]
@@ -187,6 +228,7 @@ mod cli_tests {
         std::env::remove_var("TYCHO_URL");
         std::env::remove_var("HTTP_HOST");
         std::env::remove_var("HTTP_PORT");
+        std::env::remove_var("FYND_HOSTED_SWAGGER_URL");
         let cli = Cli::try_parse_from(vec!["fynd", "serve"]).expect("parse errored");
 
         let Commands::Serve(args) = cli.command else {
@@ -206,6 +248,7 @@ mod cli_tests {
         assert_eq!(args.worker_router_timeout_ms, 100);
         assert_eq!(args.worker_router_min_responses, 0);
         assert_eq!(args.blocklist_config, None);
+        assert_eq!(args.hosted_swagger_url, None);
         assert!(!args.partial_blocks);
         #[cfg(feature = "metrics")]
         assert_eq!(args.metrics_port, METRICS_PORT);
@@ -226,5 +269,26 @@ mod cli_tests {
     fn test_openapi_subcommand() {
         let cli = Cli::try_parse_from(vec!["fynd", "openapi"]).expect("parse errored");
         assert_eq!(cli.command, Commands::Openapi);
+    }
+
+    #[test]
+    fn test_parses_calldata_watermark() {
+        std::env::remove_var("CALLDATA_WATERMARK");
+        let cli = Cli::try_parse_from(vec!["fynd", "serve", "--calldata-watermark", "fynd"])
+            .expect("parse errored");
+        let Commands::Serve(args) = cli.command else { panic!("expected serve") };
+        assert_eq!(args.calldata_watermark, Some("fynd".to_string()));
+
+        let cli = Cli::try_parse_from(vec!["fynd", "serve"]).expect("parse errored");
+        let Commands::Serve(args) = cli.command else { panic!("expected serve") };
+        assert_eq!(args.calldata_watermark, None);
+    }
+
+    #[test]
+    fn parses_chains_config() {
+        let cli = Cli::try_parse_from(vec!["fynd", "serve", "--chains-config", "chains.yaml"])
+            .expect("parse errored");
+        let Commands::Serve(args) = cli.command else { panic!("expected serve") };
+        assert_eq!(args.chains_config, Some(PathBuf::from("chains.yaml")));
     }
 }

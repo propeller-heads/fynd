@@ -23,13 +23,13 @@ use alloy::{
 use anyhow::{bail, Context};
 use bytes::Bytes;
 use clap::Parser;
-use erc20_overrides as erc20;
 use fynd_client::{
     AllowanceCheck, ApprovalParams, EncodingOptions, ExecutionOptions, FyndClient,
     FyndClientBuilder, HealthStatus, Order, OrderSide, PermitDetails as FyndPermitDetails,
     PermitSingle as FyndPermitSingle, QuoteOptions, QuoteParams, SignedApproval, SignedSwap,
     SigningHints, StorageOverrides, UserTransferType,
 };
+use fynd_core::simulation::token_layout::discover_layout;
 use num_bigint::BigUint;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -112,19 +112,21 @@ async fn build_dry_run_overrides(
     spender: Address,
 ) -> anyhow::Result<StorageOverrides> {
     info!("Detecting storage slots for {sell_token:#x}...");
-    let (balance_res, allowance_res) = tokio::join!(
-        erc20::find_balance_slot(provider, sell_token, sender),
-        erc20::find_allowance_slot(provider, sell_token, sender, spender),
+    let layout = discover_layout(provider, sell_token, sender, spender).await?;
+    let balance_slot = layout.balance_slot(sender);
+    let allowance_slot = layout.allowance_slot(sender, spender);
+    info!(
+        "Found balance slot {balance_slot} and allowance slot {allowance_slot} in {:#x}",
+        layout.storage_contract()
     );
-    let balance_slot = balance_res?;
-    let allowance_slot = allowance_res?;
-    info!("Found balance slot {balance_slot} and allowance slot {allowance_slot}");
 
     // Use MAX >> 1 (clear the top bit) to avoid triggering tokens that pack metadata into
     // bit 255 of the storage slot — e.g. USDC uses the top bit as a blacklist flag.
     // 2^255 - 1 is still large enough to cover any realistic balance or allowance.
     let max_val = Bytes::copy_from_slice(&B256::from(U256::MAX >> 1).0);
-    let token_key = Bytes::copy_from_slice(sell_token.as_slice());
+    // A proxy keeps its balances somewhere other than the address the swap calls, so the write
+    // goes to the contract discovery named rather than to the token.
+    let token_key = Bytes::copy_from_slice(layout.storage_contract().as_slice());
     let mut overrides = StorageOverrides::default();
     overrides.insert(token_key.clone(), Bytes::copy_from_slice(&balance_slot.0), max_val.clone());
     overrides.insert(token_key, Bytes::copy_from_slice(&allowance_slot.0), max_val);
@@ -144,14 +146,14 @@ async fn wait_for_health(client: &FyndClient, fynd_url: &str) -> anyhow::Result<
                 if tokio::time::Instant::now() >= deadline {
                     bail!(
                         "solver at {fynd_url} not healthy after 30s \
-                         (last update: {}ms ago, {} pools); \
+                         (last update: {}ms ago, {} solver pools); \
                          wait for market data to load",
                         h.last_update_ms(),
                         h.num_solver_pools()
                     );
                 }
                 info!(
-                    "Solver not ready yet ({} pools, last update {}ms ago), retrying...",
+                    "Solver not ready yet ({} solver pools, last update {}ms ago), retrying...",
                     h.num_solver_pools(),
                     h.last_update_ms()
                 );
@@ -336,14 +338,30 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             }
             let info = client.info().await?;
-            let router_addr = Address::try_from(info.router_address().as_ref())
-                .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
+            let router_addr = Address::try_from(
+                info.router_address()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "server has no router_address; encoding is unavailable on this chain"
+                        )
+                    })?
+                    .as_ref(),
+            )
+            .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
             (EncodingOptions::new(slippage), vec![router_addr])
         }
         TransferType::TransferFromPermit2 => {
             let info = client.info().await?;
-            let router_addr = Address::try_from(info.router_address().as_ref())
-                .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
+            let router_addr = Address::try_from(
+                info.router_address()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "server has no router_address; encoding is unavailable on this chain"
+                        )
+                    })?
+                    .as_ref(),
+            )
+            .map_err(|_| anyhow::anyhow!("invalid router address from /v1/info"))?;
             if cli.execute {
                 // Check against the swap amount but approve max — subsequent swaps won't
                 // need re-approval even after Permit2 deducts from the ERC-20 allowance.
@@ -414,7 +432,7 @@ async fn main() -> anyhow::Result<()> {
         println!("Route ({} hops):", route.swaps().len());
         for (i, swap) in route.swaps().iter().enumerate() {
             println!(
-                "  {}. 0x{} -> 0x{} via {} (pool: {})",
+                "  {}. 0x{} -> 0x{} via {} (component: {})",
                 i + 1,
                 hex::encode(swap.token_in()),
                 hex::encode(swap.token_out()),

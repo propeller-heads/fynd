@@ -5,34 +5,61 @@
 //! based on market events.
 
 pub mod petgraph;
-
-use std::collections::HashMap;
+pub mod token_graph;
 
 pub use petgraph::{EdgeData, PetgraphStableDiGraphManager, StableDiGraph};
+use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use thiserror::Error;
+pub use token_graph::{PairEdge, TokenGraph, TokenPath, TopologyGraph, TopologyGraphManager};
 use tycho_simulation::{
     tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim},
     tycho_core::models::token::Token,
 };
 
-use crate::types::ComponentId;
+use crate::{
+    derived::DerivedData,
+    feed::market_data::MarketDataView,
+    types::{ComponentId, RouteExclusions},
+};
 
-/// A path through the graph as a sequence of edge indices.
+/// Tokens held without allocating. A path of `h` hops names `h + 1` tokens, so this covers every
+/// `max_hops` up to 4. A deeper path still works: `SmallVec` moves to the heap and behaves as a
+/// `Vec` from there.
+pub(crate) const INLINE_TOKENS: usize = 5;
+
+/// Edges held without allocating. A path's edges are its tokens less one, and an edge is a leg of
+/// a route, so this sizes per-leg buffers too.
+/// Edges a path holds inline before it spills to the heap. One fewer than its tokens.
+pub const INLINE_EDGES: usize = INLINE_TOKENS - 1;
+
+/// A route with a pool chosen for every leg.
 ///
-/// Each edge index points to an edge in the graph containing the component ID and weight.
-/// This representation allows O(1) access to edge data during scoring and simulation.
-#[derive(Clone, Default)]
+/// Borrows from the graph rather than copying it, so scoring and simulation read a leg's component
+/// id and weight without a lookup.
+#[derive(Default)]
 pub struct Path<'a, D> {
-    /// Sequence of token addresses in the path.
-    pub tokens: Vec<&'a Address>,
-    /// Sequence of edge indices representing the path. Length is tokens.len() - 1.
-    pub edge_data: Vec<&'a EdgeData<D>>,
+    /// The tokens the route passes through, in order.
+    pub tokens: SmallVec<[&'a Address; INLINE_TOKENS]>,
+    /// The pool taken on each leg. One shorter than `tokens`.
+    pub edge_data: SmallVec<[&'a EdgeData<D>; INLINE_EDGES]>,
+}
+
+/// Written out rather than derived so the copy is a `memcpy`: `SmallVec` takes that path only
+/// through `from_slice`, which the derived `Clone` cannot call.
+impl<D> Clone for Path<'_, D> {
+    fn clone(&self) -> Self {
+        Self {
+            tokens: SmallVec::from_slice(&self.tokens),
+            edge_data: SmallVec::from_slice(&self.edge_data),
+        }
+    }
 }
 
 impl<'a, D> Path<'a, D> {
     /// Creates a new empty Path.
     pub fn new() -> Self {
-        Self { tokens: Vec::new(), edge_data: Vec::new() }
+        Self { tokens: SmallVec::new(), edge_data: SmallVec::new() }
     }
 
     /// Adds a hop to the path.
@@ -71,17 +98,6 @@ impl<'a, D> Path<'a, D> {
             .zip(self.edge_data.iter())
             .map(|(tokens, edge)| (tokens[0], *edge, tokens[1]))
     }
-
-    /// Creates a new reversed Path from the current one.
-    pub fn reversed(self) -> Self {
-        let reversed_tokens = self.tokens.into_iter().rev().collect();
-        let reversed_edge_data = self
-            .edge_data
-            .into_iter()
-            .rev()
-            .collect();
-        Self { tokens: reversed_tokens, edge_data: reversed_edge_data }
-    }
 }
 
 /// Errors that can occur during graph operations.
@@ -97,7 +113,7 @@ pub enum GraphError {
     #[error("Components with less then 2 tokens cannot be added: {0:?}")]
     InvalidComponents(Vec<ComponentId>),
     /// No edge exists between the given tokens for this component (test-only).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     #[error("No edge found between tokens {0:?} and {1:?} for component {2}")]
     MissingComponentBetweenTokens(Address, Address, ComponentId),
 }
@@ -114,18 +130,60 @@ where
     ///
     /// Arguments:
     /// - components: A map of component IDs to their tokens addresses.
-    fn initialize_graph(&mut self, components: &HashMap<ComponentId, Vec<Address>>);
+    fn initialize_graph(&mut self, components: &FxHashMap<ComponentId, Vec<Address>>);
 
     /// Returns a reference to the managed graph.
     fn graph(&self) -> &G;
 }
 
-use crate::{derived::DerivedData, feed::market_data::MarketDataView};
+/// The bounds a route search runs under.
+///
+/// Bundles what an algorithm configures once — how long a route may be, and which tokens it may
+/// pass through — so they travel as one argument instead of three. What a request excludes is not
+/// here: that changes per solve and travels beside this as a [`RouteExclusions`].
+#[derive(Debug, Clone)]
+pub struct GraphQueryFilter {
+    /// Shortest route to return, in hops. A query with `0` matches nothing.
+    pub min_hops: usize,
+    /// Longest route to return, in hops.
+    pub max_hops: usize,
+    /// Tokens a route may pass *through*. Its own endpoints are always allowed, whatever this
+    /// holds. `None` allows every token.
+    pub connector_tokens: Option<FxHashSet<Address>>,
+}
+
+/// One solve's route search: the bounds the algorithm configured, and what the request excludes.
+///
+/// The two have different lifetimes — the bounds are built with the algorithm, the exclusions
+/// arrive with the order — so a search borrows both rather than owning either.
+#[derive(Debug, Clone, Copy)]
+pub struct RouteSearch<'a> {
+    /// How long a route may be, and which tokens it may pass through.
+    pub bounds: &'a GraphQueryFilter,
+    /// Pools and tokens this request excludes.
+    pub exclusions: &'a RouteExclusions,
+}
+
+impl RouteSearch<'_> {
+    /// Whether a route may pass through this token: an endpoint always may, and an
+    /// intermediate must clear both the connector list and the request's exclusions.
+    #[must_use]
+    pub fn allows_token(self, token: &Address, endpoints: (&Address, &Address)) -> bool {
+        self.exclusions
+            .allows_token(token, endpoints) &&
+            (token == endpoints.0 ||
+                token == endpoints.1 ||
+                self.bounds
+                    .connector_tokens
+                    .as_ref()
+                    .is_none_or(|tokens| tokens.contains(token)))
+    }
+}
 
 /// Trait for edge weight types that can be computed from a ProtocolSim and DerivedData.
 ///
 /// Implement this trait for edge data types that should use pre-computed derived data
-/// (pool depths, spot prices, etc.) instead of computing them from scratch.
+/// (component depths, spot prices, etc.) instead of computing them from scratch.
 pub trait EdgeWeightFromSimAndDerived: Sized {
     /// Computes edge weight data using ProtocolSim and pre-computed DerivedData.
     ///
@@ -135,7 +193,7 @@ pub trait EdgeWeightFromSimAndDerived: Sized {
     /// * `component_id` - The component ID for derived data lookup
     /// * `token_in` - The input token
     /// * `token_out` - The output token
-    /// * `derived` - Pre-computed derived data (pool depths, spot prices, etc.)
+    /// * `derived` - Pre-computed derived data (component depths, spot prices, etc.)
     ///
     /// # Returns
     ///

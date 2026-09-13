@@ -46,8 +46,8 @@ pub struct ExpectedFile {
 pub struct ExpectedMetadata {
     /// Block number of the last recorded update.
     pub block_number: u64,
-    /// Total registered pool count.
-    pub num_pools: usize,
+    /// Total registered component count.
+    pub num_components: usize,
     /// Total registered token count.
     pub num_tokens: usize,
     /// Fynd crate version at generation time.
@@ -60,10 +60,10 @@ pub struct ExpectedMetadata {
 /// Snapshot of derived data counts for deterministic replay assertions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivedDataMetrics {
-    /// Number of unique pools with at least one spot price.
-    pub spot_price_pools: usize,
-    /// Number of unique pools with at least one pool depth.
-    pub pool_depth_pools: usize,
+    /// Number of unique components with at least one spot price.
+    pub components_with_spot_prices: usize,
+    /// Number of unique components with at least one component depth.
+    pub components_with_depths: usize,
     /// Number of tokens with gas price conversions.
     pub token_prices: usize,
 }

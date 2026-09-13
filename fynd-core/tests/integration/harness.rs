@@ -29,7 +29,7 @@ impl TestHarness {
             .gas_price_as_biguint();
         let pools = load_pools();
 
-        let solver = Solver::from_recording(chain, recording.updates, pools, gas_price)
+        let solver = Solver::from_recording(chain, recording.updates, pools, gas_price, None)
             .await
             .expect("failed to build solver from recording");
 
@@ -69,7 +69,11 @@ impl TestHarness {
     }
 }
 
+/// The worker pools these tests solve with.
+///
+/// Their own config, not the repo's: the expected-output baseline was recorded with a deeper hop
+/// budget than the shipped default allows. See `worker_pools.toml` next to this file.
 fn load_pools() -> HashMap<String, fynd_core::PoolConfig> {
-    let toml_content = include_str!("../../../worker_pools.toml");
+    let toml_content = include_str!("worker_pools.toml");
     fynd_test_fixtures::parse_pools_toml(toml_content).expect("failed to parse worker_pools.toml")
 }

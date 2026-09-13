@@ -69,7 +69,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     let info = client.info().await?;
-    let router = Address::from_slice(info.router_address().as_ref());
+    let router = Address::from_slice(
+        info.router_address()
+            .expect("example requires a chain with encoding support")
+            .as_ref(),
+    );
     let chain_id = info.chain_id();
 
     // Approve the Permit2 contract to spend WETH if the current allowance is insufficient.

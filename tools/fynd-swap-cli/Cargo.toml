@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 fynd-client = { workspace = true }
-erc20-overrides = { workspace = true }
+fynd-core = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 alloy = { workspace = true, features = ["signer-local"] }

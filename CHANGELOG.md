@@ -1,3 +1,754 @@
+
+## [0.105.0](https://github.com/propeller-heads/fynd/compare/0.104.0...0.105.0) (2026-09-13)
+
+### Features
+
+* **token-prices:** run mean pricing in the per-block manager ([b5479b1](https://github.com/propeller-heads/fynd/commit/b5479b1997ed74b482c1f2fd0c0b11d27dd9e331))
+* **token-prices:** price at the mean, solve on a throttled loop ([b731c45](https://github.com/propeller-heads/fynd/commit/b731c454198d645a63048be346413095c66f71d2))
+* **core:** time the price-impact walk per worker pool ([b66309b](https://github.com/propeller-heads/fynd/commit/b66309b93b6ece7093269f2a7c1629b7d93bb9e6))
+* default pool depth to 2 hops, matching the shipped config ([72f98c0](https://github.com/propeller-heads/fynd/commit/72f98c0d791e6aaeea2f1c639ca3b3d8195b23c9))
+* **token-prices:** opt-in buy+sell pricing behind an interval ([78ff01d](https://github.com/propeller-heads/fynd/commit/78ff01d19154d729e8c924ca16e02aa59cf64832))
+* **derived:** distinguish unreachable tokens in price failures ([6ca7b28](https://github.com/propeller-heads/fynd/commit/6ca7b28303ca4e520d3e6ae94cccc9652e378222))
+* **token-prices:** derive token prices by solving with the router ([53c9ca4](https://github.com/propeller-heads/fynd/commit/53c9ca46753e6a3c34d2f429f370d9098fb22254))
+* **rpc:** serve mid prices from GET /v1/prices ([ac9173c](https://github.com/propeller-heads/fynd/commit/ac9173c83dff17f7682022b3f8d0c53bd5636b4b))
+
+### Bug Fixes
+
+* **core:** reject unrepresentable price impact ([7960cee](https://github.com/propeller-heads/fynd/commit/7960cee7699ed503c3af9a22c8f3712b7f3e7cc5))
+* apply review cleanups to pricing docs, logs, and snapshot edges ([8bd9e38](https://github.com/propeller-heads/fynd/commit/8bd9e388746767c5341427124ee6250ccfd21a6c))
+* **core:** handle split-route input totals ([ea81aa0](https://github.com/propeller-heads/fynd/commit/ea81aa036d20fde29726b6b26da99b6050052d10))
+* **core:** compute price impact for split routes ([e839fbf](https://github.com/propeller-heads/fynd/commit/e839fbfac7bddcfaa8dbc3d0bd0d6262eadfd72b))
+* adapt pricing walks to route exclusions from main ([4dad2b6](https://github.com/propeller-heads/fynd/commit/4dad2b68c69695a7de3aa140538d15eecd7f731a))
+* **token-prices:** carry tokens past a timed-out buy pass as unattempted ([faae9fd](https://github.com/propeller-heads/fynd/commit/faae9fd8388c6efaf6cb0299348f883b68a9985d))
+* **token-prices:** report a pass that cannot start as unattempted ([82f9bf1](https://github.com/propeller-heads/fynd/commit/82f9bf1d62a9f66a93c4491e01b5a8bc1bcce78e))
+* **token-prices:** derive pricing depth from the deepest configured pool ([9cc22d3](https://github.com/propeller-heads/fynd/commit/9cc22d3d4f829074d0ac1f954be2bb079b408e72))
+* **token-prices:** carry the cause inside NoSellRoute ([3d5d1c4](https://github.com/propeller-heads/fynd/commit/3d5d1c4b19ae28442098f24c27b844d27d33f359))
+* **token-prices:** log why a token drops out of pricing ([efb0f1e](https://github.com/propeller-heads/fynd/commit/efb0f1e84e2086a006faf0579a5969161d71b162))
+* **token-prices:** bound the pricing pass, carry prices it cuts off ([45d4c9b](https://github.com/propeller-heads/fynd/commit/45d4c9b2ed703f40a9b15b4616595fd8f792224e))
+* **token-prices:** invalidate prices on any candidate route's pools ([e80f0ee](https://github.com/propeller-heads/fynd/commit/e80f0ee2a0b387f1f956206e386eb15134369cbb))
+* **token-prices:** give background solves their own 1s timeout ([e98928f](https://github.com/propeller-heads/fynd/commit/e98928f8713ac26feaf10b508d042ad9a27595d0))
+* **token-prices:** count unreachable tokens instead of reporting failed items ([7c626ec](https://github.com/propeller-heads/fynd/commit/7c626ec01f250f8aeba1c938b924af231e3d8a35))
+* **token-prices:** price every token in reach, not just probe paths ([e09c797](https://github.com/propeller-heads/fynd/commit/e09c79769aa12d643151104b936bbed8c25989d2))
+* **token-prices:** use Fx hash collections after rebase onto main ([72fc665](https://github.com/propeller-heads/fynd/commit/72fc6653f2257b72d5f16ae47aac3e029a462335))
+* **prices:** serve the gas-token-only map instead of a permanent 503 ([a17ffb5](https://github.com/propeller-heads/fynd/commit/a17ffb5ba977467a00ca2f8b018d22ea7fce07a4))
+* **prices:** 503 until more than the gas token is priced ([ad992d6](https://github.com/propeller-heads/fynd/commit/ad992d66c4e3619b6eb622fd7673176367b8cbd5))
+* slugify non-conforming User-Identity metric labels ([5999e8f](https://github.com/propeller-heads/fynd/commit/5999e8f8a47d8d75a1dcde4ea7b707631139a100))
+
+### Performance Improvements
+
+* **core:** remove market reads from price impact ([1ec6f3f](https://github.com/propeller-heads/fynd/commit/1ec6f3f0e7f589e0ce52aaf64f8e8e08482742e3))
+* **token-prices:** run the pricing pass on a blocking thread ([9c4eeab](https://github.com/propeller-heads/fynd/commit/9c4eeabc499759626d94c8e8156516139fea9baf))
+* **token-prices:** bound the snapshot to filtered routes, clone in batches ([62d3e47](https://github.com/propeller-heads/fynd/commit/62d3e473ecaea633b075a4d47396a0dec8e11611))
+* **token-prices:** read buy amounts without building routes ([489dfb1](https://github.com/propeller-heads/fynd/commit/489dfb1e2f72731c7a2f2030c2c38307fee338bf))
+* **token-prices:** solve every sell against one shared market snapshot ([da19e82](https://github.com/propeller-heads/fynd/commit/da19e82fddc8047d21efe17adaf00929b9c0c73f))
+* **token-prices:** price from the buy route alone ([7159d61](https://github.com/propeller-heads/fynd/commit/7159d61b3ba3b2f958116ccd8dde7d17fd7b2b4b))
+* **token-prices:** take every buy route from one relaxation ([cc708b5](https://github.com/propeller-heads/fynd/commit/cc708b557de4d885e3250697ed3dc8b1677d305b))
+
+### Reverts
+
+* keep the 3-hop routing default; cap pricing in a follow-up ([b40629b](https://github.com/propeller-heads/fynd/commit/b40629bd26da78a8b3edeeb349b7d301cb02381a))
+
+
+## [0.104.0](https://github.com/propeller-heads/fynd/compare/0.103.0...0.104.0) (2026-09-09)
+
+### Features
+
+* **clients:** expose the route filter ([12d68e3](https://github.com/propeller-heads/fynd/commit/12d68e3966640ccc134e8bbfaa46abed7455f18e))
+* **rpc:** let a request say what it will not route through ([025ffe5](https://github.com/propeller-heads/fynd/commit/025ffe55712c734d83abf7998c761baccdd1106b))
+* **core:** give an algorithm one request that says what it may not use ([3ec9978](https://github.com/propeller-heads/fynd/commit/3ec9978d56b734b80079a190d9a4e66e73325dfc))
+* **core:** log what a request's route filter resolved to ([b702fed](https://github.com/propeller-heads/fynd/commit/b702fed55b0f48e5a788332d86522e53c9252088))
+* **core:** resolve and enforce a request's exclusions in the worker ([71772e8](https://github.com/propeller-heads/fynd/commit/71772e82628feaf3164015d255f4bd64c16a9ccb))
+* **core:** name the liquidity a request excludes from a route ([9423371](https://github.com/propeller-heads/fynd/commit/9423371e86e0d3ed4ad61c04ccbcefe540a2929f))
+* **core:** index market components by protocol system ([67eedcd](https://github.com/propeller-heads/fynd/commit/67eedcdbdc7543c0a8ea404c9ac605a5292aac30))
+
+### Bug Fixes
+
+* **core:** give pair_has_allowed_pool one answer for an unconnected pair ([682b014](https://github.com/propeller-heads/fynd/commit/682b0146c6bdad6e2370454fa4d346bc73966bfb))
+
+### Performance Improvements
+
+* **core:** keep a leg a slice unless the request excludes one of its pools ([ed5112f](https://github.com/propeller-heads/fynd/commit/ed5112f6c93342ad30ed59a70fa2ca13cdc66f2f))
+* **core:** skip snapshotting state for pools the solve refuses ([f1a72d3](https://github.com/propeller-heads/fynd/commit/f1a72d36ba768fac7ea7767d4ceb5438528d40f4))
+
+
+## [0.103.0](https://github.com/propeller-heads/fynd/compare/0.102.3...0.103.0) (2026-09-08)
+
+### Features
+
+* support new Robinhood protocols ([f8537ea](https://github.com/propeller-heads/fynd/commit/f8537ea892f43f47d1caa7e7f3d48bf8737cba0b))
+* **ci:** tell the downstream deployment repository about a release ([bb48446](https://github.com/propeller-heads/fynd/commit/bb4844633ebe419ad8097eb5183953f0be6ec1e7))
+
+### Bug Fixes
+
+* **core:** give a simulated swap four times the estimated gas ([35d3136](https://github.com/propeller-heads/fynd/commit/35d31362bfa865576c8f44569232d7a38de3863a))
+* **core:** decide pAMMs against the event the market broadcast ([e0f0afb](https://github.com/propeller-heads/fynd/commit/e0f0afba59294e6fc261c1a2a82a17cccb93df2c))
+* **core:** withhold a pAMM only for the reason this rule owns ([714cd52](https://github.com/propeller-heads/fynd/commit/714cd52538f62e54bc14e3921d8054560a476b39))
+* **core:** give each pAMM one state, not two set memberships ([720ddbf](https://github.com/propeller-heads/fynd/commit/720ddbf2c6d7a5f47e237990319195646b066b7d))
+* **core:** keep a forgotten pAMM out of the graph ([91f61da](https://github.com/propeller-heads/fynd/commit/91f61da770d65017b12a0f676cea0209af008f25))
+* **core:** let a withheld pAMM back into the graph ([007ffcf](https://github.com/propeller-heads/fynd/commit/007ffcf7e2730708cba51cc7acd153dcd423e9b3))
+* **core:** keep an unbacked pAMM out of the worker's graph ([4d67050](https://github.com/propeller-heads/fynd/commit/4d67050532cfe922f710053b3f9e83f4ad2b41d2))
+
+
+## [0.102.3](https://github.com/propeller-heads/fynd/compare/0.102.2...0.102.3) (2026-09-04)
+
+### Bug Fixes
+
+* drop router max slippage tolerance check from encoder ([84ef95d](https://github.com/propeller-heads/fynd/commit/84ef95d3fc0c0e53ea42dcf8e57c65c32125aed2))
+
+
+## [0.102.2](https://github.com/propeller-heads/fynd/compare/0.101.1...0.102.2) (2026-09-04)
+
+### Features
+
+* update tycho deps to use latest router deployed ([bbf162c](https://github.com/propeller-heads/fynd/commit/bbf162c77b72e7a3084c7fa6e802dafa2d741dc1))
+
+
+## [0.102.1](https://github.com/propeller-heads/fynd/compare/0.101.1...0.102.1) (2026-09-04)
+
+### Features
+
+* update tycho deps to use latest router deployed ([bbf162c](https://github.com/propeller-heads/fynd/commit/bbf162c77b72e7a3084c7fa6e802dafa2d741dc1))
+* count the winning route's protocols as metrics ([fd1219e](https://github.com/propeller-heads/fynd/commit/fd1219e1ffed7513a474e0f4bf21c49a1e02552c))
+* simulate encoded quotes against a token's real storage layout ([1fbb733](https://github.com/propeller-heads/fynd/commit/1fbb733e7e5ae4d6eca4b99ec449b65c1cc33a38))
+
+### Bug Fixes
+
+* **core:** pin the trace to the block the simulation reported ([7f4242c](https://github.com/propeller-heads/fynd/commit/7f4242c7d8b40ec28cd3641addafc6a4f47a3342))
+* **core:** leave a favourable simulation out of the shortfall mean ([bf1a289](https://github.com/propeller-heads/fynd/commit/bf1a289fa574ee4f390458d6e33b8fcfa7811888))
+* **core:** trace a revert in the block the simulation ran in ([04bb1ce](https://github.com/propeller-heads/fynd/commit/04bb1ce9bda9c8800022e200356d1bb7d2b42168))
+* **core:** place a rebasing token's mapping without naming its address ([78c840f](https://github.com/propeller-heads/fynd/commit/78c840fc6760fa77dcecbb4d1a4917d18e7bc931))
+* **core:** keep a refused RPC from deciding a token cannot be simulated ([5c49977](https://github.com/propeller-heads/fynd/commit/5c4997723a16c906dce018c2ecd700f557acdd50))
+
+### Performance Improvements
+
+* **core:** stop preparing the winning-protocols log when it is off ([1ffaa55](https://github.com/propeller-heads/fynd/commit/1ffaa55d76ec26037c965fbaa7491482d47ca713))
+* **core:** share one layout discovery between concurrent quotes ([0abbf82](https://github.com/propeller-heads/fynd/commit/0abbf822170a46575298015e699ece8846599b26))
+* **core:** bound the layout probes over the read, not over each account ([6bc4b4d](https://github.com/propeller-heads/fynd/commit/6bc4b4d89945f9983aa34dbaddac01a6bb89edb6))
+
+
+## [0.102.0](https://github.com/propeller-heads/fynd/compare/0.101.1...0.102.0) (2026-09-04)
+
+### Features
+
+* update tycho deps to use latest router deployed ([bbf162c](https://github.com/propeller-heads/fynd/commit/bbf162c77b72e7a3084c7fa6e802dafa2d741dc1))
+* count the winning route's protocols as metrics ([fd1219e](https://github.com/propeller-heads/fynd/commit/fd1219e1ffed7513a474e0f4bf21c49a1e02552c))
+* simulate encoded quotes against a token's real storage layout ([1fbb733](https://github.com/propeller-heads/fynd/commit/1fbb733e7e5ae4d6eca4b99ec449b65c1cc33a38))
+
+### Bug Fixes
+
+* **core:** pin the trace to the block the simulation reported ([7f4242c](https://github.com/propeller-heads/fynd/commit/7f4242c7d8b40ec28cd3641addafc6a4f47a3342))
+* **core:** leave a favourable simulation out of the shortfall mean ([bf1a289](https://github.com/propeller-heads/fynd/commit/bf1a289fa574ee4f390458d6e33b8fcfa7811888))
+* **core:** trace a revert in the block the simulation ran in ([04bb1ce](https://github.com/propeller-heads/fynd/commit/04bb1ce9bda9c8800022e200356d1bb7d2b42168))
+* **core:** place a rebasing token's mapping without naming its address ([78c840f](https://github.com/propeller-heads/fynd/commit/78c840fc6760fa77dcecbb4d1a4917d18e7bc931))
+* **core:** keep a refused RPC from deciding a token cannot be simulated ([5c49977](https://github.com/propeller-heads/fynd/commit/5c4997723a16c906dce018c2ecd700f557acdd50))
+
+### Performance Improvements
+
+* **core:** stop preparing the winning-protocols log when it is off ([1ffaa55](https://github.com/propeller-heads/fynd/commit/1ffaa55d76ec26037c965fbaa7491482d47ca713))
+* **core:** share one layout discovery between concurrent quotes ([0abbf82](https://github.com/propeller-heads/fynd/commit/0abbf822170a46575298015e699ece8846599b26))
+* **core:** bound the layout probes over the read, not over each account ([6bc4b4d](https://github.com/propeller-heads/fynd/commit/6bc4b4d89945f9983aa34dbaddac01a6bb89edb6))
+
+
+## [0.101.1](https://github.com/propeller-heads/fynd/compare/0.101.0...0.101.1) (2026-09-03)
+
+### Features
+
+* **bench:** let the viewer read another results directory ([9475175](https://github.com/propeller-heads/fynd/commit/9475175091bd8f9f21fff840f916e85b5df6d782))
+
+
+## [0.101.0](https://github.com/propeller-heads/fynd/compare/0.100.2...0.101.0) (2026-09-03)
+
+### Features
+
+* carry the simulated deviation on the winning-quote log ([d55eca8](https://github.com/propeller-heads/fynd/commit/d55eca88560d0d26db945d5339565443bdce8dbf))
+* expose the simulation stage of the quote pipeline ([1c21f3b](https://github.com/propeller-heads/fynd/commit/1c21f3ba948cca7bd3d03836db6fe10d92629196))
+* label the simulation metrics by pool and algorithm ([f221c52](https://github.com/propeller-heads/fynd/commit/f221c5215516d8064da47b601e309019149c0728))
+
+### Bug Fixes
+
+* keep the deviation quantiles inside the bucket range ([cb01a56](https://github.com/propeller-heads/fynd/commit/cb01a56c19c0597fcaf6c057d2bdabb4f23b24ea))
+* keep the HTTP span's fields off the per-quote log lines ([1467634](https://github.com/propeller-heads/fynd/commit/1467634858cf591a7bd2d5766702acfe4d0480f8))
+* measure the simulated amount against the post-fee quote ([6b5267e](https://github.com/propeller-heads/fynd/commit/6b5267efc7d74eda6112a3345306ab459c6fcf27))
+
+
+## [0.100.2](https://github.com/propeller-heads/fynd/compare/0.100.1...0.100.2) (2026-09-03)
+
+### Features
+
+* chart quote simulation outcome and deviation ([88fe5e3](https://github.com/propeller-heads/fynd/commit/88fe5e33402bf7e219d7e82adeec2903605db1c5))
+* report quote simulation outcome and deviation ([a476fa7](https://github.com/propeller-heads/fynd/commit/a476fa7b347ec435cefa97db8ca468eea295c123))
+* **api:** return simulation_result on a quote ([b782937](https://github.com/propeller-heads/fynd/commit/b782937b8a169c3925be0cf1ff674ff6b590b0db))
+* **serve:** gate quote simulation behind --enable-simulation ([e09f154](https://github.com/propeller-heads/fynd/commit/e09f154f65c323a219f6f63ba8a4284d0c3e5c4d))
+* log the protocols the winning quote swaps on ([628d0c5](https://github.com/propeller-heads/fynd/commit/628d0c5d7a77e45e3b38d6491ea90740949b4076))
+* **core:** simulate under a realistic transaction environment ([aa804a3](https://github.com/propeller-heads/fynd/commit/aa804a30b601a7fbca966c36ff32dd0f3bfcd19f))
+* **core:** simulate encoded quotes against the latest block ([455599e](https://github.com/propeller-heads/fynd/commit/455599ee2307da668b6405c0b5d2802fdeec7c18))
+
+### Bug Fixes
+
+* update Tycho to 0.378.4 ([d60f7df](https://github.com/propeller-heads/fynd/commit/d60f7dfa3885367c06ffae4060d21d2265d37340))
+* **docker:** drop the deleted erc20-overrides crate from the build ([f5d941c](https://github.com/propeller-heads/fynd/commit/f5d941c4d2c7f7519d24909ced5a496a319cbb26))
+
+
+## [0.100.1](https://github.com/propeller-heads/fynd/compare/0.100.0...0.100.1) (2026-09-02)
+
+### Bug Fixes
+
+* **rpc:** warn instead of failing on protocols Tycho dropped ([5a947d5](https://github.com/propeller-heads/fynd/commit/5a947d5a0482b09471a426b2c5d70cb2e8d72203))
+
+
+## [0.100.0](https://github.com/propeller-heads/fynd/compare/0.99.22...0.100.0) (2026-09-02)
+
+### Features
+
+* add disable-slippage-taking encoding ([a4f4586](https://github.com/propeller-heads/fynd/commit/a4f458607b5ecca040bcb02d0516dcf96d10fed9))
+* run Fynd's own command line with algorithms a caller brought ([967c60b](https://github.com/propeller-heads/fynd/commit/967c60bf779b2cef7d80b4aea9a9bf1e3fa8eace))
+* **core:** serve a routing algorithm that lives outside this crate ([2c95b0c](https://github.com/propeller-heads/fynd/commit/2c95b0c9205418a33322077d43d4e4f4be723fac))
+* **core:** benchmark a routing algorithm that lives outside this crate ([e1df8c3](https://github.com/propeller-heads/fynd/commit/e1df8c31934a7295d7152e46e6aab680cd8aef70))
+* **core:** let an algorithm outside this crate report why it failed ([0fb0d38](https://github.com/propeller-heads/fynd/commit/0fb0d38372f5daa7ef0edb65b7ca0585ffec2c9f))
+* capture disable-slippage-taking in the replay log ([bf1a262](https://github.com/propeller-heads/fynd/commit/bf1a2623695e492399fed6c953783f2a87a4d346))
+* **core:** tell a rejected route from a market with no path ([80b1407](https://github.com/propeller-heads/fynd/commit/80b140777f23c64962bf727f1c3fe77ba4483307))
+* name the quote's wire field after the algorithm ([fc8e2d0](https://github.com/propeller-heads/fynd/commit/fc8e2d0ce9c1a7f8d199afa5da3007b5358c5129))
+* return the winning solver in the quote response ([cdcca2b](https://github.com/propeller-heads/fynd/commit/cdcca2b461edb59ddf50f4da970a9b5f407c00fa))
+* **client:** expose the quote algorithm in the Rust client ([1b113f2](https://github.com/propeller-heads/fynd/commit/1b113f21ed7d0589dd46342f83349037a76fdc90))
+
+### Bug Fixes
+
+* share one 120s deadline window across signed payloads ([7f68dda](https://github.com/propeller-heads/fynd/commit/7f68dda8a602219d306cea932c33107aa6990bf1))
+* fail signing when the clock precedes the Unix epoch ([81ce2c7](https://github.com/propeller-heads/fynd/commit/81ce2c7fb1e7ce29ba64b1442c727993b8bafbcf))
+* prefer explicit client_fee_params over disable-slippage-taking ([9fd163d](https://github.com/propeller-heads/fynd/commit/9fd163d37adb1f36de044f728672e4c36d905519))
+* **core:** return an error when the split fractions oversubscribe ([a617973](https://github.com/propeller-heads/fynd/commit/a61797343e24fdf3a9fb9e1a75b48f2b40471950))
+* **core:** restore FyndBuilder::with_algorithm as deprecated ([b63ec6c](https://github.com/propeller-heads/fynd/commit/b63ec6c7f74d4eb9f8eb91ef7ad0bbc26a2a0dd2))
+
+### Performance Improvements
+
+* **core:** clone the pool state only for the pass that builds the route ([36bd5b1](https://github.com/propeller-heads/fynd/commit/36bd5b1a6a4ef3da55db399ff75a9e28951b0e55))
+
+
+## [0.99.22](https://github.com/propeller-heads/fynd/compare/0.99.20...0.99.22) (2026-08-29)
+
+### Features
+
+* raise tycho floor to 0.370.2 for Angstrom filter fix ([f0a7a9c](https://github.com/propeller-heads/fynd/commit/f0a7a9c3a5ef534f6e4eec3b13016147e0fd4574))
+
+
+## [0.99.21](https://github.com/propeller-heads/fynd/compare/0.99.20...0.99.21) (2026-08-29)
+
+### Features
+
+* raise tycho floor to 0.370.2 for Angstrom filter fix ([f0a7a9c](https://github.com/propeller-heads/fynd/commit/f0a7a9c3a5ef534f6e4eec3b13016147e0fd4574))
+
+
+## [0.99.20](https://github.com/propeller-heads/fynd/compare/0.99.18...0.99.20) (2026-08-28)
+
+### Features
+
+* raise tycho lower bound to 0.370.0 ([d329e3a](https://github.com/propeller-heads/fynd/commit/d329e3a5d07d59025012998ae31a4920c3765fc6))
+* **core:** add SolveError::InvalidWorkerPools for allowlist errors ([ab89495](https://github.com/propeller-heads/fynd/commit/ab89495233783fac5f6d1d285c56aa126ae64757))
+* **core:** reject empty pool allowlists and rename finalize_quote ([95e3a42](https://github.com/propeller-heads/fynd/commit/95e3a4271ddcf68b631b362b08cc2d32b2fb76bb))
+* **core:** expose solve, encode_quotes and finalize stages of the router ([38625b5](https://github.com/propeller-heads/fynd/commit/38625b5b0d6638578998cd3962b4421b1d719738))
+* **core:** allow requests to restrict solving to named worker pools ([c80cdbe](https://github.com/propeller-heads/fynd/commit/c80cdbefec307894f032b6ac8e44db2af6db811e))
+* **propamm:** name the pAMM components with no fallback pool ([3b48f69](https://github.com/propeller-heads/fynd/commit/3b48f69493ce1402ccee43c114f9688bac9151b2))
+* **rpc:** expose the quote pipeline stages and app state for embedders ([0190e01](https://github.com/propeller-heads/fynd/commit/0190e017881559728d20b42bae812a1933be32df))
+* **rpc:** add configure_routes hook to register overriding routes ([4b7291b](https://github.com/propeller-heads/fynd/commit/4b7291b998e4ec724d1f35bb2e3bb7634cdc9341))
+
+### Bug Fixes
+
+* validate before capturing and reject empty rankings everywhere ([a1a4049](https://github.com/propeller-heads/fynd/commit/a1a40498ccc6e1e3134e22800177e4ba8564c996))
+* **core:** validate the worker pool allowlist once per request ([f050787](https://github.com/propeller-heads/fynd/commit/f05078712431745a9bc6fa40e6e220924510bf32))
+* **core:** make RankedQuotes::new fallible instead of panicking ([8e92179](https://github.com/propeller-heads/fynd/commit/8e92179c4119fc95caa1bf839201f432ededcbd5))
+* leave a pAMM out of the graph when its fallback cannot be priced ([d35d618](https://github.com/propeller-heads/fynd/commit/d35d618d81ef85bd3f36e0e15249c0860b8c5b64))
+* **rpc:** restrict RequestOutcome and is_failure to crate-internal use ([d355097](https://github.com/propeller-heads/fynd/commit/d3550974a3dd6a776c8422824fdfc52e6d9b77c7))
+* **rpc:** derive num_orders from capture in log_quote_outcome ([f2fdf67](https://github.com/propeller-heads/fynd/commit/f2fdf67eb91ea615291ec2b0e3047f4e48811912))
+* **rpc:** harden RequestOutcome and document route override limits ([6a8277d](https://github.com/propeller-heads/fynd/commit/6a8277d0a948b50d9734d15979741581f8936e15))
+
+
+## [0.99.19](https://github.com/propeller-heads/fynd/compare/0.99.18...0.99.19) (2026-08-28)
+
+### Features
+
+* raise tycho lower bound to 0.370.0 ([d329e3a](https://github.com/propeller-heads/fynd/commit/d329e3a5d07d59025012998ae31a4920c3765fc6))
+* **core:** add SolveError::InvalidWorkerPools for allowlist errors ([ab89495](https://github.com/propeller-heads/fynd/commit/ab89495233783fac5f6d1d285c56aa126ae64757))
+* **core:** reject empty pool allowlists and rename finalize_quote ([95e3a42](https://github.com/propeller-heads/fynd/commit/95e3a4271ddcf68b631b362b08cc2d32b2fb76bb))
+* **core:** expose solve, encode_quotes and finalize stages of the router ([38625b5](https://github.com/propeller-heads/fynd/commit/38625b5b0d6638578998cd3962b4421b1d719738))
+* **core:** allow requests to restrict solving to named worker pools ([c80cdbe](https://github.com/propeller-heads/fynd/commit/c80cdbefec307894f032b6ac8e44db2af6db811e))
+* **propamm:** name the pAMM components with no fallback pool ([3b48f69](https://github.com/propeller-heads/fynd/commit/3b48f69493ce1402ccee43c114f9688bac9151b2))
+* **rpc:** expose the quote pipeline stages and app state for embedders ([0190e01](https://github.com/propeller-heads/fynd/commit/0190e017881559728d20b42bae812a1933be32df))
+* **rpc:** add configure_routes hook to register overriding routes ([4b7291b](https://github.com/propeller-heads/fynd/commit/4b7291b998e4ec724d1f35bb2e3bb7634cdc9341))
+
+### Bug Fixes
+
+* validate before capturing and reject empty rankings everywhere ([a1a4049](https://github.com/propeller-heads/fynd/commit/a1a40498ccc6e1e3134e22800177e4ba8564c996))
+* **core:** validate the worker pool allowlist once per request ([f050787](https://github.com/propeller-heads/fynd/commit/f05078712431745a9bc6fa40e6e220924510bf32))
+* **core:** make RankedQuotes::new fallible instead of panicking ([8e92179](https://github.com/propeller-heads/fynd/commit/8e92179c4119fc95caa1bf839201f432ededcbd5))
+* leave a pAMM out of the graph when its fallback cannot be priced ([d35d618](https://github.com/propeller-heads/fynd/commit/d35d618d81ef85bd3f36e0e15249c0860b8c5b64))
+* **rpc:** restrict RequestOutcome and is_failure to crate-internal use ([d355097](https://github.com/propeller-heads/fynd/commit/d3550974a3dd6a776c8422824fdfc52e6d9b77c7))
+* **rpc:** derive num_orders from capture in log_quote_outcome ([f2fdf67](https://github.com/propeller-heads/fynd/commit/f2fdf67eb91ea615291ec2b0e3047f4e48811912))
+* **rpc:** harden RequestOutcome and document route override limits ([6a8277d](https://github.com/propeller-heads/fynd/commit/6a8277d0a948b50d9734d15979741581f8936e15))
+
+
+## [0.99.18](https://github.com/propeller-heads/fynd/compare/0.99.17...0.99.18) (2026-08-27)
+
+### Bug Fixes
+
+* **feed:** apply the hook filter to uniswap_v4_hooks only ([f9e9199](https://github.com/propeller-heads/fynd/commit/f9e91999b06a234aa705c72fb3551611920033db))
+* **feed:** drop Uniswap V4 pools using hook 0x051c99a4 ([37929eb](https://github.com/propeller-heads/fynd/commit/37929eb7b70657fce0e5c33941025356bfc46d27))
+* bind exclusive swap signatures to the Tycho router as locker ([2bfc2bc](https://github.com/propeller-heads/fynd/commit/2bfc2bc93ac9e7f1df77056e51b80005e6216cd6))
+* **feed:** block the eight sibling hooks of 0x051c99a4 ([6cc37bc](https://github.com/propeller-heads/fynd/commit/6cc37bc5d718aa4f5721044e163769e5df6ae631))
+
+
+## [0.99.17](https://github.com/propeller-heads/fynd/compare/0.99.16...0.99.17) (2026-08-26)
+
+### Features
+
+* add Robinhood to hosted API support ([54e06b8](https://github.com/propeller-heads/fynd/commit/54e06b858de3cd69eab76032964644a0cf7a00f4))
+
+### Bug Fixes
+
+* draw exclusive swap nonces from a random per-process prefix ([3398945](https://github.com/propeller-heads/fynd/commit/3398945417529c37f5215bbb60ec6550598da6c5))
+* address PR #466 review comments ([299a8fb](https://github.com/propeller-heads/fynd/commit/299a8fbd26a7f2d6de07e7200f9b843d31228458))
+
+
+
+## [0.99.15](https://github.com/propeller-heads/fynd/compare/0.99.14...0.99.15) (2026-08-25)
+
+### Features
+
+* exclude protocol systems per worker pool ([52807f3](https://github.com/propeller-heads/fynd/commit/52807f3cd18210fe01ae7ebeb5e727a9308c5314))
+
+### Bug Fixes
+
+* drop pAMM quotes under min_amount_out before ranking ([5df7259](https://github.com/propeller-heads/fynd/commit/5df72591f7276b44afbd601df6ba2ec8ef5ecb7d))
+
+
+## [0.99.14](https://github.com/propeller-heads/fynd/compare/0.99.12...0.99.14) (2026-08-24)
+
+### Features
+
+* **core:** count pAMM quotes dropped for a weak fallback ([aa75d1a](https://github.com/propeller-heads/fynd/commit/aa75d1a4d55ef044eb7c5c9d1659b20aee9fcae0))
+* **core:** drop a pAMM quote whose fallback misses the floor ([46c05b0](https://github.com/propeller-heads/fynd/commit/46c05b03b775f7037774fd34de4583bf10a354dc))
+* **core:** stamp the fallback amount out on pAMM routes ([4c0a8f3](https://github.com/propeller-heads/fynd/commit/4c0a8f362a75d03665ef51797ec4bcdfe1da8d01))
+* **core:** keep the fallback pool index current in each worker ([687c684](https://github.com/propeller-heads/fynd/commit/687c684da7d4d337071014d19dde77f368562ef9))
+* **core:** read the PropAMMRouter fee tiers from chain on a timer ([1158486](https://github.com/propeller-heads/fynd/commit/11584867e67b8ea9971571a3ff6de3aa73751754))
+* **core:** compute the route output when pAMM legs fall back ([b474bfb](https://github.com/propeller-heads/fynd/commit/b474bfb3c89bae07a58c411204c6c93bbf41134b))
+* report exclusive surplus in gas-token units ([049ca4b](https://github.com/propeller-heads/fynd/commit/049ca4b9ba5d7c54c2068b1cf7992e00377a0e60))
+
+### Bug Fixes
+
+* **core:** abort the fee tier fetcher on shutdown ([3cc41ad](https://github.com/propeller-heads/fynd/commit/3cc41ad1502658aa7288f2dd66f4e5ea16e872be))
+* **core:** price the pAMM fallback on the state it was solved on ([d378c45](https://github.com/propeller-heads/fynd/commit/d378c458788fb1ed67358d459c052edcdea2e7fd))
+
+
+## [0.99.13](https://github.com/propeller-heads/fynd/compare/0.99.12...0.99.13) (2026-08-24)
+
+### Features
+
+* **core:** count pAMM quotes dropped for a weak fallback ([aa75d1a](https://github.com/propeller-heads/fynd/commit/aa75d1a4d55ef044eb7c5c9d1659b20aee9fcae0))
+* **core:** drop a pAMM quote whose fallback misses the floor ([46c05b0](https://github.com/propeller-heads/fynd/commit/46c05b03b775f7037774fd34de4583bf10a354dc))
+* **core:** stamp the fallback amount out on pAMM routes ([4c0a8f3](https://github.com/propeller-heads/fynd/commit/4c0a8f362a75d03665ef51797ec4bcdfe1da8d01))
+* **core:** keep the fallback pool index current in each worker ([687c684](https://github.com/propeller-heads/fynd/commit/687c684da7d4d337071014d19dde77f368562ef9))
+* **core:** read the PropAMMRouter fee tiers from chain on a timer ([1158486](https://github.com/propeller-heads/fynd/commit/11584867e67b8ea9971571a3ff6de3aa73751754))
+* **core:** compute the route output when pAMM legs fall back ([b474bfb](https://github.com/propeller-heads/fynd/commit/b474bfb3c89bae07a58c411204c6c93bbf41134b))
+* report exclusive surplus in gas-token units ([049ca4b](https://github.com/propeller-heads/fynd/commit/049ca4b9ba5d7c54c2068b1cf7992e00377a0e60))
+
+### Bug Fixes
+
+* **core:** abort the fee tier fetcher on shutdown ([3cc41ad](https://github.com/propeller-heads/fynd/commit/3cc41ad1502658aa7288f2dd66f4e5ea16e872be))
+* **core:** price the pAMM fallback on the state it was solved on ([d378c45](https://github.com/propeller-heads/fynd/commit/d378c458788fb1ed67358d459c052edcdea2e7fd))
+
+
+## [0.99.12](https://github.com/propeller-heads/fynd/compare/0.99.11...0.99.12) (2026-08-21)
+
+### Features
+
+* add configurable calldata watermark ([7232c0c](https://github.com/propeller-heads/fynd/commit/7232c0ca6ce92d63b4ef66f4a8cf5b1b3499e29b))
+* count exclusive candidates dropped for invalid route shape ([dd16584](https://github.com/propeller-heads/fynd/commit/dd16584c41710f338245a4cf483e3c85df2b43be))
+
+### Bug Fixes
+
+* **api:** bound experimental list query limits ([521dd3c](https://github.com/propeller-heads/fynd/commit/521dd3c179af1f82401cd8ce50fc054ed927babb))
+
+
+## [0.99.11](https://github.com/propeller-heads/fynd/compare/0.99.10...0.99.11) (2026-08-20)
+
+### Features
+
+* Reuse caching developed for WF in ML ([d5e3a91](https://github.com/propeller-heads/fynd/commit/d5e3a91c48b901c3b9d94a23bb5a1fa98fe61dd9))
+* Waterfill - Slim Shady version ([5cadfd9](https://github.com/propeller-heads/fynd/commit/5cadfd94b7c51ce0dea095c20a4c156afde791f2))
+
+### Bug Fixes
+
+* rank water-fill candidate paths net of gas ([1b75b68](https://github.com/propeller-heads/fynd/commit/1b75b6891af29785319b8f3e95e4b981a47881f0))
+
+
+## [0.99.10](https://github.com/propeller-heads/fynd/compare/0.99.9...0.99.10) (2026-08-19)
+
+### Features
+
+* accept exclusive legs that wrap into the output token ([320204e](https://github.com/propeller-heads/fynd/commit/320204ebf664facb0341a3cca3b730908babbc52))
+
+
+
+
+## [0.99.7](https://github.com/propeller-heads/fynd/compare/0.99.6...0.99.7) (2026-08-17)
+
+### Features
+
+* Replace path data types with SmallVec ([4a7424b](https://github.com/propeller-heads/fynd/commit/4a7424b851084f9e6404e8d7df44d4012e1ecbdb))
+* Use FxHash at all hashed fields ([75ea368](https://github.com/propeller-heads/fynd/commit/75ea368b4ab6085136f7d9c0109fbf94571be160))
+* Add error tracking on benchmark ([3fd39fe](https://github.com/propeller-heads/fynd/commit/3fd39fef0e3187fe118ecdacda154c62c9399bbb))
+* Keep public API backwards compatible ([fada11d](https://github.com/propeller-heads/fynd/commit/fada11d6ba92c0016fcab62681c2e579e20e254a))
+* **most_liquid:** Never send a route through one pool twice ([d1fc9be](https://github.com/propeller-heads/fynd/commit/d1fc9be73197e2dbe61deb98aeb034f82df53465))
+* Allow querying market data with reference IDs ([8bed02b](https://github.com/propeller-heads/fynd/commit/8bed02b8deb5aa7dc0d083591e2f47acbc8b0fda))
+* Implement target node filtering on bellman ford ([cfb138f](https://github.com/propeller-heads/fynd/commit/cfb138f17067b4f14655123559d1b1b7375779d7))
+* Implement MostLiquid V2, designed with token sequences ([06f4a74](https://github.com/propeller-heads/fynd/commit/06f4a7492f3d8d68a6dec9f0eb78e09f4829888b))
+* Implement topology graph search methods ([b23372c](https://github.com/propeller-heads/fynd/commit/b23372c23ae50715dab87c0fa568972528c48fc5))
+* Use shared pointer (ARC) for component and token data ([20b67e8](https://github.com/propeller-heads/fynd/commit/20b67e8016553c76c04a01741b99b61abcad54e5))
+* Implement TopologyGraph - single edge between tokens ([9463fa1](https://github.com/propeller-heads/fynd/commit/9463fa1f40ca3c31bf4e85d565feba420c02bc17))
+
+### Bug Fixes
+
+* Update callsite after merging main ([d606fb8](https://github.com/propeller-heads/fynd/commit/d606fb8c949fd57e1aea5781deb6bc11a6eff8a4))
+* Give the integration tests their own worker pool config ([0648090](https://github.com/propeller-heads/fynd/commit/06480908da73dfbec9a2a1dcc0f74db58d2056d1))
+
+### Performance Improvements
+
+* Extract subset loops optimized ([7b2624a](https://github.com/propeller-heads/fynd/commit/7b2624a88525e35379d678e9d54675e80456c116))
+
+
+## [0.99.6](https://github.com/propeller-heads/fynd/compare/0.99.5...0.99.6) (2026-08-14)
+
+### Features
+
+* Address PR reviews, add a LIVE mode, and UI improvements. ([78d072e](https://github.com/propeller-heads/fynd/commit/78d072e4078a36e28b1842c485bc64e502aa306d))
+* Add an offline benchmark and a profiling tool ([34f367c](https://github.com/propeller-heads/fynd/commit/34f367c0afc31c2d868a1c79cf6bc3d5ec91c2c3))
+* A few more iterations on benchmark following usage ([cd2d86e](https://github.com/propeller-heads/fynd/commit/cd2d86e464ee0b2f82e35a0d7ef8933118fd7e37))
+
+### Bug Fixes
+
+* **rpc:** invert liquidity unit conversion in GET /v1/tokens ([03147a2](https://github.com/propeller-heads/fynd/commit/03147a2390f345632e984d962d11bcf9bf11b9f4))
+
+
+
+
+## [0.99.3](https://github.com/propeller-heads/fynd/compare/0.99.2...0.99.3) (2026-08-11)
+
+### Features
+
+* **rpc:** add offset pagination to GET /v1/tokens ([da05b88](https://github.com/propeller-heads/fynd/commit/da05b88a06864b47088c01379e3d3736784202be))
+* **rpc:** add experimental GET /v1/tokens graph token endpoint ([efdc327](https://github.com/propeller-heads/fynd/commit/efdc327d569a053a8d38a9ff8f66e5dc1113befd))
+
+
+## [0.99.2](https://github.com/propeller-heads/fynd/compare/0.99.1...0.99.2) (2026-08-11)
+
+### Features
+
+* **rpc:** drop price unit contract and fix decimal truncation ([d6a81c0](https://github.com/propeller-heads/fynd/commit/d6a81c007a6d2728865ea2054211c8ddf4f02743))
+* **prices:** expose decimal string unit contract ([9b570c0](https://github.com/propeller-heads/fynd/commit/9b570c0db472e1dac62b312c6abbfb6b1bf59817))
+* **rpc:** define stable price unit contract ([55e7788](https://github.com/propeller-heads/fynd/commit/55e7788eab7ffb5450084eeff7d3cb6c05297c85))
+
+### Bug Fixes
+
+* **ci:** align OpenAPI drift contract ([cbc8177](https://github.com/propeller-heads/fynd/commit/cbc8177a106f6d4a4f7445c86ae03843e32d4045))
+
+
+## [0.99.1](https://github.com/propeller-heads/fynd/compare/0.98.0...0.99.1) (2026-08-07)
+
+### Features
+
+* **core:** move tycho crates to the 0.354.0 release ([d44556f](https://github.com/propeller-heads/fynd/commit/d44556f527ae58933aa0f9893f917e6c671dd1e2))
+* **client:** sign the 11-field ClientFee payload ([166a2dc](https://github.com/propeller-heads/fynd/commit/166a2dc2091739442b9b5d5ce457556cad75d201))
+* **core:** encode router fees against tycho draft branch ([c37eb9b](https://github.com/propeller-heads/fynd/commit/c37eb9b490330d80fd25768d592dd05b5ad6a865))
+
+
+## [0.99.0](https://github.com/propeller-heads/fynd/compare/0.98.0...0.99.0) (2026-08-07)
+
+### Features
+
+* **core:** move tycho crates to the 0.354.0 release ([d44556f](https://github.com/propeller-heads/fynd/commit/d44556f527ae58933aa0f9893f917e6c671dd1e2))
+* **client:** sign the 11-field ClientFee payload ([166a2dc](https://github.com/propeller-heads/fynd/commit/166a2dc2091739442b9b5d5ce457556cad75d201))
+* **core:** encode router fees against tycho draft branch ([c37eb9b](https://github.com/propeller-heads/fynd/commit/c37eb9b490330d80fd25768d592dd05b5ad6a865))
+
+
+## [0.98.0](https://github.com/propeller-heads/fynd/compare/0.97.14...0.98.0) (2026-08-05)
+
+### Features
+
+* **monitoring:** add per-pool solve p95 panel to the local dashboard ([e73cd4d](https://github.com/propeller-heads/fynd/commit/e73cd4da76b0a2f88f75146d52cbf0b4488430e3))
+* replace ExclusivityPolicy with scope based filtering ([c011dc6](https://github.com/propeller-heads/fynd/commit/c011dc62631ae4f093d185de44f609000df6e5d0))
+* rename pool_depths and poolId in /v1/prices and TS client ([8eb73c8](https://github.com/propeller-heads/fynd/commit/8eb73c895b9ff361f128cf6ed43ca10d6bd5ee1d))
+* quote exclusive routes when no public route exists ([2930167](https://github.com/propeller-heads/fynd/commit/2930167b896a6b7aa4ee3c288eea4da17bc69a87))
+* **metrics:** add per-pool solve duration histogram ([bd59b68](https://github.com/propeller-heads/fynd/commit/bd59b6803058cb37082f0332948730f7e184c563))
+* default to PublicOnly scope and rename All to IncludeExclusive ([aad3886](https://github.com/propeller-heads/fynd/commit/aad38864b90ecdf3ac9339f4710f7a301eb2b39e))
+* give the user a share of the exclusive route improvement ([7beabb1](https://github.com/propeller-heads/fynd/commit/7beabb1bfb90e19b2ae43e72731dc0311ca6a097))
+* require exclusive routes to beat public by 1 bps ([5fde9ba](https://github.com/propeller-heads/fynd/commit/5fde9baea7afc51ae92abee3ffaa4b47939f15f4))
+
+### Bug Fixes
+
+* use imported path ([6c07c5a](https://github.com/propeller-heads/fynd/commit/6c07c5aa3d938794fb8821a1c388387414ff1fe8))
+* fix terminal-leg check in has_valid_exclusive_route ([4d10c88](https://github.com/propeller-heads/fynd/commit/4d10c88922db9a2446831252300336b1b8dd4b66))
+
+
+## [0.97.14](https://github.com/propeller-heads/fynd/compare/0.97.13...0.97.14) (2026-08-03)
+
+### Features
+
+* **feed:** stream exclusive pools via the exclusive: protocol prefix ([d8510fd](https://github.com/propeller-heads/fynd/commit/d8510fdc22bea47132c79e1c84f361bfa37fad65))
+
+
+
+## [0.97.12](https://github.com/propeller-heads/fynd/compare/0.97.11...0.97.12) (2026-07-30)
+
+### Features
+
+* **derived:** add coalesce_market_events for lag recovery ([5b655a2](https://github.com/propeller-heads/fynd/commit/5b655a2455b71e8cbeba8813c3063525f86353e8))
+
+### Bug Fixes
+
+* **derived:** correct lag-recovery doc comment and count drain-time lag skips ([2f35f07](https://github.com/propeller-heads/fynd/commit/2f35f07cced995c1f2ef5e90c78d000c213b92af))
+* **derived:** recover from broadcast lag incrementally, not via full recompute ([42fcf69](https://github.com/propeller-heads/fynd/commit/42fcf69d111842fb6c7cd414da5efc7d9d2540b9))
+
+
+## [0.97.11](https://github.com/propeller-heads/fynd/compare/0.97.10...0.97.11) (2026-07-30)
+
+### Features
+
+* **fynd-core:** derive route summaries from the solved route ([3f8c10c](https://github.com/propeller-heads/fynd/commit/3f8c10c6230fa15141838cf988769036b3f85d01))
+* **hindsight:** solve fresh at back-of-block alongside route replay ([3ae070d](https://github.com/propeller-heads/fynd/commit/3ae070dca867ecda1eccc03a869ebf1288213ee3))
+* **hindsight:** re-execute top routes to measure positive slippage ([a3a4946](https://github.com/propeller-heads/fynd/commit/a3a4946c7f103afac4c33da9b8e574935c618bb8))
+
+### Bug Fixes
+
+* **fynd-core:** guard replayed pool sims against panics ([73e289a](https://github.com/propeller-heads/fynd/commit/73e289ae13e8374bbc673a0493085daed4207a64))
+
+
+
+
+## [0.97.8](https://github.com/propeller-heads/fynd/compare/0.97.7...0.97.8) (2026-07-29)
+
+### Features
+
+* **hindsight:** add offline HTML report subcommand ([7193561](https://github.com/propeller-heads/fynd/commit/7193561ab82947f1344aac90f5f14e531410165e))
+* consolidate permission and pool-role types ([7c4e723](https://github.com/propeller-heads/fynd/commit/7c4e7235ba38c875ca4df86a82a2656d23f25782))
+* scaffold permissioned surplus pools ([7fb9dbc](https://github.com/propeller-heads/fynd/commit/7fb9dbc6882fe699af64f549b0a8e263cc96ae61))
+* **core:** carry the failing SolveError on OrderQuote and aggregate it ([9079077](https://github.com/propeller-heads/fynd/commit/9079077c5d0de72aef631d0ae5fbf6e6221c56da))
+* **core:** classify algorithm errors into specific solve errors ([a2788d6](https://github.com/propeller-heads/fynd/commit/a2788d6dcf95120993656949af9385645256bb28))
+* **core:** add MaxGasExceeded, MissingData, SimulationFailed solve errors ([6f98e3b](https://github.com/propeller-heads/fynd/commit/6f98e3ba4d9c6231a274e6b814b551709d509c34))
+* **encoding:** rename to exclusive-swap and add taker buffer ([3d5db72](https://github.com/propeller-heads/fynd/commit/3d5db72a71c0273a5a4032de4d9f0073e68ee46d))
+* **encoding:** sign exclusive-swap quotes into Ekubo user_data ([0477847](https://github.com/propeller-heads/fynd/commit/04778473fc9bbacb451812e2d23619df6c9e6cf9))
+* require an exclusivity policy when liquidity_scope is set ([1b61ddf](https://github.com/propeller-heads/fynd/commit/1b61ddf98f812b983f1fbf88e46ecbf277cba765))
+* cover exclusive candidate filters in combine_with_surplus ([44ba437](https://github.com/propeller-heads/fynd/commit/44ba437edba97f1a519cd9fc2c42c40db3fcb43a))
+* add tests for early return cases ([e3398db](https://github.com/propeller-heads/fynd/commit/e3398db8c1c36fea65b921dc13c826993e73d700))
+* implement permissioned surplus routing logic ([c2b31e2](https://github.com/propeller-heads/fynd/commit/c2b31e2c81ef70bddfd502667a510fdc38301207))
+* **rpc:** log namespaced failure_reasons on the quote capture line ([fd375ce](https://github.com/propeller-heads/fynd/commit/fd375ce3802e6523a1407811b16656da96e1ab33))
+
+### Bug Fixes
+
+* **water-fill:** route simulation calls through the panic guard ([08b54b9](https://github.com/propeller-heads/fynd/commit/08b54b95fc82ff75301397ee7197efd3e6bf418b))
+* **core:** derive max-gas cause from quote gas, not elimination ([4ad42c6](https://github.com/propeller-heads/fynd/commit/4ad42c685d952e73784894d0c64c6ff611ad7ff5))
+* repair merge fallout from PR #340 rename ([e7c4640](https://github.com/propeller-heads/fynd/commit/e7c4640f9981303a2e7c47f624f5bd05f5704462))
+* add struct fields introduced on main to rebased tests ([ec57451](https://github.com/propeller-heads/fynd/commit/ec57451e86253d07a249da93655e1fbe4bdafcaf))
+* gas compensate the committed amount on surplus quotes ([853e8dc](https://github.com/propeller-heads/fynd/commit/853e8dc26f991c41a130d7944d6bb17f419b8d97))
+* capture the full surplus on split routes ([bafedcb](https://github.com/propeller-heads/fynd/commit/bafedcb81e0df2474444ab6c7cc77175052b1b61))
+* rename tests ([3e522df](https://github.com/propeller-heads/fynd/commit/3e522df82927b0524be9db1d90b2c3fedcd87088))
+* ceil commited_leg for protocol to not overcapture ([193aa07](https://github.com/propeller-heads/fynd/commit/193aa07164ed7277d58e56ac12df02afa89eeba6))
+* not consider gas in quote ([18ff332](https://github.com/propeller-heads/fynd/commit/18ff332414978f75f47e2c4348d80237ee124dd6))
+* gas compensate the committed amount on exclusive quotes ([12ca21b](https://github.com/propeller-heads/fynd/commit/12ca21ba9218a3319e32b95d3bc20cae8d412806))
+* use exclusive routes that tie the public gross output ([8d0f5c2](https://github.com/propeller-heads/fynd/commit/8d0f5c2c17e436e34ff395c4eb98c259c374d800))
+* update docs link ([702a163](https://github.com/propeller-heads/fynd/commit/702a1635a77fd831d88fe2437ecd1dd8106d1ace))
+* set permission field in path_frank_wolfe registry test ([fe47f65](https://github.com/propeller-heads/fynd/commit/fe47f657a2ade5973f78192dbe15e34ce173344c))
+* **rpc:** repeat request-level failure reason per order ([c6b28c1](https://github.com/propeller-heads/fynd/commit/c6b28c12472ed6c1cf068709c43dcb93debe7752))
+
+
+## [0.97.7](https://github.com/propeller-heads/fynd/compare/0.97.6...0.97.7) (2026-07-28)
+
+### Features
+
+* **core:** report AmountTooSmall for dust quotes via input-vs-single-hop-gas ([890b731](https://github.com/propeller-heads/fynd/commit/890b731f42eab803d77ce68992dfaf09d45cbaf2))
+* **core:** add AmountTooSmall no-path reason and aggregate it ([ec57a0c](https://github.com/propeller-heads/fynd/commit/ec57a0cf03f47a92f2f4eda849e140a695e4b268))
+* **rpc:** log amount_too_small no-route reason code ([087de5d](https://github.com/propeller-heads/fynd/commit/087de5d4956cee418701030424a9006e7bb36126))
+
+### Bug Fixes
+
+* log terminal errors so stdout log pipelines show them ([7bea194](https://github.com/propeller-heads/fynd/commit/7bea19483c7dc3736266d0ef7be96b45759e9c46))
+* **core:** make AmountTooSmall docs and Display mode-neutral ([2039b19](https://github.com/propeller-heads/fynd/commit/2039b19d89b6784bbc6d3cbdf1b6292542e41c21))
+* **core:** rank no-route reasons by tier when aggregating pools ([765cd93](https://github.com/propeller-heads/fynd/commit/765cd93d4a30ac477751d641b2eedd8553a608fe))
+
+### Performance Improvements
+
+* **core:** gate input-side dust check on uneconomic edges ([b4b72e5](https://github.com/propeller-heads/fynd/commit/b4b72e5c3a4c79b4936dc81df1df2a9504489408))
+
+
+## [0.97.6](https://github.com/propeller-heads/fynd/compare/0.97.4...0.97.6) (2026-07-27)
+
+### Features
+
+* add aerodrome_v1 to protocol registry ([12c47ad](https://github.com/propeller-heads/fynd/commit/12c47ad482ec8559e03ff40c5680d63b84a06747))
+
+
+## [0.97.5](https://github.com/propeller-heads/fynd/compare/0.97.4...0.97.5) (2026-07-27)
+
+### Features
+
+* **rpc:** make the hosted Swagger UI opt-in via --hosted-swagger-url ([4e0b883](https://github.com/propeller-heads/fynd/commit/4e0b8839dd49011386ceea62bbf704b516a93d89))
+* **rpc:** serve a hosted-gateway Swagger UI at /docs/hosted/ ([473b18f](https://github.com/propeller-heads/fynd/commit/473b18f78cf288fd5c406be42021c702e4b4190b))
+* log solve requests that take more than 200ms ([7c54ab7](https://github.com/propeller-heads/fynd/commit/7c54ab719f0ceef765f9a64a7dd1ec68649c4560))
+
+### Bug Fixes
+
+* **rpc:** declare hosted auth as raw Authorization API key ([dd9667d](https://github.com/propeller-heads/fynd/commit/dd9667db21d2d9589bdefbed4babba0a6ba61c54))
+
+
+## [0.97.4](https://github.com/propeller-heads/fynd/compare/0.97.3...0.97.4) (2026-07-24)
+
+### Bug Fixes
+
+* **rpc:** fail fast when the computation manager task exits ([dd5755a](https://github.com/propeller-heads/fynd/commit/dd5755a9b00af21447a942b86b8999a369cc701f))
+
+
+## [0.97.3](https://github.com/propeller-heads/fynd/compare/0.97.2...0.97.3) (2026-07-23)
+
+### Features
+
+* log inputs on contained pool simulation panic ([ee04f07](https://github.com/propeller-heads/fynd/commit/ee04f07e441ddf09fab508e6437a509c94b50471))
+* add lunarbase to the protocol registry ([bcc69ae](https://github.com/propeller-heads/fynd/commit/bcc69ae4b5737e16c1e0771b0c454a9674205aaf))
+
+### Bug Fixes
+
+* guard pool depth diagnostic probe against panics ([b54c4ed](https://github.com/propeller-heads/fynd/commit/b54c4ed2094a885955e9eadc8801799b7160e420))
+* contain pool simulation panics in solver algorithms ([7d3a070](https://github.com/propeller-heads/fynd/commit/7d3a070f7e7b8efa5d48a0ced4001cb32f76ad1b))
+
+
+## [0.97.2](https://github.com/propeller-heads/fynd/compare/0.97.1...0.97.2) (2026-07-23)
+
+### Features
+
+* export per-protocol pool count and sync status metrics ([fcb5970](https://github.com/propeller-heads/fynd/commit/fcb597018edb4d9368b2a45e896d6984eba961f1))
+
+## [0.97.1](https://github.com/propeller-heads/fynd/compare/0.97.0...0.97.1) (2026-07-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* removes the --reconnect-delay-secs CLI flag and the public
+reconnect_delay builder methods / RECONNECT_DELAY constant (all dead code).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+### Bug Fixes
+
+* correct hosted-api onboarding docs and improve serve-path observability ([595385c](https://github.com/propeller-heads/fynd/commit/595385c8c62d3f1588b68b22709bb5ff0af891f3))
+
+
+### Reverts
+
+* keep the reconnect_delay knob (avoid breaking change) ([c509a04](https://github.com/propeller-heads/fynd/commit/c509a040b79b36a32a4424c95aefab933dab4173))
+
+
+### Code Refactoring
+
+* address PR review comments ([aa2916c](https://github.com/propeller-heads/fynd/commit/aa2916c45100f1412a5851015f406b96824f8c7a))
+
+## [0.97.0](https://github.com/propeller-heads/fynd/compare/0.96.0...0.97.0) (2026-07-21)
+
+
+### Features
+
+* **core:** aggregate and attach no-route reason to OrderQuote ([5260938](https://github.com/propeller-heads/fynd/commit/5260938704c024e08d0e41df52fccacf86898cab))
+* **core:** carry NoPathReason on SolveError::NoRouteFound ([59eef1a](https://github.com/propeller-heads/fynd/commit/59eef1a393e40a93ed451df3b01b07b77b889868))
+* **rpc:** add request capture log emission ([13d47d1](https://github.com/propeller-heads/fynd/commit/13d47d10b87c9e974801f8e7b277f9b2dd73ab36))
+* **rpc:** add request replay-capture helpers ([53cbe7e](https://github.com/propeller-heads/fynd/commit/53cbe7e37d2275189b804b179342d484c485a795))
+* **rpc:** log every accepted quote request for replay ([1d60c00](https://github.com/propeller-heads/fynd/commit/1d60c00703984bc08ecd579b73c9c85c5e7ce1b9))
+* **rpc:** log no_route_reasons on the quote capture line ([394ba83](https://github.com/propeller-heads/fynd/commit/394ba831295d23c3494a24bb24eba11efc7b4097))
+* **rpc:** log only failed quotes, rename event to quote_failure ([de6b0c9](https://github.com/propeller-heads/fynd/commit/de6b0c91a724ed1e786da9683f1389a1045deb32))
+
+## [0.96.0](https://github.com/propeller-heads/fynd/compare/0.95.0...0.96.0) (2026-07-21)
+
+
+### Features
+
+* **hindsight:** record which strategy decoded each trade ([bed0cdc](https://github.com/propeller-heads/fynd/commit/bed0cdc8f160f6fe1fca85f8921a24764c184486))
+
+## [0.95.0](https://github.com/propeller-heads/fynd/compare/0.94.0...0.95.0) (2026-07-21)
+
+
+### Features
+
+* add hosted-API auth and per-chain routing to clients ([d4405cb](https://github.com/propeller-heads/fynd/commit/d4405cbe64edbbef86a238bfcafafa9b6efe431c))
+
+
+### Bug Fixes
+
+* **client:** send API key as raw Authorization header, not Bearer ([4d63aaa](https://github.com/propeller-heads/fynd/commit/4d63aaafc4cbc9e790707f9cabf2a29d192af5e5))
+
+## [0.94.0](https://github.com/propeller-heads/fynd/compare/0.93.0...0.94.0) (2026-07-20)
+
+
+### Features
+
+* **api:** report null router_address and 501 encoding on quote-only chains ([bda79ca](https://github.com/propeller-heads/fynd/commit/bda79ca6fa6d0e1a8db600b615d8082fe78485fa))
+* **chain:** resolve custom chains and native token via the registry ([96ee352](https://github.com/propeller-heads/fynd/commit/96ee352599d8fb4e6cfe142fa0a0965b99948664))
+* **cli:** add --chains-config to install the custom-chain registry ([a04a9cd](https://github.com/propeller-heads/fynd/commit/a04a9cd6751143cd78c58992410fcc878f8365bc))
+* **encoding:** add disabled encoder state for router-less chains ([cd4c006](https://github.com/propeller-heads/fynd/commit/cd4c006a47d04e39d97ff793bc5d1d379c4509c5))
+* make InstanceInfo.router_address optional for quote-only chains ([095063b](https://github.com/propeller-heads/fynd/commit/095063b9462ae8ea434b8754242e09467943541e))
+* **solver:** make router address optional and gate the fee fetcher ([a849b54](https://github.com/propeller-heads/fynd/commit/a849b5445fb6b2c4d80abd42700fe557a6256043))
+* upgrade tycho to 0.340.0 ([a08e77d](https://github.com/propeller-heads/fynd/commit/a08e77d266a09b3252540b2266edef06061849b2))
+
+
+### Bug Fixes
+
+* address custom-chain PR review comments ([38e486e](https://github.com/propeller-heads/fynd/commit/38e486ec3d39968506a4ee6fc0f610b379dc828e))
+* **api:** map only encoding-unavailable to 501, keep encoding failures at 422 ([ecfa019](https://github.com/propeller-heads/fynd/commit/ecfa01978267b815f9ebc0b96109b09d355cd7a3))
+* **chain:** preserve fail-fast for placeholder native token; drop dead lazy_static ([c3cc396](https://github.com/propeller-heads/fynd/commit/c3cc3965285822472ce40ec1a391559ca4340c1b))
+
+## [0.93.0](https://github.com/propeller-heads/fynd/compare/0.92.0...0.93.0) (2026-07-20)
+
+
+### Features
+
+* add version to /v1/info instance info ([e9c0cd9](https://github.com/propeller-heads/fynd/commit/e9c0cd9c344bd85272e0a7969d86800051b2d935))
+* emit fynd_build_info metric with binary version ([6843465](https://github.com/propeller-heads/fynd/commit/6843465ce53da6765683508e653e7f7622f2e9e5))
+
+## [0.92.0](https://github.com/propeller-heads/fynd/compare/0.91.0...0.92.0) (2026-07-17)
+
+
+### Features
+
+* add chain label and histogram buckets to metrics exporter ([0bcbf29](https://github.com/propeller-heads/fynd/commit/0bcbf29b7ab1ffd5a044650857813443654d6272))
+* add component and token count getters to MarketState ([3825175](https://github.com/propeller-heads/fynd/commit/3825175a231ef5f3ee62b3ef6d847637539738f7))
+* add HTTP metrics middleware with per-client labels ([3f30279](https://github.com/propeller-heads/fynd/commit/3f30279dd645e7af7c7560e04522092c15403d28))
+* record derived computation duration, failure, freshness metrics ([60080fc](https://github.com/propeller-heads/fynd/commit/60080fc99c51741e37320914dd0fe69d7041ef7f))
+* record encoding duration and failure metrics ([b601716](https://github.com/propeller-heads/fynd/commit/b601716f15fda4280b52a2326ef498acb1f2d5bf))
+* record feed freshness, update duration, and size metrics ([1c42bc3](https://github.com/propeller-heads/fynd/commit/1c42bc399fd90d69ce1d222e5ba21c2004c1f3ae))
+
+
+### Bug Fixes
+
+* bound per-client metric label values ([a9f5063](https://github.com/propeller-heads/fynd/commit/a9f50633f5b2c5a068f5b51c3dd4b8b25b99dcc0))
+
+## [0.91.0](https://github.com/propeller-heads/fynd/compare/0.90.3...0.91.0) (2026-07-17)
+
+
+### Features
+
+* record per-pool queue wait and depth metrics at task pickup ([bef8139](https://github.com/propeller-heads/fynd/commit/bef8139b527e6b0db3094ac95032775bc9902ebf))
+
+## [0.90.3](https://github.com/propeller-heads/fynd/compare/0.90.2...0.90.3) (2026-07-17)
+
+
+### Bug Fixes
+
+* restore native CurveState using upstream curve_filter ([79c616b](https://github.com/propeller-heads/fynd/commit/79c616b03afed2261ccee74f9f28205da1b969d2)), closes [#318](https://github.com/propeller-heads/fynd/issues/318)
+
+## [0.90.2](https://github.com/propeller-heads/fynd/compare/0.90.1...0.90.2) (2026-07-16)
+
+
+### Bug Fixes
+
+* correct vm:curve revert rationale comment ([fd367f4](https://github.com/propeller-heads/fynd/commit/fd367f4c3f59fcb1b12d717d83b93c5bd80e7f9a))
+* revert vm:curve to EVMPoolState VM simulation ([38f54bf](https://github.com/propeller-heads/fynd/commit/38f54bf09ee3d264c2ec858ff5100707c50fb66f))
+
+## [0.90.1](https://github.com/propeller-heads/fynd/compare/0.90.0...0.90.1) (2026-07-16)
+
 ## [0.90.0](https://github.com/propeller-heads/fynd/compare/0.89.2...0.90.0) (2026-07-14)
 
 

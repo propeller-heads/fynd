@@ -6,18 +6,15 @@
 //! [`RouterFeeFetcher`](crate::encoding::fee_fetcher::RouterFeeFetcher) refreshes it from
 //! chain, so swapping in a FeeCalculator with a different precision is tracked automatically.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::sync::{Arc, RwLock};
 
+use rustc_hash::FxHashMap;
 use tycho_simulation::tycho_common::Bytes;
 
-/// Legacy basis-points denominator: client fees on the wire use 10,000 = 100%.
+/// Legacy basis-points denominator: client fees on Fynd's API use 10,000 = 100%.
 ///
-/// This is the calldata convention between Fynd and the router (`clientFeeBps`), independent
-/// of the FeeCalculator's internal precision. The contract scales `clientFeeBps` into its own
-/// fee units by `max_fee_units / LEGACY_BPS_DENOMINATOR`.
+/// The router takes `clientFeeBps` in the FeeCalculator's own fee units, so the encoder scales
+/// the API value by `max_fee_units / LEGACY_BPS_DENOMINATOR` before putting it in calldata.
 pub const LEGACY_BPS_DENOMINATOR: u64 = 10_000;
 
 /// Fee-unit precision for the [`RouterFees::fallback`] configuration: 100% = 100,000,000 fee
@@ -53,7 +50,7 @@ impl FeeRates {
         self.on_client_fee
     }
 
-    /// Fee units representing 100% (the contract's `MAX_FEE_BPS`).
+    /// Fee units representing 100% (the contract's `MAX_BPS`).
     pub fn max_fee_units(&self) -> u64 {
         self.max_fee_units
     }
@@ -62,6 +59,12 @@ impl FeeRates {
     /// (`max_fee_units / LEGACY_BPS_DENOMINATOR`).
     pub fn fee_units_per_bps(&self) -> u64 {
         self.max_fee_units / LEGACY_BPS_DENOMINATOR
+    }
+
+    /// Converts a client fee given in legacy basis points into the fee units the router
+    /// expects in `ClientFeeParams.clientFeeBps`.
+    pub fn client_fee_units(&self, bps: u16) -> u64 {
+        bps as u64 * self.fee_units_per_bps()
     }
 
     /// Combined denominator when two fee-unit rates are multiplied (`max_fee_units`²).
@@ -82,7 +85,7 @@ pub struct RouterFees {
     /// Per-client resolved `(fee_on_output, fee_on_client_fee)` in fee units. The fetcher
     /// has already applied each client's overrides over the defaults, so a lookup miss simply
     /// falls back to the defaults.
-    custom_fees: HashMap<Bytes, (u32, u32)>,
+    custom_fees: FxHashMap<Bytes, (u32, u32)>,
 }
 
 impl RouterFees {
@@ -92,7 +95,7 @@ impl RouterFees {
         max_fee_units: u64,
         default_fee_on_output: u32,
         default_fee_on_client_fee: u32,
-        custom_fees: HashMap<Bytes, (u32, u32)>,
+        custom_fees: FxHashMap<Bytes, (u32, u32)>,
     ) -> Self {
         Self { max_fee_units, default_fee_on_output, default_fee_on_client_fee, custom_fees }
     }
@@ -101,10 +104,10 @@ impl RouterFees {
     /// a fetch fails: a 0.1 bps router fee on output, no fee on client fees, and no per-client
     /// overrides. Lets the encoder always produce a transaction rather than failing.
     pub fn fallback() -> Self {
-        Self::new(FALLBACK_MAX_FEE_UNITS, FALLBACK_FEE_ON_OUTPUT, 0, HashMap::new())
+        Self::new(FALLBACK_MAX_FEE_UNITS, FALLBACK_FEE_ON_OUTPUT, 0, FxHashMap::default())
     }
 
-    /// Fee units representing 100% (the contract's `MAX_FEE_BPS`).
+    /// Fee units representing 100% (the contract's `MAX_BPS`).
     pub fn max_fee_units(&self) -> u64 {
         self.max_fee_units
     }
@@ -173,14 +176,14 @@ mod tests {
 
     #[test]
     fn test_fees_for_unknown_client() {
-        let fees = RouterFees::new(SCALE, 100_000, 20_000_000, HashMap::new());
+        let fees = RouterFees::new(SCALE, 100_000, 20_000_000, FxHashMap::default());
 
         assert_eq!(fees.fees_for(&client(0xAA)), FeeRates::new(100_000, 20_000_000, SCALE));
     }
 
     #[test]
     fn test_fees_for_known_client() {
-        let custom = HashMap::from([(client(0xAA), (50_000u32, 10_000_000u32))]);
+        let custom = FxHashMap::from_iter([(client(0xAA), (50_000u32, 10_000_000u32))]);
         let fees = RouterFees::new(SCALE, 100_000, 20_000_000, custom);
 
         // Known client gets its stored pair; everyone else gets the defaults.
@@ -209,7 +212,7 @@ mod tests {
             1_000
         );
 
-        shared.set(RouterFees::new(SCALE, 1, 2, HashMap::new()));
+        shared.set(RouterFees::new(SCALE, 1, 2, FxHashMap::default()));
 
         let snapshot = shared.snapshot();
         assert_eq!(snapshot.max_fee_units(), SCALE);

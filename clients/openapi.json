@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.75.1"
+    "version": "0.102.3"
   },
   "paths": {
     "/v1/health": {
@@ -61,6 +61,79 @@
             }
           }
         }
+      }
+    },
+    "/v1/prices": {
+      "get": {
+        "tags": [
+          "prices"
+        ],
+        "summary": "GET /v1/prices - Return per-token mid prices and optional market data.",
+        "description": "Returns 503 until the first token-price solve has landed. Each `prices[].price` is a\nplain decimal string holding raw target-token units divided by raw gas-token units;\nconsumers must normalize both tokens' decimals before using it. Use the `include` query\nparameter to add spot prices and/or component depths.\n\n# Query Parameters\n\n- `include` - Comma-separated list: `depths`, `spot_prices`\n- `limit` - Max entries for spot_prices / component_depths (default and maximum: 1000)",
+        "operationId": "get_prices",
+        "parameters": [
+          {
+            "name": "include",
+            "in": "query",
+            "description": "Comma-separated list of additional data to include.\nValid values: `depths`, `spot_prices`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "example": "depths,spot_prices"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of spot_prices and component_depths entries (default and maximum: 1000).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "maximum": 1000,
+              "minimum": 0
+            },
+            "example": 1000
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Prices returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PricesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameter or limit exceeds 1000",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Data not yet available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "x-experimental": true
       }
     },
     "/v1/quote": {
@@ -123,6 +196,80 @@
             }
           }
         }
+      }
+    },
+    "/v1/tokens": {
+      "get": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "GET /v1/tokens - Return the tokens currently in the routing graph, ranked by usefulness.",
+        "description": "Serves metadata (symbol, decimals, tax, gas, quality) for exactly the tokens present in\nthe routing graph, sorted by approximate routable `liquidity` in raw gas-token units\n(descending), then `component_count`, then address. The list is recomputed lazily at\nmost once per derived-data update and cached; nothing runs on the quote path.\n\nPaginate with `offset`/`limit` (e.g. `?limit=100&offset=1000` returns tokens ranked\n#1001-#1100). Pages are consistent while the response `block` is unchanged; restart\nfrom offset 0 when it advances mid-pagination.\n\n# Query Parameters\n\n- `limit` - Maximum number of tokens returned (default and maximum: 1000)\n- `offset` - Number of tokens to skip from the start of the ranked list (default: 0)",
+        "operationId": "get_tokens",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of tokens returned (default and maximum: 1000).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "maximum": 1000,
+              "minimum": 0
+            },
+            "example": 1000
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Number of tokens to skip from the start of the ranked list (default: 0).\n\nPages are consistent as long as `block` is unchanged between requests;\nrestart from offset 0 when it advances mid-pagination.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "example": 0
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Graph tokens returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokensResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameter or limit exceeds 1000",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Data not yet available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "x-experimental": true
       }
     }
   },
@@ -200,6 +347,69 @@
           }
         }
       },
+      "ComponentDepthEntry": {
+        "type": "object",
+        "description": "A single directional component depth.",
+        "required": [
+          "component_id",
+          "token_in",
+          "token_out",
+          "depth"
+        ],
+        "properties": {
+          "component_id": {
+            "$ref": "#/components/schemas/String",
+            "description": "Component (liquidity pool) identifier."
+          },
+          "depth": {
+            "type": "string",
+            "description": "Maximum input amount before hitting the slippage threshold (decimal string)."
+          },
+          "token_in": {
+            "type": "string",
+            "description": "Input token address.",
+            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          },
+          "token_out": {
+            "type": "string",
+            "description": "Output token address.",
+            "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          }
+        }
+      },
+      "ComputationBlocks": {
+        "type": "object",
+        "description": "Block numbers at which each computation was last run.",
+        "required": [
+          "token_prices"
+        ],
+        "properties": {
+          "component_depths": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Block at which component depths were computed. `None` if not yet available.",
+            "minimum": 0
+          },
+          "spot_prices": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Block at which spot prices were computed. `None` if not yet available.",
+            "minimum": 0
+          },
+          "token_prices": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block at which the token prices were computed.",
+            "minimum": 0
+          }
+        }
+      },
       "EncodingOptions": {
         "type": "object",
         "description": "Options to customize the encoding behavior.",
@@ -247,6 +457,11 @@
                 "description": "Per-request price guard configuration. If `None`, struct defaults are used."
               }
             ]
+          },
+          "simulate": {
+            "type": "boolean",
+            "description": "Whether to simulate encoded transactions against the latest block. Defaults to `false`.",
+            "example": false
           },
           "slippage": {
             "type": "number",
@@ -313,8 +528,76 @@
               "string",
               "null"
             ],
-            "description": "keccak256 of the ABI-encoded swap bytes, as a 0x-prefixed hex string.\nPresent only when client fee params were included in the request.\nUse this with `amount_in`, `token_in`, `token_out`, `min_amount_received`, and `receiver`\nto compute the 10-field EIP-712 `ClientFee` signing hash (see client library helpers).",
+            "description": "keccak256 of the ABI-encoded swap bytes, as a 0x-prefixed hex string.\nPresent only when client fee params were included in the request.\nUse this with `amount_in`, `token_in`, `token_out`, `amount_out`, `min_amount_received`,\nand `receiver` to compute the 11-field EIP-712 `ClientFee` signing hash (see client library\nhelpers).",
             "example": null
+          }
+        }
+      },
+      "GraphTokenEntry": {
+        "type": "object",
+        "description": "A token currently present in the routing graph, with ranking signals.",
+        "required": [
+          "address",
+          "symbol",
+          "decimals",
+          "tax",
+          "gas",
+          "quality",
+          "component_count"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "Token address.",
+            "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          },
+          "component_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of graph components (liquidity pools) containing this token.",
+            "minimum": 0
+          },
+          "decimals": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Token decimals.",
+            "minimum": 0
+          },
+          "gas": {
+            "type": "array",
+            "items": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Transfer gas cost estimates as indexed by Tycho (entries may be null)."
+          },
+          "liquidity": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Approximate routable liquidity in raw gas-token units: the sum of this token's\ndirectional component depths, each divided by the token's gas price (token raw units\nper gas-token raw unit). Approximate `f64`, intended for sorting and display only.\nAbsent when the token has no computed gas price."
+          },
+          "quality": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Tycho token quality: 100 = normal; lower values indicate rebasing, fee-on-transfer,\nor analysis-failed tokens.",
+            "minimum": 0
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Token symbol as indexed by Tycho."
+          },
+          "tax": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Transfer tax in basis points (0 for ordinary tokens).",
+            "minimum": 0
           }
         }
       },
@@ -356,7 +639,7 @@
           },
           "num_solver_pools": {
             "type": "integer",
-            "description": "Number of active solver pools.",
+            "description": "Number of solver pools configured at startup.\n\nThis is the configured/registered count, not a live count of healthy worker\nthreads — it does not decrease if individual workers stop or panic.",
             "example": 2,
             "minimum": 0
           }
@@ -367,7 +650,6 @@
         "description": "Static metadata about this Fynd instance, returned by `GET /v1/info`.",
         "required": [
           "chain_id",
-          "router_address",
           "permit2_address"
         ],
         "properties": {
@@ -384,9 +666,17 @@
             "example": "0x000000000022D473030F116dDEE9F6B43aC78BA3"
           },
           "router_address": {
-            "type": "string",
-            "description": "Address of the Tycho Router contract on this chain.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Address of the Tycho Router contract on this chain; `null` on a quote-only chain.",
             "example": "0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35"
+          },
+          "version": {
+            "type": "string",
+            "description": "Fynd binary version (Cargo package version, e.g. \"0.89.1\").\n\nDefaults to empty when absent so newer clients tolerate older servers that predate it.",
+            "example": "0.89.1"
           }
         }
       },
@@ -448,6 +738,14 @@
           "block"
         ],
         "properties": {
+          "algorithm": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Routing algorithm that produced this quote.\n\nAbsent on a quote no algorithm produced, such as a no-route placeholder.",
+            "example": "bellman_ford"
+          },
           "amount_in": {
             "type": "string",
             "description": "Amount of input token (in token units, as decimal string).",
@@ -512,6 +810,17 @@
               {
                 "$ref": "#/components/schemas/Route",
                 "description": "The route to execute, if a valid route was found."
+              }
+            ]
+          },
+          "simulation_result": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SimulationResult",
+                "description": "Result of an optional on-chain simulation."
               }
             ]
           },
@@ -643,6 +952,53 @@
           }
         }
       },
+      "PricesResponse": {
+        "type": "object",
+        "description": "Top-level response for GET /v1/prices.",
+        "required": [
+          "prices",
+          "gas_token",
+          "blocks"
+        ],
+        "properties": {
+          "blocks": {
+            "$ref": "#/components/schemas/ComputationBlocks",
+            "description": "Block numbers at which each computation was last run."
+          },
+          "component_depths": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ComponentDepthEntry"
+            },
+            "description": "Component depths per component direction (only if requested via `include=depths`)."
+          },
+          "gas_token": {
+            "type": "string",
+            "description": "The gas token address (e.g. WETH).",
+            "example": "0x0000000000000000000000000000000000000000"
+          },
+          "prices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TokenPriceEntry"
+            },
+            "description": "Per-token mid prices relative to the native gas token, sorted by token address.\n\nA token the gas token cannot reach, or that cannot be sold back, is absent."
+          },
+          "spot_prices": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SpotPriceEntry"
+            },
+            "description": "Spot prices per component direction (only if requested via `include=spot_prices`)."
+          }
+        }
+      },
       "Quote": {
         "type": "object",
         "description": "Complete solution for a [`QuoteRequest`].\n\nContains a solution for each order in the request, along with aggregate\ngas estimates and timing information.",
@@ -704,6 +1060,17 @@
             "description": "Minimum number of solver responses to wait for before returning.\nIf `None` or `0`, waits for all solvers to respond (or timeout).\n\nUse the `/health` endpoint to check `num_solver_pools` before setting this value.\nValues exceeding the number of active solver pools are clamped internally.",
             "minimum": 0
           },
+          "route_filter": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RouteFilter",
+                "description": "Liquidity this request excludes from a route. If None, nothing is excluded."
+              }
+            ]
+          },
           "timeout_ms": {
             "type": [
               "integer",
@@ -750,7 +1117,7 @@
       },
       "Route": {
         "type": "object",
-        "description": "A route consisting of one or more sequential swaps.\n\nA route describes the path through liquidity pools to execute a swap.\nFor multi-hop swaps, the output of each swap becomes the input of the next.",
+        "description": "A route consisting of one or more sequential swaps.\n\nA route describes the path through components (liquidity pools) to execute a swap.\nFor multi-hop swaps, the output of each swap becomes the input of the next.",
         "required": [
           "swaps"
         ],
@@ -764,9 +1131,131 @@
           }
         }
       },
+      "RouteFilter": {
+        "type": "object",
+        "description": "Liquidity a request excludes from a route.\n\nEvery field is optional. The pools, protocol systems and tokens it names are excluded from\nevery route.",
+        "properties": {
+          "exclude_pools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Pools to exclude, by component id."
+          },
+          "exclude_protocols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Protocol systems to exclude. Matches exact names (`uniswap_v2`) or a family prefix\nending in `:` (`propammfallback:`). An entry matching no pools excludes nothing.",
+            "example": [
+              "uniswap_v2"
+            ]
+          },
+          "exclude_tokens": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tokens to exclude as intermediates. The order's own two tokens are always allowed, so\nnaming one of them changes nothing.",
+            "example": [
+              "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+            ]
+          }
+        }
+      },
+      "SimulationResult": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The simulated router call returned an amount and consumed gas.",
+            "required": [
+              "amount_out",
+              "gas_used",
+              "status"
+            ],
+            "properties": {
+              "amount_out": {
+                "type": "string",
+                "description": "Amount returned by the router call.",
+                "example": "3500000000"
+              },
+              "gas_used": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Gas consumed by the simulated call.",
+                "example": 150000,
+                "minimum": 0
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "success"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The simulated router call could not complete.",
+            "required": [
+              "reason",
+              "status"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "description": "Readable reason the simulated call failed.",
+                "example": "execution reverted: insufficient output"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "failure"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Outcome of simulating an encoded quote on the latest block."
+      },
+      "SpotPriceEntry": {
+        "type": "object",
+        "description": "A single directional spot price within a component (liquidity pool).",
+        "required": [
+          "component_id",
+          "token_in",
+          "token_out",
+          "price"
+        ],
+        "properties": {
+          "component_id": {
+            "$ref": "#/components/schemas/String",
+            "description": "Component (liquidity pool) identifier."
+          },
+          "price": {
+            "type": "number",
+            "format": "double",
+            "description": "Spot price (1 token_in = price token_out)."
+          },
+          "token_in": {
+            "type": "string",
+            "description": "Input token address.",
+            "example": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          },
+          "token_out": {
+            "type": "string",
+            "description": "Output token address.",
+            "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          }
+        }
+      },
+      "String": {
+        "type": "string"
+      },
       "Swap": {
         "type": "object",
-        "description": "A single swap within a route.\n\nRepresents an atomic swap on a specific liquidity pool (component).",
+        "description": "A single swap within a route.\n\nRepresents an atomic swap on a specific component (liquidity pool).",
         "required": [
           "component_id",
           "protocol",
@@ -790,7 +1279,7 @@
           },
           "component_id": {
             "type": "string",
-            "description": "Identifier of the liquidity pool component.",
+            "description": "Identifier of the component (liquidity pool).",
             "example": "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc"
           },
           "gas_estimate": {
@@ -818,6 +1307,55 @@
             "type": "string",
             "description": "Output token address.",
             "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          }
+        }
+      },
+      "TokenPriceEntry": {
+        "type": "object",
+        "description": "A single token's mid price relative to the gas token.",
+        "required": [
+          "token",
+          "price"
+        ],
+        "properties": {
+          "price": {
+            "type": "string",
+            "description": "Mid price: the mean of the token's buy and sell rates in raw target-token units per raw\ngas-token unit, serialized as a plain decimal string with up to 17 significant digits\n(no scientific notation).\n\nIntended for display and analytics only. Consumers must normalize both tokens'\ndecimals before using it, and should parse it with a decimal-aware parser\n(BigDecimal, BigNumber, etc.) — the string format avoids `f64` rendering\ninconsistencies across languages.",
+            "example": "0.000000003"
+          },
+          "token": {
+            "type": "string",
+            "description": "Token address.",
+            "example": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          }
+        }
+      },
+      "TokensResponse": {
+        "type": "object",
+        "description": "Top-level response for GET /v1/tokens.",
+        "required": [
+          "tokens",
+          "total",
+          "block"
+        ],
+        "properties": {
+          "block": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block at which token gas prices (the `liquidity` input) were computed.",
+            "minimum": 0
+          },
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GraphTokenEntry"
+            },
+            "description": "Graph tokens sorted by descending `liquidity`, then `component_count`, then address."
+          },
+          "total": {
+            "type": "integer",
+            "description": "Total number of graph tokens before `limit` was applied.",
+            "minimum": 0
           }
         }
       },

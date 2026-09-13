@@ -1,7 +1,7 @@
 //! Bellman-Ford algorithm with SPFA optimization for simulation-driven routing.
 //!
-//! Runs actual pool simulations (`get_amount_out()`) during edge relaxation to find
-//! optimal A-to-B routes that account for slippage, fees, and pool mechanics at the
+//! Runs actual component simulations (`get_amount_out()`) during edge relaxation to find
+//! optimal A-to-B routes that account for slippage, fees, and component mechanics at the
 //! given trade size.
 //!
 //! Key features:
@@ -11,7 +11,7 @@
 //! - **Subgraph extraction**: BFS prunes the graph to nodes reachable within `max_hops`
 //! - **SPFA (Shortest Path Faster Algorithm) queuing**: Only re-relaxes edges from nodes whose
 //!   amount improved
-//! - **Forbid revisits**: Skips edges that would revisit a token or pool already in the path
+//! - **Forbid revisits**: Skips edges that would revisit a token or component already in the path
 //!
 //! # Known limitation: SPFA order-dependence
 //!
@@ -24,13 +24,15 @@
 //! snapshot amounts between rounds or use a priority-based processing order.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::VecDeque,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
-use petgraph::{graph::NodeIndex, prelude::EdgeRef};
+use petgraph::{graph::NodeIndex, prelude::EdgeRef, stable_graph::EdgeReference};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace, warn};
 use tycho_simulation::{
     tycho_common::models::Address,
@@ -41,37 +43,100 @@ use super::{
     split_primitives::MarketOverrides, Algorithm, AlgorithmConfig, AlgorithmError, NoPathReason,
 };
 use crate::{
+    algorithm::{
+        paths,
+        request::{SolveParts, SolveRequest},
+        sim_guard::GuardedProtocolSim,
+    },
     derived::{
         computation::ComputationRequirements,
         types::{SpotPrices, TokenGasPrices},
-        SharedDerivedDataRef,
     },
-    feed::market_data::{MarketData, MarketState, StateLabel},
-    graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
-    types::{ComponentId, Order, Route, RouteResult, Swap},
+    feed::market_data::{MarketData, MarketState},
+    graph::{petgraph::StableDiGraph, EdgeData, PetgraphStableDiGraphManager},
+    types::{ComponentId, Order, Route, RouteExclusions, RouteResult, Swap},
 };
 
-/// BFS subgraph: adjacency list, token node set, and component ID set.
-type Subgraph =
-    (HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>, HashSet<NodeIndex>, HashSet<ComponentId>);
+/// One BFS walk's yield: the part of the graph a solve may route through.
+struct Subgraph<'a> {
+    adjacency: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
+    token_nodes: FxHashSet<NodeIndex>,
+    /// Borrows from the graph: it exists to ask for the market subset and is done with before
+    /// the solve starts, unlike the adjacency list, which outlives the graph borrow inside
+    /// [`BellmanFordContext`] and so owns its ids.
+    component_ids: FxHashSet<&'a ComponentId>,
+}
 
 /// Everything needed to call `find_single_route` repeatedly without redoing setup.
 ///
-/// Built once by `build_context`, which acquires the market and derived locks and snapshots all
-/// relevant states. `find_single_route` uses this snapshot directly — no lock re-acquisition — so
-/// all route evaluations within one order see a consistent view of the same block's pool states.
+/// Holds a snapshot of market and derived state taken under lock at build time. Solves read the
+/// snapshot without re-acquiring any lock, so all route evaluations within one order see a
+/// consistent view of the same block's component states.
 pub(crate) struct BellmanFordContext {
     pub(crate) token_in_node: NodeIndex,
-    pub(crate) token_out_node: NodeIndex,
-    pub(crate) adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
-    pub(crate) token_map: HashMap<NodeIndex, Token>,
+    /// Absent when the context was built from a source token only, with no destination; such
+    /// a context serves `reach_from_source_token` but not `find_single_route`.
+    pub(crate) token_out_node: Option<NodeIndex>,
+    pub(crate) adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>>,
+    pub(crate) token_map: FxHashMap<NodeIndex, Arc<Token>>,
     pub(crate) market_data: MarketState,
     pub(crate) gas_price_wei: Option<BigUint>,
     pub(crate) token_prices: Option<TokenGasPrices>,
     pub(crate) spot_prices: Option<SpotPrices>,
-    pub(crate) node_address: HashMap<NodeIndex, Address>,
+    pub(crate) node_address: FxHashMap<NodeIndex, Address>,
     pub(crate) max_idx: usize,
     pub(crate) scoring: RouteScoringMode,
+}
+
+impl BellmanFordContext {
+    /// Re-points the context at new endpoints behind a freshly pruned adjacency, in one step —
+    /// so one snapshot can serve many solves.
+    ///
+    /// The subgraph walk and the endpoint switch belong together: re-pointing alone would leave
+    /// the solve running against the previous root's subgraph. Token metadata and the market
+    /// snapshot are reused as-is, so the new endpoints must lie inside the subgraph the context
+    /// was built from. Returns the walk's candidate component ids — every component on any
+    /// `token_in`-to-`token_out` path within `max_hops` — or `None` when no such path exists.
+    pub(crate) fn reroot_toward<'a>(
+        &mut self,
+        graph: &'a StableDiGraph<()>,
+        token_in_node: NodeIndex,
+        token_out_node: NodeIndex,
+        hops_to_token_out: &FxHashMap<NodeIndex, usize>,
+        max_hops: usize,
+    ) -> Option<FxHashSet<&'a ComponentId>> {
+        let subgraph = BellmanFordAlgorithm::get_subgraph_with_hop_map(
+            graph,
+            (token_in_node, Some(token_out_node)),
+            Some(hops_to_token_out),
+            max_hops,
+            &RouteExclusions::default(),
+        )?;
+        self.adj = subgraph.adjacency;
+        self.token_in_node = token_in_node;
+        self.token_out_node = Some(token_out_node);
+        Some(subgraph.component_ids)
+    }
+}
+
+/// Everything one relaxation from the source token reached, and whether it was cut short.
+pub(crate) struct ReachOutcome {
+    /// Destination address → what the best path there delivers. Tokens the relaxation left at
+    /// zero, and those whose path could not be reconstructed, are absent.
+    pub(crate) reached: FxHashMap<Address, ReachedToken>,
+    /// True when the relaxation broke on its timeout: a token absent from `reached` may merely
+    /// be unvisited, not unreachable.
+    pub(crate) timed_out: bool,
+}
+
+/// What one relaxation delivers at a destination the source token reaches: the output amount
+/// and the components along the best path to it.
+pub(crate) struct ReachedToken {
+    /// What the path delivers at the destination. Never zero: a destination the relaxation
+    /// leaves at zero counts as unreached and is absent from the map.
+    pub(crate) amount_out: BigUint,
+    /// The components the path runs through, in hop order.
+    pub(crate) components: Vec<ComponentId>,
 }
 
 /// Controls how `find_single_route` ranks candidate routes after simulation.
@@ -85,7 +150,8 @@ pub(crate) enum RouteScoringMode {
 /// Per-call overrides for `find_single_route`.
 #[derive(Default)]
 pub(crate) struct FindRouteOptions {
-    /// Pool state overrides: degrade or zero-gas specific pools without modifying market data.
+    /// Component state overrides: degrade or zero-gas specific components without modifying market
+    /// data.
     pub(crate) overrides: MarketOverrides,
 }
 
@@ -93,24 +159,29 @@ pub(crate) struct FindRouteOptions {
 struct SPFAResult {
     /// Best gross output amount reachable at each node index.
     amount: Vec<BigUint>,
-    /// The (predecessor node, pool) that last improved each node's amount.
+    /// The (predecessor node, component) that last improved each node's amount.
     predecessor: Vec<Option<(NodeIndex, ComponentId)>>,
     /// Gas consumed by the edge that last improved each node's amount.
     edge_gas: Vec<BigUint>,
     /// Cumulative spot-price product from token_in to each node (for gas fallback).
     spot_product: Vec<f64>,
+    /// True if some hop's input couldn't cover that hop's own gas (gas-aware) or a sim
+    /// produced a literal zero output (gas-unaware) — i.e. the amount is dust, not unroutable.
+    input_below_hop_gas: bool,
+    /// True if the relaxation broke on its timeout, leaving some nodes unvisited.
+    timed_out: bool,
 }
 
 /// Bellman-Ford algorithm with SPFA optimisation for simulation-driven DEX routing.
 ///
-/// Finds optimal A→B routes by running actual pool simulations during edge relaxation,
-/// accounting for slippage, fees, and pool mechanics at the requested trade size.
+/// Finds optimal A→B routes by running actual component simulations during edge relaxation,
+/// accounting for slippage, fees, and component mechanics at the requested trade size.
 /// Gas costs are subtracted when price data is available.
 pub struct BellmanFordAlgorithm {
     max_hops: usize,
     timeout: Duration,
     gas_aware: bool,
-    connector_tokens: Option<HashSet<Address>>,
+    connector_tokens: Option<FxHashSet<Address>>,
 }
 
 impl Default for BellmanFordAlgorithm {
@@ -129,20 +200,23 @@ impl BellmanFordAlgorithm {
         }
     }
 
+    /// The longest route a solve may build. Callers bounding their own walks or pruning maps
+    /// read it here so the two bounds cannot drift apart.
+    pub(crate) fn max_hops(&self) -> usize {
+        self.max_hops
+    }
+
     /// One-time async setup for repeated `find_single_route` calls.
     ///
     /// Validates the order, extracts the subgraph, acquires the market and derived data
     /// locks exactly once, and snapshots all state into a [`BellmanFordContext`]. All
     /// subsequent `find_single_route` calls on the returned context use the same block's
-    /// pool states.
+    /// component states.
     pub(crate) async fn build_context(
         &self,
-        graph: &StableDiGraph<()>,
-        market: MarketData,
-        label: Option<StateLabel>,
-        derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, StableDiGraph<()>>,
     ) -> Result<BellmanFordContext, AlgorithmError> {
+        let SolveParts { graph, order, market, label, derived, exclusions } = request.into_parts();
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
@@ -179,33 +253,125 @@ impl BellmanFordAlgorithm {
             });
         }
 
-        // BFS from token_in up to max_hops, building adjacency list and component set.
-        let (adj, token_nodes, component_ids) =
-            Self::get_subgraph(graph, token_in_node, self.max_hops, order)?;
+        let subgraph =
+            Self::get_subgraph(graph, token_in_node, token_out_node, self.max_hops, &exclusions)
+                .ok_or_else(|| AlgorithmError::NoPath {
+                    from: order.token_in().clone(),
+                    to: order.token_out().clone(),
+                    reason: NoPathReason::NoGraphPath,
+                })?;
+        // The view is acquired only after the walk: only the extraction needs the guard, and
+        // holding it through a walk would queue the feed's writer.
+        let market_view = paths::read_market(&market, label).await?;
+        let market_data = market_view.extract_subset_with_overlay(&subgraph.component_ids);
+        drop(market_view);
+        let mut ctx = self.context_from_snapshot(
+            graph,
+            market_data,
+            subgraph,
+            token_in_node,
+            Some(token_out_node),
+        );
+        ctx.token_prices = token_prices;
+        ctx.spot_prices = spot_prices;
+        Ok(ctx)
+    }
 
-        let market_view = match label.as_ref() {
-            Some(l) => market
-                .read_labeled(l)
-                .await
-                .map_err(|e| AlgorithmError::Other(e.to_string()))?,
-            None => market.read().await,
-        };
-        let token_map: HashMap<NodeIndex, Token> = token_nodes
+    /// A context whose subgraph is everything within `walk_hops` of `token_in` — no destination
+    /// prunes it. Having no destination, it cannot serve `find_single_route` until
+    /// `reroot_toward` gives it one.
+    ///
+    /// `walk_hops` bounds the subgraph, not route length — routes stay bounded by the
+    /// algorithm's own `max_hops`. A caller that re-roots the context at tokens away from
+    /// `token_in` walks further than it routes: a route of `max_hops` hops back to `token_in`
+    /// can start `max_hops` away, and the walk must include that node's outgoing edges.
+    ///
+    /// `prune_toward` narrows the walk to nodes that can still reach one of the given tokens
+    /// within the hop budget, so the subgraph covers the candidate paths between `token_in` and
+    /// those tokens instead of everything `walk_hops` reaches. A caller re-solving a handful of
+    /// tokens then snapshots that handful's routes, not the whole market.
+    ///
+    /// Reads the market unlabeled and no derived data, cloning the snapshot in batches so the
+    /// feed's writer never waits for the whole clone. `None` when `token_in` is not in the
+    /// graph or nothing is reachable from it.
+    pub(crate) async fn build_context_from_source_token(
+        &self,
+        graph: &StableDiGraph<()>,
+        market: MarketData,
+        token_in: &Address,
+        walk_hops: usize,
+        prune_toward: Option<&FxHashSet<Address>>,
+    ) -> Option<BellmanFordContext> {
+        let mut token_in_node = None;
+        let mut target_nodes = Vec::new();
+        for node in graph.node_indices() {
+            let address = &graph[node];
+            if address == token_in {
+                token_in_node = Some(node);
+            }
+            if prune_toward.is_some_and(|targets| targets.contains(address)) {
+                target_nodes.push(node);
+            }
+        }
+        let token_in_node = token_in_node?;
+        // Pricing walks carry no request, so nothing is excluded and the source stands in for
+        // both exempt endpoints.
+        let exclusions = RouteExclusions::default();
+        let hops_to_targets = prune_toward.map(|_| {
+            Self::get_hops_to_reach_any(
+                graph,
+                target_nodes,
+                (token_in_node, token_in_node),
+                walk_hops,
+                &exclusions,
+            )
+        });
+        let subgraph = Self::get_subgraph_with_hop_map(
+            graph,
+            (token_in_node, None),
+            hops_to_targets.as_ref(),
+            walk_hops,
+            &exclusions,
+        )?;
+        let market_data = market
+            .extract_subset_batched(&subgraph.component_ids)
+            .await;
+        Some(self.context_from_snapshot(graph, market_data, subgraph, token_in_node, None))
+    }
+
+    /// Snapshots everything a solve reads — tokens, component states, gas price, and scoring
+    /// inputs — from a market subset already extracted, so no market lock is held here: the
+    /// caller controls how long its guard lives. The endpoints must be the pair the subgraph
+    /// was walked with; the destination, when present, is carried for `find_single_route`'s
+    /// readout. Derived data starts empty; a caller that has token or spot prices sets the
+    /// fields on the returned context.
+    ///
+    /// The subset must cover the subgraph's components (`extract_subset` over its component ids
+    /// does); a token node whose token the subset lacks silently gets no metadata, and solves
+    /// treat it as unreachable.
+    fn context_from_snapshot(
+        &self,
+        graph: &StableDiGraph<()>,
+        market_data: MarketState,
+        subgraph: Subgraph<'_>,
+        token_in_node: NodeIndex,
+        token_out_node: Option<NodeIndex>,
+    ) -> BellmanFordContext {
+        let Subgraph { adjacency: adj, token_nodes, component_ids: _ } = subgraph;
+
+        let token_map: FxHashMap<NodeIndex, Arc<Token>> = token_nodes
             .iter()
             .filter_map(|&node| {
-                market_view
-                    .get_token(&graph[node])
-                    .cloned()
-                    .map(|t| (node, t))
+                market_data
+                    .get_token_shared(&graph[node])
+                    .map(|token| (node, Arc::clone(token)))
             })
             .collect();
-        let market_data = market_view.extract_subset_with_overlay(&component_ids);
         let gas_price_wei = market_data
             .gas_price()
             .map(|gp| gp.effective_gas_price().clone());
-        drop(market_view);
 
-        let node_address: HashMap<NodeIndex, Address> = token_map
+        let node_address: FxHashMap<NodeIndex, Address> = token_map
             .iter()
             .map(|(&node, token)| (node, token.address.clone()))
             .collect();
@@ -232,27 +398,86 @@ impl BellmanFordAlgorithm {
             "subgraph extracted"
         );
 
-        Ok(BellmanFordContext {
+        BellmanFordContext {
             token_in_node,
             token_out_node,
             adj,
             token_map,
             market_data,
             gas_price_wei,
-            token_prices,
-            spot_prices,
+            token_prices: None,
+            spot_prices: None,
             node_address,
             max_idx,
             scoring,
-        })
+        }
+    }
+
+    /// Every token the source token reaches, with what the best path to it delivers and the
+    /// components that path runs through, from one relaxation.
+    ///
+    /// The relaxation fills the best amount at every node, so reading all of them costs one pass
+    /// rather than one per destination. Deliberately not a [`Route`] per destination:
+    /// `build_route` deep-clones each swap's component, tokens, and simulation state, and a
+    /// caller pricing every reachable destination reads none of that. Build `ctx` with
+    /// `build_context_from_source_token`, so that no destination prunes its subgraph.
+    ///
+    /// Tokens the source token cannot reach, and those whose path cannot be reconstructed, are
+    /// absent from `reached`; the outcome's `timed_out` says whether absence means unreachable.
+    pub(crate) fn reach_from_source_token(
+        &self,
+        ctx: &BellmanFordContext,
+        amount_in: &BigUint,
+    ) -> ReachOutcome {
+        let spfa = self.run_spfa(ctx, amount_in, &MarketOverrides::default(), Instant::now());
+
+        let mut reached = FxHashMap::default();
+        let mut dropped = 0usize;
+        for (idx, amount) in spfa.amount.iter().enumerate() {
+            if amount.is_zero() || idx == ctx.token_in_node.index() {
+                continue;
+            }
+            let node = NodeIndex::new(idx);
+            let Some(address) = ctx.node_address.get(&node) else {
+                trace!(node = idx, "destination dropped: no token metadata for node");
+                dropped += 1;
+                continue;
+            };
+            let path_edges = match Self::reconstruct_path(
+                node,
+                ctx.token_in_node,
+                &spfa.predecessor,
+            ) {
+                Ok(path_edges) => path_edges,
+                Err(error) => {
+                    trace!(node = idx, token = %address, %error, "destination dropped: path reconstruction failed");
+                    dropped += 1;
+                    continue;
+                }
+            };
+            let components = path_edges
+                .into_iter()
+                .map(|(_, _, component_id)| component_id)
+                .collect();
+            reached
+                .insert(address.clone(), ReachedToken { amount_out: amount.clone(), components });
+        }
+
+        debug!(
+            reached = reached.len(),
+            dropped,
+            timed_out = spfa.timed_out,
+            "found a route to every reachable destination from one relaxation"
+        );
+        ReachOutcome { reached, timed_out: spfa.timed_out }
     }
 
     /// Runs the SPFA relaxation loop and reconstructs the best route from a pre-built context.
     ///
     /// This is the repeatable, synchronous solve phase. Call it multiple times with different
-    /// `opts.overrides` to evaluate alternative pool states without redoing the setup in `ctx`.
-    /// Overrides shadow the corresponding pool in `ctx.market_data` for both relaxation and route
-    /// construction.
+    /// `opts.overrides` to evaluate alternative component states without redoing the setup in
+    /// `ctx`. Overrides shadow the corresponding component in `ctx.market_data` for both
+    /// relaxation and route construction.
     pub(crate) fn find_single_route(
         &self,
         ctx: &BellmanFordContext,
@@ -261,14 +486,35 @@ impl BellmanFordAlgorithm {
     ) -> Result<RouteResult, AlgorithmError> {
         let start = Instant::now();
 
-        let spfa = self.run_spfa(ctx, order, &opts.overrides, start);
+        let Some(token_out_node) = ctx.token_out_node else {
+            return Err(AlgorithmError::Other(
+                "find_single_route needs a context built with a destination".to_string(),
+            ));
+        };
+        // A re-rooted context paired with a stale order would report a solve for one pair as a
+        // solve for another; the endpoints come from `ctx`, the amount from `order`.
+        debug_assert!(
+            ctx.node_address.get(&ctx.token_in_node) == Some(order.token_in()) &&
+                ctx.node_address.get(&token_out_node) == Some(order.token_out()),
+            "context endpoints do not match the order's token pair"
+        );
 
-        let out_idx = ctx.token_out_node.index();
+        let spfa = self.run_spfa(ctx, order.amount(), &opts.overrides, start);
+
+        let out_idx = token_out_node.index();
         if spfa.amount[out_idx].is_zero() {
+            // Dust (a hop's input below its own gas) -> AmountTooSmall; everything else
+            // (unreachable, filtered, sim error incl. too-large, missing state, timeout)
+            // -> NoGraphPath.
+            let reason = if spfa.input_below_hop_gas {
+                NoPathReason::AmountTooSmall
+            } else {
+                NoPathReason::NoGraphPath
+            };
             return Err(AlgorithmError::NoPath {
                 from: order.token_in().clone(),
                 to: order.token_out().clone(),
-                reason: NoPathReason::NoGraphPath,
+                reason,
             });
         }
 
@@ -276,7 +522,7 @@ impl BellmanFordAlgorithm {
         // (no re-simulation needed since forbid-revisits guarantees relaxation
         // amounts match sequential execution).
         let path_edges =
-            Self::reconstruct_path(ctx.token_out_node, ctx.token_in_node, &spfa.predecessor)?;
+            Self::reconstruct_path(token_out_node, ctx.token_in_node, &spfa.predecessor)?;
 
         let route =
             Self::build_route(ctx, &path_edges, &spfa.amount, &spfa.edge_gas, &opts.overrides)?;
@@ -320,7 +566,7 @@ impl BellmanFordAlgorithm {
     fn run_spfa(
         &self,
         ctx: &BellmanFordContext,
-        order: &Order,
+        amount_in: &BigUint,
         overrides: &MarketOverrides,
         start: Instant,
     ) -> SPFAResult {
@@ -332,12 +578,14 @@ impl BellmanFordAlgorithm {
         let mut edge_gas: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
         let mut cumul_gas: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
 
-        amount[ctx.token_in_node.index()] = order.amount().clone();
+        amount[ctx.token_in_node.index()] = amount_in.clone();
 
         // Track cumulative spot price product from token_in for fallback gas estimation.
         // spot_product[v] = product of spot prices along the path from token_in to v.
         let mut spot_product: Vec<f64> = vec![0.0; ctx.max_idx];
         spot_product[ctx.token_in_node.index()] = 1.0;
+
+        let mut input_below_hop_gas = false;
 
         let gas_aware = matches!(ctx.scoring, RouteScoringMode::NetOutput) &&
             ctx.gas_price_wei.is_some() &&
@@ -349,10 +597,12 @@ impl BellmanFordAlgorithm {
         }
 
         let mut active_nodes: Vec<NodeIndex> = vec![ctx.token_in_node];
+        let mut timed_out = false;
 
         for round in 0..self.max_hops {
             if start.elapsed() >= self.timeout {
                 debug!(round, "timeout during relaxation");
+                timed_out = true;
                 break;
             }
             if active_nodes.is_empty() {
@@ -360,7 +610,7 @@ impl BellmanFordAlgorithm {
                 break;
             }
 
-            let mut next_active: HashSet<NodeIndex> = HashSet::new();
+            let mut next_active: FxHashSet<NodeIndex> = FxHashSet::default();
 
             for &u in &active_nodes {
                 let u_idx = u.index();
@@ -374,22 +624,15 @@ impl BellmanFordAlgorithm {
                 for (v, component_id) in edges {
                     let v_idx = v.index();
 
-                    // Single predecessor walk: skip if target token or pool already in path
+                    // Single predecessor walk: skip if target token or component already in path
                     if Self::path_has_conflict(u, *v, component_id, &predecessor) {
                         continue;
                     }
 
                     // Skip disallowed connector tokens. Endpoints (token_in / token_out) are
                     // always permitted regardless of the allowlist.
-                    if let (Some(tokens), Some(v_addr)) =
-                        (&self.connector_tokens, ctx.node_address.get(v))
-                    {
-                        if v_addr != order.token_in() &&
-                            v_addr != order.token_out() &&
-                            !tokens.contains(v_addr)
-                        {
-                            continue;
-                        }
+                    if !self.connector_allows(ctx, *v) {
+                        continue;
                     }
 
                     let Some(token_v) = ctx.token_map.get(v) else { continue };
@@ -404,17 +647,18 @@ impl BellmanFordAlgorithm {
                             continue;
                         };
 
-                    let result = match sim.get_amount_out(amount[u_idx].clone(), token_u, token_v) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            trace!(
-                                component_id,
-                                error = %e,
-                                "simulation failed, skipping edge"
-                            );
-                            continue;
-                        }
-                    };
+                    let result =
+                        match sim.get_amount_out_guarded(amount[u_idx].clone(), token_u, token_v) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                trace!(
+                                    component_id,
+                                    error = %e,
+                                    "simulation failed, skipping edge"
+                                );
+                                continue;
+                            }
+                        };
 
                     let candidate_cumul_gas = &cumul_gas[u_idx] + &result.gas;
 
@@ -442,6 +686,27 @@ impl BellmanFordAlgorithm {
                             ctx.gas_price_wei.as_ref().unwrap(),
                             v_price.as_ref(),
                         );
+                        // Dust signal: this hop's input can't cover its own gas. Input-side, so
+                        // healthy and too-large orders (large inputs) never trip it. Gated on
+                        // net_candidate <= 0 (implied by input < hop gas) to keep the extra
+                        // price lookup off the hot path.
+                        if !input_below_hop_gas && net_candidate <= BigInt::ZERO {
+                            let u_price = Self::resolve_token_price(
+                                ctx.node_address.get(&u),
+                                ctx.token_prices.as_ref(),
+                                spot_product[u_idx],
+                                ctx.node_address.get(&ctx.token_in_node),
+                            );
+                            if Self::gas_adjusted_amount(
+                                &amount[u_idx],
+                                &result.gas,
+                                ctx.gas_price_wei.as_ref().unwrap(),
+                                u_price.as_ref(),
+                            ) <= BigInt::ZERO
+                            {
+                                input_below_hop_gas = true;
+                            }
+                        }
                         let net_existing = Self::gas_adjusted_amount(
                             &amount[v_idx],
                             &cumul_gas[v_idx],
@@ -450,6 +715,9 @@ impl BellmanFordAlgorithm {
                         );
                         net_candidate > net_existing
                     } else {
+                        if result.amount.is_zero() {
+                            input_below_hop_gas = true;
+                        }
                         result.amount > amount[v_idx]
                     };
 
@@ -472,7 +740,17 @@ impl BellmanFordAlgorithm {
             active_nodes.sort_unstable();
         }
 
-        SPFAResult { amount, predecessor, edge_gas, spot_product }
+        SPFAResult { amount, predecessor, edge_gas, spot_product, input_below_hop_gas, timed_out }
+    }
+
+    /// Whether the connector-token allowlist permits routing *into* node `v`.
+    /// Endpoints (token_in / token_out) are always permitted. No allowlist => all allowed.
+    fn connector_allows(&self, ctx: &BellmanFordContext, v: NodeIndex) -> bool {
+        let (Some(tokens), Some(v_addr)) = (&self.connector_tokens, ctx.node_address.get(&v))
+        else {
+            return true;
+        };
+        v == ctx.token_in_node || ctx.token_out_node == Some(v) || tokens.contains(v_addr)
     }
 
     /// Constructs a [`Route`] from a reconstructed path and SPFA output arrays.
@@ -484,7 +762,7 @@ impl BellmanFordAlgorithm {
         overrides: &MarketOverrides,
     ) -> Result<Route, AlgorithmError> {
         let mut swaps = Vec::with_capacity(path_edges.len());
-        let mut tokens: HashMap<Address, Token> = HashMap::new();
+        let mut tokens: FxHashMap<Address, Token> = FxHashMap::default();
 
         for (from_node, to_node, component_id) in path_edges {
             let token_in = ctx
@@ -508,7 +786,8 @@ impl BellmanFordAlgorithm {
                     kind: "component",
                     id: Some(component_id.clone()),
                 })?;
-            // Use the override's sim state if available so the route reflects overridden pools.
+            // Use the override's sim state if available so the route reflects overridden
+            // components.
             let sim_state = overrides
                 .get(component_id)
                 .or_else(|| {
@@ -533,10 +812,10 @@ impl BellmanFordAlgorithm {
             ));
             tokens
                 .entry(token_in.address.clone())
-                .or_insert_with(|| token_in.clone());
+                .or_insert_with(|| Token::clone(token_in));
             tokens
                 .entry(token_out.address.clone())
-                .or_insert_with(|| token_out.clone());
+                .or_insert_with(|| Token::clone(token_out));
         }
 
         Ok(Route::new(swaps, tokens)?)
@@ -624,12 +903,12 @@ impl BellmanFordAlgorithm {
         None
     }
 
-    /// Checks whether the target node or pool conflicts with the existing path to `from`.
+    /// Checks whether the target node or component conflicts with the existing path to `from`.
     /// Walks the predecessor chain once, checking both conditions simultaneously.
     pub(crate) fn path_has_conflict(
         from: NodeIndex,
         target_node: NodeIndex,
-        target_pool: &ComponentId,
+        target_component: &ComponentId,
         predecessor: &[Option<(NodeIndex, ComponentId)>],
     ) -> bool {
         let mut current = from;
@@ -639,7 +918,7 @@ impl BellmanFordAlgorithm {
             }
             match &predecessor[current.index()] {
                 Some((prev, cid)) => {
-                    if cid == target_pool {
+                    if cid == target_component {
                         return true;
                     }
                     current = *prev;
@@ -658,7 +937,7 @@ impl BellmanFordAlgorithm {
     ) -> Result<Vec<(NodeIndex, NodeIndex, ComponentId)>, AlgorithmError> {
         let mut path = Vec::new();
         let mut current = token_out;
-        let mut visited = HashSet::new();
+        let mut visited = FxHashSet::default();
 
         while current != token_in {
             if !visited.insert(current) {
@@ -686,55 +965,177 @@ impl BellmanFordAlgorithm {
         Ok(path)
     }
 
-    /// Extracts the subgraph reachable from `token_in_node` within `max_hops` via BFS.
+    /// Extracts the part of the graph that can carry a route from `token_in` to `token_out` in at
+    /// most `max_hops`. Returns `None` when no edge qualifies; the caller says what an empty
+    /// subgraph means for it.
     ///
-    /// Returns `(adjacency_list, token_nodes, component_ids)` or `NoPath` if the
-    /// subgraph is empty (no outgoing edges from the source).
-    pub(crate) fn get_subgraph(
-        graph: &StableDiGraph<()>,
-        token_in_node: NodeIndex,
+    /// Both ends bound the walk. A token reached in `d` hops is only worth keeping if the
+    /// destination is still `max_hops - d` hops away or nearer, and the same holds edge by edge.
+    /// The distances used are the shortest ones, so nothing that could appear on a route of legal
+    /// length is discarded.
+    ///
+    /// Drops excluded pools and intermediate tokens while retaining `token_in` and `token_out`.
+    /// Filtering before relaxation also excludes that liquidity from the solve's market subset.
+    ///
+    /// Expanding from the source alone reaches most of the market. Every component the walk
+    /// reaches gets copied by the caller's `extract_subset`, held for the solve, and simulated
+    /// during relaxation, so bounding the walk bounds all three.
+    fn get_subgraph<'a>(
+        graph: &'a StableDiGraph<()>,
+        token_in: NodeIndex,
+        token_out: NodeIndex,
         max_hops: usize,
-        order: &Order,
-    ) -> Result<Subgraph, AlgorithmError> {
-        let mut adj: HashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = HashMap::new();
-        let mut token_nodes: HashSet<NodeIndex> = HashSet::new();
-        let mut component_ids: HashSet<ComponentId> = HashSet::new();
-        let mut visited_nodes = HashSet::new();
+        exclusions: &RouteExclusions,
+    ) -> Option<Subgraph<'a>> {
+        // Walked from the destination along outgoing edges, not incoming ones. Every pool in this
+        // graph is entered as a pair of opposite edges, so the two walks cover the same tokens and
+        // the outgoing one needs no reversed index.
+        let hops_to_token_out =
+            Self::get_hops_to_reach(graph, token_in, token_out, max_hops, exclusions);
+        Self::get_subgraph_with_hop_map(
+            graph,
+            (token_in, Some(token_out)),
+            Some(&hops_to_token_out),
+            max_hops,
+            exclusions,
+        )
+    }
+
+    /// `get_subgraph` with the target hop map supplied by the caller: the map costs a BFS over
+    /// the graph, so a caller pruning many sources toward the same destination pays it once, and
+    /// a multi-source map prunes one walk toward a whole set of targets. Without a map nothing
+    /// prunes the walk — everything within `max_hops` of `token_in` is kept, the full reach a
+    /// caller reading every relaxed node (`reach_from_source_token`) needs.
+    fn get_subgraph_with_hop_map<'a>(
+        graph: &'a StableDiGraph<()>,
+        endpoints: (NodeIndex, Option<NodeIndex>),
+        hops_to_token_out: Option<&FxHashMap<NodeIndex, usize>>,
+        max_hops: usize,
+        exclusions: &RouteExclusions,
+    ) -> Option<Subgraph<'a>> {
+        let (token_in, token_out) = endpoints;
+        let mut adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = FxHashMap::default();
+        let mut token_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
+        let mut component_ids: FxHashSet<&ComponentId> = FxHashSet::default();
+        let mut visited_nodes = FxHashSet::default();
         let mut queued_nodes = VecDeque::new();
 
-        visited_nodes.insert(token_in_node);
-        token_nodes.insert(token_in_node);
-        queued_nodes.push_back((token_in_node, 0usize));
+        visited_nodes.insert(token_in);
+        token_nodes.insert(token_in);
+        queued_nodes.push_back((token_in, 0usize));
 
-        while let Some((node, depth)) = queued_nodes.pop_front() {
-            if depth >= max_hops {
+        while let Some((node, depth_walked)) = queued_nodes.pop_front() {
+            if depth_walked >= max_hops {
                 continue;
             }
             for edge in graph.edges(node) {
-                let target = edge.target();
-                let cid = edge.weight().component_id.clone();
+                let next_token = edge.target();
 
+                // Without a destination there is no second endpoint to exempt; the source
+                // stands in for both.
+                if !Self::can_cross(
+                    graph,
+                    edge,
+                    (token_in, token_out.unwrap_or(token_in)),
+                    exclusions,
+                ) {
+                    continue;
+                }
+
+                if let Some(hops_to_token_out) = &hops_to_token_out {
+                    // Taking this edge spends one hop; the rest have to be enough to finish the
+                    // route.
+                    let Some(&hops_left) = hops_to_token_out.get(&next_token) else {
+                        // token_out is not reachable from next_token within the hop budget.
+                        continue;
+                    };
+
+                    if depth_walked + 1 + hops_left > max_hops {
+                        // Finishing the route from next_token would take more hops than are left.
+                        continue;
+                    }
+                }
+
+                let component_id = &edge.weight().component_id;
                 adj.entry(node)
                     .or_default()
-                    .push((target, cid.clone()));
-                component_ids.insert(cid);
-                token_nodes.insert(target);
+                    .push((next_token, component_id.clone()));
+                component_ids.insert(component_id);
+                token_nodes.insert(next_token);
 
-                if visited_nodes.insert(target) {
-                    queued_nodes.push_back((target, depth + 1));
+                if visited_nodes.insert(next_token) {
+                    queued_nodes.push_back((next_token, depth_walked + 1));
                 }
             }
         }
 
         if adj.is_empty() {
-            return Err(AlgorithmError::NoPath {
-                from: order.token_in().clone(),
-                to: order.token_out().clone(),
-                reason: NoPathReason::NoGraphPath,
-            });
+            return None;
         }
 
-        Ok((adj, token_nodes, component_ids))
+        Some(Subgraph { adjacency: adj, token_nodes, component_ids })
+    }
+
+    // Both walks exempt the order's token_in and token_out from token exclusions.
+    fn can_cross(
+        graph: &StableDiGraph<()>,
+        edge: EdgeReference<'_, EdgeData<()>>,
+        endpoints: (NodeIndex, NodeIndex),
+        exclusions: &RouteExclusions,
+    ) -> bool {
+        !exclusions.excludes_pool(&edge.weight().component_id) &&
+            exclusions
+                .allows_token(&graph[edge.target()], (&graph[endpoints.0], &graph[endpoints.1]))
+    }
+
+    /// Every node within `max_hops` of `token_out`, and its distance to that destination.
+    ///
+    /// Counts only allowed hops, skipping excluded pools and intermediate tokens.
+    pub(crate) fn get_hops_to_reach(
+        graph: &StableDiGraph<()>,
+        token_in: NodeIndex,
+        token_out: NodeIndex,
+        max_hops: usize,
+        exclusions: &RouteExclusions,
+    ) -> FxHashMap<NodeIndex, usize> {
+        Self::get_hops_to_reach_any(graph, [token_out], (token_in, token_out), max_hops, exclusions)
+    }
+
+    /// Every node within `max_hops` of any of `sources`, and the fewest hops to reach one.
+    ///
+    /// Counts only allowed hops, skipping excluded pools and intermediate tokens; `endpoints`
+    /// are exempt from the token exclusions.
+    fn get_hops_to_reach_any(
+        graph: &StableDiGraph<()>,
+        sources: impl IntoIterator<Item = NodeIndex>,
+        endpoints: (NodeIndex, NodeIndex),
+        max_hops: usize,
+        exclusions: &RouteExclusions,
+    ) -> FxHashMap<NodeIndex, usize> {
+        let mut hops_to_reach: FxHashMap<NodeIndex, usize> = FxHashMap::default();
+        let mut frontier = Vec::new();
+        for source in sources {
+            hops_to_reach.insert(source, 0);
+            frontier.push(source);
+        }
+        for depth in 1..=max_hops {
+            let mut next = Vec::new();
+            for node in frontier {
+                for edge in graph.edges(node) {
+                    let neighbor = edge.target();
+                    if hops_to_reach.contains_key(&neighbor) ||
+                        !Self::can_cross(graph, edge, endpoints, exclusions)
+                    {
+                        continue;
+                    }
+                    hops_to_reach.insert(neighbor, depth);
+                    next.push(neighbor);
+                }
+            }
+            frontier = next;
+        }
+
+        hops_to_reach
     }
 
     /// Computes net_amount_out by subtracting gas costs from the output amount.
@@ -749,7 +1150,7 @@ impl BellmanFordAlgorithm {
         gas_price: &BigUint,
         token_prices: Option<&TokenGasPrices>,
         spot_product: &[f64],
-        node_address: &HashMap<NodeIndex, Address>,
+        node_address: &FxHashMap<NodeIndex, Address>,
         token_in_node: NodeIndex,
     ) -> Result<BigInt, AlgorithmError> {
         let last_swap = route.swaps().last().ok_or_else(|| {
@@ -801,18 +1202,13 @@ impl Algorithm for BellmanFordAlgorithm {
         "bellman_ford"
     }
 
-    #[instrument(level = "debug", skip_all, fields(order_id = %order.id()))]
+    #[instrument(level = "debug", skip_all, fields(order_id = %request.order().id()))]
     async fn find_best_route(
         &self,
-        graph: &Self::GraphType,
-        market: MarketData,
-        label: Option<StateLabel>,
-        derived: Option<SharedDerivedDataRef>,
-        order: &Order,
+        request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let ctx = self
-            .build_context(graph, market, label, derived, order)
-            .await?;
+        let order = request.order();
+        let ctx = self.build_context(request).await?;
         self.find_single_route(&ctx, order, FindRouteOptions::default())
     }
 
@@ -856,7 +1252,7 @@ mod tests {
 
     /// Sets up market and graph with `()` edge weights for BellmanFord tests.
     fn setup_market_bf(
-        pools: Vec<(&str, &Token, &Token, MockProtocolSim)>,
+        components: Vec<(&str, &Token, &Token, MockProtocolSim)>,
     ) -> (MarketData, PetgraphStableDiGraphManager<()>) {
         let mut market = MarketState::new();
 
@@ -868,11 +1264,14 @@ mod tests {
         });
         market.update_last_updated(crate::types::BlockInfo::new(1, "0x00".into(), 0));
 
-        for (pool_id, token_in, token_out, state) in pools {
+        for (component_id, token_in, token_out, state) in components {
             let tokens = vec![token_in.clone(), token_out.clone()];
-            let comp = component(pool_id, &tokens);
+            let comp = component(component_id, &tokens);
             market.upsert_components(std::iter::once(comp));
-            market.update_states([(pool_id.to_string(), Box::new(state) as Box<dyn ProtocolSim>)]);
+            market.update_states([(
+                component_id.to_string(),
+                Box::new(state) as Box<dyn ProtocolSim>,
+            )]);
             market.upsert_tokens(tokens);
         }
 
@@ -887,7 +1286,7 @@ mod tests {
     ) -> crate::derived::SharedDerivedDataRef {
         use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
-        let mut token_prices: TokenGasPrices = HashMap::new();
+        let mut token_prices: TokenGasPrices = FxHashMap::default();
         for address in token_addresses {
             token_prices.insert(
                 address.clone(),
@@ -909,6 +1308,224 @@ mod tests {
     // ==================== Unit Tests ====================
 
     #[tokio::test]
+    async fn test_find_best_route_with_excluded_endpoints() {
+        let a = token(0x01, "A");
+        let b = token(0x02, "B");
+        let c = token(0x03, "C");
+        let (market, manager) = setup_market_bf(vec![
+            ("ab", &a, &b, MockProtocolSim::new(2.0)),
+            ("bc", &b, &c, MockProtocolSim::new(2.0)),
+        ]);
+        let order = order(&a, &c, 1000, OrderSide::Sell);
+        let result = bf_algorithm(2, 1000)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order).with_exclusions(
+                RouteExclusions::default().with_tokens([a.address.clone(), c.address.clone()]),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.route().swaps().len(), 2);
+        assert_eq!(result.route().swaps()[0].component_id(), "ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "bc");
+    }
+
+    /// A pool the request excludes cannot carry a hop, so the pool that is left carries the order.
+    #[tokio::test]
+    async fn test_find_best_route_with_excluded_pool() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_bf(vec![
+            ("best", &token_a, &token_b, MockProtocolSim::new(3.0)),
+            ("second", &token_a, &token_b, MockProtocolSim::new(2.0)),
+        ]);
+        let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+        let result = bf_algorithm(2, 1000)
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &ord)
+                    .with_exclusions(RouteExclusions::default().with_pools(["best".to_string()])),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.route().swaps()[0].component_id(), "second");
+    }
+
+    /// The subgraph must hold everything a route could use and nothing else.
+    ///
+    /// Dropping too little is only slow, so no test would catch it; dropping too much loses routes
+    /// silently, and the route that dies first is the one using every hop it is allowed.
+    ///
+    /// ```text
+    ///   A --[ab]-- B --[bc]-- C      the only route, and it needs both hops
+    ///   A --[ad]-- D                 a dead end: D reaches nothing else
+    /// ```
+    #[test]
+    fn test_get_subgraph_keeps_full_length_routes_and_drops_dead_ends() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+
+        let (_, manager) = setup_market_bf(vec![
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ad", &token_a, &token_d, MockProtocolSim::new(5.0)),
+        ]);
+        let graph = manager.graph();
+        let node = |address: &Address| {
+            graph
+                .node_indices()
+                .find(|&n| &graph[n] == address)
+                .expect("token in graph")
+        };
+        let Subgraph { adjacency: adj, component_ids, .. } = BellmanFordAlgorithm::get_subgraph(
+            graph,
+            node(&token_a.address),
+            node(&token_c.address),
+            2,
+            &RouteExclusions::default(),
+        )
+        .unwrap();
+
+        let kept = |id: &str| {
+            component_ids
+                .iter()
+                .any(|component_id| *component_id == id)
+        };
+
+        // A -> B -> C spends the whole budget, so an off-by-one in the test would drop it.
+        assert!(kept("component_ab"), "the route's first hop must survive");
+        assert!(kept("component_bc"), "the route's second hop must survive");
+        // D is reachable from A but reaches nothing, so no route can pass through it. Keeping it
+        // would deep-copy its pool state and simulate it during relaxation, both for nothing.
+        assert!(!kept("component_ad"), "a dead end must not be kept");
+
+        // Nor should stepping back towards the source be kept: from B, returning to A leaves no
+        // budget to reach C.
+        let from_b = adj
+            .get(&node(&token_b.address))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        assert!(
+            from_b
+                .iter()
+                .all(|(target, _)| *target != node(&token_a.address)),
+            "B -> A cannot finish the route and must not be kept"
+        );
+    }
+
+    /// A token can sit inside the hop budget of both ends and still be on no legal route.
+    ///
+    /// D is one hop from the source and two from the destination, and the budget is two, so both
+    /// halves fit on their own while the route through D needs three. Only the sum rules it out,
+    /// which is the one case the arithmetic decides: a dead end is already gone by then, dropped
+    /// for having no distance to the destination at all.
+    ///
+    /// ```text
+    ///   A --[ab]-- B --[bc]-- C        two hops, the whole budget
+    ///   A --[ad]-- D --[de]-- E --[ec]-- C     three hops through D
+    /// ```
+    #[test]
+    fn test_get_subgraph_drops_detours_that_cannot_finish_in_budget() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+        let token_e = token(0x05, "E");
+
+        let (_, manager) = setup_market_bf(vec![
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ad", &token_a, &token_d, MockProtocolSim::new(5.0)),
+            ("component_de", &token_d, &token_e, MockProtocolSim::new(5.0)),
+            ("component_ec", &token_e, &token_c, MockProtocolSim::new(5.0)),
+        ]);
+        let graph = manager.graph();
+        let node = |address: &Address| {
+            graph
+                .node_indices()
+                .find(|&n| &graph[n] == address)
+                .expect("token in graph")
+        };
+        let Subgraph { token_nodes, component_ids, .. } = BellmanFordAlgorithm::get_subgraph(
+            graph,
+            node(&token_a.address),
+            node(&token_c.address),
+            2,
+            &RouteExclusions::default(),
+        )
+        .unwrap();
+
+        let kept = |id: &str| {
+            component_ids
+                .iter()
+                .any(|component_id| *component_id == id)
+        };
+
+        assert!(kept("component_ab"), "the two-hop route's first leg must survive");
+        assert!(kept("component_bc"), "the two-hop route's second leg must survive");
+
+        // One hop spent reaching D, two more needed to leave it: three in a budget of two.
+        assert!(!kept("component_ad"), "the step into a detour must not be kept");
+        assert!(!kept("component_de"), "nor anything further along it");
+        assert!(!kept("component_ec"), "nor its last leg into the destination");
+        assert!(
+            !token_nodes.contains(&node(&token_d.address)),
+            "a token no legal route reaches must not be kept"
+        );
+    }
+
+    /// Without a destination, `max_hops` from the source is the only bound on the walk.
+    ///
+    /// ```text
+    ///   G --[gb]-- B --[bc]-- C --[cd]-- D      D is three hops out, budget is two
+    /// ```
+    #[test]
+    fn test_subgraph_without_destination() {
+        let token_g = token(0x01, "G");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+
+        let (_, manager) = setup_market_bf(vec![
+            ("component_gb", &token_g, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(2.0)),
+        ]);
+        let graph = manager.graph();
+        let node = |address: &Address| {
+            graph
+                .node_indices()
+                .find(|&n| &graph[n] == address)
+                .expect("token in graph")
+        };
+        let Subgraph { token_nodes, component_ids, .. } =
+            BellmanFordAlgorithm::get_subgraph_with_hop_map(
+                graph,
+                (node(&token_g.address), None),
+                None,
+                2,
+                &RouteExclusions::default(),
+            )
+            .unwrap();
+
+        let kept = |id: &str| {
+            component_ids
+                .iter()
+                .any(|component_id| *component_id == id)
+        };
+
+        assert!(kept("component_gb"), "the first hop is within budget");
+        assert!(kept("component_bc"), "the second hop spends the budget exactly");
+        assert!(!kept("component_cd"), "an edge past the hop budget must not be kept");
+        assert!(
+            !token_nodes.contains(&node(&token_d.address)),
+            "a token past the hop budget must not be kept"
+        );
+    }
+
+    #[tokio::test]
     async fn test_linear_path_found() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
@@ -916,16 +1533,16 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(4.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(4.0)),
         ]);
 
         let algo = bf_algorithm(4, 1000);
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
@@ -945,48 +1562,48 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(3.0)),
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(4.0)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(1.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(3.0)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(4.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(1.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
         // A->B->D: 100*2*3=600 is better than A->C->D: 100*4*1=400
         assert_eq!(result.route().swaps().len(), 2);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ab");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_bd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_bd");
         assert_eq!(result.route().swaps()[1].amount_out(), &BigUint::from(600u64));
     }
 
     #[tokio::test]
-    async fn test_parallel_pools() {
-        // Two pools between A and B with different multipliers
+    async fn test_parallel_components() {
+        // Two components between A and B with different multipliers
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool1", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool2", &token_a, &token_b, MockProtocolSim::new(5.0)),
+            ("component1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component2", &token_a, &token_b, MockProtocolSim::new(5.0)),
         ]);
 
         let algo = bf_algorithm(2, 1000);
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
         assert_eq!(result.route().swaps().len(), 1);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool2");
+        assert_eq!(result.route().swaps()[0].component_id(), "component2");
         assert_eq!(result.route().swaps()[0].amount_out(), &BigUint::from(500u64));
     }
 
@@ -998,7 +1615,7 @@ mod tests {
 
         // A-B connected, C disconnected
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         // Add token_c to market without connecting it
         {
@@ -1010,7 +1627,7 @@ mod tests {
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await;
         assert!(matches!(result, Err(AlgorithmError::NoPath { .. })));
     }
@@ -1022,17 +1639,305 @@ mod tests {
         let token_x = token(0x99, "X");
 
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_x, &token_b, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await;
         assert!(matches!(
             result,
             Err(AlgorithmError::NoPath { reason: NoPathReason::SourceTokenNotInGraph, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_amount_too_small_when_reachable_but_zero_output() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        // Reachable component, but rate 0.5 on a 1-unit input floors to 0 output.
+        let (market, manager) =
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(0.5))]);
+        let algo = bf_algorithm(3, 1000);
+        let ord = order(&token_a, &token_b, 1, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_amount_too_small_when_dust_occurs_mid_route() {
+        // A->B floors 1*0.5 to 0 one hop before token_out: dust mid-route must still
+        // be AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let (market, manager) = setup_market_bf(vec![
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(0.5)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+        let algo = bf_algorithm(3, 1000);
+        let ord = order(&token_a, &token_c, 1, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_amount_too_large_for_liquidity() {
+        // Output 2000 exceeds liquidity 500, so the sim errors: a too-large amount must
+        // never be mislabeled AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, manager) = setup_market_bf(vec![(
+            "component_ab",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0).with_liquidity(500),
+        )]);
+        let algo = bf_algorithm(2, 1000);
+        let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_unreachable_within_hops() {
+        // A->B->C exists, but max_hops=1 leaves C out of the subgraph.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let (market, manager) = setup_market_bf(vec![
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+        let algo = bf_algorithm(1, 1000);
+        let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_reach_from_source_token_covers_branches_off_any_pair() {
+        // G->A and G->B->C: B and C sit on no G->A path, so a subgraph pruned toward any
+        // single destination would drop them. The from-source context must keep them all.
+        let token_g = token(0x01, "G");
+        let token_a = token(0x02, "A");
+        let token_b = token(0x03, "B");
+        let token_c = token(0x04, "C");
+
+        let (market, manager) = setup_market_bf(vec![
+            ("component_ga", &token_g, &token_a, MockProtocolSim::new(2.0)),
+            ("component_gb", &token_g, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+
+        let algo = bf_algorithm(3, 1000);
+        let ctx = algo
+            .build_context_from_source_token(manager.graph(), market, &token_g.address, 3, None)
+            .await
+            .expect("gas token has outgoing edges");
+        let routes = algo.reach_from_source_token(&ctx, &BigUint::from(100u64));
+
+        let reached: FxHashSet<Address> = routes.reached.keys().cloned().collect();
+        let expected: FxHashSet<Address> = [&token_a, &token_b, &token_c]
+            .into_iter()
+            .map(|t| t.address.clone())
+            .collect();
+        assert_eq!(reached, expected);
+    }
+
+    #[tokio::test]
+    async fn test_reach_from_source_token_zero_timeout() {
+        // A zero timeout cuts the relaxation before its first round: nothing is reached, and
+        // the outcome must say the run was cut short rather than that nothing is reachable.
+        let token_g = token(0x01, "G");
+        let token_a = token(0x02, "A");
+        let (market, manager) =
+            setup_market_bf(vec![("component_ga", &token_g, &token_a, MockProtocolSim::new(2.0))]);
+
+        let algo = bf_algorithm(3, 0);
+        let ctx = algo
+            .build_context_from_source_token(manager.graph(), market, &token_g.address, 3, None)
+            .await
+            .expect("source has outgoing edges");
+
+        let routes = algo.reach_from_source_token(&ctx, &BigUint::from(100u64));
+
+        assert!(routes.timed_out, "a zero timeout must be reported as a cut-short relaxation");
+        assert!(routes.reached.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_context_pruned_toward_filter_tokens() {
+        // G->A and G->B->C: pruned toward A with a 2-hop walk, the snapshot covers the G-A
+        // candidate route and leaves the B branch's components out entirely.
+        let token_g = token(0x01, "G");
+        let token_a = token(0x02, "A");
+        let token_b = token(0x03, "B");
+        let token_c = token(0x04, "C");
+
+        let (market, manager) = setup_market_bf(vec![
+            ("component_ga", &token_g, &token_a, MockProtocolSim::new(2.0)),
+            ("component_gb", &token_g, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+
+        let algo = bf_algorithm(3, 1000);
+        let filter: FxHashSet<Address> = [token_a.address.clone()]
+            .into_iter()
+            .collect();
+        let ctx = algo
+            .build_context_from_source_token(
+                manager.graph(),
+                market,
+                &token_g.address,
+                2,
+                Some(&filter),
+            )
+            .await
+            .expect("the filter token is reachable");
+
+        assert!(ctx
+            .market_data
+            .get_simulation_state("component_ga")
+            .is_some());
+        assert!(
+            ctx.market_data
+                .get_simulation_state("component_gb")
+                .is_none(),
+            "the B branch sits on no G-A candidate path"
+        );
+        assert!(ctx
+            .market_data
+            .get_simulation_state("component_bc")
+            .is_none());
+
+        let routes = algo.reach_from_source_token(&ctx, &BigUint::from(100u64));
+        let reached: FxHashSet<Address> = routes.reached.keys().cloned().collect();
+        assert_eq!(reached, filter);
+    }
+
+    #[tokio::test]
+    async fn test_find_single_route_rejects_a_context_built_without_destination() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, manager) =
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+
+        let algo = bf_algorithm(3, 1000);
+        let ctx = algo
+            .build_context_from_source_token(manager.graph(), market, &token_a.address, 3, None)
+            .await
+            .expect("source has outgoing edges");
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let result = algo.find_single_route(&ctx, &ord, FindRouteOptions::default());
+        assert!(
+            matches!(result, Err(AlgorithmError::Other(_))),
+            "expected an Other error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_single_route_after_reroot() {
+        // A context built from G, re-rooted at C, solves the reverse direction C->B->G
+        // against the same snapshot: one context serves solves from any node it covers.
+        let token_g = token(0x01, "G");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let (market, manager) = setup_market_bf(vec![
+            ("component_gb", &token_g, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+        let graph = manager.graph();
+
+        let algo = bf_algorithm(3, 1000);
+        let mut ctx = algo
+            .build_context_from_source_token(graph, market, &token_g.address, 3, None)
+            .await
+            .expect("source has outgoing edges");
+        let node_of = |address: &Address| {
+            graph
+                .node_indices()
+                .find(|&n| &graph[n] == address)
+                .expect("token is in the graph")
+        };
+
+        let gas_node = ctx.token_in_node;
+        let hops_to_gas = BellmanFordAlgorithm::get_hops_to_reach(
+            graph,
+            gas_node,
+            gas_node,
+            3,
+            &RouteExclusions::default(),
+        );
+        ctx.reroot_toward(graph, node_of(&token_c.address), gas_node, &hops_to_gas, 3)
+            .expect("a C-to-G path exists");
+        let ord = order(&token_c, &token_g, 100, OrderSide::Sell);
+        let result = algo
+            .find_single_route(&ctx, &ord, FindRouteOptions::default())
+            .expect("re-rooted context solves back to its source");
+
+        // 100 C -> 50 B -> 25 G through the two fee-free 2.0 pools read in reverse.
+        assert_eq!(
+            result
+                .route()
+                .amount_out(&token_g.address),
+            BigUint::from(25u64)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_connector_tokens_exclude_intermediate() {
+        // B is not in the connector allowlist, so SPFA never simulates into it:
+        // policy exclusion reads as NoGraphPath, not AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+
+        let (market, manager) = setup_market_bf(vec![
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(2.0)),
+        ]);
+
+        let algo = BellmanFordAlgorithm::with_config(
+            AlgorithmConfig::new(1, 3, Duration::from_millis(1000), None)
+                .unwrap()
+                .with_connector_tokens(FxHashSet::default()),
+        );
+        let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
         ));
     }
 
@@ -1043,13 +1948,13 @@ mod tests {
         let token_x = token(0x99, "X");
 
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_a, &token_x, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await;
         assert!(matches!(
             result,
@@ -1066,16 +1971,16 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(4.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(4.0)),
         ]);
 
         let algo = bf_algorithm(2, 1000);
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { .. })),
@@ -1092,22 +1997,22 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
         ]);
 
         let algo = bf_algorithm(4, 1000);
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
         // Should find exactly the 2-hop path A->B->C = 100*2*3 = 600
         assert_eq!(result.route().swaps().len(), 2);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ab");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_bc");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_bc");
         assert_eq!(result.route().swaps()[1].amount_out(), &BigUint::from(600u64));
     }
 
@@ -1121,25 +2026,25 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
-            ("pool_cb", &token_c, &token_b, MockProtocolSim::new(100.0)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(2.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_cb", &token_c, &token_b, MockProtocolSim::new(100.0)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(2.0)),
         ]);
 
         let algo = bf_algorithm(4, 1000);
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
         // Should find A->B->D = 100*2*2 = 400 (the direct 2-hop path)
         // The 4-hop revisit path A->B->C->B->D is blocked
         assert_eq!(result.route().swaps().len(), 2, "should use direct 2-hop path");
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ab");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_bd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_bd");
         assert_eq!(result.route().swaps()[1].amount_out(), &BigUint::from(400u64));
     }
 
@@ -1151,15 +2056,15 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
@@ -1174,7 +2079,7 @@ mod tests {
         let token_b = token(0x02, "B");
 
         let (market, manager) = setup_market_bf(vec![(
-            "pool1",
+            "component1",
             &token_a,
             &token_b,
             MockProtocolSim::new(2.0).with_gas(10),
@@ -1186,7 +2091,7 @@ mod tests {
         let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, Some(derived), &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord).with_derived(derived))
             .await
             .unwrap();
 
@@ -1204,8 +2109,8 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
         ]);
 
         // 0ms timeout
@@ -1213,7 +2118,7 @@ mod tests {
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await;
 
         // With 0ms timeout, we expect either:
@@ -1238,9 +2143,9 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        // Pool with 10% fee
+        // Component with 10% fee
         let (market, manager) = setup_market_bf(vec![(
-            "pool1",
+            "component1",
             &token_a,
             &token_b,
             MockProtocolSim::new(2.0).with_fee(0.1),
@@ -1250,7 +2155,7 @@ mod tests {
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
@@ -1263,9 +2168,9 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
 
-        // Pool with limited liquidity (500 tokens)
+        // Component with limited liquidity (500 tokens)
         let (market, manager) = setup_market_bf(vec![(
-            "pool1",
+            "component1",
             &token_a,
             &token_b,
             MockProtocolSim::new(2.0).with_liquidity(500),
@@ -1276,11 +2181,11 @@ mod tests {
 
         // Should fail due to insufficient liquidity
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { .. })),
-            "Should fail when trade exceeds pool liquidity"
+            "Should fail when trade exceeds component liquidity"
         );
     }
 
@@ -1293,15 +2198,15 @@ mod tests {
         let token_e = token(0x05, "E");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_de", &token_d, &token_e, MockProtocolSim::new(4.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_de", &token_d, &token_e, MockProtocolSim::new(4.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_a, &token_e, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await;
         assert!(
             matches!(result, Err(AlgorithmError::NoPath { .. })),
@@ -1311,24 +2216,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_spfa_skips_failed_simulations() {
-        // Pool that will fail simulation (liquidity=0 would cause error for any amount)
+        // Component that will fail simulation (liquidity=0 would cause error for any amount)
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_bf(vec![
-            // Direct path with failing pool
-            ("pool_ab_bad", &token_a, &token_b, MockProtocolSim::new(2.0).with_liquidity(0)),
+            // Direct path with failing component
+            ("component_ab_bad", &token_a, &token_b, MockProtocolSim::new(2.0).with_liquidity(0)),
             // Alternative path that works
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(2.0)),
-            ("pool_cb", &token_c, &token_b, MockProtocolSim::new(3.0)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(2.0)),
+            ("component_cb", &token_c, &token_b, MockProtocolSim::new(3.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await;
 
         // Should find A->C->B despite A->B failing
@@ -1341,7 +2246,7 @@ mod tests {
             }
             Err(AlgorithmError::NoPath { .. }) => {
                 // Also acceptable if liquidity=0 blocks all paths through B
-                // (since the failing pool might also block the reverse B->A edge)
+                // (since the failing component might also block the reverse B->A edge)
             }
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
@@ -1355,15 +2260,15 @@ mod tests {
         let token_c = token(0x03, "C");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bc", &token_b, &token_c, MockProtocolSim::new(3.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
@@ -1416,10 +2321,10 @@ mod tests {
         let low_gas: u64 = 100;
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(3.0).with_gas(high_gas)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(2.0).with_gas(high_gas)),
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(2.0).with_gas(low_gas)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(2.0).with_gas(low_gas)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(3.0).with_gas(high_gas)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(2.0).with_gas(high_gas)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(2.0).with_gas(low_gas)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(2.0).with_gas(low_gas)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
@@ -1434,14 +2339,14 @@ mod tests {
         ]);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, Some(derived), &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord).with_derived(derived))
             .await
             .unwrap();
 
         // Gas-aware relaxation should pick the cheaper path A -> C -> D
         assert_eq!(result.route().swaps().len(), 2);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ac");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_cd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ac");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_cd");
     }
 
     #[tokio::test]
@@ -1457,10 +2362,10 @@ mod tests {
         let low_gas: u64 = 100;
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(3.0).with_gas(high_gas)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(2.0).with_gas(high_gas)),
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(2.0).with_gas(low_gas)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(2.0).with_gas(low_gas)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(3.0).with_gas(high_gas)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(2.0).with_gas(high_gas)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(2.0).with_gas(low_gas)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(2.0).with_gas(low_gas)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
@@ -1468,14 +2373,71 @@ mod tests {
 
         // No derived data: should fall back to gross comparison
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
         // Without gas awareness, picks the higher-gross path A -> B -> D
         assert_eq!(result.route().swaps().len(), 2);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ab");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_bd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_bd");
+    }
+
+    #[tokio::test]
+    async fn test_amount_too_small_when_net_uneconomic_after_gas() {
+        // Gas-aware branch: the 1-unit input (worth 1 at 1:1) is far below the hop's
+        // gas cost of 1000 -> AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_bf(vec![(
+            "component_ab",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0).with_gas(10),
+        )]);
+
+        let algo = bf_algorithm(2, 1000);
+        let ord = order(&token_a, &token_b, 1, OrderSide::Sell);
+        let derived =
+            setup_derived_with_token_prices(&[token_a.address.clone(), token_b.address.clone()]);
+
+        let result = algo
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord).with_derived(derived))
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::AmountTooSmall, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_no_graph_path_when_output_uneconomic_but_input_economic() {
+        // Output value (500) is below the hop's gas (1000) so the solve fails, but the
+        // input (10_000) covers it: a healthy-sized order on a low-rate component must read
+        // NoGraphPath, not AmountTooSmall.
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let (market, manager) = setup_market_bf(vec![(
+            "component_ab",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(0.05).with_gas(10),
+        )]);
+
+        let algo = bf_algorithm(1, 1000);
+        let ord = order(&token_a, &token_b, 10_000, OrderSide::Sell);
+        let derived =
+            setup_derived_with_token_prices(&[token_a.address.clone(), token_b.address.clone()]);
+
+        let result = algo
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord).with_derived(derived))
+            .await;
+        assert!(matches!(
+            result,
+            Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+        ));
     }
 
     // ==================== Connector token tests ====================
@@ -1484,7 +2446,7 @@ mod tests {
     fn bf_algorithm_with_connectors(
         max_hops: usize,
         timeout_ms: u64,
-        connector_tokens: HashSet<Address>,
+        connector_tokens: FxHashSet<Address>,
     ) -> BellmanFordAlgorithm {
         BellmanFordAlgorithm::with_config(
             AlgorithmConfig::new(1, max_hops, Duration::from_millis(timeout_ms), None)
@@ -1507,25 +2469,25 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(2.0)),
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(3.0)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(3.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(2.0)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(3.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(3.0)),
         ]);
 
-        let connectors: HashSet<Address> = [token_c.address.clone()].into();
+        let connectors: FxHashSet<Address> = FxHashSet::from_iter([token_c.address.clone()]);
         let algo = bf_algorithm_with_connectors(3, 1000, connectors);
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
         // Only A->C->D is reachable; B was pruned.
         assert_eq!(result.route().swaps().len(), 2);
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ac");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_cd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ac");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_cd");
     }
 
     #[tokio::test]
@@ -1535,14 +2497,14 @@ mod tests {
         let token_b = token(0x02, "B");
 
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         // Empty allowlist — no intermediate tokens allowed, but direct hop A->B should work.
-        let algo = bf_algorithm_with_connectors(1, 1000, HashSet::new());
+        let algo = bf_algorithm_with_connectors(1, 1000, FxHashSet::default());
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
@@ -1559,32 +2521,32 @@ mod tests {
         let token_d = token(0x04, "D");
 
         let (market, manager) = setup_market_bf(vec![
-            ("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
-            ("pool_bd", &token_b, &token_d, MockProtocolSim::new(3.0)),
-            ("pool_ac", &token_a, &token_c, MockProtocolSim::new(1.0)),
-            ("pool_cd", &token_c, &token_d, MockProtocolSim::new(1.0)),
+            ("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("component_bd", &token_b, &token_d, MockProtocolSim::new(3.0)),
+            ("component_ac", &token_a, &token_c, MockProtocolSim::new(1.0)),
+            ("component_cd", &token_c, &token_d, MockProtocolSim::new(1.0)),
         ]);
 
         let algo = bf_algorithm(3, 1000);
         let ord = order(&token_a, &token_d, 100, OrderSide::Sell);
 
         let result = algo
-            .find_best_route(manager.graph(), market, None, None, &ord)
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
         // Best path is A->B->D = 100*2*3 = 600
-        assert_eq!(result.route().swaps()[0].component_id(), "pool_ab");
-        assert_eq!(result.route().swaps()[1].component_id(), "pool_bd");
+        assert_eq!(result.route().swaps()[0].component_id(), "component_ab");
+        assert_eq!(result.route().swaps()[1].component_id(), "component_bd");
         assert_eq!(result.route().swaps()[1].amount_out(), &BigUint::from(600u64));
     }
 
     #[test]
-    fn test_path_has_conflict_detects_node_and_pool() {
-        // Path: 0 -[pool_a]-> 1 -[pool_b]-> 2
+    fn test_path_has_conflict_detects_node_and_component() {
+        // Path: 0 -[component_a]-> 1 -[component_b]-> 2
         let mut pred: Vec<Option<(NodeIndex, ComponentId)>> = vec![None; 4];
-        pred[1] = Some((NodeIndex::new(0), "pool_a".into()));
-        pred[2] = Some((NodeIndex::new(1), "pool_b".into()));
+        pred[1] = Some((NodeIndex::new(0), "component_a".into()));
+        pred[2] = Some((NodeIndex::new(1), "component_b".into()));
 
         // Node conflicts: node 0 is in path, node 3 is not
         assert!(BellmanFordAlgorithm::path_has_conflict(
@@ -1607,23 +2569,23 @@ mod tests {
             &pred
         ));
 
-        // Pool conflicts: pool_a and pool_b are used, pool_c is not
+        // Component conflicts: component_a and component_b are used, component_c is not
         assert!(BellmanFordAlgorithm::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
-            &"pool_a".into(),
+            &"component_a".into(),
             &pred
         ));
         assert!(BellmanFordAlgorithm::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
-            &"pool_b".into(),
+            &"component_b".into(),
             &pred
         ));
         assert!(!BellmanFordAlgorithm::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
-            &"pool_c".into(),
+            &"component_c".into(),
             &pred
         ));
     }
@@ -1634,13 +2596,13 @@ mod tests {
         let token_b = token(0x02, "B");
 
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         let algo = bf_algorithm(2, 1000);
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
         let ctx = algo
-            .build_context(manager.graph(), market, None, None, &ord)
+            .build_context(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 
@@ -1650,10 +2612,10 @@ mod tests {
             .unwrap();
         assert_eq!(normal.route().swaps()[0].amount_out(), &BigUint::from(2000u64));
 
-        // Override pool_ab with a degraded sim (multiplier 1.0): 1000 * 1.0 = 1000
+        // Override component_ab with a degraded sim (multiplier 1.0): 1000 * 1.0 = 1000
         let opts = FindRouteOptions {
             overrides: MarketOverrides::empty()
-                .with_override("pool_ab".to_string(), Box::new(MockProtocolSim::new(1.0))),
+                .with_override("component_ab".to_string(), Box::new(MockProtocolSim::new(1.0))),
         };
         let overridden = algo
             .find_single_route(&ctx, &ord, opts)
@@ -1673,13 +2635,13 @@ mod tests {
         let token_b = token(0x02, "B");
 
         let (market, manager) =
-            setup_market_bf(vec![("pool_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+            setup_market_bf(vec![("component_ab", &token_a, &token_b, MockProtocolSim::new(2.0))]);
 
         let algo = bf_algorithm(2, 1000);
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
         let ctx = algo
-            .build_context(manager.graph(), market, None, None, &ord)
+            .build_context(SolveRequest::new(manager.graph(), market, &ord))
             .await
             .unwrap();
 

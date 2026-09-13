@@ -10,7 +10,7 @@
 //! - [`fynd`] — [`fynd::FyndAggregator`], a wrapper that turns `(token_in, token_out, amount)` into
 //!   a Fynd quote.
 //!
-//! ERC-20 storage-slot detection lives in the `erc20-overrides` crate and is used internally by
+//! ERC-20 storage-slot detection lives in `fynd-core` and is used internally by
 //! [`swap_simulation::EthCallRunner`].
 
 pub mod aggregator;

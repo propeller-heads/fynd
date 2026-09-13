@@ -1,12 +1,19 @@
-use std::{collections::HashSet, time::Duration};
+use std::time::Duration;
 
+use rustc_hash::FxHashSet;
 use tycho_simulation::tycho_common::models::Chain;
 
+/// Per-worker component filtering: which components reach one worker's graph.
+pub(crate) mod component_filter;
 /// Market events broadcast by the Tycho feed on every block update.
 pub mod events;
+/// Exclusive-component classification.
+pub mod exclusivity;
 pub(crate) mod gas;
 /// Shared market data store (`MarketState`, `MarketData`).
 pub mod market_data;
+/// Background sampler exporting per-protocol market metrics.
+pub(crate) mod metrics_sampler;
 /// Protocol system registry: maps protocol names to their Tycho identifiers.
 pub mod protocol_registry;
 /// Tycho WebSocket feed: connects to the Tycho data stream and populates `MarketState`.
@@ -43,10 +50,11 @@ pub(crate) struct TychoFeedConfig {
     /// Only include tokens traded within this many days.
     pub(crate) traded_n_days_ago: Option<u64>,
     /// Component IDs to exclude from the Tycho stream.
-    pub(crate) blocklisted_components: HashSet<String>,
+    pub(crate) blocklisted_components: FxHashSet<String>,
     /// Enable partial block (flashblock) updates from the Tycho stream.
-    /// When enabled, pool state updates are delivered mid-block rather than only at finalization,
-    /// reducing effective latency at the cost of processing more frequent, smaller updates.
+    /// When enabled, component state updates are delivered mid-block rather than only at
+    /// finalization, reducing effective latency at the cost of processing more frequent,
+    /// smaller updates.
     pub(crate) partial_blocks: bool,
 }
 
@@ -70,7 +78,7 @@ impl TychoFeedConfig {
             traded_n_days_ago: None,
             tvl_buffer_ratio: 1.1,
             reconnect_delay: Duration::from_secs(5),
-            blocklisted_components: HashSet::new(),
+            blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
         }
     }
@@ -95,7 +103,7 @@ impl TychoFeedConfig {
         self
     }
 
-    pub(crate) fn blocklisted_components(mut self, components: HashSet<String>) -> Self {
+    pub(crate) fn blocklisted_components(mut self, components: FxHashSet<String>) -> Self {
         self.blocklisted_components = components;
         self
     }
