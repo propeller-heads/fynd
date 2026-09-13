@@ -691,7 +691,9 @@ impl TychoFeed {
         // Check for delayed/stale block messages to prevent state regression.
         let stale_check = {
             let market = self.market_data.read().await;
-            market.last_updated().map(|b| (new_block_number < b.number(), b.number()))
+            market
+                .last_updated()
+                .map(|b| (new_block_number < b.number(), b.number()))
         };
 
         if let Some((true, current_block_num)) = stale_check {
@@ -715,7 +717,8 @@ impl TychoFeed {
         // We filter out added components from updated_components_ids.
         // There is no need to emit newly added components in both added_components and
         // updated_components, as doing so would cause downstream computations (like
-        // SpotPriceComputation and PoolDepthComputation) to perform redundant work on the same pool.
+        // SpotPriceComputation and PoolDepthComputation) to perform redundant work on the same
+        // pool.
         let updated_components_ids: HashSet<_> = updated_or_new_states
             .keys()
             .filter(|id| !added_components.contains_key(id.as_str()))
@@ -1485,7 +1488,9 @@ mod tests {
         // Verify component was NOT added to market data
         let reader = market_data.read().await;
         assert!(
-            reader.get_component(component_id).is_none(),
+            reader
+                .get_component(component_id)
+                .is_none(),
             "Component should not be in market data because update is stale"
         );
 
