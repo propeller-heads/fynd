@@ -60,7 +60,7 @@ pub struct TurbinePayload {
 /// [`alloy::primitives::Signature`] to [`SignedSwap::assemble`].
 ///
 /// Only the [`Fynd`](Self::Fynd) variant is currently executable; calling methods on the
-/// [`Turbine`](Self::Turbine) variant will panic with `unimplemented!`.
+/// [`Turbine`](Self::Turbine) variant will return a [`FyndError::Protocol`] error.
 #[derive(Debug)]
 pub enum SwapPayload {
     /// Fynd execution path — an EIP-1559 transaction targeting the RouterV3 contract.
@@ -74,16 +74,18 @@ impl SwapPayload {
     ///
     /// For the Fynd path this is the EIP-1559 transaction's `signature_hash()`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if called on the `Turbine` variant.
-    pub fn signing_hash(&self) -> B256 {
+    /// Returns an error if called on the `Turbine` variant as Turbine execution is not yet implemented.
+    pub fn signing_hash(&self) -> Result<B256, crate::error::FyndError> {
         match self {
             Self::Fynd(p) => {
                 use alloy::consensus::SignableTransaction;
-                p.tx.signature_hash()
+                Ok(p.tx.signature_hash())
             }
-            Self::Turbine(_) => unimplemented!("Turbine signing not yet implemented"),
+            Self::Turbine(_) => Err(crate::error::FyndError::Protocol(
+                "Turbine signing not yet implemented".into(),
+            )),
         }
     }
 
@@ -100,13 +102,15 @@ impl SwapPayload {
 
     /// The order quote embedded in this payload.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if called on the `Turbine` variant.
-    pub fn quote(&self) -> &Quote {
+    /// Returns an error if called on the `Turbine` variant as Turbine execution is not yet implemented.
+    pub fn quote(&self) -> Result<&Quote, crate::error::FyndError> {
         match self {
-            Self::Fynd(p) => &p.quote,
-            Self::Turbine(_) => unimplemented!("Turbine signing not yet implemented"),
+            Self::Fynd(p) => Ok(&p.quote),
+            Self::Turbine(_) => Err(crate::error::FyndError::Protocol(
+                "Turbine signing not yet implemented".into(),
+            )),
         }
     }
 
@@ -649,5 +653,12 @@ mod tests {
 
         let result = compute_settled_amount(&receipt, &token, &receiver);
         assert_eq!(result, Some(BigUint::from(300u64)));
+    }
+
+    #[test]
+    fn turbine_payload_methods_return_err_instead_of_panic() {
+        let turbine = SwapPayload::Turbine(TurbinePayload { _order_quote: () });
+        assert!(matches!(turbine.signing_hash(), Err(crate::error::FyndError::Protocol(_))));
+        assert!(matches!(turbine.quote(), Err(crate::error::FyndError::Protocol(_))));
     }
 }
