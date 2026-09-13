@@ -543,7 +543,10 @@ impl BellmanFordAlgorithm {
             ctx.token_in_node,
         )?;
 
-        let result = RouteResult::new(route, net_amount_out, gas_price);
+        let mut result = RouteResult::new(route, net_amount_out, gas_price);
+        if let Some(b) = ctx.market_data.last_updated() {
+            result = result.with_block_info(b.clone());
+        }
 
         let solve_time_ms = start.elapsed().as_millis() as u64;
         debug!(
