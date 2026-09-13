@@ -461,11 +461,9 @@ where
         // Get the graph from the graph manager
         let graph = self.graph_manager.graph();
 
-        // Get block info and resolve the effective state label.
-        // TODO: maybe the algorithm should return the block info with the route? The block might
-        // update while solving and the route returned might be for the newer block.
+        // Get initial block info and exclusions for the solve request.
         let (block_info, solved_against, exclusions) = {
-            // Read briefly to capture block info; drop the lock before solving so it is not held
+            // Read briefly to capture initial block info; drop the lock before solving so it is not held
             // across the algorithm's own read call.
             let view = self
                 .read_market(params.state_label())
@@ -501,6 +499,18 @@ where
 
         let order_quote = match result {
             Ok(result) => {
+                // If the algorithm recorded block info from its market view, use it for atomic accuracy.
+                let (block_info, solved_against) = if let Some(solver_block) = result.block_info() {
+                    let solved_against = if params.state_label().is_none() {
+                        solver_block.number().to_string()
+                    } else {
+                        solved_against
+                    };
+                    (solver_block.clone(), solved_against)
+                } else {
+                    (block_info, solved_against)
+                };
+
                 // Extract scalar values before consuming result with into_route()
                 let amount_out_net_gas = result
                     .net_amount_out()
