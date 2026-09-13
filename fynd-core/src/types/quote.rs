@@ -1470,9 +1470,11 @@ impl BlockInfo {
 pub struct Route {
     /// Ordered sequence of swaps to execute.
     swaps: Vec<Swap>,
-    /// Full `Token` objects keyed by address, populated by the algorithm that
-    /// built the route. Skipped during (de)serialization — only the in-process
-    /// encoding path consumes it.
+    /// Full `Token` objects keyed by address.
+    ///
+    /// Built-in algorithms add every token referenced by the swaps. Price-impact calculation
+    /// and in-process encoding use this map. Serialization omits it, so a deserialized route
+    /// has an empty map.
     #[serde(skip, default)]
     tokens: FxHashMap<Bytes, Token>,
     /// Amount out this route delivers if its pAMM legs fall back to Uniswap V3.
@@ -1530,18 +1532,18 @@ impl Route {
         self.swaps
     }
 
-    /// Returns the token map attached to this route. Empty unless populated via
-    /// [`Route::with_tokens`].
+    /// Returns the route's token map.
+    ///
+    /// Built-in algorithms add every token referenced by the swaps. Custom, deserialized,
+    /// test, and replay routes can have missing entries.
     pub(crate) fn tokens(&self) -> &FxHashMap<Bytes, Token> {
         &self.tokens
     }
 
-    /// Returns the symbol of `address`, resolved from this route's own token map (populated by
-    /// the algorithm that built the route). `None` if the route carries no entry for it — for
-    /// example a route built without a token map (tests, replays).
+    /// Returns the symbol for `address` from this route's token map. Returns `None` when the
+    /// map has no entry for the address.
     ///
-    /// Lets a caller outside this crate render a human-readable path (tokens and protocols
-    /// interleaved) without needing a separate, externally-sourced token table.
+    /// This lets an external caller render a human-readable route without a separate token table.
     pub fn token_symbol(&self, address: &Address) -> Option<&str> {
         self.tokens
             .get(address)
@@ -1562,26 +1564,12 @@ pub struct RouteResult {
     net_amount_out: BigInt,
     /// Effective gas price (in wei) at the time the route was computed.
     gas_price: BigUint,
-    /// Price impact as a signed fraction (e.g. 0.0016 = 16 bps, -0.001 = favorable).
-    /// `None` when the algorithm did not compute one.
-    price_impact: Option<f64>,
 }
 
 impl RouteResult {
     /// Creates a new route result.
     pub fn new(route: Route, net_amount_out: BigInt, gas_price: BigUint) -> Self {
-        Self { route, net_amount_out, gas_price, price_impact: None }
-    }
-
-    /// Attaches an algorithm-computed price impact (signed fraction).
-    pub fn with_price_impact(mut self, price_impact: f64) -> Self {
-        self.price_impact = Some(price_impact);
-        self
-    }
-
-    /// Returns the algorithm-computed price impact (signed fraction), if any.
-    pub(crate) fn price_impact(&self) -> Option<f64> {
-        self.price_impact
+        Self { route, net_amount_out, gas_price }
     }
 
     /// The route this result carries.
@@ -1639,6 +1627,23 @@ impl Route {
         self.swaps
             .first()
             .map(|s| s.token_in.clone())
+    }
+
+    /// Total raw input the route consumes: the `amount_in` of every swap in the first branch
+    /// collection, the swaps that divide the input token's balance. `None` for an empty route.
+    ///
+    /// Exact for a validated route whose input and output tokens differ: `validate_cycles` then
+    /// forbids any swap from producing the input token, so nothing but the order's input feeds
+    /// that collection.
+    pub(crate) fn input_amount(&self) -> Option<BigUint> {
+        let (_, first_collection) = branch_collections(&self.swaps, |swap| &swap.token_in)
+            .into_iter()
+            .next()?;
+        Some(
+            first_collection
+                .iter()
+                .fold(BigUint::ZERO, |total, swap| total + &swap.amount_in),
+        )
     }
 
     /// Returns the output token of the route (last swap's output).
@@ -1752,19 +1757,12 @@ impl Route {
     ///   must have `split == 0.0` (remainder), and the sum must be strictly less than `1.0`
     /// - BFS connectivity: outputs of each branch collection connect to inputs of the next
     fn validate_split_route(&self) -> Result<(), RouteValidationError> {
-        // Collect swaps into branch collections by their input token. Each
-        // branch collection represents a split (parallel branches sharing the
-        // same token_in), not a sequential path.
-        let mut token_in_to_index: FxHashMap<Address, usize> = FxHashMap::default();
-        let mut swaps_by_token_in: Vec<(Address, Vec<&Swap>)> = Vec::new();
-        for swap in &self.swaps {
-            if let Some(&idx) = token_in_to_index.get(&swap.token_in) {
-                swaps_by_token_in[idx].1.push(swap);
-            } else {
-                token_in_to_index.insert(swap.token_in.clone(), swaps_by_token_in.len());
-                swaps_by_token_in.push((swap.token_in.clone(), vec![swap]));
-            }
-        }
+        let swaps_by_token_in = branch_collections(&self.swaps, |swap| &swap.token_in);
+        let token_in_to_index: FxHashMap<Address, usize> = swaps_by_token_in
+            .iter()
+            .enumerate()
+            .map(|(index, (token_in, _))| (token_in.clone(), index))
+            .collect();
 
         validate_split_amounts(&swaps_by_token_in)?;
         validate_bfs_connectivity(&swaps_by_token_in, &token_in_to_index)?;
@@ -1774,6 +1772,32 @@ impl Route {
 
         Ok(())
     }
+}
+
+/// Groups `items` by the token each consumes, in order of first appearance.
+///
+/// Each group is one branch collection: the swaps that divide the balance standing at a token,
+/// whether one swap takes it all or several split it. The route validator checks a split route
+/// collection by collection, and `spot_reference_output` visits them in the same order. The helper
+/// itself only preserves first-seen order; that every producer of a token comes before its
+/// consumers is a property of a validated route, guaranteed by `validate_cycles`.
+pub(crate) fn branch_collections<'a, T>(
+    items: &'a [T],
+    token_in: impl Fn(&'a T) -> &'a Address,
+) -> Vec<(Address, Vec<&'a T>)> {
+    let mut index_by_token: FxHashMap<&'a Address, usize> = FxHashMap::default();
+    let mut collections: Vec<(Address, Vec<&'a T>)> = Vec::new();
+    for item in items {
+        let token = token_in(item);
+        match index_by_token.get(token) {
+            Some(&index) => collections[index].1.push(item),
+            None => {
+                index_by_token.insert(token, collections.len());
+                collections.push((token.clone(), vec![item]));
+            }
+        }
+    }
+    collections
 }
 
 fn validate_split_amounts(
@@ -2482,24 +2506,27 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // RouteResult Tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn route_result_price_impact_defaults_none_and_sets() {
-        let route = make_route(vec![(0x01, 0x02)]);
-        let rr = RouteResult::new(route.clone(), BigInt::from(0), BigUint::from(0u8));
-        assert_eq!(rr.price_impact(), None);
-        let rr2 = rr.with_price_impact(0.0025);
-        assert_eq!(rr2.price_impact(), Some(0.0025));
-    }
-
-    // -------------------------------------------------------------------------
     // Split Route Validation Tests
     // -------------------------------------------------------------------------
 
     fn make_split_swap(token_in: u8, token_out: u8, split: f64) -> Swap {
         make_swap(token_in, token_out, 1000, 990).with_split(split)
+    }
+
+    #[test]
+    fn test_input_amount_sums_first_branch_collection() {
+        //        ┌──[60%: 600]──┐
+        //   A ───┤              ├─── B ───[rem: 980]─── C
+        //        └──[rem: 400]──┘
+        // The A collection consumes 1000 in total; the downstream B swap does not count.
+        let swaps = vec![
+            make_swap(0x01, 0x02, 600, 590).with_split(0.6),
+            make_swap(0x01, 0x02, 400, 390),
+            make_swap(0x02, 0x03, 980, 970),
+        ];
+        let route = Route::new(swaps, FxHashMap::default()).expect("non-empty route");
+        assert!(route.validate().is_ok());
+        assert_eq!(route.input_amount(), Some(BigUint::from(1000u64)));
     }
 
     #[test]
