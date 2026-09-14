@@ -333,6 +333,10 @@ impl RankedQuotes {
 
 /// Encodes successful order quotes into router calldata, recording the encoding metrics the
 /// HTTP service reports.
+///
+/// `encoding_failures_total` counts orders, and [`Encoder::encode`] increments it for each order
+/// that fails. An error returned here fails the whole call, and `http_requests_total` counts it
+/// under its error status.
 pub async fn encode_quotes(
     encoder: &Encoder,
     order_quotes: Vec<OrderQuote>,
@@ -343,9 +347,6 @@ pub async fn encode_quotes(
         .encode(order_quotes, encoding_options.clone())
         .await;
     histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
-    if encoded.is_err() {
-        counter!("encoding_failures_total").increment(1);
-    }
     encoded
 }
 
