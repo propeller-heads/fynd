@@ -131,7 +131,7 @@ fn status_str(status: QuoteStatus) -> &'static str {
         QuoteStatus::Timeout => "timeout",
         QuoteStatus::NotReady => "not_ready",
         QuoteStatus::PriceCheckFailed => "price_check_failed",
-        QuoteStatus::FailedEncoding => "failed_encoding",
+        QuoteStatus::EncodingFailed => "encoding_failed",
     }
 }
 

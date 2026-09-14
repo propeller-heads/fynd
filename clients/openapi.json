@@ -1113,7 +1113,7 @@
           "timeout",
           "not_ready",
           "price_check_failed",
-          "failed_encoding"
+          "encoding_failed"
         ]
       },
       "Route": {

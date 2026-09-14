@@ -254,7 +254,7 @@ impl Encoder {
     /// Encodes order solutions for execution.
     ///
     /// Each order is encoded on its own: an order that fails keeps its route and amounts, gets
-    /// [`QuoteStatus::FailedEncoding`] and no transaction, while every other order in the request
+    /// [`QuoteStatus::EncodingFailed`] and no transaction, while every other order in the request
     /// keeps its calldata. A caller reads the per-order status, as it already does for
     /// [`QuoteStatus::NoRouteFound`] and [`QuoteStatus::PriceCheckFailed`].
     ///
@@ -340,7 +340,7 @@ impl Encoder {
                 "encoding failed for this order; it is returned without a transaction"
             );
             counter!("encoding_failures_total").increment(1);
-            quotes[idx].set_status(QuoteStatus::FailedEncoding);
+            quotes[idx].set_status(QuoteStatus::EncodingFailed);
         }
 
         Ok(quotes)
@@ -1230,7 +1230,7 @@ mod tests {
             .await
             .expect("a failing order is reported on the order, not on the call");
 
-        assert_eq!(result[0].status(), QuoteStatus::FailedEncoding);
+        assert_eq!(result[0].status(), QuoteStatus::EncodingFailed);
         assert!(result[0].transaction().is_none(), "an unsigned exclusive leg must not be encoded");
     }
 
@@ -1422,7 +1422,7 @@ mod tests {
 
         assert_eq!(result[0].status(), QuoteStatus::Success);
         assert!(result[0].transaction().is_some());
-        assert_eq!(result[1].status(), QuoteStatus::FailedEncoding);
+        assert_eq!(result[1].status(), QuoteStatus::EncodingFailed);
         assert!(result[1].transaction().is_none());
     }
 
@@ -1440,7 +1440,7 @@ mod tests {
             .expect("a failing order is reported on the order, not on the call");
 
         for quote in result {
-            assert_eq!(quote.status(), QuoteStatus::FailedEncoding);
+            assert_eq!(quote.status(), QuoteStatus::EncodingFailed);
             assert!(quote.transaction().is_none());
         }
     }
@@ -1540,7 +1540,7 @@ mod tests {
             .encode(vec![quote], opts)
             .await
             .expect("a failing order is reported on the order, not on the call");
-        assert_eq!(result[0].status(), QuoteStatus::FailedEncoding);
+        assert_eq!(result[0].status(), QuoteStatus::EncodingFailed);
     }
 
     #[tokio::test]
@@ -1830,7 +1830,7 @@ mod tests {
             .encode(vec![quote], opts)
             .await
             .expect("a failing order is reported on the order, not on the call");
-        assert_eq!(result[0].status(), QuoteStatus::FailedEncoding);
+        assert_eq!(result[0].status(), QuoteStatus::EncodingFailed);
         assert!(result[0].transaction().is_none());
     }
 

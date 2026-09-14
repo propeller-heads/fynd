@@ -175,7 +175,7 @@ pub(crate) fn quote_status_code(status: QuoteStatus) -> &'static str {
         QuoteStatus::Timeout => "timeout",
         QuoteStatus::NotReady => "not_ready",
         QuoteStatus::PriceCheckFailed => "price_check_failed",
-        QuoteStatus::FailedEncoding => "failed_encoding",
+        QuoteStatus::EncodingFailed => "encoding_failed",
         _ => "unknown",
     }
 }
@@ -196,7 +196,7 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
             QuoteStatus::Timeout => "infra/timeout",
             QuoteStatus::NotReady => "data/not_ready",
             QuoteStatus::PriceCheckFailed => "guard/price_check_failed",
-            QuoteStatus::FailedEncoding => "encoding/failed_encoding",
+            QuoteStatus::EncodingFailed => "encoding/encoding_failed",
             _ => "unknown",
         };
     };
