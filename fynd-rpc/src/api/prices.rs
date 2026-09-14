@@ -71,17 +71,54 @@ impl fmt::Display for IncludeField {
     }
 }
 
-/// Block numbers at which each computation was last run.
+/// Freshness metadata for the latest persisted aggregate computation output.
+///
+/// Incremental computations can retain entries or failures produced by earlier runs, so this
+/// status does not guarantee that every item in the aggregate was recomputed at this block.
 #[derive(Debug, Serialize, ToSchema)]
-pub struct ComputationBlocks {
-    /// Block at which the token prices were computed.
-    pub token_prices: u64,
-    /// Block at which spot prices were computed. `None` if not yet available.
+pub struct ComputationDataStatus {
+    /// Market block associated with the latest aggregate persistence.
+    pub block: u64,
+    /// Elapsed monotonic time in milliseconds since Fynd persisted the latest aggregate output.
+    /// This is distinct from the source-chain head age and from per-item freshness.
+    pub last_update_ms: u64,
+}
+
+/// Freshness metadata for the computations exposed by GET /v1/prices.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ComputationDataStatuses {
+    /// Freshness metadata for token gas prices.
+    pub token_prices: ComputationDataStatus,
+    /// Freshness metadata for spot prices, omitted until that computation has persisted output.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub spot_prices: Option<u64>,
-    /// Block at which component depths were computed. `None` if not yet available.
+    #[schema(nullable = false)]
+    pub spot_prices: Option<ComputationDataStatus>,
+    /// Freshness metadata for component depths, omitted until that computation has persisted
+    /// output.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_depths: Option<u64>,
+    #[schema(nullable = false)]
+    pub component_depths: Option<ComputationDataStatus>,
+}
+
+/// Freshness metadata for Tycho's source-chain head.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TychoDataStatus {
+    /// Latest block Fynd accepted from the Tycho ready synchronizer selected by its feed.
+    /// This identifies Fynd's current Tycho-derived market snapshot; it is not an independent
+    /// query of the canonical chain head.
+    pub head: crate::api::dto::BlockInfo,
+    /// Age of the source-chain head in milliseconds, with the same semantics as
+    /// `/v1/health.last_update_ms`.
+    pub last_update_ms: u64,
+}
+
+/// Source and computation freshness metadata for GET /v1/prices.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DataStatus {
+    /// Freshness metadata for Tycho's source-chain head.
+    pub tycho: TychoDataStatus,
+    /// Freshness metadata for persisted computation outputs.
+    pub computations: ComputationDataStatuses,
 }
 
 /// Top-level response for GET /v1/prices.
@@ -94,8 +131,8 @@ pub struct PricesResponse {
     /// The gas token address (e.g. WETH).
     #[schema(value_type = String, example = "0x0000000000000000000000000000000000000000")]
     pub gas_token: Address,
-    /// Block numbers at which each computation was last run.
-    pub blocks: ComputationBlocks,
+    /// Source and computation freshness metadata for the returned data.
+    pub data_status: DataStatus,
     /// Spot prices per component direction (only if requested via `include=spot_prices`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spot_prices: Option<Vec<SpotPriceEntry>>,
@@ -283,6 +320,63 @@ mod tests {
     use num_bigint::BigUint;
 
     use super::*;
+
+    #[test]
+    fn test_data_status_serialization() {
+        let status = DataStatus {
+            tycho: TychoDataStatus {
+                head: crate::api::dto::BlockInfo::new(
+                    21_000_000,
+                    "0xfull-head-hash".to_string(),
+                    1_700_000_000,
+                ),
+                last_update_ms: 2_500,
+            },
+            computations: ComputationDataStatuses {
+                token_prices: ComputationDataStatus { block: 20_999_998, last_update_ms: 125 },
+                spot_prices: None,
+                component_depths: None,
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!({
+                "tycho": {
+                    "head": {
+                        "number": 21_000_000,
+                        "hash": "0xfull-head-hash",
+                        "timestamp": 1_700_000_000,
+                    },
+                    "last_update_ms": 2_500,
+                },
+                "computations": {
+                    "token_prices": {
+                        "block": 20_999_998,
+                        "last_update_ms": 125,
+                    },
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn test_data_status_serializes_available_optional_computations() {
+        let computations = ComputationDataStatuses {
+            token_prices: ComputationDataStatus { block: 10, last_update_ms: 100 },
+            spot_prices: Some(ComputationDataStatus { block: 11, last_update_ms: 200 }),
+            component_depths: Some(ComputationDataStatus { block: 12, last_update_ms: 300 }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(computations).unwrap(),
+            serde_json::json!({
+                "token_prices": { "block": 10, "last_update_ms": 100 },
+                "spot_prices": { "block": 11, "last_update_ms": 200 },
+                "component_depths": { "block": 12, "last_update_ms": 300 },
+            })
+        );
+    }
 
     // ---- IncludeField parsing ----
 

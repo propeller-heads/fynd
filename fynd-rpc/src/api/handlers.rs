@@ -1,5 +1,8 @@
 //! HTTP request handlers for the solver API.
 
+#[cfg(feature = "experimental")]
+use std::time::Instant;
+
 use actix_web::{web, HttpRequest, HttpResponse};
 use fynd_core::SolveError;
 use tracing::instrument;
@@ -9,8 +12,9 @@ use tracing::{debug, info, warn};
 use super::{dto, ApiError, AppState, RouteConfigurator};
 #[cfg(feature = "experimental")]
 use crate::api::prices::{
-    price_to_decimal_string, ComponentDepthEntry, ComputationBlocks, IncludeField, PricesQuery,
-    PricesResponse, SpotPriceEntry, TokenPriceEntry,
+    price_to_decimal_string, ComponentDepthEntry, ComputationDataStatus, ComputationDataStatuses,
+    DataStatus, IncludeField, PricesQuery, PricesResponse, SpotPriceEntry, TokenPriceEntry,
+    TychoDataStatus,
 };
 #[cfg(feature = "experimental")]
 use crate::api::tokens::{build_token_entries, TokensCache, TokensQuery, TokensResponse};
@@ -292,30 +296,92 @@ pub async fn get_prices(
     let want_depths = include_fields.contains(&IncludeField::Depths);
     let want_spot = include_fields.contains(&IncludeField::SpotPrices);
 
-    // Acquire read lock, check staleness first (avoid cloning if 503), then clone
-    let store = state.derived_data.read().await;
-    // The prices and their block are one store slot, written together when a pass lands, so
-    // one check covers both.
-    let (token_prices, token_prices_block) = store
-        .token_prices()
-        .zip(store.token_prices_block())
-        .ok_or(ApiError::StaleData { age_ms: u64::MAX })?;
-    if want_spot && store.spot_prices_block().is_none() {
-        return Err(ApiError::StaleData { age_ms: u64::MAX });
-    }
-    if want_depths && store.component_depths_block().is_none() {
-        return Err(ApiError::StaleData { age_ms: u64::MAX });
-    }
-    let spot_prices_block = store.spot_prices_block();
-    let component_depths_block = store.component_depths_block();
-    let token_prices_data = token_prices.clone();
-    let spot_prices_data = if want_spot { store.spot_prices().cloned() } else { None };
-    let component_depths_data = if want_depths { store.component_depths().cloned() } else { None };
-    drop(store);
+    let (
+        token_prices,
+        token_prices_status,
+        spot_prices_data,
+        spot_prices_status,
+        component_depths_data,
+        component_depths_status,
+    ) = {
+        let store = state.derived_data.read().await;
+        let now = Instant::now();
+        let token_prices_status = store
+            .token_prices_status()
+            .ok_or_else(|| ApiError::NotReady("Token prices have not been computed".to_string()))?;
+        let token_prices = store
+            .token_prices()
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::Internal("Token price status exists without output".to_string())
+            })?;
+        let spot_prices_status = store
+            .spot_prices_status()
+            .map(|status| ComputationDataStatus {
+                block: status.block(),
+                last_update_ms: status.age_ms_at(now),
+            });
+        if want_spot && spot_prices_status.is_none() {
+            return Err(ApiError::NotReady("Spot prices have not been computed".to_string()));
+        }
+        let spot_prices_data = if want_spot {
+            Some(
+                store
+                    .spot_prices()
+                    .cloned()
+                    .ok_or_else(|| {
+                        ApiError::Internal("Spot price status exists without output".to_string())
+                    })?,
+            )
+        } else {
+            None
+        };
+        let component_depths_status = store
+            .component_depths_status()
+            .map(|status| ComputationDataStatus {
+                block: status.block(),
+                last_update_ms: status.age_ms_at(now),
+            });
+        if want_depths && component_depths_status.is_none() {
+            return Err(ApiError::NotReady("Component depths have not been computed".to_string()));
+        }
+        let component_depths_data = if want_depths {
+            Some(
+                store
+                    .component_depths()
+                    .cloned()
+                    .ok_or_else(|| {
+                        ApiError::Internal(
+                            "Component depth status exists without output".to_string(),
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        (
+            token_prices,
+            ComputationDataStatus {
+                block: token_prices_status.block(),
+                last_update_ms: token_prices_status.age_ms_at(now),
+            },
+            spot_prices_data,
+            spot_prices_status,
+            component_depths_data,
+            component_depths_status,
+        )
+    };
+
+    let tycho_status = state
+        .health_tracker()
+        .tycho_head_status()
+        .await
+        .ok_or_else(|| ApiError::NotReady("Tycho head is unavailable".to_string()))?;
 
     let mut prices = Vec::new();
     let mut skipped_tokens = 0usize;
-    for (address, price) in token_prices_data {
+    for (address, price) in token_prices {
         match price_to_decimal_string(&price.numerator, &price.denominator) {
             Some(price) => prices.push(TokenPriceEntry { token: address, price }),
             None => {
@@ -388,10 +454,16 @@ pub async fn get_prices(
     let response = PricesResponse {
         prices,
         gas_token: state.gas_token.clone(),
-        blocks: ComputationBlocks {
-            token_prices: token_prices_block,
-            spot_prices: spot_prices_block,
-            component_depths: component_depths_block,
+        data_status: DataStatus {
+            tycho: TychoDataStatus {
+                head: tycho_status.head.into(),
+                last_update_ms: tycho_status.last_update_ms,
+            },
+            computations: ComputationDataStatuses {
+                token_prices: token_prices_status,
+                spot_prices: spot_prices_status,
+                component_depths: component_depths_status,
+            },
         },
         spot_prices,
         component_depths,
@@ -642,6 +714,19 @@ mod tests {
     }
 
     #[cfg(feature = "experimental")]
+    async fn seed_tycho_head(state: &AppState) {
+        state
+            .market_data
+            .write()
+            .await
+            .update_last_updated(fynd_core::BlockInfo::new(
+                19_000_001,
+                "0xprices-head".to_string(),
+                1_700_000_000,
+            ));
+    }
+
+    #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_handler_rejects_limit_over_maximum_before_derived_data() {
         let state = make_test_state();
@@ -667,7 +752,36 @@ mod tests {
 
     #[cfg(feature = "experimental")]
     #[actix_web::test]
-    async fn test_prices_returns_503_before_derived_data() {
+    async fn test_prices_handler_returns_503_without_tycho_head() {
+        let state = make_test_state();
+        state
+            .derived_data
+            .write()
+            .await
+            .set_token_prices(Default::default(), vec![], 19_000_000, true);
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 503);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "NOT_READY", "body was: {body}");
+        assert_eq!(body["error"], "data not ready: Tycho head is unavailable");
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_preserves_token_not_ready_error_precedence() {
         let state = make_test_state();
         let app = test::init_service(
             App::new()
@@ -684,6 +798,12 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status().as_u16(), 503);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "NOT_READY", "body was: {body}");
+        assert_eq!(
+            body["error"], "data not ready: Token prices have not been computed",
+            "body was: {body}"
+        );
     }
 
     // The pricing pass cannot fail as a whole, so its first run sets the block even when
@@ -697,6 +817,7 @@ mod tests {
         use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
         let state = make_test_state();
+        seed_tycho_head(&state).await;
         {
             let mut store = state.derived_data.write().await;
             store.set_token_prices(
@@ -734,6 +855,7 @@ mod tests {
         use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
         let state = make_test_state();
+        seed_tycho_head(&state).await;
         {
             let mut store = state.derived_data.write().await;
             store.set_token_prices(
@@ -769,10 +891,116 @@ mod tests {
 
     #[cfg(feature = "experimental")]
     #[actix_web::test]
+    async fn test_prices_handler_returns_not_ready_without_token_prices() {
+        let state = make_test_state();
+        seed_tycho_head(&state).await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 503);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "NOT_READY", "body was: {body}");
+        assert_eq!(
+            body["error"], "data not ready: Token prices have not been computed",
+            "body was: {body}"
+        );
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_returns_not_ready_for_requested_uncomputed_data() {
+        for (uri, expected_error) in [
+            (
+                "/v1/prices?include=spot_prices",
+                "data not ready: Spot prices have not been computed",
+            ),
+            (
+                "/v1/prices?include=depths",
+                "data not ready: Component depths have not been computed",
+            ),
+        ] {
+            let state = make_test_state();
+            seed_tycho_head(&state).await;
+            state
+                .derived_data
+                .write()
+                .await
+                .set_token_prices(Default::default(), vec![], 19_000_000, true);
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(state))
+                    .route("/v1/prices", web::get().to(super::get_prices)),
+            )
+            .await;
+
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri(uri)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status().as_u16(), 503);
+            let body = body_json(resp).await;
+            assert_eq!(body["code"], "NOT_READY", "body was: {body}");
+            assert_eq!(body["error"], expected_error, "body was: {body}");
+        }
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_reports_available_statuses_without_optional_outputs() {
+        let state = make_test_state();
+        seed_tycho_head(&state).await;
+        {
+            let mut store = state.derived_data.write().await;
+            store.set_token_prices(Default::default(), vec![], 19_000_000, true);
+            store.set_spot_prices(Default::default(), vec![], 18_999_999, true);
+            store.set_component_depths(Default::default(), vec![], 18_999_998, true);
+        }
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        let body: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+
+        assert!(body.get("spot_prices").is_none(), "body was: {body}");
+        assert!(body.get("component_depths").is_none(), "body was: {body}");
+        let computations = &body["data_status"]["computations"];
+        assert_eq!(computations["token_prices"]["block"], 19_000_000);
+        assert_eq!(computations["spot_prices"]["block"], 18_999_999);
+        assert_eq!(computations["component_depths"]["block"], 18_999_998);
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
     async fn test_prices_handler_applies_limit_boundaries() {
         use num_bigint::BigUint;
 
+        const MAX_TEST_COMPUTATION_AGE_MS: u64 = 60_000;
+
         let state = make_test_state();
+        seed_tycho_head(&state).await;
         let token = test_addr(1);
         let token_in = test_addr(2);
         let token_out = test_addr(3);
@@ -841,6 +1069,17 @@ mod tests {
                 1000,
                 "body was: {body}"
             );
+            for status_name in ["token_prices", "spot_prices", "component_depths"] {
+                let status = &body["data_status"]["computations"][status_name];
+                assert_eq!(status["block"], 19_000_000, "body was: {body}");
+                let age_ms = status["last_update_ms"]
+                    .as_u64()
+                    .unwrap_or_else(|| panic!("{status_name} age must be a u64: {body}"));
+                assert!(
+                    age_ms <= MAX_TEST_COMPUTATION_AGE_MS,
+                    "{status_name} age {age_ms}ms was unexpectedly high: {body}"
+                );
+            }
         }
 
         let zero_limit: Value = test::call_and_read_body_json(
@@ -865,11 +1104,24 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+        for status_name in ["token_prices", "spot_prices", "component_depths"] {
+            let status = &zero_limit["data_status"]["computations"][status_name];
+            assert_eq!(status["block"], 19_000_000, "body was: {zero_limit}");
+            let age_ms = status["last_update_ms"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{status_name} age must be a u64: {zero_limit}"));
+            assert!(
+                age_ms <= MAX_TEST_COMPUTATION_AGE_MS,
+                "{status_name} age {age_ms}ms was unexpectedly high: {zero_limit}"
+            );
+        }
     }
 
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_handler_serializes_decimal_strings() {
+        const MAX_TEST_COMPUTATION_AGE_MS: u64 = 60_000;
+
         let gas_token = "0x0000000000000000000000000000000000000001";
         // (address, numerator, denominator, expected decimal string), pre-sorted by address
         // because the handler sorts entries for a deterministic wire order.
@@ -881,6 +1133,7 @@ mod tests {
         let mut state = make_test_state();
         state.gas_token =
             tycho_simulation::tycho_common::models::Address::from_str(gas_token).unwrap();
+        seed_tycho_head(&state).await;
         let mut token_prices = rustc_hash::FxHashMap::default();
         for (address, numerator, denominator) in
             cases.map(|(address, numerator, denominator, _)| (address, numerator, denominator))
@@ -896,18 +1149,60 @@ mod tests {
             .await
             .set_token_prices(token_prices, vec![], 19_000_000, true);
 
+        let state = web::Data::new(state);
         let app = test::init_service(
             App::new()
-                .app_data(web::Data::new(state))
+                .app_data(state.clone())
                 .route("/v1/prices", web::get().to(super::get_prices)),
         )
         .await;
+        let tycho_age_before = state.health_tracker().age_ms().await;
         let request = test::TestRequest::get()
             .uri("/v1/prices")
             .to_request();
-        let body: Value = test::call_and_read_body_json(&app, request).await;
+        let response = test::call_service(&app, request).await;
+        let tycho_age_after = state.health_tracker().age_ms().await;
+        assert_eq!(response.status(), 200);
+        let body = body_json(response).await;
 
-        assert_eq!(body["blocks"]["token_prices"], 19_000_000);
+        assert!(body["data_status"].is_object(), "body was: {body}");
+        assert!(body.get("blocks").is_none(), "body was: {body}");
+        let tycho_status = &body["data_status"]["tycho"];
+        assert_eq!(tycho_status["head"]["number"], 19_000_001);
+        assert_eq!(tycho_status["head"]["hash"], "0xprices-head");
+        assert_eq!(tycho_status["head"]["timestamp"], 1_700_000_000);
+        let tycho_age = tycho_status["last_update_ms"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("Tycho age must be a u64: {body}"));
+        assert!(
+            (tycho_age_before..=tycho_age_after).contains(&tycho_age),
+            "Tycho age {tycho_age}ms was outside request bounds \
+             {tycho_age_before}..={tycho_age_after}: {body}"
+        );
+
+        let computations = &body["data_status"]["computations"];
+        assert_eq!(computations["token_prices"]["block"], 19_000_000);
+        let token_age = computations["token_prices"]["last_update_ms"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("token computation age must be a u64: {body}"));
+        assert!(
+            token_age <= MAX_TEST_COMPUTATION_AGE_MS,
+            "token computation age {token_age}ms was unexpectedly high: {body}"
+        );
+        assert!(body.get("spot_prices").is_none(), "body was: {body}");
+        assert!(body.get("component_depths").is_none(), "body was: {body}");
+        assert!(
+            computations
+                .get("spot_prices")
+                .is_none(),
+            "body was: {body}"
+        );
+        assert!(
+            computations
+                .get("component_depths")
+                .is_none(),
+            "body was: {body}"
+        );
         assert!(body["gas_token"]
             .as_str()
             .unwrap()
@@ -927,6 +1222,7 @@ mod tests {
     #[actix_web::test]
     async fn test_prices_handler_skips_non_serializable_prices() {
         let state = make_test_state();
+        seed_tycho_head(&state).await;
         let mut token_prices = rustc_hash::FxHashMap::default();
         let valid = tycho_simulation::tycho_common::models::Address::from([1u8; 20]);
         token_prices.insert(valid.clone(), Price::new(1u8.into(), 2u8.into()));

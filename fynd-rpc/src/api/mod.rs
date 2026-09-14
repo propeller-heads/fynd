@@ -32,7 +32,7 @@ use actix_web::{web, HttpResponse, ResponseError};
 pub use dto::HealthStatus;
 pub use error::ApiError;
 use fynd_core::{
-    derived::SharedDerivedDataRef, feed::market_data::MarketData,
+    derived::SharedDerivedDataRef, feed::market_data::MarketData, types::BlockInfo,
     worker_pool_router::WorkerPoolRouter,
 };
 use handlers::configure_routes;
@@ -85,6 +85,10 @@ pub struct ApiDoc;
     paths(handlers::get_prices, handlers::get_tokens),
     components(schemas(
         prices::PricesResponse,
+        prices::DataStatus,
+        prices::TychoDataStatus,
+        prices::ComputationDataStatuses,
+        prices::ComputationDataStatus,
         prices::TokenPriceEntry,
         prices::SpotPriceEntry,
         prices::ComponentDepthEntry,
@@ -120,6 +124,25 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     openapi
 }
 
+fn block_age_ms_at_time(timestamp_secs: u64, now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH)
+        .map_or(u64::MAX, |now| {
+            now.as_secs()
+                .saturating_sub(timestamp_secs)
+                .saturating_mul(1000)
+        })
+}
+
+fn tycho_head_status_at(head: BlockInfo, now: SystemTime) -> TychoHeadStatus {
+    let last_update_ms = block_age_ms_at_time(head.timestamp(), now);
+    TychoHeadStatus { head, last_update_ms }
+}
+
+pub(crate) struct TychoHeadStatus {
+    pub(crate) head: BlockInfo,
+    pub(crate) last_update_ms: u64,
+}
+
 /// Simple tracker for service health metrics.
 ///
 /// Reads the last update timestamp from MarketState to determine how fresh the market data is,
@@ -149,21 +172,25 @@ impl HealthTracker {
         self
     }
 
+    /// Returns the current Tycho head and its age from one market-data snapshot.
+    pub(crate) async fn tycho_head_status(&self) -> Option<TychoHeadStatus> {
+        let head = self.tycho_head().await?;
+        Some(tycho_head_status_at(head, SystemTime::now()))
+    }
+
+    async fn tycho_head(&self) -> Option<BlockInfo> {
+        self.market_data
+            .read()
+            .await
+            .last_updated()
+            .cloned()
+    }
+
     /// Returns milliseconds since the last market data update.
     pub async fn age_ms(&self) -> u64 {
-        let data = self.market_data.read().await;
-        match data.last_updated() {
-            Some(block_info) => {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                // Convert block timestamp (seconds) to ms and calculate age
-                now.saturating_sub(block_info.timestamp())
-                    .saturating_mul(1000)
-            }
-            None => u64::MAX, // Never updated
-        }
+        self.tycho_head_status()
+            .await
+            .map_or(u64::MAX, |TychoHeadStatus { head: _, last_update_ms }| last_update_ms)
     }
 
     /// Returns milliseconds since the last gas price update, if available.
@@ -319,8 +346,172 @@ pub(crate) fn configure_app(
         }));
 }
 
+#[cfg(test)]
+mod health_tracker_tests {
+    use std::sync::Arc;
+
+    use fynd_core::types::BlockInfo;
+
+    use super::*;
+
+    fn test_tracker(market_data: MarketData) -> HealthTracker {
+        let derived_data: SharedDerivedDataRef =
+            Arc::new(tokio::sync::RwLock::new(Default::default()));
+        HealthTracker::new(market_data, derived_data)
+    }
+
+    #[test]
+    fn test_block_age_ms_at_time() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_042);
+
+        assert_eq!(block_age_ms_at_time(1_000, now), 42_000);
+        assert_eq!(block_age_ms_at_time(1_043, now), 0);
+    }
+
+    #[test]
+    fn test_block_age_ms_at_time_before_unix_epoch_is_stale() {
+        let before_epoch = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1))
+            .expect("one second before Unix epoch");
+
+        assert_eq!(block_age_ms_at_time(1_000, before_epoch), u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn test_tycho_head_status() {
+        let market_data = MarketData::new_shared();
+        market_data
+            .write()
+            .await
+            .update_last_updated(BlockInfo::new(42, "0xfull-head-hash".into(), 1_700_000_000));
+        let tracker = test_tracker(market_data);
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_042);
+
+        let head = tracker
+            .tycho_head()
+            .await
+            .expect("seeded Tycho head");
+        let status = tycho_head_status_at(head, now);
+
+        assert_eq!(status.head.number(), 42);
+        assert_eq!(status.head.hash(), "0xfull-head-hash");
+        assert_eq!(status.head.timestamp(), 1_700_000_000);
+        assert_eq!(status.last_update_ms, 42_000);
+    }
+
+    #[tokio::test]
+    async fn test_tycho_head_status_missing() {
+        let tracker = test_tracker(MarketData::new_shared());
+
+        assert!(tracker
+            .tycho_head_status()
+            .await
+            .is_none());
+        assert_eq!(tracker.age_ms().await, u64::MAX);
+    }
+}
+
 #[cfg(all(test, feature = "experimental"))]
 mod openapi_tests {
+    #[test]
+    fn test_data_status_schemas() {
+        let spec = serde_json::to_value(super::openapi_spec()).unwrap();
+        let schemas = &spec["components"]["schemas"];
+
+        for schema_name in
+            ["DataStatus", "TychoDataStatus", "ComputationDataStatuses", "ComputationDataStatus"]
+        {
+            assert!(schemas[schema_name].is_object(), "missing {schema_name} schema");
+        }
+
+        let prices_response = &schemas["PricesResponse"];
+        let prices_required = prices_response["required"]
+            .as_array()
+            .expect("PricesResponse must declare required properties");
+        assert!(
+            prices_required
+                .iter()
+                .any(|value| value == "data_status"),
+            "PricesResponse.data_status must be required"
+        );
+        let prices_properties = &prices_response["properties"];
+        assert_eq!(prices_properties["data_status"]["$ref"], "#/components/schemas/DataStatus");
+        assert!(
+            prices_properties
+                .get("blocks")
+                .is_none(),
+            "PricesResponse must not expose the replaced blocks property"
+        );
+        assert!(
+            schemas
+                .get("ComputationBlocks")
+                .is_none(),
+            "replaced ComputationBlocks schema must not remain in the contract"
+        );
+
+        let tycho_head = &schemas["TychoDataStatus"]["properties"]["head"];
+        assert_eq!(tycho_head["$ref"], "#/components/schemas/BlockInfo");
+        assert!(
+            tycho_head["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("Tycho ready synchronizer")),
+            "Tycho head must document its exact selection semantics"
+        );
+        assert!(
+            schemas["BlockInfo"]["description"]
+                .as_str()
+                .is_some_and(|description| {
+                    description.contains("Source-chain block identity") &&
+                        !description.contains("quote")
+                }),
+            "shared BlockInfo documentation must be context-neutral"
+        );
+
+        let required_properties = [
+            ("DataStatus", ["tycho", "computations"].as_slice()),
+            ("TychoDataStatus", ["head", "last_update_ms"].as_slice()),
+            ("ComputationDataStatuses", ["token_prices"].as_slice()),
+            ("ComputationDataStatus", ["block", "last_update_ms"].as_slice()),
+        ];
+        for (schema_name, expected_properties) in required_properties {
+            let required = schemas[schema_name]["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{schema_name} must declare required properties"));
+            for property in expected_properties {
+                assert!(
+                    required
+                        .iter()
+                        .any(|value| value == property),
+                    "{schema_name}.{property} must be required"
+                );
+            }
+        }
+
+        let computation_required = schemas["ComputationDataStatuses"]["required"]
+            .as_array()
+            .expect("ComputationDataStatuses must declare required properties");
+        let computation_properties = &schemas["ComputationDataStatuses"]["properties"];
+        for optional_property in ["spot_prices", "component_depths"] {
+            assert!(
+                !computation_required
+                    .iter()
+                    .any(|value| value == optional_property),
+                "ComputationDataStatuses.{optional_property} must remain optional"
+            );
+            let property = &computation_properties[optional_property];
+            assert_eq!(
+                property["$ref"], "#/components/schemas/ComputationDataStatus",
+                "ComputationDataStatuses.{optional_property} must reference the status schema"
+            );
+            assert!(
+                !property
+                    .to_string()
+                    .contains("\"null\""),
+                "ComputationDataStatuses.{optional_property} must be omitted, not nullable"
+            );
+        }
+    }
+
     #[test]
     fn test_openapi_spec_marks_prices_experimental() {
         let spec = serde_json::to_value(super::openapi_spec()).unwrap();

@@ -8,7 +8,7 @@
 #
 # What it does:
 #   1. Builds the server binary and exports the OpenAPI spec to clients/openapi.json
-#   2. Regenerates clients/typescript/autogen/src/schema.d.ts via openapi-typescript
+#   2. Regenerates clients/typescript/client/src/schema.d.ts via openapi-typescript
 #
 # Requirements:
 #   - Rust toolchain (cargo)
@@ -25,7 +25,7 @@ cargo run --manifest-path "$REPO_ROOT/Cargo.toml" --features fynd-rpc/experiment
 echo "    Written: $OPENAPI_JSON"
 
 echo "==> Regenerating TypeScript schema..."
-npx --yes openapi-typescript "$OPENAPI_JSON" -o "$TS_SCHEMA"
+npx --yes openapi-typescript@7.13.0 "$OPENAPI_JSON" -o "$TS_SCHEMA"
 echo "    Written: $TS_SCHEMA"
 
 echo "Done. Commit both files if they changed."

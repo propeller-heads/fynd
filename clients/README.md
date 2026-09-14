@@ -9,12 +9,12 @@ clients/
   openapi.json              # Committed OpenAPI spec (generated from Rust source)
   rust/                     # Rust client crate
   typescript/
-    autogen/                # Auto-generated TypeScript types + fetch client
+    client/                 # Typed client with generated OpenAPI schema declarations
 ```
 
 ## Regenerating derived artefacts
 
-`clients/openapi.json` and `clients/typescript/autogen/src/schema.d.ts` are both generated files
+`clients/openapi.json` and `clients/typescript/client/src/schema.d.ts` are both generated files
 committed to source control. CI drift checks verify they match the binary output on every PR.
 
 After changing any HTTP handler, request/response type, or route, run:
@@ -31,7 +31,7 @@ in one step. Commit both files afterwards.
 | Step | Command |
 |------|---------|
 | Export OpenAPI spec | `cargo run -- openapi > clients/openapi.json` |
-| Regenerate TS schema | `npx openapi-typescript clients/openapi.json -o clients/typescript/autogen/src/schema.d.ts` |
+| Regenerate TS schema | `npx --yes openapi-typescript@7.13.0 clients/openapi.json -o clients/typescript/client/src/schema.d.ts` |
 
 ## Adding a new client
 

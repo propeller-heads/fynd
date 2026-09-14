@@ -1,9 +1,10 @@
 //! Typed storage for derived data.
 
-use std::{any::Any, str::FromStr, sync::Arc};
+use std::{any::Any, str::FromStr, sync::Arc, time::Instant};
 
 use rustc_hash::FxHashMap;
 use tokio::sync::RwLock;
+use tracing::warn;
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
@@ -23,16 +24,42 @@ struct ComputedValue<T> {
     block: u64,
 }
 
-/// A type-erased computation output paired with the block it was computed for.
+/// Read-only persistence metadata for a stored computation output.
+#[derive(Debug, Clone, Copy)]
+pub struct ComputationStatus {
+    block: u64,
+    updated_at: Instant,
+}
+
+impl ComputationStatus {
+    /// Returns the block for which the stored output was computed.
+    pub fn block(&self) -> u64 {
+        self.block
+    }
+
+    /// Returns the output age in milliseconds at `now`.
+    ///
+    /// Returns zero when `now` precedes the persistence instant and [`u64::MAX`] when the
+    /// elapsed millisecond count cannot fit in a `u64`.
+    pub fn age_ms_at(&self, now: Instant) -> u64 {
+        let elapsed = now.saturating_duration_since(self.updated_at);
+        u64::try_from(elapsed.as_millis()).unwrap_or_else(|_| {
+            warn!("Failed to compute age_ms at {:?}", elapsed);
+            u64::MAX
+        })
+    }
+}
+
+/// A type-erased computation output paired with its persistence metadata.
 struct ComputedSlot {
     data: Box<dyn Any + Send + Sync>,
-    block: u64,
+    status: ComputationStatus,
 }
 
 impl std::fmt::Debug for ComputedSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ComputedSlot")
-            .field("block", &self.block)
+            .field("status", &self.status)
             .finish_non_exhaustive()
     }
 }
@@ -86,8 +113,20 @@ impl DerivedData {
         data: T,
         block: u64,
     ) {
-        self.slots
-            .insert(id, ComputedSlot { data: Box::new(data), block });
+        self.set_output_at(id, data, block, Instant::now());
+    }
+
+    fn set_output_at<T: Any + Send + Sync>(
+        &mut self,
+        id: ComputationId,
+        data: T,
+        block: u64,
+        updated_at: Instant,
+    ) {
+        self.slots.insert(
+            id,
+            ComputedSlot { data: Box::new(data), status: ComputationStatus { block, updated_at } },
+        );
     }
 
     /// Returns the output stored under `id` downcast to `T`, or `None` if absent.
@@ -102,9 +141,14 @@ impl DerivedData {
 
     /// Returns the block at which the output under `id` was last computed.
     pub(crate) fn output_block(&self, id: ComputationId) -> Option<u64> {
+        self.output_status(id)
+            .map(|status| status.block())
+    }
+
+    fn output_status(&self, id: ComputationId) -> Option<ComputationStatus> {
         self.slots
             .get(id)
-            .map(|slot| slot.block)
+            .map(|slot| slot.status)
     }
 
     /// Removes the output stored under `id`.
@@ -146,6 +190,11 @@ impl DerivedData {
     /// Returns the block at which token prices were last computed.
     pub fn token_prices_block(&self) -> Option<u64> {
         self.output_block(TokenGasPriceComputation::ID)
+    }
+
+    /// Returns persistence metadata for token prices, if computed.
+    pub fn token_prices_status(&self) -> Option<ComputationStatus> {
+        self.output_status(TokenGasPriceComputation::ID)
     }
 
     /// Sets token prices, merging failures for incremental runs.
@@ -237,6 +286,11 @@ impl DerivedData {
         self.output_block(ComponentDepthComputation::ID)
     }
 
+    /// Returns persistence metadata for component depths, if computed.
+    pub fn component_depths_status(&self) -> Option<ComputationStatus> {
+        self.output_status(ComponentDepthComputation::ID)
+    }
+
     /// Sets component depths, merging failures for incremental runs.
     ///
     /// For full recomputes, the failure map is replaced entirely. For incremental runs,
@@ -297,6 +351,11 @@ impl DerivedData {
     /// Returns the block at which spot prices were last computed.
     pub fn spot_prices_block(&self) -> Option<u64> {
         self.output_block(SpotPriceComputation::ID)
+    }
+
+    /// Returns persistence metadata for spot prices, if computed.
+    pub fn spot_prices_status(&self) -> Option<ComputationStatus> {
+        self.output_status(SpotPriceComputation::ID)
     }
 
     /// Sets spot prices, merging failures for incremental runs.
@@ -360,6 +419,8 @@ impl DerivedData {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
     use crate::{algorithm::test_utils::addr, derived::types::SpotPrices};
 
@@ -369,6 +430,131 @@ mod tests {
 
     fn pair_key(comp: &str, b_in: u8, b_out: u8) -> SpotPriceKey {
         (comp.to_string(), addr(b_in), addr(b_out))
+    }
+
+    #[test]
+    fn test_token_prices_status_age() {
+        let updated_at = Instant::now();
+        let mut store = DerivedData::new();
+        store.set_output_at(
+            TokenGasPriceComputation::ID,
+            Arc::new(TokenGasPrices::default()),
+            42,
+            updated_at,
+        );
+
+        let status = store.token_prices_status().unwrap();
+        assert_eq!(status.block(), 42);
+        assert_eq!(status.age_ms_at(updated_at + Duration::from_millis(1_234)), 1_234);
+    }
+
+    #[test]
+    fn test_computation_statuses_update_independently() {
+        let started_at = Instant::now();
+        let mut store = DerivedData::new();
+        store.set_output_at(
+            TokenGasPriceComputation::ID,
+            Arc::new(TokenGasPrices::default()),
+            10,
+            started_at,
+        );
+        store.set_output_at(
+            SpotPriceComputation::ID,
+            SpotPrices::default(),
+            11,
+            started_at + Duration::from_millis(10),
+        );
+        store.set_output_at(
+            ComponentDepthComputation::ID,
+            ComponentDepths::default(),
+            12,
+            started_at + Duration::from_millis(20),
+        );
+        store.set_output_at(
+            TokenGasPriceComputation::ID,
+            Arc::new(TokenGasPrices::default()),
+            20,
+            started_at + Duration::from_millis(30),
+        );
+        let compared_at = started_at + Duration::from_millis(50);
+
+        let token_prices = store.token_prices_status().unwrap();
+        assert_eq!(token_prices.block(), 20);
+        assert_eq!(token_prices.age_ms_at(compared_at), 20);
+        let spot_prices = store.spot_prices_status().unwrap();
+        assert_eq!(spot_prices.block(), 11);
+        assert_eq!(spot_prices.age_ms_at(compared_at), 40);
+        let component_depths = store.component_depths_status().unwrap();
+        assert_eq!(component_depths.block(), 12);
+        assert_eq!(component_depths.age_ms_at(compared_at), 30);
+    }
+
+    #[test]
+    fn test_clear_token_prices_status() {
+        let updated_at = Instant::now();
+        let mut store = DerivedData::new();
+        store.set_output_at(
+            TokenGasPriceComputation::ID,
+            Arc::new(TokenGasPrices::default()),
+            10,
+            updated_at,
+        );
+        store.set_output_at(SpotPriceComputation::ID, SpotPrices::default(), 11, updated_at);
+
+        store.clear_token_prices();
+
+        assert!(store.token_prices_status().is_none());
+        assert!(store.spot_prices_status().is_some());
+    }
+
+    #[test]
+    fn test_clear_all_computation_statuses() {
+        let updated_at = Instant::now();
+        let mut store = DerivedData::new();
+        store.set_output_at(
+            TokenGasPriceComputation::ID,
+            Arc::new(TokenGasPrices::default()),
+            10,
+            updated_at,
+        );
+        store.set_output_at(SpotPriceComputation::ID, SpotPrices::default(), 11, updated_at);
+        store.set_output_at(
+            ComponentDepthComputation::ID,
+            ComponentDepths::default(),
+            12,
+            updated_at,
+        );
+
+        store.clear_all();
+
+        assert!(store.token_prices_status().is_none());
+        assert!(store.spot_prices_status().is_none());
+        assert!(store
+            .component_depths_status()
+            .is_none());
+    }
+
+    #[test]
+    fn test_computation_status_earlier_comparison() {
+        let updated_at = Instant::now();
+        let mut store = DerivedData::new();
+        store.set_output_at(
+            TokenGasPriceComputation::ID,
+            Arc::new(TokenGasPrices::default()),
+            10,
+            updated_at,
+        );
+        let compared_at = updated_at
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .token_prices_status()
+                .unwrap()
+                .age_ms_at(compared_at),
+            0
+        );
     }
 
     #[test]

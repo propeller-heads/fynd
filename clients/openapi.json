@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.102.3"
+    "version": "0.104.0"
   },
   "paths": {
     "/v1/health": {
@@ -277,7 +277,7 @@
     "schemas": {
       "BlockInfo": {
         "type": "object",
-        "description": "Block information at which a quote was computed.\n\nQuotes are only valid for the block at which they were computed. Market\nconditions may change in subsequent blocks.",
+        "description": "Source-chain block identity.",
         "required": [
           "number",
           "hash",
@@ -377,36 +377,64 @@
           }
         }
       },
-      "ComputationBlocks": {
+      "ComputationDataStatus": {
         "type": "object",
-        "description": "Block numbers at which each computation was last run.",
+        "description": "Freshness metadata for the latest persisted aggregate computation output.\n\nIncremental computations can retain entries or failures produced by earlier runs, so this\nstatus does not guarantee that every item in the aggregate was recomputed at this block.",
+        "required": [
+          "block",
+          "last_update_ms"
+        ],
+        "properties": {
+          "block": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Market block associated with the latest aggregate persistence.",
+            "minimum": 0
+          },
+          "last_update_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Elapsed monotonic time in milliseconds since Fynd persisted the latest aggregate output.\nThis is distinct from the source-chain head age and from per-item freshness.",
+            "minimum": 0
+          }
+        }
+      },
+      "ComputationDataStatuses": {
+        "type": "object",
+        "description": "Freshness metadata for the computations exposed by GET /v1/prices.",
         "required": [
           "token_prices"
         ],
         "properties": {
           "component_depths": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Block at which component depths were computed. `None` if not yet available.",
-            "minimum": 0
+            "$ref": "#/components/schemas/ComputationDataStatus",
+            "description": "Freshness metadata for component depths, omitted until that computation has persisted\noutput."
           },
           "spot_prices": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Block at which spot prices were computed. `None` if not yet available.",
-            "minimum": 0
+            "$ref": "#/components/schemas/ComputationDataStatus",
+            "description": "Freshness metadata for spot prices, omitted until that computation has persisted output."
           },
           "token_prices": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Block at which the token prices were computed.",
-            "minimum": 0
+            "$ref": "#/components/schemas/ComputationDataStatus",
+            "description": "Freshness metadata for token gas prices."
+          }
+        }
+      },
+      "DataStatus": {
+        "type": "object",
+        "description": "Source and computation freshness metadata for GET /v1/prices.",
+        "required": [
+          "tycho",
+          "computations"
+        ],
+        "properties": {
+          "computations": {
+            "$ref": "#/components/schemas/ComputationDataStatuses",
+            "description": "Freshness metadata for persisted computation outputs."
+          },
+          "tycho": {
+            "$ref": "#/components/schemas/TychoDataStatus",
+            "description": "Freshness metadata for Tycho's source-chain head."
           }
         }
       },
@@ -958,13 +986,9 @@
         "required": [
           "prices",
           "gas_token",
-          "blocks"
+          "data_status"
         ],
         "properties": {
-          "blocks": {
-            "$ref": "#/components/schemas/ComputationBlocks",
-            "description": "Block numbers at which each computation was last run."
-          },
           "component_depths": {
             "type": [
               "array",
@@ -974,6 +998,10 @@
               "$ref": "#/components/schemas/ComponentDepthEntry"
             },
             "description": "Component depths per component direction (only if requested via `include=depths`)."
+          },
+          "data_status": {
+            "$ref": "#/components/schemas/DataStatus",
+            "description": "Source and computation freshness metadata for the returned data."
           },
           "gas_token": {
             "type": "string",
@@ -1391,6 +1419,26 @@
             "type": "string",
             "description": "Native token value to send with the transaction (as decimal string).",
             "example": "0"
+          }
+        }
+      },
+      "TychoDataStatus": {
+        "type": "object",
+        "description": "Freshness metadata for Tycho's source-chain head.",
+        "required": [
+          "head",
+          "last_update_ms"
+        ],
+        "properties": {
+          "head": {
+            "$ref": "#/components/schemas/BlockInfo",
+            "description": "Latest block Fynd accepted from the Tycho ready synchronizer selected by its feed.\nThis identifies Fynd's current Tycho-derived market snapshot; it is not an independent\nquery of the canonical chain head."
+          },
+          "last_update_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Age of the source-chain head in milliseconds, with the same semantics as\n`/v1/health.last_update_ms`.",
+            "minimum": 0
           }
         }
       },
