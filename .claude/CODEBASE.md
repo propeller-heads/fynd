@@ -84,9 +84,10 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 2. `WorkerPoolRouter` allocates the worker pools serving each order (an exclusive-access pool only for a request granted access via the `x-exclusive-access` header) and fans out to them in parallel
 3. Each pool's `TaskQueue` dispatches to a `SolverWorker` on a dedicated OS thread
 4. Worker resolves request exclusions with `MarketState::resolve_route_filter`, then calls `Algorithm::find_best_route` with a `SolveRequest` carrying its local graph, shared market/derived data, and resolved pools/tokens. It rejects returned routes that violate the request filter, including excluded pAMM fallback pools
-5. `WorkerPoolRouter` collects results, ranks candidates by `amount_out_net_gas` descending; if price guard is enabled it validates in rank order
-6. If `EncodingOptions` provided, `Encoder` produces ABI-encoded calldata
-7. Returns `Quote` response
+5. `WorkerPoolRouter` collects results; when an `rfq:` protocol is streamed, `RfqOverlay` replaces hops of each candidate with RFQ legs that pay more (`fynd-core/src/rfq_overlay/`). RFQ components are in no worker's graph
+6. `WorkerPoolRouter` ranks candidates by `amount_out_net_gas` descending; if price guard is enabled it validates in rank order
+7. If `EncodingOptions` provided, `Encoder` produces ABI-encoded calldata
+8. Returns `Quote` response
 
 ### Threading Model
 

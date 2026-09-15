@@ -40,6 +40,7 @@ pub mod price_guard;
 pub mod propamm_fallback;
 /// Re-execute an already-built route against a (possibly newer) market state.
 pub mod replay;
+pub mod rfq_overlay;
 /// `eth_call` plumbing shared by the tasks that read contract state.
 mod rpc;
 /// On-chain quote simulation and state override helpers.

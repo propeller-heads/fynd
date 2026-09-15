@@ -57,6 +57,7 @@ fynd serve \
 **Limitations:**
 
 * RFQ protocols cannot run alone. At least one on-chain protocol is required.
+* RFQ quotes do not take part in route finding. Routes are solved over on-chain liquidity; afterwards each hop of a candidate route is compared with the RFQ quotes for that token pair, and an RFQ leg replaces the hop when the route then pays more after gas.
 * When encoding is enabled (`encoding_options` in the quote request), RFQ quotes require an additional round-trip to the RFQ provider to fetch a signed quote. This can add significant tail latency to solve times. If you are using RFQ protocols, consider quoting first without encoding to evaluate the price, and only request encoding once you are confident the quote is worth executing.
 
 **Environment variables:**

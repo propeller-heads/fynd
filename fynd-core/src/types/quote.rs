@@ -2098,6 +2098,13 @@ impl Swap {
     ///
     /// The router stamps this onto the single exclusive leg of a surplus route so the encoding
     /// layer can build the leg's exclusive-swap payload. See [`Swap::committed_amount_out`].
+    /// Overwrites the amounts this swap moves and the gas it costs, after a re-price.
+    pub(crate) fn set_amounts(&mut self, amount_in: BigUint, amount_out: BigUint, gas: BigUint) {
+        self.amount_in = amount_in;
+        self.amount_out = amount_out;
+        self.gas_estimate = gas;
+    }
+
     pub(crate) fn set_committed_amount_out(&mut self, committed_amount_out: BigUint) {
         self.committed_amount_out = Some(committed_amount_out);
     }

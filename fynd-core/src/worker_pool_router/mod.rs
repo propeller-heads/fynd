@@ -51,9 +51,10 @@ use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
     encoding::encoder::Encoder, feed::exclusivity::is_exclusive, price_guard::guard::PriceGuard,
-    simulation::simulator::QuoteSimulator, worker_pool::task_queue::TaskQueueHandle, BlockInfo,
-    EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus,
-    SolveError, SolveParams, SurplusInfo, Swap,
+    rfq_overlay::RfqOverlay, simulation::simulator::QuoteSimulator,
+    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote,
+    OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
+    SurplusInfo, Swap,
 };
 
 /// Reported when a request asks for simulation on a server started without `--enable-simulation`.
@@ -254,6 +255,9 @@ pub struct WorkerPoolRouter {
     price_guard: Option<PriceGuard>,
     /// Simulates encoded quotes when a request explicitly asks for it.
     simulator: Option<QuoteSimulator>,
+    /// Replaces hops of the solved routes with RFQ legs that pay more. Present when the
+    /// deployment streams an RFQ protocol; `None` otherwise.
+    rfq_overlay: Option<RfqOverlay>,
 }
 
 /// Ranked, unencoded candidates for every order of a request — the output of
@@ -376,7 +380,14 @@ impl WorkerPoolRouter {
         config: WorkerPoolRouterConfig,
         encoder: Encoder,
     ) -> Self {
-        Self { solver_pools, config, encoder, price_guard: None, simulator: None }
+        Self {
+            solver_pools,
+            config,
+            encoder,
+            price_guard: None,
+            simulator: None,
+            rfq_overlay: None,
+        }
     }
 
     /// Makes price guard validation available for this router.
@@ -394,6 +405,12 @@ impl WorkerPoolRouter {
         self
     }
 
+    /// Runs the RFQ overlay on every candidate of every solve, before ranking.
+    pub fn with_rfq_overlay(mut self, rfq_overlay: RfqOverlay) -> Self {
+        self.rfq_overlay = Some(rfq_overlay);
+        self
+    }
+
     /// Returns the number of registered solver pools.
     pub fn num_pools(&self) -> usize {
         self.solver_pools.len()
@@ -402,12 +419,12 @@ impl WorkerPoolRouter {
     /// Fans the request out to its worker pools and returns every order's ranked candidates.
     ///
     /// Performs everything [`Self::quote`] does except encoding and final assembly: allocation,
-    /// fan-out, gas refinement, pAMM floor check, ranking, exclusive-surplus overlay, comparison
-    /// logging and price-guard validation. Callers that need more than the single best route per
-    /// order — or want to encode with a different [`Encoder`] — build on this and finish with
-    /// [`encode_quotes`] and [`finalize_quote`]. With the price guard enabled, every order's list
-    /// in the returned [`RankedQuotes`] holds exactly one candidate — the guard has already picked
-    /// the winner.
+    /// fan-out, RFQ overlay, gas refinement, pAMM floor check, ranking, exclusive-surplus overlay,
+    /// comparison logging and price-guard validation. Callers that need more than the single
+    /// best route per order — or want to encode with a different [`Encoder`] — build on this
+    /// and finish with [`encode_quotes`] and [`finalize_quote`]. With the price guard enabled,
+    /// every order's list in the returned [`RankedQuotes`] holds exactly one candidate — the
+    /// guard has already picked the winner.
     pub async fn solve(
         &self,
         request: &QuoteRequest,
@@ -472,6 +489,16 @@ impl WorkerPoolRouter {
             .collect();
 
         let mut order_responses = futures::future::join_all(order_futures).await;
+
+        // Every candidate, not only the eventual winner: a candidate that beats the rest only
+        // with an RFQ leg must still win the ranking below.
+        if let Some(rfq_overlay) = &self.rfq_overlay {
+            for responses in &mut order_responses {
+                for WorkerPoolQuote { quote, .. } in &mut responses.quotes {
+                    rfq_overlay.improve(quote).await;
+                }
+            }
+        }
 
         // Refine gas estimates for all candidates using estimate_gas_usage before ranking,
         // so ranking uses accurate gas costs rather than naive route.total_gas().
