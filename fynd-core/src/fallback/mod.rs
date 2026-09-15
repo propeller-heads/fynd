@@ -14,6 +14,7 @@
 //! fallbacks so `WorkerPoolRouter` can drop such a route candidate before ranking.
 
 pub(crate) mod manager;
+pub(crate) mod user_data;
 
 use num_bigint::BigUint;
 use rustc_hash::FxHashMap;
@@ -189,7 +190,8 @@ fn substitute_fallbacks(route: &Route) -> Vec<Swap> {
 /// # Errors
 ///
 /// `NoFallbackPool` when the market holds no candidate pool for the pair; `AllPoolsExcluded` when
-/// the request rules out every one; `SimulationFailed` when none of the rest could be priced.
+/// the request rules out every one; `SimulationFailed` when none of the rest could be priced, which
+/// includes a pool whose component carries too little to encode.
 fn select_fallback(
     swap: &Swap,
     market: &MarketDataView<'_>,
@@ -232,6 +234,11 @@ fn select_fallback(
             last_failure = Some(format!("{candidate} left the market before it could be priced"));
             continue;
         };
+        // A pool the router cannot be told how to run is no use however well it prices.
+        if let Err(error) = user_data::check_encodable(component, swap.token_in()) {
+            last_failure = Some(error.to_string());
+            continue;
+        }
         match state.get_amount_out_guarded(swap.amount_in().clone(), token_in, token_out) {
             Ok(simulated) => {
                 if best
@@ -315,6 +322,15 @@ pub enum FallbackError {
         /// What stopped the replay.
         reason: String,
     },
+    /// A pool's component does not carry what `TychoFallbackRouter` needs to run it. Selection
+    /// skips such a pool, so this only escapes when every candidate for a leg is unencodable.
+    #[error("fallback pool {component_id} cannot be encoded: {reason}")]
+    MissingPoolData {
+        /// The candidate pool that cannot be encoded.
+        component_id: ComponentId,
+        /// What it is missing.
+        reason: String,
+    },
 }
 
 impl FallbackError {
@@ -324,9 +340,9 @@ impl FallbackError {
         match self {
             Self::NoFallbackPool { .. } => RouteRejection::FallbackPoolMissing,
             Self::AllPoolsExcluded { .. } => RouteRejection::FallbackExcluded,
-            Self::SimulationFailed { .. } | Self::ReplayFailed { .. } => {
-                RouteRejection::FallbackUnpriceable
-            }
+            Self::SimulationFailed { .. } |
+            Self::ReplayFailed { .. } |
+            Self::MissingPoolData { .. } => RouteRejection::FallbackUnpriceable,
         }
     }
 }
