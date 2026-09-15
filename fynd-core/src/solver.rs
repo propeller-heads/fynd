@@ -40,6 +40,7 @@ use crate::{
         gas::GasPriceFetcher,
         market_data::MarketData,
         metrics_sampler::MetricsSampler,
+        protocol_registry::has_rfq_protocols,
         tycho_feed::TychoFeed,
         TychoFeedConfig,
     },
@@ -50,6 +51,7 @@ use crate::{
     propamm_fallback::{
         fee_tier_fetcher::FeeTierFetcher, SharedFeeTiers, PROPAMM_ROUTER_ADDRESS, PROPAMM_VENUES,
     },
+    rfq_overlay::RfqOverlay,
     simulation::simulator::QuoteSimulator,
     types::constants::native_token,
     worker_pool::{
@@ -847,6 +849,8 @@ impl FyndBuilder {
         }
 
         let market_data = MarketData::new_shared();
+        // Decided here because the protocol list moves into the feed config next.
+        let rfq_streamed = has_rfq_protocols(&self.protocols);
 
         let tycho_feed_config = TychoFeedConfig::new(
             self.tycho_url,
@@ -1053,6 +1057,10 @@ impl FyndBuilder {
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
         if let Some(simulator) = quote_simulator {
             router = router.with_simulator(simulator);
+        }
+        if rfq_streamed {
+            router = router
+                .with_rfq_overlay(RfqOverlay::start(market_data.clone(), tycho_feed.subscribe()));
         }
 
         if self.price_guard_enabled {

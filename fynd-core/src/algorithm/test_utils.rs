@@ -11,6 +11,7 @@ use tycho_simulation::{
         models::{protocol::ProtocolComponent, token::Token, Address, Chain},
         simulation::{
             errors::{SimulationError, TransitionError},
+            indicatively_priced::IndicativelyPriced,
             protocol_sim::{
                 Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
                 SwapConstraint,
@@ -249,6 +250,94 @@ impl ProtocolSim for MockProtocolSim {
             .unwrap_or(false)
     }
 }
+
+// ==================== MockRfqSim ====================
+
+/// A [`MockProtocolSim`] that also implements `IndicativelyPriced`, so the crate classifies it as
+/// an RFQ component. Its state does not move with a swap, like a maker's price levels.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct MockRfqSim {
+    inner: MockProtocolSim,
+}
+
+impl MockRfqSim {
+    /// An RFQ mock quoting at `spot_price`, with the mock's default gas.
+    pub fn new(spot_price: f64) -> Self {
+        Self { inner: MockProtocolSim::new(spot_price) }
+    }
+
+    /// Sets the gas each swap reports.
+    pub fn with_gas(mut self, gas: u64) -> Self {
+        self.inner = self.inner.with_gas(gas);
+        self
+    }
+}
+
+#[typetag::serde]
+impl ProtocolSim for MockRfqSim {
+    fn fee(&self) -> f64 {
+        self.inner.fee()
+    }
+
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        self.inner.spot_price(base, quote)
+    }
+
+    fn get_amount_out(
+        &self,
+        amount_in: BigUint,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Result<GetAmountOutResult, SimulationError> {
+        let result = self
+            .inner
+            .get_amount_out(amount_in, token_in, token_out)?;
+        Ok(GetAmountOutResult::new(result.amount, result.gas, Box::new(self.clone())))
+    }
+
+    fn get_limits(
+        &self,
+        sell_token: Bytes,
+        buy_token: Bytes,
+    ) -> Result<(BigUint, BigUint), SimulationError> {
+        self.inner
+            .get_limits(sell_token, buy_token)
+    }
+
+    fn delta_transition(
+        &mut self,
+        _delta: ProtocolStateDelta,
+        _tokens: &std::collections::HashMap<Bytes, Token>,
+        _balances: &Balances,
+    ) -> Result<(), TransitionError> {
+        unimplemented!("delta_transition not implemented in MockRfqSim")
+    }
+
+    fn clone_box(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn eq(&self, other: &dyn ProtocolSim) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|o| self.inner.eq(&o.inner))
+    }
+
+    fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
+        Ok(self)
+    }
+}
+
+impl IndicativelyPriced for MockRfqSim {}
 
 // ==================== DivByZeroSim ====================
 

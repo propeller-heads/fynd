@@ -37,6 +37,7 @@ use crate::{
         FallbackPoolIndex, FeeTiers, SharedFeeTiers, FALLBACK_PROTOCOL_SYSTEM,
         PROPAMM_FALLBACK_PREFIX,
     },
+    rfq_overlay::is_rfq_component,
     types::{
         internal::{RouteRejection, SolveTask},
         ComponentId, Route, RouteExclusionFilter, RouteExclusions,
@@ -47,7 +48,9 @@ use crate::{
 
 /// Whether a worker with this scope and exclusion list must keep `component` out of its graph: an
 /// exclusive component in a `PublicOnly` worker pool, or a component of an excluded protocol
-/// system.
+/// system. The callers add a third rule that needs the market, not the component alone: every
+/// worker drops RFQ components (`rfq_overlay::is_rfq_component`), which the router puts back
+/// after the solve.
 ///
 /// Holds for the life of the worker, which is what lets it filter state updates and removals as
 /// well as additions. The pAMM rule in [`PammManager`] does not, and is applied beside this one.
@@ -358,7 +361,8 @@ where
             let topology = market.component_topology();
             let Self { pamm_admission, liquidity_scope, exclude_protocols, .. } = self;
             let caller_drops = |component: &ProtocolComponent| {
-                should_drop_component(*liquidity_scope, exclude_protocols, component)
+                should_drop_component(*liquidity_scope, exclude_protocols, component) ||
+                    is_rfq_component(market.base_market_state(), component)
             };
             let withheld_pamms =
                 pamm_admission.withhold_from_graph(&market, &topology, &caller_drops);
@@ -396,7 +400,8 @@ where
             let market = market_data.read().await;
             let Self { pamm_admission, liquidity_scope, exclude_protocols, .. } = self;
             let caller_drops = |component: &ProtocolComponent| {
-                should_drop_component(*liquidity_scope, exclude_protocols, component)
+                should_drop_component(*liquidity_scope, exclude_protocols, component) ||
+                    is_rfq_component(market.base_market_state(), component)
             };
             let mut event = event;
             pamm_admission.apply_pamm_admission(
@@ -981,8 +986,8 @@ mod tests {
         algorithm::{
             most_liquid::DepthAndPrice,
             test_utils::{
-                component, component_with_protocol, order, setup_market_weighted, token,
-                MockProtocolSim,
+                component, component_with_protocol, order, setup_market_weighted,
+                setup_market_weighted_boxed, token, MockProtocolSim, MockRfqSim,
             },
         },
         derived::{
@@ -1785,6 +1790,60 @@ mod tests {
 
         assert!(should_drop_component(worker.liquidity_scope, &worker.exclude_protocols, &pamm));
         assert!(!should_drop_component(worker.liquidity_scope, &worker.exclude_protocols, &public));
+    }
+
+    /// An RFQ component is the router's to add after the solve, so no worker's graph holds one.
+    #[tokio::test]
+    async fn test_initialize_graph_with_rfq_component() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted_boxed(vec![
+            ("uni", &token_a, &token_b, Box::new(MockProtocolSim::new(2.0))),
+            ("rfq", &token_a, &token_b, Box::new(MockRfqSim::new(2.0))),
+        ]);
+        let (market_without_rfq, _) = setup_market_weighted_boxed(vec![(
+            "uni",
+            &token_a,
+            &token_b,
+            Box::new(MockProtocolSim::new(2.0)),
+        )]);
+        let mut worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            MockAlgorithm::new(),
+            0,
+            "test_pool".to_string(),
+        );
+        let mut worker_without_rfq = SolverWorker::new(
+            market_without_rfq,
+            DerivedData::new_shared(),
+            MockAlgorithm::new(),
+            0,
+            "test_pool".to_string(),
+        );
+
+        worker.initialize_graph().await;
+        worker_without_rfq
+            .initialize_graph()
+            .await;
+
+        assert_eq!(
+            worker
+                .graph_manager
+                .graph()
+                .edge_count(),
+            worker_without_rfq
+                .graph_manager
+                .graph()
+                .edge_count()
+        );
+        assert!(
+            worker
+                .graph_manager
+                .graph()
+                .edge_count() >
+                0
+        );
     }
 
     /// The pAMM every admission test decides.
