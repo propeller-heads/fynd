@@ -8,6 +8,8 @@ Fix the output rate of a token pair for your users. Fynd routes the swap at mark
 
 Stable Swap Rate is built from two primitives you may already use: the [client fee](client-fees.md) and the [client contribution](client-fees.md#maxclientcontribution).
 
+Stable Swap Rate runs as a separate Fynd server that we host for you, with its own base URL. It accepts the same requests as the standard Fynd API and returns the same responses, plus an API extension with Stable Swap Rate fields.
+
 {% hint style="warning" %}
 **Beta.** Stable Swap Rate is available to selected integrators. To get access, contact us on [Telegram](https://t.me/+B4CNQwv7dgIyYTJl).
 {% endhint %}
@@ -16,22 +18,19 @@ Stable Swap Rate is built from two primitives you may already use: the [client f
 
 1. You declare the rate your user sees, for example 1 USDC = 1 USDT.
 2. Fynd finds the best market route, as for any quote.
-3. When the market is better than your rate, the difference is collected as a client fee into your vault.
-4. When the market is worse, your vault tops the output up to the declared amount via client contributions.
+3. When the market quote is above your declared output, the surplus goes to your vault as a client fee.
+4. When the market quote is below your declared output, your vault tops the output up to the declared amount as a client contribution.
 5. The router settles atomically and your user receives the declared amount.
 
-```text
-user --approve + swap--> TychoRouter --> pools
-                            |
-                     client vault
-                  fee / contribution
-```
+<figure><picture><source srcset="../.gitbook/assets/stable-swap-rate-flow-darkmode.png" media="(prefers-color-scheme: dark)"><img src="../.gitbook/assets/stable-swap-rate-flow-lightmode.png" alt="Stable Swap Rate flow: TychoRouter routes the swap through pools, moves a surplus to your vault as a client fee or takes a shortfall from it as a client contribution, and sends the declared output to the user"></picture><figcaption></figcaption></figure>
 
-Fynd encodes the declared rate into the same `ClientFee` payload that [client fees](client-fees.md) use. The fee moves surplus into your vault, and `maxClientContribution` caps how much the router may take from your vault to cover a shortfall. No new contract sits between your user and the router.
+Fynd encodes the declared rate into the same `ClientFee` payload that [client fees](client-fees.md) use. The fee moves surplus into your vault, and `maxClientContribution` caps how much the router may take from your vault to cover a shortfall. No new contract sits between your user and the router. The vault only settles the difference between your declared rate and the onchain rate, so a declared rate that tracks the market needs only a small float.
 
-Your vault never funds the swap itself. The pools do. The vault only settles the difference between your declared rate and the onchain rate, so a declared rate that tracks the market needs only a small float.
+The formula uses three inputs:
 
-Given the market quote `Q`, the declared output `D`, and your depeg tolerance in basis points:
+- **Market quote (`Q`)**: what the best onchain route returns for the input amount right now. It moves with the market.
+- **Declared output (`D`)**: what you promise your user, at the rate you set. For 1,000,000 USDC at 1 USDC = 1 USDT, `D` is 1,000,000 USDT, whatever the market does.
+- **Depeg tolerance**: the largest gap, in basis points of `D`, that your vault covers when the market is below your rate.
 
 ```
 1. expected_amount_out     = max(Q, D)
@@ -67,9 +66,9 @@ user receives           = 1,000,000
 
 ## Quote response
 
-The Stable Swap Rate endpoint is Fynd-compatible. Send the same `POST /v1/{chain}/quote` request with encoding enabled, and read the same `OrderQuote` back. The `fee_breakdown` and the encoded `transaction` are the standard ones, so an existing Fynd client only needs a different base URL. Encoding is required because the fixed rate lives in the transaction's `ClientFee` payload. See [encoding options](encoding-options.md).
+Your Stable Swap Rate server accepts the same `POST /v1/{chain}/quote` request as Fynd. Enable encoding, and you get the same `OrderQuote` back. The `fee_breakdown` and the encoded `transaction` are the standard ones, so an existing Fynd client only needs a different base URL. Encoding is required because the fixed rate lives in the transaction's `ClientFee` payload. See [encoding options](encoding-options.md).
 
-Each quote carries an additional `x_stable_rate` object. Use it to show your user the declared rate next to the market, and to monitor how far the market drifts from your rate and how much your vault subsidizes.
+Each quote also carries the Stable Swap Rate API extension. Use it to show your user the declared rate next to the market, and to monitor how far the market drifts from your rate and how much your vault subsidizes.
 
 | Field                        | Type      | Description                                                          |
 | ---------------------------- | --------- | -------------------------------------------------------------------- |
