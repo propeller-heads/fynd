@@ -174,7 +174,9 @@ function toWireClientFeeParams(p: ClientFeeParams): WireClientFeeParams {
         receiver: p.receiver,
         max_contribution: p.maxContribution.toString(),
         deadline: p.deadline,
-        signature: p.signature ?? '',
+        // The wire field is required. Empty bytes tell the server to encode a placeholder that
+        // the client patches after signing.
+        signature: '0x',
     };
 }
 
@@ -201,6 +203,7 @@ function fromWireFeeBreakdown(wire: WireFeeBreakdown): FeeBreakdown {
         clientFee: BigInt(wire.client_fee),
         maxSlippage: BigInt(wire.max_slippage),
         minAmountReceived: BigInt(wire.min_amount_received),
+        ...(wire.swaps_hash != null ? {swapsHash: wire.swaps_hash as Hex} : {}),
     };
 }
 
@@ -216,6 +219,9 @@ function fromWireTransaction(wire: WireTransaction): Transaction {
         to: wire.to as Address,
         value: BigInt(wire.value),
         data: wire.data as Hex,
+        ...(wire.client_fee_signature_offset != null
+            ? {clientFeeSignatureOffset: wire.client_fee_signature_offset}
+            : {}),
     };
 }
 

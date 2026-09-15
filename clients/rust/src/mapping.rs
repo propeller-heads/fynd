@@ -165,11 +165,9 @@ impl TryFrom<EncodingOptions> for dto::EncodingOptions {
                 dto::Bytes::from(fee.receiver.as_ref()),
                 fee.max_contribution,
                 fee.deadline,
-                dto::Bytes::from(
-                    fee.signature
-                        .unwrap_or_default()
-                        .as_ref(),
-                ),
+                // The wire field is required. Empty bytes tell the server to encode a
+                // placeholder that the client patches after signing.
+                dto::Bytes::default(),
             ));
         }
         if let Some(pg) = opts.price_guard {
@@ -805,8 +803,7 @@ mod tests {
             Bytes::copy_from_slice(&[0x44; 20]),
             BigUint::from(500_000u64),
             1_893_456_000u64,
-        )
-        .with_signature(Bytes::copy_from_slice(&[0xAB; 65]));
+        );
         let opts = EncodingOptions::new(0.01).with_client_fee(fee);
 
         let dto_opts = dto::EncodingOptions::try_from(opts).unwrap();
@@ -815,7 +812,8 @@ mod tests {
         assert_eq!(dto_fee.bps(), 100);
         assert_eq!(*dto_fee.max_contribution(), BigUint::from(500_000u64));
         assert_eq!(dto_fee.deadline(), 1_893_456_000u64);
-        assert_eq!(dto_fee.signature().len(), 65);
+        // Unsigned on the wire — the server encodes a placeholder for the client to patch.
+        assert!(dto_fee.signature().is_empty());
     }
 
     #[test]

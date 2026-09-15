@@ -1,6 +1,15 @@
-import { concatHex, encodeAbiParameters, keccak256, stringToHex } from 'viem';
+import {
+  bytesToHex,
+  concatHex,
+  encodeAbiParameters,
+  hexToBytes,
+  isHex,
+  keccak256,
+  stringToHex,
+} from 'viem';
 import { FyndError } from './error.js';
-import type { Address, ClientFeeParams, EncodingOptions, Hex } from './types.js';
+import { assertSignatureLength, SIGNATURE_BYTES } from './signing.js';
+import type { Address, ClientFeeParams, EncodingOptions, Hex, Quote } from './types.js';
 
 /**
  * Fee units per basis point in the router's `ClientFeeParams.clientFeeBps`.
@@ -27,6 +36,12 @@ const EIP712_DOMAIN_TYPEHASH = keccak256(
   )
 );
 
+/** Must match the EIP-712 domain `name` in `TychoRouter.sol`. */
+const EIP712_DOMAIN_NAME_HASH = keccak256(stringToHex('TychoRouter'));
+
+/** Must match the EIP-712 domain `version` in `TychoRouter.sol`. */
+const EIP712_DOMAIN_VERSION_HASH = keccak256(stringToHex('1'));
+
 /** Swap-specific inputs the router binds the client fee signature to. */
 export interface ClientFeeSwapContext {
   /** Exact input amount from the order. */
@@ -48,11 +63,11 @@ export interface ClientFeeSwapContext {
 /**
  * Computes the EIP-712 signing hash for client fee params.
  *
- * Pass the returned hash to the fee receiver's signer, then set the
- * 65-byte signature on the `ClientFeeParams` before passing to `withClientFee`.
+ * Pass the returned hash to the fee receiver's signer, then patch the 65-byte signature into
+ * the quote's calldata with `patchClientFeeSignature`.
  *
  * The hash covers all 11 `ClientFee` fields: the fee params plus the swap they are bound to,
- * which come from a prior unsigned quote request.
+ * which come from the quote requested with unsigned params.
  *
  * `routerAddress` is the TychoRouter contract address.
  */
@@ -73,8 +88,8 @@ export function clientFeeSigningHash(
       ],
       [
         EIP712_DOMAIN_TYPEHASH,
-        keccak256(stringToHex('TychoRouter')),
-        keccak256(stringToHex('1')),
+        EIP712_DOMAIN_NAME_HASH,
+        EIP712_DOMAIN_VERSION_HASH,
         BigInt(chainId),
         routerAddress,
       ]
@@ -119,19 +134,76 @@ export function clientFeeSigningHash(
 
 /**
  * Attach client fee configuration to encoding options.
- * Validates that signature is present and exactly 65 bytes (130 hex chars + '0x' prefix).
+ *
+ * Sign after quoting — see `patchClientFeeSignature`.
  */
 export function withClientFee(
   opts: EncodingOptions,
   params: ClientFeeParams,
 ): EncodingOptions {
-  if (params.signature === undefined) {
-    throw FyndError.config('Client fee signature is required');
-  }
-  if (params.signature.length !== 132) {
+  return { ...opts, clientFeeParams: params };
+}
+
+/**
+ * Overwrite the client fee signature placeholder in a quote's calldata.
+ *
+ * The server encodes the transaction with a zeroed 65-byte placeholder and reports its byte
+ * offset as `transaction.clientFeeSignatureOffset`, so one quote request is enough: sign the
+ * hash from `clientFeeSigningHash`, patch it in here, and submit the transaction. The Rust
+ * client calls this same step `Quote::with_client_fee_signature`.
+ *
+ * Returns a new quote and leaves the input untouched.
+ *
+ * Throws when:
+ * - the quote carries no encoded transaction — set `encodingOptions` on the request;
+ * - the quote carries no signature offset — set `clientFeeParams` on the request too;
+ * - `signature` is not 65 bytes;
+ * - the signature or the calldata is not valid hex;
+ * - the offset does not fit the calldata;
+ * - the bytes at the offset are not the zeroed placeholder.
+ */
+export function patchClientFeeSignature(quote: Quote, signature: Hex): Quote {
+  const tx = quote.transaction;
+  if (tx === undefined) {
     throw FyndError.config(
-      `Client fee signature must be exactly 65 bytes (132 hex chars), got ${String(params.signature.length)} chars`
+      'Quote has no transaction to patch — set encodingOptions on the quote request'
     );
   }
-  return { ...opts, clientFeeParams: params };
+  const offset = tx.clientFeeSignatureOffset;
+  if (offset === undefined) {
+    throw FyndError.config(
+      'Quote has no clientFeeSignatureOffset — set clientFeeParams on the quote request'
+    );
+  }
+  assertSignatureLength(signature, 'Client fee');
+  const calldata = parseHexBytes(tx.data, 'Quote calldata');
+  if (offset < 0 || offset + SIGNATURE_BYTES > calldata.length) {
+    throw FyndError.config(
+      `Client fee signature at offset ${String(offset)} does not fit ${String(calldata.length)}-byte calldata`
+    );
+  }
+  // A wrong offset would silently overwrite an adjacent ABI field — amounts, receiver, route —
+  // and return a quote that still looks valid. The placeholder is always zeroed, so anything
+  // else at this offset means the server and the client disagree about where it sits.
+  const placeholder = calldata.subarray(offset, offset + SIGNATURE_BYTES);
+  if (placeholder.some((byte) => byte !== 0)) {
+    throw FyndError.config(
+      `Client fee signature offset ${String(offset)} does not point at the zeroed placeholder`
+    );
+  }
+  calldata.set(parseHexBytes(signature, 'Client fee signature'), offset);
+  return { ...quote, transaction: { ...tx, data: bytesToHex(calldata) } };
+}
+
+/**
+ * Converts a hex string to bytes, rejecting input `hexToBytes` would misread.
+ *
+ * viem throws its own error type on invalid characters and silently left-pads an odd number
+ * of digits, which would shift every byte of the calldata by a nibble.
+ */
+function parseHexBytes(value: Hex, label: string): Uint8Array {
+  if (!isHex(value, { strict: true }) || value.length % 2 !== 0) {
+    throw FyndError.config(`${label} is not valid hex: ${value.slice(0, 12)}...`);
+  }
+  return hexToBytes(value);
 }

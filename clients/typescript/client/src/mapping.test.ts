@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { toWireRequest, fromWireQuote, fromWireHealth } from './mapping.js';
 import { FyndError } from './error.js';
 import type { Address, Hex, QuoteParams } from './types.js';
-import type { components } from '@fynd/autogen';
+import type { components } from './autogen.js';
 
-type WireSolution = components["schemas"]["Solution"];
+type WireSolution = components["schemas"]["Quote"];
 
 const SENDER = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045' as const;
 const TOKEN_IN = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as const;
@@ -182,7 +182,6 @@ describe('toWireRequest', () => {
             receiver: '0x4444444444444444444444444444444444444444' as Address,
             maxContribution: 500000n,
             deadline: 1893456000,
-            signature: `0x${'ab'.repeat(65)}` as Hex,
           },
         },
       },
@@ -194,7 +193,8 @@ describe('toWireRequest', () => {
     expect(fee?.receiver).toBe('0x4444444444444444444444444444444444444444');
     expect(fee?.max_contribution).toBe('500000');
     expect(fee?.deadline).toBe(1893456000);
-    expect(fee?.signature).toBe(`0x${'ab'.repeat(65)}`);
+    // Unsigned on the wire — the server encodes a placeholder for the client to patch.
+    expect(fee?.signature).toBe('0x');
   });
 
   it('omits client_fee_params when not provided', () => {
@@ -399,6 +399,60 @@ describe('fromWireQuote', () => {
   it('transaction is undefined when wire value is absent', () => {
     const quote = fromWireQuote(baseWireSolution, TOKEN_OUT, SENDER);
     expect(quote.transaction).toBeUndefined();
+  });
+
+  it('maps client fee signing fields when present', () => {
+    const wire: WireSolution = {
+      ...baseWireSolution,
+      orders: [
+        {
+          ...baseWireSolution.orders[0]!,
+          transaction: {
+            to: '0x1111111111111111111111111111111111111111',
+            value: '0',
+            data: '0xdeadbeef',
+            client_fee_signature_offset: 68,
+          },
+          fee_breakdown: {
+            router_fee: '350000',
+            client_fee: '2800000',
+            max_slippage: '3496850',
+            min_amount_received: '3493353150',
+            swaps_hash: `0x${'11'.repeat(32)}`,
+          },
+        },
+      ],
+    };
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.transaction?.clientFeeSignatureOffset).toBe(68);
+    expect(quote.feeBreakdown?.swapsHash).toBe(`0x${'11'.repeat(32)}`);
+  });
+
+  it('maps client fee signing fields when the wire values are null', () => {
+    const wire: WireSolution = {
+      ...baseWireSolution,
+      orders: [
+        {
+          ...baseWireSolution.orders[0]!,
+          transaction: {
+            to: '0x1111111111111111111111111111111111111111',
+            value: '0',
+            data: '0xdeadbeef',
+            client_fee_signature_offset: null,
+          },
+          fee_breakdown: {
+            router_fee: '350000',
+            client_fee: '0',
+            max_slippage: '3496850',
+            min_amount_received: '3493353150',
+            swaps_hash: null,
+          },
+        },
+      ],
+    };
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.transaction?.clientFeeSignatureOffset).toBeUndefined();
+    expect(quote.feeBreakdown?.swapsHash).toBeUndefined();
   });
 });
 
