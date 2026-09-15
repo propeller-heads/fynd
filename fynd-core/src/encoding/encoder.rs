@@ -36,13 +36,23 @@ use crate::{
 /// Canonical Permit2 contract address — identical on all EVM chains.
 pub const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 
-/// How many orders of one request encode at the same time.
+/// How many quotes of one request encode at the same time.
 ///
 /// Matches `tycho-execution`'s `MAX_ENCODING_THREADS`, which caps the same fan-out when it encodes
-/// a batch itself. Encoding one order per call takes that crate's single-item path, so the cap has
+/// a batch itself. Encoding one quote per call takes that crate's single-item path, so the cap has
 /// to be applied here. An encoding task blocks on the RFQ round trip and holds a thread of the
 /// runtime's blocking pool for it, and that pool is shared with every other request.
 const MAX_CONCURRENT_ENCODES: usize = 32;
+
+/// One quote's solution, ready to encode, with the fee figures its router call carries.
+#[derive(Debug)]
+struct PreparedSolution {
+    /// Position of the quote in the request, where the encoded transaction is written back.
+    quote_index: usize,
+    solution: Solution,
+    fee_breakdown: FeeBreakdown,
+    fee_rates: FeeRates,
+}
 
 /// Encodes solution into tycho compatible transactions.
 ///
@@ -251,11 +261,11 @@ impl Encoder {
         self.router_fees.clone()
     }
 
-    /// Encodes order solutions for execution.
+    /// Encodes the quotes of a request for execution.
     ///
-    /// Each order is encoded on its own: an order that fails keeps its route and amounts, gets
-    /// [`QuoteStatus::EncodingFailed`] and no transaction, while every other order in the request
-    /// keeps its calldata. A caller reads the per-order status, as it already does for
+    /// Each quote is encoded on its own: a quote that fails keeps its route and amounts, gets
+    /// [`QuoteStatus::EncodingFailed`] and no transaction, while every other quote in the request
+    /// keeps its calldata. A caller reads the status of each quote, as it already does for
     /// [`QuoteStatus::NoRouteFound`] and [`QuoteStatus::PriceCheckFailed`].
     ///
     /// # Arguments
@@ -263,11 +273,11 @@ impl Encoder {
     /// * `encoding_options` - Additional context needed for encoding.
     ///
     /// # Returns
-    /// The input quotes, with the encoded transaction added to each order that encoded.
+    /// The input quotes, with the encoded transaction added to each quote that encoded.
     ///
     /// # Errors
     /// Returns [`SolveError::EncodingUnavailable`] on a chain with no Tycho router. A failure that
-    /// belongs to one order never fails the call.
+    /// belongs to one quote never fails the call.
     pub async fn encode(
         &self,
         mut quotes: Vec<OrderQuote>,
@@ -289,18 +299,16 @@ impl Encoder {
         }
 
         let router_fees = self.router_fees.snapshot();
-        let mut to_encode: Vec<(usize, Solution, FeeBreakdown, FeeRates)> = Vec::new();
+        let mut to_encode: Vec<PreparedSolution> = Vec::new();
         let mut failures: Vec<(usize, SolveError)> = Vec::new();
 
-        for (i, quote) in quotes.iter().enumerate() {
+        for (quote_index, quote) in quotes.iter().enumerate() {
             if quote.status() != QuoteStatus::Success {
                 continue;
             }
-            match self.prepare_solution(quote, &encoding_options, &router_fees) {
-                Ok((solution, fee_breakdown, fee_rates)) => {
-                    to_encode.push((i, solution, fee_breakdown, fee_rates));
-                }
-                Err(e) => failures.push((i, e)),
+            match self.prepare_solution(quote_index, quote, &encoding_options, &router_fees) {
+                Ok(prepared) => to_encode.push(prepared),
+                Err(e) => failures.push((quote_index, e)),
             }
         }
 
@@ -308,39 +316,29 @@ impl Encoder {
             .encode_prepared_solutions(tycho_encoder, &to_encode)
             .await?;
 
-        for (encoded_solution, (idx, solution, fee_breakdown, fee_rates)) in encoded_solutions
+        for (encoded_solution, prepared) in encoded_solutions
             .into_iter()
             .zip(to_encode)
         {
-            let encoded = encoded_solution.and_then(|encoded_solution| {
-                let gas_estimate = encoded_solution.estimated_gas().clone();
-                let (transaction, fee_breakdown) = self.encode_tycho_router_call(
-                    encoded_solution,
-                    &solution,
-                    &encoding_options,
-                    fee_breakdown,
-                    fee_rates,
-                )?;
-                Ok((gas_estimate, transaction, fee_breakdown))
-            });
-            match encoded {
-                Ok((gas_estimate, transaction, fee_breakdown)) => {
-                    quotes[idx].set_gas_estimate(gas_estimate);
-                    quotes[idx].set_transaction(transaction);
-                    quotes[idx].set_fee_breakdown(fee_breakdown);
-                }
-                Err(e) => failures.push((idx, SolveError::FailedEncoding(e.to_string()))),
+            let quote_index = prepared.quote_index;
+            if let Err(e) = self.attach_transaction(
+                &mut quotes[quote_index],
+                encoded_solution,
+                prepared,
+                &encoding_options,
+            ) {
+                failures.push((quote_index, SolveError::FailedEncoding(e.to_string())));
             }
         }
 
-        for (idx, error) in failures {
+        for (quote_index, error) in failures {
             tracing::warn!(
-                order_id = %quotes[idx].order_id(),
+                order_id = %quotes[quote_index].order_id(),
                 %error,
-                "encoding failed for this order; it is returned without a transaction"
+                "encoding failed for this quote; it is returned without a transaction"
             );
             counter!("encoding_failures_total").increment(1);
-            quotes[idx].set_status(QuoteStatus::EncodingFailed);
+            quotes[quote_index].set_status(QuoteStatus::EncodingFailed);
         }
 
         Ok(quotes)
@@ -350,10 +348,11 @@ impl Encoder {
     /// and any signature an exclusive leg needs.
     fn prepare_solution(
         &self,
+        quote_index: usize,
         quote: &OrderQuote,
         encoding_options: &EncodingOptions,
         router_fees: &RouterFees,
-    ) -> Result<(Solution, FeeBreakdown, FeeRates), SolveError> {
+    ) -> Result<PreparedSolution, SolveError> {
         let fee_client = self.fee_client(encoding_options, quote)?;
         let fee_rates = router_fees.fees_for(&fee_client);
         let fee_breakdown = Self::calculate_fee_breakdown(
@@ -390,7 +389,31 @@ impl Encoder {
                 solution
             }
         };
-        Ok((solution, fee_breakdown, fee_rates))
+        Ok(PreparedSolution { quote_index, solution, fee_breakdown, fee_rates })
+    }
+
+    /// Builds the router call for one encoded solution and writes its transaction, gas estimate
+    /// and fee breakdown to the quote.
+    fn attach_transaction(
+        &self,
+        quote: &mut OrderQuote,
+        encoded_solution: Result<EncodedSolution, EncodingError>,
+        prepared: PreparedSolution,
+        encoding_options: &EncodingOptions,
+    ) -> Result<(), EncodingError> {
+        let encoded_solution = encoded_solution?;
+        let gas_estimate = encoded_solution.estimated_gas().clone();
+        let (transaction, fee_breakdown) = self.encode_tycho_router_call(
+            encoded_solution,
+            &prepared.solution,
+            encoding_options,
+            prepared.fee_breakdown,
+            prepared.fee_rates,
+        )?;
+        quote.set_gas_estimate(gas_estimate);
+        quote.set_transaction(transaction);
+        quote.set_fee_breakdown(fee_breakdown);
+        Ok(())
     }
 
     /// Encodes each prepared solution into router swap calldata, one result per solution in the
@@ -405,13 +428,13 @@ impl Encoder {
     async fn encode_prepared_solutions(
         &self,
         tycho_encoder: &Arc<dyn TychoEncoder>,
-        to_encode: &[(usize, Solution, FeeBreakdown, FeeRates)],
+        to_encode: &[PreparedSolution],
     ) -> Result<Vec<Result<EncodedSolution, EncodingError>>, SolveError> {
         // Owned clones, so no task borrows from `to_encode`: a future that holds such a borrow
         // is not general enough over its lifetime for an async caller further up.
         let solutions: Vec<Solution> = to_encode
             .iter()
-            .map(|(_, solution, _, _)| solution.clone())
+            .map(|prepared| prepared.solution.clone())
             .collect();
 
         let tycho_encoder = Arc::clone(tycho_encoder);
@@ -1528,7 +1551,7 @@ mod tests {
 
         let opts = EncodingOptions::new(1.0);
         let err = encoder
-            .prepare_solution(&quote, &opts, &encoder.router_fees().snapshot())
+            .prepare_solution(0, &quote, &opts, &encoder.router_fees().snapshot())
             .expect_err("100% slippage leaves nothing for the router's floor");
         assert!(
             err.to_string()
@@ -1818,7 +1841,7 @@ mod tests {
         let opts = EncodingOptions::new(0.01).with_disable_slippage_taking(true);
 
         let err = encoder
-            .prepare_solution(&quote, &opts, &encoder.router_fees().snapshot())
+            .prepare_solution(0, &quote, &opts, &encoder.router_fees().snapshot())
             .expect_err("encoding must fail without a signing key");
         assert!(
             err.to_string()
