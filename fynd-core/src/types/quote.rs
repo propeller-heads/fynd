@@ -101,7 +101,7 @@ impl RouteExclusionFilter {
     /// Excludes every pool of these protocol systems.
     ///
     /// An entry matches a system exactly (`uniswap_v2`), or a family when it ends in `:`
-    /// (`propammfallback:`). An entry matching no pools excludes nothing.
+    /// (`fallback:`). An entry matching no pools excludes nothing.
     #[must_use]
     pub fn with_excluded_protocols(mut self, protocols: impl IntoIterator<Item = String>) -> Self {
         self.excluded_protocols
@@ -1500,7 +1500,7 @@ pub struct Route {
     tokens: FxHashMap<Bytes, Token>,
     /// Amount out this route delivers if its pAMM legs fall back to the pools stamped on them.
     ///
-    /// Set by the worker for routes that contain a `propammfallback:` leg; `None` for every other
+    /// Set by the worker for routes that contain a `fallback:` leg; `None` for every other
     /// route. The router drops the candidate when this amount cannot clear `min_amount_out`,
     /// which stays derived from the pAMM quote and the user's slippage. In-process only —
     /// `#[serde(skip)]`, so it never enters the wire format.
@@ -1534,7 +1534,7 @@ impl Route {
 
     /// Amount out this route delivers if its pAMM legs fall back to the pools stamped on them.
     /// `None` unless the worker computed one, which it does only for routes with a
-    /// `propammfallback:` leg.
+    /// `fallback:` leg.
     pub fn fallback_amount_out(&self) -> Option<&BigUint> {
         self.fallback_amount_out.as_ref()
     }
@@ -2082,19 +2082,20 @@ pub struct Swap {
     committed_amount_out: Option<BigUint>,
     /// The pool this leg falls back to if it is a pAMM leg and the pAMM swap fails.
     ///
-    /// Set by the worker on every `propammfallback:` leg (see
-    /// `propamm_fallback::stamp_fallbacks`); `None` for every other swap. In-process only —
-    /// consumed by the encoder; `#[serde(skip)]` so it never enters the wire format.
+    /// Set by the worker on every `fallback:` leg (see
+    /// `fallback::price_through_fallbacks`); `None` for every other swap. In-process only
+    /// — consumed by the encoder; `#[serde(skip)]` so it never enters the wire format.
     #[serde(skip)]
     fallback: Option<FallbackLeg>,
 }
 
-/// The pool `TychoFallbackRouter` runs if the pAMM leg it is attached to fails.
+/// The leg a pAMM swap becomes when the maker's quote fails on chain: the fallback pool, its state
+/// at selection, and what it pays.
 ///
 /// Chosen by the worker among the pools the market holds for the leg's pair, by best simulated
-/// amount out for the leg's `amount_in`. Carries the component and state so the route can be
-/// replayed through it and so the encoder can derive the router's `[venue][venue data]` from it.
-/// In-process only: it never enters the wire format.
+/// amount out for the leg's `amount_in`. `TychoFallbackRouter` runs it in place of the pAMM swap.
+/// The component and state let the route be replayed through it and let the encoder derive the
+/// router's `[venue][venue data]`. In-process only: it never enters the wire format.
 #[derive(Debug, Clone)]
 pub struct FallbackLeg {
     /// Identifier of the fallback pool.
@@ -2174,16 +2175,7 @@ impl Swap {
         self
     }
 
-    /// Attaches the pool this pAMM leg falls back to.
-    pub fn with_fallback(mut self, fallback: FallbackLeg) -> Self {
-        self.fallback = Some(fallback);
-        self
-    }
-
     /// Attaches the pool this pAMM leg falls back to, in place.
-    ///
-    /// The worker stamps this onto every `propammfallback:` leg after `stamp_fallbacks`, so
-    /// `fallback_amount_out` can replay the route and the encoder can name the pool.
     pub(crate) fn set_fallback(&mut self, fallback: FallbackLeg) {
         self.fallback = Some(fallback);
     }

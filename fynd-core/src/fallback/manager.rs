@@ -1,6 +1,6 @@
 //! Which pAMM components a worker's graph may hold.
 //!
-//! A `propammfallback:` leg only reaches the chain through the fallback pool the solver picks for
+//! A `fallback:` leg only reaches the chain through the fallback pool the solver picks for
 //! it, so a pAMM whose pair this market holds no candidate for can never produce a quotable
 //! route. The answer expires — pools arrive and leave — so it is re-decided on every market event.
 
@@ -9,8 +9,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
 
 use crate::{
+    fallback::{is_pamm, must_withhold_pamm, FallbackPoolIndex},
     feed::{events::MarketEvent, market_data::MarketDataView},
-    propamm_fallback::{is_pamm, must_withhold_pamm, FallbackPoolIndex},
     types::ComponentId,
 };
 

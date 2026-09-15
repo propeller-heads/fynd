@@ -17,8 +17,8 @@ use crate::{
 /// Whether `component` belongs to a protocol system in `exclude_protocols`.
 ///
 /// An entry names a protocol system exactly (`uniswap_v2`), or, when it ends with `:`, the whole
-/// family under that prefix: `propammfallback:` excludes `propammfallback:fermiswap` and every
-/// other venue the PropAMMRouter serves. An empty list excludes nothing.
+/// family under that prefix: `fallback:` excludes `fallback:fermiswap` and every other pAMM the
+/// `TychoFallbackRouter` executes. An empty list excludes nothing.
 pub(crate) fn is_excluded_protocol(
     exclude_protocols: &[String],
     component: &ProtocolComponent,
@@ -108,11 +108,7 @@ mod tests {
     }
 
     fn pamm_component(id: &str) -> ProtocolComponent {
-        component_with_protocol(
-            id,
-            "propammfallback:fermiswap",
-            &[token(0x01, "A"), token(0x02, "B")],
-        )
+        component_with_protocol(id, "fallback:fermiswap", &[token(0x01, "A"), token(0x02, "B")])
     }
 
     fn market_with(components: Vec<ProtocolComponent>) -> MarketState {
@@ -122,11 +118,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::family_prefix(&["propammfallback:"], "propammfallback:fermiswap", true)]
+    #[case::family_prefix(&["fallback:"], "fallback:fermiswap", true)]
     #[case::exact_system(&["uniswap_v2"], "uniswap_v2", true)]
     #[case::other_system(&["uniswap_v2"], "uniswap_v3", false)]
-    #[case::exact_entry_is_not_a_prefix(&["propammfallback"], "propammfallback:fermiswap", false)]
-    #[case::no_exclusions(&[], "propammfallback:fermiswap", false)]
+    #[case::exact_entry_is_not_a_prefix(&["fallback"], "fallback:fermiswap", false)]
+    #[case::no_exclusions(&[], "fallback:fermiswap", false)]
     fn test_is_excluded_protocol(
         #[case] exclude_protocols: &[&str],
         #[case] protocol_system: &str,
@@ -148,7 +144,7 @@ mod tests {
             exclusive_component("excl-1"),
             pamm_component("pamm-1"),
         ]);
-        let exclude_protocols = vec!["propammfallback:".to_string()];
+        let exclude_protocols = vec!["fallback:".to_string()];
         let drop =
             |c: &ProtocolComponent| is_exclusive(c) || is_excluded_protocol(&exclude_protocols, c);
 
@@ -172,7 +168,7 @@ mod tests {
             removed_components: ids(),
             updated_components: ids(),
         };
-        let exclude_protocols = vec!["propammfallback:".to_string()];
+        let exclude_protocols = vec!["fallback:".to_string()];
         let drop =
             |c: &ProtocolComponent| is_exclusive(c) || is_excluded_protocol(&exclude_protocols, c);
 

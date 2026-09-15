@@ -23,6 +23,7 @@ use crate::{
         computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
     },
+    fallback::{has_fallback_leg, manager::PammManager, price_through_fallbacks},
     feed::{
         component_filter::{
             filter_event, is_excluded_protocol, protocol_matches, remove_components,
@@ -32,14 +33,7 @@ use crate::{
         market_data::{MarketData, MarketDataView, StateLabel},
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
-    propamm_fallback::{
-        fallback_amount_out, has_pamm_leg, manager::PammManager, stamp_fallbacks,
-        FallbackAmountOut, FallbackSelectionError,
-    },
-    types::{
-        internal::{RouteRejection, SolveTask},
-        Route, RouteExclusionFilter, RouteExclusions,
-    },
+    types::{internal::SolveTask, Route, RouteExclusionFilter, RouteExclusions},
     worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
@@ -462,63 +456,26 @@ where
                     )));
                 }
 
-                // A route with a pAMM leg needs a fallback pool on every such leg, and the amount
-                // out those fallbacks would deliver: the router checks it against `min_amount_out`
-                // before ranking and drops the candidate when it falls short. A route with a leg
-                // that has no fallback, or whose fallback cannot be priced, is dropped here,
-                // because there is nothing to check that floor against.
-                if has_pamm_leg(&route) {
+                // A pAMM route is ranked on what its fallbacks pay against `min_amount_out`, so a
+                // leg with no fallback, or one that cannot be priced, is dropped here — there is
+                // no floor to check.
+                if has_fallback_leg(&route) {
                     // The same view the algorithm solved against, so the fallback is selected and
                     // priced on the requested overlay rather than the base state.
                     let market = self
                         .read_market(params.state_label())
                         .await?;
-                    let stamped = stamp_fallbacks(
+                    match price_through_fallbacks(
                         &mut route,
                         &market,
                         self.pamm_admission.fallback_pools(),
                         params.route_filter(),
-                    );
-                    if let Err(error) = stamped {
-                        let rejection = match &error {
-                            FallbackSelectionError::NoFallbackPool { .. } => {
-                                RouteRejection::PammFallbackPoolMissing
-                            }
-                            FallbackSelectionError::AllExcluded { .. } => {
-                                RouteRejection::PammFallbackExcluded
-                            }
-                            FallbackSelectionError::NotPriceable { .. } => {
-                                RouteRejection::PammFallbackUnpriceable
-                            }
-                        };
-                        debug!(order_id = %order.id(), ?error, "dropping pAMM route: {rejection}");
-                        return Err(SolveError::route_rejected(order.id(), rejection));
-                    }
-                    match fallback_amount_out(&route, &market) {
-                        FallbackAmountOut::AmountOut(amount) => {
-                            route.set_fallback_amount_out(amount)
-                        }
-                        FallbackAmountOut::MissingFallback { component_id } => {
-                            debug!(
-                                order_id = %order.id(),
-                                %component_id,
-                                "dropping pAMM route: a pAMM leg carries no fallback"
-                            );
-                            return Err(SolveError::route_rejected(
-                                order.id(),
-                                RouteRejection::PammFallbackUnpriceable,
-                            ));
-                        }
-                        FallbackAmountOut::NotPriceable { reason } => {
-                            debug!(
-                                order_id = %order.id(),
-                                %reason,
-                                "dropping pAMM route: the fallback could not be simulated"
-                            );
-                            return Err(SolveError::route_rejected(
-                                order.id(),
-                                RouteRejection::PammFallbackUnpriceable,
-                            ));
+                    ) {
+                        Ok(amount) => route.set_fallback_amount_out(amount),
+                        Err(error) => {
+                            let rejection = error.rejection();
+                            debug!(order_id = %order.id(), %error, "{rejection}");
+                            return Err(SolveError::route_rejected(order.id(), rejection));
                         }
                     }
                 }
@@ -904,9 +861,11 @@ mod tests {
             computations::{SpotPriceComputation, TokenGasPriceComputation},
             DerivedData,
         },
+        fallback::{manager::PammState, FALLBACK_PREFIX},
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
-        propamm_fallback::{manager::PammState, PROPAMM_FALLBACK_PREFIX},
-        types::{ComponentId, OrderSide, Route, RouteExclusionFilter, RouteResult, Swap},
+        types::{
+            ComponentId, OrderSide, Route, RouteExclusionFilter, RouteRejection, RouteResult, Swap,
+        },
         AlgorithmError,
     };
 
@@ -1379,9 +1338,8 @@ mod tests {
         assert_eq!(quote.order().amount_out(), &BigUint::from(190u64));
     }
 
-    /// Mock algorithm that returns a single-leg route through a pAMM executed via the
-    /// PropAMMRouter. The market holds no Uniswap V3 pool for the pair, so the router's fallback
-    /// would revert and the worker must drop the route.
+    /// Mock algorithm returning one `fallback:` leg for the (A, B) pair; the market each
+    /// test builds decides whether the leg gets a fallback.
     struct PropAMMRouteAlgorithm;
 
     impl Algorithm for PropAMMRouteAlgorithm {
@@ -1400,7 +1358,7 @@ mod tests {
             let token_b = token(0x02, "B");
             let swap = Swap::new(
                 "pamm".to_string(),
-                format!("{PROPAMM_FALLBACK_PREFIX}fermiswap"),
+                format!("{FALLBACK_PREFIX}fermiswap"),
                 token_a.address.clone(),
                 token_b.address.clone(),
                 BigUint::from(100u64),
@@ -1450,7 +1408,7 @@ mod tests {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let fallback = component_with_protocol(
-            "fallback_pool",
+            FALLBACK_POOL,
             "uniswap_v3",
             &[token_a.clone(), token_b.clone()],
         );
@@ -1463,7 +1421,7 @@ mod tests {
             state.upsert_tokens([token_a, token_b]);
             state.upsert_components([fallback]);
             state.update_states([(
-                "fallback_pool".to_string(),
+                FALLBACK_POOL.to_string(),
                 Box::new(MockProtocolSim::new(2.0).with_liquidity(1)) as Box<dyn ProtocolSim>,
             )]);
         }
@@ -1473,10 +1431,9 @@ mod tests {
     /// The request's filter reaches the pool a pAMM leg settles through, so excluding every
     /// candidate, by pool or by protocol, leaves the leg no fallback.
     #[rstest]
-    #[case::pool(RouteExclusionFilter::default().with_excluded_pools(["fallback_pool".to_string()]))]
+    #[case::pool(RouteExclusionFilter::default().with_excluded_pools([FALLBACK_POOL.to_string()]))]
     #[case::protocol(RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v3".to_string()]))]
     #[tokio::test]
-    #[ignore = "scaffold: select_fallback is not implemented"]
     async fn test_quote_pamm_route_with_excluded_fallback(#[case] filter: RouteExclusionFilter) {
         let result =
             quote_pamm_route_against(market_with_unpriceable_fallback_pool(), filter).await;
@@ -1484,7 +1441,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(SolveError::RouteRejected { reason: RouteRejection::PammFallbackExcluded, .. })
+                Err(SolveError::RouteRejected { reason: RouteRejection::FallbackExcluded, .. })
             ),
             "expected rejection before fallback simulation, got {result:?}"
         );
@@ -1493,7 +1450,6 @@ mod tests {
     /// Without a fallback pool for the pair the fallback reverts too, so there is no fallback
     /// amount to check `min_amount_out` against.
     #[tokio::test]
-    #[ignore = "scaffold: select_fallback is not implemented"]
     async fn test_quote_pamm_route_without_fallback_pool() {
         let (market, _) = setup_market_weighted(vec![]);
 
@@ -1502,10 +1458,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(SolveError::RouteRejected {
-                    reason: RouteRejection::PammFallbackPoolMissing,
-                    ..
-                })
+                Err(SolveError::RouteRejected { reason: RouteRejection::FallbackPoolMissing, .. })
             ),
             "expected the unbacked pAMM route to be dropped, got {result:?}"
         );
@@ -1514,7 +1467,6 @@ mod tests {
     /// A fallback pool that cannot price the swap leaves no amount to check `min_amount_out`
     /// against, so the route is dropped rather than ranked on the pAMM's own amount.
     #[tokio::test]
-    #[ignore = "scaffold: select_fallback is not implemented"]
     async fn test_quote_pamm_route_with_unpriceable_fallback() {
         let result = quote_pamm_route_against(
             market_with_unpriceable_fallback_pool(),
@@ -1525,10 +1477,7 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(SolveError::RouteRejected {
-                    reason: RouteRejection::PammFallbackUnpriceable,
-                    ..
-                })
+                Err(SolveError::RouteRejected { reason: RouteRejection::FallbackUnpriceable, .. })
             ),
             "expected the unpriceable fallback to drop the route, got {result:?}"
         );
@@ -1648,10 +1597,9 @@ mod tests {
             0,
             "test_pool".to_string(),
         )
-        .with_exclude_protocols(vec![PROPAMM_FALLBACK_PREFIX.to_string()]);
+        .with_exclude_protocols(vec![FALLBACK_PREFIX.to_string()]);
 
-        let pamm =
-            component_with_protocol("pamm-1", "propammfallback:fermiswap", &[token(0x01, "A")]);
+        let pamm = component_with_protocol("pamm-1", "fallback:fermiswap", &[token(0x01, "A")]);
         let public = component("uni-1", &[token(0x01, "A")]);
 
         assert!(should_drop_component(worker.liquidity_scope, &worker.exclude_protocols, &pamm));
@@ -1661,8 +1609,9 @@ mod tests {
     /// The pAMM every admission test decides.
     const PAMM: &str = "pamm-1";
 
-    /// The pool the pAMM falls back to.
-    const FALLBACK_POOL: &str = "uni-1";
+    /// The pool the pAMM falls back to. A real address, because selection refuses a candidate
+    /// whose component id it cannot encode as a pool for the router.
+    const FALLBACK_POOL: &str = "0x3333333333333333333333333333333333333333";
 
     /// A market holding the pAMM and the Uniswap V3 pool it falls back to.
     fn market_with_pamm_and_fallback() -> MarketData {
@@ -1684,12 +1633,26 @@ mod tests {
         let token_b = token(0x02, "B");
         let pamm = component_with_protocol(
             PAMM,
-            "propammfallback:fermiswap",
+            "fallback:fermiswap",
             &[token_a.clone(), token_b.clone()],
         );
         let mut state = market.try_write().expect("uncontended");
         state.upsert_tokens([token_a, token_b]);
         state.upsert_components([pamm]);
+    }
+
+    /// A second candidate pool on the same pair, so the pAMM keeps a fallback when one leaves.
+    const SECOND_FALLBACK_POOL: &str = "0x4444444444444444444444444444444444444444";
+
+    /// Adds a `uniswap_v2` pool serving the same pair as `FALLBACK_POOL`.
+    fn add_second_fallback_pool(market: &MarketData) {
+        let second = component_with_protocol(
+            SECOND_FALLBACK_POOL,
+            "uniswap_v2",
+            &[token(0x01, "A"), token(0x02, "B")],
+        );
+        let mut state = market.try_write().expect("uncontended");
+        state.upsert_components([second]);
     }
 
     /// Adds the Uniswap V3 pool the pAMM falls back to.
@@ -1805,6 +1768,25 @@ mod tests {
         );
     }
 
+    /// A pAMM is evicted when its last candidate pool leaves, not when any one does — the whole
+    /// point of choosing a pool per leg is that one pair can have several.
+    #[test]
+    fn test_apply_pamm_admission_keeps_a_pamm_behind_a_second_fallback_pool() {
+        let market = market_with_pamm_and_fallback();
+        add_second_fallback_pool(&market);
+        let mut worker = admission_worker(market.clone());
+        admit(&mut worker, &market, added_component_event(PAMM));
+
+        let event = admit(&mut worker, &market, removed_component_event(FALLBACK_POOL));
+
+        assert!(
+            !removed_ids(&event).contains(&PAMM.to_string()),
+            "the pAMM still has a fallback pool: {:?}",
+            removed_ids(&event)
+        );
+        assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Admitted));
+    }
+
     /// The market names a component in `added_components` once, so the event that adds the
     /// fallback pool does not name the pAMM. Without the withheld set the pAMM would stay out
     /// until the next rebuild, which is worse than before this rule existed.
@@ -1916,7 +1898,7 @@ mod tests {
     async fn test_initialize_graph_leaves_an_excluded_pamm_off_the_record() {
         let market = market_with_pamm_and_fallback();
         let mut worker = admission_worker(market);
-        worker.exclude_protocols = vec![PROPAMM_FALLBACK_PREFIX.to_string()];
+        worker.exclude_protocols = vec![FALLBACK_PREFIX.to_string()];
 
         worker.initialize_graph().await;
 
@@ -1936,8 +1918,7 @@ mod tests {
             "test_pool".to_string(),
         );
 
-        let pamm =
-            component_with_protocol("pamm-1", "propammfallback:fermiswap", &[token(0x01, "A")]);
+        let pamm = component_with_protocol("pamm-1", "fallback:fermiswap", &[token(0x01, "A")]);
 
         assert!(!should_drop_component(worker.liquidity_scope, &worker.exclude_protocols, &pamm));
     }

@@ -212,9 +212,9 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
             Some(_) | None => "graph/other",
         },
         SolveError::RouteRejected { reason, .. } => match reason {
-            RouteRejection::PammFallbackExcluded => "route/pamm_fallback_excluded",
-            RouteRejection::PammFallbackPoolMissing => "route/pamm_fallback_pool_missing",
-            RouteRejection::PammFallbackUnpriceable => "route/pamm_fallback_unpriceable",
+            RouteRejection::FallbackExcluded => "route/fallback_excluded",
+            RouteRejection::FallbackPoolMissing => "route/fallback_pool_missing",
+            RouteRejection::FallbackUnpriceable => "route/fallback_unpriceable",
             _ => "route/other",
         },
         SolveError::InsufficientLiquidity { .. } => "graph/insufficient_liquidity",
@@ -632,9 +632,9 @@ mod tests {
         assert_eq!(
             failure_reason_slug(
                 s,
-                Some(&SolveError::route_rejected("o", RouteRejection::PammFallbackPoolMissing))
+                Some(&SolveError::route_rejected("o", RouteRejection::FallbackPoolMissing))
             ),
-            "route/pamm_fallback_pool_missing"
+            "route/fallback_pool_missing"
         );
         assert_eq!(
             failure_reason_slug(

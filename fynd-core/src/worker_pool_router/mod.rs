@@ -1652,7 +1652,7 @@ mod tests {
     }
 
     /// A candidate that quotes 990 out and falls back to `fallback_amount_out` — what a worker
-    /// stamps on a route with a `propammfallback:` leg.
+    /// stamps on a route with a `fallback:` leg.
     fn pamm_quote(amount_out_net_gas: u64, fallback_amount_out: u64) -> OrderQuote {
         let mut quote = make_single_quote(amount_out_net_gas)
             .order()
