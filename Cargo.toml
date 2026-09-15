@@ -60,6 +60,9 @@ tycho-simulation = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
 
+# Default calldata watermark (hash of the Tycho API key)
+sha2 = { workspace = true }
+
 [dev-dependencies]
 rstest = { workspace = true }
 reqwest = { workspace = true }

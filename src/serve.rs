@@ -190,6 +190,26 @@ fn record_build_info() {
 
 /// Resolves the Tycho WebSocket URL: uses the override if provided, otherwise looks up the
 /// chain-specific Fynd default endpoint.
+/// Number of bytes of the API key hash kept in the default watermark. Enough to tell
+/// deployments apart, short enough not to inflate calldata gas noticeably.
+const WATERMARK_KEY_HASH_BYTES: usize = 8;
+
+/// Builds the watermark used when `--calldata-watermark` is not set: the binary version and, when
+/// a Tycho API key is configured, a truncated SHA-256 of that key. The key itself never reaches
+/// the chain; the hash lets an operator who knows their key recognise their own router calls.
+pub(crate) fn default_calldata_watermark(tycho_api_key: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut watermark = format!("fynd/{}", env!("CARGO_PKG_VERSION"));
+    let Some(api_key) = tycho_api_key else {
+        return watermark;
+    };
+    let key_hash = Sha256::digest(api_key.as_bytes());
+    watermark.push('/');
+    watermark.push_str(&hex::encode(&key_hash[..WATERMARK_KEY_HASH_BYTES]));
+    watermark
+}
+
 pub(crate) fn resolve_tycho_url(
     chain: &str,
     override_url: Option<&str>,
@@ -320,9 +340,12 @@ async fn setup_solver(
     builder = builder.partial_blocks(args.partial_blocks);
     builder = builder.price_guard_enabled(args.enable_price_guard);
     builder = builder.simulation_enabled(args.enable_simulation);
-    if let Some(watermark) = &args.calldata_watermark {
-        builder = builder.calldata_watermark(watermark.as_bytes());
-    }
+    let watermark = args
+        .calldata_watermark
+        .clone()
+        .unwrap_or_else(|| default_calldata_watermark(args.tycho_api_key.as_deref()));
+    info!(watermark, "stamping encoded calldata");
+    builder = builder.calldata_watermark(watermark.as_bytes());
 
     // Build and start solver
     let solver = configure(builder)
@@ -470,6 +493,42 @@ mod tests {
                 env!("CARGO_PKG_VERSION")
             )),
             "unexpected metrics output:\n{rendered}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod watermark_tests {
+    use super::default_calldata_watermark;
+
+    #[test]
+    fn test_default_calldata_watermark_without_api_key() {
+        assert_eq!(default_calldata_watermark(None), format!("fynd/{}", env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn test_default_calldata_watermark_with_api_key() {
+        let watermark = default_calldata_watermark(Some("secret-key"));
+        let (prefix, key_hash) = watermark
+            .rsplit_once('/')
+            .expect("watermark must carry a hash segment");
+        assert_eq!(prefix, format!("fynd/{}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(key_hash.len(), 16);
+        assert!(key_hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
+        assert!(!watermark.contains("secret-key"), "the raw key must not be stamped");
+    }
+
+    #[test]
+    fn test_default_calldata_watermark_is_deterministic_per_key() {
+        assert_eq!(
+            default_calldata_watermark(Some("key-a")),
+            default_calldata_watermark(Some("key-a"))
+        );
+        assert_ne!(
+            default_calldata_watermark(Some("key-a")),
+            default_calldata_watermark(Some("key-b"))
         );
     }
 }
