@@ -54,7 +54,8 @@ pub struct Encoder {
     disable_slippage_taking_signer: Option<DisableSlippageTakingSigner>,
     /// Bytes appended to every encoded transaction's calldata to tag its origin. Trailing
     /// calldata beyond the ABI-encoded arguments is ignored by the EVM, so the tag is free of
-    /// on-chain effect. `None` (the default) appends nothing.
+    /// on-chain effect. `None` (the default) appends nothing. A request that carries its own
+    /// watermark in [`EncodingOptions`] replaces this one.
     calldata_watermark: Option<Vec<u8>>,
 }
 
@@ -632,7 +633,10 @@ impl Encoder {
 
         let mut contract_interaction =
             Self::encode_input(encoded_solution.function_signature(), method_calldata);
-        if let Some(watermark) = &self.calldata_watermark {
+        let watermark = encoding_options
+            .calldata_watermark()
+            .or(self.calldata_watermark.as_deref());
+        if let Some(watermark) = watermark {
             contract_interaction.extend_from_slice(watermark);
         }
 
@@ -1699,6 +1703,39 @@ mod tests {
             .data();
         // The watermark is a pure suffix: stripping it yields the unwatermarked calldata.
         assert_eq!(*plain_data, watermarked_data[..watermarked_data.len() - 4]);
+    }
+
+    #[tokio::test]
+    async fn test_request_watermark_replaces_encoder_watermark() {
+        let encoder = real_encoder().with_calldata_watermark("fynd");
+        let quote = make_order_quote(990)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+        let opts = EncodingOptions::new(0.01).with_calldata_watermark("propeller/acme");
+
+        let result = encoder
+            .encode(vec![quote], opts)
+            .await
+            .unwrap();
+
+        let data = result[0].transaction().unwrap().data();
+        assert!(data.ends_with(b"propeller/acme"), "request watermark must be the suffix");
+        let before_suffix = &data[..data.len() - b"propeller/acme".len()];
+        assert!(!before_suffix.ends_with(b"fynd"), "encoder watermark must not be stamped too");
+    }
+
+    #[tokio::test]
+    async fn test_request_watermark_applies_without_encoder_watermark() {
+        let quote = make_order_quote(990)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+        let opts = EncodingOptions::new(0.01).with_calldata_watermark("propeller/acme");
+
+        let result = real_encoder()
+            .encode(vec![quote], opts)
+            .await
+            .unwrap();
+
+        let data = result[0].transaction().unwrap().data();
+        assert!(data.ends_with(b"propeller/acme"));
     }
 
     #[tokio::test]
