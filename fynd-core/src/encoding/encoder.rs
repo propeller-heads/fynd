@@ -30,6 +30,7 @@ use crate::{
         exclusive_swap::ExclusiveSwapSigner,
         router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
+    fallback::user_data::fallback_user_data,
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, SolveError, Transaction,
 };
 
@@ -136,7 +137,7 @@ fn solution_from_quote(
         .map(|s| {
             let token_in = lookup_token(s.token_in())?;
             let token_out = lookup_token(s.token_out())?;
-            Ok(Swap::new(
+            let swap = Swap::new(
                 s.protocol_component().clone(),
                 token_in,
                 token_out,
@@ -144,7 +145,14 @@ fn solution_from_quote(
             )
             .with_split(*s.split())
             .with_protocol_state(Arc::from(s.protocol_state().clone_box()))
-            .with_estimated_amount_in(s.amount_in().clone()))
+            .with_estimated_amount_in(s.amount_in().clone());
+            // `TychoFallbackRouter` refuses a swap that does not name where the leg retries, so a
+            // stamped leg carries its pool across as `user_data`.
+            let Some(fallback) = s.fallback() else { return Ok(swap) };
+            let user_data = fallback_user_data(fallback, s.token_in()).map_err(|error| {
+                SolveError::FailedEncoding(format!("pAMM leg {}: {error}", s.component_id()))
+            })?;
+            Ok(swap.with_user_data(Bytes::from(user_data.into_bytes())))
         })
         .collect::<Result<Vec<_>, SolveError>>()?;
 
