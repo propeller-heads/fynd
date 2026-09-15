@@ -41,9 +41,6 @@ release = false
 name = "fynd-gas-audit"
 release = false
 [[package]]
-name = "hindsight"
-release = false
-[[package]]
 name = "record-market"
 release = false
 [[package]]

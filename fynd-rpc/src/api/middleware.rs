@@ -7,7 +7,8 @@
 //!
 //! `User-Identity` and `X-User-Plan` are injected by an upstream auth proxy in hosted
 //! deployments; direct traffic (health probes, deployments without the proxy) falls back
-//! to bounded sentinel values.
+//! to bounded sentinel values. A `User-Identity` value with bytes outside the label
+//! alphabet is slugified, not discarded, so every client keeps its own series.
 
 use std::time::Instant;
 
@@ -34,9 +35,12 @@ impl ClientLabels {
                 .and_then(|value| value.to_str().ok())
         };
         Self {
-            user_identity: header_value("user-identity")
-                .map(|value| sanitize_label(value, "invalid").to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
+            user_identity: match headers.get("user-identity") {
+                Some(value) => {
+                    slugify_label(value.as_bytes()).unwrap_or_else(|| "invalid".to_string())
+                }
+                None => "unknown".to_string(),
+            },
             user_plan: header_value("x-user-plan")
                 .map(|value| sanitize_label(value, "invalid").to_string())
                 .unwrap_or_else(|| "none".to_string()),
@@ -48,18 +52,41 @@ impl ClientLabels {
     }
 }
 
+const MAX_LABEL_LEN: usize = 64;
+
+fn is_label_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/')
+}
+
 /// Accepts bounded, printable-ASCII label values (`[A-Za-z0-9._/-]`, ≤64 chars); anything
 /// else — including a misconfigured or bypassed proxy forwarding attacker-controlled
 /// input — collapses to `fallback`. Keeping label cardinality bounded is what keeps
 /// Prometheus scraping cheap.
 fn sanitize_label<'a>(value: &'a str, fallback: &'static str) -> &'a str {
-    let is_label_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/');
-    let well_formed = value.len() <= 64 && !value.is_empty() && value.chars().all(is_label_char);
+    let well_formed =
+        value.len() <= MAX_LABEL_LEN && !value.is_empty() && value.bytes().all(is_label_byte);
     if well_formed {
         value
     } else {
         fallback
     }
+}
+
+/// Rewrites a raw header value into a label value (`[A-Za-z0-9._/-]`, ≤64 bytes): every
+/// other byte becomes `-` and the result is cut at 64 bytes. A well-formed value passes
+/// through unchanged, so existing series keep their names. Returns `None` for an empty
+/// value. Discarding the whole value instead would collapse every client whose name has a
+/// space or a non-ASCII byte into one shared series, and the name would never be recorded.
+fn slugify_label(value: &[u8]) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    let slug = value
+        .iter()
+        .take(MAX_LABEL_LEN)
+        .map(|&byte| if is_label_byte(byte) { byte as char } else { '-' })
+        .collect();
+    Some(slug)
 }
 
 /// Accepts only `product/version` tokens (e.g. `fynd-client/0.9.0`) as label values;
@@ -185,6 +212,39 @@ mod tests {
     }
 
     #[test]
+    fn slugify_label_passes_well_formed_value() {
+        assert_eq!(
+            slugify_label(b"fynd-preissue-20260720-014"),
+            Some("fynd-preissue-20260720-014".to_string())
+        );
+        assert_eq!(slugify_label(b"Relay"), Some("Relay".to_string()));
+        let max_len_value = "a".repeat(64);
+        assert_eq!(slugify_label(max_len_value.as_bytes()), Some(max_len_value.clone()));
+    }
+
+    #[test]
+    fn slugify_label_replaces_illegal_bytes() {
+        assert_eq!(slugify_label(b"Relay - FOMO"), Some("Relay---FOMO".to_string()));
+        assert_eq!(
+            slugify_label(b"scale; DROP TABLE users"),
+            Some("scale--DROP-TABLE-users".to_string())
+        );
+        // `É` is two UTF-8 bytes, so it becomes two hyphens.
+        assert_eq!(slugify_label("Émile".as_bytes()), Some("--mile".to_string()));
+    }
+
+    #[test]
+    fn slugify_label_truncates_to_max_len() {
+        let oversized = "a".repeat(65);
+        assert_eq!(slugify_label(oversized.as_bytes()), Some("a".repeat(64)));
+    }
+
+    #[test]
+    fn slugify_label_rejects_empty_value() {
+        assert_eq!(slugify_label(b""), None);
+    }
+
+    #[test]
     fn sanitize_client_version_accepts_product_token() {
         assert_eq!(sanitize_client_version("fynd-client/0.9.0"), "fynd-client/0.9.0");
     }
@@ -215,7 +275,31 @@ mod tests {
     }
 
     #[test]
-    fn client_labels_sanitizes_oversized_user_identity() {
+    fn client_labels_slugifies_user_identity() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("user-identity"),
+            HeaderValue::from_static("Relay - FOMO"),
+        );
+        let labels = ClientLabels::from_headers(&headers);
+        assert_eq!(labels.user_identity, "Relay---FOMO");
+    }
+
+    #[test]
+    fn client_labels_slugifies_non_ascii_user_identity() {
+        let mut headers = HeaderMap::new();
+        // Bytes 0x80–0xFF are valid header bytes but fail `HeaderValue::to_str`. The label
+        // must come from the raw bytes, or this client falls back to `unknown`.
+        headers.insert(
+            HeaderName::from_static("user-identity"),
+            HeaderValue::from_bytes("Émile".as_bytes()).unwrap(),
+        );
+        let labels = ClientLabels::from_headers(&headers);
+        assert_eq!(labels.user_identity, "--mile");
+    }
+
+    #[test]
+    fn client_labels_truncates_oversized_user_identity() {
         let mut headers = HeaderMap::new();
         let oversized = "a".repeat(65);
         headers.insert(
@@ -223,8 +307,16 @@ mod tests {
             HeaderValue::from_str(&oversized).unwrap(),
         );
         let labels = ClientLabels::from_headers(&headers);
-        // Distinct from the "unknown" sentinel used when the header is absent: this value
-        // was present but failed sanitization, which signals a misbehaving upstream.
+        assert_eq!(labels.user_identity, "a".repeat(64));
+    }
+
+    #[test]
+    fn client_labels_marks_empty_user_identity_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HeaderName::from_static("user-identity"), HeaderValue::from_static(""));
+        let labels = ClientLabels::from_headers(&headers);
+        // Distinct from the "unknown" sentinel used when the header is absent: the proxy sent
+        // the header with nothing in it, which signals a misbehaving upstream.
         assert_eq!(labels.user_identity, "invalid");
     }
 

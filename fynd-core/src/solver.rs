@@ -173,6 +173,17 @@ fn propamm_fee_tier_fetcher(
     .map_err(|e| SolverBuildError::FeeTierFetcher(e.to_string()))
 }
 
+/// The token pricing pass's hop budget, from the configured pools' `max_hops` values.
+///
+/// Pricing must reach every token a quote can route to — a token within some pool's `max_hops`
+/// but beyond pricing's hop budget would be quoted gas-blind — so the budget follows the deepest
+/// configured pool rather than any constant.
+fn pricing_max_hops(pool_max_hops: impl Iterator<Item = usize>) -> usize {
+    pool_max_hops
+        .max()
+        .unwrap_or(defaults::POOL_MAX_HOPS)
+}
+
 fn parse_connector_tokens(
     raw: Option<&[String]>,
 ) -> Result<Option<FxHashSet<Address>>, SolverBuildError> {
@@ -447,6 +458,14 @@ impl PoolEntry {
         match self {
             PoolEntry::BuiltIn { liquidity_scope, .. } => *liquidity_scope,
             PoolEntry::Custom(custom) => custom.liquidity_scope,
+        }
+    }
+
+    /// Returns the longest route this worker pool may build.
+    fn max_hops(&self) -> usize {
+        match self {
+            PoolEntry::BuiltIn { max_hops, .. } => *max_hops,
+            PoolEntry::Custom(custom) => custom.max_hops,
         }
     }
 }
@@ -854,8 +873,14 @@ impl FyndBuilder {
         let market_event_tx = tycho_feed.event_sender();
 
         let gas_token = native_token(&self.chain).map_err(|_| SolverBuildError::GasToken)?;
+        let pricing_max_hops = pricing_max_hops(
+            self.pools
+                .iter()
+                .map(PoolEntry::max_hops),
+        );
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
+            .with_max_hop(pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.
@@ -866,8 +891,8 @@ impl FyndBuilder {
         let derived_data: SharedDerivedDataRef = computation_manager.store();
         let derived_event_tx = computation_manager.event_sender();
 
-        // Subscribe event channels before spawning (one for computation manager + one per worker
-        // pool)
+        // Subscribe event channels before spawning (one for the computation manager + one per
+        // worker pool)
         let computation_event_rx = tycho_feed.subscribe();
         let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
 
@@ -1482,11 +1507,20 @@ impl Solver {
             });
         }
 
-        // Computation manager
         let gas_token = native_token(&chain).map_err(|_| SolverBuildError::GasToken)?;
+        let pricing_max_hops = pricing_max_hops(
+            pools
+                .values()
+                .map(|pool_cfg| pool_cfg.max_hops()),
+        );
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
-            .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
+            .with_max_hop(pricing_max_hops)
+            .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD)
+            // Replay tests assert exact priced-token counts against a deterministic recording;
+            // an effectively unbounded budget keeps a starved CI machine from cutting the
+            // pricing pass short and failing the count.
+            .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60));
         let (computation_manager, _) =
             ComputationManager::new(computation_config, market_data.clone())
                 .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;

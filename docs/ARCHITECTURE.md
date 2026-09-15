@@ -115,8 +115,8 @@ This modular architecture allows users to:
 │  TychoFeed events ──► ComputationManager                              │
 │                          │                                            │
 │                          ├─ SpotPriceComputation                      │
+│                          ├─ TokenGasPriceComputation                  │
 │                          ├─ ComponentDepthComputation (needs spots)   │
-│                          ├─ TokenGasPriceComputation (needs spots)    │
 │                          │                                            │
 │                          ▼                                            │
 │                     DerivedData Store ──► broadcast events            │
@@ -330,8 +330,8 @@ TychoFeed
     └──► Trigger Gas Price Fetcher
     └──► ComputationManager
             ├──► SpotPriceComputation
-            ├──► ComponentDepthComputation
             ├──► TokenGasPriceComputation
+            ├──► ComponentDepthComputation
             └──► Broadcast DerivedDataEvent
                     └──► Workers (update edge weights + readiness)
 ```

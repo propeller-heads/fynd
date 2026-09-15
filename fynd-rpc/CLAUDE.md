@@ -53,7 +53,7 @@ annotations live in one place.
 | `disable_slippage_taking.rs` | Reads the `x-disable-slippage-taking` header (`from_headers`) and writes it onto the request's `EncodingOptions` (`apply`), in both directions — the header is the only thing that can turn the encoding on |
 | `prices.rs` | Types and helpers for `GET /v1/prices`: query params, response DTOs (`PricesResponse`, `TokenPriceEntry`, etc.), `price_to_decimal_string` exact decimal serialization |
 | `tokens.rs` | Types and helpers for `GET /v1/tokens`: `TokensResponse`/`GraphTokenEntry` DTOs, `build_token_entries` ranking fold, `TokensCache` |
-| `middleware.rs` | HTTP metrics middleware: records `http_request_duration_seconds` (histogram) and `http_requests_total` (counter with per-client `user_identity`/`user_plan`/`client_version` labels sourced from proxy-injected headers) |
+| `middleware.rs` | HTTP metrics middleware: records `http_request_duration_seconds` (histogram) and `http_requests_total` (counter with per-client `user_identity`/`user_plan`/`client_version` labels sourced from proxy-injected headers). A `User-Identity` value outside `[A-Za-z0-9._/-]{1,64}` is slugified byte by byte (`Relay - FOMO` → `Relay---FOMO`, cut at 64 bytes) so the client keeps its own series; an empty value is `invalid`, an absent header is `unknown` |
 
 ## Builder Pattern
 
