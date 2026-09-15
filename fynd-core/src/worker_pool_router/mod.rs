@@ -17,7 +17,10 @@
 //!    transfer costs and router overhead. The `amount_out_net_gas` values are rescaled
 //!    proportionally so the final ranking reflects realistic execution cost.
 //! 5. **Selection**: Choose best quote (max refined `amount_out_net_gas`)
-//! 6. **Encoding**: If [`EncodingOptions`](crate::EncodingOptions) are provided in the request,
+//! 6. **Re-ranking**: Requote the best candidate's RFQ legs against the market maker and rank the
+//!    candidates again on the signed amounts, so a route priced off price levels no maker has
+//!    committed to cannot keep the order
+//! 7. **Encoding**: If [`EncodingOptions`](crate::EncodingOptions) are provided in the request,
 //!    encode winning solutions into executable on-chain transactions via the
 //!    [`encoding::encoder::Encoder`](crate::encoding::encoder::Encoder)
 
@@ -26,6 +29,7 @@ pub mod config;
 mod instrumentation;
 #[cfg(test)]
 mod log_capture;
+mod rerank;
 
 use std::{
     sync::LazyLock,
@@ -562,7 +566,9 @@ impl WorkerPoolRouter {
     /// 2. Sends the order to those worker pools in parallel
     /// 3. Waits for responses with timeout
     /// 4. Selects the best quote based on `amount_out_net_gas`
-    /// 5. If `encoding_options` are set on the request, encodes winning solutions into on-chain
+    /// 5. Requotes the best candidate's RFQ legs and ranks the candidates again on what the market
+    ///    maker signed for
+    /// 6. If `encoding_options` are set on the request, encodes winning solutions into on-chain
     ///    transactions
     ///
     /// `access` is the caller's access to exclusive liquidity, resolved at the trust
@@ -576,6 +582,11 @@ impl WorkerPoolRouter {
     ) -> Result<Quote, SolveError> {
         let ranked = self.solve(&request, access).await?;
         let started = ranked.started();
+        // An indicatively priced candidate is ranked on price levels no maker has committed to,
+        // so the ranking is settled on signed quotes before the winner is fixed.
+        let mut per_order = ranked.into_per_order();
+        rerank::rerank_on_signed_quotes(&mut per_order).await;
+        let ranked = RankedQuotes::started_at(per_order, started)?;
         let mut order_quotes = ranked.into_best();
         if let Some(encoding_options) = request.options().encoding_options() {
             order_quotes = encode_quotes(&self.encoder, order_quotes, encoding_options).await?;
