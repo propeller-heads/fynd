@@ -186,7 +186,7 @@ pub struct PoolConfig {
     #[serde(default)]
     liquidity_scope: Option<LiquidityScope>,
     /// Protocol systems this worker pool's workers never route through, e.g.
-    /// `["propammfallback:"]`. Absent = no restriction.
+    /// `["fallback:"]`. Absent = no restriction.
     #[serde(default)]
     exclude_protocols: Option<Vec<String>>,
 }
@@ -232,7 +232,7 @@ impl PoolConfig {
 
     /// Sets the protocol systems this worker pool never routes through. An entry names a protocol
     /// system exactly (`"uniswap_v2"`), or the whole family under a prefix when it ends with `:`
-    /// (`"propammfallback:"` covers every venue on the PropAMMRouter).
+    /// (`"fallback:"` covers every pAMM the TychoFallbackRouter executes).
     pub fn with_exclude_protocols(mut self, exclude_protocols: Vec<String>) -> Self {
         self.exclude_protocols = Some(exclude_protocols);
         self

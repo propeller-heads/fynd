@@ -44,6 +44,7 @@ use tycho_simulation::{
 };
 
 use super::DataFeedError;
+use crate::fallback::FALLBACK_PREFIX;
 
 /// Opts a protocol into streaming its exclusive pools, e.g. `exclusive:ekubo_v3`.
 ///
@@ -57,15 +58,6 @@ const EXCLUSIVE_CAPABLE_PROTOCOLS: &[&str] = &["ekubo_v3"];
 /// Marks a `--protocols` entry served from the Titan pAMM price level stream rather than from
 /// Tycho, e.g. `pricelevelstream:fermiswap`.
 const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
-
-/// Marks a component whose swaps execute through Titan's PropAMMRouter rather than against the
-/// venue directly, e.g. `propammfallback:fermiswap`.
-///
-/// tycho-simulation gives a venue on the router's on-chain whitelist this family instead of
-/// [`PRICE_LEVEL_STREAM_PREFIX`], so one `pricelevelstream:{venue}` entry can bring in components
-/// under either prefix depending on the whitelist. Fynd never requests this family: it names the
-/// venue, and the stream decides which of the two labels its components carry.
-const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
 
 /// Marks a `--protocols` entry served from an RFQ client rather than from Tycho, e.g.
 /// `rfq:bebop`.
@@ -147,8 +139,8 @@ pub(crate) fn has_tycho_protocols(protocols: &[String]) -> bool {
 /// Most entries name their own label. An `exclusive:{system}` entry selects the system's
 /// exclusive-liquidity stream variant, and the prefix is stripped before registration, so its
 /// components arrive under the bare system name. A `pricelevelstream:{venue}` entry names the venue
-/// to stream, and its components arrive labelled `propammfallback:{venue}` when that venue is on
-/// the PropAMMRouter whitelist, so both prefixes answer for the same entry.
+/// to stream, and its components arrive labelled `fallback:{venue}` when that venue is on the
+/// TychoFallbackRouter whitelist, so both prefixes answer for the same entry.
 pub fn matches_streamed_system(entry: &str, protocol_system: &str) -> bool {
     let entry = entry
         .strip_prefix(EXCLUSIVE_PREFIX)
@@ -158,7 +150,7 @@ pub fn matches_streamed_system(entry: &str, protocol_system: &str) -> bool {
     }
     match (
         entry.strip_prefix(PRICE_LEVEL_STREAM_PREFIX),
-        protocol_system.strip_prefix(PROPAMM_FALLBACK_PREFIX),
+        protocol_system.strip_prefix(FALLBACK_PREFIX),
     ) {
         (Some(requested_venue), Some(streamed_venue)) => requested_venue == streamed_venue,
         _ => false,
@@ -842,17 +834,17 @@ mod tests {
             "pricelevelstream:fermiswap"
         ));
         // The whitelisted venue arrives under the router's family for the same entry.
-        assert!(matches_streamed_system("pricelevelstream:fermiswap", "propammfallback:fermiswap"));
+        assert!(matches_streamed_system("pricelevelstream:fermiswap", "fallback:fermiswap"));
         // The prefix is stripped before registration, so the components carry the bare system.
         assert!(matches_streamed_system("exclusive:ekubo_v3", "ekubo_v3"));
     }
 
     #[test]
     fn test_matches_streamed_system_rejects_another_venue() {
-        assert!(!matches_streamed_system("pricelevelstream:fermiswap", "propammfallback:kipseli"));
+        assert!(!matches_streamed_system("pricelevelstream:fermiswap", "fallback:kipseli"));
         assert!(!matches_streamed_system("pricelevelstream:fermiswap", "vm:fermiswap"));
-        assert!(!matches_streamed_system("uniswap_v3", "propammfallback:fermiswap"));
-        assert!(!matches_streamed_system("vm:fermiswap", "propammfallback:fermiswap"));
+        assert!(!matches_streamed_system("uniswap_v3", "fallback:fermiswap"));
+        assert!(!matches_streamed_system("vm:fermiswap", "fallback:fermiswap"));
         assert!(!matches_streamed_system("exclusive:ekubo_v3", "ekubo_v2"));
     }
 

@@ -76,26 +76,26 @@ impl SolveTask {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteRejection {
-    /// The route has a `propammfallback:` leg whose pair has no fallback pool in this market, so
-    /// the amount the leg would deliver on a fallback cannot be known.
-    PammFallbackPoolMissing,
-    /// The route has a `propammfallback:` leg whose fallback exists but could not be simulated.
-    PammFallbackUnpriceable,
-    /// The route has a `propammfallback:` leg whose every candidate fallback pool the request
-    /// excludes, so no fallback may be selected for it.
-    PammFallbackExcluded,
+    /// The route has a `fallback:` leg whose pair has no fallback pool in this market, so the
+    /// amount the leg would deliver on a fallback cannot be known.
+    FallbackPoolMissing,
+    /// The route has a `fallback:` leg whose fallback exists but could not be simulated.
+    FallbackUnpriceable,
+    /// The route has a `fallback:` leg whose every candidate fallback pool the request excludes,
+    /// so no fallback may be selected for it.
+    FallbackExcluded,
 }
 
 impl std::fmt::Display for RouteRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PammFallbackExcluded => {
-                write!(f, "pAMM route dropped: request excludes its fallback pool")
+            Self::FallbackExcluded => {
+                write!(f, "pAMM route dropped: request excludes every fallback pool for the pair")
             }
-            Self::PammFallbackPoolMissing => {
+            Self::FallbackPoolMissing => {
                 write!(f, "pAMM route dropped: no fallback pool for the pair")
             }
-            Self::PammFallbackUnpriceable => {
+            Self::FallbackUnpriceable => {
                 write!(f, "pAMM route dropped: the fallback could not be simulated")
             }
         }

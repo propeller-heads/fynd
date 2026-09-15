@@ -106,7 +106,7 @@ export interface Transaction {
 export interface RouteFilter {
   /** Pools to exclude, by component id. */
   excludePools?: string[];
-  /** Protocol systems to exclude: exact names (`uniswap_v2`) or family prefixes (`propammfallback:`). */
+  /** Protocol systems to exclude: exact names (`uniswap_v2`) or family prefixes (`fallback:`). */
   excludeProtocols?: string[];
   /**
    * Tokens to exclude as intermediates. The order's own two tokens are always allowed, so

@@ -279,7 +279,7 @@ impl WorkerPoolBuilder {
     }
 
     /// Sets the protocol systems this pool's workers never route through. An entry names a
-    /// protocol system exactly, or a whole family when it ends with `:` (`propammfallback:`).
+    /// protocol system exactly, or a whole family when it ends with `:` (`fallback:`).
     pub fn exclude_protocols(mut self, exclude_protocols: Vec<String>) -> Self {
         self.config.exclude_protocols = exclude_protocols;
         self
