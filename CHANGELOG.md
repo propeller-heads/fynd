@@ -1,4 +1,19 @@
 
+## [0.106.0](https://github.com/propeller-heads/fynd/compare/0.105.0...0.106.0) (2026-09-15)
+
+### Features
+
+* **clients:** drop the pre-quote client fee signature ([47d5630](https://github.com/propeller-heads/fynd/commit/47d563073ebeb9df64e05fdb54c06d85d145751d))
+* **ts:** patch client fee signatures into quoted calldata ([6973db3](https://github.com/propeller-heads/fynd/commit/6973db371d45b885b42f64869079d330b3e35d12))
+* pin exclusive swap payloads to the quoted amounts ([1df690e](https://github.com/propeller-heads/fynd/commit/1df690e846b505f0be28f55882b90c5ce3532cb2))
+
+### Bug Fixes
+
+* **ts-client:** simulate from the sender the transaction will use ([48055ca](https://github.com/propeller-heads/fynd/commit/48055ca3fa3e72c8828c92890e4f27ddd68d7321))
+* **ts-client:** set the caller on eth_call ([275a109](https://github.com/propeller-heads/fynd/commit/275a1091628096bd83027cb7d9b107efbd28ce1d))
+* widen the exclusive swap output cap to 50% ([69253bc](https://github.com/propeller-heads/fynd/commit/69253bc29e39317074ed9e0e02f246cab8dcbe01))
+
+
 ## [0.105.0](https://github.com/propeller-heads/fynd/compare/0.104.0...0.105.0) (2026-09-13)
 
 ### Features
