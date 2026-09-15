@@ -41,20 +41,21 @@ use crate::{
 /// Environment variable holding the pool controller's private key (hex, with or without `0x`).
 pub(crate) const ENV_CONTROLLER_KEY: &str = "EXCLUSIVE_SWAP_CONTROLLER_KEY";
 
-/// Environment variable overriding [`DEFAULT_OUTPUT_CAP_TOLERANCE_BPS`], read when the signer is
-/// built from the environment.
+/// Environment variable overriding `DEFAULT_OUTPUT_CAP_TOLERANCE_BPS`.
 pub(crate) const ENV_OUTPUT_CAP_TOLERANCE_BPS: &str = "EXCLUSIVE_SWAP_OUTPUT_CAP_BPS";
 
 /// Output the pinned cap allows above the quoted amount, in basis points.
 ///
 /// The cap has to survive a pool move in the taker's favour between quoting and execution, or the
-/// taker's own swap reverts on it. Every basis point is equally room a copycat can work with, so
-/// the two costs trade directly against each other and the right value is the favourable drift a
-/// deployment actually sees — hence the override.
-const DEFAULT_OUTPUT_CAP_TOLERANCE_BPS: u32 = 100;
+/// taker's own swap reverts on it. A leg at the end of a route absorbs the drift of every hop
+/// before it, and thin pools move far enough that a tight cap would revert ordinary trades, so the
+/// default is wide. At 50% it still stops a payload being spent at a multiple of the size it was
+/// quoted for. Every basis point is room a copycat can work with, so a deployment that has
+/// measured its own drift can tighten this with the override.
+const DEFAULT_OUTPUT_CAP_TOLERANCE_BPS: u32 = 5_000;
 
 /// Reads the cap tolerance from the environment, falling back to
-/// [`DEFAULT_OUTPUT_CAP_TOLERANCE_BPS`] when the variable is unset or unusable.
+/// `DEFAULT_OUTPUT_CAP_TOLERANCE_BPS` when the variable is unset or unusable.
 fn output_cap_tolerance_bps_env() -> u32 {
     let Ok(raw) = std::env::var(ENV_OUTPUT_CAP_TOLERANCE_BPS) else {
         return DEFAULT_OUTPUT_CAP_TOLERANCE_BPS;
@@ -292,16 +293,16 @@ fn signed_swap_meta(deadline: u32, fee: u32, nonce: u64, authorized_locker: Addr
 /// Builds the `PoolBalanceUpdate` that pins a swap to the amounts it was quoted for.
 ///
 /// The extension compares the realized pool balance deltas against these minimums, and applies its
-/// own fee only after that check. The pool gains `token_in`, so a minimum there floors what the
-/// taker pays in; it loses `token_out`, so a negative minimum there caps the pool's gross outflow —
-/// the taker receives that minus the fee. The two bounds fail in opposite directions, which is why
-/// both are set: the cap rejects an oversized swap, and the floor rejects the reverse swap, whose
-/// `token_in` delta is negative and can never clear a positive floor.
+/// own fee only after that check. The pool gains `token_in`, so the minimum on that side is the
+/// smallest input the swap may pay; it loses `token_out`, so the negative minimum on that side is
+/// the largest output the pool may pay out, before the fee. The cap rejects an oversized swap, and
+/// the floor rejects the reverse swap, whose `token_in` delta is negative and can never clear a
+/// positive floor.
 ///
 /// `floor_factor_bps` scales the quoted input into the floor and comes from the request's slippage
-/// (see `input_floor_factor_bps`), so the floor never rejects drift the router would accept. The
-/// cap is a fixed `OUTPUT_CAP_TOLERANCE_BPS` above the quoted output, because slippage bounds how
-/// much less a taker will accept and says nothing about how much more.
+/// (see `input_floor_factor_bps`), so the floor never rejects drift the router would accept.
+/// `cap_factor_bps` scales the quoted output into the cap and is a fixed tolerance, because
+/// slippage bounds how much less a taker will accept and says nothing about how much more.
 ///
 /// Deltas are ordered by token address to match the on-chain `PoolKey`. Both bounds are widened and
 /// truncated, so the floor lands looser and the cap tighter by up to one base unit.
@@ -313,20 +314,22 @@ fn pinned_min_balance_update(
     floor_factor_bps: u32,
     cap_factor_bps: u32,
 ) -> Result<B256, SolveError> {
-    let pool_token_in_delta =
-        pinned_delta(swap.amount_in(), floor_factor_bps).ok_or_else(|| {
+    let pool_token_in_delta = bps::scale_truncating(swap.amount_in(), floor_factor_bps)
+        .to_i128()
+        .ok_or_else(|| {
             SolveError::FailedEncoding(
                 "pinned input floor overflows the extension's i128 balance delta".to_string(),
             )
         })?;
-    let pool_token_out_delta =
-        -pinned_delta(swap.amount_out(), cap_factor_bps).ok_or_else(|| {
+    let pool_token_out_delta = -bps::scale_truncating(swap.amount_out(), cap_factor_bps)
+        .to_i128()
+        .ok_or_else(|| {
             SolveError::FailedEncoding(
                 "pinned output cap overflows the extension's i128 balance delta".to_string(),
             )
         })?;
 
-    let (delta0, delta1) = if token_in_sorts_first(swap.token_in(), swap.token_out()) {
+    let (delta0, delta1) = if swap.token_in() <= swap.token_out() {
         (pool_token_in_delta, pool_token_out_delta)
     } else {
         (pool_token_out_delta, pool_token_in_delta)
@@ -336,12 +339,6 @@ fn pinned_min_balance_update(
     word[0..16].copy_from_slice(&delta0.to_be_bytes());
     word[16..32].copy_from_slice(&delta1.to_be_bytes());
     Ok(B256::from(word))
-}
-
-/// Scales `amount` by `factor_bps` and converts it to an `i128` delta magnitude; the caller applies
-/// the sign the pool's side of the swap calls for. `None` when the result exceeds `i128::MAX`.
-fn pinned_delta(amount: &BigUint, factor_bps: u32) -> Option<i128> {
-    bps::scale_truncating(amount, factor_bps).to_i128()
 }
 
 /// Derives the extension's 0.32 fixed-point fee so the taker's realized output tracks `committed`.
@@ -413,18 +410,12 @@ fn pool_id(token0: &[u8], token1: &[u8], config: B256) -> Result<B256, SolveErro
     Ok(keccak256(buf))
 }
 
-/// Whether `token_in` is the pool's `token0`, the lower of the two addresses.
-///
-/// The `poolId` the signature covers and the delta halves it pins both order by this rule, so it
-/// lives in one place: if the two ever disagreed, the extension would check the input floor against
-/// the output token.
-fn token_in_sorts_first(token_in: &[u8], token_out: &[u8]) -> bool {
-    token_in <= token_out
-}
-
 /// Orders two token addresses so `token0 < token1`, matching the on-chain `PoolKey`.
+///
+/// `pinned_min_balance_update` orders its two delta halves by the same comparison; if the two ever
+/// disagreed, the extension would check the input floor against the output token.
 fn sorted_tokens<'a>(token_in: &'a [u8], token_out: &'a [u8]) -> (&'a [u8], &'a [u8]) {
-    if token_in_sorts_first(token_in, token_out) {
+    if token_in <= token_out {
         (token_in, token_out)
     } else {
         (token_out, token_in)
@@ -576,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn test_output_cap_tolerance_widens_the_cap() {
+    fn test_output_cap_tolerance_overrides_the_default() {
         let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER)
             .with_output_cap_tolerance_bps(500);
         let swap = swap_with_amounts(0x11, 0x22, 4_000_000, 3_000_000);
@@ -587,7 +578,7 @@ mod tests {
             .build_user_data(&swap, 0.03)
             .unwrap();
 
-        // 5% above the quoted output instead of the default 1%.
+        // 5% above the quoted output instead of the default 50%.
         let (_, cap) = split_min_balance_update(B256::from_slice(&user_data.as_ref()[40..72]));
         assert_eq!(cap, -3_150_000);
     }
@@ -849,10 +840,10 @@ mod tests {
         let config = pool_config_word(swap.protocol_component()).unwrap();
         assert_eq!(&bytes[0..8], &config.as_slice()[20..28]); // pool config fee
                                                               // Pinned against literals, not a second call to the packer: the fixture quotes 1_000_000
-                                                              // in and out, so the floor is 3% below and the cap 1% above.
+                                                              // in and out, so the floor is 3% below and the cap 50% above.
         assert_eq!(
             split_min_balance_update(B256::from_slice(&bytes[40..72])),
-            (970_000, -1_010_000)
+            (970_000, -1_500_000)
         );
 
         // The signature recovers over the digest rebuilt from the payload's meta and minBU.
