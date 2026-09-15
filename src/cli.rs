@@ -149,8 +149,9 @@ pub struct ServeArgs {
 
     /// Watermark appended to every encoded transaction's calldata (e.g. "fynd"), so on-chain
     /// observers can attribute router calls to this deployment. The EVM ignores calldata past
-    /// the ABI-encoded arguments, so the watermark does not change execution. Disabled by
-    /// default.
+    /// the ABI-encoded arguments, so the watermark does not change execution. When unset, the
+    /// calldata is stamped with `fynd/<version>` followed by a truncated SHA-256 of the Tycho
+    /// API key when one is configured.
     #[arg(long, env)]
     pub calldata_watermark: Option<String>,
 
