@@ -204,6 +204,7 @@ fn quote_status_label(status: QuoteStatus) -> &'static str {
         QuoteStatus::Timeout => "timeout",
         QuoteStatus::NotReady => "not_ready",
         QuoteStatus::PriceCheckFailed => "price_check_failed",
+        QuoteStatus::EncodingFailed => "encoding_failed",
     }
 }
 
@@ -238,7 +239,7 @@ pub(super) fn solver_error_label(error: &SolveError) -> &'static str {
         SolveError::InvalidOrder(_) => "invalid_order",
         SolveError::NotReady(_) => "not_ready",
         SolveError::ComputationFailed(_) => "computation_failed",
-        SolveError::FailedEncoding(_) => "failed_encoding",
+        SolveError::FailedEncoding(_) => "encoding_failed",
         SolveError::EncodingUnavailable(_) => "encoding_unavailable",
         SolveError::MaxGasExceeded => "max_gas_exceeded",
         SolveError::MissingData(_) => "missing_data",
