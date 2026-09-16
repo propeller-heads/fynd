@@ -1,0 +1,18 @@
+{
+  "name": "@fynd/swap-client-fee",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@kayibal/fynd-client": "workspace:*",
+    "viem": "2.46.3"
+  },
+  "devDependencies": {
+    "tsx": "4.19.4",
+    "typescript": "5.8.2"
+  }
+}

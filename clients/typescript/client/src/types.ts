@@ -59,8 +59,8 @@ export interface PermitSingle {
 /** Client fee configuration for the Tycho Router.
  *
  * When provided, the router charges a fee in basis points on the swap output.
- * The `signature` must be an EIP-712 signature by the `receiver` over the
- * `ClientFee` typed data — compute the hash with `clientFeeSigningHash`.
+ *
+ * Send these params unsigned; see `patchClientFeeSignature` for the signing flow.
  */
 export interface ClientFeeParams {
   /** Fee in basis points (0–10,000). 100 = 1%. */
@@ -71,8 +71,6 @@ export interface ClientFeeParams {
   maxContribution: bigint;
   /** Unix timestamp after which the signature is invalid. */
   deadline: number;
-  /** 65-byte EIP-712 ECDSA signature by `receiver`. Set after signing. */
-  signature?: Hex;
 }
 
 /** Controls how the solver encodes the settlement transaction. */
@@ -96,6 +94,13 @@ export interface Transaction {
   to: Address;
   value: bigint;
   data: Hex;
+  /**
+   * Byte offset of the client fee signature placeholder within `data`.
+   *
+   * Present only when `clientFeeParams` was set on the quote request. Pass the quote to
+   * `patchClientFeeSignature`, which overwrites the placeholder at this offset.
+   */
+  clientFeeSignatureOffset?: number;
 }
 
 /**
@@ -171,6 +176,13 @@ export interface FeeBreakdown {
   maxSlippage: bigint;
   /** Minimum amount the user receives on-chain (the min_amount_out in the tx). */
   minAmountReceived: bigint;
+  /**
+   * keccak256 of the encoded swaps bytes.
+   *
+   * Present only when `clientFeeParams` was set on the quote request. Pass it to
+   * `clientFeeSigningHash` as `ClientFeeSwapContext.swapsHash`.
+   */
+  swapsHash?: Hex;
 }
 
 /** Outcome of simulating an encoded quote against the latest block. */

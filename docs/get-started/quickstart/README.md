@@ -118,7 +118,7 @@ npm install @kayibal/fynd-client
 const client = new FyndClient({
   baseUrl: FYND_URL,
   sender: account.address,
-  provider: viemProvider(publicClient, account.address),
+  provider: viemProvider(publicClient),
   fetchRevertReason: true,
 });
 
