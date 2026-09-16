@@ -17,6 +17,7 @@
 * [Price Guard](guides/price-guard.md)
 * [Fynd Fees](guides/router-fees.md)
 * [Charge Fees on your Swaps](guides/client-fees.md)
+* [Stable Swap Rate](guides/stable-swap-rate.md)
 * [Benchmarking](guides/benchmarking.md)
 * [Custom Algorithm](guides/custom-algorithm.md)
 
