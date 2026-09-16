@@ -12,8 +12,9 @@
 //! route can end up with several RFQ legs. The decision at the end is all or nothing: a route whose
 //! RFQ legs win per hop but lose after gas is returned unchanged.
 //!
-//! Two kinds of route are left alone: one carrying an exclusive leg (its committed amount is tied
-//! to the leg), and one with a pAMM fallback amount (the amount describes the original legs).
+//! Two kinds of route are left alone: one carrying an exclusive leg (the surplus step compares it
+//! against the public candidates, which do get RFQ legs), and one with a pAMM fallback amount (the
+//! amount describes the original legs).
 
 use std::{
     collections::HashMap,
@@ -39,6 +40,7 @@ use crate::{
     algorithm::{sim_guard::GuardedProtocolSim, split_primitives::split_amount},
     feed::{
         events::MarketEvent,
+        exclusivity::is_exclusive,
         market_data::{MarketData, MarketDataView, MarketState},
     },
     replay::ReplayError,
@@ -281,7 +283,7 @@ fn improve_route(
         route
             .swaps()
             .iter()
-            .any(|swap| swap.committed_amount_out().is_some())
+            .any(|swap| is_exclusive(swap.protocol_component()))
     {
         return Ok(None);
     }
@@ -518,6 +520,7 @@ mod tests {
         algorithm::test_utils::{
             component, setup_market_weighted_boxed, token, MockProtocolSim, MockRfqSim,
         },
+        feed::exclusivity::mark_exclusive,
         types::BlockInfo,
     };
 
@@ -747,8 +750,20 @@ mod tests {
             setup_market_weighted_boxed(vec![("rfq", &a, &b, Box::new(MockRfqSim::new(3.0)))]);
         let view = view(&market);
         let index = RfqIndex::build(&view);
-        let mut swap = pool_swap("excl", &a, &b, 1000, 2000, MockProtocolSim::new(2.0));
-        swap.set_committed_amount_out(BigUint::from(1900u64));
+        let mut exclusive_pool = component("excl", &[a.clone(), b.clone()]);
+        mark_exclusive(&mut exclusive_pool);
+        let state = MockProtocolSim::new(2.0);
+        let swap = Swap::new(
+            "excl".to_string(),
+            "mock".to_string(),
+            a.address.clone(),
+            b.address.clone(),
+            BigUint::from(1000u64),
+            BigUint::from(2000u64),
+            BigUint::from(state.gas),
+            exclusive_pool,
+            Box::new(state),
+        );
         let route = route(vec![swap], &[&a, &b]);
 
         assert!(improve_route(&route, &view, &index)
