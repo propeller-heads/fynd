@@ -592,6 +592,11 @@ pub struct EncodingOptions {
     /// Whether to simulate encoded transactions against the latest block. Defaults to disabled.
     #[serde(default)]
     simulate: bool,
+    /// Calldata watermark for this request, replacing the encoder's deployment-wide one. Set by
+    /// the serving layer from request context (never by the caller), so it is not part of the
+    /// wire format and is not captured for replay.
+    #[serde(skip)]
+    calldata_watermark: Option<Vec<u8>>,
 }
 
 impl EncodingOptions {
@@ -606,6 +611,7 @@ impl EncodingOptions {
             disable_slippage_taking: false,
             price_guard: PriceGuardConfig::default(),
             simulate: false,
+            calldata_watermark: None,
         }
     }
 
@@ -646,6 +652,18 @@ impl EncodingOptions {
     /// Returns whether simulation of the encoded transaction was requested.
     pub fn simulate(&self) -> bool {
         self.simulate
+    }
+
+    /// Stamps this request's calldata with `watermark` instead of the encoder's deployment-wide
+    /// watermark. A hosted service uses it to attribute calldata to the client it serves.
+    pub fn with_calldata_watermark(mut self, watermark: impl Into<Vec<u8>>) -> Self {
+        self.calldata_watermark = Some(watermark.into());
+        self
+    }
+
+    /// Returns the per-request calldata watermark, if set.
+    pub fn calldata_watermark(&self) -> Option<&[u8]> {
+        self.calldata_watermark.as_deref()
     }
 
     /// Returns the permit2 authorization, if set.
@@ -2916,6 +2934,17 @@ mod tests {
             100
         );
         assert!((deserialized.slippage() - 0.005).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_encoding_options_calldata_watermark_not_serialized() {
+        let opts = EncodingOptions::new(0.005).with_calldata_watermark("propeller/acme");
+        assert_eq!(opts.calldata_watermark(), Some(&b"propeller/acme"[..]));
+
+        let json = serde_json::to_string(&opts).unwrap();
+        assert!(!json.contains("watermark"), "watermark leaked onto the wire: {json}");
+        let deserialized: EncodingOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.calldata_watermark(), None);
     }
 
     #[test]
