@@ -1179,9 +1179,12 @@ impl BellmanFordAlgorithm {
             .and_then(|(node, _)| spot_product.get(node.index()).copied())
             .unwrap_or(0.0);
 
-        let token_in_addr = node_address.get(&token_in_node);
-        let output_price =
-            Self::resolve_token_price(Some(out_addr), token_prices, out_node_spot, token_in_addr);
+        let output_price = Self::resolve_token_price(
+            Some(out_addr),
+            token_prices,
+            out_node_spot,
+            node_address.get(&token_in_node),
+        );
 
         Ok(match output_price {
             Some(price) if !price.denominator.is_zero() => {
@@ -1189,7 +1192,7 @@ impl BellmanFordAlgorithm {
                 BigInt::from(amount_out.clone()) - BigInt::from(gas_cost)
             }
             _ => {
-                debug!(output_token = %out_addr, ?token_in_addr, "no gas price for output token, returning gross amount_out");
+                debug!("no gas price for output token, returning gross amount_out");
                 BigInt::from(amount_out.clone())
             }
         })
