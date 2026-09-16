@@ -1187,7 +1187,7 @@ impl BellmanFordAlgorithm {
                 BigInt::from(amount_out.clone()) - BigInt::from(gas_cost)
             }
             _ => {
-                warn!("no gas price for output token, returning gross amount_out");
+                debug!("no gas price for output token, returning gross amount_out");
                 BigInt::from(amount_out.clone())
             }
         })
