@@ -9,3 +9,5 @@ mod derived_data_tests;
 mod solution_tests;
 #[path = "integration/timing_tests.rs"]
 mod timing_tests;
+#[path = "integration/unpriced_tokens.rs"]
+mod unpriced_tokens;
