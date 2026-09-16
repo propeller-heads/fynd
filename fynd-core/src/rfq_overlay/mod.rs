@@ -345,13 +345,20 @@ fn improve_route(
             state.clone_box(),
         )
         .with_split(split);
+        // The leg takes the last member's slot so swaps of the branch that keep a fraction stay
+        // ahead of it; a leg that inherits the remainder then stays last, as the split rules
+        // require.
+        let last_member = members[members.len() - 1];
         for &i in members.iter().rev() {
             swaps.remove(i);
         }
-        swaps.insert(hop, rfq_swap);
+        let slot = last_member - (members.len() - 1);
+        swaps.insert(slot, rfq_swap);
         reprice(&mut swaps, tokens, market, &input_token, &total_in)?;
         replaced = true;
-        hop += 1;
+        if slot == hop {
+            hop += 1;
+        }
     }
     if !replaced {
         return Ok(None);
@@ -740,6 +747,46 @@ mod tests {
         assert_eq!(swap.amount_out(), &BigUint::from(3000u64));
         assert_eq!(*swap.split(), 0.0);
         assert!(improved.route.validate().is_ok());
+    }
+
+    #[test]
+    fn test_improve_route_split_hop_around_other_pair() {
+        let a = token(0x0A, "A");
+        let b = token(0x0B, "B");
+        let c = token(0x0C, "C");
+        let d = token(0x0D, "D");
+        let (market, _) =
+            setup_market_weighted_boxed(vec![("rfq", &a, &b, Box::new(MockRfqSim::new(3.0)))]);
+        let view = view(&market);
+        let index = RfqIndex::build(&view);
+        let route = route(
+            vec![
+                pool_swap("pool_1", &a, &b, 500, 1000, MockProtocolSim::new(2.0)).with_split(0.5),
+                pool_swap("pool_2", &a, &c, 300, 600, MockProtocolSim::new(2.0)).with_split(0.3),
+                pool_swap("pool_3", &a, &b, 200, 400, MockProtocolSim::new(2.0)),
+                pool_swap("pool_4", &b, &d, 1400, 2800, MockProtocolSim::new(2.0)),
+                pool_swap("pool_5", &c, &d, 600, 1200, MockProtocolSim::new(2.0)),
+            ],
+            &[&a, &b, &c, &d],
+        );
+
+        let improved = improve_route(&route, &view, &index)
+            .unwrap()
+            .expect("the RFQ pays more than pool_1 and pool_3 together");
+
+        let ids: Vec<&str> = improved
+            .route
+            .swaps()
+            .iter()
+            .map(Swap::component_id)
+            .collect();
+        assert_eq!(ids, ["pool_2", "rfq", "pool_4", "pool_5"]);
+        let [other_pair, rfq_leg, ..] = improved.route.swaps() else { panic!("four swaps") };
+        assert_eq!(other_pair.amount_in(), &BigUint::from(300u64));
+        assert_eq!(rfq_leg.amount_in(), &BigUint::from(700u64));
+        assert_eq!(*rfq_leg.split(), 0.0);
+        assert!(improved.route.validate().is_ok());
+        assert_eq!(improved.amount_out, BigUint::from(5400u64));
     }
 
     #[test]
