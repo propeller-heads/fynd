@@ -62,7 +62,8 @@ enum FallbackProtocol {
 
 /// The `user_data` JSON naming `leg`'s pool, for the tycho swap the pAMM leg encodes to.
 ///
-/// `token_in` is the leg's input token, which Curve and Fluid need to state their direction.
+/// `token_in` and `token_out` are the leg's own tokens. Curve indexes its `exchange` by them and
+/// Fluid states its direction from `token_in`, and neither can be recovered from the pool alone.
 ///
 /// # Errors
 ///
@@ -72,9 +73,10 @@ enum FallbackProtocol {
 pub(crate) fn fallback_user_data(
     leg: &FallbackLeg,
     token_in: &Address,
+    token_out: &Address,
 ) -> Result<String, FallbackError> {
     let component = leg.protocol_component();
-    let protocol = fallback_protocol(component, token_in)?;
+    let protocol = fallback_protocol(component, token_in, token_out)?;
     serde_json::to_string(&protocol).map_err(|error| FallbackError::MissingPoolData {
         component_id: leg.component_id().to_string(),
         reason: error.to_string(),
@@ -92,21 +94,23 @@ pub(crate) fn fallback_user_data(
 pub(super) fn check_encodable(
     component: &ProtocolComponent,
     token_in: &Address,
+    token_out: &Address,
 ) -> Result<(), FallbackError> {
-    fallback_protocol(component, token_in).map(|_| ())
+    fallback_protocol(component, token_in, token_out).map(|_| ())
 }
 
 /// Reads `component` into the variant its protocol system calls for.
 fn fallback_protocol(
     component: &ProtocolComponent,
     token_in: &Address,
+    token_out: &Address,
 ) -> Result<FallbackProtocol, FallbackError> {
     let pool = pool_address(component)?;
     match component.protocol_system.as_str() {
         "uniswap_v2" => Ok(FallbackProtocol::UniswapV2 { pair: pool, fee_bps: UNISWAP_V2_FEE_BPS }),
         "uniswap_v3" => Ok(FallbackProtocol::UniswapV3 { pool }),
         UNISWAP_V4_SYSTEM => uniswap_v4(component),
-        "vm:curve" => curve(component, pool, token_in),
+        "vm:curve" => curve(component, pool, token_in, token_out),
         "fluid_v1" => Ok(FallbackProtocol::FluidV1 {
             dex: pool,
             zero2one: component.tokens.first() == Some(token_in),
@@ -135,15 +139,11 @@ fn curve(
     component: &ProtocolComponent,
     pool: Address,
     token_in: &Address,
+    token_out: &Address,
 ) -> Result<FallbackProtocol, FallbackError> {
     let pool_type = u8::try_from(attribute_u32(component, CURVE_POOL_TYPE_ATTRIBUTE)?)
         .map_err(|_| unencodable(component, "pool type does not fit a byte".to_string()))?;
     let coins = curve_coins(component);
-    let token_out = component
-        .tokens
-        .iter()
-        .find(|token| *token != token_in)
-        .ok_or_else(|| unencodable(component, "names only one token".to_string()))?;
     let (Some(i), Some(j)) = (coin_index(&coins, token_in), coin_index(&coins, token_out)) else {
         return Err(unencodable(component, "coins do not name both tokens of the pair".to_string()));
     };
@@ -231,8 +231,12 @@ mod tests {
     /// The shape tycho's `test_encode_uniswap_v3_fallback` packs to `…01{pool}`.
     #[test]
     fn test_uniswap_v3_user_data() {
-        let json = fallback_user_data(&leg(USDC_WETH_USV3, "uniswap_v3", &[]), &address(USDC))
-            .expect("encodable");
+        let json = fallback_user_data(
+            &leg(USDC_WETH_USV3, "uniswap_v3", &[]),
+            &address(USDC),
+            &address(WETH),
+        )
+        .expect("encodable");
 
         assert_eq!(json, format!(r#"{{"protocol":"uniswap_v3","pool":"{USDC_WETH_USV3}"}}"#));
     }
@@ -242,7 +246,8 @@ mod tests {
     fn test_uniswap_v2_user_data() {
         let pair = "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc";
         let json =
-            fallback_user_data(&leg(pair, "uniswap_v2", &[]), &address(USDC)).expect("encodable");
+            fallback_user_data(&leg(pair, "uniswap_v2", &[]), &address(USDC), &address(WETH))
+                .expect("encodable");
 
         assert_eq!(json, format!(r#"{{"protocol":"uniswap_v2","pair":"{pair}","fee_bps":30}}"#));
     }
@@ -262,6 +267,7 @@ mod tests {
                 ],
             ),
             &address(USDC),
+            &address(WETH),
         )
         .expect("encodable");
 
@@ -283,6 +289,7 @@ mod tests {
                 &[(UNISWAP_V4_TICK_SPACING_ATTRIBUTE, Bytes::from(vec![60u8]))],
             ),
             &address(USDC),
+            &address(WETH),
         )
         .expect_err("no fee");
 
@@ -307,6 +314,7 @@ mod tests {
                 ],
             ),
             &address(USDC),
+            &address(WETH),
         )
         .expect("encodable");
 
@@ -322,9 +330,11 @@ mod tests {
     fn test_fluid_v1_user_data() {
         let dex = "0x4444444444444444444444444444444444444444";
         let zero_to_one =
-            fallback_user_data(&leg(dex, "fluid_v1", &[]), &address(USDC)).expect("encodable");
+            fallback_user_data(&leg(dex, "fluid_v1", &[]), &address(USDC), &address(WETH))
+                .expect("encodable");
         let one_to_zero =
-            fallback_user_data(&leg(dex, "fluid_v1", &[]), &address(WETH)).expect("encodable");
+            fallback_user_data(&leg(dex, "fluid_v1", &[]), &address(WETH), &address(USDC))
+                .expect("encodable");
 
         assert_eq!(
             zero_to_one,
@@ -339,8 +349,9 @@ mod tests {
     /// A system the router has no venue byte for is rejected rather than encoded as something else.
     #[test]
     fn test_unsupported_protocol_system() {
-        let error = fallback_user_data(&leg("0x1234", "sushiswap_v2", &[]), &address(USDC))
-            .expect_err("not a fallback protocol");
+        let error =
+            fallback_user_data(&leg("0x1234", "sushiswap_v2", &[]), &address(USDC), &address(WETH))
+                .expect_err("not a fallback protocol");
 
         assert!(
             matches!(error, FallbackError::MissingPoolData { .. }),

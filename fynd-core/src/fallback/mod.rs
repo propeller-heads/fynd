@@ -235,7 +235,8 @@ fn select_fallback(
             continue;
         };
         // A pool the router cannot be told how to run is no use however well it prices.
-        if let Err(error) = user_data::check_encodable(component, swap.token_in()) {
+        if let Err(error) = user_data::check_encodable(component, swap.token_in(), swap.token_out())
+        {
             last_failure = Some(error.to_string());
             continue;
         }
