@@ -79,8 +79,9 @@ pub enum RouteRejection {
     /// The route has a `fallback:` leg whose pair has no fallback pool in this market, so the
     /// amount the leg would deliver on a fallback cannot be known.
     FallbackPoolMissing,
-    /// The route has a `fallback:` leg whose fallback exists but could not be simulated.
-    FallbackUnpriceable,
+    /// The route has a `fallback:` leg whose fallback pool exists but could not be run: no
+    /// candidate simulated, or none carried the data the router needs.
+    FallbackNotSimulatable,
     /// The route has a `fallback:` leg whose every candidate fallback pool the request excludes,
     /// so no fallback may be selected for it.
     FallbackExcluded,
@@ -95,8 +96,8 @@ impl std::fmt::Display for RouteRejection {
             Self::FallbackPoolMissing => {
                 write!(f, "pAMM route dropped: no fallback pool for the pair")
             }
-            Self::FallbackUnpriceable => {
-                write!(f, "pAMM route dropped: the fallback could not be simulated")
+            Self::FallbackNotSimulatable => {
+                write!(f, "pAMM route dropped: the fallback could not be run")
             }
         }
     }
