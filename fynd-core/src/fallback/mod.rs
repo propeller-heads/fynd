@@ -18,6 +18,7 @@ pub(crate) mod user_data;
 
 use num_bigint::BigUint;
 use rustc_hash::FxHashMap;
+use tracing::debug;
 use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
 
 use crate::{
@@ -42,17 +43,10 @@ pub const FALLBACK_PREFIX: &str = "fallback:";
 
 /// Protocol systems a pAMM leg may fall back to.
 ///
-/// Must match the systems `TychoFallbackRouter` supports, which Tycho calls venues. A component
-/// under any other protocol system — a Uniswap V2 fork included — has no venue byte the router
-/// understands, so it is never a candidate pool.
+/// Must match the systems `TychoFallbackRouter` supports. A component under any other protocol
+/// system has no protocol byte the router understands, so it is never a candidate pool.
 pub(crate) const FALLBACK_PROTOCOL_SYSTEMS: &[&str] =
     &["uniswap_v2", "uniswap_v3", "uniswap_v4", "vm:curve", "fluid_v1"];
-
-/// The one system in `FALLBACK_PROTOCOL_SYSTEMS` whose pools carry conditions of their own.
-const UNISWAP_V4_SYSTEM: &str = "uniswap_v4";
-
-/// Static attribute naming a Uniswap V4 pool's hook contract.
-const HOOKS_ATTRIBUTE: &str = "hooks";
 
 /// Whether `route` has a leg the `TychoFallbackRouter` executes (`fallback:` protocol family).
 ///
@@ -107,17 +101,12 @@ pub(crate) fn must_withhold_pamm(component: &ProtocolComponent, index: &Fallback
 /// Stamps a fallback pool on every pAMM leg of `route` and returns what the route delivers
 /// through them.
 ///
-/// Each `fallback:` swap gets the `FallbackLeg` that `select_fallback` picks for it, so the
-/// route leaves this call both priced and encodable; every other leg is untouched. Stamping and
-/// pricing are one pass, so a route cannot reach the replay unstamped.
+/// Every other leg is untouched. Stamping and pricing happen in one pass, so a route cannot reach
+/// the replay unstamped, and both read `market`, so a labeled solve prices on the overlay it was
+/// solved on.
 ///
-/// The replay goes through `replay_route`, so split fractions and shared-pool depletion behave
-/// exactly as they do for any other route: a substituted leg's smaller output feeds the next one,
-/// and two legs on one pool see it deplete. Selection and replay both read `market`, so a labeled
-/// solve prices the fallback on the same overlay the route was solved on.
-///
-/// Check `has_fallback_leg` first: a route with no such leg substitutes nothing and pays for a
-/// replay that returns its own amount out.
+/// Check `has_fallback_leg` first: a route with no such leg pays for a replay that returns its own
+/// amount out.
 ///
 /// # Errors
 ///
@@ -219,25 +208,23 @@ fn select_fallback(
     let (Some(token_in), Some(token_out)) =
         (market.get_token(swap.token_in()), market.get_token(swap.token_out()))
     else {
-        return Err(FallbackError::SimulationFailed {
-            component_id: leg.to_string(),
-            reason: "the market holds no token metadata for the leg's pair".to_string(),
-        });
+        debug!(pamm_leg = %leg, "the market holds no token metadata for the leg's pair");
+        return Err(FallbackError::SimulationFailed { component_id: leg.to_string() });
     };
 
     let mut best: Option<FallbackLeg> = None;
-    let mut last_failure: Option<String> = None;
     for candidate in admitted {
         let (Some(component), Some(state)) =
             (market.get_component(candidate), market.get_simulation_state(candidate))
         else {
-            last_failure = Some(format!("{candidate} left the market before it could be priced"));
+            debug!(pamm_leg = %leg, %candidate, "fallback candidate left the market");
             continue;
         };
-        // A pool the router cannot be told how to run is no use however well it prices.
-        if let Err(error) = user_data::check_encodable(component, swap.token_in(), swap.token_out())
+        // A pool we cannot encode is no use however well it prices.
+        if let Err(error) =
+            user_data::fallback_protocol(component, swap.token_in(), swap.token_out())
         {
-            last_failure = Some(error.to_string());
+            debug!(pamm_leg = %leg, %candidate, %error, "skipping fallback candidate");
             continue;
         }
         match state.get_amount_out_guarded(swap.amount_in().clone(), token_in, token_out) {
@@ -247,21 +234,19 @@ fn select_fallback(
                     .is_none_or(|leg| simulated.amount > *leg.amount_out())
                 {
                     best = Some(FallbackLeg::new(
-                        candidate.clone(),
                         component.clone(),
                         state.clone_box(),
                         simulated.amount,
                     ));
                 }
             }
-            Err(error) => last_failure = Some(format!("{candidate}: {error}")),
+            Err(error) => {
+                debug!(pamm_leg = %leg, %candidate, %error, "fallback candidate would not simulate");
+            }
         }
     }
 
-    best.ok_or_else(|| FallbackError::SimulationFailed {
-        component_id: leg.to_string(),
-        reason: last_failure.unwrap_or_else(|| "no candidate pool could be simulated".to_string()),
-    })
+    best.ok_or_else(|| FallbackError::SimulationFailed { component_id: leg.to_string() })
 }
 
 /// Whether the request rules this candidate pool out, by pool id or by protocol system.
@@ -308,13 +293,12 @@ pub enum FallbackError {
         /// The pAMM leg whose candidate pools are all excluded.
         component_id: ComponentId,
     },
-    /// Candidate pools remain, but none could be simulated for the leg's `amount_in`.
-    #[error("no fallback pool for pAMM leg {component_id} could be simulated: {reason}")]
+    /// Candidate pools remain, but none could be run for the leg. Each one's reason is logged at
+    /// debug as it is skipped.
+    #[error("no fallback pool for pAMM leg {component_id} could be used")]
     SimulationFailed {
         /// The pAMM leg whose candidate pools all failed.
         component_id: ComponentId,
-        /// What stopped the last simulation.
-        reason: String,
     },
     /// Every leg has a fallback, but the substituted route could not be replayed, so there is no
     /// amount to floor at.
@@ -444,12 +428,12 @@ fn is_fallback_candidate(component: &ProtocolComponent) -> bool {
     {
         return false;
     }
-    if component.protocol_system != UNISWAP_V4_SYSTEM {
+    if component.protocol_system != "uniswap_v4" {
         return true;
     }
     let hooked = component
         .static_attributes
-        .get(HOOKS_ATTRIBUTE)
+        .get("hooks")
         .is_some_and(|hooks| !is_zero(hooks.as_ref()));
     let native = component
         .tokens
@@ -652,19 +636,19 @@ mod tests {
     #[test]
     fn test_is_fallback_candidate_hooked_or_native_v4() {
         let pair = [util::token(1, "WETH"), util::token(2, "USDC")];
-        let plain = util::component_with_protocol("v4", UNISWAP_V4_SYSTEM, &pair);
+        let plain = util::component_with_protocol("v4", "uniswap_v4", &pair);
         assert!(is_fallback_candidate(&plain));
 
         let mut zero_hooks = plain.clone();
         zero_hooks
             .static_attributes
-            .insert(HOOKS_ATTRIBUTE.to_string(), Bytes::from(vec![0u8; 20]));
+            .insert("hooks".to_string(), Bytes::from(vec![0u8; 20]));
         assert!(is_fallback_candidate(&zero_hooks));
 
         let mut hooked = plain.clone();
         hooked
             .static_attributes
-            .insert(HOOKS_ATTRIBUTE.to_string(), Bytes::from(vec![0x11u8; 20]));
+            .insert("hooks".to_string(), Bytes::from(vec![0x11u8; 20]));
         assert!(!is_fallback_candidate(&hooked));
 
         let mut native = plain;

@@ -28,8 +28,8 @@ pub mod algorithm;
 pub mod derived;
 /// Encodes solved routes into ABI-encoded on-chain calldata via Tycho's router contracts.
 pub mod encoding;
-/// Computes the amount out a route delivers when its pAMM legs fall back to Uniswap V3, so the
-/// encoder can drop a quote whose fallback pays less than `min_amount_out`.
+/// Picks the pool each pAMM leg falls back to and computes what the route delivers through those
+/// pools, so a quote whose fallback pays less than `min_amount_out` can be dropped.
 pub mod fallback;
 /// Market data feed: Tycho WebSocket integration, gas price fetching, and protocol registry.
 pub mod feed;
