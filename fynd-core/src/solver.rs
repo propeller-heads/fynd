@@ -1190,10 +1190,21 @@ impl FyndBuilder {
                 .await;
         });
 
+        let mut task_guard = SolverTaskGuard::new(vec![
+            feed_handle.abort_handle(),
+            gas_price_handle.abort_handle(),
+            metrics_sampler_handle.abort_handle(),
+            router_fee_handle.abort_handle(),
+            fee_tier_handle.abort_handle(),
+            computation_handle.abort_handle(),
+        ]);
+
         let pending = pending_rx
             .await
             .map_err(|_| SolverBuildError::PendingChannelClosed)?
             .map_err(SolverBuildError::FeedSetup)?;
+
+        task_guard.disarm();
 
         Ok((
             Solver {
@@ -1269,10 +1280,21 @@ impl FyndBuilder {
                 .await;
         });
 
+        let mut task_guard = SolverTaskGuard::new(vec![
+            feed_handle.abort_handle(),
+            gas_price_handle.abort_handle(),
+            metrics_sampler_handle.abort_handle(),
+            router_fee_handle.abort_handle(),
+            fee_tier_handle.abort_handle(),
+            computation_handle.abort_handle(),
+        ]);
+
         let controller = controller_rx
             .await
             .map_err(|_| SolverBuildError::StepControllerChannelClosed)?
             .map_err(SolverBuildError::FeedSetup)?;
+
+        task_guard.disarm();
 
         Ok((
             Solver {
@@ -1296,6 +1318,41 @@ impl FyndBuilder {
         ))
     }
 } // impl FyndBuilder
+
+/// Aborts the component tasks a build has already spawned, unless [`Solver`] took ownership of
+/// them.
+///
+/// `build_with_pending` and `build_with_step_controller` spawn the component tasks and then wait
+/// for the feed task to hand back a value over a channel. That wait returns an error when token
+/// loading fails or the channel closes. Dropping a `JoinHandle` detaches its task instead of
+/// stopping it, so a failed build would otherwise leave the Tycho feed connected and consuming
+/// blocks for the lifetime of the process.
+struct SolverTaskGuard {
+    tasks: Vec<AbortHandle>,
+    armed: bool,
+}
+
+impl SolverTaskGuard {
+    fn new(tasks: Vec<AbortHandle>) -> Self {
+        Self { tasks, armed: true }
+    }
+
+    /// Leaves the tasks running, for when [`Solver`] takes ownership of their handles.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SolverTaskGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
 
 /// A running solver assembled by [`FyndBuilder`].
 pub struct Solver {
@@ -1836,5 +1893,34 @@ mod tests {
         .build();
 
         assert!(matches!(result, Err(SolverBuildError::NoPublicPool)));
+    }
+
+    /// A build that fails after spawning its component tasks must not leave them running: a
+    /// detached Tycho feed holds a websocket connection for the lifetime of the process.
+    #[tokio::test]
+    async fn test_solver_task_guard_aborts_armed_tasks() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let guard = SolverTaskGuard::new(vec![task.abort_handle()]);
+
+        drop(guard);
+
+        let join_error = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the guard should have aborted the task")
+            .expect_err("an aborted task reports cancellation");
+        assert!(join_error.is_cancelled());
+    }
+
+    /// A build that succeeds hands the handles to `Solver`, which owns the tasks from then on.
+    #[tokio::test]
+    async fn test_solver_task_guard_leaves_disarmed_tasks_running() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let mut guard = SolverTaskGuard::new(vec![task.abort_handle()]);
+
+        guard.disarm();
+        drop(guard);
+
+        assert!(!task.is_finished());
+        task.abort();
     }
 }
