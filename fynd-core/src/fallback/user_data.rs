@@ -36,7 +36,7 @@ const UNISWAP_V2_FEE_BPS: u8 = 30;
 
 /// The fallback protocol and the data the router needs to run it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "protocol", rename_all = "snake_case")]
+#[serde(tag = "fallback_protocol", rename_all = "snake_case")]
 pub(super) enum FallbackProtocol {
     UniswapV2 { pair: Address, fee_bps: u8 },
     UniswapV3 { pool: Address },
@@ -216,7 +216,10 @@ mod tests {
         )
         .expect("encodable");
 
-        assert_eq!(json, format!(r#"{{"protocol":"uniswap_v3","pool":"{USDC_WETH_USV3}"}}"#));
+        assert_eq!(
+            json,
+            format!(r#"{{"fallback_protocol":"uniswap_v3","pool":"{USDC_WETH_USV3}"}}"#)
+        );
     }
 
     /// Canonical Uniswap V2 charges the 30 bps the router caps its fee at.
@@ -227,7 +230,10 @@ mod tests {
             fallback_user_data(&leg(pair, "uniswap_v2", &[]), &address(USDC), &address(WETH))
                 .expect("encodable");
 
-        assert_eq!(json, format!(r#"{{"protocol":"uniswap_v2","pair":"{pair}","fee_bps":30}}"#));
+        assert_eq!(
+            json,
+            format!(r#"{{"fallback_protocol":"uniswap_v2","pair":"{pair}","fee_bps":30}}"#)
+        );
     }
 
     /// Fee and tick spacing come off the component, matching tycho's V4 decoder attributes.
@@ -252,7 +258,7 @@ mod tests {
         assert_eq!(
             json,
             format!(
-                r#"{{"protocol":"uniswap_v4","fee":3000,"tick_spacing":60,"hook":"{hook}","hook_data":"0x"}}"#
+                r#"{{"fallback_protocol":"uniswap_v4","fee":3000,"tick_spacing":60,"hook":"{hook}","hook_data":"0x"}}"#
             )
         );
     }
@@ -295,7 +301,7 @@ mod tests {
         // USDC is the second coin, WETH the first, so the swap runs 1 -> 0.
         assert_eq!(
             json,
-            format!(r#"{{"protocol":"curve","pool":"{pool}","pool_type":1,"i":1,"j":0}}"#)
+            format!(r#"{{"fallback_protocol":"curve","pool":"{pool}","pool_type":1,"i":1,"j":0}}"#)
         );
     }
 
@@ -312,11 +318,11 @@ mod tests {
 
         assert_eq!(
             zero_to_one,
-            format!(r#"{{"protocol":"fluid_v1","dex":"{dex}","zero2one":true}}"#)
+            format!(r#"{{"fallback_protocol":"fluid_v1","dex":"{dex}","zero2one":true}}"#)
         );
         assert_eq!(
             one_to_zero,
-            format!(r#"{{"protocol":"fluid_v1","dex":"{dex}","zero2one":false}}"#)
+            format!(r#"{{"fallback_protocol":"fluid_v1","dex":"{dex}","zero2one":false}}"#)
         );
     }
 
