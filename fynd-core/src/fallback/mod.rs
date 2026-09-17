@@ -116,12 +116,13 @@ pub(crate) fn price_through_fallbacks(
     market: &MarketDataView<'_>,
     index: &FallbackPoolIndex,
     filter: &RouteExclusionFilter,
+    pool_exclusions: &[String],
 ) -> Result<BigUint, FallbackError> {
     for swap in route.swaps_mut() {
         if !is_fallback_leg(swap) {
             continue;
         }
-        let fallback = select_fallback(swap, market, index, filter)?;
+        let fallback = select_fallback(swap, market, index, filter, pool_exclusions)?;
         swap.set_fallback(fallback);
     }
     let substituted = substitute_fallbacks(route);
@@ -186,6 +187,7 @@ fn select_fallback(
     market: &MarketDataView<'_>,
     index: &FallbackPoolIndex,
     filter: &RouteExclusionFilter,
+    pool_exclusions: &[String],
 ) -> Result<FallbackLeg, FallbackError> {
     let leg = swap.component_id();
     let candidates = index.candidates_for(swap.token_in(), swap.token_out());
@@ -199,7 +201,7 @@ fn select_fallback(
 
     let admitted: Vec<&ComponentId> = candidates
         .iter()
-        .filter(|candidate| !is_excluded(candidate, market, filter))
+        .filter(|candidate| !is_excluded(candidate, market, filter, pool_exclusions))
         .collect();
     if admitted.is_empty() {
         return Err(FallbackError::AllPoolsExcluded { component_id: leg.to_string() });
@@ -249,7 +251,11 @@ fn select_fallback(
     best.ok_or_else(|| FallbackError::SimulationFailed { component_id: leg.to_string() })
 }
 
-/// Whether the request rules this candidate pool out, by pool id or by protocol system.
+/// Whether this candidate pool is ruled out, by the request's own filter or by the worker pool's
+/// `exclude_protocols`.
+///
+/// The fallback executes as part of the route, so a pool told never to route through a protocol
+/// must not settle its pAMM legs there either.
 ///
 /// A candidate the market no longer holds is not excluded here: `select_fallback` drops it when it
 /// fails to read its state, which keeps "the request said no" and "the pool is gone" as separate
@@ -258,6 +264,7 @@ fn is_excluded(
     candidate: &ComponentId,
     market: &MarketDataView<'_>,
     filter: &RouteExclusionFilter,
+    pool_exclusions: &[String],
 ) -> bool {
     if filter
         .excluded_pools()
@@ -269,6 +276,7 @@ fn is_excluded(
     filter
         .excluded_protocols()
         .iter()
+        .chain(pool_exclusions)
         .any(|entry| protocol_matches(entry, &component.protocol_system))
 }
 
@@ -381,7 +389,8 @@ impl FallbackPoolIndex {
             .map_or(&[], Vec::as_slice)
     }
 
-    /// Indexes `component_id` under every pair of its tokens if `is_fallback_candidate` admits it.
+    /// Indexes `component_id` under every pair of its tokens the router could run, if
+    /// `is_fallback_candidate` admits it. A pair with native ETH on either side is skipped.
     ///
     /// A component already indexed is re-filed from scratch, so an addition the market repeats
     /// cannot list it twice.
@@ -394,6 +403,10 @@ impl FallbackPoolIndex {
         let token_count = component.tokens.len();
         let mut pairs = Vec::with_capacity(token_count * (token_count - 1) / 2);
         for (token_a, token_b) in token_pairs(&component.tokens) {
+            // The rest of a pool's coins can still serve, but not a pair the router cannot run.
+            if is_native_token(token_a) || is_native_token(token_b) {
+                continue;
+            }
             let pair = sorted_pair(token_a, token_b);
             self.pools
                 .entry(pair.clone())
@@ -420,8 +433,11 @@ impl FallbackPoolIndex {
 /// Whether `component` can serve as a fallback pool.
 ///
 /// Its protocol system must be one of `FALLBACK_PROTOCOL_SYSTEMS` and it must hold at least two
-/// tokens. A Uniswap V4 pool must also have a zero or absent hook and no native-ETH (zero address)
-/// currency: `TychoFallbackRouter` runs V4 without hook data and without value.
+/// tokens. A Uniswap V4 pool must also have a zero or absent hook, because
+/// `TychoFallbackRouter` runs V4 without hook data.
+///
+/// Native ETH is judged per pair rather than here: a pool holding it alongside ERC20 coins still
+/// serves the pairs that do not touch it. See `FallbackPoolIndex::insert`.
 fn is_fallback_candidate(component: &ProtocolComponent) -> bool {
     if !FALLBACK_PROTOCOL_SYSTEMS.contains(&component.protocol_system.as_str()) ||
         component.tokens.len() < 2
@@ -431,15 +447,21 @@ fn is_fallback_candidate(component: &ProtocolComponent) -> bool {
     if component.protocol_system != "uniswap_v4" {
         return true;
     }
-    let hooked = component
+    !component
         .static_attributes
         .get("hooks")
-        .is_some_and(|hooks| !is_zero(hooks.as_ref()));
-    let native = component
-        .tokens
-        .iter()
-        .any(|token| is_zero(token.as_ref()));
-    !hooked && !native
+        .is_some_and(|hooks| !is_zero(hooks.as_ref()))
+}
+
+/// Whether `token` is native ETH under either name a fallback protocol gives it.
+///
+/// Uniswap V4 uses the zero address; Curve and Fluid use the all-`0xee` sentinel.
+/// `TychoFallbackRouter` moves a leg's tokens with ERC20 transfers and states that native ETH is
+/// unsupported, so neither can be one side of a fallback swap.
+fn is_native_token(token: &Address) -> bool {
+    let bytes = token.as_ref();
+    bytes.len() == 20 &&
+        (bytes.iter().all(|byte| *byte == 0) || bytes.iter().all(|byte| *byte == 0xEE))
 }
 
 /// Every unordered pair of `tokens`, so a component is judged and indexed on the same pairs.
@@ -650,10 +672,47 @@ mod tests {
             .static_attributes
             .insert("hooks".to_string(), Bytes::from(vec![0x11u8; 20]));
         assert!(!is_fallback_candidate(&hooked));
+    }
 
-        let mut native = plain;
-        native.tokens[0] = Address::from(vec![0u8; 20]);
-        assert!(!is_fallback_candidate(&native));
+    /// Native ETH rules out the pair, not the pool: a V4 pool on the zero address and a Curve pool
+    /// on the `0xee` sentinel are filed under their ERC20 pairs and nothing else.
+    #[test]
+    fn test_index_skips_native_pairs() {
+        let native_v4 = Address::from(vec![0u8; 20]);
+        let native_curve = Address::from(vec![0xEEu8; 20]);
+        let market = crate::feed::market_data::MarketData::new_shared();
+        {
+            let mut state = market.try_write().expect("uncontended");
+            let (usdc, weth) = (util::token(1, "USDC"), util::token(2, "WETH"));
+            state.upsert_tokens([usdc.clone(), weth.clone()]);
+            let mut v4 = util::component_with_protocol(
+                WORSE_POOL,
+                "uniswap_v4",
+                &[usdc.clone(), weth.clone()],
+            );
+            v4.tokens[0] = native_v4.clone();
+            let mut curve = util::component_with_protocol(POOL, "vm:curve", &[usdc, weth]);
+            curve.tokens.push(native_curve.clone());
+            state.upsert_components([v4, curve]);
+        }
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
+
+        let index = FallbackPoolIndex::build(&view);
+
+        // The V4 pool's only pair was ETH/WETH, so it is filed under nothing.
+        assert!(index
+            .candidates_for(&native_v4, &addr(2))
+            .is_empty());
+        // The Curve pool keeps USDC/WETH and loses the two pairs that touch ETH.
+        assert_eq!(index.candidates_for(&addr(1), &addr(2)), [POOL.to_string()]);
+        assert!(index
+            .candidates_for(&addr(1), &native_curve)
+            .is_empty());
+        assert!(index
+            .candidates_for(&addr(2), &native_curve)
+            .is_empty());
     }
 
     /// The pair key is order-independent, and a pair the market holds no pool for is empty.
@@ -797,7 +856,7 @@ mod tests {
         let index = FallbackPoolIndex::build(&view);
 
         let fallback =
-            select_fallback(&pamm_swap(), &view, &index, &RouteExclusionFilter::default())
+            select_fallback(&pamm_swap(), &view, &index, &RouteExclusionFilter::default(), &[])
                 .expect("candidates exist");
 
         assert_eq!(fallback.component_id(), BETTER_POOL);
@@ -819,7 +878,8 @@ mod tests {
             .expect("uncontended");
         let index = FallbackPoolIndex::build(&view);
 
-        let fallback = select_fallback(&pamm_swap(), &view, &index, &filter).expect("one left");
+        let fallback =
+            select_fallback(&pamm_swap(), &view, &index, &filter, &[]).expect("one left");
 
         assert_eq!(fallback.component_id(), WORSE_POOL);
     }
@@ -836,12 +896,36 @@ mod tests {
         let filter = RouteExclusionFilter::default()
             .with_excluded_protocols(["uniswap_v2".to_string(), "uniswap_v3".to_string()]);
 
-        let error = select_fallback(&pamm_swap(), &view, &index, &filter).expect_err("none left");
+        let error =
+            select_fallback(&pamm_swap(), &view, &index, &filter, &[]).expect_err("none left");
 
         assert_eq!(
             error,
             FallbackError::AllPoolsExcluded { component_id: PAMM_COMPONENT.to_string() }
         );
+    }
+
+    /// A worker pool told never to route through a protocol must not settle its pAMM legs there
+    /// either, so its own `exclude_protocols` rules candidates out alongside the request's filter.
+    #[test]
+    fn test_select_fallback_honours_the_worker_pools_exclusions() {
+        let market = market_with_fallback_pools();
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
+        let index = FallbackPoolIndex::build(&view);
+        let pool_exclusions = ["uniswap_v2".to_string()];
+
+        let fallback = select_fallback(
+            &pamm_swap(),
+            &view,
+            &index,
+            &RouteExclusionFilter::default(),
+            &pool_exclusions,
+        )
+        .expect("the worse pool is left");
+
+        assert_eq!(fallback.component_id(), WORSE_POOL);
     }
 
     /// A labeled solve selects on its overlay, so a pool the overlay reprices is judged at the
@@ -867,7 +951,7 @@ mod tests {
         let index = FallbackPoolIndex::build(&view);
 
         let fallback =
-            select_fallback(&pamm_swap(), &view, &index, &RouteExclusionFilter::default())
+            select_fallback(&pamm_swap(), &view, &index, &RouteExclusionFilter::default(), &[])
                 .expect("candidate pools exist");
 
         // The overlay halves the better pool, dropping it below the worse one's unchanged 1.0.
@@ -887,9 +971,14 @@ mod tests {
         let mut route = Route::new(vec![pamm_swap(), unbacked_pamm_swap()], FxHashMap::default())
             .expect("non-empty route");
 
-        let error =
-            price_through_fallbacks(&mut route, &view, &index, &RouteExclusionFilter::default())
-                .expect_err("the second leg has no candidate pool");
+        let error = price_through_fallbacks(
+            &mut route,
+            &view,
+            &index,
+            &RouteExclusionFilter::default(),
+            &[],
+        )
+        .expect_err("the second leg has no candidate pool");
 
         assert_eq!(
             error,
@@ -910,8 +999,9 @@ mod tests {
             .expect("uncontended");
         let index = FallbackPoolIndex::build(&view);
 
-        let error = select_fallback(&pamm_swap(), &view, &index, &RouteExclusionFilter::default())
-            .expect_err("no candidates");
+        let error =
+            select_fallback(&pamm_swap(), &view, &index, &RouteExclusionFilter::default(), &[])
+                .expect_err("no candidates");
 
         assert_eq!(
             error,
@@ -934,7 +1024,7 @@ mod tests {
         let mut route = Route::new(vec![uniswap_swap(), pamm_swap()], FxHashMap::default())
             .expect("non-empty route");
 
-        price_through_fallbacks(&mut route, &view, &index, &RouteExclusionFilter::default())
+        price_through_fallbacks(&mut route, &view, &index, &RouteExclusionFilter::default(), &[])
             .expect("candidate pools exist");
 
         let [plain, pamm] = route.swaps() else { panic!("two legs") };
@@ -962,9 +1052,14 @@ mod tests {
             Route::new(vec![pamm_swap().with_split(0.6), pamm_swap()], FxHashMap::default())
                 .expect("non-empty route");
 
-        let amount_out =
-            price_through_fallbacks(&mut route, &view, &index, &RouteExclusionFilter::default())
-                .expect("candidate pools exist");
+        let amount_out = price_through_fallbacks(
+            &mut route,
+            &view,
+            &index,
+            &RouteExclusionFilter::default(),
+            &[],
+        )
+        .expect("candidate pools exist");
 
         // Both legs fall back to the better pool and split one 2000 input: 60% at its 1.5, then
         // the remaining 800 at the 2.5 the mock reports after the first swap. Pricing one leg
