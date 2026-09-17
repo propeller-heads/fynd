@@ -25,10 +25,7 @@ use tycho_simulation::tycho_common::{
     Bytes,
 };
 
-use crate::{
-    fallback::{FallbackError, HOOKS_ATTRIBUTE, UNISWAP_V4_SYSTEM},
-    types::FallbackLeg,
-};
+use crate::{fallback::FallbackError, types::FallbackLeg};
 
 /// The fee every canonical Uniswap V2 pool charges, in basis points.
 ///
@@ -37,22 +34,10 @@ use crate::{
 /// fork here would need the fork's own fee read off the component and checked against that cap.
 const UNISWAP_V2_FEE_BPS: u8 = 30;
 
-/// Curve's coin list, in the pool's own index order.
-const CURVE_COINS_ATTRIBUTE: &str = "coins";
-
-/// How Curve's math variant is grouped, which decides the `exchange` signature the router calls.
-const CURVE_POOL_TYPE_ATTRIBUTE: &str = "pool_type";
-
-/// The Uniswap V4 pool's LP fee, as tycho-simulation's V4 decoder names it.
-const UNISWAP_V4_FEE_ATTRIBUTE: &str = "key_lp_fee";
-
-/// The Uniswap V4 pool's tick spacing.
-const UNISWAP_V4_TICK_SPACING_ATTRIBUTE: &str = "tick_spacing";
-
 /// The fallback protocol and the data the router needs to run it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "protocol", rename_all = "snake_case")]
-enum FallbackProtocol {
+pub(super) enum FallbackProtocol {
     UniswapV2 { pair: Address, fee_bps: u8 },
     UniswapV3 { pool: Address },
     UniswapV4 { fee: u32, tick_spacing: i32, hook: Address, hook_data: Bytes },
@@ -83,24 +68,15 @@ pub(crate) fn fallback_user_data(
     })
 }
 
-/// Whether `component` carries everything `TychoFallbackRouter` needs to run it as a fallback.
+/// Reads `component` into the variant its protocol system calls for.
 ///
-/// Selection calls this so a pool that could not be encoded is never chosen — the alternative is
-/// a route that prices well and then fails at encoding time.
+/// Selection calls this too, so a pool that could not be encoded is never chosen: the alternative
+/// is a route that prices well and then fails at encoding time.
 ///
 /// # Errors
 ///
 /// `MissingPoolData`, with what the component is missing.
-pub(super) fn check_encodable(
-    component: &ProtocolComponent,
-    token_in: &Address,
-    token_out: &Address,
-) -> Result<(), FallbackError> {
-    fallback_protocol(component, token_in, token_out).map(|_| ())
-}
-
-/// Reads `component` into the variant its protocol system calls for.
-fn fallback_protocol(
+pub(super) fn fallback_protocol(
     component: &ProtocolComponent,
     token_in: &Address,
     token_out: &Address,
@@ -109,8 +85,8 @@ fn fallback_protocol(
     match component.protocol_system.as_str() {
         "uniswap_v2" => Ok(FallbackProtocol::UniswapV2 { pair: pool, fee_bps: UNISWAP_V2_FEE_BPS }),
         "uniswap_v3" => Ok(FallbackProtocol::UniswapV3 { pool }),
-        UNISWAP_V4_SYSTEM => uniswap_v4(component),
-        "vm:curve" => curve(component, pool, token_in, token_out),
+        "uniswap_v4" => uniswap_v4_fallback(component),
+        "vm:curve" => curve_fallback(component, pool, token_in, token_out),
         "fluid_v1" => Ok(FallbackProtocol::FluidV1 {
             dex: pool,
             zero2one: component.tokens.first() == Some(token_in),
@@ -121,13 +97,13 @@ fn fallback_protocol(
 
 /// A Uniswap V4 pool identifies itself by its key, not by an address, so its fee, tick spacing and
 /// hook travel instead of a pool address.
-fn uniswap_v4(component: &ProtocolComponent) -> Result<FallbackProtocol, FallbackError> {
-    let fee = attribute_u32(component, UNISWAP_V4_FEE_ATTRIBUTE)?;
-    let tick_spacing = i32::try_from(attribute_u32(component, UNISWAP_V4_TICK_SPACING_ATTRIBUTE)?)
+fn uniswap_v4_fallback(component: &ProtocolComponent) -> Result<FallbackProtocol, FallbackError> {
+    let fee = attribute_u32(component, "key_lp_fee")?;
+    let tick_spacing = i32::try_from(attribute_u32(component, "tick_spacing")?)
         .map_err(|_| unencodable(component, "tick spacing does not fit int24".to_string()))?;
     let hook = component
         .static_attributes
-        .get(HOOKS_ATTRIBUTE)
+        .get("hooks")
         .cloned()
         .unwrap_or_else(|| Address::from(vec![0u8; 20]));
     Ok(FallbackProtocol::UniswapV4 { fee, tick_spacing, hook, hook_data: Bytes::default() })
@@ -135,13 +111,13 @@ fn uniswap_v4(component: &ProtocolComponent) -> Result<FallbackProtocol, Fallbac
 
 /// Curve's `exchange` takes the pair's positions in the pool's own coin list, and a `pool_type`
 /// that decides which `exchange` signature the router calls.
-fn curve(
+fn curve_fallback(
     component: &ProtocolComponent,
     pool: Address,
     token_in: &Address,
     token_out: &Address,
 ) -> Result<FallbackProtocol, FallbackError> {
-    let pool_type = u8::try_from(attribute_u32(component, CURVE_POOL_TYPE_ATTRIBUTE)?)
+    let pool_type = u8::try_from(attribute_u32(component, "pool_type")?)
         .map_err(|_| unencodable(component, "pool type does not fit a byte".to_string()))?;
     let coins = curve_coins(component);
     let (Some(i), Some(j)) = (coin_index(&coins, token_in), coin_index(&coins, token_out)) else {
@@ -150,12 +126,15 @@ fn curve(
     Ok(FallbackProtocol::Curve { pool, pool_type, i, j })
 }
 
-/// The pool's coins in index order, falling back to its token list when it carries no `coins`
-/// attribute — the two agree for a two-coin pool, and only a wider pool can order them differently.
+/// The pool's coins, in the index order Curve's own `exchange` takes.
+///
+/// Curve calls them coins, not tokens, and indexes them by position in the pool. The component's
+/// `tokens` carry no such promise, so they are only the fallback for a pool with no `coins`
+/// attribute, where a two-coin pool leaves nothing to get wrong.
 fn curve_coins(component: &ProtocolComponent) -> Vec<Address> {
     component
         .static_attributes
-        .get(CURVE_COINS_ATTRIBUTE)
+        .get("coins")
         .and_then(|coins| serde_json::from_slice::<Vec<Address>>(coins.as_ref()).ok())
         .unwrap_or_else(|| component.tokens.clone())
 }
@@ -221,7 +200,6 @@ mod tests {
             .map(|(name, value)| ((*name).to_string(), value.clone()))
             .collect::<HashMap<_, _>>();
         FallbackLeg::new(
-            id.to_string(),
             component,
             Box::new(util::MockProtocolSim::new(1.0)),
             num_bigint::BigUint::from(1u32),
@@ -259,11 +237,11 @@ mod tests {
         let json = fallback_user_data(
             &leg(
                 "0x1234",
-                UNISWAP_V4_SYSTEM,
+                "uniswap_v4",
                 &[
-                    (UNISWAP_V4_FEE_ATTRIBUTE, Bytes::from(3000u32.to_be_bytes().to_vec())),
-                    (UNISWAP_V4_TICK_SPACING_ATTRIBUTE, Bytes::from(vec![60u8])),
-                    (HOOKS_ATTRIBUTE, address(hook)),
+                    ("key_lp_fee", Bytes::from(3000u32.to_be_bytes().to_vec())),
+                    ("tick_spacing", Bytes::from(vec![60u8])),
+                    ("hooks", address(hook)),
                 ],
             ),
             &address(USDC),
@@ -283,18 +261,14 @@ mod tests {
     #[test]
     fn test_uniswap_v4_without_fee() {
         let error = fallback_user_data(
-            &leg(
-                "0x1234",
-                UNISWAP_V4_SYSTEM,
-                &[(UNISWAP_V4_TICK_SPACING_ATTRIBUTE, Bytes::from(vec![60u8]))],
-            ),
+            &leg("0x1234", "uniswap_v4", &[("tick_spacing", Bytes::from(vec![60u8]))]),
             &address(USDC),
             &address(WETH),
         )
         .expect_err("no fee");
 
         assert!(
-            matches!(error, FallbackError::MissingPoolData { ref reason, .. } if reason.contains(UNISWAP_V4_FEE_ATTRIBUTE)),
+            matches!(error, FallbackError::MissingPoolData { ref reason, .. } if reason.contains("key_lp_fee")),
             "unexpected error: {error}"
         );
     }
@@ -309,8 +283,8 @@ mod tests {
                 pool,
                 "vm:curve",
                 &[
-                    (CURVE_POOL_TYPE_ATTRIBUTE, Bytes::from(vec![1u8])),
-                    (CURVE_COINS_ATTRIBUTE, Bytes::from(coins.into_bytes())),
+                    ("pool_type", Bytes::from(vec![1u8])),
+                    ("coins", Bytes::from(coins.into_bytes())),
                 ],
             ),
             &address(USDC),
@@ -346,7 +320,31 @@ mod tests {
         );
     }
 
-    /// A system the router has no venue byte for is rejected rather than encoded as something else.
+    /// Every system the index admits as a candidate has a variant here. Adding one to
+    /// `FALLBACK_PROTOCOL_SYSTEMS` without a match arm would make it selectable and then
+    /// unencodable, which this catches at the point the list grows.
+    #[test]
+    fn test_every_admitted_system_encodes() {
+        for system in crate::fallback::FALLBACK_PROTOCOL_SYSTEMS {
+            let attributes: Vec<(&str, Bytes)> = match *system {
+                "uniswap_v4" => vec![
+                    ("key_lp_fee", Bytes::from(3000u32.to_be_bytes().to_vec())),
+                    ("tick_spacing", Bytes::from(vec![60u8])),
+                ],
+                "vm:curve" => vec![("pool_type", Bytes::from(vec![1u8]))],
+                _ => Vec::new(),
+            };
+            let leg = leg(USDC_WETH_USV3, system, &attributes);
+
+            assert!(
+                fallback_user_data(&leg, &address(USDC), &address(WETH)).is_ok(),
+                "{system} is a candidate system with no encoding"
+            );
+        }
+    }
+
+    /// A system the router has no protocol byte for is rejected rather than encoded as something
+    /// else.
     #[test]
     fn test_unsupported_protocol_system() {
         let error =

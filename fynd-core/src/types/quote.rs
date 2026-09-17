@@ -2094,13 +2094,11 @@ pub struct Swap {
 ///
 /// Chosen by the worker among the pools the market holds for the leg's pair, by best simulated
 /// amount out for the leg's `amount_in`. `TychoFallbackRouter` runs it in place of the pAMM swap.
-/// The component and state let the route be replayed through it and let the encoder derive the
-/// router's `[venue][venue data]`. In-process only: it never enters the wire format.
+/// The component and state let the route be replayed through it and let the encoder read the
+/// protocol data the router needs. In-process only: it never enters the wire format.
 #[derive(Debug, Clone)]
 pub struct FallbackLeg {
-    /// Identifier of the fallback pool.
-    component_id: ComponentId,
-    /// The fallback pool's component, which the encoder turns into the router's venue data.
+    /// The fallback pool's component, which carries its id and the data the encoder reads.
     protocol_component: ProtocolComponent,
     /// The fallback pool's state at selection time, so the route can be replayed through it.
     protocol_state: Box<dyn ProtocolSim>,
@@ -2111,17 +2109,16 @@ pub struct FallbackLeg {
 impl FallbackLeg {
     /// Creates a fallback leg on `protocol_component`, priced at `amount_out` for the leg's input.
     pub fn new(
-        component_id: ComponentId,
         protocol_component: ProtocolComponent,
         protocol_state: Box<dyn ProtocolSim>,
         amount_out: BigUint,
     ) -> Self {
-        Self { component_id, protocol_component, protocol_state, amount_out }
+        Self { protocol_component, protocol_state, amount_out }
     }
 
     /// Returns the fallback pool's component ID.
     pub fn component_id(&self) -> &str {
-        &self.component_id
+        &self.protocol_component.id
     }
 
     /// Returns the fallback pool's component.

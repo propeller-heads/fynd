@@ -146,8 +146,8 @@ fn solution_from_quote(
             .with_split(*s.split())
             .with_protocol_state(Arc::from(s.protocol_state().clone_box()))
             .with_estimated_amount_in(s.amount_in().clone());
-            // `TychoFallbackRouter` refuses a swap that does not name where the leg retries, so a
-            // stamped leg carries its pool across as `user_data`.
+            // `TychoFallbackRouter` refuses a swap that does not name its fallback, and the
+            // fallback pool goes in `user_data`.
             let Some(fallback) = s.fallback() else { return Ok(swap) };
             let user_data =
                 fallback_user_data(fallback, s.token_in(), s.token_out()).map_err(|error| {
