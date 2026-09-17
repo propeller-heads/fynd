@@ -20,19 +20,18 @@
 use std::str::FromStr;
 
 use serde::Serialize;
-use tycho_simulation::tycho_common::{
-    models::{protocol::ProtocolComponent, Address},
-    Bytes,
+use tycho_simulation::{
+    tycho_common::{
+        models::{protocol::ProtocolComponent, Address},
+        Bytes,
+    },
+    tycho_core::simulation::protocol_sim::ProtocolSim,
 };
 
 use crate::{fallback::FallbackError, types::FallbackLeg};
 
-/// The fee every canonical Uniswap V2 pool charges, in basis points.
-///
-/// `FALLBACK_PROTOCOL_SYSTEMS` admits `uniswap_v2` alone, not its forks, so every candidate pool
-/// charges this. It is also the most the router accepts — it reverts above 30 — so admitting a
-/// fork here would need the fork's own fee read off the component and checked against that cap.
-const UNISWAP_V2_FEE_BPS: u8 = 30;
+/// The highest Uniswap V2 fee `TychoFallbackRouter` runs; it reverts above this.
+const MAX_UNISWAP_V2_FEE_BPS: u8 = 30;
 
 /// The fallback protocol and the data the router needs to run it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -61,7 +60,7 @@ pub(crate) fn fallback_user_data(
     token_out: &Address,
 ) -> Result<String, FallbackError> {
     let component = leg.protocol_component();
-    let protocol = fallback_protocol(component, token_in, token_out)?;
+    let protocol = fallback_protocol(component, leg.protocol_state(), token_in, token_out)?;
     serde_json::to_string(&protocol).map_err(|error| FallbackError::MissingPoolData {
         component_id: leg.component_id().to_string(),
         reason: error.to_string(),
@@ -73,18 +72,30 @@ pub(crate) fn fallback_user_data(
 /// Selection calls this too, so a pool that could not be encoded is never chosen: the alternative
 /// is a route that prices well and then fails at encoding time.
 ///
+/// A Uniswap V2 or V3 fork encodes as its base protocol. Tycho would accept the fork's own name as
+/// an alias, but the canonical name is what the variant serializes to and needs no alias table on
+/// either side. `state` supplies the fee a V2 pool charges, which differs between forks.
+///
 /// # Errors
 ///
-/// `MissingPoolData`, with what the component is missing.
+/// `MissingPoolData`, with what the component is missing or why the router would refuse it.
 pub(super) fn fallback_protocol(
     component: &ProtocolComponent,
+    state: &dyn ProtocolSim,
     token_in: &Address,
     token_out: &Address,
 ) -> Result<FallbackProtocol, FallbackError> {
     let pool = pool_address(component)?;
     match component.protocol_system.as_str() {
-        "uniswap_v2" => Ok(FallbackProtocol::UniswapV2 { pair: pool, fee_bps: UNISWAP_V2_FEE_BPS }),
-        "uniswap_v3" => Ok(FallbackProtocol::UniswapV3 { pool }),
+        "uniswap_v2" | "sushiswap_v2" | "pancakeswap_v2" | "quickswap_v2" => {
+            Ok(FallbackProtocol::UniswapV2 {
+                pair: pool,
+                fee_bps: uniswap_v2_fee_bps(component, state)?,
+            })
+        }
+        "uniswap_v3" | "pancakeswap_v3" | "sushiswap_v3" | "robinswap_v3" => {
+            Ok(FallbackProtocol::UniswapV3 { pool })
+        }
         "uniswap_v4" => uniswap_v4_fallback(component),
         "vm:curve" => curve_fallback(component, pool, token_in, token_out),
         "fluid_v1" => Ok(FallbackProtocol::FluidV1 {
@@ -93,6 +104,28 @@ pub(super) fn fallback_protocol(
         }),
         other => Err(unencodable(component, format!("{other} is not a fallback protocol"))),
     }
+}
+
+/// The fee a Uniswap V2 pool charges, in basis points, from the state tycho-simulation decoded.
+///
+/// Forks differ here (`pancakeswap_v2` charges 25 where `uniswap_v2` charges 30), and the router
+/// reverts above `MAX_UNISWAP_V2_FEE_BPS`, so a pool over the cap is refused at selection rather
+/// than failing on chain.
+fn uniswap_v2_fee_bps(
+    component: &ProtocolComponent,
+    state: &dyn ProtocolSim,
+) -> Result<u8, FallbackError> {
+    let fee_bps = (state.fee() * 10_000.0).round();
+    if fee_bps < 0.0 || fee_bps > f64::from(MAX_UNISWAP_V2_FEE_BPS) {
+        return Err(FallbackError::MissingPoolData {
+            component_id: component.id.clone(),
+            reason: format!(
+                "charges {fee_bps} bps, the fallback router accepts at most {MAX_UNISWAP_V2_FEE_BPS}"
+            ),
+        });
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(fee_bps as u8)
 }
 
 /// A Uniswap V4 pool identifies itself by its key, not by an address, so its fee, tick spacing and
@@ -199,9 +232,24 @@ mod tests {
             .iter()
             .map(|(name, value)| ((*name).to_string(), value.clone()))
             .collect::<HashMap<_, _>>();
+        leg_with_fee(id, system, attributes, 0.003)
+    }
+
+    /// `leg` at a chosen fee, which only the Uniswap V2 family reads.
+    fn leg_with_fee(id: &str, system: &str, attributes: &[(&str, Bytes)], fee: f64) -> FallbackLeg {
+        let mut component = util::component_with_protocol(
+            id,
+            system,
+            &[util::token(1, "USDC"), util::token(2, "WETH")],
+        );
+        component.tokens = vec![address(USDC), address(WETH)];
+        component.static_attributes = attributes
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone()))
+            .collect::<HashMap<_, _>>();
         FallbackLeg::new(
             component,
-            Box::new(util::MockProtocolSim::new(1.0)),
+            Box::new(util::MockProtocolSim::new(1.0).with_fee(fee)),
             num_bigint::BigUint::from(1u32),
         )
     }
@@ -219,6 +267,45 @@ mod tests {
         assert_eq!(
             json,
             format!(r#"{{"fallback_protocol":"uniswap_v3","pool":"{USDC_WETH_USV3}"}}"#)
+        );
+    }
+
+    /// A V2 fork encodes as Uniswap V2 with its own fee: PancakeSwap's 25 bps rides through, and
+    /// the variant serializes to the canonical name whatever the fork was called.
+    #[test]
+    fn test_uniswap_v2_fork_user_data() {
+        let pair = "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc";
+        let json = fallback_user_data(
+            &leg_with_fee(pair, "pancakeswap_v2", &[], 0.0025),
+            &address(USDC),
+            &address(WETH),
+        )
+        .expect("encodable");
+
+        assert_eq!(
+            json,
+            format!(r#"{{"fallback_protocol":"uniswap_v2","pair":"{pair}","fee_bps":25}}"#)
+        );
+    }
+
+    /// A V2 pool over the router's 30 bps cap is refused here rather than reverting on chain.
+    #[test]
+    fn test_uniswap_v2_fee_above_cap() {
+        let error = fallback_user_data(
+            &leg_with_fee(
+                "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc",
+                "sushiswap_v2",
+                &[],
+                0.0031,
+            ),
+            &address(USDC),
+            &address(WETH),
+        )
+        .expect_err("31 bps is over the cap");
+
+        assert!(
+            matches!(error, FallbackError::MissingPoolData { ref reason, .. } if reason.contains("31")),
+            "unexpected error: {error}"
         );
     }
 
@@ -353,9 +440,12 @@ mod tests {
     /// else.
     #[test]
     fn test_unsupported_protocol_system() {
-        let error =
-            fallback_user_data(&leg("0x1234", "sushiswap_v2", &[]), &address(USDC), &address(WETH))
-                .expect_err("not a fallback protocol");
+        let error = fallback_user_data(
+            &leg("0x1234", "vm:balancer_v2", &[]),
+            &address(USDC),
+            &address(WETH),
+        )
+        .expect_err("not a fallback protocol");
 
         assert!(
             matches!(error, FallbackError::MissingPoolData { .. }),
