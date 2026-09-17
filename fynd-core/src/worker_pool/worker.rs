@@ -470,6 +470,7 @@ where
                         &market,
                         self.pamm_admission.fallback_pools(),
                         params.route_filter(),
+                        &self.exclude_protocols,
                     ) {
                         Ok(amount) => route.set_fallback_amount_out(amount),
                         Err(error) => {
