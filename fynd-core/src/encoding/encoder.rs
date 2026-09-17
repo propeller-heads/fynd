@@ -128,9 +128,10 @@ fn solution_from_quote(
             // `TychoFallbackRouter` refuses a swap that does not name where the leg retries, so a
             // stamped leg carries its pool across as `user_data`.
             let Some(fallback) = s.fallback() else { return Ok(swap) };
-            let user_data = fallback_user_data(fallback, s.token_in()).map_err(|error| {
-                SolveError::FailedEncoding(format!("pAMM leg {}: {error}", s.component_id()))
-            })?;
+            let user_data =
+                fallback_user_data(fallback, s.token_in(), s.token_out()).map_err(|error| {
+                    SolveError::FailedEncoding(format!("pAMM leg {}: {error}", s.component_id()))
+                })?;
             Ok(swap.with_user_data(Bytes::from(user_data.into_bytes())))
         })
         .collect::<Result<Vec<_>, SolveError>>()?;
