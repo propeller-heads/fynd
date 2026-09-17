@@ -72,19 +72,10 @@ pub(crate) const FALLBACK_PROTOCOL_SYSTEMS: &[&str] = &[
 /// Gate `price_through_fallbacks` behind this: it lets a route without such a leg cost neither a
 /// market read lock nor a replay.
 pub(crate) fn has_fallback_leg(route: &Route) -> bool {
-    route
-        .swaps()
-        .iter()
-        .any(is_fallback_leg)
-}
-
-/// Whether `swap` is a leg the `TychoFallbackRouter` executes.
-///
-/// Named for the family, not for a stamped fallback: a leg is one of these before selection has
-/// run, whereas `Swap::fallback` says whether a pool has been chosen for it.
-fn is_fallback_leg(swap: &Swap) -> bool {
-    swap.protocol()
-        .starts_with(FALLBACK_PREFIX)
+    route.swaps().iter().any(|swap| {
+        swap.protocol()
+            .starts_with(FALLBACK_PREFIX)
+    })
 }
 
 /// Whether `component` is a pAMM: a proprietary AMM that publishes a quote ladder per block, and
@@ -138,7 +129,10 @@ pub(crate) fn price_through_fallbacks(
     pool_exclusions: &[String],
 ) -> Result<BigUint, FallbackError> {
     for swap in route.swaps_mut() {
-        if !is_fallback_leg(swap) {
+        if !swap
+            .protocol()
+            .starts_with(FALLBACK_PREFIX)
+        {
             continue;
         }
         let fallback = select_fallback(swap, market, index, filter, pool_exclusions)?;
@@ -354,7 +348,7 @@ impl FallbackError {
             Self::AllPoolsExcluded { .. } => RouteRejection::FallbackExcluded,
             Self::SimulationFailed { .. } |
             Self::ReplayFailed { .. } |
-            Self::MissingPoolData { .. } => RouteRejection::FallbackUnpriceable,
+            Self::MissingPoolData { .. } => RouteRejection::FallbackNotSimulatable,
         }
     }
 }

@@ -433,7 +433,9 @@ fn error_label(error: &SolveError) -> &'static str {
         SolveError::RouteRejected { reason, .. } => match reason {
             RouteRejection::FallbackExcluded => "route rejected: fallback excluded",
             RouteRejection::FallbackPoolMissing => "route rejected: fallback pool missing",
-            RouteRejection::FallbackUnpriceable => "route rejected: pAMM fallback not simulatable",
+            RouteRejection::FallbackNotSimulatable => {
+                "route rejected: pAMM fallback not simulatable"
+            }
             // `RouteRejection` is `#[non_exhaustive]`; a variant added upstream lands here.
             _ => "route rejected: other",
         },

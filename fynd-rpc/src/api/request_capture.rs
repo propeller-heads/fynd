@@ -214,7 +214,7 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
         SolveError::RouteRejected { reason, .. } => match reason {
             RouteRejection::FallbackExcluded => "route/fallback_excluded",
             RouteRejection::FallbackPoolMissing => "route/fallback_pool_missing",
-            RouteRejection::FallbackUnpriceable => "route/fallback_unpriceable",
+            RouteRejection::FallbackNotSimulatable => "route/fallback_not_simulatable",
             _ => "route/other",
         },
         SolveError::InsufficientLiquidity { .. } => "graph/insufficient_liquidity",

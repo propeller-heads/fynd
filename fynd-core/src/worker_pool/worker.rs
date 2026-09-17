@@ -1478,7 +1478,10 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(SolveError::RouteRejected { reason: RouteRejection::FallbackUnpriceable, .. })
+                Err(SolveError::RouteRejected {
+                    reason: RouteRejection::FallbackNotSimulatable,
+                    ..
+                })
             ),
             "expected the unpriceable fallback to drop the route, got {result:?}"
         );

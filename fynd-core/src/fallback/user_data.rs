@@ -102,7 +102,10 @@ pub(super) fn fallback_protocol(
             dex: pool,
             zero2one: component.tokens.first() == Some(token_in),
         }),
-        other => Err(unencodable(component, format!("{other} is not a fallback protocol"))),
+        other => Err(FallbackError::MissingPoolData {
+            component_id: component.id.clone(),
+            reason: format!("{other} is not a fallback protocol"),
+        }),
     }
 }
 
@@ -132,8 +135,12 @@ fn uniswap_v2_fee_bps(
 /// hook travel instead of a pool address.
 fn uniswap_v4_fallback(component: &ProtocolComponent) -> Result<FallbackProtocol, FallbackError> {
     let fee = attribute_u32(component, "key_lp_fee")?;
-    let tick_spacing = i32::try_from(attribute_u32(component, "tick_spacing")?)
-        .map_err(|_| unencodable(component, "tick spacing does not fit int24".to_string()))?;
+    let tick_spacing = i32::try_from(attribute_u32(component, "tick_spacing")?).map_err(|_| {
+        FallbackError::MissingPoolData {
+            component_id: component.id.clone(),
+            reason: "tick spacing does not fit int24".to_string(),
+        }
+    })?;
     let hook = component
         .static_attributes
         .get("hooks")
@@ -150,11 +157,18 @@ fn curve_fallback(
     token_in: &Address,
     token_out: &Address,
 ) -> Result<FallbackProtocol, FallbackError> {
-    let pool_type = u8::try_from(attribute_u32(component, "pool_type")?)
-        .map_err(|_| unencodable(component, "pool type does not fit a byte".to_string()))?;
+    let pool_type = u8::try_from(attribute_u32(component, "pool_type")?).map_err(|_| {
+        FallbackError::MissingPoolData {
+            component_id: component.id.clone(),
+            reason: "pool type does not fit a byte".to_string(),
+        }
+    })?;
     let coins = curve_coins(component);
     let (Some(i), Some(j)) = (coin_index(&coins, token_in), coin_index(&coins, token_out)) else {
-        return Err(unencodable(component, "coins do not name both tokens of the pair".to_string()));
+        return Err(FallbackError::MissingPoolData {
+            component_id: component.id.clone(),
+            reason: "coins do not name both tokens of the pair".to_string(),
+        });
     };
     Ok(FallbackProtocol::Curve { pool, pool_type, i, j })
 }
@@ -182,8 +196,9 @@ fn coin_index(coins: &[Address], token: &Address) -> Option<u8> {
 
 /// The pool's on-chain address, which every protocol but Uniswap V4 keys its fallback on.
 fn pool_address(component: &ProtocolComponent) -> Result<Address, FallbackError> {
-    Address::from_str(&component.id).map_err(|_| {
-        unencodable(component, format!("component id {} is not an address", component.id))
+    Address::from_str(&component.id).map_err(|_| FallbackError::MissingPoolData {
+        component_id: component.id.clone(),
+        reason: format!("component id {} is not an address", component.id),
     })
 }
 
@@ -192,18 +207,20 @@ fn attribute_u32(component: &ProtocolComponent, name: &str) -> Result<u32, Fallb
     let raw = component
         .static_attributes
         .get(name)
-        .ok_or_else(|| unencodable(component, format!("has no {name} static attribute")))?;
+        .ok_or_else(|| FallbackError::MissingPoolData {
+            component_id: component.id.clone(),
+            reason: format!("has no {name} static attribute"),
+        })?;
     let bytes = raw.as_ref();
     if bytes.len() > 4 {
-        return Err(unencodable(component, format!("{name} is wider than four bytes")));
+        return Err(FallbackError::MissingPoolData {
+            component_id: component.id.clone(),
+            reason: format!("{name} is wider than four bytes"),
+        });
     }
     Ok(bytes
         .iter()
         .fold(0u32, |value, byte| (value << 8) | u32::from(*byte)))
-}
-
-fn unencodable(component: &ProtocolComponent, reason: String) -> FallbackError {
-    FallbackError::MissingPoolData { component_id: component.id.clone(), reason }
 }
 
 #[cfg(test)]
