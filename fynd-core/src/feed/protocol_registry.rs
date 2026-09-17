@@ -419,6 +419,15 @@ pub(crate) fn register_exchanges(
                     None,
                 );
             }
+            "up_v3" => {
+                // Up is a Slipstream fork: its pools carry the same `tick_spacing` and
+                // `default_fee` static attributes Aerodrome's decoder reads.
+                builder = builder.exchange::<AerodromeSlipstreamsState>(
+                    "up_v3",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
             "ekubo_v3" => {
                 // SignedExclusiveSwap pools need a controller signature per swap, so they are
                 // only streamed when the deployment explicitly opts in.
@@ -801,8 +810,16 @@ mod tests {
 
     #[test]
     fn test_register_exchanges_registers_every_robinhood_protocol() {
-        let robinhood_protocols =
-            ["sushiswap_v3", "uniswap_v4", "robinswap_v3", "uniswap_v3", "ramses_v3", "uniswap_v2"];
+        let robinhood_protocols = [
+            "sushiswap_v3",
+            "uniswap_v4",
+            "robinswap_v3",
+            "uniswap_v3",
+            "ramses_v3",
+            "uniswap_v2",
+            "ekubo_v3",
+            "up_v3",
+        ];
         let skipped = skipped_unknown_protocols(&robinhood_protocols);
         assert!(
             skipped.is_empty(),
