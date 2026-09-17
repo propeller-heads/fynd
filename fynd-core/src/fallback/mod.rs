@@ -19,7 +19,7 @@ pub(crate) mod user_data;
 use num_bigint::BigUint;
 use rustc_hash::FxHashMap;
 use tracing::debug;
-use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
+use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address, Chain};
 
 use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
@@ -41,31 +41,37 @@ use crate::{
 /// whitelisted venue could use it; any pAMM qualifies for this one.
 pub const FALLBACK_PREFIX: &str = "fallback:";
 
-/// Protocol systems a pAMM leg may fall back to.
+/// Protocol systems a pAMM leg may fall back to on `chain`.
 ///
-/// Must match the systems `TychoFallbackRouter` supports. A component under any other protocol
-/// system has no protocol byte the router understands, so it is never a candidate pool.
-///
-/// The Uniswap V2 and V3 forks encode exactly as their base protocol does, which is why
-/// tycho-execution routes them to the same executors. Replace the two fork groups below with
-/// `tycho_execution::encoding::evm::constants::{UNISWAP_V2_FORKS, UNISWAP_V3_FORKS}` once the
-/// fallback encoder is released: they are `pub` there, and importing them keeps this list from
-/// drifting away from what the encoder accepts.
-pub(crate) const FALLBACK_PROTOCOL_SYSTEMS: &[&str] = &[
-    // UNISWAP_V2_FORKS
-    "uniswap_v2",
-    "sushiswap_v2",
-    "pancakeswap_v2",
-    "quickswap_v2",
-    // UNISWAP_V3_FORKS
-    "uniswap_v3",
-    "pancakeswap_v3",
-    "sushiswap_v3",
-    "robinswap_v3",
-    "uniswap_v4",
-    "vm:curve",
-    "fluid_v1",
-];
+/// Each chain's `TychoFallbackRouter` supports its own set, and a chain with no router deployed
+/// supports none, so every pAMM there is withheld from the graph. A component under any other
+/// protocol system has no protocol byte the router understands, so it is never a candidate pool.
+pub(crate) fn fallback_protocol_systems(chain: Chain) -> &'static [&'static str] {
+    match chain {
+        // The Uniswap V2 and V3 forks encode exactly as their base protocol does, which is why
+        // tycho-execution routes them to the same executors. Replace the two fork groups with
+        // `tycho_execution::encoding::evm::constants::{UNISWAP_V2_FORKS, UNISWAP_V3_FORKS}` once
+        // the fallback encoder is released: they are `pub` there, and importing them keeps this
+        // list from drifting away from what the encoder accepts.
+        Chain::Ethereum => &[
+            // UNISWAP_V2_FORKS
+            "uniswap_v2",
+            "sushiswap_v2",
+            "pancakeswap_v2",
+            "quickswap_v2",
+            // UNISWAP_V3_FORKS
+            "uniswap_v3",
+            "pancakeswap_v3",
+            "sushiswap_v3",
+            "robinswap_v3",
+            // Other protocols
+            "uniswap_v4",
+            "vm:curve",
+            "fluid_v1",
+        ],
+        _ => &[],
+    }
+}
 
 /// Whether `route` has a leg the `TychoFallbackRouter` executes (`fallback:` protocol family).
 ///
@@ -445,14 +451,14 @@ impl FallbackPoolIndex {
 
 /// Whether `component` can serve as a fallback pool.
 ///
-/// Its protocol system must be one of `FALLBACK_PROTOCOL_SYSTEMS` and it must hold at least two
-/// tokens. A Uniswap V4 pool must also have a zero or absent hook, because
-/// `TychoFallbackRouter` runs V4 without hook data.
+/// Its protocol system must be one its chain's router supports (`fallback_protocol_systems`) and
+/// it must hold at least two tokens. A Uniswap V4 pool must also have a zero or absent hook,
+/// because `TychoFallbackRouter` runs V4 without hook data.
 ///
 /// Native ETH is judged per pair rather than here: a pool holding it alongside ERC20 coins still
 /// serves the pairs that do not touch it. See `FallbackPoolIndex::insert`.
 fn is_fallback_candidate(component: &ProtocolComponent) -> bool {
-    if !FALLBACK_PROTOCOL_SYSTEMS.contains(&component.protocol_system.as_str()) ||
+    if !fallback_protocol_systems(component.chain).contains(&component.protocol_system.as_str()) ||
         component.tokens.len() < 2
     {
         return false;
@@ -647,18 +653,22 @@ mod tests {
         assert!(has_fallback_leg(&pamm));
     }
 
-    /// Every system the `TychoFallbackRouter` supports qualifies, forks included; a system it
-    /// has no protocol byte for does not.
+    /// Every system Ethereum's `TychoFallbackRouter` supports qualifies, forks included; a system
+    /// it has no protocol byte for does not, and neither does anything on a chain with no router.
     #[test]
     fn test_is_fallback_candidate_protocol_systems() {
         let pair = [util::token(1, "WETH"), util::token(2, "USDC")];
-        for system in FALLBACK_PROTOCOL_SYSTEMS {
+        for system in fallback_protocol_systems(Chain::Ethereum) {
             let component = util::component_with_protocol("pool", system, &pair);
             assert!(is_fallback_candidate(&component), "{system} must qualify");
         }
 
         let unsupported = util::component_with_protocol("pool", "vm:balancer_v2", &pair);
         assert!(!is_fallback_candidate(&unsupported));
+
+        let mut on_base = util::component_with_protocol("pool", "uniswap_v3", &pair);
+        on_base.chain = Chain::Base;
+        assert!(!is_fallback_candidate(&on_base));
         let pamm = util::component_with_protocol("pool", PAMM_PROTOCOL, &pair);
         assert!(!is_fallback_candidate(&pamm));
         // A pool of one token serves no pair, so it would be filed under nothing.

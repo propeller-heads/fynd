@@ -53,7 +53,7 @@ pub(super) enum FallbackProtocol {
 ///
 /// `MissingPoolData` when the pool's component does not carry what its protocol needs — a V4 pool
 /// with no fee or tick spacing, a Curve pool whose coins do not name the pair, a protocol system
-/// outside `FALLBACK_PROTOCOL_SYSTEMS`.
+/// no chain's router supports.
 pub(crate) fn fallback_user_data(
     leg: &FallbackLeg,
     token_in: &Address,
@@ -430,12 +430,14 @@ mod tests {
         );
     }
 
-    /// Every system the index admits as a candidate has a variant here. Adding one to
-    /// `FALLBACK_PROTOCOL_SYSTEMS` without a match arm would make it selectable and then
+    /// Every system the index admits as a candidate has a variant here. Adding one to a chain's
+    /// list in `fallback_protocol_systems` without a match arm would make it selectable and then
     /// unencodable, which this catches at the point the list grows.
     #[test]
     fn test_every_admitted_system_encodes() {
-        for system in crate::fallback::FALLBACK_PROTOCOL_SYSTEMS {
+        use tycho_simulation::tycho_common::models::Chain;
+
+        for system in crate::fallback::fallback_protocol_systems(Chain::Ethereum) {
             let attributes: Vec<(&str, Bytes)> = match *system {
                 "uniswap_v4" => vec![
                     ("key_lp_fee", Bytes::from(3000u32.to_be_bytes().to_vec())),
