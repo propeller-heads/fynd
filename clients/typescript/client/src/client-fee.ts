@@ -133,6 +133,20 @@ export function clientFeeSigningHash(
 }
 
 /**
+ * Zero-fee client fee params that identify `receiver` as the fee client without charging
+ * anything.
+ *
+ * The router resolves one fee client per swap from `clientFeeReceiver`; without client fee
+ * params that is the transaction sender. Zero-fee params attach `receiver` to the swap, so the
+ * router fee rates configured for that address apply, while `feeBreakdown.clientFee` stays `0`
+ * and no funds move to `receiver`. The receiver key must still sign every swap with
+ * `clientFeeSigningHash`, and the params expire at `deadline` (Unix seconds).
+ */
+export function zeroClientFee(receiver: Address, deadline: number): ClientFeeParams {
+  return { bps: 0, receiver, maxContribution: 0n, deadline };
+}
+
+/**
  * Attach client fee configuration to encoding options.
  *
  * Sign after quoting — see `patchClientFeeSignature`.

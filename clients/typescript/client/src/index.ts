@@ -50,6 +50,7 @@ export {
   clientFeeSigningHash,
   patchClientFeeSignature,
   withClientFee,
+  zeroClientFee,
 } from "./client-fee.js";
 export type { ClientFeeSwapContext } from "./client-fee.js";
 export { FyndClient } from "./client.js";

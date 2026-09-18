@@ -81,6 +81,62 @@ Set it to `0` to collect fees without covering slippage losses. This is the comm
 
 See [Tycho encoding docs](https://docs.propellerheads.xyz/tycho/for-solvers/execution/encoding#encode) for vault details.
 
+## Identify as a client without charging a fee
+
+The router resolves one fee client per swap from `clientFeeReceiver`. Without `ClientFeeParams` that
+is the transaction sender, so when your users submit swaps from their own wallets nothing ties those
+swaps to you, and router fee rates negotiated for your address never apply.
+
+A zero-fee `ClientFeeParams` attaches your address to the swap without charging your users. Build it
+with `zeroClientFee` (TypeScript) or `ClientFeeParams::zero` (Rust), then follow the
+[signing flow](#setting-up-client-fees) above unchanged: the router still verifies the signature, so
+the receiver key must sign every swap.
+
+What changes with zero-fee params:
+
+* `fee_breakdown.client_fee` is `0`. `router_fee` uses the rates configured for the receiver address.
+* No funds move to the receiver. It only signs.
+* The `deadline` applies. A quote without `ClientFeeParams` never expires; one with them reverts on
+  submission after the deadline, so leave room for the time between quoting and submitting.
+
+Only the params differ from the [code examples](#code-examples) below:
+
+{% tabs %}
+{% tab title="TypeScript" %}
+```typescript
+// Zero fee, zero subsidy: the router charges nothing and only records who the client is.
+// `receiver` is the key that signs; it needs no funds.
+const identity = zeroClientFee(clientAccount.address, Math.floor(Date.now() / 1000) + 3600);
+const quote = await client.quote({
+  order,
+  options: { encodingOptions: withClientFee(encodingOptions(SLIPPAGE), identity) },
+});
+// Then sign `clientFeeSigningHash(identity, ...)` with `clientAccount` and call
+// `patchClientFeeSignature`, exactly as in the example below.
+```
+{% endtab %}
+
+{% tab title="Rust" %}
+```rust
+// Zero fee, zero subsidy: the router charges nothing and only records who the client is.
+// `client_signer` is the key that signs; it needs no funds.
+let identity = ClientFeeParams::zero(
+    Bytes::copy_from_slice(client_signer.address().as_slice()),
+    deadline,
+);
+let quote = client
+    .quote(QuoteParams::new(
+        order,
+        QuoteOptions::default()
+            .with_encoding_options(EncodingOptions::new(SLIPPAGE).with_client_fee(identity.clone())),
+    ))
+    .await?;
+// Then sign `identity.eip712_signing_hash(...)` with `client_signer` and call
+// `quote.with_client_fee_signature`, exactly as in the example below.
+```
+{% endtab %}
+{% endtabs %}
+
 ## EIP-712 signing
 
 The fee receiver signs a typed data hash binding the fee params to the swap they were quoted for:

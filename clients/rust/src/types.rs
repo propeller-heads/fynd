@@ -147,6 +147,18 @@ impl ClientFeeParams {
         Self { bps, receiver, max_contribution, deadline }
     }
 
+    /// Create zero-fee client fee params that identify `receiver` as the fee client without
+    /// charging anything.
+    ///
+    /// The router resolves one fee client per swap from `clientFeeReceiver`; without client fee
+    /// params that is the transaction sender. Zero-fee params attach `receiver` to the swap, so
+    /// the router fee rates configured for that address apply, while `fee_breakdown.client_fee`
+    /// stays `0` and no funds move to `receiver`. The receiver key must still sign every swap
+    /// with [`ClientFeeParams::eip712_signing_hash`], and the params expire at `deadline`.
+    pub fn zero(receiver: Bytes, deadline: u64) -> Self {
+        Self::new(0, receiver, BigUint::ZERO, deadline)
+    }
+
     /// Compute the EIP-712 signing hash for the client fee params.
     ///
     /// Pass the returned hash to the fee receiver's signer, then patch the 65-byte result into
@@ -1551,6 +1563,15 @@ mod tests {
         let stored = opts.client_fee_params.as_ref().unwrap();
         assert_eq!(stored.bps, 100);
         assert_eq!(stored.max_contribution, BigUint::from(500_000u64));
+    }
+
+    #[test]
+    fn test_client_fee_zero() {
+        let fee = ClientFeeParams::zero(sample_fee_receiver(), 1_893_456_000);
+        assert_eq!(fee.bps, 0);
+        assert_eq!(fee.receiver, sample_fee_receiver());
+        assert_eq!(fee.max_contribution, BigUint::ZERO);
+        assert_eq!(fee.deadline, 1_893_456_000);
     }
 
     #[test]
