@@ -663,6 +663,9 @@ pub enum QuoteStatus {
     NotReady,
     /// The solution failed external price validation.
     PriceCheckFailed,
+    /// A route was found, but it could not be encoded into router calldata. The quote carries no
+    /// transaction. Other orders in the same request keep theirs.
+    EncodingFailed,
 }
 
 /// Ethereum block at which a quote was computed.
