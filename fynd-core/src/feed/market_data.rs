@@ -412,7 +412,7 @@ impl MarketState {
     /// the components this market holds for that system.
     ///
     /// A protocol system matches exactly (`uniswap_v2`), or as a family when the entry ends in
-    /// `:` (`propammfallback:`). An entry this market holds no component for excludes nothing.
+    /// `:` (`fallback:`). An entry this market holds no component for excludes nothing.
     #[must_use]
     pub fn resolve_route_filter(&self, filter: &RouteExclusionFilter) -> RouteExclusions {
         let mut pools = filter.excluded_pools().clone();
@@ -729,12 +729,11 @@ mod tests {
         let b = token(0x02, "B");
         let mut market = MarketState::new();
         market.upsert_components([
-            component_with_protocol("pamm", "propammfallback:fermiswap", &[a.clone(), b.clone()]),
+            component_with_protocol("pamm", "fallback:fermiswap", &[a.clone(), b.clone()]),
             component_with_protocol("v3", "uniswap_v3", &[a, b]),
         ]);
         let prefix = market.resolve_route_filter(
-            &RouteExclusionFilter::default()
-                .with_excluded_protocols(["propammfallback:".to_string()]),
+            &RouteExclusionFilter::default().with_excluded_protocols(["fallback:".to_string()]),
         );
         let partial = market.resolve_route_filter(
             &RouteExclusionFilter::default().with_excluded_protocols(["propamm".to_string()]),

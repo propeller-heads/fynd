@@ -157,7 +157,7 @@ pub struct RouteFilter {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     exclude_pools: Vec<String>,
     /// Protocol systems to exclude. Matches exact names (`uniswap_v2`) or a family prefix
-    /// ending in `:` (`propammfallback:`). An entry matching no pools excludes nothing.
+    /// ending in `:` (`fallback:`). An entry matching no pools excludes nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "openapi", schema(example = json!(["uniswap_v2"])))]
     exclude_protocols: Vec<String>,

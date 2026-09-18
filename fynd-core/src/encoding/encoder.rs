@@ -28,6 +28,7 @@ use crate::{
         exclusive_swap::ExclusiveSwapSigner,
         router_fees::{FeeRates, SharedRouterFees},
     },
+    fallback::user_data::fallback_user_data,
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, SolveError, Transaction,
 };
 
@@ -116,7 +117,7 @@ fn solution_from_quote(
         .map(|s| {
             let token_in = lookup_token(s.token_in())?;
             let token_out = lookup_token(s.token_out())?;
-            Ok(Swap::new(
+            let swap = Swap::new(
                 s.protocol_component().clone(),
                 token_in,
                 token_out,
@@ -124,7 +125,15 @@ fn solution_from_quote(
             )
             .with_split(*s.split())
             .with_protocol_state(Arc::from(s.protocol_state().clone_box()))
-            .with_estimated_amount_in(s.amount_in().clone()))
+            .with_estimated_amount_in(s.amount_in().clone());
+            // `TychoFallbackRouter` refuses a swap that does not name its fallback, and the
+            // fallback pool goes in `user_data`.
+            let Some(fallback) = s.fallback() else { return Ok(swap) };
+            let user_data =
+                fallback_user_data(fallback, s.token_in(), s.token_out()).map_err(|error| {
+                    SolveError::FailedEncoding(format!("pAMM leg {}: {error}", s.component_id()))
+                })?;
+            Ok(swap.with_user_data(Bytes::from(user_data.into_bytes())))
         })
         .collect::<Result<Vec<_>, SolveError>>()?;
 
@@ -697,10 +706,10 @@ impl Encoder {
         call_data
     }
 
-    /// Whether the quote's pAMM legs fall back to a Uniswap V3 fill that still pays the user's
+    /// Whether the quote's pAMM legs fall back to a fill that still pays the user's
     /// `min_amount_out`.
     ///
-    /// A pAMM leg fills on the venue when the maker's quote reaches the chain, and on a Uniswap V3
+    /// A pAMM leg fills on the venue when the maker's quote reaches the chain, and on its fallback
     /// pool when it does not. `min_amount_out` keeps describing the venue quote and the slippage
     /// the user accepted, so a fallback below that floor reverts. Such a quote must be dropped
     /// before the router picks it, so the next-best candidate is quoted instead.
@@ -742,7 +751,7 @@ impl Encoder {
         )?)
     }
 
-    /// Whether a pAMM route's Uniswap V3 fallback fill clears the floor the router checks.
+    /// Whether a pAMM route's fallback fill clears the floor the router checks.
     ///
     /// `floor` is `min_amount_out`: the venue quote, less fees, less the slippage the user
     /// accepted. The fallback pays less than the venue quote, and when it pays less than the floor
