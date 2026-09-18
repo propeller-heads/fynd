@@ -1,4 +1,18 @@
 
+## [0.107.1](https://github.com/propeller-heads/fynd/compare/0.107.0...0.107.1) (2026-09-18)
+
+### Features
+
+* **clients:** add zero-fee ClientFeeParams constructor ([0d27fe7](https://github.com/propeller-heads/fynd/commit/0d27fe749c97d831dc877634ef3b50216f310451))
+* expose price data status ([673e71f](https://github.com/propeller-heads/fynd/commit/673e71f4acb2a69dd42227d7a5ec13ca46ba9c91))
+
+### Bug Fixes
+
+* address price status review feedback ([7dec1b5](https://github.com/propeller-heads/fynd/commit/7dec1b52c96461495bc1963701274e5157445d00))
+* distinguish uncomputed price data ([47b5979](https://github.com/propeller-heads/fynd/commit/47b59790107aaa078184793506604c8ad55e8270))
+* Remove unnecessary function and drop plan file. ([fc302bd](https://github.com/propeller-heads/fynd/commit/fc302bdce5c29f1f4845a80e87046c74860431ba))
+
+
 ## [0.107.0](https://github.com/propeller-heads/fynd/compare/0.106.0...0.107.0) (2026-09-18)
 
 ### Features
