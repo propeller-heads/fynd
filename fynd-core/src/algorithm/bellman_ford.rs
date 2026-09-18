@@ -533,15 +533,20 @@ impl BellmanFordAlgorithm {
             .clone()
             .unwrap_or_default();
 
-        let net_amount_out = Self::compute_net_amount_out(
-            &final_amount_out,
-            &route,
-            &gas_price,
-            ctx.token_prices.as_ref(),
-            &spfa.spot_product,
-            &ctx.node_address,
-            ctx.token_in_node,
-        )?;
+        let net_amount_out = match ctx.scoring {
+            // Gross scoring means net equals gross by definition, so skip the
+            // conversion and its no-price fallback.
+            RouteScoringMode::GrossOutput => BigInt::from(final_amount_out.clone()),
+            RouteScoringMode::NetOutput => Self::compute_net_amount_out(
+                &final_amount_out,
+                &route,
+                &gas_price,
+                ctx.token_prices.as_ref(),
+                &spfa.spot_product,
+                &ctx.node_address,
+                ctx.token_in_node,
+            )?,
+        };
 
         let result = RouteResult::new(route, net_amount_out, gas_price);
 
@@ -1187,7 +1192,7 @@ impl BellmanFordAlgorithm {
                 BigInt::from(amount_out.clone()) - BigInt::from(gas_cost)
             }
             _ => {
-                warn!("no gas price for output token, returning gross amount_out");
+                debug!("no gas price for output token, returning gross amount_out");
                 BigInt::from(amount_out.clone())
             }
         })
