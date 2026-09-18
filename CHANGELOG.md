@@ -1,4 +1,19 @@
 
+## [0.107.0](https://github.com/propeller-heads/fynd/compare/0.106.0...0.107.0) (2026-09-18)
+
+### Features
+
+* **cli:** stamp a default calldata watermark ([3cc5200](https://github.com/propeller-heads/fynd/commit/3cc520091839dcaf246c994e04c73217d62001f3))
+* **feed:** register up_v3 in the protocol registry ([b959ad5](https://github.com/propeller-heads/fynd/commit/b959ad563466e55ea7ba95575001c1b90116efbd))
+* **core:** set a calldata watermark per request ([ae69201](https://github.com/propeller-heads/fynd/commit/ae6920152ba9ab4b435d4a793abce62f4cf3f0e7))
+* encode each order independently ([02a157c](https://github.com/propeller-heads/fynd/commit/02a157c82b010b6c1e2d2f1c7c2ad395dad687b5))
+
+### Bug Fixes
+
+* **fynd-core:** skip net-of-gas when scoring gross output ([68cd260](https://github.com/propeller-heads/fynd/commit/68cd260ebc9bc7b0a4b33451cc13d31f07f3e2ac))
+* **fynd-core:** lower output-token gas-price log to debug ([720f5bd](https://github.com/propeller-heads/fynd/commit/720f5bd458ce8bc91c05b22397178cf4b484cf15))
+
+
 ## [0.106.0](https://github.com/propeller-heads/fynd/compare/0.105.0...0.106.0) (2026-09-15)
 
 ### Features
