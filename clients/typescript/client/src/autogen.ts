@@ -1,9 +1,8 @@
 /**
  * Thin wrapper around openapi-fetch, bound to the fynd-rpc OpenAPI schema.
  *
- * The schema types live in `./schema.js`, which *is* auto-generated — re-generate it by running:
- *   cargo run -- openapi > clients/openapi.json
- *   openapi-typescript clients/openapi.json -o clients/typescript/client/src/schema.d.ts
+ * The schema types live in `./schema.js`, which *is* auto-generated. Re-generate it from the
+ * repository root with `./scripts/update-openapi.sh`.
  * This file is hand-maintained and is not touched by that pipeline.
  */
 

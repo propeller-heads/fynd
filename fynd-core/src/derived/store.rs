@@ -134,9 +134,17 @@ impl DerivedData {
     /// Each id maps to a single output type, so reading an existing slot as the wrong `T`
     /// is a programmer error: it trips a debug assertion and otherwise returns `None`.
     pub(crate) fn output<T: Any>(&self, id: ComputationId) -> Option<&T> {
-        let slot = self.slots.get(id)?;
+        self.output_with_status(id)
+            .map(|(data, _)| data)
+    }
+
+    /// Returns the typed output and persistence metadata from the same stored slot.
+    fn output_with_status<T: Any>(&self, id: ComputationId) -> Option<(&T, ComputationStatus)> {
+        let slot = self.slots.get(&id)?;
         debug_assert!(slot.data.is::<T>(), "derived output {id} read as the wrong type");
-        slot.data.downcast_ref::<T>()
+        slot.data
+            .downcast_ref::<T>()
+            .map(|data| (data, slot.status))
     }
 
     /// Returns the block at which the output under `id` was last computed.
@@ -192,9 +200,9 @@ impl DerivedData {
         self.output_block(TokenGasPriceComputation::ID)
     }
 
-    /// Returns persistence metadata for token prices, if computed.
-    pub fn token_prices_status(&self) -> Option<ComputationStatus> {
-        self.output_status(TokenGasPriceComputation::ID)
+    /// Returns token prices and their persistence metadata from the same stored output.
+    pub fn token_prices_with_status(&self) -> Option<(&Arc<TokenGasPrices>, ComputationStatus)> {
+        self.output_with_status(TokenGasPriceComputation::ID)
     }
 
     /// Sets token prices, merging failures for incremental runs.
@@ -286,9 +294,9 @@ impl DerivedData {
         self.output_block(ComponentDepthComputation::ID)
     }
 
-    /// Returns persistence metadata for component depths, if computed.
-    pub fn component_depths_status(&self) -> Option<ComputationStatus> {
-        self.output_status(ComponentDepthComputation::ID)
+    /// Returns component depths and their persistence metadata from the same stored output.
+    pub fn component_depths_with_status(&self) -> Option<(&ComponentDepths, ComputationStatus)> {
+        self.output_with_status(ComponentDepthComputation::ID)
     }
 
     /// Sets component depths, merging failures for incremental runs.
@@ -353,9 +361,9 @@ impl DerivedData {
         self.output_block(SpotPriceComputation::ID)
     }
 
-    /// Returns persistence metadata for spot prices, if computed.
-    pub fn spot_prices_status(&self) -> Option<ComputationStatus> {
-        self.output_status(SpotPriceComputation::ID)
+    /// Returns spot prices and their persistence metadata from the same stored output.
+    pub fn spot_prices_with_status(&self) -> Option<(&SpotPrices, ComputationStatus)> {
+        self.output_with_status(SpotPriceComputation::ID)
     }
 
     /// Sets spot prices, merging failures for incremental runs.
@@ -443,7 +451,10 @@ mod tests {
             updated_at,
         );
 
-        let status = store.token_prices_status().unwrap();
+        let (prices, status) = store
+            .token_prices_with_status()
+            .unwrap();
+        assert!(prices.is_empty());
         assert_eq!(status.block(), 42);
         assert_eq!(status.age_ms_at(updated_at + Duration::from_millis(1_234)), 1_234);
     }
@@ -478,60 +489,19 @@ mod tests {
         );
         let compared_at = started_at + Duration::from_millis(50);
 
-        let token_prices = store.token_prices_status().unwrap();
+        let (_, token_prices) = store
+            .token_prices_with_status()
+            .unwrap();
         assert_eq!(token_prices.block(), 20);
         assert_eq!(token_prices.age_ms_at(compared_at), 20);
-        let spot_prices = store.spot_prices_status().unwrap();
+        let (_, spot_prices) = store.spot_prices_with_status().unwrap();
         assert_eq!(spot_prices.block(), 11);
         assert_eq!(spot_prices.age_ms_at(compared_at), 40);
-        let component_depths = store.component_depths_status().unwrap();
+        let (_, component_depths) = store
+            .component_depths_with_status()
+            .unwrap();
         assert_eq!(component_depths.block(), 12);
         assert_eq!(component_depths.age_ms_at(compared_at), 30);
-    }
-
-    #[test]
-    fn test_clear_token_prices_status() {
-        let updated_at = Instant::now();
-        let mut store = DerivedData::new();
-        store.set_output_at(
-            TokenGasPriceComputation::ID,
-            Arc::new(TokenGasPrices::default()),
-            10,
-            updated_at,
-        );
-        store.set_output_at(SpotPriceComputation::ID, SpotPrices::default(), 11, updated_at);
-
-        store.clear_token_prices();
-
-        assert!(store.token_prices_status().is_none());
-        assert!(store.spot_prices_status().is_some());
-    }
-
-    #[test]
-    fn test_clear_all_computation_statuses() {
-        let updated_at = Instant::now();
-        let mut store = DerivedData::new();
-        store.set_output_at(
-            TokenGasPriceComputation::ID,
-            Arc::new(TokenGasPrices::default()),
-            10,
-            updated_at,
-        );
-        store.set_output_at(SpotPriceComputation::ID, SpotPrices::default(), 11, updated_at);
-        store.set_output_at(
-            ComponentDepthComputation::ID,
-            ComponentDepths::default(),
-            12,
-            updated_at,
-        );
-
-        store.clear_all();
-
-        assert!(store.token_prices_status().is_none());
-        assert!(store.spot_prices_status().is_none());
-        assert!(store
-            .component_depths_status()
-            .is_none());
     }
 
     #[test]
@@ -550,8 +520,9 @@ mod tests {
 
         assert_eq!(
             store
-                .token_prices_status()
+                .token_prices_with_status()
                 .unwrap()
+                .1
                 .age_ms_at(compared_at),
             0
         );
@@ -613,9 +584,15 @@ mod tests {
 
         store.clear_all();
 
-        assert!(store.token_prices().is_none());
-        assert!(store.spot_prices().is_none());
-        assert!(store.component_depths().is_none());
+        assert!(store
+            .token_prices_with_status()
+            .is_none());
+        assert!(store
+            .spot_prices_with_status()
+            .is_none());
+        assert!(store
+            .component_depths_with_status()
+            .is_none());
         assert!(!store.derived_data_ready());
     }
 
@@ -704,6 +681,9 @@ mod tests {
         );
         store.clear_token_prices();
         assert_eq!(store.token_price_failure(&token_addr), None);
+        assert!(store
+            .token_prices_with_status()
+            .is_none());
     }
 
     #[test]

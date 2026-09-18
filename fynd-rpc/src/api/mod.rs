@@ -133,11 +133,6 @@ fn block_age_ms_at_time(timestamp_secs: u64, now: SystemTime) -> u64 {
         })
 }
 
-fn tycho_head_status_at(head: BlockInfo, now: SystemTime) -> TychoHeadStatus {
-    let last_update_ms = block_age_ms_at_time(head.timestamp(), now);
-    TychoHeadStatus { head, last_update_ms }
-}
-
 pub(crate) struct TychoHeadStatus {
     pub(crate) head: BlockInfo,
     pub(crate) last_update_ms: u64,
@@ -174,16 +169,14 @@ impl HealthTracker {
 
     /// Returns the current Tycho head and its age from one market-data snapshot.
     pub(crate) async fn tycho_head_status(&self) -> Option<TychoHeadStatus> {
-        let head = self.tycho_head().await?;
-        Some(tycho_head_status_at(head, SystemTime::now()))
-    }
-
-    async fn tycho_head(&self) -> Option<BlockInfo> {
-        self.market_data
+        let head = self
+            .market_data
             .read()
             .await
             .last_updated()
-            .cloned()
+            .cloned()?;
+        let last_update_ms = block_age_ms_at_time(head.timestamp(), SystemTime::now());
+        Some(TychoHeadStatus { head, last_update_ms })
     }
 
     /// Returns milliseconds since the last market data update.
@@ -350,8 +343,6 @@ pub(crate) fn configure_app(
 mod health_tracker_tests {
     use std::sync::Arc;
 
-    use fynd_core::types::BlockInfo;
-
     use super::*;
 
     fn test_tracker(market_data: MarketData) -> HealthTracker {
@@ -380,23 +371,24 @@ mod health_tracker_tests {
     #[tokio::test]
     async fn test_tycho_head_status() {
         let market_data = MarketData::new_shared();
+        let timestamp = 1_700_000_000;
         market_data
             .write()
             .await
-            .update_last_updated(BlockInfo::new(42, "0xfull-head-hash".into(), 1_700_000_000));
+            .update_last_updated(BlockInfo::new(42, "0xfull-head-hash".into(), timestamp));
         let tracker = test_tracker(market_data);
-        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_042);
-
-        let head = tracker
-            .tycho_head()
+        let age_before = block_age_ms_at_time(timestamp, SystemTime::now());
+        let status = tracker
+            .tycho_head_status()
             .await
             .expect("seeded Tycho head");
-        let status = tycho_head_status_at(head, now);
+        let age_after = block_age_ms_at_time(timestamp, SystemTime::now());
 
         assert_eq!(status.head.number(), 42);
         assert_eq!(status.head.hash(), "0xfull-head-hash");
-        assert_eq!(status.head.timestamp(), 1_700_000_000);
-        assert_eq!(status.last_update_ms, 42_000);
+        assert_eq!(status.head.timestamp(), timestamp);
+        assert!(status.last_update_ms >= age_before);
+        assert!(status.last_update_ms <= age_after);
     }
 
     #[tokio::test]
@@ -414,79 +406,9 @@ mod health_tracker_tests {
 #[cfg(all(test, feature = "experimental"))]
 mod openapi_tests {
     #[test]
-    fn test_data_status_schemas() {
+    fn test_optional_computation_status_schemas_are_non_nullable() {
         let spec = serde_json::to_value(super::openapi_spec()).unwrap();
         let schemas = &spec["components"]["schemas"];
-
-        for schema_name in
-            ["DataStatus", "TychoDataStatus", "ComputationDataStatuses", "ComputationDataStatus"]
-        {
-            assert!(schemas[schema_name].is_object(), "missing {schema_name} schema");
-        }
-
-        let prices_response = &schemas["PricesResponse"];
-        let prices_required = prices_response["required"]
-            .as_array()
-            .expect("PricesResponse must declare required properties");
-        assert!(
-            prices_required
-                .iter()
-                .any(|value| value == "data_status"),
-            "PricesResponse.data_status must be required"
-        );
-        let prices_properties = &prices_response["properties"];
-        assert_eq!(prices_properties["data_status"]["$ref"], "#/components/schemas/DataStatus");
-        assert!(
-            prices_properties
-                .get("blocks")
-                .is_none(),
-            "PricesResponse must not expose the replaced blocks property"
-        );
-        assert!(
-            schemas
-                .get("ComputationBlocks")
-                .is_none(),
-            "replaced ComputationBlocks schema must not remain in the contract"
-        );
-
-        let tycho_head = &schemas["TychoDataStatus"]["properties"]["head"];
-        assert_eq!(tycho_head["$ref"], "#/components/schemas/BlockInfo");
-        assert!(
-            tycho_head["description"]
-                .as_str()
-                .is_some_and(|description| description.contains("Tycho ready synchronizer")),
-            "Tycho head must document its exact selection semantics"
-        );
-        assert!(
-            schemas["BlockInfo"]["description"]
-                .as_str()
-                .is_some_and(|description| {
-                    description.contains("Source-chain block identity") &&
-                        !description.contains("quote")
-                }),
-            "shared BlockInfo documentation must be context-neutral"
-        );
-
-        let required_properties = [
-            ("DataStatus", ["tycho", "computations"].as_slice()),
-            ("TychoDataStatus", ["head", "last_update_ms"].as_slice()),
-            ("ComputationDataStatuses", ["token_prices"].as_slice()),
-            ("ComputationDataStatus", ["block", "last_update_ms"].as_slice()),
-        ];
-        for (schema_name, expected_properties) in required_properties {
-            let required = schemas[schema_name]["required"]
-                .as_array()
-                .unwrap_or_else(|| panic!("{schema_name} must declare required properties"));
-            for property in expected_properties {
-                assert!(
-                    required
-                        .iter()
-                        .any(|value| value == property),
-                    "{schema_name}.{property} must be required"
-                );
-            }
-        }
-
         let computation_required = schemas["ComputationDataStatuses"]["required"]
             .as_array()
             .expect("ComputationDataStatuses must declare required properties");

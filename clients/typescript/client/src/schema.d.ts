@@ -50,10 +50,11 @@ export interface paths {
         };
         /**
          * GET /v1/prices - Return per-token mid prices and optional market data.
-         * @description Returns 503 until the first token-price solve has landed. Each `prices[].price` is a
-         *     plain decimal string holding raw target-token units divided by raw gas-token units;
-         *     consumers must normalize both tokens' decimals before using it. Use the `include` query
-         *     parameter to add spot prices and/or component depths.
+         * @description Returns 503 with `NOT_READY` until the first token-price solve has landed and a Tycho head is
+         *     available. In the production feed lifecycle, the Tycho head lands before derived computations.
+         *     Each `prices[].price` is a plain decimal string holding raw target-token units divided by raw
+         *     gas-token units; consumers must normalize both tokens' decimals before using it. Use the
+         *     `include` query parameter to add spot prices and/or component depths.
          *
          *     # Query Parameters
          *
@@ -481,7 +482,7 @@ export interface components {
              * @example 3498000000
              */
             amount_out_net_gas: string;
-            /** @description Block at which this quote was computed. */
+            /** @description Block at which this quote was computed. The quote is valid only for this block. */
             block: components["schemas"]["BlockInfo"];
             fee_breakdown?: null | components["schemas"]["FeeBreakdown"];
             /**
@@ -852,8 +853,9 @@ export interface components {
             head: components["schemas"]["BlockInfo"];
             /**
              * Format: int64
-             * @description Age of the source-chain head in milliseconds, with the same semantics as
-             *     `/v1/health.last_update_ms`.
+             * @description Wall-clock age of the source-chain head in milliseconds, with the same semantics as
+             *     `/v1/health.last_update_ms`. The block timestamp is in whole seconds, so this value has
+             *     one-second granularity and is not directly comparable to monotonic computation ages.
              */
             last_update_ms: number;
         };
@@ -959,7 +961,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Data not yet available */
+            /** @description NOT_READY: token prices, requested computations, or Tycho head are not yet available */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -1062,7 +1064,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Data not yet available */
+            /** @description NOT_READY: token prices have not yet been computed */
             503: {
                 headers: {
                     [name: string]: unknown;

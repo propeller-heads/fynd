@@ -107,8 +107,9 @@ pub struct TychoDataStatus {
     /// This identifies Fynd's current Tycho-derived market snapshot; it is not an independent
     /// query of the canonical chain head.
     pub head: crate::api::dto::BlockInfo,
-    /// Age of the source-chain head in milliseconds, with the same semantics as
-    /// `/v1/health.last_update_ms`.
+    /// Wall-clock age of the source-chain head in milliseconds, with the same semantics as
+    /// `/v1/health.last_update_ms`. The block timestamp is in whole seconds, so this value has
+    /// one-second granularity and is not directly comparable to monotonic computation ages.
     pub last_update_ms: u64,
 }
 
@@ -334,7 +335,7 @@ mod tests {
             },
             computations: ComputationDataStatuses {
                 token_prices: ComputationDataStatus { block: 20_999_998, last_update_ms: 125 },
-                spot_prices: None,
+                spot_prices: Some(ComputationDataStatus { block: 20_999_997, last_update_ms: 250 }),
                 component_depths: None,
             },
         };
@@ -355,25 +356,11 @@ mod tests {
                         "block": 20_999_998,
                         "last_update_ms": 125,
                     },
+                    "spot_prices": {
+                        "block": 20_999_997,
+                        "last_update_ms": 250,
+                    },
                 },
-            })
-        );
-    }
-
-    #[test]
-    fn test_data_status_serializes_available_optional_computations() {
-        let computations = ComputationDataStatuses {
-            token_prices: ComputationDataStatus { block: 10, last_update_ms: 100 },
-            spot_prices: Some(ComputationDataStatus { block: 11, last_update_ms: 200 }),
-            component_depths: Some(ComputationDataStatus { block: 12, last_update_ms: 300 }),
-        };
-
-        assert_eq!(
-            serde_json::to_value(computations).unwrap(),
-            serde_json::json!({
-                "token_prices": { "block": 10, "last_update_ms": 100 },
-                "spot_prices": { "block": 11, "last_update_ms": 200 },
-                "component_depths": { "block": 12, "last_update_ms": 300 },
             })
         );
     }
