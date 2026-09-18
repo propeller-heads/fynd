@@ -8,6 +8,10 @@ Fynd charges a fee when you execute a swap. Quotes are free.
 
 The default Fynd fee is 0.1 bps (0.001%) of swap output. Contact us for volume discounts.
 
+Negotiated rates are keyed to your address. When your users submit swaps from their own wallets,
+[identify yourself with zero-fee client fee params](client-fees.md#identify-as-a-client-without-charging-a-fee)
+so the rates apply.
+
 If you charge your own swap fees, Fynd also takes 20% of those fees. See [Charge Fees on your Swaps](client-fees.md).
 
 ## Fee breakdown

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { clientFeeSigningHash, patchClientFeeSignature, withClientFee } from './client-fee.js';
+import {
+  clientFeeSigningHash,
+  patchClientFeeSignature,
+  withClientFee,
+  zeroClientFee,
+} from './client-fee.js';
 import type { ClientFeeSwapContext } from './client-fee.js';
 import { encodingOptions } from './permit2.js';
 import { FyndError } from './error.js';
@@ -109,6 +114,17 @@ describe('clientFeeSigningHash', () => {
       swapsHash: `0x${'22'.repeat(32)}` as Hex,
     });
     expect(hash1).not.toBe(hash2);
+  });
+});
+
+describe('zeroClientFee', () => {
+  it('charges nothing and subsidizes nothing', () => {
+    expect(zeroClientFee(FEE_RECEIVER, 1893456000)).toEqual({
+      bps: 0,
+      receiver: FEE_RECEIVER,
+      maxContribution: 0n,
+      deadline: 1893456000,
+    });
   });
 });
 
