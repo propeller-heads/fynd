@@ -25,7 +25,7 @@ cargo run --manifest-path "$REPO_ROOT/Cargo.toml" --features fynd-rpc/experiment
 echo "    Written: $OPENAPI_JSON"
 
 echo "==> Regenerating TypeScript schema..."
-npx --yes openapi-typescript "$OPENAPI_JSON" -o "$TS_SCHEMA"
+npx --yes openapi-typescript@7.13.0 "$OPENAPI_JSON" -o "$TS_SCHEMA"
 echo "    Written: $TS_SCHEMA"
 
 echo "Done. Commit both files if they changed."

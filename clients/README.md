@@ -31,8 +31,8 @@ in one step. Commit both files afterwards.
 
 | Step | Command |
 |------|---------|
-| Export OpenAPI spec | `cargo run -- openapi > clients/openapi.json` |
-| Regenerate TS schema | `npx openapi-typescript clients/openapi.json -o clients/typescript/client/src/schema.d.ts` |
+| Export OpenAPI spec | `cargo run --locked --features fynd-rpc/experimental -- openapi > clients/openapi.json` |
+| Regenerate TS schema | `npx --yes openapi-typescript@7.13.0 clients/openapi.json -o clients/typescript/client/src/schema.d.ts` |
 
 ## Adding a new client
 

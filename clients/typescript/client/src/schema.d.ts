@@ -50,10 +50,11 @@ export interface paths {
         };
         /**
          * GET /v1/prices - Return per-token mid prices and optional market data.
-         * @description Returns 503 until the first token-price solve has landed. Each `prices[].price` is a
-         *     plain decimal string holding raw target-token units divided by raw gas-token units;
-         *     consumers must normalize both tokens' decimals before using it. Use the `include` query
-         *     parameter to add spot prices and/or component depths.
+         * @description Returns 503 with `NOT_READY` until the first token-price solve has landed and a Tycho head is
+         *     available. In the production feed lifecycle, the Tycho head lands before derived computations.
+         *     Each `prices[].price` is a plain decimal string holding raw target-token units divided by raw
+         *     gas-token units; consumers must normalize both tokens' decimals before using it. Use the
+         *     `include` query parameter to add spot prices and/or component depths.
          *
          *     # Query Parameters
          *
@@ -133,12 +134,7 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /**
-         * @description Block information at which a quote was computed.
-         *
-         *     Quotes are only valid for the block at which they were computed. Market
-         *     conditions may change in subsequent blocks.
-         */
+        /** @description Source-chain block identity. */
         BlockInfo: {
             /**
              * @description Block hash as a hex string.
@@ -210,23 +206,43 @@ export interface components {
              */
             token_out: string;
         };
-        /** @description Block numbers at which each computation was last run. */
-        ComputationBlocks: {
+        /**
+         * @description Freshness metadata for the latest persisted aggregate computation output.
+         *
+         *     Incremental computations can retain entries or failures produced by earlier runs, so this
+         *     status does not guarantee that every item in the aggregate was recomputed at this block.
+         */
+        ComputationDataStatus: {
             /**
              * Format: int64
-             * @description Block at which component depths were computed. `None` if not yet available.
+             * @description Market block associated with the latest aggregate persistence.
              */
-            component_depths?: number | null;
+            block: number;
             /**
              * Format: int64
-             * @description Block at which spot prices were computed. `None` if not yet available.
+             * @description Elapsed monotonic time in milliseconds since Fynd persisted the latest aggregate output.
+             *     This is distinct from the source-chain head age and from per-item freshness.
              */
-            spot_prices?: number | null;
+            last_update_ms: number;
+        };
+        /** @description Freshness metadata for the computations exposed by GET /v1/prices. */
+        ComputationDataStatuses: {
             /**
-             * Format: int64
-             * @description Block at which the token prices were computed.
+             * @description Freshness metadata for component depths, omitted until that computation has persisted
+             *     output.
              */
-            token_prices: number;
+            component_depths?: components["schemas"]["ComputationDataStatus"];
+            /** @description Freshness metadata for spot prices, omitted until that computation has persisted output. */
+            spot_prices?: components["schemas"]["ComputationDataStatus"];
+            /** @description Freshness metadata for token gas prices. */
+            token_prices: components["schemas"]["ComputationDataStatus"];
+        };
+        /** @description Source and computation freshness metadata for GET /v1/prices. */
+        DataStatus: {
+            /** @description Freshness metadata for persisted computation outputs. */
+            computations: components["schemas"]["ComputationDataStatuses"];
+            /** @description Freshness metadata for Tycho's source-chain head. */
+            tycho: components["schemas"]["TychoDataStatus"];
         };
         /** @description Options to customize the encoding behavior. */
         EncodingOptions: {
@@ -466,7 +482,7 @@ export interface components {
              * @example 3498000000
              */
             amount_out_net_gas: string;
-            /** @description Block at which this quote was computed. */
+            /** @description Block at which this quote was computed. The quote is valid only for this block. */
             block: components["schemas"]["BlockInfo"];
             fee_breakdown?: null | components["schemas"]["FeeBreakdown"];
             /**
@@ -567,10 +583,10 @@ export interface components {
         };
         /** @description Top-level response for GET /v1/prices. */
         PricesResponse: {
-            /** @description Block numbers at which each computation was last run. */
-            blocks: components["schemas"]["ComputationBlocks"];
             /** @description Component depths per component direction (only if requested via `include=depths`). */
             component_depths?: components["schemas"]["ComponentDepthEntry"][] | null;
+            /** @description Source and computation freshness metadata for the returned data. */
+            data_status: components["schemas"]["DataStatus"];
             /**
              * @description The gas token address (e.g. WETH).
              * @example 0x0000000000000000000000000000000000000000
@@ -827,6 +843,22 @@ export interface components {
              */
             value: string;
         };
+        /** @description Freshness metadata for Tycho's source-chain head. */
+        TychoDataStatus: {
+            /**
+             * @description Latest block Fynd accepted from the Tycho ready synchronizer selected by its feed.
+             *     This identifies Fynd's current Tycho-derived market snapshot; it is not an independent
+             *     query of the canonical chain head.
+             */
+            head: components["schemas"]["BlockInfo"];
+            /**
+             * Format: int64
+             * @description Wall-clock age of the source-chain head in milliseconds, with the same semantics as
+             *     `/v1/health.last_update_ms`. The block timestamp is in whole seconds, so this value has
+             *     one-second granularity and is not directly comparable to monotonic computation ages.
+             */
+            last_update_ms: number;
+        };
         /**
          * @description Token transfer method for moving funds into Tycho execution.
          * @enum {string}
@@ -929,7 +961,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Data not yet available */
+            /** @description NOT_READY: token prices, requested computations, or Tycho head are not yet available */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -1032,7 +1064,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Data not yet available */
+            /** @description NOT_READY: token prices have not yet been computed */
             503: {
                 headers: {
                     [name: string]: unknown;

@@ -933,7 +933,7 @@ pub struct OrderQuote {
     #[serde_as(as = "DisplayFromStr")]
     #[cfg_attr(feature = "openapi", schema(value_type = String, example = "3498000000"))]
     amount_out_net_gas: BigUint,
-    /// Block at which this quote was computed.
+    /// Block at which this quote was computed. The quote is valid only for this block.
     block: BlockInfo,
     /// Effective gas price (in wei) at the time the route was computed.
     #[serde_as(as = "Option<DisplayFromStr>")]
@@ -1078,10 +1078,7 @@ pub enum QuoteStatus {
     EncodingFailed,
 }
 
-/// Block information at which a quote was computed.
-///
-/// Quotes are only valid for the block at which they were computed. Market
-/// conditions may change in subsequent blocks.
+/// Source-chain block identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BlockInfo {
