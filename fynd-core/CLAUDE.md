@@ -132,22 +132,29 @@ reason.
 
 ## Non-Tycho Liquidity Sources
 
-Two kinds of `--protocols` entry name a stream other than Tycho's, each with its own endpoint and
-its own registration function in `feed/protocol_registry.rs`:
+Two kinds of `--protocols` entry name a stream other than Tycho's, each with its own endpoint:
 
-| Entry | Registered by | Stream |
+| Entry | Opened by | Stream |
 |---|---|---|
-| `rfq:<protocol>` | `register_rfq` | RFQ client, driven by a supervised task writing into an mpsc channel |
-| `pricelevelstream:<venue>` | `open_price_level_stream` | Titan pAMM price level WebSocket, an `impl Stream<Item = Update>` polled directly (it reconnects on its own, so there is no task to supervise) |
+| `book:<protocol>` | `BookStream::open` (`feed/book_stream.rs`) | One off-chain book venue per entry — the RFQ market makers and Metric — each publishing its complete set of price-level books over a watch channel kept fresh by its own task |
+| `pricelevelstream:<venue>` | `open_price_level_stream` (`feed/protocol_registry.rs`) | Titan pAMM price level WebSocket, an `impl Stream<Item = Update>` polled directly (it reconnects on its own, so there is no task to supervise) |
 
-`register_exchanges` skips both prefixes, and `has_tycho_protocols` / `has_rfq_protocols` tell
-`TychoFeed` which sources to open. `is_tycho_system` is the per-entry form of the first, used by
-`register_exchanges` to skip these entries and exported so `fynd_rpc::protocols` can leave them out
-of its Tycho availability check. All three feed loops (`run`, `run_with_pending`,
-`run_with_step_controller`) select over whichever sources are configured and hand every `Update`
-to the same `handle_tycho_message`. Both non-Tycho streams are opened before the loop answers its
-`pending_tx` / `controller_tx` handshake, so a configuration error reaches the caller as an error
-rather than as a handle to a feed that dies.
+`register_exchanges` skips both prefixes, and `has_tycho_protocols` tells `TychoFeed` whether to
+open a Tycho stream at all. `is_tycho_system` is its per-entry form, used by `register_exchanges`
+to skip these entries and exported so `fynd_rpc::protocols` can leave them out of its Tycho
+availability check. All three feed loops (`run`, `run_with_pending`, `run_with_step_controller`)
+select over whichever sources are configured, handing every `Update` to `handle_tycho_message`
+and every `BookUpdate` to `handle_book_update`. Both non-Tycho streams are opened before the loop
+answers its `pending_tx` / `controller_tx` handshake, so a configuration error reaches the caller
+as an error rather than as a handle to a feed that dies.
+
+A venue serving a book publishes states of the world, not changes to them: the newest set replaces the last
+one, and a pair missing from it is a pair the venue stopped serving. `BookFeeds` keeps the ids
+each venue last published and derives the components to add and to drop from the difference; a
+venue with nothing servable — its books went stale, or its task gave up — drops all of them and
+can serve again later. Books belong to no block, so `handle_book_update` writes to the base
+market state directly instead of through `apply_block_update`: it neither advances the block
+label nor evicts a simulation overlay built against the current block.
 
 Price level venues must be one of tycho-simulation's `default_served_pamms` — an unrecognised name
 is a `DataFeedError::Config`, not a warning, because these entries are always hand-written. The

@@ -220,3 +220,12 @@ wiremock = "0.6"
 [profile.profiling]
 inherits = "release"
 debug = true
+
+# Local tycho checkout under test: the branch that replaces the RFQ merge layer with per-provider
+# watch feeds. Drop this block once those changes are released.
+[patch.crates-io]
+tycho-common = { git = "https://github.com/propeller-heads/tycho.git", rev = "806140437" }
+tycho-client = { git = "https://github.com/propeller-heads/tycho.git", rev = "806140437" }
+tycho-ethereum = { git = "https://github.com/propeller-heads/tycho.git", rev = "806140437" }
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho.git", rev = "806140437" }
+tycho-execution = { git = "https://github.com/propeller-heads/tycho.git", rev = "806140437" }

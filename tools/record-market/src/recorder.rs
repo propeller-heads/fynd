@@ -98,7 +98,7 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
         match tokio::time::timeout(remaining, stream.next()).await {
             Ok(Some(Ok(update))) => {
                 tracing::debug!(
-                    block = update.block_number_or_timestamp,
+                    block = update.block_number,
                     new_pairs = update.new_pairs.len(),
                     states = update.states.len(),
                     "captured update"

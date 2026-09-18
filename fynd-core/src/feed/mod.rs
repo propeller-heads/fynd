@@ -1,8 +1,10 @@
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use rustc_hash::FxHashSet;
 use tycho_simulation::tycho_common::models::Chain;
 
+/// Book feeds: market-maker venues streaming price levels over their own connection.
+pub(crate) mod book_stream;
 /// Per-worker component filtering: which components reach one worker's graph.
 pub(crate) mod component_filter;
 /// Market events broadcast by the Tycho feed on every block update.
@@ -18,6 +20,15 @@ pub(crate) mod metrics_sampler;
 pub mod protocol_registry;
 /// Tycho WebSocket feed: connects to the Tycho data stream and populates `MarketState`.
 pub mod tycho_feed;
+
+/// Awaits `source` when there is one, and pends forever when there is not — so a `select!` arm
+/// can read an optional source without a branch of its own.
+pub(crate) async fn when_configured<T>(source: Option<impl Future<Output = T>>) -> T {
+    match source {
+        Some(source) => source.await,
+        None => std::future::pending().await,
+    }
+}
 
 /// Configuration for the TychoFeed.
 #[derive(Debug, Clone)]

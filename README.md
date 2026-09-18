@@ -6,7 +6,7 @@ routes across multiple DeFi protocols in real-time.
 ## Features
 
 - **Multi-protocol routing** - Routes through your favorite on-chain liquidity protocol, like Uniswap, Balancer, Curve,
-  RFQ protocols, or any other protocol supported
+  off-chain book venues, or any other protocol supported
   by [Tycho](https://docs.propellerheads.xyz/tycho/for-solvers/supported-protocols).
 - **Real-time market data** - Tycho Stream keeps all liquidity states synchronized every block
 - **Multi-algorithm competition** - Multiple solver pools run different algorithm configurations in parallel; the best

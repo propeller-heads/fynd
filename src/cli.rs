@@ -71,7 +71,7 @@ pub struct ServeArgs {
     /// List of protocols to index (comma-separated, e.g., uniswap_v2,uniswap_v3).
     /// If omitted, all on-chain protocols are fetched from Tycho RPC.
     /// Use "all_onchain" to fetch all on-chain protocols and combine with explicit entries,
-    /// e.g., --protocols all_onchain,rfq:bebop.
+    /// e.g., --protocols all_onchain,book:bebop.
     /// Prefix a protocol with "exclusive:" to also stream its exclusive pools,
     /// e.g., --protocols all_onchain,exclusive:ekubo_v3.
     /// Prefix a protocol with "exclude:" to drop it from the list,

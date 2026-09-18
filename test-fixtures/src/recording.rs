@@ -125,6 +125,6 @@ mod tests {
 
         assert_eq!(loaded.metadata.chain, "ethereum");
         assert_eq!(loaded.updates.len(), 1);
-        assert_eq!(loaded.updates[0].block_number_or_timestamp, 12345);
+        assert_eq!(loaded.updates[0].block_number, 12345);
     }
 }
