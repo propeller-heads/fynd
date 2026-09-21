@@ -8,6 +8,8 @@
 //!   (`/v1/{chain}/quote`) and authenticates requests with an API key sent as the raw
 //!   `Authorization` header value. Only served when a gateway URL is configured.
 
+use std::sync::Arc;
+
 use actix_web::web;
 use serde_json::json;
 use utoipa::openapi::{
@@ -22,6 +24,16 @@ use crate::api::openapi_spec;
 /// Name of the API key security scheme declared by the hosted spec.
 const API_KEY_SCHEME_NAME: &str = "ApiKeyAuth";
 
+/// Rewrites the OpenAPI document before it is served.
+///
+/// Registered with `FyndRPCBuilder::configure_openapi`. The closure receives the document fynd
+/// generates for the routes it serves and returns the document to publish; both `/docs/` and the
+/// hosted `/docs/hosted/` variant are derived from its output. A binary that replaces a route
+/// uses it to swap that route's operation for its own — for example by removing the path and
+/// merging a `#[derive(OpenApi)]` document of the replacement — so the published spec matches the
+/// handler that actually answers.
+pub type OpenApiConfigurator = Arc<dyn Fn(OpenApi) -> OpenApi + Send + Sync>;
+
 /// Registers the Swagger UIs and the specs they load.
 ///
 /// The self-hosted UI is always served. The hosted one describes a gateway this process knows
@@ -29,19 +41,30 @@ const API_KEY_SCHEME_NAME: &str = "ApiKeyAuth";
 ///
 /// The hosted UI is registered first because actix matches resources in registration order:
 /// `/docs/{_:.*}` also matches `/docs/hosted/index.html` and would serve a 404 for it.
-pub(crate) fn configure_docs(cfg: &mut web::ServiceConfig, hosted_url: Option<&str>) {
+pub(crate) fn configure_docs(
+    cfg: &mut web::ServiceConfig,
+    hosted_url: Option<&str>,
+    overrides: Option<&OpenApiConfigurator>,
+) {
     if let Some(hosted_url) = hosted_url {
         cfg.service(
             SwaggerUi::new("/docs/hosted/{_:.*}")
-                .url("/api-docs/hosted/openapi.json", hosted_spec(hosted_url)),
+                .url("/api-docs/hosted/openapi.json", hosted_spec(hosted_url, overrides)),
         );
     }
-    cfg.service(SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", self_hosted_spec()));
+    cfg.service(
+        SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", self_hosted_spec(overrides)),
+    );
 }
 
-/// Builds the spec describing the endpoints this process routes.
-fn self_hosted_spec() -> OpenApi {
-    openapi_spec()
+/// Builds the spec describing the endpoints this process routes, after applying the embedder's
+/// `overrides` when there are any.
+fn self_hosted_spec(overrides: Option<&OpenApiConfigurator>) -> OpenApi {
+    let openapi = openapi_spec();
+    match overrides {
+        Some(configure) => configure(openapi),
+        None => openapi,
+    }
 }
 
 /// Builds the spec describing the endpoints as exposed by the hosted gateway.
@@ -52,8 +75,8 @@ fn self_hosted_spec() -> OpenApi {
 /// which "Try it out" can only produce 401s. The gateway matches the entire `Authorization`
 /// header value against its key store, so the scheme is an API key in that header — an HTTP
 /// bearer scheme would add a `Bearer ` prefix the gateway rejects.
-fn hosted_spec(server_url: &str) -> OpenApi {
-    let mut openapi = self_hosted_spec();
+fn hosted_spec(server_url: &str, overrides: Option<&OpenApiConfigurator>) -> OpenApi {
+    let mut openapi = self_hosted_spec(overrides);
 
     let routed_paths = std::mem::take(&mut openapi.paths.paths);
     for (path, mut path_item) in routed_paths {
@@ -134,12 +157,12 @@ mod tests {
 
     /// The hosted spec as Swagger UI receives it.
     fn hosted_spec_json(server_url: &str) -> Value {
-        serde_json::to_value(hosted_spec(server_url)).expect("spec serializes")
+        serde_json::to_value(hosted_spec(server_url, None)).expect("spec serializes")
     }
 
     #[test]
     fn self_hosted_spec_paths() {
-        let spec = self_hosted_spec();
+        let spec = self_hosted_spec(None);
         let paths: Vec<&str> = spec
             .paths
             .paths
@@ -160,7 +183,7 @@ mod tests {
 
     #[test]
     fn self_hosted_spec_has_no_security() {
-        let spec = self_hosted_spec();
+        let spec = self_hosted_spec(None);
 
         assert!(spec.security.is_none());
         assert!(spec.servers.is_none());
@@ -173,7 +196,7 @@ mod tests {
 
     #[test]
     fn hosted_spec_paths_carry_chain_segment() {
-        let spec = hosted_spec(TEST_SERVER_URL);
+        let spec = hosted_spec(TEST_SERVER_URL, None);
         let paths: Vec<&str> = spec
             .paths
             .paths
@@ -195,7 +218,7 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[test]
     fn hosted_spec_includes_experimental_paths() {
-        let spec = hosted_spec(TEST_SERVER_URL);
+        let spec = hosted_spec(TEST_SERVER_URL, None);
 
         assert!(spec
             .paths
@@ -243,7 +266,7 @@ mod tests {
 
     #[test]
     fn hosted_spec_server_url() {
-        let spec = hosted_spec(TEST_SERVER_URL);
+        let spec = hosted_spec(TEST_SERVER_URL, None);
 
         let servers = spec.servers.expect("server is set");
         assert_eq!(servers.len(), 1);
@@ -255,7 +278,7 @@ mod tests {
     #[actix_web::test]
     async fn both_swagger_uis_are_reachable() {
         let app = actix_test::init_service(
-            App::new().configure(|cfg| configure_docs(cfg, Some(TEST_SERVER_URL))),
+            App::new().configure(|cfg| configure_docs(cfg, Some(TEST_SERVER_URL), None)),
         )
         .await;
 
@@ -273,7 +296,8 @@ mod tests {
     #[actix_web::test]
     async fn hosted_swagger_ui_needs_a_url() {
         let app =
-            actix_test::init_service(App::new().configure(|cfg| configure_docs(cfg, None))).await;
+            actix_test::init_service(App::new().configure(|cfg| configure_docs(cfg, None, None)))
+                .await;
 
         let self_hosted = actix_test::call_service(
             &app,
@@ -296,7 +320,7 @@ mod tests {
     #[actix_web::test]
     async fn spec_endpoints_serve_their_own_paths() {
         let app = actix_test::init_service(
-            App::new().configure(|cfg| configure_docs(cfg, Some(TEST_SERVER_URL))),
+            App::new().configure(|cfg| configure_docs(cfg, Some(TEST_SERVER_URL), None)),
         )
         .await;
 
@@ -321,5 +345,48 @@ mod tests {
             hosted["components"]["securitySchemes"][API_KEY_SCHEME_NAME].is_object(),
             "{hosted}"
         )
+    }
+    /// An embedder that replaces a route must be able to publish a spec that describes its own
+    /// handler; the override applies to the self-hosted document and, through it, to the hosted
+    /// one.
+    #[actix_web::test]
+    async fn openapi_override_applies_to_both_specs() {
+        let overrides: OpenApiConfigurator = Arc::new(|mut openapi: OpenApi| {
+            let quote = openapi
+                .paths
+                .paths
+                .remove("/v1/quote")
+                .expect("default quote operation");
+            openapi
+                .paths
+                .paths
+                .insert("/v1/custom-quote".to_string(), quote);
+            openapi
+        });
+        let app = actix_test::init_service(
+            App::new()
+                .configure(|cfg| configure_docs(cfg, Some(TEST_SERVER_URL), Some(&overrides))),
+        )
+        .await;
+
+        let self_hosted: Value = actix_test::call_and_read_body_json(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/api-docs/openapi.json")
+                .to_request(),
+        )
+        .await;
+        assert!(self_hosted["paths"]["/v1/quote"].is_null(), "{self_hosted}");
+        assert!(self_hosted["paths"]["/v1/custom-quote"].is_object(), "{self_hosted}");
+
+        let hosted: Value = actix_test::call_and_read_body_json(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/api-docs/hosted/openapi.json")
+                .to_request(),
+        )
+        .await;
+        assert!(hosted["paths"]["/v1/{chain}/quote"].is_null(), "{hosted}");
+        assert!(hosted["paths"]["/v1/{chain}/custom-quote"].is_object(), "{hosted}")
     }
 }
