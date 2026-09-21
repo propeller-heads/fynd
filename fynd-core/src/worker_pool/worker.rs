@@ -1792,8 +1792,8 @@ mod tests {
     }
 
     /// The market names a component in `added_components` once, so the event that adds the
-    /// fallback pool does not name the pAMM. Without the withheld set the pAMM would stay out
-    /// until the next rebuild, which is worse than before this rule existed.
+    /// fallback pool does not name the pAMM. The withheld set is what lets the pAMM back in
+    /// before the next rebuild.
     #[test]
     fn test_apply_pamm_admission_after_the_fallback_pool_arrives() {
         let market = market_with_pamm();

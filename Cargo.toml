@@ -177,8 +177,11 @@ metrics-util = "0.20"
 # 0.413.0 also exposes the per-subscription delta buffer setting used by Fynd. Both crates must
 # move together: the simulation crate provides the state decoders and the execution crate the
 # swap encoders for the new systems.
-tycho-execution = ">=0.413.0"
-tycho-simulation = ">=0.413.0"
+# `fallback/` reads protocol names and per-chain support from tycho-execution's `FallbackProtocol`
+# (public since 0.414.0). Both crates move together: tycho-simulation emits the `fallback:`
+# components tycho-execution encodes.
+tycho-execution = ">=0.414.0"
+tycho-simulation = ">=0.414.0"
 typetag = "0.2"
 
 # Compression
