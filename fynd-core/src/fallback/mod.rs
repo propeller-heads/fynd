@@ -41,36 +41,45 @@ use crate::{
 /// whitelisted venue could use it; any pAMM qualifies for this one.
 pub const FALLBACK_PREFIX: &str = "fallback:";
 
-/// Protocol systems a pAMM leg may fall back to on `chain`.
-///
-/// Each chain's `TychoFallbackRouter` supports its own set, and a chain with no router deployed
-/// supports none, so every pAMM there is withheld from the graph. A component under any other
-/// protocol system has no protocol byte the router understands, so it is never a candidate pool.
-pub(crate) fn fallback_protocol_systems(chain: Chain) -> &'static [&'static str] {
+/// Uniswap V2 and its forks. They share one pool ABI and encode as `uniswap_v2`.
+pub(crate) const UNISWAP_V2_FORKS: &[&str] =
+    &["uniswap_v2", "sushiswap_v2", "pancakeswap_v2", "quickswap_v2"];
+
+/// Uniswap V3, its forks and the Slipstream deployments. They share V3's `swap` and callback and
+/// encode as `uniswap_v3`.
+pub(crate) const UNISWAP_V3_FORKS: &[&str] = &[
+    "uniswap_v3",
+    "pancakeswap_v3",
+    "sushiswap_v3",
+    "robinswap_v3",
+    "aerodrome_slipstreams",
+    "velodrome_slipstreams",
+    "up_v3",
+    "ramses_v3",
+];
+
+/// The protocol systems a pAMM leg may fall back to on `chain`, grouped as tycho-execution's
+/// `SUPPORTED_PROTOCOLS` and fork lists name them. A chain with no `TychoFallbackRouter` has none.
+fn fallback_protocol_groups(chain: Chain) -> &'static [&'static [&'static str]] {
     match chain {
-        // The Uniswap V2 and V3 forks encode exactly as their base protocol does, which is why
-        // tycho-execution routes them to the same executors. Replace the two fork groups with
-        // `tycho_execution::encoding::evm::constants::{UNISWAP_V2_FORKS, UNISWAP_V3_FORKS}` once
-        // the fallback encoder is released: they are `pub` there, and importing them keeps this
-        // list from drifting away from what the encoder accepts.
-        Chain::Ethereum => &[
-            // UNISWAP_V2_FORKS
-            "uniswap_v2",
-            "sushiswap_v2",
-            "pancakeswap_v2",
-            "quickswap_v2",
-            // UNISWAP_V3_FORKS
-            "uniswap_v3",
-            "pancakeswap_v3",
-            "sushiswap_v3",
-            "robinswap_v3",
-            // Other protocols
-            "uniswap_v4",
-            "vm:curve",
-            "fluid_v1",
-        ],
+        Chain::Ethereum => {
+            &[UNISWAP_V2_FORKS, UNISWAP_V3_FORKS, &["uniswap_v4", "vm:curve", "fluid_v1"]]
+        }
+        Chain::Base => &[UNISWAP_V2_FORKS, UNISWAP_V3_FORKS, &["uniswap_v4", "aerodrome_v1"]],
+        // `Chain` is `#[non_exhaustive]`, so the remaining variants cannot be listed.
         _ => &[],
     }
+}
+
+/// Protocol systems a pAMM leg may fall back to on `chain`.
+///
+/// A chain with no `TychoFallbackRouter` supports none, so every pAMM there is withheld from the
+/// graph. A component under any other protocol system has no protocol byte the router
+/// understands, so it is never a candidate pool.
+pub(crate) fn fallback_protocol_systems(chain: Chain) -> impl Iterator<Item = &'static str> {
+    fallback_protocol_groups(chain)
+        .iter()
+        .flat_map(|group| group.iter().copied())
 }
 
 /// Whether `route` has a leg the `TychoFallbackRouter` executes (`fallback:` protocol family).
@@ -458,7 +467,7 @@ impl FallbackPoolIndex {
 /// Native ETH is judged per pair rather than here: a pool holding it alongside ERC20 coins still
 /// serves the pairs that do not touch it. See `FallbackPoolIndex::insert`.
 fn is_fallback_candidate(component: &ProtocolComponent) -> bool {
-    if !fallback_protocol_systems(component.chain).contains(&component.protocol_system.as_str()) ||
+    if !fallback_protocol_systems(component.chain).any(|system| system == component.protocol_system) ||
         component.tokens.len() < 2
     {
         return false;
@@ -653,22 +662,30 @@ mod tests {
         assert!(has_fallback_leg(&pamm));
     }
 
-    /// Every system Ethereum's `TychoFallbackRouter` supports qualifies, forks included; a system
-    /// it has no protocol byte for does not, and neither does anything on a chain with no router.
+    /// Every system a chain's `TychoFallbackRouter` supports qualifies there, forks included; a
+    /// system it has no protocol byte for does not, nor one the chain's router lacks, nor anything
+    /// on a chain with no router.
     #[test]
     fn test_is_fallback_candidate_protocol_systems() {
         let pair = [util::token(1, "WETH"), util::token(2, "USDC")];
-        for system in fallback_protocol_systems(Chain::Ethereum) {
-            let component = util::component_with_protocol("pool", system, &pair);
-            assert!(is_fallback_candidate(&component), "{system} must qualify");
+        for chain in [Chain::Ethereum, Chain::Base] {
+            for system in fallback_protocol_systems(chain) {
+                let mut component = util::component_with_protocol("pool", system, &pair);
+                component.chain = chain;
+                assert!(is_fallback_candidate(&component), "{system} must qualify on {chain}");
+            }
         }
 
         let unsupported = util::component_with_protocol("pool", "vm:balancer_v2", &pair);
         assert!(!is_fallback_candidate(&unsupported));
 
-        let mut on_base = util::component_with_protocol("pool", "uniswap_v3", &pair);
-        on_base.chain = Chain::Base;
-        assert!(!is_fallback_candidate(&on_base));
+        // Base's router deploys without Fluid; Plasma has no router.
+        let mut fluid_on_base = util::component_with_protocol("pool", "fluid_v1", &pair);
+        fluid_on_base.chain = Chain::Base;
+        assert!(!is_fallback_candidate(&fluid_on_base));
+        let mut on_plasma = util::component_with_protocol("pool", "uniswap_v3", &pair);
+        on_plasma.chain = Chain::Plasma;
+        assert!(!is_fallback_candidate(&on_plasma));
         let pamm = util::component_with_protocol("pool", PAMM_PROTOCOL, &pair);
         assert!(!is_fallback_candidate(&pamm));
         // A pool of one token serves no pair, so it would be filed under nothing.
