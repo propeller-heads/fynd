@@ -528,6 +528,7 @@ pub struct FyndBuilder {
     reconnect_delay: Duration,
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
+    tycho_subscription_buffer_size: Option<usize>,
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
@@ -564,6 +565,7 @@ impl FyndBuilder {
             reconnect_delay: defaults::RECONNECT_DELAY,
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
+            tycho_subscription_buffer_size: None,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
@@ -643,6 +645,13 @@ impl FyndBuilder {
     /// unaffected.
     pub fn partial_blocks(mut self, enabled: bool) -> Self {
         self.partial_blocks = enabled;
+        self
+    }
+
+    /// Sets the number of delta messages buffered for each Tycho subscription. Leaving this
+    /// unset preserves Tycho's native default.
+    pub fn tycho_subscription_buffer_size(mut self, size: usize) -> Self {
+        self.tycho_subscription_buffer_size = Some(size);
         self
     }
 
@@ -862,6 +871,11 @@ impl FyndBuilder {
         .traded_n_days_ago(self.traded_n_days_ago)
         .blocklisted_components(self.blocklisted_components)
         .partial_blocks(self.partial_blocks);
+
+        let tycho_feed_config = match self.tycho_subscription_buffer_size {
+            Some(size) => tycho_feed_config.subscription_buffer_size(size),
+            None => tycho_feed_config,
+        };
 
         let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
             .map_err(|e| SolverBuildError::RpcClient(e.to_string()))?;

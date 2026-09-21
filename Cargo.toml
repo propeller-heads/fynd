@@ -162,12 +162,13 @@ metrics-util = "0.20"
 # Tycho
 # 0.399.0 is the first release that can encode both of the protocols Robinhood Chain now indexes:
 # the swap encoder registry gains up_v3 in 0.398.0, and the Robinhood ekubo_v3 executor address
-# lands in 0.399.0 (the ekubo_v3 encoder itself is much older). Below this floor a route over
+# lands in 0.399.0 (the ekubo_v3 encoder itself is much older). Below that version a route over
 # either protocol fails to encode, so registering them in the protocol registry is not enough.
-# Both crates must move together: the simulation crate provides the state decoders and the
-# execution crate the swap encoders for the new systems.
-tycho-execution = ">=0.399.0"
-tycho-simulation = ">=0.399.0"
+# 0.413.0 also exposes the per-subscription delta buffer setting used by Fynd. Both crates must
+# move together: the simulation crate provides the state decoders and the execution crate the
+# swap encoders for the new systems.
+tycho-execution = ">=0.413.0"
+tycho-simulation = ">=0.413.0"
 typetag = "0.2"
 
 # Compression

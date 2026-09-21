@@ -105,6 +105,17 @@ impl TychoFeed {
         self.event_tx.clone()
     }
 
+    /// Creates a Tycho stream builder with the configured per-subscription delta buffer.
+    /// Keeping this construction in one place ensures normal, pending, and step-controlled feeds
+    /// use the same setting.
+    fn protocol_stream_builder(&self) -> ProtocolStreamBuilder {
+        let builder = ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain);
+        match self.config.subscription_buffer_size {
+            Some(size) => builder.subscription_buffer_size(size),
+            None => builder,
+        }
+    }
+
     /// Runs the indexer event loop until the underlying Tycho stream ends or errors.
     ///
     /// This method does not itself reconnect. Transient transport failures are absorbed
@@ -158,7 +169,7 @@ impl TychoFeed {
             );
 
             let mut stream_builder = register_exchanges(
-                ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
+                self.protocol_stream_builder()
                     .skip_state_decode_failures(true),
                 tvl_filter,
                 &self.config.protocols,
@@ -347,7 +358,7 @@ impl TychoFeed {
             };
 
         let mut stream_builder = match register_exchanges(
-            ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
+            self.protocol_stream_builder()
                 .skip_state_decode_failures(true),
             ComponentFilter::with_tvl_range(
                 self.config.min_tvl / self.config.tvl_buffer_ratio,
@@ -562,7 +573,7 @@ impl TychoFeed {
         );
 
         let mut stream_builder = match register_exchanges(
-            ProtocolStreamBuilder::new(&self.config.tycho_url, self.config.chain)
+            self.protocol_stream_builder()
                 .skip_state_decode_failures(true),
             tvl_filter,
             &self.config.protocols,
@@ -928,6 +939,27 @@ mod tests {
             vec!["uniswap_v2".to_string()],
             10.0,
         )
+    }
+
+    #[tokio::test]
+    async fn test_subscription_buffer_size_rejects_oversized_config_before_network_io() {
+        let config = create_test_config().subscription_buffer_size(usize::MAX);
+        let feed = TychoFeed::new(config, new_shared_market_data());
+
+        let result = feed
+            .protocol_stream_builder()
+            .build()
+            .await;
+        let Err(error) = result else {
+            panic!("an oversized subscription buffer size must be rejected during setup");
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("subscription buffer size must not exceed"),
+            "Tycho should reject an oversized subscription buffer size before network I/O: {error}"
+        );
     }
 
     // Helper to create a test token

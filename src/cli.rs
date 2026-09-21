@@ -55,6 +55,11 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub tycho_api_key: Option<String>,
 
+    /// Number of delta messages buffered for each Tycho subscription. Unset keeps Tycho's
+    /// native default.
+    #[arg(long, env)]
+    pub tycho_subscription_buffer_size: Option<usize>,
+
     /// Disable TLS for Tycho connection
     #[arg(long)]
     pub disable_tls: bool,
@@ -177,6 +182,8 @@ pub struct ServeArgs {
 mod cli_tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_arg_parsing() {
         let cli = Cli::try_parse_from(vec![
@@ -194,6 +201,8 @@ mod cli_tests {
             "https://rpc.example.com",
             "--tycho-url",
             "wss://custom.tycho.url",
+            "--tycho-subscription-buffer-size",
+            "1024",
             "--protocols",
             "uniswap_v2,uniswap_v3",
             "--min-tvl",
@@ -214,6 +223,7 @@ mod cli_tests {
         assert_eq!(args.tycho_api_key, Some("test-key".to_string()));
         assert_eq!(args.rpc_url, Some("https://rpc.example.com".to_string()));
         assert_eq!(args.tycho_url, Some("wss://custom.tycho.url".to_string()));
+        assert_eq!(args.tycho_subscription_buffer_size, Some(1024));
         assert_eq!(args.protocols, vec!["uniswap_v2", "uniswap_v3"]);
         assert_eq!(args.min_tvl, Some(20.0));
         assert_eq!(args.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
@@ -223,9 +233,13 @@ mod cli_tests {
 
     #[test]
     fn test_arg_parsing_defaults() {
+        let _env_lock = ENV_LOCK
+            .lock()
+            .expect("environment lock poisoned");
         // Clear ambient env vars so the test is deterministic regardless of the shell environment.
         std::env::remove_var("RPC_URL");
         std::env::remove_var("TYCHO_API_KEY");
+        std::env::remove_var("TYCHO_SUBSCRIPTION_BUFFER_SIZE");
         std::env::remove_var("TYCHO_URL");
         std::env::remove_var("HTTP_HOST");
         std::env::remove_var("HTTP_PORT");
@@ -239,6 +253,7 @@ mod cli_tests {
         assert_eq!(args.http_host, "0.0.0.0");
         assert_eq!(args.http_port, 3000);
         assert_eq!(args.tycho_api_key, None);
+        assert_eq!(args.tycho_subscription_buffer_size, None);
         assert_eq!(args.rpc_url, None);
         assert_eq!(args.tycho_url, None);
         assert!(args.protocols.is_empty());
@@ -253,6 +268,20 @@ mod cli_tests {
         assert!(!args.partial_blocks);
         #[cfg(feature = "metrics")]
         assert_eq!(args.metrics_port, METRICS_PORT);
+    }
+
+    #[test]
+    fn test_parses_tycho_subscription_buffer_size_from_environment() {
+        let _env_lock = ENV_LOCK
+            .lock()
+            .expect("environment lock poisoned");
+        std::env::set_var("TYCHO_SUBSCRIPTION_BUFFER_SIZE", "1024");
+
+        let cli = Cli::try_parse_from(vec!["fynd", "serve"]).expect("parse errored");
+        let Commands::Serve(args) = cli.command else { panic!("expected Serve command") };
+
+        std::env::remove_var("TYCHO_SUBSCRIPTION_BUFFER_SIZE");
+        assert_eq!(args.tycho_subscription_buffer_size, Some(1024));
     }
 
     #[test]
