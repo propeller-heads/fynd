@@ -192,6 +192,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Sets the number of delta messages buffered for each Tycho subscription. Leaving this
+    /// unset preserves Tycho's native default.
+    pub fn tycho_subscription_buffer_size(mut self, size: usize) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .tycho_subscription_buffer_size(size);
+        self
+    }
+
     /// Overrides the default encoder with a custom one.
     pub fn encoder(mut self, encoder: Encoder) -> Self {
         self.fynd_builder = self.fynd_builder.encoder(encoder);

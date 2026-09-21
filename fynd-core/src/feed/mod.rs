@@ -56,6 +56,9 @@ pub(crate) struct TychoFeedConfig {
     /// finalization, reducing effective latency at the cost of processing more frequent,
     /// smaller updates.
     pub(crate) partial_blocks: bool,
+    /// Number of delta messages buffered for each Tycho subscription. When unset, Tycho keeps
+    /// its native default.
+    pub(crate) subscription_buffer_size: Option<usize>,
 }
 
 impl TychoFeedConfig {
@@ -80,6 +83,7 @@ impl TychoFeedConfig {
             reconnect_delay: Duration::from_secs(5),
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
+            subscription_buffer_size: None,
         }
     }
 
@@ -112,6 +116,11 @@ impl TychoFeedConfig {
         self.partial_blocks = enabled;
         self
     }
+
+    pub(crate) fn subscription_buffer_size(mut self, size: usize) -> Self {
+        self.subscription_buffer_size = Some(size);
+        self
+    }
 }
 
 /// Errors that can occur in the indexer.
@@ -128,4 +137,23 @@ pub(crate) enum DataFeedError {
     /// Event send error.
     #[error("event send error: {0}")]
     EventChannelError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_subscription_buffer_size_defaults_to_unset() {
+        let config = TychoFeedConfig::new(
+            "ws://test.tycho.io".to_string(),
+            Chain::Ethereum,
+            None,
+            false,
+            vec!["uniswap_v2".to_string()],
+            10.0,
+        );
+
+        assert_eq!(config.subscription_buffer_size, None);
+    }
 }

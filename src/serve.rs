@@ -338,6 +338,9 @@ async fn setup_solver(
 
     builder = builder.blocklist(blocklist);
     builder = builder.partial_blocks(args.partial_blocks);
+    if let Some(size) = args.tycho_subscription_buffer_size {
+        builder = builder.tycho_subscription_buffer_size(size);
+    }
     builder = builder.price_guard_enabled(args.enable_price_guard);
     builder = builder.simulation_enabled(args.enable_simulation);
     let watermark = args
