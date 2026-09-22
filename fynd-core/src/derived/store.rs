@@ -295,11 +295,6 @@ impl DerivedData {
         true
     }
 
-    /// Clears token prices with dependencies.
-    pub fn clear_token_prices_deps(&mut self) {
-        self.token_prices_deps = None;
-    }
-
     // -------------------------------------------------------------------------
     // Component Depths
     // -------------------------------------------------------------------------

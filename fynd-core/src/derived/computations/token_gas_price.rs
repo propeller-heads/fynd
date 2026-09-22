@@ -334,43 +334,44 @@ pub struct TokenGasPriceComputation {
     full_pass_interval: Duration,
     /// When the last full pass started. `None` until the first one runs, which makes that first
     /// pass due immediately. Behind a `Mutex` because `compute` takes `&self`, and behind an
-    /// `Arc` so a clone of this computation shares one interval rather than getting a second
-    /// one that would let two full passes run back to back.
+    /// `Arc` because the struct derives `Clone` for the `spawn_blocking` handoff.
     last_full_pass: Arc<Mutex<Option<Instant>>>,
 }
 
-/// Orders the tokens a pass will attempt, putting `priority` first.
+/// Orders the tokens a pass will attempt, putting the ones with no price yet first.
 ///
 /// `pass_budget` cuts the sell loop off wherever it has reached, and a token it never attempts
 /// keeps its previous price. A token that has no previous price cannot do that: it would stay
 /// unpriced, and with no stored dependency set the incremental filter could not find it again
 /// either, so it would wait for the next full pass. Attempting those first is what stops the
-/// deadline from dropping them.
-fn order_priority_first(
+/// deadline from dropping them, on a full pass as much as an incremental one.
+fn order_unpriced_first(
     tokens: &FxHashSet<Address>,
-    priority: &FxHashSet<Address>,
+    already_priced: &FxHashSet<Address>,
 ) -> Vec<Address> {
     let mut ordered = Vec::with_capacity(tokens.len());
     ordered.extend(
         tokens
             .iter()
-            .filter(|token| priority.contains(*token))
+            .filter(|token| !already_priced.contains(*token))
             .cloned(),
     );
     ordered.extend(
         tokens
             .iter()
-            .filter(|token| !priority.contains(*token))
+            .filter(|token| already_priced.contains(*token))
             .cloned(),
     );
     ordered
 }
 
-/// How long a full pass may be deferred by default while topology keeps changing.
+/// How long a full pass may be deferred by default.
 ///
-/// Five minutes because a full pass is the only thing that re-prices a token whose route could
-/// have improved through a component no stored dependency set names. Every other reason to
-/// re-price a token is already covered incrementally and runs on the block it happens.
+/// Five minutes because a full pass is the only thing that covers the two cases the incremental
+/// path cannot see: a token whose route could have improved through a component that no stored
+/// dependency set names, and an unpriced token that becomes reachable through a new component
+/// which does not itself list it. Every other reason to re-price a token is covered
+/// incrementally and runs on the block it happens.
 const DEFAULT_FULL_PASS_INTERVAL: Duration = Duration::from_secs(300);
 
 impl Default for TokenGasPriceComputation {
@@ -462,7 +463,7 @@ impl TokenGasPriceComputation {
         &self,
         market: &MarketData,
         filter_tokens: Option<&FxHashSet<Address>>,
-        priority_tokens: &FxHashSet<Address>,
+        already_priced: &FxHashSet<Address>,
     ) -> Result<PricingPassOutcome, ComputationError> {
         let (topology, block) = {
             let guard = market.read().await;
@@ -518,7 +519,7 @@ impl TokenGasPriceComputation {
             });
         };
 
-        let ordered = order_priority_first(&tokens_to_price, priority_tokens);
+        let ordered = order_unpriced_first(&tokens_to_price, already_priced);
         // Stamp the result with the snapshot's block, not the earlier topology read — the feed
         // can advance between the two locks, and every price is computed against the snapshot.
         let block = ctx
@@ -569,7 +570,7 @@ impl TokenGasPriceComputation {
         // The dependency map holds one `path_components` set per priced token, so cloning it to
         // change a handful of entries is this pass's dominant cost on a large market. Read it by
         // reference here, and edit the stored map in place further down.
-        let (tokens_to_recompute, new_tokens, existing_prices) = {
+        let (tokens_to_recompute, new_tokens, already_priced, existing_prices) = {
             let store_guard = store.read().await;
             let Some(existing_deps) = store_guard.token_prices_deps() else {
                 return Ok(None);
@@ -592,16 +593,17 @@ impl TokenGasPriceComputation {
             // A token that arrives with a new component has no stored dependency set, so the
             // filter above cannot find it. Until it has a price it cannot be quoted at all, so
             // it is priced here rather than at the next full pass.
-            let mut new_tokens = FxHashSet::default();
+            let mut new_tokens = 0usize;
             for token in changed.added.values().flatten() {
                 if existing_deps.contains_key(token) {
                     continue;
                 }
                 if tokens_to_recompute.insert(token.clone()) {
-                    new_tokens.insert(token.clone());
+                    new_tokens += 1;
                 }
             }
-            (tokens_to_recompute, new_tokens, existing_prices)
+            let already_priced: FxHashSet<Address> = existing_deps.keys().cloned().collect();
+            (tokens_to_recompute, new_tokens, already_priced, existing_prices)
         };
 
         if tokens_to_recompute.is_empty() {
@@ -610,13 +612,13 @@ impl TokenGasPriceComputation {
 
         debug!(
             affected_tokens = tokens_to_recompute.len(),
-            new_tokens = new_tokens.len(),
+            new_tokens,
             total_tokens = existing_prices.len(),
             "incremental token price recomputation"
         );
 
         let solved = self
-            .solve_token_prices(market, Some(&tokens_to_recompute), &new_tokens)
+            .solve_token_prices(market, Some(&tokens_to_recompute), &already_priced)
             .await?;
 
         let mut result = existing_prices;
@@ -638,7 +640,8 @@ impl TokenGasPriceComputation {
                 }
             });
         if !edited {
-            warn!("token price dependencies vanished between the read and the write; pass dropped");
+            warn!("token price dependencies vanished between the read and the write");
+            // Returning `None` sends `compute` to a full solve, which rebuilds them.
             return Ok(None);
         }
         Span::current().record("updated_token_prices", result.len());
@@ -706,8 +709,20 @@ impl TokenGasPriceComputation {
         market: &MarketData,
         store: &SharedDerivedDataRef,
     ) -> Result<ComputationOutput<TokenGasPrices>, ComputationError> {
+        // A full pass is cut off by the same budget as an incremental one, and on a market
+        // where it never finishes it prices a different subset each time. A token that already
+        // has a price can afford to be cut — it keeps what it has. A token that has none would
+        // be unpriced until another full pass happened to reach it, which is now a whole
+        // interval away, so those go first.
+        let already_priced: FxHashSet<Address> = {
+            let store_guard = store.read().await;
+            store_guard
+                .token_prices_deps()
+                .map(|deps| deps.keys().cloned().collect())
+                .unwrap_or_default()
+        };
         let solved = self
-            .solve_token_prices(market, None, &FxHashSet::default())
+            .solve_token_prices(market, None, &already_priced)
             .await?;
 
         let mut token_prices_with_deps = TokenPricesWithDeps::default();
@@ -1333,16 +1348,18 @@ mod tests {
     /// Tokens with no previous price are attempted before the rest, so the sell loop's deadline
     /// cannot be what leaves them unpriced.
     #[test]
-    fn test_order_priority_first_puts_new_tokens_at_the_front() {
+    fn test_order_unpriced_first_puts_tokens_without_a_price_at_the_front() {
         let a = token(1, "AAA").address;
         let b = token(2, "BBB").address;
         let c = token(3, "CCC").address;
         let tokens: FxHashSet<Address> = [a.clone(), b.clone(), c.clone()]
             .into_iter()
             .collect();
-        let priority: FxHashSet<Address> = [c.clone()].into_iter().collect();
+        let already_priced: FxHashSet<Address> = [a.clone(), b.clone()]
+            .into_iter()
+            .collect();
 
-        let ordered = order_priority_first(&tokens, &priority);
+        let ordered = order_unpriced_first(&tokens, &already_priced);
 
         assert_eq!(ordered.len(), 3, "every token is still attempted");
         assert_eq!(ordered[0], c, "the token with no previous price goes first");
