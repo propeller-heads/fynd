@@ -158,8 +158,8 @@ impl ComputationManagerConfig {
 
     /// Overrides the shortest time between two full token-pricing passes.
     ///
-    /// Inside the interval a topology change is served incrementally. `Duration::ZERO` runs a
-    /// full pass on every topology change, which is the behaviour before the interval existed.
+    /// The interval is periodic: a full pass runs on the first block after it elapses, and every
+    /// block inside it is served incrementally. `Duration::ZERO` makes every block a full pass.
     pub fn with_pricing_full_pass_interval(mut self, interval: Duration) -> Self {
         self.pricing_full_pass_interval = Some(interval);
         self

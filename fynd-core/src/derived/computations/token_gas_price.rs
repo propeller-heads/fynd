@@ -36,12 +36,20 @@
 //! A component arriving or leaving used to force a full solve on the block it happened, because a
 //! new component appears in no stored dependency set and so the incremental filter cannot find the
 //! tokens it might now route through. On a market where components cross the TVL threshold
-//! continuously that made the full solve the normal case rather than the exception. Full solves
-//! are now spaced by `full_pass_interval`, and inside it a topology change is served
-//! incrementally: every token whose stored routes ran through a changed component is re-solved,
-//! and so is every token a new component brought with it, which is what keeps a newly listed
-//! token quotable without waiting. What waits for the next full pass is narrower — an existing
-//! token whose route could have improved through a component no stored dependency set names.
+//! continuously that made the full solve the normal case rather than the exception.
+//!
+//! A full solve now runs on the first block after `full_pass_interval` has elapsed, whatever
+//! changed on that block, and every other block is served incrementally. Periodic rather than
+//! topology-triggered is deliberate: it bounds the wait on a market where topology changes are
+//! rare, which a topology-triggered interval would not — there the next deferred case would wait
+//! for the next topology change *after* the interval, which can be hours.
+//!
+//! The incremental pass re-solves every token whose stored routes ran through a changed
+//! component, and every token a new component brought with it, which is what keeps a newly listed
+//! token quotable without waiting for the interval. Two narrower cases do wait for it: an
+//! existing token whose route could have improved through a component that no stored dependency
+//! set names, and a currently unpriced token that becomes reachable through a new component which
+//! does not itself list that token.
 
 use std::{
     sync::{Arc, Mutex},
@@ -146,7 +154,9 @@ impl<'a> PricingPass<'a> {
 
     /// Prices every token the budget allows, one sell relaxation each — the pass's dominant
     /// cost. Pure CPU work: callers run it on a blocking thread.
-    fn sell_loop(&mut self, tokens_to_price: FxHashSet<Address>, block: u64) -> PricingPassOutcome {
+    /// `tokens_to_price` is an order, not a set: the caller puts the tokens that must not be
+    /// dropped by the deadline at the front.
+    fn sell_loop(&mut self, tokens_to_price: Vec<Address>, block: u64) -> PricingPassOutcome {
         let deadline = Instant::now() + self.computation.pass_budget;
         let mut prices = FxHashMap::default();
         let mut failed_items = Vec::new();
@@ -319,14 +329,41 @@ pub struct TokenGasPriceComputation {
     /// timeout. Tokens not attempted before it expires keep their previous price; the module's
     /// Cost section says what a slow pass would otherwise delay.
     pass_budget: Duration,
-    /// Shortest time between two full passes. A topology change inside the interval is served
-    /// incrementally instead of by a full solve; see the module's Cost section.
+    /// Shortest time between two full passes. Every block inside the interval is served
+    /// incrementally; see the module's Cost section.
     full_pass_interval: Duration,
     /// When the last full pass started. `None` until the first one runs, which makes that first
     /// pass due immediately. Behind a `Mutex` because `compute` takes `&self`, and behind an
     /// `Arc` so a clone of this computation shares one interval rather than getting a second
     /// one that would let two full passes run back to back.
     last_full_pass: Arc<Mutex<Option<Instant>>>,
+}
+
+/// Orders the tokens a pass will attempt, putting `priority` first.
+///
+/// `pass_budget` cuts the sell loop off wherever it has reached, and a token it never attempts
+/// keeps its previous price. A token that has no previous price cannot do that: it would stay
+/// unpriced, and with no stored dependency set the incremental filter could not find it again
+/// either, so it would wait for the next full pass. Attempting those first is what stops the
+/// deadline from dropping them.
+fn order_priority_first(
+    tokens: &FxHashSet<Address>,
+    priority: &FxHashSet<Address>,
+) -> Vec<Address> {
+    let mut ordered = Vec::with_capacity(tokens.len());
+    ordered.extend(
+        tokens
+            .iter()
+            .filter(|token| priority.contains(*token))
+            .cloned(),
+    );
+    ordered.extend(
+        tokens
+            .iter()
+            .filter(|token| !priority.contains(*token))
+            .cloned(),
+    );
+    ordered
 }
 
 /// How long a full pass may be deferred by default while topology keeps changing.
@@ -366,8 +403,10 @@ impl TokenGasPriceComputation {
 
     /// Sets the shortest time between two full passes.
     ///
-    /// `Duration::ZERO` makes every topology change run a full pass, which is the behaviour
-    /// before this interval existed.
+    /// The interval is periodic, not topology-triggered: a full pass runs on the first block
+    /// after it elapses, whatever changed on that block. `Duration::ZERO` therefore makes every
+    /// block a full pass, which is heavier than the behaviour this interval replaced — that one
+    /// solved fully on a topology change and incrementally otherwise. No setting reproduces it.
     pub fn with_full_pass_interval(self, full_pass_interval: Duration) -> Self {
         Self { full_pass_interval, ..self }
     }
@@ -385,6 +424,10 @@ impl TokenGasPriceComputation {
     }
 
     /// Returns whether a full pass is due, and claims the interval when it is.
+    ///
+    /// The interval is claimed before the pass runs, so a pass that then fails does not get
+    /// retried until the next one falls due. That is deliberate: a pass that fails for a reason
+    /// that persists would otherwise retry on every block.
     fn claim_full_pass(&self) -> bool {
         let mut last = match self.last_full_pass.lock() {
             Ok(guard) => guard,
@@ -419,6 +462,7 @@ impl TokenGasPriceComputation {
         &self,
         market: &MarketData,
         filter_tokens: Option<&FxHashSet<Address>>,
+        priority_tokens: &FxHashSet<Address>,
     ) -> Result<PricingPassOutcome, ComputationError> {
         let (topology, block) = {
             let guard = market.read().await;
@@ -473,6 +517,8 @@ impl TokenGasPriceComputation {
                 unattempted: tokens_to_price,
             });
         };
+
+        let ordered = order_priority_first(&tokens_to_price, priority_tokens);
         // Stamp the result with the snapshot's block, not the earlier topology read — the feed
         // can advance between the two locks, and every price is computed against the snapshot.
         let block = ctx
@@ -488,7 +534,7 @@ impl TokenGasPriceComputation {
         tokio::task::spawn_blocking(move || {
             let _entered = span.enter();
             let mut pass = PricingPass::new(&algorithm, graph_manager.graph(), ctx, &computation);
-            pass.sell_loop(tokens_to_price, block)
+            pass.sell_loop(ordered, block)
         })
         .await
         .map_err(|join_error| {
@@ -520,40 +566,43 @@ impl TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<Option<ComputationOutput<TokenGasPrices>>, ComputationError> {
-        let (existing_deps, existing_prices) = {
+        // The dependency map holds one `path_components` set per priced token, so cloning it to
+        // change a handful of entries is this pass's dominant cost on a large market. Read it by
+        // reference here, and edit the stored map in place further down.
+        let (tokens_to_recompute, new_tokens, existing_prices) = {
             let store_guard = store.read().await;
-            let Some(existing_deps) = store_guard.token_prices_deps().cloned() else {
+            let Some(existing_deps) = store_guard.token_prices_deps() else {
                 return Ok(None);
             };
             let Some(existing_prices) = store_guard.token_prices().cloned() else {
                 return Ok(None);
             };
-            (existing_deps, existing_prices)
+
+            let changed_components = changed.all_changed_ids();
+            let mut tokens_to_recompute: FxHashSet<Address> = existing_deps
+                .iter()
+                .filter(|(_, entry)| {
+                    !entry
+                        .path_components
+                        .is_disjoint(&changed_components)
+                })
+                .map(|(addr, _)| addr.clone())
+                .collect();
+
+            // A token that arrives with a new component has no stored dependency set, so the
+            // filter above cannot find it. Until it has a price it cannot be quoted at all, so
+            // it is priced here rather than at the next full pass.
+            let mut new_tokens = FxHashSet::default();
+            for token in changed.added.values().flatten() {
+                if existing_deps.contains_key(token) {
+                    continue;
+                }
+                if tokens_to_recompute.insert(token.clone()) {
+                    new_tokens.insert(token.clone());
+                }
+            }
+            (tokens_to_recompute, new_tokens, existing_prices)
         };
-
-        let changed_components = changed.all_changed_ids();
-        let mut tokens_to_recompute: FxHashSet<Address> = existing_deps
-            .iter()
-            .filter(|(_, entry)| {
-                !entry
-                    .path_components
-                    .is_disjoint(&changed_components)
-            })
-            .map(|(addr, _)| addr.clone())
-            .collect();
-
-        // A token that arrives with a new component has no stored dependency set to match
-        // against, so the filter above cannot find it. Price it here rather than leave it
-        // unpriced until the next full pass: until it has a price it cannot be quoted at all.
-        let mut new_tokens = 0usize;
-        for token in changed.added.values().flatten() {
-            if existing_deps.contains_key(token) {
-                continue;
-            }
-            if tokens_to_recompute.insert(token.clone()) {
-                new_tokens += 1;
-            }
-        }
 
         if tokens_to_recompute.is_empty() {
             return Ok(Some(ComputationOutput::success(existing_prices)));
@@ -561,35 +610,37 @@ impl TokenGasPriceComputation {
 
         debug!(
             affected_tokens = tokens_to_recompute.len(),
-            new_tokens,
+            new_tokens = new_tokens.len(),
             total_tokens = existing_prices.len(),
             "incremental token price recomputation"
         );
 
         let solved = self
-            .solve_token_prices(market, Some(&tokens_to_recompute))
+            .solve_token_prices(market, Some(&tokens_to_recompute), &new_tokens)
             .await?;
 
         let mut result = existing_prices;
-        let mut new_deps = existing_deps;
-
-        for token in &tokens_to_recompute {
-            if let Some(entry) = solved.prices.get(token) {
-                result.insert(token.clone(), entry.price.clone());
-                new_deps.insert(token.clone(), entry.clone());
-            } else if !solved.unattempted.contains(token) {
-                // Attempted and failed: the routes are gone, so the price is too. A token the
-                // deadline cut off keeps its entry instead — nothing is known about it this
-                // block, and dropping it would hide it from this incremental path for good.
-                result.remove(token);
-                new_deps.remove(token);
-            }
-        }
-
-        store
+        let edited = store
             .write()
             .await
-            .set_token_prices_deps(new_deps, solved.block);
+            .edit_token_prices_deps(solved.block, |deps| {
+                for token in &tokens_to_recompute {
+                    if let Some(entry) = solved.prices.get(token) {
+                        result.insert(token.clone(), entry.price.clone());
+                        deps.insert(token.clone(), entry.clone());
+                    } else if !solved.unattempted.contains(token) {
+                        // Attempted and failed: the routes are gone, so the price is too. A token
+                        // the deadline cut off keeps its entry instead — nothing is known about it
+                        // this block, and dropping it would hide it from this path for good.
+                        result.remove(token);
+                        deps.remove(token);
+                    }
+                }
+            });
+        if !edited {
+            warn!("token price dependencies vanished between the read and the write; pass dropped");
+            return Ok(None);
+        }
         Span::current().record("updated_token_prices", result.len());
 
         Ok(Some(ComputationOutput::with_failures(result, solved.failed_items)))
@@ -629,10 +680,10 @@ impl DerivedComputation for TokenGasPriceComputation {
             return self.full_solve(market, store).await;
         }
 
-        // A topology change no longer forces a full solve on the block it arrives on. Inside
-        // the interval the pass stays incremental, which still re-prices every token whose
-        // stored routes ran through a changed component and every token a new component
-        // brought with it.
+        // Every block inside the interval is served incrementally, which still re-prices every
+        // token whose stored routes ran through a changed component and every token a new
+        // component brought with it. A topology change no longer forces a full solve on the
+        // block it arrives on.
         if !self.claim_full_pass() {
             if let Some(result) = self
                 .try_incremental_compute(market, store, changed)
@@ -656,7 +707,7 @@ impl TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
     ) -> Result<ComputationOutput<TokenGasPrices>, ComputationError> {
         let solved = self
-            .solve_token_prices(market, None)
+            .solve_token_prices(market, None, &FxHashSet::default())
             .await?;
 
         let mut token_prices_with_deps = TokenPricesWithDeps::default();
@@ -713,7 +764,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{setup_market_weighted, token, MockProtocolSim},
+        algorithm::test_utils::{component, setup_market_weighted, token, MockProtocolSim},
         derived::store::DerivedData,
     };
 
@@ -1073,10 +1124,11 @@ mod tests {
         );
     }
 
-    /// With the interval at zero every topology change runs a full pass, which is the
-    /// behaviour from before the interval existed.
+    /// The interval is periodic, not topology-triggered. At zero, a block carrying only state
+    /// updates runs a full pass too, which is what distinguishes this from the behaviour the
+    /// interval replaced: there, an updated-only block always went incremental.
     #[tokio::test]
-    async fn test_zero_interval_runs_a_full_pass_per_topology_change() {
+    async fn test_zero_interval_runs_a_full_pass_on_every_block() {
         use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
 
         let eth = token(0, "ETH");
@@ -1101,19 +1153,32 @@ mod tests {
             ("eth_bbb".to_string(), Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>),
         ]);
 
-        let mut added = FxHashMap::default();
-        added.insert("eth_aaa_v2".to_string(), vec![eth.address.clone(), aaa.address.clone()]);
+        // Only eth_aaa is reported, and only as an update: no topology change at all. Before
+        // the interval this always went incremental and left BBB alone.
         let output = computation
-            .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
+            .compute(
+                &market,
+                &store,
+                &ChangedComponents {
+                    updated: vec!["eth_aaa".to_string()],
+                    ..ChangedComponents::default()
+                },
+            )
             .await
             .expect("pricing must not fail");
 
         assert!((ratio(&output.data[&aaa.address]) - 4000.0).abs() < 1e-6, "AAA re-solved");
-        assert!((ratio(&output.data[&bbb.address]) - 5000.0).abs() < 1e-6, "BBB re-solved");
+        assert!(
+            (ratio(&output.data[&bbb.address]) - 5000.0).abs() < 1e-6,
+            "BBB re-solved, so the pass was full even though no topology changed"
+        );
     }
 
     /// A token that arrives with a new component has no stored dependency set, so the
     /// intersection cannot find it. It must still be priced without waiting for a full pass.
+    ///
+    /// The market genuinely starts without the component, rather than a store edited by hand,
+    /// so this covers the real case of a token absent from the initial topology.
     #[tokio::test]
     async fn test_added_token_is_priced_inside_the_interval() {
         use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
@@ -1121,10 +1186,8 @@ mod tests {
         let eth = token(0, "ETH");
         let aaa = token(1, "AAA");
         let ccc = token(2, "CCC");
-        let (market, _) = setup_market_weighted(vec![
-            ("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0)),
-            ("eth_ccc", &eth, &ccc, MockProtocolSim::new(2500.0)),
-        ]);
+        let (market, _) =
+            setup_market_weighted(vec![("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0))]);
         let computation =
             TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
                 .with_full_pass_interval(Duration::from_secs(3600));
@@ -1134,23 +1197,23 @@ mod tests {
             .await
             .expect("pricing must not fail");
         TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        assert!(!store
+            .read()
+            .await
+            .token_prices()
+            .expect("priced")
+            .contains_key(&ccc.address));
 
-        // Drop CCC's dependency entry so it looks like a token nothing has priced yet, which is
-        // the state a genuinely new token is in.
+        // CCC's pool is listed now, exactly as the feed would deliver it.
         {
-            let mut guard = store.write().await;
-            let mut deps = guard
-                .token_prices_deps()
-                .cloned()
-                .expect("a full pass stores dependencies");
-            deps.remove(&ccc.address);
-            guard.set_token_prices_deps(deps, 1);
+            let mut guard = market.write().await;
+            guard.upsert_tokens([ccc.clone()]);
+            guard.upsert_components([component("eth_ccc", &[eth.clone(), ccc.clone()])]);
+            guard.update_states([(
+                "eth_ccc".to_string(),
+                Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>,
+            )]);
         }
-
-        market.write().await.update_states([(
-            "eth_ccc".to_string(),
-            Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>,
-        )]);
 
         let mut added = FxHashMap::default();
         added.insert("eth_ccc".to_string(), vec![eth.address.clone(), ccc.address.clone()]);
@@ -1167,6 +1230,123 @@ mod tests {
             (ratio(&output.data[&aaa.address]) - 2000.0).abs() < 1e-6,
             "an unrelated token is left alone"
         );
+    }
+
+    /// A full pass runs once the interval has elapsed, on whatever block comes next.
+    #[tokio::test]
+    async fn test_full_pass_runs_once_the_interval_elapses() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let bbb = token(2, "BBB");
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0)),
+            ("eth_bbb", &eth, &bbb, MockProtocolSim::new(2500.0)),
+        ]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_full_pass_interval(Duration::from_millis(1));
+        let store = DerivedData::new_shared();
+        let full = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+
+        market.write().await.update_states([
+            ("eth_aaa".to_string(), Box::new(MockProtocolSim::new(4000.0)) as Box<dyn ProtocolSim>),
+            ("eth_bbb".to_string(), Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>),
+        ]);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Only eth_aaa changed, so an incremental pass would leave BBB alone. The interval has
+        // elapsed, so this is a full pass and BBB moves too.
+        let output = computation
+            .compute(
+                &market,
+                &store,
+                &ChangedComponents {
+                    updated: vec!["eth_aaa".to_string()],
+                    ..ChangedComponents::default()
+                },
+            )
+            .await
+            .expect("pricing must not fail");
+
+        assert!((ratio(&output.data[&bbb.address]) - 5000.0).abs() < 1e-6, "BBB re-solved");
+    }
+
+    /// A token whose only pool is removed loses its price rather than keeping a stale one.
+    ///
+    /// The incremental path handled `removed` before, but a removal always forced a full solve,
+    /// so this path never ran in production. It does now.
+    #[tokio::test]
+    async fn test_removed_component_unprices_its_token_incrementally() {
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let bbb = token(2, "BBB");
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0)),
+            ("eth_bbb", &eth, &bbb, MockProtocolSim::new(2500.0)),
+        ]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_full_pass_interval(Duration::from_secs(3600));
+        let store = DerivedData::new_shared();
+        let full = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+
+        market
+            .write()
+            .await
+            .remove_components([&"eth_aaa".to_string()]);
+
+        let output = computation
+            .compute(
+                &market,
+                &store,
+                &ChangedComponents {
+                    removed: vec!["eth_aaa".to_string()],
+                    ..ChangedComponents::default()
+                },
+            )
+            .await
+            .expect("pricing must not fail");
+
+        assert!(!output.data.contains_key(&aaa.address), "AAA is unpriced, not stale");
+        assert!(
+            !store
+                .read()
+                .await
+                .token_prices_deps()
+                .expect("deps stored")
+                .contains_key(&aaa.address),
+            "AAA's dependencies are dropped with its price"
+        );
+        assert!((ratio(&output.data[&bbb.address]) - 2500.0).abs() < 1e-6, "BBB untouched");
+    }
+
+    /// Tokens with no previous price are attempted before the rest, so the sell loop's deadline
+    /// cannot be what leaves them unpriced.
+    #[test]
+    fn test_order_priority_first_puts_new_tokens_at_the_front() {
+        let a = token(1, "AAA").address;
+        let b = token(2, "BBB").address;
+        let c = token(3, "CCC").address;
+        let tokens: FxHashSet<Address> = [a.clone(), b.clone(), c.clone()]
+            .into_iter()
+            .collect();
+        let priority: FxHashSet<Address> = [c.clone()].into_iter().collect();
+
+        let ordered = order_priority_first(&tokens, &priority);
+
+        assert_eq!(ordered.len(), 3, "every token is still attempted");
+        assert_eq!(ordered[0], c, "the token with no previous price goes first");
+        assert!(ordered[1..].contains(&a) && ordered[1..].contains(&b));
     }
 
     #[tokio::test]

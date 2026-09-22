@@ -643,8 +643,9 @@ impl FyndBuilder {
 
     /// Sets the shortest time between two full token-pricing passes.
     ///
-    /// Inside the interval a topology change re-prices only the tokens it affects and the
-    /// tokens it introduces, instead of re-pricing every token in the market.
+    /// A full pass runs on the first block after the interval elapses. Every block inside it
+    /// re-prices only the tokens a change affects and the tokens it introduces, instead of
+    /// re-pricing every token in the market.
     pub fn pricing_full_pass_interval(mut self, interval: Duration) -> Self {
         self.pricing_full_pass_interval = Some(interval);
         self

@@ -60,9 +60,9 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub tycho_subscription_buffer_size: Option<usize>,
 
-    /// Shortest time, in seconds, between two full token-pricing passes. Inside the interval a
-    /// topology change re-prices only the tokens it affects and the tokens it introduces. Unset
-    /// keeps the built-in default.
+    /// Shortest time, in seconds, between two full token-pricing passes. A full pass runs on the
+    /// first block after the interval elapses; every block inside it re-prices only the tokens a
+    /// change affects and the tokens it introduces. Unset keeps the built-in default.
     #[arg(long, env)]
     pub pricing_full_pass_interval_secs: Option<u64>,
 
