@@ -116,13 +116,8 @@ impl DerivedComputation for ComponentDepthComputation {
         ComputationRequirements::fresh([SpotPriceComputation::ID])
     }
 
-    fn persist(
-        store: &mut DerivedData,
-        output: ComputationOutput<Self::Output>,
-        block: u64,
-        is_full_recompute: bool,
-    ) {
-        store.set_component_depths(output.data, output.failed_items, block, is_full_recompute);
+    fn persist(store: &mut DerivedData, output: ComputationOutput<Self::Output>, block: u64) {
+        store.set_component_depths(output.data, output.failed_items, block);
     }
 
     #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_component_depths))]
@@ -132,7 +127,7 @@ impl DerivedComputation for ComponentDepthComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        let (spot_prices, mut component_depths) = read_stored_data(store, changed).await?;
+        let (spot_prices, mut component_depths) = read_stored_data(store).await?;
         for component_id in &changed.removed {
             component_depths.retain(|key, _| &key.0 != component_id);
         }
@@ -189,48 +184,35 @@ impl DerivedComputation for ComponentDepthComputation {
 /// The depth of one directed pair of a component, or why it has none.
 type PairDepth = (ComponentDepthKey, Result<BigUint, FailedItemError>);
 
-/// Reads the stored spot prices, and the stored depths to start from. A full recompute starts
-/// from no depths.
+/// Reads the stored spot prices, and the stored depths to start from.
 async fn read_stored_data(
     store: &SharedDerivedDataRef,
-    changed: &ChangedComponents,
 ) -> Result<(SpotPrices, ComponentDepths), ComputationError> {
     let store_guard = store.read().await;
     let spot_prices = store_guard
         .spot_prices()
         .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))?
         .clone();
-    let component_depths = if changed.is_full_recompute {
-        ComponentDepths::default()
-    } else {
-        store_guard
-            .component_depths()
-            .cloned()
-            .unwrap_or_default()
-    };
+    let component_depths = store_guard
+        .component_depths()
+        .cloned()
+        .unwrap_or_default();
     Ok((spot_prices, component_depths))
 }
 
 /// Returns the components whose depths need computing, and a market snapshot of them taken under
-/// a brief lock. A full recompute computes every component; otherwise the added and updated ones.
+/// a brief lock: the added and updated ones.
 async fn snapshot_changed_components(
     market: &MarketData,
     changed: &ChangedComponents,
 ) -> (MarketState, Vec<ComponentId>) {
     let market_guard = market.read().await;
-    let components_to_compute: Vec<ComponentId> = if changed.is_full_recompute {
-        market_guard
-            .component_topology()
-            .into_keys()
-            .collect()
-    } else {
-        changed
-            .added
-            .keys()
-            .chain(changed.updated.iter())
-            .cloned()
-            .collect()
-    };
+    let components_to_compute: Vec<ComponentId> = changed
+        .added
+        .keys()
+        .chain(changed.updated.iter())
+        .cloned()
+        .collect();
     let component_ids: FxHashSet<&ComponentId> = components_to_compute.iter().collect();
     (market_guard.extract_subset(&component_ids), components_to_compute)
 }
@@ -467,7 +449,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(SpotPrices::default(), vec![], 0, true);
+            .set_spot_prices(SpotPrices::default(), vec![], 0);
         let changed = ChangedComponents::default();
 
         let output = ComponentDepthComputation::default()
@@ -531,7 +513,6 @@ mod tests {
             )]),
             removed: vec![],
             updated: vec![],
-            is_full_recompute: true,
         };
         let spot_output = spot_comp
             .compute(&market, &derived, &changed)
@@ -540,7 +521,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(spot_output.data, vec![], 0, true);
+            .set_spot_prices(spot_output.data, vec![], 0);
 
         let component_depths_output = ComponentDepthComputation::default()
             .compute(&market, &derived, &changed)
@@ -607,7 +588,6 @@ mod tests {
             )]),
             removed: vec![],
             updated: vec![],
-            is_full_recompute: true,
         };
         let spot_output = SpotPriceComputation::new()
             .compute(&market, &derived, &changed)
@@ -616,7 +596,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(spot_output.data, vec![], 0, true);
+            .set_spot_prices(spot_output.data, vec![], 0);
 
         let output = ComponentDepthComputation::default()
             .compute(&market, &derived, &changed)
@@ -660,7 +640,6 @@ mod tests {
             )]),
             removed: vec![],
             updated: vec![],
-            is_full_recompute: true,
         };
         let spot_output = SpotPriceComputation::new()
             .compute(&market, &derived, &changed)
@@ -669,7 +648,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(spot_output.data, vec![], 0, true);
+            .set_spot_prices(spot_output.data, vec![], 0);
 
         let output = ComponentDepthComputation::default()
             .compute(&market, &derived, &changed)
@@ -713,7 +692,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(partial_spot, vec![], 0, true);
+            .set_spot_prices(partial_spot, vec![], 0);
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([
                 ("eth_usdc".to_string(), vec![eth.address.clone(), usdc.address.clone()]),
@@ -721,7 +700,6 @@ mod tests {
             ]),
             removed: vec![],
             updated: vec![],
-            is_full_recompute: true,
         };
 
         let output = ComponentDepthComputation::default()
@@ -760,7 +738,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(SpotPrices::default(), vec![], 0, true);
+            .set_spot_prices(SpotPrices::default(), vec![], 0);
 
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
@@ -769,7 +747,6 @@ mod tests {
             )]),
             removed: vec![],
             updated: vec![],
-            is_full_recompute: false,
         };
 
         let output = ComponentDepthComputation::default()
@@ -821,7 +798,6 @@ mod tests {
             )]),
             removed: vec![],
             updated: vec![],
-            is_full_recompute: true,
         };
 
         let spot_output = SpotPriceComputation::new()
@@ -831,7 +807,7 @@ mod tests {
         derived
             .try_write()
             .unwrap()
-            .set_spot_prices(spot_output.data, vec![], 0, true);
+            .set_spot_prices(spot_output.data, vec![], 0);
 
         let output = ComponentDepthComputation::default()
             .compute(&market, &derived, &changed)

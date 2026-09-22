@@ -711,8 +711,7 @@ impl FyndBuilder {
     /// Sets how long after a token-pricing pass starts the next one may start.
     ///
     /// The cap bounds what one pass costs; this bounds how often one runs. A block inside the
-    /// interval serves the stored prices, unless a component brought a token with no price or
-    /// the manager asked for a full recompute.
+    /// interval serves the stored prices, unless a component brought a token with no price.
     pub fn set_pricing_min_pass_interval(mut self, interval: Duration) -> Self {
         self.pricing_min_pass_interval = Some(interval);
         self

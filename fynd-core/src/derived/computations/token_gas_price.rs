@@ -114,7 +114,6 @@
 //! # Seeding prices
 //!
 //! Seeding rebuilds the price and dependency maps at startup or when either map is missing.
-//! `ChangedComponents::is_full_recompute` also forces seeding and restarts the interval.
 //! Seeding selects every market token except the gas token without a token count cap because
 //! `derived_data_ready` does not wait for every token to have a price. The sell solve cap and
 //! deadline still apply. Unattempted tokens keep their previous price and dependencies.
@@ -1205,11 +1204,10 @@ impl TokenGasPriceComputation {
     /// A whole pass also waits for a block other than `last_pass_block`, unless the interval is
     /// zero.
     ///
-    /// `must_solve` runs a whole pass whatever the interval says, for a caller that has nothing
-    /// stored to serve instead. `arrivals` only earns the tokens that arrived: those cannot be
-    /// quoted until they are priced, but pricing them is not a reason to start the interval
-    /// again or to rank the rest of the market again.
-    fn start_pass(&self, block: u64, arrivals: bool, must_solve: bool) -> PassSlot {
+    /// `arrivals` only earns the tokens that arrived: those cannot be quoted until they are
+    /// priced, but pricing them is not a reason to start the interval again or to rank the rest
+    /// of the market again.
+    fn start_pass(&self, block: u64, arrivals: bool) -> PassSlot {
         let mut state = self.lock_pass_history();
         let now = Instant::now();
         let interval_elapsed = state
@@ -1219,7 +1217,7 @@ impl TokenGasPriceComputation {
             state
                 .last_pass_block
                 .is_none_or(|last_block| last_block != block);
-        if (interval_elapsed && new_block) || must_solve {
+        if interval_elapsed && new_block {
             state.last_pass_started = Some(now);
             state.last_pass_block = Some(block);
             return PassSlot::Due;
@@ -1695,13 +1693,8 @@ impl DerivedComputation for TokenGasPriceComputation {
         ComputationRequirements::none()
     }
 
-    fn persist(
-        store: &mut DerivedData,
-        output: ComputationOutput<Self::Output>,
-        block: u64,
-        is_full_recompute: bool,
-    ) {
-        store.set_token_prices(output.data, output.failed_items, block, is_full_recompute);
+    fn persist(store: &mut DerivedData, output: ComputationOutput<Self::Output>, block: u64) {
+        store.set_token_prices(output.data, output.failed_items, block);
     }
 
     #[instrument(
@@ -1721,39 +1714,35 @@ impl DerivedComputation for TokenGasPriceComputation {
             .last_updated()
             .map_or(0, |block| block.number());
         // A component arriving earns a pass inside the interval, but only for the tokens it
-        // carries; a full recompute earns a whole one, having nothing stored to serve instead.
-        let scope =
-            match self.start_pass(block, !changed.added.is_empty(), changed.is_full_recompute) {
-                PassSlot::Due => PassScope::Whole,
-                PassSlot::ArrivalsOnly => PassScope::ArrivalsOnly,
-                PassSlot::Deferred => {
-                    let stored = {
-                        let store_guard = store.read().await;
-                        store_guard.token_prices().cloned()
-                    };
-                    // Nothing stored means nothing to serve, so the interval cannot defer this
-                    // block: seeding runs instead.
-                    let Some(prices) = stored else {
-                        return self
-                            .seed_all_prices(market, store)
-                            .await;
-                    };
-                    Span::current().record("updated_token_prices", prices.len());
-                    return Ok(ComputationOutput::with_failures(prices, Vec::new()));
-                }
-            };
-
-        // Startup and lag recovery have nothing stored to select from, so they offer every token
-        // to the pass. So does a block whose selection finds nothing stored. Every other block
-        // selects, and the cap bounds what the pass gets through, whatever the block brought:
-        // the tokens of an added component are ranked first, not exempted from the cap.
-        if !changed.is_full_recompute {
-            if let Some(result) = self
-                .update_prices(market, store, changed, scope)
-                .await?
-            {
-                return Ok(result);
+        // carries.
+        let scope = match self.start_pass(block, !changed.added.is_empty()) {
+            PassSlot::Due => PassScope::Whole,
+            PassSlot::ArrivalsOnly => PassScope::ArrivalsOnly,
+            PassSlot::Deferred => {
+                let stored = {
+                    let store_guard = store.read().await;
+                    store_guard.token_prices().cloned()
+                };
+                // Nothing stored means nothing to serve, so the interval cannot defer this
+                // block: seeding runs instead.
+                let Some(prices) = stored else {
+                    return self
+                        .seed_all_prices(market, store)
+                        .await;
+                };
+                Span::current().record("updated_token_prices", prices.len());
+                return Ok(ComputationOutput::with_failures(prices, Vec::new()));
             }
+        };
+
+        // A block whose selection finds nothing stored offers every token to the pass. Every
+        // other block selects, and the cap bounds what the pass gets through, whatever the block
+        // brought: the tokens of an added component are ranked first, not exempted from the cap.
+        if let Some(result) = self
+            .update_prices(market, store, changed, scope)
+            .await?
+        {
+            return Ok(result);
         }
 
         self.seed_all_prices(market, store)
@@ -1937,14 +1926,20 @@ mod tests {
             .await
             .expect("pricing must not fail");
 
-        // A full recompute whose deadline expires immediately attempts nothing; every token
+        // A seeding pass whose deadline expires immediately attempts nothing; every token
         // must keep its previous price rather than vanish with no later pass to restore it.
         let output = computation_for(&eth.address)
             .with_pass_budget(Duration::ZERO)
             .compute(
                 &market,
                 &store,
-                &ChangedComponents { is_full_recompute: true, ..ChangedComponents::default() },
+                &ChangedComponents {
+                    added: FxHashMap::from_iter([(
+                        "eth_usdc".to_string(),
+                        vec![eth.address.clone(), usdc.address.clone()],
+                    )]),
+                    ..ChangedComponents::default()
+                },
             )
             .await
             .expect("pricing must not fail");
@@ -1987,7 +1982,10 @@ mod tests {
             .compute(
                 &market,
                 &store,
-                &ChangedComponents { is_full_recompute: true, ..ChangedComponents::default() },
+                &ChangedComponents {
+                    removed: vec!["eth_usdc".to_string()],
+                    ..ChangedComponents::default()
+                },
             )
             .await
             .expect("pricing must not fail");
@@ -2009,7 +2007,7 @@ mod tests {
             .expect("pricing must not fail");
         // The manager persists between runs; without this `update_prices` bails out on the
         // missing stored prices and the test would exercise seeding twice.
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         // The pool's state changes, marking USDC for re-pricing, but the deadline expires
         // before it is attempted: the previous price must survive.
@@ -2060,7 +2058,7 @@ mod tests {
             .await
             .expect("pricing must not fail");
         // The manager persists between runs; the incremental path reads the stored prices.
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         // Both pools move, but only eth_aaa is reported as changed: AAA must re-price
         // against the new state while BBB keeps its stored price.
@@ -2106,7 +2104,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         market.write().await.update_states([
             ("eth_aaa".to_string(), Box::new(MockProtocolSim::new(4000.0)) as Box<dyn ProtocolSim>),
@@ -2150,7 +2148,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
         assert!(!store
             .read()
             .await
@@ -2202,7 +2200,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         market
             .write()
@@ -2381,7 +2379,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         market.write().await.update_states([(
             "eth_aaa".to_string(),
@@ -2422,7 +2420,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         {
             let mut guard = market.write().await;
@@ -2467,7 +2465,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1);
 
         let mut added = FxHashMap::default();
         {
@@ -2512,7 +2510,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1);
 
         // A new pool prices AAA far better, and a new token arrives on the same block. The cap
         // of one takes the token with no price, so AAA is cut.
@@ -2545,7 +2543,7 @@ mod tests {
             (ratio(&cut.data[&aaa.address]) - 2000.0).abs() < 1e-6,
             "the cap took the token with no price, so AAA keeps its old price"
         );
-        TokenGasPriceComputation::persist(&mut *store.write().await, cut, 2, false);
+        TokenGasPriceComputation::persist(&mut *store.write().await, cut, 2);
 
         // Nothing changes on this block. Only the arrived rank can reach AAA: its stored
         // dependencies do not name the new pool.
@@ -2585,7 +2583,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1);
 
         let mut added = FxHashMap::default();
         {
@@ -2636,45 +2634,29 @@ mod tests {
             .with_min_pass_interval(Duration::from_millis(400));
 
         assert_eq!(
-            computation.start_pass(1, false, false),
+            computation.start_pass(1, false),
             PassSlot::Due,
             "the first pass is due, nothing has run"
         );
         assert_eq!(
-            computation.start_pass(2, false, false),
+            computation.start_pass(2, false),
             PassSlot::Deferred,
             "a block straight after one inside the interval waits"
         );
 
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(
-            computation.start_pass(3, true, false),
+            computation.start_pass(3, true),
             PassSlot::ArrivalsOnly,
             "an arrival inside the interval earns a pass for its own tokens"
         );
 
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(
-            computation.start_pass(4, false, false),
+            computation.start_pass(4, false),
             PassSlot::Due,
             "450ms after the only whole pass the interval has elapsed, so the arrival in the \
              middle of it did not restart it"
-        );
-    }
-
-    /// A caller with nothing stored to serve gets a whole pass whatever the interval says.
-    #[test]
-    fn test_a_must_solve_pass_ignores_the_interval() {
-        let eth = token(0, "ETH").address;
-        let computation = TokenGasPriceComputation::new(eth, 1, BigUint::from(PROBE_AMOUNT))
-            .with_min_pass_interval(Duration::from_secs(3600));
-
-        assert_eq!(computation.start_pass(1, false, false), PassSlot::Due);
-        assert_eq!(computation.start_pass(2, false, false), PassSlot::Deferred);
-        assert_eq!(
-            computation.start_pass(2, false, true),
-            PassSlot::Due,
-            "a full recompute has nothing to serve instead, so it runs a whole pass"
         );
     }
 
@@ -2684,10 +2666,10 @@ mod tests {
         let computation = TokenGasPriceComputation::new(eth, 1, BigUint::from(PROBE_AMOUNT))
             .with_min_pass_interval(Duration::from_millis(1));
 
-        assert_eq!(computation.start_pass(5, false, false), PassSlot::Due);
+        assert_eq!(computation.start_pass(5, false), PassSlot::Due);
         std::thread::sleep(Duration::from_millis(5));
-        assert_eq!(computation.start_pass(5, false, false), PassSlot::Deferred);
-        assert_eq!(computation.start_pass(6, false, false), PassSlot::Due);
+        assert_eq!(computation.start_pass(5, false), PassSlot::Deferred);
+        assert_eq!(computation.start_pass(6, false), PassSlot::Due);
     }
 
     /// Tokens that can never be priced must not hold a slot in every pass.
@@ -2728,7 +2710,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1);
 
         // AAA's pool moves. It has to be re-priced within a few passes rather than waiting
         // behind three tokens that fail every time.
@@ -2750,7 +2732,7 @@ mod tests {
                 repriced = true;
                 break;
             }
-            TokenGasPriceComputation::persist(&mut *store.write().await, output, block, false);
+            TokenGasPriceComputation::persist(&mut *store.write().await, output, block);
         }
 
         assert!(repriced, "the priced token is refreshed rather than starved by failing tokens");
@@ -2788,7 +2770,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
         assert!(
             !store
                 .read()
@@ -2887,7 +2869,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
         let first_pass = stamp(&computation, &aaa.address);
         assert_eq!(stamp(&computation, &bbb.address), first_pass, "one pass priced both");
 
@@ -2900,7 +2882,7 @@ mod tests {
             .compute(&market, &store, &changed)
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, incremental, 2, false);
+        TokenGasPriceComputation::persist(&mut *store.write().await, incremental, 2);
 
         assert!(
             stamp(&computation, &aaa.address) > first_pass,
@@ -2927,7 +2909,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         // The pool's state moves, but the changed set names no stored dependency, so the
         // incremental path must return the stored prices without re-solving anything.
@@ -2998,7 +2980,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         // The pool turns one-way: the liquidity cap lets the 0.5e18 buy through but blocks the
         // 1e18 sell back. A token that was priced and then lost its sell route must stop being
@@ -3259,7 +3241,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
         let failure_before = store
             .read()
             .await
@@ -3276,7 +3258,7 @@ mod tests {
             .compute(&market, &store, &removed)
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, output, 2, false);
+        TokenGasPriceComputation::persist(&mut *store.write().await, output, 2);
 
         assert!(failure_before);
         assert!(store

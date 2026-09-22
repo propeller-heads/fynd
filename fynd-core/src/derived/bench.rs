@@ -2,8 +2,8 @@
 //! without a live Tycho stream.
 //!
 //! [`time_derived_computations`] replays the first update, which is the market snapshot, and runs
-//! every computation as a full recompute. Then it replays each later update and runs the
-//! computations incrementally on the components that update changed. The market and the store
+//! every computation on the whole topology it carries. Then it replays each later update and runs
+//! the computations incrementally on the components that update changed. The market and the store
 //! carry over between blocks, as they do under `ComputationManager`. Computations run one at a
 //! time, pool depths after the spot prices they read, so each time is for that computation alone.
 
@@ -194,7 +194,7 @@ async fn time_computation<C: DerivedComputation>(
     let elapsed = start.elapsed();
     let items = output_len(&output.data);
     let failed = output.failed_items.len();
-    C::persist(&mut *run.store.write().await, output, block, run.changed.is_full_recompute);
+    C::persist(&mut *run.store.write().await, output, block);
     println!(
         "block {block} {:<17} {:>10.1} ms  items={items} failed={failed}",
         C::ID,
@@ -272,20 +272,23 @@ pub async fn time_derived_computations(
         .expect("the snapshot replays");
     set_gas_price(&market, settings.gas_price_wei.clone()).await;
     drain_events(&mut events);
-    let components = market
+    let topology = market
         .read()
         .await
         .component_topology()
-        .len();
+        .clone();
     println!(
-        "replayed the snapshot in {:.1} s: {components} components",
-        start.elapsed().as_secs_f64()
+        "replayed the snapshot in {:.1} s: {} components",
+        start.elapsed().as_secs_f64(),
+        topology.len()
     );
 
-    let full_recompute = ChangedComponents { is_full_recompute: true, ..Default::default() };
+    // The snapshot is the seeding block: every component it carries arrives at once, which is
+    // what the manager sends at startup.
+    let seeding = ChangedComponents { added: topology, ..Default::default() };
     let block = read_current_block(&market).await;
     let times = computations
-        .run_block(&BlockRun { market: &market, store: &store, changed: &full_recompute, block })
+        .run_block(&BlockRun { market: &market, store: &store, changed: &seeding, block })
         .await;
     report.times.first_block = times.into_iter().collect();
     report.values.after_first_block = read_derived_values(&store).await;
@@ -304,7 +307,6 @@ pub async fn time_derived_computations(
                 added: added_components,
                 removed: removed_components,
                 updated: updated_components,
-                is_full_recompute: false,
             };
             if changed.added.is_empty() && changed.removed.is_empty() && changed.updated.is_empty()
             {
