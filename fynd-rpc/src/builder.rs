@@ -321,7 +321,6 @@ impl FyndRPCBuilder {
         }
 
         let chain = parts.chain();
-        let chain_id = chain.id();
         let router_address = parts.router_address().cloned();
         let permit2_address = {
             use fynd_core::encoding::encoder::PERMIT2_ADDRESS;
@@ -362,7 +361,7 @@ impl FyndRPCBuilder {
         let app_state = AppState::new(
             router,
             health_tracker,
-            chain_id,
+            chain,
             router_address,
             permit2_address,
             #[cfg(feature = "experimental")]

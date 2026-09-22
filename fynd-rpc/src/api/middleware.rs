@@ -19,8 +19,11 @@ use actix_web::{
     middleware::Next,
 };
 use metrics::{counter, histogram};
+use serde::Serialize;
 
-/// Per-client label values extracted from proxy-injected headers.
+/// Per-client label values extracted from proxy-injected headers. Also the `client` block of
+/// a quote record, so its fallbacks (`unknown`, `none`, `invalid`) reach the store as-is.
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ClientLabels {
     pub(crate) user_identity: String,
     pub(crate) user_plan: String,

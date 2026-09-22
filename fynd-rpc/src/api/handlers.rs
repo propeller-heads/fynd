@@ -22,9 +22,10 @@ use crate::api::{
     disable_slippage_taking,
     error::{solve_error_code, ErrorResponse},
     exclusive_access,
+    record::{QuoteRecord, RequestRecord},
     request_capture::{
         self, failure_reason_slug, log_request_capture, log_slow_solve, quote_status_code,
-        ReplayRequest, RequestOutcome,
+        RequestOutcome,
     },
 };
 
@@ -88,13 +89,14 @@ pub async fn quote(
         core_request,
         disable_slippage_taking::from_headers(http_request.headers()),
     );
-    let capture = ReplayRequest::capture(&core_request, access);
+    let request_record = RequestRecord::capture(&core_request, access);
 
     let result = state
         .worker_router()
         .quote(core_request, access)
         .await;
-    log_quote_outcome(capture, &result);
+    let record = QuoteRecord::build(request_record, &result, state.chain(), http_request.headers());
+    log_quote_outcome(&record, &result);
 
     let dto_quote: dto::Quote = result?.into();
     Ok(HttpResponse::Ok().json(dto_quote))
@@ -103,8 +105,8 @@ pub async fn quote(
 /// Validates a wire-format quote request and converts it to the core type.
 ///
 /// Rejects requests without orders and orders that fail [`fynd_core::Order::validate`]. Take a
-/// [`ReplayRequest::capture`] of the returned request if the outcome should be logged with
-/// [`log_quote_outcome`].
+/// [`RequestRecord::capture`] of the returned request before solving it, so the outcome can be
+/// recorded with [`QuoteRecord::build`] and logged with [`log_quote_outcome`].
 pub fn validate_quote_request(
     request: dto::QuoteRequest,
 ) -> Result<fynd_core::QuoteRequest, ApiError> {
@@ -122,14 +124,17 @@ pub fn validate_quote_request(
 
 /// Emits the failure-capture and slow-solve log lines for a finished quote.
 ///
-/// Serialization happens on a detached task carrying the current span, so it never adds latency
-/// to the response. Successful, fast quotes log nothing (see `RequestOutcome::is_failure`).
+/// The request the lines carry is the replay capture inside `record`, cloned so the record stays
+/// with the caller. Serialization happens on a detached task carrying the current span, so it
+/// never adds latency to the response. Successful, fast quotes log nothing (see
+/// `RequestOutcome::is_failure`).
 ///
 /// # Panics
 ///
 /// Spawns the detached task with [`actix_web::rt::spawn`], which panics when called outside a
 /// running Actix system. Callers must invoke this from an Actix worker (i.e. inside a handler).
-pub fn log_quote_outcome(capture: ReplayRequest, result: &Result<fynd_core::Quote, SolveError>) {
+pub fn log_quote_outcome(record: &QuoteRecord, result: &Result<fynd_core::Quote, SolveError>) {
+    let capture = record.replay().clone();
     let num_orders = capture.num_orders();
     let outcome = match result {
         Ok(core_quote) => RequestOutcome::Solved {
@@ -679,7 +684,7 @@ mod tests {
         AppState::new(
             router,
             health_tracker,
-            1,
+            Chain::Ethereum,
             Some(router_address),
             permit2_address,
             #[cfg(feature = "experimental")]

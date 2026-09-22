@@ -15,7 +15,7 @@ use tycho_simulation::tycho_common::models::Address;
 /// present. The server-generated `id`, the routing-irrelevant `sender` /
 /// `receiver` (also PII we keep out of logs), and all encoding data are
 /// omitted — nothing is copied implicitly, so no DTO field can leak.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ReplayOrder {
     token_in: Address,
     token_out: Address,
@@ -24,7 +24,7 @@ struct ReplayOrder {
 }
 
 /// Routing-essential view of the request-level solve options.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ReplayOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_ms: Option<u64>,
@@ -37,7 +37,7 @@ struct ReplayOptions {
 }
 
 /// The liquidity a captured request excluded, sorted so two captures of one request read alike.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ReplayExclusionRouteFilter {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     exclude_pools: Vec<String>,
@@ -99,7 +99,7 @@ impl ReplayExclusionRouteFilter {
 /// The serialized JSON shape is a log format, not a stable API, and may change between
 /// releases.
 #[must_use]
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReplayRequest {
     orders: Vec<ReplayOrder>,
     options: ReplayOptions,
@@ -342,25 +342,17 @@ pub(crate) fn log_slow_solve(
     );
 }
 
+/// Request fixtures shared with the record tests: one order with a sender and receiver, and a
+/// request carrying every signed field a capture must leave out.
 #[cfg(test)]
-mod tests {
-    use std::{
-        io,
-        sync::{Arc, Mutex},
-    };
-
+pub(crate) mod test_fixtures {
     use fynd_rpc_types::{
         Bytes, ClientFeeParams, EncodingOptions, Order, OrderSide, PermitDetails, PermitSingle,
         QuoteOptions, QuoteRequest,
     };
     use num_bigint::BigUint;
-    use rstest::rstest;
-    use serde_json::Value;
-    use tracing_subscriber::fmt::MakeWriter;
 
-    use super::*;
-
-    fn order() -> Order {
+    pub(crate) fn order() -> Order {
         Order::new(
             Bytes::from([0xAAu8; 20]),
             Bytes::from([0xBBu8; 20]),
@@ -371,7 +363,7 @@ mod tests {
         .with_receiver(Bytes::from([0x77u8; 20]))
     }
 
-    fn request_with_signatures() -> QuoteRequest {
+    pub(crate) fn request_with_signatures() -> QuoteRequest {
         let permit = PermitSingle::new(
             PermitDetails::new(
                 Bytes::from([0xAAu8; 20]),
@@ -399,6 +391,24 @@ mod tests {
             .with_encoding_options(encoding);
         QuoteRequest::new(vec![order()]).with_options(options)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io,
+        sync::{Arc, Mutex},
+    };
+
+    use fynd_rpc_types::{QuoteOptions, QuoteRequest};
+    use rstest::rstest;
+    use serde_json::Value;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    use super::{
+        test_fixtures::{order, request_with_signatures},
+        *,
+    };
 
     #[test]
     fn replay_json_captures_only_routing_fields() {
@@ -450,58 +460,6 @@ mod tests {
         assert_eq!(captured["exclude_pools"], serde_json::json!(["pool-1"]));
         assert_eq!(captured["exclude_protocols"], serde_json::json!(["uniswap_v2"]));
         assert!(captured.get("exclude_tokens").is_none(), "an empty list is left out");
-    }
-
-    #[test]
-    fn replay_json_output_keys_are_allowlisted() {
-        let req = request_with_signatures();
-        let json = replay_json(req, ExclusiveAccess::Denied);
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-        let top_level: std::collections::BTreeSet<&str> = value
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(
-            top_level,
-            ["orders", "options", "exclusive_access", "disable_slippage_taking"]
-                .into_iter()
-                .collect(),
-            "unexpected top-level keys {top_level:?} — a new field may leak into replay logs; json: {json}"
-        );
-
-        let options = value
-            .get("options")
-            .and_then(Value::as_object)
-            .unwrap();
-        assert!(
-            !options.contains_key("encoding_options"),
-            "encoding_options leaked into replay log; json: {json}"
-        );
-        let options_allowlist = ["timeout_ms", "min_responses", "max_gas", "route_filter"];
-        for key in options.keys() {
-            assert!(
-                options_allowlist.contains(&key.as_str()),
-                "unexpected key {key} — a new option field may leak into replay logs; json: {json}"
-            );
-        }
-
-        // Only routing-essential order fields — id / sender / receiver must NOT appear.
-        let orders_allowlist = ["token_in", "token_out", "amount", "side"];
-        for order in value
-            .get("orders")
-            .and_then(Value::as_array)
-            .unwrap()
-        {
-            for key in order.as_object().unwrap().keys() {
-                assert!(
-                    orders_allowlist.contains(&key.as_str()),
-                    "unexpected key {key} — a new order field may leak into replay logs; json: {json}"
-                );
-            }
-        }
     }
 
     #[rstest]
