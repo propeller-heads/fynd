@@ -3,7 +3,8 @@ name = "fynd-gas-audit"
 version.workspace = true
 edition = "2021"
 description = "One-shot audit of Fynd's gas_estimate vs. actual on-chain gas usage"
-license = "MIT"
+license-file = "../../LICENSE.md"
+repository.workspace = true
 
 [dependencies]
 # Fynd integration

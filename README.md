@@ -95,3 +95,7 @@ Client SDKs that handle quoting, token approvals, and swap execution end-to-end:
 
 - **[`fynd-client`](https://crates.io/crates/fynd-client)** — Rust
 - **[`@kayibal/fynd-client`](https://www.npmjs.com/package/@kayibal/fynd-client)** — TypeScript
+
+## License
+
+Fynd is licensed under the [Fynd License 1.0](LICENSE.md).

@@ -3,7 +3,8 @@ name = "fynd-swap-cli"
 version.workspace = true
 edition = "2021"
 description = "CLI for quoting and executing token swaps via the Fynd solver"
-license = "MIT"
+license-file = "../../LICENSE.md"
+repository.workspace = true
 
 [dependencies]
 fynd-client = { workspace = true }

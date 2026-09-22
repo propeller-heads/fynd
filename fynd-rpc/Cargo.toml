@@ -3,7 +3,8 @@ name = "fynd-rpc"
 version.workspace = true
 edition = "2021"
 description = "HTTP RPC server for Fynd DEX router"
-license = "MIT"
+license-file = "../LICENSE.md"
+repository.workspace = true
 readme = "README.md"
 
 [dependencies]

@@ -56,6 +56,10 @@ pub type RouteConfigurator =
 /// OpenAPI documentation bundle for the stable Fynd RPC endpoints.
 #[derive(OpenApi)]
 #[openapi(
+    info(license(
+        name = "Fynd License 1.0",
+        url = "https://github.com/propeller-heads/fynd/blob/main/LICENSE.md"
+    )),
     paths(handlers::quote, handlers::health, handlers::info),
     components(schemas(
         dto::QuoteRequest,
