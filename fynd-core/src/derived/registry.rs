@@ -101,11 +101,10 @@ where
             }
         }
         let failed_items = output.failed_items.clone();
-        let is_full_recompute = changed.is_full_recompute;
         Ok(ComputedWrite {
             failed_items,
             persist: Box::new(move |store: &mut DerivedData| {
-                C::persist(store, output, block, is_full_recompute);
+                C::persist(store, output, block);
             }),
         })
     }
@@ -158,7 +157,6 @@ mod tests {
             &mut store,
             ComputationOutput::success(DummyData(7)),
             100,
-            true,
         );
 
         assert_eq!(store.output::<DummyData>(DummyComputation::ID), Some(&DummyData(7)));

@@ -229,11 +229,7 @@ impl<T> ComputationOutput<T> {
 ///         store: &SharedDerivedDataRef,
 ///         changed: &ChangedComponents,
 ///     ) -> Result<Self::Output, ComputationError> {
-///         if changed.is_full_recompute {
-///             // Full recompute: process all components
-///         } else {
-///             // Incremental: only process changed components
-///         }
+///         // Only process the components that changed this block.
 ///     }
 /// }
 /// ```
@@ -263,13 +259,7 @@ pub trait DerivedComputation: Send + Sync + 'static {
     /// partial failures, so a computation needs no change to `DerivedData` to be
     /// stored. Computations that keep a typed failure map (or other bespoke storage)
     /// override this. The manager calls it after [`Self::compute`].
-    fn persist(
-        store: &mut DerivedData,
-        output: ComputationOutput<Self::Output>,
-        block: u64,
-        is_full_recompute: bool,
-    ) {
-        let _ = is_full_recompute;
+    fn persist(store: &mut DerivedData, output: ComputationOutput<Self::Output>, block: u64) {
         store.set_output(Self::ID, output.data, block);
     }
 
@@ -288,7 +278,6 @@ pub trait DerivedComputation: Send + Sync + 'static {
     /// # Incremental Computation
     ///
     /// Implementations should use `changed` to only recompute data affected by the changes:
-    /// - `changed.is_full_recompute` - If true, recompute everything (startup/lag recovery)
     /// - `changed.added` - New components to compute
     /// - `changed.removed` - Components to remove from results
     /// - `changed.updated` - Components whose state changed
