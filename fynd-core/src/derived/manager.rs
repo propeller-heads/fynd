@@ -38,11 +38,6 @@ pub struct ChangedComponents {
 }
 
 impl ChangedComponents {
-    /// Returns true if this update changes the graph topology (adds or removes components).
-    pub fn is_topology_change(&self) -> bool {
-        !self.added.is_empty() || !self.removed.is_empty()
-    }
-
     /// Returns a HashSet of all changed component IDs.
     pub fn all_changed_ids(&self) -> FxHashSet<ComponentId> {
         let mut all = FxHashSet::default();
@@ -132,6 +127,9 @@ pub struct ComputationManagerConfig {
     /// default. The replay harness sets an effectively unbounded budget so integration tests
     /// can assert exact priced-token counts.
     pricing_pass_budget: Option<Duration>,
+    /// Overrides the shortest time between two full token-pricing passes; `None` keeps the
+    /// computation's default.
+    pricing_full_pass_interval: Option<Duration>,
 }
 
 impl ComputationManagerConfig {
@@ -155,6 +153,15 @@ impl ComputationManagerConfig {
     /// Overrides the wall-clock budget for the token pricing pass's sell loop.
     pub fn with_pricing_pass_budget(mut self, pass_budget: Duration) -> Self {
         self.pricing_pass_budget = Some(pass_budget);
+        self
+    }
+
+    /// Overrides the shortest time between two full token-pricing passes.
+    ///
+    /// Inside the interval a topology change is served incrementally. `Duration::ZERO` runs a
+    /// full pass on every topology change, which is the behaviour before the interval existed.
+    pub fn with_pricing_full_pass_interval(mut self, interval: Duration) -> Self {
+        self.pricing_full_pass_interval = Some(interval);
         self
     }
 
@@ -190,6 +197,7 @@ impl Default for ComputationManagerConfig {
             max_hop: crate::solver::defaults::POOL_MAX_HOPS,
             depth_slippage_threshold: 0.01,
             pricing_pass_budget: None,
+            pricing_full_pass_interval: None,
         }
     }
 }
@@ -232,6 +240,9 @@ impl ComputationManager {
             .with_gas_token(config.gas_token);
         if let Some(pass_budget) = config.pricing_pass_budget {
             token_prices = token_prices.with_pass_budget(pass_budget);
+        }
+        if let Some(interval) = config.pricing_full_pass_interval {
+            token_prices = token_prices.with_full_pass_interval(interval);
         }
         manager.register(token_prices)?;
         manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;

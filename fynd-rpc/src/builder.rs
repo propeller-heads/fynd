@@ -201,6 +201,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Sets the shortest time between two full token-pricing passes. Leaving this unset keeps
+    /// the computation's default.
+    pub fn pricing_full_pass_interval(mut self, interval: Duration) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .pricing_full_pass_interval(interval);
+        self
+    }
+
     /// Overrides the default encoder with a custom one.
     pub fn encoder(mut self, encoder: Encoder) -> Self {
         self.fynd_builder = self.fynd_builder.encoder(encoder);

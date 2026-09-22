@@ -511,6 +511,9 @@ pub struct FyndBuilder {
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
     tycho_subscription_buffer_size: Option<usize>,
+    /// Shortest time between two full token-pricing passes; `None` keeps the computation's
+    /// default.
+    pricing_full_pass_interval: Option<Duration>,
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
@@ -548,6 +551,7 @@ impl FyndBuilder {
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
             tycho_subscription_buffer_size: None,
+            pricing_full_pass_interval: None,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
@@ -634,6 +638,15 @@ impl FyndBuilder {
     /// unset preserves Tycho's native default.
     pub fn tycho_subscription_buffer_size(mut self, size: usize) -> Self {
         self.tycho_subscription_buffer_size = Some(size);
+        self
+    }
+
+    /// Sets the shortest time between two full token-pricing passes.
+    ///
+    /// Inside the interval a topology change re-prices only the tokens it affects and the
+    /// tokens it introduces, instead of re-pricing every token in the market.
+    pub fn pricing_full_pass_interval(mut self, interval: Duration) -> Self {
+        self.pricing_full_pass_interval = Some(interval);
         self
     }
 
@@ -892,10 +905,13 @@ impl FyndBuilder {
                 .iter()
                 .map(PoolEntry::max_hops),
         );
-        let computation_config = ComputationManagerConfig::new()
+        let mut computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
             .with_max_hop(pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
+        if let Some(interval) = self.pricing_full_pass_interval {
+            computation_config = computation_config.with_pricing_full_pass_interval(interval);
+        }
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.
         let (computation_manager, _) =

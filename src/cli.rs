@@ -60,6 +60,12 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub tycho_subscription_buffer_size: Option<usize>,
 
+    /// Shortest time, in seconds, between two full token-pricing passes. Inside the interval a
+    /// topology change re-prices only the tokens it affects and the tokens it introduces. Unset
+    /// keeps the built-in default.
+    #[arg(long, env)]
+    pub pricing_full_pass_interval_secs: Option<u64>,
+
     /// Disable TLS for Tycho connection
     #[arg(long)]
     pub disable_tls: bool,
