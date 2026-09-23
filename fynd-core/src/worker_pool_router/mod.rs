@@ -670,7 +670,7 @@ impl WorkerPoolRouter {
 
                 async move {
                     let result = queue
-                        .enqueue(order_clone, task_params)
+                        .enqueue(order_clone, task_params, deadline)
                         .await;
                     (worker_pool_name, result)
                 }

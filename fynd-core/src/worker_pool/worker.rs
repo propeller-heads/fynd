@@ -165,6 +165,25 @@ fn record_task_duration(pool_name: &str, duration: Duration, outcome: &'static s
     .record(duration.as_secs_f64());
 }
 
+/// How long this task may run, or `None` when the router has already given up on it.
+///
+/// The router starts its deadline when the request arrives, before the task is queued, and
+/// abandons every pool that has not answered by then. Two things follow, and this is both of
+/// them. A task picked up after the deadline has no reader left, so solving it only takes a
+/// worker away from a task that still has one. A task picked up before the deadline may run
+/// until the earlier of its pool budget and what remains of the deadline.
+///
+/// Taking the smaller of the two is what lets the pool budget stay meaningful: a caller that
+/// raises `timeout_ms` moves the deadline out and gets the deeper search it asked for, and a
+/// caller that does not is never promised a budget the router will cut short.
+fn task_budget(pool_timeout: Duration, deadline: Instant, now: Instant) -> Option<Duration> {
+    let remaining = deadline.checked_duration_since(now)?;
+    if remaining.is_zero() {
+        return None;
+    }
+    Some(pool_timeout.min(remaining))
+}
+
 /// Records time the worker spent in one of the arms that compete with task pickup.
 ///
 /// The worker's `select!` is `biased` with market events and derived-data events ahead of the
@@ -800,9 +819,32 @@ where
                                 task_rx.len(),
                             );
 
-                            // Wait for derived data readiness before solving
-                            // Use algorithm timeout as the max wait time
-                            if let Err(e) = self.wait_until_ready(self.algorithm.timeout()).await {
+                            // The router gives up at its own deadline and reads no answer after
+                            // it. Solving anyway takes this worker away from a task that still
+                            // has a reader, which lengthens the queue and pushes the next task
+                            // past its deadline too.
+                            let Some(budget) =
+                                task_budget(self.algorithm.timeout(), task.deadline(), started)
+                            else {
+                                debug!(
+                                    self.worker_id,
+                                    task_id = %task_id,
+                                    waited_ms = task.wait_time().as_millis() as u64,
+                                    "task passed its deadline in the queue; not solving"
+                                );
+                                record_task_duration(
+                                    &self.pool_name,
+                                    started.elapsed(),
+                                    "abandoned",
+                                );
+                                let waited_ms = task.wait_time().as_millis() as u64;
+                                task.respond(Err(SolveError::timeout(waited_ms)));
+                                continue;
+                            };
+
+                            // Wait for derived data readiness before solving, bounded by what
+                            // remains of the deadline as well as by the pool's own budget.
+                            if let Err(e) = self.wait_until_ready(budget).await {
                                 warn!(
                                     self.worker_id,
                                     task_id = %task_id,
@@ -2374,6 +2416,37 @@ mod tests {
             one_histogram_sample(&recorded, "worker_pool_task_duration_seconds");
         assert_eq!(labels, vec!["pool=test_pool".to_string(), format!("outcome={outcome}")]);
         assert!((seconds - 0.120).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_expired_task_has_no_budget() {
+        let now = Instant::now();
+        let deadline = now - Duration::from_millis(1);
+        assert_eq!(task_budget(Duration::from_millis(1000), deadline, now), None);
+    }
+
+    /// The router gives up at its own deadline, so a budget past it buys nothing: the pool would
+    /// keep searching for an answer no caller is still waiting for.
+    #[test]
+    fn test_budget_is_capped_by_the_router_deadline() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(100);
+        assert_eq!(
+            task_budget(Duration::from_millis(1000), deadline, now),
+            Some(Duration::from_millis(100))
+        );
+    }
+
+    /// A caller that raises its own timeout gets the deeper search it asked for, bounded by the
+    /// pool's configured budget rather than by the router default.
+    #[test]
+    fn test_budget_keeps_the_pool_limit_when_the_deadline_is_further_out() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(5000);
+        assert_eq!(
+            task_budget(Duration::from_millis(1000), deadline, now),
+            Some(Duration::from_millis(1000))
+        );
     }
 
     /// The three arms partition the worker's non-solving time, so each must carry its own label

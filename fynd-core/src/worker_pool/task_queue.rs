@@ -4,6 +4,8 @@
 //! It provides backpressure and allows the HTTP layer to remain
 //! responsive even when workers are busy.
 
+use std::time::Instant;
+
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -38,6 +40,7 @@ impl TaskQueueHandle {
         &self,
         order: Order,
         params: SolveParams,
+        deadline: Instant,
     ) -> Result<SingleOrderQuote, SolveError> {
         // Create response channel
         let (response_tx, response_rx) = oneshot::channel();
@@ -46,7 +49,7 @@ impl TaskQueueHandle {
         let task_id = Uuid::new_v4();
 
         // Create task
-        let task = SolveTask::new(task_id, order, response_tx).with_params(params);
+        let task = SolveTask::new(task_id, order, response_tx, deadline).with_params(params);
 
         // Try to send
         self.sender
@@ -136,6 +139,12 @@ mod tests {
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
+    }
+
+    /// A deadline far enough out that these tests never reach it, so they measure the queue
+    /// rather than the router giving up.
+    fn far_deadline() -> Instant {
+        Instant::now() + std::time::Duration::from_secs(60)
     }
 
     fn make_order() -> Order {
@@ -254,7 +263,7 @@ mod tests {
 
         // Enqueue an order
         let result = handle
-            .enqueue(make_order(), SolveParams::default())
+            .enqueue(make_order(), SolveParams::default(), far_deadline())
             .await;
 
         worker
@@ -279,7 +288,7 @@ mod tests {
         });
 
         let result = handle
-            .enqueue(make_order(), SolveParams::default())
+            .enqueue(make_order(), SolveParams::default(), far_deadline())
             .await;
 
         worker
@@ -304,7 +313,7 @@ mod tests {
         });
 
         let result = handle
-            .enqueue(make_order(), SolveParams::default())
+            .enqueue(make_order(), SolveParams::default(), far_deadline())
             .await;
 
         worker
@@ -323,7 +332,7 @@ mod tests {
         drop(receiver);
 
         let result = handle
-            .enqueue(make_order(), SolveParams::default())
+            .enqueue(make_order(), SolveParams::default(), far_deadline())
             .await;
         assert!(matches!(result, Err(SolveError::QueueFull)));
     }
@@ -340,7 +349,7 @@ mod tests {
 
         // Create a oneshot and send a task
         let (response_tx, _response_rx) = oneshot::channel();
-        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx);
+        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, far_deadline());
 
         handle
             .sender
@@ -352,7 +361,7 @@ mod tests {
 
         // Send another
         let (response_tx2, _response_rx2) = oneshot::channel();
-        let task2 = SolveTask::new(Uuid::new_v4(), make_order(), response_tx2);
+        let task2 = SolveTask::new(Uuid::new_v4(), make_order(), response_tx2, far_deadline());
         handle
             .sender
             .send(task2)
@@ -375,7 +384,7 @@ mod tests {
         // Fill the queue
         for _ in 0..capacity {
             let (response_tx, _response_rx) = oneshot::channel();
-            let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx);
+            let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, far_deadline());
             handle
                 .sender
                 .send(task)
@@ -398,12 +407,12 @@ mod tests {
         let (tx2, _rx2) = oneshot::channel();
         handle
             .sender
-            .send(SolveTask::new(Uuid::new_v4(), make_order(), tx1))
+            .send(SolveTask::new(Uuid::new_v4(), make_order(), tx1, far_deadline()))
             .await
             .unwrap();
         handle
             .sender
-            .send(SolveTask::new(Uuid::new_v4(), make_order(), tx2))
+            .send(SolveTask::new(Uuid::new_v4(), make_order(), tx2, far_deadline()))
             .await
             .unwrap();
 
@@ -441,8 +450,8 @@ mod tests {
 
         // Enqueue from both handles concurrently
         let (result1, result2) = tokio::join!(
-            handle1.enqueue(make_order(), SolveParams::default()),
-            handle2.enqueue(make_order(), SolveParams::default()),
+            handle1.enqueue(make_order(), SolveParams::default(), far_deadline()),
+            handle2.enqueue(make_order(), SolveParams::default(), far_deadline()),
         );
 
         worker
@@ -474,10 +483,10 @@ mod tests {
 
         // Enqueue two orders
         let _ = handle
-            .enqueue(make_order(), SolveParams::default())
+            .enqueue(make_order(), SolveParams::default(), far_deadline())
             .await;
         let _ = handle
-            .enqueue(make_order(), SolveParams::default())
+            .enqueue(make_order(), SolveParams::default(), far_deadline())
             .await;
 
         let (id1, id2): (Uuid, Uuid) = collector
@@ -493,7 +502,7 @@ mod tests {
     #[test]
     fn test_solve_task_wait_time_increases() {
         let (response_tx, _response_rx) = oneshot::channel();
-        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx);
+        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, far_deadline());
 
         let wait1 = task.wait_time();
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -505,7 +514,7 @@ mod tests {
     #[tokio::test]
     async fn test_solve_task_respond_delivers_result() {
         let (response_tx, response_rx) = oneshot::channel();
-        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx);
+        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, far_deadline());
 
         task.respond(Ok(make_single_quote()));
 
@@ -518,7 +527,7 @@ mod tests {
     #[tokio::test]
     async fn test_solve_task_respond_delivers_error() {
         let (response_tx, response_rx) = oneshot::channel();
-        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx);
+        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, far_deadline());
 
         task.respond(Err(SolveError::Timeout { elapsed_ms: 100 }));
 

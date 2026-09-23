@@ -27,12 +27,30 @@ pub struct SolveTask {
     response_tx: oneshot::Sender<SolveResult>,
     /// When this task was created.
     created_at: Instant,
+    /// When the router stops waiting for this task's answer.
+    ///
+    /// The router's clock starts when the request arrives, before the task is queued, so this
+    /// bounds the queue wait and the solve together. A worker reads it to leave an answer nobody
+    /// waits for unsolved, and to keep the solve inside what remains of it.
+    deadline: Instant,
 }
 
 impl SolveTask {
     /// Creates a new solve task with default parameters (base Tycho state).
-    pub fn new(id: TaskId, order: Order, response_tx: oneshot::Sender<SolveResult>) -> Self {
-        Self { id, order, params: SolveParams::default(), response_tx, created_at: Instant::now() }
+    pub fn new(
+        id: TaskId,
+        order: Order,
+        response_tx: oneshot::Sender<SolveResult>,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            id,
+            order,
+            params: SolveParams::default(),
+            response_tx,
+            created_at: Instant::now(),
+            deadline,
+        }
     }
 
     /// Attaches solve parameters to this task.
@@ -59,6 +77,11 @@ impl SolveTask {
     /// Returns how long this task has been waiting.
     pub fn wait_time(&self) -> std::time::Duration {
         self.created_at.elapsed()
+    }
+
+    /// Returns when the router stops waiting for this task's answer.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
     }
 
     /// Sends the result back to the requester.
