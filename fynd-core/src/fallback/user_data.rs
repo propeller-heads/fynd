@@ -1,16 +1,14 @@
 //! The fallback pool as `TychoFallbackRouter` wants it: JSON on the tycho swap's `user_data`.
 //!
-//! `FallbackSwapEncoder` deserializes this into its own `FallbackSwapData`, then packs the
-//! protocol byte and the protocol data the router's `_executeFallback` decodes. That enum is
-//! private to tycho-execution, so this mirrors its wire shape; the tag is tycho's public
-//! `FallbackProtocol::user_data_name`, and the tests below assert the JSON against the encodings
-//! tycho's own tests expect.
+//! This builds tycho-execution's `FallbackSwapData` from the chosen pool's component and
+//! serializes it. `FallbackSwapEncoder` reads that JSON back into the same enum, then packs the
+//! protocol byte and the protocol data the router's `_executeFallback` decodes.
 //!
 //! | protocol | fields | packed as |
 //! |---|---|---|
 //! | `uniswap_v2` | `pair`, `fee_bps` | `pair(20) ++ fee_bps(1)` |
 //! | `uniswap_v3` | `pool` | `pool(20)` |
-//! | `uniswap_v4` | `fee`, `tick_spacing` | `fee(3) ++ tick_spacing(3) ++ zero hook(20)` |
+//! | `uniswap_v4` | `fee`, `tick_spacing`, `hook` | `fee(3) ++ tick_spacing(3) ++ hook(20)` |
 //! | `curve` | `pool`, `pool_type`, `i`, `j` | `pool(20) ++ pool_type(1) ++ i(1) ++ j(1)` |
 //! | `fluid_v1` | `dex`, `zero2one` | `dex(20) ++ zero2one(1)` |
 //! | `aerodrome_v1` | `pool` | `pool(20)` |
@@ -18,14 +16,16 @@
 //! Swap direction on the Uniswap family and Aerodrome comes from the sort order of the swap's own
 //! tokens, so it is not carried here. Curve's coin indices and Fluid's `zero2one` are the pool's
 //! own ordering, which no sort can recover, so both are read off the component. Hooked Uniswap V4
-//! pools are not supported: `is_fallback_candidate` admits none, and no hook travels here.
+//! pools are not supported: `is_fallback_candidate` admits none, so the hook is always empty.
 
 use std::str::FromStr;
 
-use serde::Serialize;
-use tycho_execution::encoding::evm::swap_encoder::FallbackProtocol;
+use tycho_execution::encoding::evm::swap_encoder::{FallbackProtocol, FallbackSwapData};
 use tycho_simulation::{
-    tycho_common::models::{protocol::ProtocolComponent, Address},
+    tycho_common::{
+        models::{protocol::ProtocolComponent, Address},
+        Bytes,
+    },
     tycho_core::simulation::protocol_sim::ProtocolSim,
 };
 
@@ -33,19 +33,6 @@ use crate::{fallback::FallbackError, types::FallbackLeg};
 
 /// The highest Uniswap V2 fee `TychoFallbackRouter` runs; it reverts above this.
 const MAX_UNISWAP_V2_FEE_BPS: u8 = 30;
-
-/// The fallback protocol and the data the router needs to run it. Each variant's snake-case name
-/// is the protocol's `FallbackProtocol::user_data_name`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "fallback_protocol", rename_all = "snake_case")]
-pub(super) enum FallbackSwapData {
-    UniswapV2 { pair: Address, fee_bps: u8 },
-    UniswapV3 { pool: Address },
-    UniswapV4 { fee: u32, tick_spacing: i32 },
-    Curve { pool: Address, pool_type: u8, i: u8, j: u8 },
-    FluidV1 { dex: Address, zero2one: bool },
-    AerodromeV1 { pool: Address },
-}
 
 /// The `user_data` JSON naming `leg`'s pool, for the tycho swap the pAMM leg encodes to.
 ///
@@ -135,8 +122,8 @@ fn uniswap_v2_fee_bps(
 }
 
 /// A Uniswap V4 pool identifies itself by its key, not by an address, so its fee and tick spacing
-/// travel instead of a pool address. The key's hook is always zero: hooked pools are not
-/// candidates.
+/// travel instead of a pool address. The hook is always empty: hooked pools are not candidates,
+/// and tycho's encoder refuses a non-zero one.
 fn uniswap_v4_fallback(component: &ProtocolComponent) -> Result<FallbackSwapData, FallbackError> {
     let fee = attribute_u32(component, "key_lp_fee")?;
     let tick_spacing = i32::try_from(attribute_u32(component, "tick_spacing")?).map_err(|_| {
@@ -145,7 +132,12 @@ fn uniswap_v4_fallback(component: &ProtocolComponent) -> Result<FallbackSwapData
             reason: "tick spacing does not fit int24".to_string(),
         }
     })?;
-    Ok(FallbackSwapData::UniswapV4 { fee, tick_spacing })
+    Ok(FallbackSwapData::UniswapV4 {
+        fee,
+        tick_spacing,
+        hook: Bytes::default(),
+        hook_data: Bytes::default(),
+    })
 }
 
 /// Curve's `exchange` takes the pair's positions in the pool's own coin list, and a `pool_type`
@@ -225,8 +217,6 @@ fn attribute_u32(component: &ProtocolComponent, name: &str) -> Result<u32, Fallb
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-
-    use tycho_simulation::tycho_common::Bytes;
 
     use super::*;
     use crate::algorithm::test_utils as util;
@@ -341,8 +331,8 @@ mod tests {
         );
     }
 
-    /// Fee and tick spacing come off the component, matching tycho's V4 decoder attributes. No
-    /// hook travels: tycho's encoder writes the zero hook.
+    /// Fee and tick spacing come off the component, matching tycho's V4 decoder attributes. The
+    /// hook travels empty, which tycho's encoder packs as the zero hook.
     #[test]
     fn test_uniswap_v4_user_data() {
         let json = fallback_user_data(
@@ -359,7 +349,13 @@ mod tests {
         )
         .expect("encodable");
 
-        assert_eq!(json, r#"{"fallback_protocol":"uniswap_v4","fee":3000,"tick_spacing":60}"#);
+        assert_eq!(
+            json,
+            concat!(
+                r#"{"fallback_protocol":"uniswap_v4","fee":3000,"tick_spacing":60,"#,
+                r#""hook":"0x","hook_data":"0x"}"#
+            )
+        );
     }
 
     /// A V4 pool with no fee attribute cannot be encoded, so it must not reach the router.
