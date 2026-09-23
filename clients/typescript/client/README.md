@@ -1,6 +1,6 @@
 # @kayibal/fynd-client
 
-Licensed under the [Fynd License 1.0](https://github.com/propeller-heads/fynd/blob/main/LICENSE.md). This package is source-available, not MIT-licensed or distributed under an open-source license.
+This package is provided under the [Fynd License 1.0](https://github.com/propeller-heads/fynd/blob/main/LICENSE.md). Use, modification, distribution, and settlement are subject to its terms.
 
 TypeScript client for the [Fynd](https://fynd.xyz) DEX router.
 

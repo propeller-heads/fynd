@@ -23,7 +23,7 @@ layout:
 
 ## What is Fynd?
 
-Fynd is a source-available DEX aggregator that runs locally on your server under the [Fynd License 1.0](reference/license.md). It is not MIT-licensed or distributed under an open-source license. We built Fynd to be **reliable** and **trustless.**
+Fynd is a DEX aggregator that runs locally on your server. It is provided under the [Fynd License 1.0](reference/license.md). Use, modification, distribution, and settlement are subject to its terms. We built Fynd to be **reliable** and **trustless.**
 
 Fynd gives you quotes in 20ms, supports 1.000 RPS on commodity hardware (see [performance](reference/benchmark-results.md)), does not overquote, and is configurable to the pools, tokens, and objectives you care about (low reverts, best price, low latency, etc.).
 

@@ -3,7 +3,7 @@
 A high-performance DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho). Finds optimal swap
 routes across multiple DeFi protocols in real-time.
 
-Fynd is source-available under the [Fynd License 1.0](LICENSE.md), not MIT or an open-source license. Use, modification, distribution, and settlement are subject to that license.
+Fynd is provided under the [Fynd License 1.0](LICENSE.md). Use, modification, distribution, and settlement are subject to its terms.
 
 ## Features
 
@@ -100,4 +100,4 @@ Client SDKs that handle quoting, token approvals, and swap execution end-to-end:
 
 ## License
 
-The [Fynd License 1.0](LICENSE.md) applies to Fynd-authored code, clients, tools, examples, and documentation in this revision, except material expressly identified as separately licensed. It requires settlement through the designated router and includes fee, revenue-share, and distribution conditions. No MIT alternative is offered for this revision. Third-party components retain their own licenses.
+The [Fynd License 1.0](LICENSE.md) applies to Fynd-authored code, clients, tools, examples, and documentation, except material expressly identified as separately licensed. It requires settlement through the designated router and includes fee, revenue-share, and distribution conditions. Third-party components retain their own licenses.
