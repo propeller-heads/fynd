@@ -1,6 +1,6 @@
 # Fynd License 1.0
 
-Copyright © 2026 PropellerHeads AG. All rights reserved except as expressly granted below.
+Copyright © 2026 PropellerHeads AG. All rights reserved except as expressly granted below. PropellerHeads AG is the **Licensor**, subject to Section 12.3. **You** means the accepting individual or legal entity; anyone accepting for an entity must have authority to bind it.
 
 By exercising any right granted by this License, you accept its terms. If you do not accept them, you may not use, reproduce, modify, or distribute the Software.
 
@@ -52,7 +52,7 @@ By exercising any right granted by this License, you accept its terms. If you do
 
 3.3 You must permit the Designated Router to calculate and collect the Platform Fee, Positive Slippage Capture, and Revenue Share without alteration, avoidance, or interference.
 
-3.4 If you supply a Fynd Output to another person for Settlement, you must provide a prominent notice of the applicable router and anti-circumvention requirements and obtain that person's agreement to comply before enabling that Settlement. Where you control submission or execution, you must enforce those requirements. Supplying an output does not grant permission to settle it outside Section 3.
+3.4 If you supply a Fynd Output to another person for Settlement, you must provide a prominent notice of the applicable router and anti-circumvention requirements. Where you control submission or execution, you must enforce those requirements. Supplying an output does not grant permission to settle it outside Section 3.
 
 ## 4. Revenue share
 
@@ -64,9 +64,13 @@ By exercising any right granted by this License, you accept its terms. If you do
 
 For Revenue Share accounting, an economic receipt is counted once across you, your Affiliates, and intermediaries. A transfer of that receipt within that group does not create a second receipt.
 
-4.4 For each calendar quarter in which you or an Affiliate receives Settlement Revenue or Service Revenue, including where all corresponding Revenue Share was collected automatically, you must within thirty days after that quarter report Settlement Revenue, Service Revenue, Revenue Shares collected automatically, and Revenue Shares remaining payable, and pay the outstanding amount in accordance with the reasonable payment instructions published by the Licensor. Non-cash consideration is valued at its fair market value when received, using a widely recognized exchange or pricing source applied consistently.
+4.4 For each calendar quarter in which you or an Affiliate receives Settlement Revenue or Service Revenue, including where all corresponding Revenue Share was collected automatically, you must within thirty days after that quarter report Settlement Revenue, Service Revenue, Revenue Shares collected automatically, and Revenue Shares remaining payable, and pay the outstanding amount under Section 4.6. Each report must identify you, the reporting period, relevant Affiliate receipts, the currency or token and value of receipts, the basis for any allocation or conversion, and the transaction references or other evidence supporting amounts already collected. Non-cash consideration is valued at its fair market value when received, using a widely recognized exchange or pricing source applied consistently or, if none exists, a reasonable documented valuation method.
 
 4.5 You must maintain complete and accurate records supporting each report for at least three years. No more than once per calendar year, the Licensor may have an independent auditor inspect those records on at least thirty days' notice, during normal business hours and subject to reasonable confidentiality obligations. The Licensor bears the audit cost unless the audit identifies an underpayment exceeding five percent for the period audited, in which case you must reimburse the reasonable audit cost in addition to the shortfall and any interest permitted by law.
+
+4.6 **Payment instructions.** The Licensor must publish or link reporting and payment instructions on the Router Registry page, identifying the reporting destination, payee, currency or token, network and token contract where applicable, payment destination, and payment reference. Any conversion method must specify an independently verifiable market rate, source, and valuation time, without changing the agreed economics or adding a surcharge. Reports default to the notice address in Section 12.11. Payment is complete upon receipt in the designated account or finality on the designated network. Changes require thirty days' notice and do not invalidate payments correctly made under the instructions then effective. Missing usable instructions or a reasonably disputed payee triggers Section 12.9's deferral and record-keeping rules for the affected obligation, even without a Continuity Event; unrelated reports and undisputed payments remain due.
+
+4.7 **Taxes.** You must pay VAT, sales, use, or similar indirect taxes legally chargeable by the Licensor in addition to amounts due, against a legally sufficient tax document, unless you account for them directly under a reverse-charge or equivalent rule. Each party bears its own income taxes. Legally required withholding is credited against payment if remitted to the authority and evidenced promptly. No gross-up applies without a signed agreement. Both parties must reasonably cooperate on tax-relief documentation. Taxes already paid cannot be recovered twice; the revenue definitions' tax exclusions remain unchanged.
 
 ## 5. No circumvention
 
@@ -82,7 +86,7 @@ For Revenue Share accounting, an economic receipt is counted once across you, yo
 
 (e) enable, direct, assist, or knowingly permit another person to do any of the foregoing.
 
-5.2 Section 5 applies to use of the Software and Fynd Outputs. It does not claim ownership of an idea, algorithm, or independently developed implementation that does not use or derive from the Software or a Fynd Output.
+5.2 Section 5 applies to use of the Software, Modifications, and Fynd Outputs.
 
 5.3 A bona fide modification that improves routing, execution price, security, or user protection does not violate Section 5 merely because the amount of a fee or Positive Slippage Capture changes. All required calculations must use accurate inputs and the applicable disclosed method, and all resulting amounts due must be paid.
 
@@ -142,12 +146,18 @@ The Software may contain or depend on third-party material governed by separate 
 
 12.5 This License is the entire agreement concerning the rights it grants. It is governed by substantive Swiss law, excluding its conflict-of-laws rules and the United Nations Convention on Contracts for the International Sale of Goods. The courts of the Canton of Zug, Switzerland have exclusive jurisdiction, subject to any mandatory law to the contrary. Either party may seek urgent or injunctive relief from any court with jurisdiction.
 
-12.6 **Registry availability.** If the Router Registry is unavailable, the last valid designation remains effective unless superseded or withdrawn for security reasons. The Licensor must maintain downloadable registry records.
+12.6 **Router Registry and notices.** The Registry comprises the page in Section 1.6 and its [machine-readable deployment record](https://raw.githubusercontent.com/propeller-heads/tycho/main/crates/tycho-execution/config/deployment_registry.json). The latter controls network identifiers, addresses, dependencies, and effective timestamps if they differ, subject to this License. The Licensor must keep both consistent and preserve downloadable, versioned designations and notices. Immutable dependency references apply only to operations using those dependencies.
 
-12.7 **Continuity Event.** For a previously designated network, a Continuity Event occurs when the Licensor permanently ceases providing settlement infrastructure without an operating successor, or fails to restore usable, compliant infrastructure for thirty days after notice sent to its published contact. Blockchain outages, your own system failures, and lawful suspension for your breach do not qualify. Notwithstanding Sections 3 and 5, you may then operate or implement replacement routers and executors for previously licensed Software versions and otherwise permitted uses, subject to Section 12.9.
+Successor notices must identify the network, changed contracts or dependencies, publication time, and effective time and migration deadline in UTC. Changes to any required contract or dependency follow Section 1.6's notice period. Scheduled successors apply only from their effective time; backdating cannot shorten notice or impose retroactive migration. Shorter security notices must explain the material risk, without requiring disclosure of exploitable details.
+
+Registry publication constitutes public notice. During unavailability, the last valid designation remains effective unless validly superseded or withdrawn. Urgent security withdrawals and restoration notices may be delivered directly under Section 12.11 and must be archived when service resumes. Registry unavailability alone does not authorize bypass; Sections 12.7 through 12.10 govern continuity.
+
+12.7 **Continuity Event.** For a previously designated network, a Continuity Event occurs when the Licensor permanently ceases providing settlement infrastructure without an operating successor, or fails to restore usable, compliant infrastructure for thirty days after notice delivered under Section 12.11. Blockchain outages, your own system failures, and lawful suspension for your breach do not qualify. Notwithstanding Sections 3 and 5, you may then operate or implement replacement routers and executors for previously licensed Software versions and otherwise permitted uses, subject to Section 12.9.
 
 12.8 **Continuity materials.** Before a router becomes mandatory, the Licensor must supply the source code and build and deployment materials needed to operate it independently. You may retain those materials. Under copyright and necessary patent rights it controls, the Licensor hereby grants you permission, exercisable upon a Continuity Event without further approval, to use, modify and deploy them for Section 12.7's purposes.
 
 12.9 **Continuing payments.** Accrued debts, Revenue Share, and the last applicable Platform Fee and Positive Slippage Capture remain payable, subject to Sections 1.9 and 6. Account for and pay amounts no longer collected on-chain under Section 4, without double counting. If payment or reporting instructions are unavailable, or the payee's entitlement is reasonably disputed, retain the records and amounts-due accounting. Payment and reporting are deferred without breach or late interest until thirty days after the rightful payee provides valid instructions.
 
-12.10 **Duration.** After permanent cessation, fallback rights continue for previously licensed versions while you comply with this License, including following a later business resumption or acquisition. After an outage, they end thirty days after compliant infrastructure is restored and restoration is publicly or directly notified. No future updates or support are promised.
+12.10 **Duration.** After permanent cessation, fallback rights continue for previously licensed versions while you comply with this License, including following a later business resumption or acquisition. After an outage, they end thirty days after compliant infrastructure is restored and restoration is publicly or directly notified under Section 12.6 or 12.11. No future updates or support are promised.
+
+12.11 **Notices.** Send legal and continuity notices to legal@propellerheads.xyz. A replacement address requires thirty days' notice on the Registry page; the old address remains valid during that period. Notices to you use your notified address or latest report. Identify the parties, relevant Software or Settlement, and matter concerned. Email counts as written notice upon acceptance by the recipient's mail server unless a non-delivery notification follows; retain delivery evidence. Tracked post or courier to the recipient's registered office or notified address counts upon recorded delivery. No acknowledgement is required. Public registry notices do not replace individual breach, termination, or audit notices. Section 12.4's signed-agreement requirement remains unchanged.
