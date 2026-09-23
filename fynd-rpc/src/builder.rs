@@ -201,12 +201,12 @@ impl FyndRPCBuilder {
         self
     }
 
-    /// Sets the shortest time between two full token-pricing passes. Leaving this unset keeps
-    /// the computation's default.
-    pub fn pricing_full_pass_interval(mut self, interval: Duration) -> Self {
+    /// Sets the wall-clock budget for one token-pricing pass. Leaving this unset keeps the
+    /// computation's default.
+    pub fn pricing_pass_budget(mut self, pass_budget: Duration) -> Self {
         self.fynd_builder = self
             .fynd_builder
-            .pricing_full_pass_interval(interval);
+            .pricing_pass_budget(pass_budget);
         self
     }
 

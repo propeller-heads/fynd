@@ -513,7 +513,7 @@ pub struct FyndBuilder {
     tycho_subscription_buffer_size: Option<usize>,
     /// Shortest time between two full token-pricing passes; `None` keeps the computation's
     /// default.
-    pricing_full_pass_interval: Option<Duration>,
+    pricing_pass_budget: Option<Duration>,
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
@@ -551,7 +551,7 @@ impl FyndBuilder {
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
             tycho_subscription_buffer_size: None,
-            pricing_full_pass_interval: None,
+            pricing_pass_budget: None,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
@@ -641,13 +641,13 @@ impl FyndBuilder {
         self
     }
 
-    /// Sets the shortest time between two full token-pricing passes.
+    /// Sets the wall-clock budget for one token-pricing pass.
     ///
-    /// A full pass runs on the first block after the interval elapses. Every block inside it
-    /// re-prices only the tokens a change affects and the tokens it introduces, instead of
-    /// re-pricing every token in the market.
-    pub fn pricing_full_pass_interval(mut self, interval: Duration) -> Self {
-        self.pricing_full_pass_interval = Some(interval);
+    /// A pass attempts the tokens it selects in priority order and stops at this budget. Tokens
+    /// it does not reach keep their previous price and rank first in the next pass, so a budget
+    /// smaller than the work rotates over the token set rather than starving part of it.
+    pub fn pricing_pass_budget(mut self, pass_budget: Duration) -> Self {
+        self.pricing_pass_budget = Some(pass_budget);
         self
     }
 
@@ -910,8 +910,8 @@ impl FyndBuilder {
             .with_gas_token(gas_token)
             .with_max_hop(pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
-        if let Some(interval) = self.pricing_full_pass_interval {
-            computation_config = computation_config.with_pricing_full_pass_interval(interval);
+        if let Some(pass_budget) = self.pricing_pass_budget {
+            computation_config = computation_config.with_pricing_pass_budget(pass_budget);
         }
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.

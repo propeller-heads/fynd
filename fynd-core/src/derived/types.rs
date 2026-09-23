@@ -59,6 +59,13 @@ pub struct TokenPriceEntry {
     /// pool becoming the better route is noticed even though the chosen routes never touched
     /// it.
     pub path_components: FxHashSet<ComponentId>,
+    /// The pricing pass this token was last priced in.
+    ///
+    /// A pass attempts the tokens it selects in order and stops at its budget, so on a market
+    /// where the selection outlasts the budget the tail would never be reached. Ordering by
+    /// this counter rotates the tail forward: the longer a token has gone unpriced, the sooner
+    /// the next pass attempts it.
+    pub last_priced_pass: u64,
 }
 
 /// Token prices with path dependency tracking.

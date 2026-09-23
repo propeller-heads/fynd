@@ -60,11 +60,12 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub tycho_subscription_buffer_size: Option<usize>,
 
-    /// Shortest time, in seconds, between two full token-pricing passes. A full pass runs on the
-    /// first block after the interval elapses; every block inside it re-prices only the tokens a
-    /// change affects and the tokens it introduces. Unset keeps the built-in default.
+    /// Wall-clock budget, in milliseconds, for one token-pricing pass. A pass attempts tokens
+    /// in priority order — the ones a component arrival brought, then the unpriced, then the
+    /// longest unpriced — and stops here. Tokens it does not reach keep their previous price and
+    /// rank first next time. Unset keeps the built-in default.
     #[arg(long, env)]
-    pub pricing_full_pass_interval_secs: Option<u64>,
+    pub pricing_pass_budget_ms: Option<u64>,
 
     /// Disable TLS for Tycho connection
     #[arg(long)]
