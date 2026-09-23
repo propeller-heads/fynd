@@ -38,6 +38,15 @@ pub struct ChangedComponents {
 }
 
 impl ChangedComponents {
+    /// Returns true if this update changes the graph topology (adds or removes components).
+    ///
+    /// A topology change is what the incremental pricing path cannot fully account for: a new
+    /// component is in no stored dependency set, so nothing points at the tokens it might now
+    /// be the best route for.
+    pub fn is_topology_change(&self) -> bool {
+        !self.added.is_empty() || !self.removed.is_empty()
+    }
+
     /// Returns a HashSet of all changed component IDs.
     pub fn all_changed_ids(&self) -> FxHashSet<ComponentId> {
         let mut all = FxHashSet::default();

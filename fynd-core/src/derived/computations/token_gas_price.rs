@@ -38,11 +38,15 @@
 //! tokens it might now route through. On a market where components cross the TVL threshold
 //! continuously that made the full solve the normal case rather than the exception.
 //!
-//! A full solve now runs on the first block after `full_pass_interval` has elapsed, whatever
-//! changed on that block, and every other block is served incrementally. Periodic rather than
-//! topology-triggered is deliberate: it bounds the wait on a market where topology changes are
-//! rare, which a topology-triggered interval would not — there the next deferred case would wait
-//! for the next topology change *after* the interval, which can be hours.
+//! A full solve now runs when two things hold: a component has arrived or left since the last
+//! full solve, and `full_pass_interval` has elapsed. Every other block is served incrementally.
+//!
+//! Both halves earn their place. Without the topology condition a full solve would run every
+//! interval on a market where nothing arrived or left, finding nothing the incremental path had
+//! not already handled. Without the interval a single arrival would force a full solve on the
+//! block it happened, which is the behaviour this replaced. The topology flag is sticky, so a
+//! change inside the interval still gets its full solve when the interval elapses — it does not
+//! wait for a second change to come along.
 //!
 //! The incremental pass re-solves every token whose stored routes ran through a changed
 //! component, and every token a new component brought with it, which is what keeps a newly listed
@@ -329,13 +333,13 @@ pub struct TokenGasPriceComputation {
     /// timeout. Tokens not attempted before it expires keep their previous price; the module's
     /// Cost section says what a slow pass would otherwise delay.
     pass_budget: Duration,
-    /// Shortest time between two full passes. Every block inside the interval is served
+    /// Shortest time between two full passes. Inside the interval every block is served
     /// incrementally; see the module's Cost section.
     full_pass_interval: Duration,
-    /// When the last full pass started. `None` until the first one runs, which makes that first
-    /// pass due immediately. Behind a `Mutex` because `compute` takes `&self`, and behind an
-    /// `Arc` because the struct derives `Clone` for the `spawn_blocking` handoff.
-    last_full_pass: Arc<Mutex<Option<Instant>>>,
+    /// What decides when the next full pass runs. Behind a `Mutex` because `compute` takes
+    /// `&self`, and behind an `Arc` because the struct derives `Clone` for the `spawn_blocking`
+    /// handoff.
+    full_pass_state: Arc<Mutex<FullPassState>>,
 }
 
 /// Orders the tokens a pass will attempt, putting the ones with no price yet first.
@@ -365,7 +369,22 @@ fn order_unpriced_first(
     ordered
 }
 
-/// How long a full pass may be deferred by default.
+/// What decides when the next full pass runs.
+///
+/// A full pass is only worth running after a component has arrived or left, because that is the
+/// one thing the incremental path cannot see. `topology_changed` records that it happened; the
+/// flag is sticky, so a change inside the interval still gets its pass when the interval
+/// elapses, rather than waiting for a second change to come along.
+#[derive(Debug, Default)]
+struct FullPassState {
+    /// When the last full pass started. `None` until the first one runs, which makes that first
+    /// pass due immediately.
+    last: Option<Instant>,
+    /// Whether a component has arrived or left since the last full pass.
+    topology_changed: bool,
+}
+
+/// How long a full pass may be deferred by default once a topology change has made it due.
 ///
 /// Five minutes because a full pass is the only thing that covers the two cases the incremental
 /// path cannot see: a token whose route could have improved through a component that no stored
@@ -385,7 +404,7 @@ impl Default for TokenGasPriceComputation {
             probe_amount: BigUint::from(10u64).pow(18), // 1 ETH
             pass_budget: Duration::from_secs(30),
             full_pass_interval: DEFAULT_FULL_PASS_INTERVAL,
-            last_full_pass: Arc::new(Mutex::new(None)),
+            full_pass_state: Arc::new(Mutex::new(FullPassState::default())),
         }
     }
 }
@@ -404,39 +423,60 @@ impl TokenGasPriceComputation {
 
     /// Sets the shortest time between two full passes.
     ///
-    /// The interval is periodic, not topology-triggered: a full pass runs on the first block
-    /// after it elapses, whatever changed on that block. `Duration::ZERO` therefore makes every
-    /// block a full pass, which is heavier than the behaviour this interval replaced — that one
-    /// solved fully on a topology change and incrementally otherwise. No setting reproduces it.
+    /// A full pass runs on the first block where the interval has elapsed *and* a component has
+    /// arrived or left since the last one. `Duration::ZERO` therefore reproduces the behaviour
+    /// this interval replaced: every topology change solves fully, everything else incrementally.
     pub fn with_full_pass_interval(self, full_pass_interval: Duration) -> Self {
         Self { full_pass_interval, ..self }
     }
 
-    /// Records that a full pass starts now, so the next one waits out the interval.
+    /// Takes the full-pass state.
     ///
-    /// A poisoned lock is taken anyway: the guarded value is one timestamp, a panic cannot
-    /// leave it half-written, and refusing to price tokens because of it would be worse.
-    fn mark_full_pass(&self) {
-        let mut last = match self.last_full_pass.lock() {
+    /// A poisoned lock is taken anyway: the guarded value is a timestamp and a flag, a panic
+    /// cannot leave either half-written, and refusing to price tokens because of it would be
+    /// worse.
+    fn full_pass_state(&self) -> std::sync::MutexGuard<'_, FullPassState> {
+        match self.full_pass_state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
-        };
-        *last = Some(Instant::now());
+        }
     }
 
-    /// Returns whether a full pass is due, and claims the interval when it is.
+    /// Records that a component has arrived or left, so the next due pass runs.
+    fn note_topology_change(&self) {
+        self.full_pass_state().topology_changed = true;
+    }
+
+    /// Records that a full pass starts now, so the next one waits for both the interval and a
+    /// further topology change.
+    fn mark_full_pass(&self) {
+        let mut state = self.full_pass_state();
+        state.last = Some(Instant::now());
+        state.topology_changed = false;
+    }
+
+    /// Returns whether a full pass is due, and claims it when it is.
     ///
-    /// The interval is claimed before the pass runs, so a pass that then fails does not get
-    /// retried until the next one falls due. That is deliberate: a pass that fails for a reason
-    /// that persists would otherwise retry on every block.
+    /// Due means both that a component has arrived or left since the last full pass and that the
+    /// interval has elapsed. Without a topology change there is nothing a full pass would find
+    /// that the incremental path has not already handled, so it does not run however long it has
+    /// been. The first pass is due whatever the flag says, because nothing is priced yet.
+    ///
+    /// The claim happens before the pass runs, so a pass that then fails does not get retried
+    /// until the next one falls due. That is deliberate: a pass that fails for a reason that
+    /// persists would otherwise retry on every block.
     fn claim_full_pass(&self) -> bool {
-        let mut last = match self.last_full_pass.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
+        let mut state = self.full_pass_state();
+        let Some(started) = state.last else {
+            // Nothing priced yet, so the first pass runs at once rather than at the interval.
+            state.last = Some(Instant::now());
+            state.topology_changed = false;
+            return true;
         };
-        let due = last.is_none_or(|started| started.elapsed() >= self.full_pass_interval);
+        let due = state.topology_changed && started.elapsed() >= self.full_pass_interval;
         if due {
-            *last = Some(Instant::now());
+            state.last = Some(Instant::now());
+            state.topology_changed = false;
         }
         due
     }
@@ -683,10 +723,15 @@ impl DerivedComputation for TokenGasPriceComputation {
             return self.full_solve(market, store).await;
         }
 
+        // A topology change is recorded rather than acted on: it no longer forces a full solve
+        // on the block it arrives on, but it does mean the next pass that falls due runs.
+        if changed.is_topology_change() {
+            self.note_topology_change();
+        }
+
         // Every block inside the interval is served incrementally, which still re-prices every
         // token whose stored routes ran through a changed component and every token a new
-        // component brought with it. A topology change no longer forces a full solve on the
-        // block it arrives on.
+        // component brought with it.
         if !self.claim_full_pass() {
             if let Some(result) = self
                 .try_incremental_compute(market, store, changed)
@@ -1139,11 +1184,10 @@ mod tests {
         );
     }
 
-    /// The interval is periodic, not topology-triggered. At zero, a block carrying only state
-    /// updates runs a full pass too, which is what distinguishes this from the behaviour the
-    /// interval replaced: there, an updated-only block always went incremental.
+    /// At zero the interval imposes no wait, so every topology change runs a full pass. That is
+    /// the behaviour this interval replaced, which makes `Duration::ZERO` the way back to it.
     #[tokio::test]
-    async fn test_zero_interval_runs_a_full_pass_on_every_block() {
+    async fn test_zero_interval_runs_a_full_pass_per_topology_change() {
         use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
 
         let eth = token(0, "ETH");
@@ -1168,24 +1212,17 @@ mod tests {
             ("eth_bbb".to_string(), Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>),
         ]);
 
-        // Only eth_aaa is reported, and only as an update: no topology change at all. Before
-        // the interval this always went incremental and left BBB alone.
+        let mut added = FxHashMap::default();
+        added.insert("eth_aaa_v2".to_string(), vec![eth.address.clone(), aaa.address.clone()]);
         let output = computation
-            .compute(
-                &market,
-                &store,
-                &ChangedComponents {
-                    updated: vec!["eth_aaa".to_string()],
-                    ..ChangedComponents::default()
-                },
-            )
+            .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
             .await
             .expect("pricing must not fail");
 
         assert!((ratio(&output.data[&aaa.address]) - 4000.0).abs() < 1e-6, "AAA re-solved");
         assert!(
             (ratio(&output.data[&bbb.address]) - 5000.0).abs() < 1e-6,
-            "BBB re-solved, so the pass was full even though no topology changed"
+            "BBB re-solved, so the topology change ran a full pass"
         );
     }
 
@@ -1275,8 +1312,49 @@ mod tests {
         ]);
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Only eth_aaa changed, so an incremental pass would leave BBB alone. The interval has
-        // elapsed, so this is a full pass and BBB moves too.
+        // A component arrives, so a full pass is due: the interval has elapsed and topology
+        // changed. An incremental pass would re-price nothing here, because the new component
+        // is in no stored dependency set and carries only tokens that already have prices.
+        let mut added = FxHashMap::default();
+        added.insert("eth_aaa_v2".to_string(), vec![eth.address.clone(), aaa.address.clone()]);
+        let output = computation
+            .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
+            .await
+            .expect("pricing must not fail");
+
+        assert!((ratio(&output.data[&bbb.address]) - 5000.0).abs() < 1e-6, "BBB re-solved");
+    }
+
+    /// However long it has been, a full pass is pointless with no component added or removed:
+    /// there is nothing in it the incremental path has not already done.
+    #[tokio::test]
+    async fn test_no_full_pass_without_a_topology_change() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let bbb = token(2, "BBB");
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0)),
+            ("eth_bbb", &eth, &bbb, MockProtocolSim::new(2500.0)),
+        ]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_full_pass_interval(Duration::from_millis(1));
+        let store = DerivedData::new_shared();
+        let full = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+
+        market.write().await.update_states([
+            ("eth_aaa".to_string(), Box::new(MockProtocolSim::new(4000.0)) as Box<dyn ProtocolSim>),
+            ("eth_bbb".to_string(), Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>),
+        ]);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // The interval has long elapsed, but nothing arrived or left, so this stays incremental.
         let output = computation
             .compute(
                 &market,
@@ -1289,7 +1367,11 @@ mod tests {
             .await
             .expect("pricing must not fail");
 
-        assert!((ratio(&output.data[&bbb.address]) - 5000.0).abs() < 1e-6, "BBB re-solved");
+        assert!((ratio(&output.data[&aaa.address]) - 4000.0).abs() < 1e-6, "AAA re-solved");
+        assert!(
+            (ratio(&output.data[&bbb.address]) - 2500.0).abs() < 1e-6,
+            "BBB keeps its price: an elapsed interval alone does not run a full pass"
+        );
     }
 
     /// A token whose only pool is removed loses its price rather than keeping a stale one.
