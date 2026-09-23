@@ -68,7 +68,9 @@
 //!
 //! A full solve is therefore only needed when there is nothing stored to select from at all:
 //! startup, and lag recovery. Nothing else gets one, including a topology change, because rank 1
-//! covers what a topology change would have been a full solve for.
+//! covers what a topology change would have been a full solve for. A full solve runs without the
+//! cap, bounded only by `pass_budget`: readiness flips as soon as it stores anything, so a capped
+//! one would report a pod ready with a fraction of the market priced.
 //!
 //! The cap bounds what one pass costs; `min_pass_interval` bounds how often one runs. Both are
 //! needed. The manager starts a computation per market event, and on Base that is several a
@@ -570,6 +572,7 @@ impl TokenGasPriceComputation {
         market: &MarketData,
         changed: Option<&FxHashSet<Address>>,
         priority: &PassPriority,
+        max_tokens: usize,
     ) -> Result<PricingPassOutcome, ComputationError> {
         let (topology, block) = {
             let guard = market.read().await;
@@ -596,7 +599,7 @@ impl TokenGasPriceComputation {
         let algorithm = BellmanFordAlgorithm::with_config(config);
 
         let universe = self.tokens_to_price(&topology);
-        let ordered = select_pass_tokens(&universe, changed, priority, self.max_tokens_per_pass);
+        let ordered = select_pass_tokens(&universe, changed, priority, max_tokens);
         // Tokens the cap left out are unattempted, exactly like ones the deadline cuts: they
         // keep their previous price and stay visible to the next pass, which ranks them by the
         // pass that last priced them.
@@ -747,7 +750,12 @@ impl TokenGasPriceComputation {
         );
 
         let solved = self
-            .solve_token_prices(market, Some(&tokens_to_recompute), &priority)
+            .solve_token_prices(
+                market,
+                Some(&tokens_to_recompute),
+                &priority,
+                self.max_tokens_per_pass,
+            )
             .await?;
 
         let mut result = existing_prices;
@@ -875,8 +883,12 @@ impl TokenGasPriceComputation {
                 .unwrap_or_default();
             PassPriority { arrived: FxHashSet::default(), last_priced }
         };
+        // No cap. A full solve only runs when there is nothing stored to select from, which is
+        // startup and lag recovery, and `derived_data_ready` flips as soon as it stores anything.
+        // Capping it would report a pod ready with a fraction of the market priced and leave the
+        // rest to fill over the following passes. `pass_budget` still bounds it.
         let solved = self
-            .solve_token_prices(market, None, &priority)
+            .solve_token_prices(market, None, &priority, usize::MAX)
             .await?;
 
         let mut token_prices_with_deps = TokenPricesWithDeps::default();
@@ -1566,12 +1578,78 @@ mod tests {
 
     /// A token with no price must stay reachable when no change points at it.
     ///
-    /// The incremental path takes its changed set from the stored dependency map, which by
-    /// construction holds only tokens that already have a price. A pass that selected from that
-    /// map alone could never offer an unpriced token again, and a capped first pass leaves most
-    /// of the market unpriced. A Base run at `min-tvl 1` stopped at 97 of 2211 tokens that way.
+    /// A token that fails to price has no stored dependency set, so the intersection that drives
+    /// the incremental path can never name it again. A selection built from stored dependencies
+    /// alone would leave it unpriced for as long as the process ran: a Base run at `min-tvl 1`
+    /// stopped at 97 tokens of 2211 that way. Only the unpriced rank reaches it.
     #[tokio::test]
     async fn test_unpriced_tokens_are_reached_without_a_change_pointing_at_them() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let oneway = token(2, "ONEWAY");
+        // ONEWAY's pool caps output per direction, so it can be bought but not sold back and
+        // the first pass cannot price it. AAA prices normally.
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0)),
+            (
+                "eth_oneway",
+                &eth,
+                &oneway,
+                MockProtocolSim::new(0.5).with_liquidity(600_000_000_000_000_000),
+            ),
+        ]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT));
+        let store = DerivedData::new_shared();
+
+        let full = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        assert!(
+            !store
+                .read()
+                .await
+                .token_prices()
+                .expect("prices are stored")
+                .contains_key(&oneway.address),
+            "the unsellable token starts with no price and no dependency set"
+        );
+
+        // Its pool gains liquidity and becomes sellable. Nothing in the stored dependency map
+        // names ONEWAY, so only the unpriced rank can offer it to the pass.
+        market.write().await.update_states([(
+            "eth_oneway".to_string(),
+            Box::new(MockProtocolSim::new(3000.0)) as Box<dyn ProtocolSim>,
+        )]);
+        let changed = ChangedComponents {
+            updated: vec!["eth_oneway".to_string()],
+            ..ChangedComponents::default()
+        };
+        let output = computation
+            .compute(&market, &store, &changed)
+            .await
+            .expect("pricing must not fail");
+
+        assert!(
+            output
+                .data
+                .contains_key(&oneway.address),
+            "a token that had no price is priced once it becomes sellable"
+        );
+        assert!(
+            (ratio(&output.data[&aaa.address]) - 2000.0).abs() < 1e-6,
+            "the already-priced token keeps its price"
+        );
+    }
+
+    /// The full solve runs without the cap, so readiness means the market is priced rather than
+    /// one pass worth of it.
+    #[tokio::test]
+    async fn test_the_full_solve_is_not_capped() {
         let eth = token(0, "ETH");
         let aaa = token(1, "AAA");
         let bbb = token(2, "BBB");
@@ -1581,48 +1659,22 @@ mod tests {
             ("eth_bbb", &eth, &bbb, MockProtocolSim::new(2500.0)),
             ("eth_ccc", &eth, &ccc, MockProtocolSim::new(3000.0)),
         ]);
-        // One token per pass, so the first pass can only ever reach a third of the market.
         let computation =
             TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
                 .with_max_tokens_per_pass(1);
         let store = DerivedData::new_shared();
 
-        let first = computation
+        let output = computation
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, first, 1, true);
-        let priced_after_first = store
-            .read()
-            .await
-            .token_prices()
-            .expect("prices are stored")
-            .len();
-        assert_eq!(priced_after_first, 2, "the cap holds: one token plus the gas token");
 
-        // Only AAA's pool ever changes. Nothing points at BBB or CCC, and neither is in the
-        // stored dependency map, so only a selection over the whole market can reach them.
-        for block in 2..=6 {
-            let changed = ChangedComponents {
-                updated: vec!["eth_aaa".to_string()],
-                ..ChangedComponents::default()
-            };
-            let output = computation
-                .compute(&market, &store, &changed)
-                .await
-                .expect("pricing must not fail");
-            TokenGasPriceComputation::persist(&mut *store.write().await, output, block, false);
-        }
-
-        let prices = store
-            .read()
-            .await
-            .token_prices()
-            .expect("prices are stored")
-            .clone();
         for (name, address) in [("AAA", &aaa.address), ("BBB", &bbb.address), ("CCC", &ccc.address)]
         {
-            assert!(prices.contains_key(address), "{name} must be priced by a later pass");
+            assert!(
+                output.data.contains_key(address),
+                "{name} is priced by the startup solve although the cap is 1"
+            );
         }
     }
 
