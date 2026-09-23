@@ -17,13 +17,70 @@ use actix_web::{
     dev::{ServiceRequest, ServiceResponse},
     http::header::HeaderMap,
     middleware::Next,
+    HttpMessage, HttpRequest,
 };
 use metrics::{counter, histogram};
 use serde::Serialize;
 
-/// Per-client label values extracted from proxy-injected headers. Also the `client` block of
-/// a quote record, so its fallbacks (`unknown`, `none`, `invalid`) reach the store as-is.
+/// Who made a request, in both forms the server needs.
+///
+/// Prometheus needs bounded, slugified label values or series cardinality grows without limit.
+/// The quote record needs what the client actually sent, so a reader can join a record against
+/// whatever the authenticating proxy calls that client. The `Serialize` impl writes the sent
+/// values: this is the record's `client` block.
+///
+/// An absent header still falls back to `unknown` / `none` on both sides, so a record can tell
+/// a client that sent nothing from one that sent an empty value.
 #[derive(Debug, Clone, Serialize)]
+pub struct ClientInfo {
+    user_identity: String,
+    user_plan: String,
+    client_version: String,
+    #[serde(skip)]
+    labels: ClientLabels,
+}
+
+impl ClientInfo {
+    /// Reads the proxy-injected headers.
+    #[must_use]
+    pub fn from_headers(headers: &HeaderMap) -> Self {
+        let raw = |name: &str, absent: &str| {
+            headers.get(name).map_or_else(
+                || absent.to_string(),
+                |value| String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        };
+        let user_identity = match raw("user-identity", "unknown") {
+            value if value.is_empty() => "invalid".to_string(),
+            value => value,
+        };
+        Self {
+            user_identity,
+            user_plan: raw("x-user-plan", "none"),
+            client_version: raw("user-agent", "unknown"),
+            labels: ClientLabels::from_headers(headers),
+        }
+    }
+
+    /// Reads what the metrics middleware stashed for this request, falling back to the headers
+    /// when it is not installed — an embedder may configure its own app.
+    #[must_use]
+    pub fn from_request(request: &HttpRequest) -> Self {
+        request
+            .extensions()
+            .get::<Self>()
+            .cloned()
+            .unwrap_or_else(|| Self::from_headers(request.headers()))
+    }
+
+    /// The bounded values the metric labels carry.
+    pub(crate) fn labels(&self) -> &ClientLabels {
+        &self.labels
+    }
+}
+
+/// Per-client label values extracted from proxy-injected headers.
+#[derive(Debug, Clone)]
 pub(crate) struct ClientLabels {
     pub(crate) user_identity: String,
     pub(crate) user_plan: String,
@@ -142,7 +199,10 @@ pub(crate) async fn http_metrics_middleware(
         .match_pattern()
         .unwrap_or_else(|| "other".to_string());
     let method = req.method().to_string();
-    let client = ClientLabels::from_headers(req.headers());
+    // Stashed so the quote handler reads the headers once per request rather than twice.
+    let client = ClientInfo::from_headers(req.headers());
+    req.extensions_mut()
+        .insert(client.clone());
 
     let result = next.call(req).await;
 
@@ -153,7 +213,7 @@ pub(crate) async fn http_metrics_middleware(
             .status_code()
             .as_u16(),
     };
-    record_request(&endpoint, &method, status, start.elapsed(), &client);
+    record_request(&endpoint, &method, status, start.elapsed(), client.labels());
     result
 }
 
@@ -286,6 +346,51 @@ mod tests {
         );
         let labels = ClientLabels::from_headers(&headers);
         assert_eq!(labels.user_identity, "Relay---FOMO");
+    }
+
+    #[test]
+    fn test_client_info_keeps_what_the_client_sent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("user-identity"),
+            HeaderValue::from_static("Relay - FOMO"),
+        );
+        headers.insert(
+            HeaderName::from_static("user-agent"),
+            HeaderValue::from_static("Mozilla/5.0 (X11; Linux)"),
+        );
+        let oversized = "a".repeat(80);
+        headers.insert(
+            HeaderName::from_static("x-user-plan"),
+            HeaderValue::from_str(&oversized).unwrap(),
+        );
+
+        let info = ClientInfo::from_headers(&headers);
+        assert_eq!(info.user_identity, "Relay - FOMO");
+        assert_eq!(info.user_plan, oversized, "the record is not bound by label length");
+        assert_eq!(info.client_version, "Mozilla/5.0 (X11; Linux)");
+
+        // The metric labels stay bounded and slugified.
+        assert_eq!(info.labels().user_identity, "Relay---FOMO");
+        assert_eq!(info.labels().user_plan, "invalid");
+        assert_eq!(info.labels().client_version, "other");
+    }
+
+    #[test]
+    fn test_client_info_defaults_to_sentinels() {
+        let info = ClientInfo::from_headers(&HeaderMap::new());
+        assert_eq!(info.user_identity, "unknown");
+        assert_eq!(info.user_plan, "none");
+        assert_eq!(info.client_version, "unknown");
+    }
+
+    #[test]
+    fn test_client_info_marks_empty_identity_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HeaderName::from_static("user-identity"), HeaderValue::from_static(""));
+        let info = ClientInfo::from_headers(&headers);
+        // Distinct from `unknown`: the proxy sent the header with nothing in it.
+        assert_eq!(info.user_identity, "invalid");
     }
 
     #[test]

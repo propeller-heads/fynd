@@ -4,7 +4,6 @@
 use std::{sync::Arc, time::Instant};
 
 use actix_web::{web, HttpRequest, HttpResponse};
-use fynd_core::SolveError;
 use tracing::instrument;
 #[cfg(feature = "experimental")]
 use tracing::{debug, info, warn};
@@ -20,13 +19,11 @@ use crate::api::prices::{
 use crate::api::tokens::{build_token_entries, TokensCache, TokensQuery, TokensResponse};
 use crate::api::{
     disable_slippage_taking,
-    error::{solve_error_code, ErrorResponse},
+    error::ErrorResponse,
     exclusive_access,
-    record::{QuoteRecord, RequestRecord},
-    request_capture::{
-        self, failure_reason_slug, log_request_capture, log_slow_solve, quote_status_code,
-        RequestOutcome,
-    },
+    middleware::ClientInfo,
+    record::{self, QuoteRecord, RequestRecord},
+    request_capture::{log_request_capture, log_slow_solve, SLOW_SOLVE_THRESHOLD_MS},
 };
 
 /// Configures API routes under the `/v1` namespace.
@@ -95,8 +92,22 @@ pub async fn quote(
         .worker_router()
         .quote(core_request, access)
         .await;
-    let record = QuoteRecord::build(request_record, &result, state.chain(), http_request.headers());
-    log_quote_outcome(&record, &result);
+    // Reading the head takes the market-data lock, so only a quote that priced nothing asks.
+    let head = match result
+        .as_ref()
+        .ok()
+        .and_then(record::priced_block)
+    {
+        Some(_) => None,
+        None => state
+            .health_tracker()
+            .tycho_head_status()
+            .await
+            .map(|status| status.head),
+    };
+    let client = ClientInfo::from_request(&http_request);
+    let record = QuoteRecord::build(request_record, &result, state.chain(), client, head);
+    log_quote_outcome(&record);
 
     let dto_quote: dto::Quote = result?.into();
     Ok(HttpResponse::Ok().json(dto_quote))
@@ -124,61 +135,33 @@ pub fn validate_quote_request(
 
 /// Emits the failure-capture and slow-solve log lines for a finished quote.
 ///
-/// The request the lines carry is the replay capture inside `record`, cloned so the record stays
-/// with the caller. Serialization happens on a detached task carrying the current span, so it
-/// never adds latency to the response. Successful, fast quotes log nothing (see
-/// `RequestOutcome::is_failure`).
+/// Both lines read the request and the outcome off `record`, so they cannot disagree with what
+/// the collector receives. Serialization happens on a detached task carrying the current span,
+/// so it never adds latency to the response. Successful, fast quotes log nothing.
 ///
 /// # Panics
 ///
 /// Spawns the detached task with [`actix_web::rt::spawn`], which panics when called outside a
 /// running Actix system. Callers must invoke this from an Actix worker (i.e. inside a handler).
-pub fn log_quote_outcome(record: &QuoteRecord, result: &Result<fynd_core::Quote, SolveError>) {
-    let capture = record.replay().clone();
-    let num_orders = capture.num_orders();
-    let outcome = match result {
-        Ok(core_quote) => RequestOutcome::Solved {
-            solve_time_ms: core_quote.solve_time_ms(),
-            order_statuses: core_quote
-                .orders()
-                .iter()
-                .map(|order_quote| quote_status_code(order_quote.status()))
-                .collect(),
-            failure_reasons: core_quote
-                .orders()
-                .iter()
-                .map(|order_quote| {
-                    failure_reason_slug(order_quote.status(), order_quote.no_route_cause())
-                })
-                .collect(),
-        },
-        Err(error) => RequestOutcome::Failed { code: solve_error_code(error) },
-    };
-    let slow_solve_time_ms = match &outcome {
-        RequestOutcome::Solved { solve_time_ms, .. }
-            if *solve_time_ms > request_capture::SLOW_SOLVE_THRESHOLD_MS =>
-        {
-            Some(*solve_time_ms)
-        }
-        RequestOutcome::Solved { .. } | RequestOutcome::Failed { .. } => None,
-    };
-    if !outcome.is_failure() && slow_solve_time_ms.is_none() {
+pub fn log_quote_outcome(record: &QuoteRecord) {
+    let is_failure = record.is_failure();
+    let slow_solve_time_ms = record.slow_solve_time_ms();
+    if !is_failure && slow_solve_time_ms.is_none() {
         return;
     }
+    // Past the guard: this quote logs, so the copies below are not wasted.
+    let capture = record.replay().clone();
+    let num_orders = capture.num_orders();
+    let outcome = record.log_outcome();
     let span = tracing::Span::current();
     actix_web::rt::spawn(async move {
         span.in_scope(|| {
             let replay_json = capture.to_json();
-            if outcome.is_failure() {
+            if is_failure {
                 log_request_capture(num_orders, &replay_json, &outcome);
             }
             if let Some(solve_time_ms) = slow_solve_time_ms {
-                log_slow_solve(
-                    solve_time_ms,
-                    num_orders,
-                    request_capture::SLOW_SOLVE_THRESHOLD_MS,
-                    &replay_json,
-                );
+                log_slow_solve(solve_time_ms, num_orders, SLOW_SOLVE_THRESHOLD_MS, &replay_json);
             }
         });
     });
