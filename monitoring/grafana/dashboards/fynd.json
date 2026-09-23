@@ -292,13 +292,13 @@
     },
     {
       "id": 12,
-      "title": "Solve Duration by Pool (p95)",
+      "title": "Solve Duration by Pool (p95, successful)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 48 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, pool) (rate(worker_pool_solve_duration_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, pool) (rate(worker_pool_task_duration_seconds_bucket{outcome=\"success\"}[1m])))",
           "legendFormat": "{{pool}}",
           "refId": "A"
         }
@@ -307,6 +307,55 @@
         "defaults": {
           "unit": "s",
           "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "title": "Task Outcomes by Pool",
+      "description": "Every task outcome, not just successes. A rising non-success share is the first sign a pool is failing work.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 64 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (pool, outcome) (rate(worker_pool_task_duration_seconds_count[1m]))",
+          "legendFormat": "{{pool}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "title": "Worker Time Attribution",
+      "description": "Where each worker's second goes. The select! is biased with event arms ahead of task pickup, so time in an arm is time tasks spend queued. The three arms are disjoint and sum.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 64 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (arm) (rate(worker_pool_arm_duration_seconds_sum[1m]))",
+          "legendFormat": "event: {{arm}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (pool) (rate(worker_pool_task_duration_seconds_sum[1m]))",
+          "legendFormat": "solve: {{pool}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "normal" } }
         },
         "overrides": []
       }

@@ -36,7 +36,7 @@ pub use allocation::ExclusiveAccess;
 use allocation::{allocate, validate_pool_allowlist, Allocation, OrderClass};
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
-use instrumentation::{record_quote_comparison, solver_error_label};
+use instrumentation::record_quote_comparison;
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive};
@@ -787,7 +787,7 @@ impl WorkerPoolRouter {
 
         // Record failures by worker pool and error type
         for (worker_pool_name, error) in &failed_solvers {
-            let error_type = solver_error_label(error);
+            let error_type = error.label();
             counter!("worker_router_solver_failures_total", "pool" => worker_pool_name.clone(), "error_type" => error_type).increment(1);
         }
 

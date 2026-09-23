@@ -145,18 +145,43 @@ fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth
         .set(queue_depth as f64);
 }
 
-/// Records successful worker-side quote latency after pickup, excluding queue wait: everything
-/// from taking the order to handing the quote back, so the algorithm's solve plus route
-/// validation, pAMM fallback pricing, price-impact calculation and quote construction. Unlike
-/// `worker_router_solve_duration_seconds`, which times the router racing every pool and so
-/// belongs to no single pool, this is attributable per pool.
+/// Records how long a task held its worker, from pickup to response, under the outcome it
+/// reached: `success`, or the [`SolveError::label`] of the failure.
 ///
-/// Successful quotes only: a pool that exhausts its timeout returns before this point and is
-/// counted in `worker_router_solver_failures_total{error_type="timeout"}` instead.
-fn record_quote_duration(pool_name: &str, quote_duration: Duration) {
-    // The metric keeps its established external name for dashboard compatibility.
-    metrics::histogram!("worker_pool_solve_duration_seconds", "pool" => pool_name.to_string())
-        .record(quote_duration.as_secs_f64());
+/// Spans the whole task rather than the algorithm's solve alone, so it also covers the wait for
+/// derived-data readiness. What this measures is worker occupancy, and a task blocked waiting to
+/// become ready occupies its worker exactly as one that is solving.
+///
+/// Every outcome is recorded. The metric this replaced took successful quotes only, which left
+/// a saturated pool looking idle: the failing case was absent from the one histogram that would
+/// have shown it. Utilisation is therefore
+/// `rate(worker_pool_task_duration_seconds_sum[..]) / workers`, over all outcomes.
+fn record_task_duration(pool_name: &str, duration: Duration, outcome: &'static str) {
+    metrics::histogram!(
+        "worker_pool_task_duration_seconds",
+        "pool" => pool_name.to_string(),
+        "outcome" => outcome
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Records time the worker spent in one of the arms that compete with task pickup.
+///
+/// The worker's `select!` is `biased` with market events and derived-data events ahead of the
+/// task queue, so this time is what a task waits behind. It is otherwise unattributable: queue
+/// wait shows that a task waited, and nothing shows what it waited for.
+///
+/// `arm` partitions that time and the values are mutually exclusive, so they sum without
+/// double-counting: `market_event` is a pass through `process_event`, `graph_init` is a full
+/// rebuild, which the lagged branch runs *instead of* `process_event`, and `derived_event` is
+/// the derived-data arm.
+fn record_worker_arm_duration(pool_name: &str, duration: Duration, arm: &'static str) {
+    metrics::histogram!(
+        "worker_pool_arm_duration_seconds",
+        "pool" => pool_name.to_string(),
+        "arm" => arm
+    )
+    .record(duration.as_secs_f64());
 }
 
 /// Records end-to-end price-impact calculation time, including protocol-specific spot-price
@@ -302,6 +327,7 @@ where
     /// three things together, from one read: the graph, the fallback pool index, and which pAMMs
     /// the graph holds and which it left out.
     pub async fn initialize_graph(&mut self) {
+        let started = Instant::now();
         let topology = {
             // One read: the index and the topology must describe the same market, or a pAMM whose
             // fallback pool arrived between the two reads stays out until the next rebuild.
@@ -322,10 +348,12 @@ where
         self.graph_manager
             .initialize_graph(&topology);
         self.initialized = true;
+        record_worker_arm_duration(&self.pool_name, started.elapsed(), "graph_init");
     }
 
     /// Applies one market event to the graph, with the pAMM admission rule run over it first.
     pub async fn process_event(&mut self, event: MarketEvent) {
+        let started = Instant::now();
         let market_data = self.market_data.clone();
         let event = {
             let market = market_data.read().await;
@@ -351,6 +379,7 @@ where
                 }
             }
         }
+        record_worker_arm_duration(&self.pool_name, started.elapsed(), "market_event");
     }
 
     /// Returns a quote for an order, optionally solved against a named state overlay.
@@ -564,8 +593,9 @@ where
             }
         };
 
+        // Occupancy is timed by the caller, which also sees the failing outcomes this point
+        // never reaches; here the elapsed time only fills in the quote's own solve_time_ms.
         let quote_duration = start_time.elapsed();
-        record_quote_duration(&self.pool_name, quote_duration);
 
         Ok(SingleOrderQuote::new(order_quote, quote_duration.as_millis() as u64))
     }
@@ -702,6 +732,7 @@ where
 
                 // Process derived data events (component depths, token prices)
                 derived_result = derived_event_rx.recv(), if !derived_closed => {
+                    let arm_started = Instant::now();
                     match derived_result {
                         Ok(event) => {
                             // Always update tracker with every event
@@ -748,6 +779,11 @@ where
                             );
                         }
                     }
+                    record_worker_arm_duration(
+                        &self.pool_name,
+                        arm_started.elapsed(),
+                        "derived_event",
+                    );
                 }
 
                 // Get next solve task
@@ -755,6 +791,9 @@ where
                     match task.ok() {
                         Some(task) => {
                             let task_id = task.id();
+                            // Occupancy starts at pickup and runs to the response, so it covers
+                            // the readiness wait as well as the solve.
+                            let started = Instant::now();
                             record_task_pickup_metrics(
                                 &self.pool_name,
                                 task.wait_time(),
@@ -770,6 +809,7 @@ where
                                     error = %e,
                                     "not ready to solve"
                                 );
+                                record_task_duration(&self.pool_name, started.elapsed(), e.label());
                                 task.respond(Err(e));
                                 continue;
                             }
@@ -780,6 +820,12 @@ where
                                 let order = task.order();
                                 self.quote(order, params).await
                             };
+
+                            let outcome = match &result {
+                                Ok(_) => "success",
+                                Err(e) => e.label(),
+                            };
+                            record_task_duration(&self.pool_name, started.elapsed(), outcome);
 
                             // Send response. The specific failure cause is already logged in
                             // `quote()` and returned to the caller, so we don't re-log here.
@@ -2292,35 +2338,63 @@ mod tests {
         assert!(depth_seen, "queue depth gauge not recorded");
     }
 
-    #[test]
-    fn test_quote_duration_metric_recorded() {
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    /// One sample of `name` in `recorded`, as (labels, seconds).
+    fn one_histogram_sample(
+        recorded: &[crate::tests::metrics::Recorded],
+        name: &str,
+    ) -> (Vec<String>, f64) {
+        use metrics_util::debugging::DebugValue;
+
+        let (_, labels, value) = recorded
+            .iter()
+            .find(|(recorded_name, _, _)| recorded_name == name)
+            .unwrap_or_else(|| panic!("{name} not recorded"));
+        let DebugValue::Histogram(samples) = value else {
+            panic!("expected histogram, got {value:?}");
+        };
+        assert_eq!(samples.len(), 1, "{name} recorded {} samples", samples.len());
+        (labels.clone(), samples[0].into_inner())
+    }
+
+    #[rstest]
+    #[case("success")]
+    #[case("timeout")]
+    #[case("not_ready")]
+    fn test_task_duration_recorded_for_every_outcome(#[case] outcome: &'static str) {
+        use metrics_util::debugging::DebuggingRecorder;
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         metrics::with_local_recorder(&recorder, || {
-            record_quote_duration("test_pool", std::time::Duration::from_millis(120));
+            record_task_duration("test_pool", std::time::Duration::from_millis(120), outcome);
         });
 
-        let mut quote_duration_seen = false;
-        for (key, _unit, _description, value) in snapshotter.snapshot().into_vec() {
-            let key = key.key();
-            if key.name() != "worker_pool_solve_duration_seconds" {
-                continue;
-            }
-            let pool_label = key
-                .labels()
-                .find(|label| label.key() == "pool")
-                .map(|label| label.value().to_string());
-            assert_eq!(pool_label.as_deref(), Some("test_pool"));
-            let DebugValue::Histogram(samples) = value else {
-                panic!("expected histogram, got {value:?}");
-            };
-            assert_eq!(samples.len(), 1);
-            assert!((samples[0].into_inner() - 0.120).abs() < 1e-9);
-            quote_duration_seen = true;
-        }
-        assert!(quote_duration_seen, "quote duration histogram not recorded");
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (labels, seconds) =
+            one_histogram_sample(&recorded, "worker_pool_task_duration_seconds");
+        assert_eq!(labels, vec!["pool=test_pool".to_string(), format!("outcome={outcome}")]);
+        assert!((seconds - 0.120).abs() < 1e-9);
+    }
+
+    /// The three arms partition the worker's non-solving time, so each must carry its own label
+    /// and none may be recorded under another's name.
+    #[rstest]
+    #[case("market_event")]
+    #[case("graph_init")]
+    #[case("derived_event")]
+    fn test_worker_arm_duration_recorded(#[case] arm: &'static str) {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_worker_arm_duration("test_pool", std::time::Duration::from_micros(250), arm);
+        });
+
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (labels, seconds) = one_histogram_sample(&recorded, "worker_pool_arm_duration_seconds");
+        assert_eq!(labels, vec!["pool=test_pool".to_string(), format!("arm={arm}")]);
+        assert!((seconds - 0.000_25).abs() < 1e-12);
     }
 
     #[test]
