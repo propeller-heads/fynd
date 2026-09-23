@@ -107,15 +107,11 @@ Every other option works as it does offline, plus:
 | `--capture-timeout-secs N` | How long to wait for the snapshot, and for the price level frame, before giving up |
 | `--tycho-url HOST` | Overrides `TYCHO_URL`. Scheme optional |
 | `--tycho-api-key KEY` | Overrides `TYCHO_API_KEY` |
-| `--rpc-url URL` | Overrides `RPC_URL`. Read for the live gas price, and once for the PropAMMRouter's fee tiers |
+| `--rpc-url URL` | Overrides `RPC_URL`. Read for the live gas price |
 
 Without `--gas-price-gwei` a live run prices gas at whatever the chain is charging, read from
 `RPC_URL`. Pass the flag and it wins. An offline run has no such price to read — the fixture
 carries none — so it keeps using the default.
-
-The same node is read once more, for the PropAMMRouter's fee tiers. A route with a
-`propammfallback:` leg needs them: without them the solver drops every such route. An offline run
-reads no node, so a market holding those components cannot be routed through them.
 
 ### pAMM price levels
 
@@ -139,11 +135,10 @@ because of that frame, so a run that quietly loses it is benching a different ma
 `--exclude-protocols vm:fermiswap` is not optional bookkeeping. FermiSwap is reachable both ways
 and both price the same maker inventory, so leaving the VM one in double-counts it.
 
-A venue on the PropAMMRouter's on-chain whitelist arrives labelled `propammfallback:{venue}`
-instead, because its swaps execute through that router. The `--include-protocols` name stays
-`pricelevelstream:{venue}` either way: it names the venue, and the stream picks the label. The
-stream reads the whitelist through the node at the `RPC_URL` environment variable — `--rpc-url`
-does not set it, so passing the flag alone leaves every venue on the direct path.
+A venue arrives labelled `fallback:{venue}`, because its swaps execute through the
+TychoFallbackRouter, which retries a reverted pAMM leg on the fallback pool the solver names. The
+`--include-protocols` name stays `pricelevelstream:{venue}`: it names the venue, and the stream
+picks the label.
 
 The profiler takes the same flags, so a slow order from a live run can be profiled against a fresh
 market: `./scripts/profile.sh --market live --config WF_d3 --orders 200`. It will be a

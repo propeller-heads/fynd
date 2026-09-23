@@ -20,25 +20,17 @@ impl UnsupportedChainError {
 /// registry.
 ///
 /// # Errors
-/// Returns `UnsupportedChainError` if the chain (custom) is not registered.
+/// Returns `UnsupportedChainError` if the chain (custom) is not registered, or if it has no
+/// wrapper contract for its native asset (Starknet, or a chain whose native balance is itself a
+/// routable token). `native_token` feeds the solver's gas token, so such a chain fails the build
+/// rather than getting a placeholder gas token.
 pub fn native_token(chain: &Chain) -> Result<Address, UnsupportedChainError> {
-    let address = chain
+    let unsupported = || UnsupportedChainError { chain: *chain };
+    chain
         .try_wrapped_native_token()
+        .map_err(|_| unsupported())?
         .map(|token| token.address)
-        .map_err(|_| UnsupportedChainError { chain: *chain })?;
-
-    // tycho-common returns a zero-address placeholder for chains with no wrapped-native token
-    // (currently Starknet — see the explicit `0x0` in its `try_wrapped_native_token` arm).
-    // `native_token` feeds the solver's gas token, so accepting a placeholder would silently build
-    // a solver with a 0x0 gas token. Reject it to preserve the fail-fast behavior Fynd had before
-    // this lookup was registry-backed (its old hardcoded map never listed Starknet). A properly
-    // configured custom chain always has a real wrapped-native address, so this never trips for
-    // one.
-    if address.is_zero() {
-        return Err(UnsupportedChainError { chain: *chain });
-    }
-
-    Ok(address)
+        .ok_or_else(unsupported)
 }
 
 /// Parses a chain name string (case-insensitive) into a [`Chain`].

@@ -29,7 +29,7 @@ impl TestHarness {
             .gas_price_as_biguint();
         let pools = load_pools();
 
-        let solver = Solver::from_recording(chain, recording.updates, pools, gas_price, None)
+        let solver = Solver::from_recording(chain, recording.updates, pools, gas_price)
             .await
             .expect("failed to build solver from recording");
 

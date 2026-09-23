@@ -679,7 +679,7 @@ export interface components {
             exclude_pools?: string[];
             /**
              * @description Protocol systems to exclude. Matches exact names (`uniswap_v2`) or a family prefix
-             *     ending in `:` (`propammfallback:`). An entry matching no pools excludes nothing.
+             *     ending in `:` (`fallback:`). An entry matching no pools excludes nothing.
              * @example [
              *       "uniswap_v2"
              *     ]

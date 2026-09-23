@@ -1347,10 +1347,11 @@ fn has_valid_exclusive_route(quote: &OrderQuote, chain: Chain) -> bool {
 /// Returns `true` when the leg converts between the native token and its wrapped form, which tycho
 /// streams as a 1:1 component.
 ///
-/// An unregistered custom chain resolves no wrap pair, so no leg qualifies and the exclusive leg
-/// must be terminal.
+/// An unregistered custom chain, or one with no wrapper contract, resolves no wrap pair, so no leg
+/// qualifies and the exclusive leg must be terminal.
 fn is_native_wrap(swap: &Swap, chain: Chain) -> bool {
-    let (Ok(native), Ok(wrapped)) = (chain.try_native_token(), chain.try_wrapped_native_token())
+    let (Ok(native), Ok(Some(wrapped))) =
+        (chain.try_native_token(), chain.try_wrapped_native_token())
     else {
         return false;
     };
@@ -1464,8 +1465,7 @@ fn drop_pamm_quotes_below_min_amount_out(
                 worker_pool = worker_pool.as_str(),
                 %fallback,
                 slippage = encoding_options.slippage(),
-                "dropping pAMM quote: the Uniswap V3 fallback pays less than the user's \
-                 min_amount_out"
+                "dropping pAMM quote: the fallback pays less than the user's min_amount_out"
             );
             quote.set_status(QuoteStatus::NoRouteFound);
         }
@@ -1653,7 +1653,7 @@ mod tests {
     }
 
     /// A candidate that quotes 990 out and falls back to `fallback_amount_out` — what a worker
-    /// stamps on a route with a `propammfallback:` leg.
+    /// stamps on a route with a `fallback:` leg.
     fn pamm_quote(amount_out_net_gas: u64, fallback_amount_out: u64) -> OrderQuote {
         let mut quote = make_single_quote(amount_out_net_gas)
             .order()
@@ -3489,6 +3489,7 @@ mod tests {
                 .address,
             SimChain::Ethereum
                 .wrapped_native_token()
+                .expect("Ethereum has WETH")
                 .address,
             make_address(0x07),
         )

@@ -80,7 +80,7 @@ The `exclude:` prefix drops a protocol from the list. It matters here: `vm:fermi
 
 * Ethereum mainnet only — the venue addresses are mainnet deployments.
 * Quotes below the smallest ladder level are rejected rather than extrapolated, and quotes above the largest come back as a partial fill at the limit.
-* A quote executes only in the block it was quoted for. The venue rejects a fill priced off a stale reading, so a quote that misses its block reverts rather than filling at the old price.
+* A quote executes only in the block it was quoted for. The venue rejects a fill priced off a stale reading, so a quote that misses its block falls back to the on-chain pool Fynd names for that leg (Uniswap V2, V3 or V4, Curve or Fluid on Ethereum) instead of filling at the old price. Fynd only returns a route whose fallback fill still clears the route's `min_amount_out`.
 
 ### Self-hosted Tycho
 
