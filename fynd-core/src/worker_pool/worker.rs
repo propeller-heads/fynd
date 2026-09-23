@@ -154,8 +154,13 @@ fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth
 ///
 /// Every outcome is recorded. The metric this replaced took successful quotes only, which left
 /// a saturated pool looking idle: the failing case was absent from the one histogram that would
-/// have shown it. Utilisation is therefore
-/// `rate(worker_pool_task_duration_seconds_sum[..]) / workers`, over all outcomes.
+/// have shown it.
+///
+/// `rate(worker_pool_task_duration_seconds_sum[..]) / workers` is therefore the share of worker
+/// slots that are occupied, and not the share of a CPU that is busy. The two differ: a worker
+/// waiting on the market lock is occupied, because it cannot take the next task, and burns no
+/// CPU while it waits. Read this against `worker_pool_arm_duration_seconds` to see what the
+/// remaining time went to, and against container CPU to see how much of either was work.
 fn record_task_duration(pool_name: &str, duration: Duration, outcome: &'static str) {
     metrics::histogram!(
         "worker_pool_task_duration_seconds",
@@ -194,6 +199,11 @@ fn task_budget(pool_timeout: Duration, deadline: Instant, now: Instant) -> Optio
 /// double-counting: `market_event` is a pass through `process_event`, `graph_init` is a full
 /// rebuild, which the lagged branch runs *instead of* `process_event`, and `derived_event` is
 /// the derived-data arm.
+///
+/// Wall time, which is the right measure of what a task waits behind: each worker owns its
+/// thread and a single-threaded runtime, so nothing else runs while an arm is held. It is not a
+/// measure of work, because an arm that blocks on the market or derived lock is counted in full
+/// and spends no CPU.
 fn record_worker_arm_duration(pool_name: &str, duration: Duration, arm: &'static str) {
     metrics::histogram!(
         "worker_pool_arm_duration_seconds",
