@@ -31,6 +31,7 @@
 
 ## Reference
 
+* [License](reference/license.md)
 * [API](reference/api.md)
 * [Architecture](ARCHITECTURE.md)
 * [Performance](reference/benchmark-results.md)

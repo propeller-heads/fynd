@@ -4,6 +4,7 @@ version.workspace = true
 edition = "2021"
 description = "Capture Tycho market state for integration testing"
 publish = false
+license-file = "../../LICENSE.md"
 
 [dependencies]
 fynd-core = { workspace = true, features = ["test-utils"] }

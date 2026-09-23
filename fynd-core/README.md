@@ -1,5 +1,7 @@
 # fynd-core
 
+Licensed under the [Fynd License 1.0](https://github.com/propeller-heads/fynd/blob/main/LICENSE.md). This package is source-available, not MIT-licensed or distributed under an open-source license.
+
 Pure solving logic for the [Fynd](https://fynd.xyz) DEX router.
 
 Contains the route-finding algorithms, market-data pipeline, and on-chain encoder that power

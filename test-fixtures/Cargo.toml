@@ -4,6 +4,7 @@ version.workspace = true
 edition = "2021"
 description = "Shared types for Fynd integration test recordings and expected outputs"
 publish = false
+license-file = "../LICENSE.md"
 
 [dependencies]
 fynd-core.workspace = true
