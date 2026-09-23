@@ -1,4 +1,25 @@
 
+## [0.108.0](https://github.com/propeller-heads/fynd/compare/0.107.1...0.108.0) (2026-09-23)
+
+### Features
+
+* **core:** build tycho 0.421.0's public FallbackSwapData ([0212b5d](https://github.com/propeller-heads/fynd/commit/0212b5dadb7bf842c681fa4c68e8a592b9f2b356))
+* **core:** encode fallback legs through tycho 0.420.0's FallbackExecutor ([c76a2ec](https://github.com/propeller-heads/fynd/commit/c76a2eca2f0ace2d5ad05730e1be76269266b112))
+* **core:** read the fallback protocols from tycho-execution ([5e8d296](https://github.com/propeller-heads/fynd/commit/5e8d2969f652350e44ae78664b5a4b39b5bc8c66))
+* **core:** select and price pAMM fallbacks for TychoFallbackRouter ([7f6cc87](https://github.com/propeller-heads/fynd/commit/7f6cc87d917c9fba3699f757ae7a09813cae770a))
+* use jemalloc as the global allocator ([f4514e1](https://github.com/propeller-heads/fynd/commit/f4514e1545cc06717af413c3b948a819d5310522))
+* **core:** match the fallback protocols tycho's router runs ([4477ad5](https://github.com/propeller-heads/fynd/commit/4477ad5a274c77e7baf0e9623612d37f59a3b65a))
+* **core:** admit Uniswap V2 and V3 forks as fallback pools ([a1222c8](https://github.com/propeller-heads/fynd/commit/a1222c85f0080f4c7a4ce19f0f5e1e71b0d5d4e8))
+* **core:** encode the chosen fallback pool into the swap user_data ([6eda861](https://github.com/propeller-heads/fynd/commit/6eda861f3e30a0e9cf0e5d14493b19f9d24d70ab))
+* **core:** scaffold solver-side pAMM fallback venue selection ([0b0f6ad](https://github.com/propeller-heads/fynd/commit/0b0f6adc3b2cb3d07fb5d426c3589935279a58ab))
+
+### Bug Fixes
+
+* **core:** refuse fallbacks on native pairs and pool-excluded protocols ([cd12fba](https://github.com/propeller-heads/fynd/commit/cd12fba45d8d83464cb361fe6123bf7c95d2055a))
+* **core:** match tycho's fallback_protocol tag in the swap user_data ([b48b02e](https://github.com/propeller-heads/fynd/commit/b48b02eae05d03fc26ba2e9187694762145a5abe))
+* **core:** index curve fallbacks by the leg's own tokens ([1954d94](https://github.com/propeller-heads/fynd/commit/1954d943b076cff6c3e221aacf0e33277cae99b6))
+
+
 ## [0.107.1](https://github.com/propeller-heads/fynd/compare/0.107.0...0.107.1) (2026-09-21)
 
 ### Features
