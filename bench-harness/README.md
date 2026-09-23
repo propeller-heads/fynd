@@ -135,11 +135,10 @@ because of that frame, so a run that quietly loses it is benching a different ma
 `--exclude-protocols vm:fermiswap` is not optional bookkeeping. FermiSwap is reachable both ways
 and both price the same maker inventory, so leaving the VM one in double-counts it.
 
-A venue on the TychoFallbackRouter's on-chain whitelist arrives labelled `fallback:{venue}`
-instead, because its swaps execute through that router. The `--include-protocols` name stays
-`pricelevelstream:{venue}` either way: it names the venue, and the stream picks the label. The
-stream reads the whitelist through the node at the `RPC_URL` environment variable — `--rpc-url`
-does not set it, so passing the flag alone leaves every venue on the direct path.
+A venue arrives labelled `fallback:{venue}`, because its swaps execute through the
+TychoFallbackRouter, which retries a reverted pAMM leg on the fallback pool the solver names. The
+`--include-protocols` name stays `pricelevelstream:{venue}`: it names the venue, and the stream
+picks the label.
 
 The profiler takes the same flags, so a slow order from a live run can be profiled against a fresh
 market: `./scripts/profile.sh --market live --config WF_d3 --orders 200`. It will be a

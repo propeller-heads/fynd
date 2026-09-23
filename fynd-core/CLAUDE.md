@@ -152,8 +152,12 @@ rather than as a handle to a feed that dies.
 Price level venues must be one of tycho-simulation's `default_served_pamms` — an unrecognised name
 is a `DataFeedError::Config`, not a warning, because these entries are always hand-written. The
 stream is Ethereum-only (`PRICE_LEVEL_STREAM_CHAIN` tracks upstream's venue set, which carries no
-chain of its own). A venue served this way may also exist as a Tycho protocol system
-(`vm:fermiswap` and `pricelevelstream:fermiswap` price the same maker inventory), so drop the
+chain of its own). Its components arrive labelled `fallback:{venue}`, tycho-execution's
+`FALLBACK_PREFIX` aliased by `fallback/`: every served venue executes through the
+`TychoFallbackRouter`, and `matches_streamed_system` maps that label back to the
+`pricelevelstream:` entry that asked for it. A venue served this way may also exist as a Tycho
+protocol system (`vm:fermiswap` and `pricelevelstream:fermiswap` price the same maker inventory),
+so drop the
 Tycho one with an `exclude:` entry rather than streaming both. `EXCLUDE_PREFIX` and
 `parse_exclusion` live here with the other entry prefixes; `fynd_rpc::protocols` applies them
 after expanding `all_onchain`.

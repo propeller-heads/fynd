@@ -29,13 +29,13 @@ use crate::{
     types::{ComponentId, FallbackLeg, Route, RouteExclusionFilter, RouteRejection, Swap},
 };
 
-/// Marks a component the `TychoFallbackRouter` executes, e.g. `fallback:fermiswap`. Must match
-/// `tycho-execution`'s `FALLBACK_PREFIX`.
+/// Marks a component the `TychoFallbackRouter` executes, e.g. `fallback:fermiswap`.
 ///
-/// tycho-simulation labels a whitelisted pAMM's components with this prefix instead of
-/// `pricelevelstream:`. Fynd requests the venue by its `pricelevelstream:{venue}` entry and the
-/// stream decides which label the components carry.
-pub const FALLBACK_PREFIX: &str = "fallback:";
+/// tycho-simulation's price level stream labels every pAMM's components with this prefix; the
+/// direct `pricelevelstream:` label is only for a stream built `without_fallback_router`. Fynd
+/// requests the venue by its `pricelevelstream:{venue}` entry and the stream decides the
+/// label.
+pub const FALLBACK_PREFIX: &str = tycho_execution::encoding::evm::FALLBACK_PREFIX;
 
 /// Whether `route` has a leg the `TychoFallbackRouter` executes (`fallback:` protocol family).
 ///

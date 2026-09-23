@@ -139,8 +139,8 @@ pub(crate) fn has_tycho_protocols(protocols: &[String]) -> bool {
 /// Most entries name their own label. An `exclusive:{system}` entry selects the system's
 /// exclusive-liquidity stream variant, and the prefix is stripped before registration, so its
 /// components arrive under the bare system name. A `pricelevelstream:{pamm}` entry names the pAMM
-/// to stream, and its components arrive labelled `fallback:{pamm}` when that pAMM is on the
-/// TychoFallbackRouter whitelist, so both prefixes answer for the same entry.
+/// to stream, and its components arrive labelled `fallback:{pamm}`: the stream serves every venue
+/// through the `TychoFallbackRouter`, so both prefixes answer for the same entry.
 pub fn matches_streamed_system(entry: &str, protocol_system: &str) -> bool {
     let entry = entry
         .strip_prefix(EXCLUSIVE_PREFIX)
@@ -850,7 +850,7 @@ mod tests {
             "pricelevelstream:fermiswap",
             "pricelevelstream:fermiswap"
         ));
-        // The whitelisted venue arrives under the router's family for the same entry.
+        // The venue arrives under the fallback router's family for the same entry.
         assert!(matches_streamed_system("pricelevelstream:fermiswap", "fallback:fermiswap"));
         // The prefix is stripped before registration, so the components carry the bare system.
         assert!(matches_streamed_system("exclusive:ekubo_v3", "ekubo_v3"));
