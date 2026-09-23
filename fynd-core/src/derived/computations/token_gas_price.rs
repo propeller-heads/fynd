@@ -66,11 +66,11 @@
 //! Tokens the cap leaves out are reported exactly like ones the deadline cut off: they keep
 //! their price, their dependencies and their stamp, and they rank by that stamp next time.
 //!
-//! A full solve is therefore only needed when there is nothing stored to select from at all:
-//! startup, and lag recovery. Nothing else gets one, including a topology change, because rank 1
-//! covers what a topology change would have been a full solve for. A full solve runs without the
-//! cap, bounded only by `pass_budget`: readiness flips as soon as it stores anything, so a capped
-//! one would report a pod ready with a fraction of the market priced.
+//! Seeding the whole market is therefore only needed when there is nothing stored to select
+//! from at all: startup, and lag recovery. Nothing else gets it, including a topology change,
+//! because rank 1 covers what a topology change would once have been a full solve for. A seeding
+//! pass runs without the cap, bounded only by `pass_budget`: readiness flips as soon as anything
+//! is stored, so a capped one would report a pod ready with a fraction of the market priced.
 //!
 //! The cap bounds what one pass costs; `min_pass_interval` bounds how often one runs. Both are
 //! needed. The manager starts a computation per market event, and on Base that is several a
@@ -397,6 +397,19 @@ pub(crate) struct PassPriority {
     last_priced: FxHashMap<Address, u64>,
 }
 
+/// The pass each priced token was last priced in, which is what a pass rotates on.
+///
+/// A token that is absent has no price, and `select_pass_tokens` ranks it ahead of every priced
+/// one. An absent map means nothing is stored at all, which is the seeding case.
+fn last_priced_stamps(deps: Option<&TokenPricesWithDeps>) -> FxHashMap<Address, u64> {
+    deps.map(|deps| {
+        deps.iter()
+            .map(|(token, entry)| (token.clone(), entry.last_priced_pass))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 /// Chooses and orders the tokens one pass attempts, and caps how many it takes.
 ///
 /// The cap is what makes a pass bounded, and it has to be applied here rather than left to
@@ -686,8 +699,8 @@ impl TokenGasPriceComputation {
     /// the reason the module doc gives. `pass_budget` is the bound, and the rank decides who
     /// gets under it.
     ///
-    /// `Ok(None)` when there is nothing stored to select from, so a full solve is needed.
-    async fn try_incremental_compute(
+    /// `Ok(None)` when there is nothing stored to select from, so seeding is needed.
+    async fn update_prices(
         &self,
         market: &MarketData,
         store: &SharedDerivedDataRef,
@@ -731,11 +744,8 @@ impl TokenGasPriceComputation {
                 }
                 tokens_to_recompute.insert(token.clone());
             }
-            let last_priced = existing_deps
-                .iter()
-                .map(|(token, entry)| (token.clone(), entry.last_priced_pass))
-                .collect();
-            let priority = PassPriority { arrived, last_priced };
+            let priority =
+                PassPriority { arrived, last_priced: last_priced_stamps(Some(existing_deps)) };
             (tokens_to_recompute, new_tokens, priority, existing_prices)
         };
 
@@ -790,7 +800,7 @@ impl TokenGasPriceComputation {
             });
         if !edited {
             warn!("token price dependencies vanished between the read and the write");
-            // Returning `None` sends `compute` to a full solve, which rebuilds them.
+            // Returning `None` sends `compute` to seeding, which rebuilds them.
             return Ok(None);
         }
         Span::current().record("updated_token_prices", result.len());
@@ -848,42 +858,42 @@ impl DerivedComputation for TokenGasPriceComputation {
         // since its tokens are what the selection ranks first.
         if !changed.is_full_recompute {
             if let Some(result) = self
-                .try_incremental_compute(market, store, changed)
+                .update_prices(market, store, changed)
                 .await?
             {
                 return Ok(result);
             }
         }
 
-        self.full_solve(market, store).await
+        self.seed_all_prices(market, store)
+            .await
     }
 }
 
 impl TokenGasPriceComputation {
-    /// Prices every token the budget allows and replaces the stored set.
-    async fn full_solve(
+    /// Prices the whole market and writes the stored set from scratch.
+    ///
+    /// Runs only when there is nothing stored to select from: startup, and lag recovery. It is
+    /// the one path that can create the dependency map and seed the gas token, which is why it
+    /// is separate from `update_prices` rather than a flag on it.
+    async fn seed_all_prices(
         &self,
         market: &MarketData,
         store: &SharedDerivedDataRef,
     ) -> Result<ComputationOutput<TokenGasPrices>, ComputationError> {
-        // A full solve is cut off by the same budget as any other pass, so it needs the same
-        // rank: unpriced tokens first, then the ones that have gone longest without a pass. On
-        // a market where one budget cannot price everything, this is what makes repeated full
-        // solves cover the set instead of re-pricing the same head each time. Nothing has
-        // arrived here — a full solve offers every token anyway.
+        // Seeding is cut off by the same budget as any other pass, so it needs the same rank:
+        // unpriced tokens first, then the ones that have gone longest without a pass. On a market
+        // where one budget cannot price everything, that is what makes a lag-recovery seed cover
+        // the set instead of re-pricing the same head. Nothing has arrived here — a seeding pass
+        // offers every token anyway.
         let priority = {
             let store_guard = store.read().await;
-            let last_priced = store_guard
-                .token_prices_deps()
-                .map(|deps| {
-                    deps.iter()
-                        .map(|(token, entry)| (token.clone(), entry.last_priced_pass))
-                        .collect()
-                })
-                .unwrap_or_default();
-            PassPriority { arrived: FxHashSet::default(), last_priced }
+            PassPriority {
+                arrived: FxHashSet::default(),
+                last_priced: last_priced_stamps(store_guard.token_prices_deps()),
+            }
         };
-        // No cap. A full solve only runs when there is nothing stored to select from, which is
+        // No cap. Seeding only runs when there is nothing stored to select from, which is
         // startup and lag recovery, and `derived_data_ready` flips as soon as it stores anything.
         // Capping it would report a pod ready with a fraction of the market priced and leave the
         // rest to fill over the following passes. `pass_budget` still bounds it.
@@ -899,8 +909,9 @@ impl TokenGasPriceComputation {
         }
 
         // Tokens the deadline cut off keep their previous entry, dependencies included: they
-        // stay served and stay visible to the incremental path, which re-prices them when one
-        // of their pools changes. Dropping them would unprice them until the next full solve.
+        // stay served and stay visible to `update_prices`, which re-prices them when one of
+        // their pools changes or when the unpriced rank reaches them. Dropping them here would
+        // leave them unpriced with nothing pointing at them.
         if !solved.unattempted.is_empty() {
             let store_guard = store.read().await;
             if let Some(previous) = store_guard.token_prices_deps() {
@@ -1101,7 +1112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_full_solve_past_deadline() {
+    async fn test_seeding_pass_past_deadline() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
         let (market, _) =
@@ -1113,7 +1124,7 @@ mod tests {
             .expect("pricing must not fail");
 
         // A full recompute whose deadline expires immediately attempts nothing; every token
-        // must keep its previous price rather than vanish until the next full solve.
+        // must keep its previous price rather than vanish with no later pass to restore it.
         let output = computation_for(&eth.address)
             .with_pass_budget(Duration::ZERO)
             .compute(
@@ -1182,8 +1193,8 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        // The manager persists between runs; without this the incremental path bails out on
-        // the missing stored prices and the test would exercise the full solve twice.
+        // The manager persists between runs; without this `update_prices` bails out on the
+        // missing stored prices and the test would exercise seeding twice.
         TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
 
         // The pool's state changes, marking USDC for re-pricing, but the deadline expires
@@ -1646,10 +1657,10 @@ mod tests {
         );
     }
 
-    /// The full solve runs without the cap, so readiness means the market is priced rather than
-    /// one pass worth of it.
+    /// The seeding pass runs without the cap, so readiness means the market is priced rather
+    /// than one pass worth of it.
     #[tokio::test]
-    async fn test_the_full_solve_is_not_capped() {
+    async fn test_the_seeding_pass_is_not_capped() {
         let eth = token(0, "ETH");
         let aaa = token(1, "AAA");
         let bbb = token(2, "BBB");
