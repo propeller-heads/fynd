@@ -201,12 +201,12 @@ impl FyndRPCBuilder {
         self
     }
 
-    /// Sets the wall-clock budget for one token-pricing pass. Leaving this unset keeps the
+    /// Sets how many tokens one token-pricing pass may attempt. Leaving this unset keeps the
     /// computation's default.
-    pub fn pricing_pass_budget(mut self, pass_budget: Duration) -> Self {
+    pub fn pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
         self.fynd_builder = self
             .fynd_builder
-            .pricing_pass_budget(pass_budget);
+            .pricing_max_tokens_per_pass(max_tokens);
         self
     }
 

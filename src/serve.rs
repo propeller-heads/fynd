@@ -366,8 +366,8 @@ async fn setup_solver(
     if let Some(size) = args.tycho_subscription_buffer_size {
         builder = builder.tycho_subscription_buffer_size(size);
     }
-    if let Some(ms) = args.pricing_pass_budget_ms {
-        builder = builder.pricing_pass_budget(Duration::from_millis(ms));
+    if let Some(max_tokens) = args.pricing_max_tokens_per_pass {
+        builder = builder.pricing_max_tokens_per_pass(max_tokens);
     }
     builder = builder.price_guard_enabled(args.enable_price_guard);
     builder = builder.simulation_enabled(args.enable_simulation);

@@ -33,7 +33,7 @@
 //! That deadline is the only thing that bounds a pass. The next section says why the set of
 //! tokens a pass selects does not.
 //!
-//! # Why the pass is bounded and rotated
+//! # Why the pass is capped and rotated
 //!
 //! "Only the tokens a change affects" does not bound anything on a dense market. Every route
 //! ends at the gas token, the gas token's own pools are the ones that trade every block, and
@@ -42,25 +42,32 @@
 //! on 2026-09-23: 46 consecutive incremental passes selected 2126 to 2134 tokens out of 2130,
 //! and pricing ran at a 97.8% duty cycle, indistinguishable from re-pricing everything.
 //!
-//! So the selection is not what bounds the cost — `pass_budget` is. The budget cuts the sell
-//! loop off wherever it has reached, which makes the order the tokens are attempted in the thing
-//! that decides what a pass is worth:
+//! So a pass is sized by `max_tokens_per_pass`, and `pass_budget` is only a backstop against one
+//! pathological token. The cap has to be what sizes it: the market snapshot is pruned toward the
+//! tokens the pass will attempt, so the set is fixed before any solving starts, and a deadline
+//! cannot shape a set it only ever interrupts.
+//!
+//! A token is a candidate when a change points at it, when a component carrying it arrived, or
+//! when it has no price. Attempted in that order, longest-unpriced first within the last group:
 //!
 //! 1. Tokens of components that arrived this block. A new component is in no stored dependency set,
 //!    so nothing else would point at the tokens whose routes it may have just improved, and a token
 //!    it introduces cannot be quoted until it has a price.
-//! 2. Tokens with no price yet. A token that has one can afford to be cut and keep it; a token that
-//!    has none would stay unquotable.
-//! 3. Everything else, longest-unpriced first.
+//! 2. Tokens with no price yet. This rank is what a selection built from stored dependencies cannot
+//!    express: an unpriced token is in no dependency set, so no change would ever name it. Without
+//!    it a capped first pass leaves the rest of the market unpriced for as long as the process runs
+//!    — 97 tokens of 2211 on the Base run that found this.
+//! 3. Tokens a change points at, longest-unpriced first. This is what makes a cap smaller than the
+//!    candidate set safe: it rotates the tail forward instead of re-pricing one head.
 //!
-//! Rule 3 is what makes a budget smaller than the work safe. Attempting tokens in a fixed order
-//! would re-price the same head every pass and never reach the tail; ordering by the pass a
-//! token was last priced in rotates the tail forward, so a market needing more than one budget's
-//! worth of pricing refreshes every token in a bounded number of passes rather than starving
-//! some of them for good.
+//! A priced token that no change points at is not a candidate at all. Its stored dependency set
+//! already names every candidate route, so a rival pool becoming better does point at it.
+//!
+//! Tokens the cap leaves out are reported exactly like ones the deadline cut off: they keep
+//! their price, their dependencies and their stamp, and they rank by that stamp next time.
 //!
 //! A full solve is therefore only needed when there is nothing stored to select from at all:
-//! startup, and lag recovery. Nothing else gets one, including a topology change, because rule 1
+//! startup, and lag recovery. Nothing else gets one, including a topology change, because rank 1
 //! covers what a topology change would have been a full solve for.
 
 use std::{
@@ -351,6 +358,8 @@ pub struct TokenGasPriceComputation {
     /// timeout. Tokens not attempted before it expires keep their previous price; the module's
     /// Cost section says what a slow pass would otherwise delay.
     pass_budget: Duration,
+    /// Most tokens one pass attempts. This is what bounds a pass; see `select_pass_tokens`.
+    max_tokens_per_pass: usize,
     /// Counts the passes that have run, and stamps every token a pass prices. Ordering by the
     /// stamp is what rotates a budget-limited pass over the whole token set; see the module's
     /// "Why the pass is bounded and rotated" section.
@@ -369,46 +378,66 @@ pub(crate) struct PassPriority {
     last_priced: FxHashMap<Address, u64>,
 }
 
-/// Orders the tokens a pass will attempt, most valuable first.
+/// Chooses and orders the tokens one pass attempts, and caps how many it takes.
 ///
-/// `pass_budget` cuts the sell loop off wherever it has reached, so this order decides what a
-/// pass is worth. Newly arrived tokens rank first because nothing else points at them, unpriced
-/// tokens next because they are the only ones a cut would leave unquotable, and the rest by the
-/// pass that last priced them so a budget smaller than the work rotates instead of starving the
-/// tail. See the module's "Why the pass is bounded and rotated" section.
-fn order_for_pass(tokens: &FxHashSet<Address>, priority: &PassPriority) -> Vec<Address> {
+/// The cap is what makes a pass bounded, and it has to be applied here rather than left to
+/// `pass_budget`: the market snapshot is pruned toward the tokens the pass will attempt, so the
+/// set has to be known before any solving starts. The budget stays a backstop for a pathological
+/// token, not the thing that decides the size of a pass.
+///
+/// A token is a candidate when a change points at it, when a component carrying it arrived, or
+/// when it has no price. That last case is the one a selection built from stored dependencies
+/// cannot express: an unpriced token is in no dependency set, so nothing would ever point at it
+/// and it would stay unpriced for as long as the process ran.
+///
+/// Rank, in order: arrived, unpriced, then the tokens a change points at, longest-unpriced
+/// first, so a cap smaller than the candidates rotates over them instead of starving the tail.
+fn select_pass_tokens(
+    universe: &FxHashSet<Address>,
+    changed: Option<&FxHashSet<Address>>,
+    priority: &PassPriority,
+    max_tokens: usize,
+) -> Vec<Address> {
     const ARRIVED: u8 = 0;
     const UNPRICED: u8 = 1;
-    const PRICED: u8 = 2;
+    const CHANGED: u8 = 2;
 
-    let mut ordered: Vec<(u8, u64, Address)> = Vec::with_capacity(tokens.len());
-    for token in tokens {
-        let entry = if priority.arrived.contains(token) {
-            (ARRIVED, 0)
-        } else {
-            match priority.last_priced.get(token) {
-                Some(pass) => (PRICED, *pass),
-                None => (UNPRICED, 0),
-            }
+    let mut ranked: Vec<(u8, u64, Address)> = Vec::with_capacity(universe.len());
+    for token in universe {
+        if priority.arrived.contains(token) {
+            ranked.push((ARRIVED, 0, token.clone()));
+            continue;
+        }
+        let Some(last) = priority.last_priced.get(token) else {
+            ranked.push((UNPRICED, 0, token.clone()));
+            continue;
         };
-        ordered.push((entry.0, entry.1, token.clone()));
+        if changed.is_none_or(|changed| changed.contains(token)) {
+            ranked.push((CHANGED, *last, token.clone()));
+        }
     }
-    // Within `PRICED`, the smaller pass number is the token that has gone longest without one.
-    ordered.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    ordered
+    // Within a rank, the smaller pass number is the token that has gone longest without one.
+    ranked.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    ranked.truncate(max_tokens);
+    ranked
         .into_iter()
         .map(|(_, _, token)| token)
         .collect()
 }
 
-/// Default wall-clock budget for a pass's sell loop.
+/// Default wall-clock backstop for a pass's sell loop.
 ///
-/// One second so that a pass costs a fraction of a block rather than a multiple of one. The
-/// previous 30 seconds was set when a pass was expected to be rare; measured on Base at
-/// `min-tvl 1` it made pricing run at a 97.5% duty cycle, back to back, delaying every other
-/// computation in its stage. Rotation is what makes a budget this much smaller than the work
-/// safe: it refreshes every token over several passes instead of starving the tail.
-const DEFAULT_PASS_BUDGET: Duration = Duration::from_secs(1);
+/// `DEFAULT_MAX_TOKENS_PER_PASS` is what sizes a pass. This only stops one pathological token
+/// from holding the derived chain, so it stays generous.
+const DEFAULT_PASS_BUDGET: Duration = Duration::from_secs(30);
+
+/// Default cap on the tokens one pass attempts.
+///
+/// Measured on Base at `min-tvl 1`, a sell costs about 12ms, so 100 tokens is a pass of roughly
+/// 1.2s against a 2s block. The whole market of about 2200 tokens refreshes in some 23 passes,
+/// which is the same staleness the uncapped pass had when it ran for 25 to 30 seconds at a time,
+/// for about 40% of the CPU.
+const DEFAULT_MAX_TOKENS_PER_PASS: usize = 100;
 
 impl Default for TokenGasPriceComputation {
     fn default() -> Self {
@@ -420,6 +449,7 @@ impl Default for TokenGasPriceComputation {
             max_hops: crate::solver::defaults::POOL_MAX_HOPS,
             probe_amount: BigUint::from(10u64).pow(18), // 1 ETH
             pass_budget: DEFAULT_PASS_BUDGET,
+            max_tokens_per_pass: DEFAULT_MAX_TOKENS_PER_PASS,
             pass_counter: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -432,9 +462,14 @@ impl TokenGasPriceComputation {
         Self { gas_token, max_hops, probe_amount, ..Self::default() }
     }
 
-    /// Sets the wall-clock budget for a pass's sell loop.
+    /// Sets the wall-clock backstop for a pass's sell loop.
     pub fn with_pass_budget(self, pass_budget: Duration) -> Self {
         Self { pass_budget, ..self }
+    }
+
+    /// Sets how many tokens one pass may attempt.
+    pub fn with_max_tokens_per_pass(self, max_tokens_per_pass: usize) -> Self {
+        Self { max_tokens_per_pass, ..self }
     }
 
     /// Claims the number of the pass that is about to run.
@@ -458,18 +493,20 @@ impl TokenGasPriceComputation {
         Self { gas_token, ..self }
     }
 
-    /// Solves every token, or only `filter_tokens` when given, with the per-token sell loop
-    /// under one wall-clock budget.
+    /// Solves one capped pass, ranking every token in the market and attempting the best
+    /// `max_tokens_per_pass` of them.
+    ///
+    /// `changed` ranks rather than narrows; `select_pass_tokens` says why.
     ///
     /// Tokens that were bought but found no sell route back come back as failed items. Tokens
     /// the gas token cannot reach at all are only counted (logged at debug): unreachable is the
-    /// normal state for much of the topology, and every full solve re-attempts them anyway.
-    /// Tokens the deadline cut off come back as unattempted, so callers can keep their
-    /// previous prices.
+    /// normal state for much of the topology. Tokens the pass did not attempt, whether the cap
+    /// or the deadline left them out, come back as unattempted so callers keep their previous
+    /// prices.
     async fn solve_token_prices(
         &self,
         market: &MarketData,
-        filter_tokens: Option<&FxHashSet<Address>>,
+        changed: Option<&FxHashSet<Address>>,
         priority: &PassPriority,
     ) -> Result<PricingPassOutcome, ComputationError> {
         let (topology, block) = {
@@ -496,7 +533,18 @@ impl TokenGasPriceComputation {
             .with_gas_aware(false);
         let algorithm = BellmanFordAlgorithm::with_config(config);
 
-        let tokens_to_price = self.tokens_to_price(&topology, filter_tokens);
+        let universe = self.tokens_to_price(&topology);
+        let ordered = select_pass_tokens(&universe, changed, priority, self.max_tokens_per_pass);
+        // Tokens the cap left out are unattempted, exactly like ones the deadline cuts: they
+        // keep their previous price and stay visible to the next pass, which ranks them by the
+        // pass that last priced them.
+        let selected: FxHashSet<Address> = ordered.iter().cloned().collect();
+        let mut capped_out: FxHashSet<Address> = FxHashSet::default();
+        for token in &universe {
+            if !selected.contains(token) {
+                capped_out.insert(token.clone());
+            }
+        }
         let graph = graph_manager.graph();
 
         // One snapshot serves the buy pass and every sell. The subgraph is walked one hop
@@ -510,23 +558,22 @@ impl TokenGasPriceComputation {
                 market.clone(),
                 &self.gas_token,
                 self.max_hops + 1,
-                filter_tokens,
+                Some(&selected),
             )
             .await
         else {
             // No subgraph around the gas token means nothing was attempted this block: the
             // tokens come back unattempted so they keep their previous prices, exactly as if
             // the deadline had cut them off.
-            warn!(unattempted = tokens_to_price.len(), "no subgraph around the gas token");
+            warn!(unattempted = universe.len(), "no subgraph around the gas token");
             return Ok(PricingPassOutcome {
                 prices: FxHashMap::default(),
                 block,
                 failed_items: Vec::new(),
-                unattempted: tokens_to_price,
+                unattempted: universe,
             });
         };
 
-        let ordered = order_for_pass(&tokens_to_price, priority);
         let pass = self.next_pass();
         // Stamp the result with the snapshot's block, not the earlier topology read — the feed
         // can advance between the two locks, and every price is computed against the snapshot.
@@ -540,7 +587,7 @@ impl TokenGasPriceComputation {
         // pinning one of the shared runtime's workers for the whole pass.
         let computation = self.clone();
         let span = Span::current();
-        tokio::task::spawn_blocking(move || {
+        let mut outcome = tokio::task::spawn_blocking(move || {
             let _entered = span.enter();
             let mut sell =
                 PricingPass::new(&algorithm, graph_manager.graph(), ctx, &computation, pass);
@@ -549,20 +596,20 @@ impl TokenGasPriceComputation {
         .await
         .map_err(|join_error| {
             ComputationError::Internal(format!("token pricing pass did not complete: {join_error}"))
-        })
+        })?;
+        outcome.unattempted.extend(capped_out);
+        Ok(outcome)
     }
 
-    /// Every token in the graph but the gas token, narrowed to `filter_tokens` when given.
+    /// Every token in the graph but the gas token.
     fn tokens_to_price(
         &self,
         topology: &FxHashMap<ComponentId, Vec<Address>>,
-        filter_tokens: Option<&FxHashSet<Address>>,
     ) -> FxHashSet<Address> {
         topology
             .values()
             .flatten()
             .filter(|token| *token != &self.gas_token)
-            .filter(|token| filter_tokens.is_none_or(|filter| filter.contains(*token)))
             .cloned()
             .collect()
     }
@@ -627,10 +674,9 @@ impl TokenGasPriceComputation {
             (tokens_to_recompute, new_tokens, priority, existing_prices)
         };
 
-        if tokens_to_recompute.is_empty() {
-            return Ok(Some(ComputationOutput::success(existing_prices)));
-        }
-
+        // No early return on an empty change set. The pass is capped, and its spare ranks go to
+        // the tokens that have gone longest without a price — including any that have none at
+        // all, which no change would ever point at.
         debug!(
             affected_tokens = tokens_to_recompute.len(),
             new_tokens,
@@ -647,17 +693,29 @@ impl TokenGasPriceComputation {
             .write()
             .await
             .edit_token_prices_deps(solved.block, |deps| {
-                for token in &tokens_to_recompute {
-                    if let Some(entry) = solved.prices.get(token) {
-                        result.insert(token.clone(), entry.price.clone());
-                        deps.insert(token.clone(), entry.clone());
-                    } else if !solved.unattempted.contains(token) {
-                        // Attempted and failed: the routes are gone, so the price is too. A token
-                        // the deadline cut off keeps its entry instead — nothing is known about it
-                        // this block, and dropping it would hide it from this path for good.
-                        result.remove(token);
-                        deps.remove(token);
-                    }
+                // Everything the pass priced, not only what the change pointed at: the pass
+                // ranks over the whole market, so it reaches tokens this block's change never
+                // named — which is the only way a token that has no price gets one.
+                for (token, entry) in &solved.prices {
+                    result.insert(token.clone(), entry.price.clone());
+                    deps.insert(token.clone(), entry.clone());
+                }
+                // Attempted and produced nothing: the routes are gone, so the price is too.
+                // A token the cap or the deadline left out is unattempted and keeps its entry —
+                // nothing is known about it this block, and dropping it would lose its stamp.
+                // The gas token is in neither set because no pass ever attempts it.
+                let dropped: Vec<Address> = deps
+                    .keys()
+                    .filter(|token| {
+                        **token != self.gas_token &&
+                            !solved.prices.contains_key(*token) &&
+                            !solved.unattempted.contains(*token)
+                    })
+                    .cloned()
+                    .collect();
+                for token in dropped {
+                    result.remove(&token);
+                    deps.remove(&token);
                 }
             });
         if !edited {
@@ -1261,35 +1319,126 @@ mod tests {
         assert!((ratio(&output.data[&bbb.address]) - 2500.0).abs() < 1e-6, "BBB untouched");
     }
 
-    /// The rank the budget cuts against: arrived, then unpriced, then longest unpriced.
+    /// The rank a pass is cut against: arrived, then unpriced, then what a change points at.
     #[test]
-    fn test_order_for_pass_ranks_arrived_then_unpriced_then_stalest() {
+    fn test_select_pass_tokens_ranks_arrived_unpriced_then_changed() {
         let arrived_token = token(1, "AAA").address;
         let unpriced = token(2, "BBB").address;
-        let stale = token(3, "CCC").address;
-        let fresh = token(4, "DDD").address;
-        let tokens: FxHashSet<Address> =
-            [arrived_token.clone(), unpriced.clone(), stale.clone(), fresh.clone()]
+        let changed_token = token(3, "CCC").address;
+        let untouched = token(4, "DDD").address;
+        let universe: FxHashSet<Address> =
+            [arrived_token.clone(), unpriced.clone(), changed_token.clone(), untouched.clone()]
                 .into_iter()
                 .collect();
-        // The arrived token is also the most recently priced, so it can only come first by
-        // outranking its own staleness.
+        // The arrived token is also the most recently priced, and the untouched one is the
+        // stalest, so rank has to beat staleness in both directions.
         let priority = PassPriority {
             arrived: [arrived_token.clone()]
                 .into_iter()
                 .collect(),
-            last_priced: [(arrived_token.clone(), 9), (stale.clone(), 1), (fresh.clone(), 7)]
+            last_priced: [
+                (arrived_token.clone(), 9),
+                (changed_token.clone(), 5),
+                (untouched.clone(), 1),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let changed: FxHashSet<Address> = [changed_token.clone()]
+            .into_iter()
+            .collect();
+
+        let ordered = select_pass_tokens(&universe, Some(&changed), &priority, usize::MAX);
+
+        assert_eq!(
+            ordered,
+            vec![arrived_token, unpriced, changed_token],
+            "arrived first, then the unpriced, then what the change points at; a priced token \
+             no change points at is not a candidate however stale it is"
+        );
+    }
+
+    /// The cap is what sizes a pass, so it must drop the lowest ranks and keep the rest.
+    #[test]
+    fn test_select_pass_tokens_caps_the_selection() {
+        let unpriced = token(1, "AAA").address;
+        let stale = token(2, "BBB").address;
+        let fresh = token(3, "CCC").address;
+        let universe: FxHashSet<Address> = [unpriced.clone(), stale.clone(), fresh.clone()]
+            .into_iter()
+            .collect();
+        let priority = PassPriority {
+            arrived: FxHashSet::default(),
+            last_priced: [(stale.clone(), 1), (fresh.clone(), 8)]
                 .into_iter()
                 .collect(),
         };
 
-        let ordered = order_for_pass(&tokens, &priority);
+        let ordered = select_pass_tokens(&universe, None, &priority, 2);
 
-        assert_eq!(ordered.len(), 4, "every token is still attempted");
-        assert_eq!(ordered[0], arrived_token, "an arrived token outranks its own staleness");
-        assert_eq!(ordered[1], unpriced, "a token with no price comes before any priced one");
-        assert_eq!(ordered[2], stale, "the token longest without a pass comes next");
-        assert_eq!(ordered[3], fresh, "the most recently priced token goes last");
+        assert_eq!(ordered, vec![unpriced, stale], "the cap keeps the two highest ranks");
+    }
+
+    /// A token with no price must stay reachable when no change points at it.
+    ///
+    /// The incremental path takes its changed set from the stored dependency map, which by
+    /// construction holds only tokens that already have a price. A pass that selected from that
+    /// map alone could never offer an unpriced token again, and a capped first pass leaves most
+    /// of the market unpriced. A Base run at `min-tvl 1` stopped at 97 of 2211 tokens that way.
+    #[tokio::test]
+    async fn test_unpriced_tokens_are_reached_without_a_change_pointing_at_them() {
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let bbb = token(2, "BBB");
+        let ccc = token(3, "CCC");
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0)),
+            ("eth_bbb", &eth, &bbb, MockProtocolSim::new(2500.0)),
+            ("eth_ccc", &eth, &ccc, MockProtocolSim::new(3000.0)),
+        ]);
+        // One token per pass, so the first pass can only ever reach a third of the market.
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_max_tokens_per_pass(1);
+        let store = DerivedData::new_shared();
+
+        let first = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, first, 1, true);
+        let priced_after_first = store
+            .read()
+            .await
+            .token_prices()
+            .expect("prices are stored")
+            .len();
+        assert_eq!(priced_after_first, 2, "the cap holds: one token plus the gas token");
+
+        // Only AAA's pool ever changes. Nothing points at BBB or CCC, and neither is in the
+        // stored dependency map, so only a selection over the whole market can reach them.
+        for block in 2..=6 {
+            let changed = ChangedComponents {
+                updated: vec!["eth_aaa".to_string()],
+                ..ChangedComponents::default()
+            };
+            let output = computation
+                .compute(&market, &store, &changed)
+                .await
+                .expect("pricing must not fail");
+            TokenGasPriceComputation::persist(&mut *store.write().await, output, block, false);
+        }
+
+        let prices = store
+            .read()
+            .await
+            .token_prices()
+            .expect("prices are stored")
+            .clone();
+        for (name, address) in [("AAA", &aaa.address), ("BBB", &bbb.address), ("CCC", &ccc.address)]
+        {
+            assert!(prices.contains_key(address), "{name} must be priced by a later pass");
+        }
     }
 
     /// The stamp a pass leaves is what the next pass ranks by, so it must tell a token the pass

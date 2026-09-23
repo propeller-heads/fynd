@@ -513,7 +513,7 @@ pub struct FyndBuilder {
     tycho_subscription_buffer_size: Option<usize>,
     /// Shortest time between two full token-pricing passes; `None` keeps the computation's
     /// default.
-    pricing_pass_budget: Option<Duration>,
+    pricing_max_tokens_per_pass: Option<usize>,
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
@@ -551,7 +551,7 @@ impl FyndBuilder {
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
             tycho_subscription_buffer_size: None,
-            pricing_pass_budget: None,
+            pricing_max_tokens_per_pass: None,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
@@ -641,13 +641,13 @@ impl FyndBuilder {
         self
     }
 
-    /// Sets the wall-clock budget for one token-pricing pass.
+    /// Sets how many tokens one token-pricing pass may attempt.
     ///
-    /// A pass attempts the tokens it selects in priority order and stops at this budget. Tokens
-    /// it does not reach keep their previous price and rank first in the next pass, so a budget
-    /// smaller than the work rotates over the token set rather than starving part of it.
-    pub fn pricing_pass_budget(mut self, pass_budget: Duration) -> Self {
-        self.pricing_pass_budget = Some(pass_budget);
+    /// A pass ranks its candidates and attempts this many. Tokens it leaves out keep their
+    /// previous price and rank first in the next pass, so a cap smaller than the candidates
+    /// rotates over them rather than starving part of the set.
+    pub fn pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
+        self.pricing_max_tokens_per_pass = Some(max_tokens);
         self
     }
 
@@ -910,8 +910,8 @@ impl FyndBuilder {
             .with_gas_token(gas_token)
             .with_max_hop(pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
-        if let Some(pass_budget) = self.pricing_pass_budget {
-            computation_config = computation_config.with_pricing_pass_budget(pass_budget);
+        if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
+            computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
         }
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.
@@ -1502,10 +1502,12 @@ impl Solver {
             .with_gas_token(gas_token)
             .with_max_hop(pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD)
-            // Replay tests assert exact priced-token counts against a deterministic recording;
-            // an effectively unbounded budget keeps a starved CI machine from cutting the
-            // pricing pass short and failing the count.
-            .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60));
+            // Replay tests assert exact priced-token counts against a deterministic recording, so
+            // neither bound on a pricing pass may apply: an effectively unbounded budget keeps a
+            // starved CI machine from cutting a pass short, and an unbounded cap keeps a pass
+            // from deferring tokens to a later one that the replay never runs.
+            .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60))
+            .with_pricing_max_tokens_per_pass(usize::MAX);
         let (computation_manager, _) =
             ComputationManager::new(computation_config, market_data.clone())
                 .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;

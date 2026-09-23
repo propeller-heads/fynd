@@ -127,6 +127,9 @@ pub struct ComputationManagerConfig {
     /// default. The replay harness sets an effectively unbounded budget so integration tests
     /// can assert exact priced-token counts.
     pricing_pass_budget: Option<Duration>,
+    /// Overrides how many tokens one token-pricing pass may attempt; `None` keeps the
+    /// computation's default.
+    pricing_max_tokens_per_pass: Option<usize>,
 }
 
 impl ComputationManagerConfig {
@@ -150,6 +153,12 @@ impl ComputationManagerConfig {
     /// Overrides the wall-clock budget for the token pricing pass's sell loop.
     pub fn with_pricing_pass_budget(mut self, pass_budget: Duration) -> Self {
         self.pricing_pass_budget = Some(pass_budget);
+        self
+    }
+
+    /// Overrides how many tokens one token-pricing pass may attempt.
+    pub fn with_pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
+        self.pricing_max_tokens_per_pass = Some(max_tokens);
         self
     }
 
@@ -185,6 +194,7 @@ impl Default for ComputationManagerConfig {
             max_hop: crate::solver::defaults::POOL_MAX_HOPS,
             depth_slippage_threshold: 0.01,
             pricing_pass_budget: None,
+            pricing_max_tokens_per_pass: None,
         }
     }
 }
@@ -227,6 +237,9 @@ impl ComputationManager {
             .with_gas_token(config.gas_token);
         if let Some(pass_budget) = config.pricing_pass_budget {
             token_prices = token_prices.with_pass_budget(pass_budget);
+        }
+        if let Some(max_tokens) = config.pricing_max_tokens_per_pass {
+            token_prices = token_prices.with_max_tokens_per_pass(max_tokens);
         }
         manager.register(token_prices)?;
         manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
