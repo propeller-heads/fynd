@@ -389,6 +389,9 @@ pub async fn run_solver_with(
     #[cfg(feature = "metrics")]
     let _metrics_task = create_metrics_exporter(&args.metrics_host, args.metrics_port, &args.chain);
 
+    #[cfg(feature = "jemalloc")]
+    let _jemalloc_stats_task = crate::jemalloc_stats::spawn_stats_reporter();
+
     serve_with(args, algorithms, provider, configure).await
 }
 

@@ -36,6 +36,12 @@
 //! ```
 //!
 //! See `fynd --help` for all available options.
+
+// The binary sets the allocator; the library leaves that choice to whoever embeds it.
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use anyhow::anyhow;
 use clap::Parser;
 use fynd::{
