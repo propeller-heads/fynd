@@ -52,7 +52,7 @@ pub async fn fetch_protocol_systems(
 /// - `native_onchain` → fetch every on-chain protocol system, then drop the VM-simulated ones
 ///   (those prefixed `vm:`), keeping only native-Rust protocols.
 ///
-/// Explicit entries other than the expansion tokens (e.g. `rfq:bebop`, `uniswap_v3`,
+/// Explicit entries other than the expansion tokens (e.g. `book:bebop`, `uniswap_v3`,
 /// `exclusive:ekubo_v3`) are merged in by protocol system, so `all_onchain,exclusive:ekubo_v3`
 /// streams `ekubo_v3` exactly once — with its exclusive pools included. Requesting a protocol both
 /// with and without the `exclusive:` prefix streams it with exclusive pools included.
@@ -64,8 +64,8 @@ pub async fn fetch_protocol_systems(
 /// nothing is logged as a warning and otherwise ignored.
 ///
 /// Every resolved protocol system is checked against the ones Tycho serves, and an entry naming a
-/// system that is gone is warned about and dropped. A list of RFQ and price level stream entries
-/// only skips the check along with the fetch, since it needs no Tycho protocol stream.
+/// system that is gone is warned about and dropped. A list of only `book:` and price level
+/// stream entries skips the check along with the fetch, since it needs no Tycho protocol stream.
 ///
 /// # Errors
 ///
@@ -92,8 +92,8 @@ pub async fn resolve_protocols(
             .any(|p| p == ALL_ONCHAIN);
 
     // Fetched for a list that needs no expansion too, so its entries can be checked against what
-    // Tycho actually serves. A list of RFQ and price level stream entries only names no Tycho
-    // system, so it skips the fetch and needs no reachable Tycho.
+    // Tycho actually serves. A list of only `book:` and price level stream entries names no
+    // Tycho system, so it skips the fetch and needs no reachable Tycho.
     let names_tycho_system = explicit
         .iter()
         .any(|protocol| is_tycho_system(&protocol.system));
@@ -196,8 +196,8 @@ fn apply_exclusions(protocols: &mut Vec<ProtocolSpec>, excluded: &[String]) {
 /// than dropping it — the stream registers a synchronizer for a system nothing will ever publish,
 /// which spends the whole startup timeout before going stale.
 ///
-/// RFQ and price level stream entries are left alone: they are served from their own endpoints and
-/// so never appear among Tycho's protocol systems.
+/// `book:` and price level stream entries are left alone: they are served from their own
+/// endpoints and so never appear among Tycho's protocol systems.
 fn drop_unserved(protocols: &mut Vec<ProtocolSpec>, available: &[String]) {
     let served: HashSet<&str> = available
         .iter()
@@ -269,8 +269,8 @@ mod tests {
 
     #[test]
     fn test_merge_appends_unexpanded_entries() {
-        let merged = merge(&["uniswap_v3"], &[ALL_ONCHAIN, "rfq:bebop"]).unwrap();
-        assert_eq!(merged, strings(&["uniswap_v3", "rfq:bebop"]));
+        let merged = merge(&["uniswap_v3"], &[ALL_ONCHAIN, "book:bebop"]).unwrap();
+        assert_eq!(merged, strings(&["uniswap_v3", "book:bebop"]));
     }
 
     #[test]
@@ -353,8 +353,8 @@ mod tests {
     #[case::exclusive(&["ekubo_v3"], &["exclusive:ekubo_v3"], &["exclusive:ekubo_v3"])]
     #[case::non_tycho(
         &["uniswap_v3"],
-        &["rfq:bebop", "pricelevelstream:fermiswap"],
-        &["rfq:bebop", "pricelevelstream:fermiswap"]
+        &["book:bebop", "pricelevelstream:fermiswap"],
+        &["book:bebop", "pricelevelstream:fermiswap"]
     )]
     fn test_drop_unserved(
         #[case] available: &[&str],
@@ -388,11 +388,11 @@ mod tests {
             None,
             false,
             Chain::Ethereum,
-            &strings(&["uniswap_v3", "vm:fermiswap", "rfq:bebop"]),
+            &strings(&["uniswap_v3", "vm:fermiswap", "book:bebop"]),
         )
         .await
         .unwrap();
-        assert_eq!(resolved, strings(&["uniswap_v3", "rfq:bebop"]));
+        assert_eq!(resolved, strings(&["uniswap_v3", "book:bebop"]));
     }
 
     #[tokio::test]
@@ -417,11 +417,11 @@ mod tests {
             None,
             false,
             Chain::Ethereum,
-            &strings(&["rfq:bebop", "pricelevelstream:fermiswap"]),
+            &strings(&["book:bebop", "pricelevelstream:fermiswap"]),
         )
         .await
         .unwrap();
-        assert_eq!(resolved, strings(&["rfq:bebop", "pricelevelstream:fermiswap"]));
+        assert_eq!(resolved, strings(&["book:bebop", "pricelevelstream:fermiswap"]));
     }
 
     #[test]

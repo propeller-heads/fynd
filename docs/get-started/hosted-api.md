@@ -530,7 +530,7 @@ A `200` with `orders[0].status: "no_route_found"` is **not** an HTTP error — i
 The hosted API is a shared, beta-rate-limited service designed for getting started and for moderate-volume integrations. If you need:
 
 * **Higher or unlimited rate limits** — run Fynd on your own hardware. The [self-host quickstart](quickstart/README.md) has you serving in minutes, and there's no rate limiter in front of your own instance.
-* **Custom algorithms, custom protocol sets, or RFQ integration** — self-host and pass `--protocols` / your algorithm config. See [Server Configuration](../guides/server-configuration.md) and [Custom Algorithm](../guides/custom-algorithm.md).
+* **Custom algorithms, custom protocol sets, or off-chain book venues** — self-host and pass `--protocols` / your algorithm config. See [Server Configuration](../guides/server-configuration.md) and [Custom Algorithm](../guides/custom-algorithm.md).
 * **A dedicated hosted instance with guaranteed capacity and SLA** — reach out to our business team. Message [@tanay_j](https://t.me/tanay_j) on Telegram, or email us at [Propeller Heads](https://www.propellerheads.xyz).
 
 What the hosted API buys you (vs. self-hosting): no infrastructure to run, no Tycho indexer endpoint to source, no release tracking, and per-chain routing tuned by the Fynd team. Self-hosting gives you ~1,000 RPS on commodity hardware (see [Performance](../reference/benchmark-results.md)) and full control — pick the tradeoff that fits your scale.

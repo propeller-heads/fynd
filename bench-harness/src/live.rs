@@ -283,11 +283,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     {
         header_line(
             "price levels",
-            format!(
-                "{} pairs quoted for block {}",
-                levels.new_pairs.len(),
-                levels.block_number_or_timestamp
-            ),
+            format!("{} pairs quoted for block {}", levels.new_pairs.len(), levels.block_number),
         );
         snapshot
             .new_pairs
@@ -296,7 +292,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
         steps.done("price levels in");
     }
 
-    let block = snapshot.block_number_or_timestamp;
+    let block = snapshot.block_number;
     let components = snapshot.new_pairs.len();
     let states = snapshot.states.len();
     header_line("captured block", format!("{block} ({components} components, {states} states)"));

@@ -8,18 +8,14 @@
 use std::{collections::HashSet, pin::Pin, time::Instant};
 
 use metrics::{gauge, histogram};
-use tokio::{
-    sync::{broadcast, oneshot},
-    task::JoinHandle,
-};
+use tokio::sync::{broadcast, oneshot};
 use tokio_stream::{Stream, StreamExt};
 use tracing::{debug, info, instrument, span, trace, Instrument, Level};
 #[cfg(feature = "experimental")]
 use tycho_simulation::evm::stream::BlockStepController;
 use tycho_simulation::{
     evm::{pending::PendingBlockProcessor, stream::ProtocolStreamBuilder},
-    protocol::models::Update,
-    rfq::stream::RFQStreamBuilder,
+    protocol::models::{ProtocolComponent, Update},
     tycho_client::feed::{component_tracker::ComponentFilter, SynchronizerState},
     tycho_common::traits::TxDeltaIndexer,
     tycho_core::Bytes,
@@ -28,15 +24,13 @@ use tycho_simulation::{
 
 use crate::{
     feed::{
+        book_stream::{next_book_update, BookStream, BookUpdate},
         events::MarketEvent,
         market_data::MarketData,
-        protocol_registry::{
-            has_rfq_protocols, has_tycho_protocols, open_price_level_stream, register_exchanges,
-            register_rfq,
-        },
-        DataFeedError, TychoFeedConfig,
+        protocol_registry::{has_tycho_protocols, open_price_level_stream, register_exchanges},
+        when_configured, DataFeedError, TychoFeedConfig,
     },
-    types::BlockInfo,
+    types::{BlockInfo, ComponentId},
 };
 
 /// The Tycho indexer that keeps market data synchronized.
@@ -66,7 +60,7 @@ fn fynd_client_metadata() -> [(&'static str, &'static str); 1] {
 /// configured.
 ///
 /// The stream reconnects on its own for as long as it is polled, so it ending means it gave up
-/// for good. That is a feed error rather than a clean stop, the same way an RFQ client task
+/// for good. That is a feed error rather than a clean stop, the same way a book feed's task
 /// returning is.
 async fn next_price_level_update<S>(
     stream: &mut Option<Pin<Box<S>>>,
@@ -74,12 +68,13 @@ async fn next_price_level_update<S>(
 where
     S: Stream<Item = Update> + Send + ?Sized,
 {
-    let Some(stream) = stream else {
-        return std::future::pending().await;
-    };
-    stream.next().await.ok_or_else(|| {
-        DataFeedError::StreamError("price level stream ended unexpectedly".to_string())
-    })
+    when_configured(
+        stream
+            .as_mut()
+            .map(|stream| stream.next()),
+    )
+    .await
+    .ok_or_else(|| DataFeedError::StreamError("price level stream ended unexpectedly".to_string()))
 }
 
 impl TychoFeed {
@@ -151,11 +146,17 @@ impl TychoFeed {
 
         debug!("Loaded {} tokens from Tycho", all_tokens.len());
 
-        // Opened before the Tycho stream so a bad venue or chain fails on the configuration
-        // rather than after the connection work.
+        // Opened before the Tycho stream so a bad venue, chain or credential fails on the
+        // configuration rather than after the connection work.
         let mut price_level_stream =
             open_price_level_stream(self.config.chain, &self.config.protocols, &all_tokens)?
                 .map(Box::pin);
+        let mut book_stream = BookStream::open(
+            self.config.chain,
+            self.config.min_tvl,
+            &self.config.protocols,
+            all_tokens.clone(),
+        )?;
 
         let mut protocol_stream = if has_tycho_protocols(&self.config.protocols) {
             let tvl_filter = ComponentFilter::with_tvl_range(
@@ -196,45 +197,11 @@ impl TychoFeed {
             None
         };
 
-        // Spawn rfq stream
-        let (mut rfq_rx, mut rfq_handle) = if has_rfq_protocols(&self.config.protocols) {
-            let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
-
-            let rfq_stream_builder = register_rfq(
-                RFQStreamBuilder::new()
-                    .set_tokens(all_tokens)
-                    .await,
-                self.config.chain,
-                self.config.min_tvl,
-                &self.config.protocols,
-                rfq_tokens,
-            )?;
-
-            let (rfq_tx, rfq_rx) = tokio::sync::mpsc::channel(64);
-
-            let rfq_handle: JoinHandle<Result<(), DataFeedError>> = tokio::spawn(async move {
-                rfq_stream_builder
-                    .build(rfq_tx)
-                    .await
-                    .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                Ok(())
-            });
-            (Some(rfq_rx), Some(rfq_handle))
-        } else {
-            (None, None)
-        };
-
         // Loop through block updates from both streams
         loop {
             tokio::select! {
                 // Handle protocol stream messages
-                msg = async {
-                    if let Some(stream) = &mut protocol_stream {
-                        stream.next().await
-                    } else {
-                        std::future::pending().await
-                    }
-                } => {
+                msg = when_configured(protocol_stream.as_mut().map(|s| s.next())) => {
                     match msg {
                         Some(msg) => {
                             trace!("Received message from protocol stream: {:?}", msg);
@@ -247,49 +214,14 @@ impl TychoFeed {
                         }
                     }
                 }
-                // Handle RFQ stream messages
-                msg = async {
-                    if let Some(rx) = &mut rfq_rx {
-                        rx.recv().await
-                    } else {
-                        std::future::pending().await
-                    }
-                } => {
-                    match msg {
-                        Some(msg) => {
-                            trace!("Received message from RFQ stream: {:?}", msg);
-                            self.handle_tycho_message(msg).await?;
-                        }
-                        None => {
-                            info!("RFQ stream ended");
-                            break;
-                        }
-                    }
+                // Handle book feed updates
+                update = next_book_update(&mut book_stream) => {
+                    self.handle_book_update(update?).await?;
                 }
                 msg = next_price_level_update(&mut price_level_stream) => {
                     let msg = msg?;
                     trace!("Received message from price level stream: {:?}", msg);
                     self.handle_tycho_message(msg).await?;
-                }
-                // Check if RFQ handle has finished or errored
-                rfq_result = async {
-                    if let Some(handle) = &mut rfq_handle {
-                        handle.await
-                    } else {
-                        std::future::pending().await
-                    }
-                } => {
-                    match rfq_result {
-                        Ok(Ok(())) => {
-                            return Err(DataFeedError::StreamError("RFQ stream task ended unexpectedly".to_string()));
-                        }
-                        Ok(Err(e)) => {
-                            return Err(DataFeedError::StreamError(format!("RFQ stream error: {}", e)));
-                        }
-                        Err(e) => {
-                            return Err(DataFeedError::StreamError(format!("RFQ task panicked: {}", e)));
-                        }
-                    }
                 }
             }
         }
@@ -306,7 +238,7 @@ impl TychoFeed {
     /// only "channel closed". If the receiver has already been dropped the processor is
     /// discarded and the feed continues normally.
     ///
-    /// RFQ protocols are handled alongside the EVM stream, identical to [`run`](Self::run).
+    /// Book feeds are handled alongside the EVM stream, identical to [`run`](Self::run).
     /// The `PendingBlockProcessor` only covers EVM on-chain state.
     pub(crate) async fn run_with_pending(
         self,
@@ -346,8 +278,8 @@ impl TychoFeed {
 
         debug!("Loaded {} tokens from Tycho", all_tokens.len());
 
-        // Opened before `pending_tx` is answered: a bad venue or chain has to reach the caller as
-        // an error, not as a processor for a feed that dies on the next line.
+        // Opened before `pending_tx` is answered: a bad venue, chain or credential has to reach
+        // the caller as an error, not as a processor for a feed that dies on the next line.
         let mut price_level_stream =
             match open_price_level_stream(self.config.chain, &self.config.protocols, &all_tokens) {
                 Ok(stream) => stream.map(Box::pin),
@@ -356,6 +288,18 @@ impl TychoFeed {
                     return Err(e);
                 }
             };
+        let mut book_stream = match BookStream::open(
+            self.config.chain,
+            self.config.min_tvl,
+            &self.config.protocols,
+            all_tokens.clone(),
+        ) {
+            Ok(book_stream) => book_stream,
+            Err(e) => {
+                let _ = pending_tx.send(Err(e.to_string()));
+                return Err(e);
+            }
+        };
 
         let mut stream_builder = match register_exchanges(
             self.protocol_stream_builder()
@@ -415,31 +359,6 @@ impl TychoFeed {
             );
         }
 
-        // Spawn RFQ stream (same as run()) — runs alongside the EVM pending stream.
-        let (mut rfq_rx, mut rfq_handle) = if has_rfq_protocols(&self.config.protocols) {
-            let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
-            let rfq_stream_builder = register_rfq(
-                RFQStreamBuilder::new()
-                    .set_tokens(all_tokens)
-                    .await,
-                self.config.chain,
-                self.config.min_tvl,
-                &self.config.protocols,
-                rfq_tokens,
-            )?;
-            let (rfq_tx, rfq_rx) = tokio::sync::mpsc::channel(64);
-            let rfq_handle: JoinHandle<Result<(), DataFeedError>> = tokio::spawn(async move {
-                rfq_stream_builder
-                    .build(rfq_tx)
-                    .await
-                    .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                Ok(())
-            });
-            (Some(rfq_rx), Some(rfq_handle))
-        } else {
-            (None, None)
-        };
-
         loop {
             tokio::select! {
                 msg = protocol_stream.next() => {
@@ -455,43 +374,14 @@ impl TychoFeed {
                         }
                     }
                 }
-                msg = async {
-                    if let Some(rx) = &mut rfq_rx { rx.recv().await }
-                    else { std::future::pending().await }
-                } => {
-                    match msg {
-                        Some(msg) => {
-                            trace!("Received message from RFQ stream: {:?}", msg);
-                            self.handle_tycho_message(msg).await?;
-                        }
-                        None => {
-                            info!("RFQ stream ended");
-                            break;
-                        }
-                    }
+                // Handle book feed updates
+                update = next_book_update(&mut book_stream) => {
+                    self.handle_book_update(update?).await?;
                 }
                 msg = next_price_level_update(&mut price_level_stream) => {
                     let msg = msg?;
                     trace!("Received message from price level stream: {:?}", msg);
                     self.handle_tycho_message(msg).await?;
-                }
-                rfq_result = async {
-                    if let Some(handle) = &mut rfq_handle { handle.await }
-                    else { std::future::pending().await }
-                } => {
-                    match rfq_result {
-                        Ok(Ok(())) => {
-                            return Err(DataFeedError::StreamError(
-                                "RFQ stream task ended unexpectedly".to_string(),
-                            ));
-                        }
-                        Ok(Err(e)) => {
-                            return Err(DataFeedError::StreamError(format!("RFQ stream error: {e}")));
-                        }
-                        Err(e) => {
-                            return Err(DataFeedError::StreamError(format!("RFQ task panicked: {e}")));
-                        }
-                    }
                 }
             }
         }
@@ -506,7 +396,7 @@ impl TychoFeed {
     /// [`BlockStepController::trigger_next_block`] for each block to be processed.
     ///
     /// Only valid when at least one Tycho-streamed protocol is configured. Returns
-    /// [`DataFeedError::Config`] if every entry names an RFQ client or the price level stream.
+    /// [`DataFeedError::Config`] if every entry is a `book:` or price level stream entry.
     #[cfg(feature = "experimental")]
     pub(crate) async fn run_with_step_controller(
         self,
@@ -551,8 +441,8 @@ impl TychoFeed {
 
         debug!("Loaded {} tokens from Tycho", all_tokens.len());
 
-        // Opened before `controller_tx` is answered: a bad venue or chain has to reach the caller
-        // as an error, not as a controller for a feed that dies on the next line.
+        // Opened before `controller_tx` is answered: a bad venue, chain or credential has to
+        // reach the caller as an error, not as a controller for a feed that dies on the next line.
         let mut price_level_stream =
             match open_price_level_stream(self.config.chain, &self.config.protocols, &all_tokens) {
                 Ok(stream) => stream.map(Box::pin),
@@ -561,6 +451,18 @@ impl TychoFeed {
                     return Err(e);
                 }
             };
+        let mut book_stream = match BookStream::open(
+            self.config.chain,
+            self.config.min_tvl,
+            &self.config.protocols,
+            all_tokens.clone(),
+        ) {
+            Ok(book_stream) => book_stream,
+            Err(e) => {
+                let _ = controller_tx.send(Err(e.to_string()));
+                return Err(e);
+            }
+        };
 
         let tvl_filter = ComponentFilter::with_tvl_range(
             self.config.min_tvl / self.config.tvl_buffer_ratio,
@@ -610,31 +512,6 @@ impl TychoFeed {
             }
         };
 
-        // Spawn rfq stream (same as run()).
-        let (mut rfq_rx, mut rfq_handle) = if has_rfq_protocols(&self.config.protocols) {
-            let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
-            let rfq_stream_builder = register_rfq(
-                RFQStreamBuilder::new()
-                    .set_tokens(all_tokens)
-                    .await,
-                self.config.chain,
-                self.config.min_tvl,
-                &self.config.protocols,
-                rfq_tokens,
-            )?;
-            let (rfq_tx, rfq_rx) = tokio::sync::mpsc::channel(64);
-            let rfq_handle: JoinHandle<Result<(), DataFeedError>> = tokio::spawn(async move {
-                rfq_stream_builder
-                    .build(rfq_tx)
-                    .await
-                    .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                Ok(())
-            });
-            (Some(rfq_rx), Some(rfq_handle))
-        } else {
-            (None, None)
-        };
-
         loop {
             tokio::select! {
                 msg = protocol_stream.next() => {
@@ -650,43 +527,14 @@ impl TychoFeed {
                         }
                     }
                 }
-                msg = async {
-                    if let Some(rx) = &mut rfq_rx { rx.recv().await }
-                    else { std::future::pending().await }
-                } => {
-                    match msg {
-                        Some(msg) => {
-                            trace!("Received message from RFQ stream: {:?}", msg);
-                            self.handle_tycho_message(msg).await?;
-                        }
-                        None => {
-                            info!("RFQ stream ended");
-                            break;
-                        }
-                    }
+                // Handle book feed updates
+                update = next_book_update(&mut book_stream) => {
+                    self.handle_book_update(update?).await?;
                 }
                 msg = next_price_level_update(&mut price_level_stream) => {
                     let msg = msg?;
                     trace!("Received message from price level stream: {:?}", msg);
                     self.handle_tycho_message(msg).await?;
-                }
-                rfq_result = async {
-                    if let Some(handle) = &mut rfq_handle { handle.await }
-                    else { std::future::pending().await }
-                } => {
-                    match rfq_result {
-                        Ok(Ok(())) => {
-                            return Err(DataFeedError::StreamError(
-                                "RFQ stream task ended unexpectedly".to_string(),
-                            ));
-                        }
-                        Ok(Err(e)) => {
-                            return Err(DataFeedError::StreamError(format!("RFQ stream error: {e}")));
-                        }
-                        Err(e) => {
-                            return Err(DataFeedError::StreamError(format!("RFQ task panicked: {e}")));
-                        }
-                    }
                 }
             }
         }
@@ -734,13 +582,13 @@ impl TychoFeed {
 
         info!(
             "received block/timestamp {} with {} new components, {} removed, {} updated",
-            msg.block_number_or_timestamp,
+            msg.block_number,
             added_components.len(),
             removed_components.len(),
             updated_or_new_states.len()
         );
         trace!("Updating market data");
-        let new_block_number = msg.block_number_or_timestamp;
+        let new_block_number = msg.block_number;
         let update_start = Instant::now();
         let mut latest_component_count = 0;
         let mut token_count = 0;
@@ -750,26 +598,7 @@ impl TychoFeed {
                     added_components
                         .clone()
                         .into_values()
-                        .map(|component| {
-                            // We can't use From<ProtocolComponent> because it removes "0x" prefix
-                            // from the id
-                            tycho_simulation::tycho_common::models::protocol::ProtocolComponent {
-                                id: component.id.to_string(),
-                                protocol_system: component.protocol_system,
-                                protocol_type_name: component.protocol_type_name,
-                                chain: component.chain,
-                                tokens: component
-                                    .tokens
-                                    .into_iter()
-                                    .map(|t| t.address)
-                                    .collect(),
-                                static_attributes: component.static_attributes,
-                                change: Default::default(),
-                                creation_tx: component.creation_tx,
-                                created_at: component.created_at,
-                                contract_addresses: component.contract_ids,
-                            }
-                        }),
+                        .map(market_component),
                 );
                 market_data.remove_components(removed_components.keys());
                 market_data.upsert_tokens(maybe_new_tokens);
@@ -830,6 +659,96 @@ impl TychoFeed {
         }
 
         Ok(())
+    }
+
+    /// Applies what one venue published to the market.
+    ///
+    /// A venue serving a book prices off the chain rather than from chain state, so its books
+    /// belong to no block: they neither advance the market's block label nor invalidate a
+    /// simulation overlay built against the current one, and the write goes straight to the
+    /// base state.
+    #[instrument(skip(self, update), fields(protocol_system = %update.protocol_system))]
+    async fn handle_book_update(&self, update: BookUpdate) -> Result<(), DataFeedError> {
+        let BookUpdate { protocol_system, added, removed, updated: updated_components, states } =
+            update;
+
+        info!(
+            "received {} books from {protocol_system}: {} new components, {} removed, {} updated",
+            states.len(),
+            added.len(),
+            removed.len(),
+            updated_components.len()
+        );
+
+        let update_start = Instant::now();
+        let component_tokens: Vec<(ComponentId, Vec<Bytes>)> = added
+            .iter()
+            .map(|component| {
+                (
+                    component.id.to_string(),
+                    component
+                        .tokens
+                        .iter()
+                        .map(|token| token.address.clone())
+                        .collect(),
+                )
+            })
+            .collect();
+        let (component_count, token_count) = {
+            let mut market_data = self
+                .market_data
+                .write()
+                .instrument(span!(Level::DEBUG, "data_feed_write_lock"))
+                .await;
+            market_data.upsert_tokens(
+                added
+                    .iter()
+                    .flat_map(|component| component.tokens.iter().cloned()),
+            );
+            market_data.upsert_components(added.into_iter().map(market_component));
+            market_data.remove_components(removed.iter());
+            market_data.update_states(states);
+            (market_data.component_count(), market_data.token_count())
+        };
+
+        histogram!("market_update_duration_seconds").record(update_start.elapsed().as_secs_f64());
+        gauge!("market_pools").set(component_count as f64);
+        gauge!("market_tokens").set(token_count as f64);
+
+        self.event_tx
+            .send(MarketEvent::MarketUpdated {
+                added_components: component_tokens.into_iter().collect(),
+                removed_components: removed,
+                updated_components,
+            })
+            .map_err(|e| DataFeedError::EventChannelError(e.to_string()))?;
+
+        Ok(())
+    }
+}
+
+/// Converts a streamed component into the market's own representation.
+///
+/// `From<ProtocolComponent>` cannot serve here: it strips the `0x` prefix from the id, and the
+/// market keys components by the prefixed form every other id in it carries.
+fn market_component(
+    component: ProtocolComponent,
+) -> tycho_simulation::tycho_common::models::protocol::ProtocolComponent {
+    tycho_simulation::tycho_common::models::protocol::ProtocolComponent {
+        id: component.id.to_string(),
+        protocol_system: component.protocol_system,
+        protocol_type_name: component.protocol_type_name,
+        chain: component.chain,
+        tokens: component
+            .tokens
+            .into_iter()
+            .map(|token| token.address)
+            .collect(),
+        static_attributes: component.static_attributes,
+        change: Default::default(),
+        creation_tx: component.creation_tx,
+        created_at: component.created_at,
+        contract_addresses: component.contract_ids,
     }
 }
 
@@ -1520,7 +1439,7 @@ mod tests {
             Chain::Ethereum,
             Some(tycho_api_key),
             true, // Use TLS for real feed test
-            vec!["rfq:bebop".to_string(), "rfq:hashflow".to_string()],
+            vec!["book:bebop".to_string(), "book:hashflow".to_string()],
             100.0,
         );
 
@@ -1559,7 +1478,7 @@ mod tests {
             Chain::Ethereum,
             Some(tycho_api_key),
             true, // Use TLS for real feed test
-            vec!["rfq:bebop".to_string(), "rfq:hashflow".to_string(), "uniswap_v2".to_string()],
+            vec!["book:bebop".to_string(), "book:hashflow".to_string(), "uniswap_v2".to_string()],
             100.0,
         );
 

@@ -12,7 +12,7 @@ find optimal swap paths. It exposes an HTTP RPC for quote requests and returns t
 gas-aware solution with optional on-chain transaction encoding.
 
 Key properties:
-- **Multi-protocol**: Routes through any on-chain protocol supported by Tycho, plus RFQ protocols
+- **Multi-protocol**: Routes through any on-chain protocol supported by Tycho, plus off-chain book venues
 - **Real-time**: Tycho Stream keeps all component states synchronized every block
 - **Multi-algorithm competition**: Multiple worker pools compete in parallel; best result wins
 - **Gas-aware**: Best solution selected by net output after gas costs

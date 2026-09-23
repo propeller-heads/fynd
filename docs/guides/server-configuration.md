@@ -38,30 +38,30 @@ See the full [list of available protocols](https://docs.propellerheads.xyz/tycho
 
 Every named protocol is checked against the ones your Tycho endpoint serves. A protocol that is not served logs a warning and is dropped from the list rather than stopping the solver.
 
-### Including RFQ Protocols
+### Including Off-Chain Priced Venues
 
-Include RFQ (Request-for-Quote) protocols alongside on-chain protocols. Use the `all_onchain` keyword to combine auto-fetched on-chain protocols with specific RFQ protocols:
+Venues whose pricing arrives as a complete book from the venue itself — the RFQ market makers (Bebop, Hashflow, Liquorice, Native) and the off-chain-priced pAMM Metric — are named with the `book:` prefix and can run alongside on-chain protocols. Fynd opens a feed for `book:bebop` and `book:hashflow`; any other `book:` entry is skipped with a warning. Use the `all_onchain` keyword to combine auto-fetched on-chain protocols with specific `book:` entries:
 
 ```bash
 fynd serve \
-  --protocols all_onchain,rfq:bebop
+  --protocols all_onchain,book:bebop
 ```
 
-Or specify both on-chain and RFQ protocols explicitly:
+Or specify both on-chain protocols and `book:` entries explicitly:
 
 ```bash
 fynd serve \
-  --protocols uniswap_v2,uniswap_v3,rfq:bebop
+  --protocols uniswap_v2,uniswap_v3,book:bebop
 ```
 
 **Limitations:**
 
-* RFQ protocols cannot run alone. At least one on-chain protocol is required.
-* When encoding is enabled (`encoding_options` in the quote request), RFQ quotes require an additional round-trip to the RFQ provider to fetch a signed quote. This can add significant tail latency to solve times. If you are using RFQ protocols, consider quoting first without encoding to evaluate the price, and only request encoding once you are confident the quote is worth executing.
+* `book:` venues cannot serve quotes on their own. At least one on-chain protocol is required. Fynd does start and the feed does publish, but books carry no block, so with no on-chain protocol the market never gets a block label, derived data never builds, and every quote returns `not_ready`.
+* When encoding is enabled (`encoding_options` in the quote request), the RFQ venues require an additional round-trip to the provider to fetch a signed quote (Metric does not). This can add significant tail latency to solve times. If you are using RFQ venues, consider quoting first without encoding to evaluate the price, and only request encoding once you are confident the quote is worth executing.
 
 **Environment variables:**
 
-* RFQ protocols require API keys passed via environment variables. Check the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the specific variables each protocol needs.
+* Every `book:` venue requires API keys passed via environment variables. Check the [off-chain priced venue docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the specific variables each protocol needs.
 
 ### pAMM Price Level Stream
 
@@ -137,7 +137,7 @@ Run `fynd serve --help` for the full list.
 | `--tycho-subscription-buffer-size` | `TYCHO_SUBSCRIPTION_BUFFER_SIZE` | _(unset; Tycho native default)_ | Number of delta messages buffered for each Tycho subscription. Leave unset to preserve Tycho's native default. |
 | `--chain`                          | —                     | `Ethereum`                 | Target chain                                                                                                                                                                                                   |
 | `--chains-config`                  | `TYCHO_CHAINS_CONFIG` | _(none)_                   | Path to the custom-chains `chains.yaml`. Required for a chain Tycho does not know as a built-in.                                                                                                              |
-| `-p, --protocols`                  | —                     | _(all on-chain)_           | Protocols to index (comma-separated). If omitted, all on-chain protocols available on your configured Tycho endpoint are fetched. Use `all_onchain` to combine auto-fetched protocols with explicit entries (e.g. `all_onchain,rfq:bebop`), and the `exclude:` prefix to drop one (e.g. `all_onchain,exclude:vm:fermiswap`). |
+| `-p, --protocols`                  | —                     | _(all on-chain)_           | Protocols to index (comma-separated). If omitted, all on-chain protocols available on your configured Tycho endpoint are fetched. Use `all_onchain` to combine auto-fetched protocols with explicit entries (e.g. `all_onchain,book:bebop`), and the `exclude:` prefix to drop one (e.g. `all_onchain,exclude:vm:fermiswap`). |
 | `--http-host`                      | `HTTP_HOST`           | `0.0.0.0`                  | HTTP bind address                                                                                                                                                                                              |
 | `--http-port`                      | `HTTP_PORT`           | `3000`                     | API port                                                                                                                                                                                                       |
 | `--min-tvl`                        | —                     | `10.0`                     | Minimum pool TVL in native token (ETH)                                                                                                                                                                         |

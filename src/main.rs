@@ -10,9 +10,9 @@
 //! # All on-chain protocols are fetched from Tycho RPC by default:
 //! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz
 //!
-//! # Combine all on-chain protocols with specific RFQ protocols:
+//! # Combine all on-chain protocols with specific off-chain book venues:
 //! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \
-//!            --protocols all_onchain,rfq:bebop
+//!            --protocols all_onchain,book:bebop
 //!
 //! # Or specify protocols explicitly:
 //! fynd serve --tycho-url tycho-fynd-ethereum.propellerheads.xyz \

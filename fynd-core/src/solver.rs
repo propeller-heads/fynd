@@ -590,7 +590,7 @@ impl FyndBuilder {
     /// Enables partial block (flashblock) updates from the Tycho stream (default: `false`).
     ///
     /// When enabled, the stream delivers component state updates mid-block rather than only at
-    /// finalization, reducing latency. Only supported for on-chain protocols; RFQ streams are
+    /// finalization, reducing latency. Only supported for on-chain protocols; book feeds are
     /// unaffected.
     pub fn partial_blocks(mut self, enabled: bool) -> Self {
         self.partial_blocks = enabled;
@@ -1162,12 +1162,13 @@ impl FyndBuilder {
     /// a block before it is decoded. Dropping the controller ungates the stream so it runs to its
     /// natural end.
     ///
-    /// Only valid when at least one non-RFQ protocol is configured.
+    /// Only valid when at least one Tycho-streamed protocol is configured.
     ///
     /// # Errors
     ///
-    /// Returns [`SolverBuildError`] if any component fails to initialize, all protocols are RFQ,
-    /// or the step-controller channel closes before the controller is delivered.
+    /// Returns [`SolverBuildError`] if any component fails to initialize, every entry is a
+    /// `book:` or price level stream entry, or the step-controller channel closes before the
+    /// controller is delivered.
     #[cfg(feature = "experimental")]
     pub async fn build_with_step_controller(
         self,

@@ -27,12 +27,12 @@ Run `--help` on any subcommand for detailed options.
    cargo build -p fynd-benchmark --release
    ```
 
-2. **Start the solver** with the `.env` vars sourced and RFQ protocols included:
+2. **Start the solver** with the `.env` vars sourced and the `book:` venues included:
    ```bash
    set -a && source .env && set +a
    RUST_LOG=info ./target/release/fynd serve \
      -w worker_pools_pfw3.toml \
-     --protocols all_onchain,rfq:bebop,rfq:hashflow \
+     --protocols all_onchain,book:bebop,book:hashflow \
      > /tmp/fynd_solver.log 2>&1 &
    ```
    Wait until `/v1/health` returns `healthy: true` (~5–10 min for derived data).

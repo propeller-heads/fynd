@@ -22,7 +22,7 @@ REQUESTS_FILE="${REQUESTS_FILE:-tools/benchmark/requests_set.json}"
 OUTPUT_FILE="${OUTPUT_FILE:-scale_results_remote.json}"
 RPC_URL="${RPC_URL:-}"
 MIN_TVL="${MIN_TVL:-}" # forwarded to `scale --min-tvl` when set; chain default otherwise
-# RFQ credentials forwarded to the remote so rfq:* protocols register. Empty when unused.
+# Book venue credentials forwarded to the remote so book:* protocols register. Empty when unused.
 BEBOP_USER="${BEBOP_USER:-}"
 BEBOP_KEY="${BEBOP_KEY:-}"
 HASHFLOW_USER="${HASHFLOW_USER:-}"
