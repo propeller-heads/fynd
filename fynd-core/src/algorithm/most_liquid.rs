@@ -862,7 +862,7 @@ mod tests {
         }
 
         let mut derived_data = DerivedData::new();
-        derived_data.set_token_prices(token_prices, vec![], 1, true);
+        derived_data.set_token_prices(token_prices, vec![], 1);
         std::sync::Arc::new(tokio::sync::RwLock::new(derived_data))
     }
 
@@ -906,14 +906,12 @@ mod tests {
                 error: FailedItemError::SimulationFailed("sim error".into()),
             }],
             10,
-            true,
         );
-        derived.set_component_depths(Default::default(), vec![], 10, true);
+        derived.set_component_depths(Default::default(), vec![], 10);
         derived.set_token_prices(
             make_token_prices(&[tok_in.address.clone(), tok_out.address.clone()]),
             vec![],
             10,
-            true,
         );
 
         let sim = make_mock_sim();
@@ -936,7 +934,7 @@ mod tests {
         // spot price succeeds
         let mut prices = crate::derived::types::SpotPrices::default();
         prices.insert(key.clone(), 1.5);
-        derived.set_spot_prices(prices, vec![], 10, true);
+        derived.set_spot_prices(prices, vec![], 10);
         // component depth fails
         derived.set_component_depths(
             Default::default(),
@@ -945,13 +943,11 @@ mod tests {
                 error: FailedItemError::SimulationFailed("depth error".into()),
             }],
             10,
-            true,
         );
         derived.set_token_prices(
             make_token_prices(&[tok_in.address.clone(), tok_out.address.clone()]),
             vec![],
             10,
-            true,
         );
 
         let sim = make_mock_sim();
@@ -978,7 +974,6 @@ mod tests {
                 error: FailedItemError::SimulationFailed("spot error".into()),
             }],
             10,
-            true,
         );
         derived.set_component_depths(
             Default::default(),
@@ -987,13 +982,11 @@ mod tests {
                 error: FailedItemError::SimulationFailed("depth error".into()),
             }],
             10,
-            true,
         );
         derived.set_token_prices(
             make_token_prices(&[tok_in.address.clone(), tok_out.address.clone()]),
             vec![],
             10,
-            true,
         );
 
         let sim = make_mock_sim();
@@ -1015,11 +1008,11 @@ mod tests {
         // Spot price and component depth both present
         let mut prices = crate::derived::types::SpotPrices::default();
         prices.insert(key.clone(), 1.5);
-        derived.set_spot_prices(prices, vec![], 10, true);
+        derived.set_spot_prices(prices, vec![], 10);
 
         let mut depths = crate::derived::types::ComponentDepths::default();
         depths.insert(key.clone(), BigUint::from(1000u64));
-        derived.set_component_depths(depths, vec![], 10, true);
+        derived.set_component_depths(depths, vec![], 10);
 
         // No token prices set — normalization should return None
 
@@ -1046,12 +1039,12 @@ mod tests {
         // Spot price
         let mut spot = crate::derived::types::SpotPrices::default();
         spot.insert(key.clone(), 2.0);
-        derived.set_spot_prices(spot, vec![], 10, true);
+        derived.set_spot_prices(spot, vec![], 10);
 
         // Raw depth: 2_000_000 token_in units
         let mut depths = crate::derived::types::ComponentDepths::default();
         depths.insert(key.clone(), BigUint::from(2_000_000u64));
-        derived.set_component_depths(depths, vec![], 10, true);
+        derived.set_component_depths(depths, vec![], 10);
 
         // Token price: 2000 token_in per 1 ETH (numerator=2000, denominator=1)
         // So 2_000_000 raw units / 2000 = 1000 ETH
@@ -1060,7 +1053,7 @@ mod tests {
             tok_in.address.clone(),
             Price { numerator: BigUint::from(2000u64), denominator: BigUint::from(1u64) },
         );
-        derived.set_token_prices(token_prices, vec![], 10, true);
+        derived.set_token_prices(token_prices, vec![], 10);
 
         let sim = make_mock_sim();
         let result =
@@ -1088,12 +1081,12 @@ mod tests {
 
         let mut spot = crate::derived::types::SpotPrices::default();
         spot.insert(key.clone(), 0.5);
-        derived.set_spot_prices(spot, vec![], 10, true);
+        derived.set_spot_prices(spot, vec![], 10);
 
         // Raw depth: 500 token_in units
         let mut depths = crate::derived::types::ComponentDepths::default();
         depths.insert(key.clone(), BigUint::from(500u64));
-        derived.set_component_depths(depths, vec![], 10, true);
+        derived.set_component_depths(depths, vec![], 10);
 
         // Token price: numerator=3, denominator=2 -> 1.5 tokens per ETH
         // depth_in_eth = 500 * 2 / 3 = 333.333...
@@ -1102,7 +1095,7 @@ mod tests {
             tok_in.address.clone(),
             Price { numerator: BigUint::from(3u64), denominator: BigUint::from(2u64) },
         );
-        derived.set_token_prices(token_prices, vec![], 10, true);
+        derived.set_token_prices(token_prices, vec![], 10);
 
         let sim = make_mock_sim();
         let result =

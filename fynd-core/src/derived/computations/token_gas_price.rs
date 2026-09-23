@@ -195,7 +195,7 @@ impl<'a> PricingPass<'a> {
     ///
     /// The component set covers every candidate route between the token and the gas token, not
     /// just the two chosen ones: a rival pool can move and become the better route, and only a
-    /// full recompute would ever notice if it were not in the set.
+    /// full solve would ever notice if it were not in the set.
     ///
     /// A token that cannot be sold back is an error, not a price: a buy rate alone would flatter
     /// a token that is expensive to exit, and prices must stay comparable across tokens.
@@ -530,13 +530,8 @@ impl DerivedComputation for TokenGasPriceComputation {
         ComputationRequirements::none()
     }
 
-    fn persist(
-        store: &mut DerivedData,
-        output: ComputationOutput<Self::Output>,
-        block: u64,
-        is_full_recompute: bool,
-    ) {
-        store.set_token_prices(output.data, output.failed_items, block, is_full_recompute);
+    fn persist(store: &mut DerivedData, output: ComputationOutput<Self::Output>, block: u64) {
+        store.set_token_prices(output.data, output.failed_items, block);
     }
 
     #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_token_prices))]
@@ -546,7 +541,7 @@ impl DerivedComputation for TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        if !changed.is_full_recompute && !changed.is_topology_change() {
+        if !changed.is_topology_change() {
             if let Some(result) = self
                 .try_incremental_compute(market, store, changed)
                 .await?
@@ -777,14 +772,20 @@ mod tests {
             .await
             .expect("pricing must not fail");
 
-        // A full recompute whose deadline expires immediately attempts nothing; every token
+        // A full solve whose deadline expires immediately attempts nothing; every token
         // must keep its previous price rather than vanish until the next full solve.
         let output = computation_for(&eth.address)
             .with_pass_budget(Duration::ZERO)
             .compute(
                 &market,
                 &store,
-                &ChangedComponents { is_full_recompute: true, ..ChangedComponents::default() },
+                &ChangedComponents {
+                    added: FxHashMap::from_iter([(
+                        "eth_usdc".to_string(),
+                        vec![eth.address.clone(), usdc.address.clone()],
+                    )]),
+                    ..ChangedComponents::default()
+                },
             )
             .await
             .expect("pricing must not fail");
@@ -827,7 +828,10 @@ mod tests {
             .compute(
                 &market,
                 &store,
-                &ChangedComponents { is_full_recompute: true, ..ChangedComponents::default() },
+                &ChangedComponents {
+                    removed: vec!["eth_usdc".to_string()],
+                    ..ChangedComponents::default()
+                },
             )
             .await
             .expect("pricing must not fail");
@@ -849,7 +853,7 @@ mod tests {
             .expect("pricing must not fail");
         // The manager persists between runs; without this the incremental path bails out on
         // the missing stored prices and the test would exercise the full solve twice.
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         // The pool's state changes, marking USDC for re-pricing, but the deadline expires
         // before it is attempted: the previous price must survive.
@@ -900,7 +904,7 @@ mod tests {
             .await
             .expect("pricing must not fail");
         // The manager persists between runs; the incremental path reads the stored prices.
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         // Both pools move, but only eth_aaa is reported as changed: AAA must re-price
         // against the new state while BBB keeps its stored price.
@@ -938,7 +942,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         // The pool's state moves, but the changed set names no stored dependency, so the
         // incremental path must return the stored prices without re-solving anything.
@@ -1009,7 +1013,7 @@ mod tests {
             .compute(&market, &store, &ChangedComponents::default())
             .await
             .expect("pricing must not fail");
-        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1);
 
         // The pool turns one-way: the liquidity cap lets the 0.5e18 buy through but blocks the
         // 1e18 sell back. A token that was priced and then lost its sell route must stop being
@@ -1051,7 +1055,7 @@ mod tests {
     async fn test_deps_cover_rival_routes() {
         // USDC prices via the direct pool, but the worse ETH->MID->USDC route is a candidate:
         // its pools must be in USDC's dependency set, or a state change that makes it the
-        // better route would leave the stored price stale until a full recompute.
+        // better route would leave the stored price stale until a full solve.
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
         let mid = token(2, "MID");

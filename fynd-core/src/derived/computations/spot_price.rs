@@ -47,13 +47,8 @@ impl DerivedComputation for SpotPriceComputation {
 
     const ID: ComputationId = "spot_prices";
 
-    fn persist(
-        store: &mut DerivedData,
-        output: ComputationOutput<Self::Output>,
-        block: u64,
-        is_full_recompute: bool,
-    ) {
-        store.set_spot_prices(output.data, output.failed_items, block, is_full_recompute);
+    fn persist(store: &mut DerivedData, output: ComputationOutput<Self::Output>, block: u64) {
+        store.set_spot_prices(output.data, output.failed_items, block);
     }
 
     #[instrument(level = "debug", skip(market, store, changed), fields(computation_id = Self::ID, updated_spot_prices))]
@@ -63,42 +58,32 @@ impl DerivedComputation for SpotPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        // Start with existing prices (or empty for full recompute).
-        let mut spot_prices = if changed.is_full_recompute {
-            SpotPrices::default()
-        } else {
-            let mut existing_prices = store
-                .read()
-                .await
-                .spot_prices()
-                .cloned()
-                .unwrap_or_default();
-            // Remove spot prices for removed components.
-            for component_id in &changed.removed {
-                existing_prices.retain(|key, _| &key.0 != component_id);
-            }
-            existing_prices
-        };
+        // Start from the stored prices; only the changed components are recomputed below.
+        let mut spot_prices = store
+            .read()
+            .await
+            .spot_prices()
+            .cloned()
+            .unwrap_or_default();
+        // Remove spot prices for removed components.
+        for component_id in &changed.removed {
+            spot_prices.retain(|key, _| &key.0 != component_id);
+        }
 
         let market_guard = market.read().await;
         let topology = market_guard.component_topology();
         let tokens = market_guard.token_registry_ref();
 
         // Determine which components need (re)computation.
-        let components_to_compute: Vec<_> = if changed.is_full_recompute {
-            topology.keys().cloned().collect()
-        } else {
-            changed
-                .added
-                .keys()
-                .chain(changed.updated.iter())
-                .cloned()
-                .collect()
-        };
+        let components_to_compute: Vec<_> = changed
+            .added
+            .keys()
+            .chain(changed.updated.iter())
+            .cloned()
+            .collect();
 
         let mut succeeded = 0usize;
         let mut failed_items: Vec<FailedItem> = Vec::new();
-        let num_components_to_compute = components_to_compute.len();
 
         for component_id in &components_to_compute {
             // Get token addresses: changed.added for new components, topology for existing.
@@ -180,15 +165,6 @@ impl DerivedComputation for SpotPriceComputation {
         );
         Span::current().record("updated_spot_prices", spot_prices.len());
 
-        // Return error if all calculations failed for a full recompute.
-        // Partial (incremental) computations can fail for a small subset of components.
-        if changed.is_full_recompute && succeeded == 0 && num_components_to_compute > 0 {
-            return Err(ComputationError::TotalFailure {
-                computation_id: Self::ID,
-                attempted: num_components_to_compute,
-            });
-        }
-
         Ok(ComputationOutput::with_failures(spot_prices, failed_items))
     }
 }
@@ -244,12 +220,15 @@ mod tests {
         }
 
         let derived = DerivedData::new_shared();
-        let changed = ChangedComponents { is_full_recompute: true, ..Default::default() };
+        let changed = ChangedComponents {
+            updated: vec!["component1".to_string(), "component2".to_string()],
+            ..Default::default()
+        };
 
         let output = SpotPriceComputation::new()
             .compute(&market, &derived, &changed)
             .await
-            .expect("should not be total failure since component1 succeeds");
+            .expect("component1 succeeds, so the computation as a whole does not fail");
 
         assert!(output.has_failures(), "component2 missing sim state should produce a failed item");
 

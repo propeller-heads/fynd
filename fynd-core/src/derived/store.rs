@@ -73,13 +73,13 @@ impl std::fmt::Debug for ComputedSlot {
 pub struct DerivedData {
     /// Computation outputs keyed by [`ComputationId`], stored type-erased.
     slots: FxHashMap<ComputationId, ComputedSlot>,
-    /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
+    /// Persistent failure map: key → (block, error). Merged with each run's failures.
     token_prices_failed: FxHashMap<TokenGasPriceKey, (u64, FailedItemError)>,
     /// Token prices with path dependency tracking for incremental computation.
     token_prices_deps: Option<ComputedValue<TokenPricesWithDeps>>,
-    /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
+    /// Persistent failure map: key → (block, error). Merged with each run's failures.
     component_depths_failed: FxHashMap<ComponentDepthKey, (u64, FailedItemError)>,
-    /// Persistent failure map: key → (block, error). Merged on incremental runs, replaced on full.
+    /// Persistent failure map: key → (block, error). Merged with each run's failures.
     spot_prices_failed: FxHashMap<SpotPriceKey, (u64, FailedItemError)>,
 }
 
@@ -205,17 +205,15 @@ impl DerivedData {
         self.output_with_status(TokenGasPriceComputation::ID)
     }
 
-    /// Sets token prices, merging failures for incremental runs.
+    /// Sets token prices, merging the run's failures into the stored map.
     ///
-    /// For full recomputes, the failure map is replaced entirely. For incremental runs,
-    /// failures are merged: existing entries for keys that now succeed are removed, new
-    /// failures are inserted, and entries for keys not attempted this run are preserved.
+    /// Existing entries for keys that now succeed are removed, new failures are inserted,
+    /// and entries for keys not attempted this run are preserved.
     pub fn set_token_prices(
         &mut self,
         prices: TokenGasPrices,
         failed_items: Vec<FailedItem>,
         block: u64,
-        is_full_recompute: bool,
     ) {
         let new_failures: FxHashMap<TokenGasPriceKey, (u64, FailedItemError)> = failed_items
             .into_iter()
@@ -226,14 +224,10 @@ impl DerivedData {
             })
             .collect();
 
-        if is_full_recompute {
-            self.token_prices_failed = new_failures;
-        } else {
-            self.token_prices_failed
-                .retain(|k, _| !prices.contains_key(k));
-            self.token_prices_failed
-                .extend(new_failures);
-        }
+        self.token_prices_failed
+            .retain(|k, _| !prices.contains_key(k));
+        self.token_prices_failed
+            .extend(new_failures);
 
         self.set_output(TokenGasPriceComputation::ID, Arc::new(prices), block);
     }
@@ -299,31 +293,25 @@ impl DerivedData {
         self.output_with_status(ComponentDepthComputation::ID)
     }
 
-    /// Sets component depths, merging failures for incremental runs.
+    /// Sets component depths, merging the run's failures into the stored map.
     ///
-    /// For full recomputes, the failure map is replaced entirely. For incremental runs,
-    /// failures are merged: existing entries for keys that now succeed are removed, new
-    /// failures are inserted, and entries for keys not attempted this run are preserved.
+    /// Existing entries for keys that now succeed are removed, new failures are inserted,
+    /// and entries for keys not attempted this run are preserved.
     pub fn set_component_depths(
         &mut self,
         depths: ComponentDepths,
         failed_items: Vec<FailedItem>,
         block: u64,
-        is_full_recompute: bool,
     ) {
         let new_failures: FxHashMap<ComponentDepthKey, (u64, FailedItemError)> = failed_items
             .into_iter()
             .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
             .collect();
 
-        if is_full_recompute {
-            self.component_depths_failed = new_failures;
-        } else {
-            self.component_depths_failed
-                .retain(|k, _| !depths.contains_key(k));
-            self.component_depths_failed
-                .extend(new_failures);
-        }
+        self.component_depths_failed
+            .retain(|k, _| !depths.contains_key(k));
+        self.component_depths_failed
+            .extend(new_failures);
 
         self.set_output(ComponentDepthComputation::ID, depths, block);
     }
@@ -366,31 +354,25 @@ impl DerivedData {
         self.output_with_status(SpotPriceComputation::ID)
     }
 
-    /// Sets spot prices, merging failures for incremental runs.
+    /// Sets spot prices, merging the run's failures into the stored map.
     ///
-    /// For full recomputes, the failure map is replaced entirely. For incremental runs,
-    /// failures are merged: existing entries for keys that now succeed are removed, new
-    /// failures are inserted, and entries for keys not attempted this run are preserved.
+    /// Existing entries for keys that now succeed are removed, new failures are inserted,
+    /// and entries for keys not attempted this run are preserved.
     pub fn set_spot_prices(
         &mut self,
         prices: SpotPrices,
         failed_items: Vec<FailedItem>,
         block: u64,
-        is_full_recompute: bool,
     ) {
         let new_failures: FxHashMap<SpotPriceKey, (u64, FailedItemError)> = failed_items
             .into_iter()
             .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
             .collect();
 
-        if is_full_recompute {
-            self.spot_prices_failed = new_failures;
-        } else {
-            self.spot_prices_failed
-                .retain(|k, _| !prices.contains_key(k));
-            self.spot_prices_failed
-                .extend(new_failures);
-        }
+        self.spot_prices_failed
+            .retain(|k, _| !prices.contains_key(k));
+        self.spot_prices_failed
+            .extend(new_failures);
 
         self.set_output(SpotPriceComputation::ID, prices, block);
     }
@@ -533,7 +515,7 @@ mod tests {
         let mut store = DerivedData::new();
         assert_eq!(store.token_prices_block(), None);
 
-        store.set_token_prices(Default::default(), vec![], 42, true);
+        store.set_token_prices(Default::default(), vec![], 42);
         assert_eq!(store.token_prices_block(), Some(42));
 
         // Other computations not set yet
@@ -544,7 +526,7 @@ mod tests {
     #[test]
     fn test_spot_prices_block_tracks_independently() {
         let mut store = DerivedData::new();
-        store.set_spot_prices(Default::default(), vec![], 10, true);
+        store.set_spot_prices(Default::default(), vec![], 10);
         assert_eq!(store.spot_prices_block(), Some(10));
         assert_eq!(store.token_prices_block(), None);
     }
@@ -552,7 +534,7 @@ mod tests {
     #[test]
     fn test_component_depths_block_tracks_independently() {
         let mut store = DerivedData::new();
-        store.set_component_depths(Default::default(), vec![], 7, true);
+        store.set_component_depths(Default::default(), vec![], 7);
         assert_eq!(store.component_depths_block(), Some(7));
         assert_eq!(store.token_prices_block(), None);
     }
@@ -562,25 +544,25 @@ mod tests {
         let mut store = DerivedData::new();
         assert!(!store.derived_data_ready());
 
-        store.set_spot_prices(Default::default(), vec![], 5, true);
+        store.set_spot_prices(Default::default(), vec![], 5);
         assert!(!store.derived_data_ready());
 
-        store.set_token_prices(Default::default(), vec![], 10, true);
+        store.set_token_prices(Default::default(), vec![], 10);
         assert!(!store.derived_data_ready());
 
         store.set_token_prices_deps(Default::default(), 10);
         assert!(!store.derived_data_ready());
 
-        store.set_component_depths(Default::default(), vec![], 9, true);
+        store.set_component_depths(Default::default(), vec![], 9);
         assert!(store.derived_data_ready());
     }
 
     #[test]
     fn test_clear_all_resets_all_fields() {
         let mut store = DerivedData::new();
-        store.set_token_prices(Default::default(), vec![], 1, true);
-        store.set_spot_prices(Default::default(), vec![], 1, true);
-        store.set_component_depths(Default::default(), vec![], 1, true);
+        store.set_token_prices(Default::default(), vec![], 1);
+        store.set_spot_prices(Default::default(), vec![], 1);
+        store.set_component_depths(Default::default(), vec![], 1);
 
         store.clear_all();
 
@@ -605,7 +587,6 @@ mod tests {
             Default::default(),
             vec![failed(&key_str, FailedItemError::SimulationFailed("sim error".into()))],
             42,
-            true,
         );
         assert_eq!(
             store.token_price_failure(&token_addr),
@@ -623,7 +604,6 @@ mod tests {
             Default::default(),
             vec![failed(&key_str, FailedItemError::SimulationFailed("sim error".into()))],
             10,
-            true,
         );
         assert_eq!(
             store.spot_price_failure(&key),
@@ -641,31 +621,12 @@ mod tests {
             Default::default(),
             vec![failed(&key_str, FailedItemError::SimulationFailed("depth error".into()))],
             7,
-            true,
         );
         assert_eq!(
             store.component_depth_failure(&key),
             Some((7, &FailedItemError::SimulationFailed("depth error".into())))
         );
         assert_eq!(store.component_depth_failure(&pair_key("component2", 0x01, 0x02)), None);
-    }
-
-    #[test]
-    fn test_rerunning_with_empty_failures_clears_old_reasons() {
-        let key = pair_key("component1", 0x01, 0x02);
-        let key_str = format!("component1/{}/{}", addr(0x01), addr(0x02));
-        let mut store = DerivedData::new();
-        store.set_spot_prices(
-            Default::default(),
-            vec![failed(&key_str, FailedItemError::MissingSimulationState)],
-            1,
-            true,
-        );
-        assert!(store.spot_price_failure(&key).is_some());
-
-        // Full re-run with no failures clears the map
-        store.set_spot_prices(Default::default(), vec![], 2, true);
-        assert_eq!(store.spot_price_failure(&key), None);
     }
 
     #[test]
@@ -677,7 +638,6 @@ mod tests {
             Default::default(),
             vec![failed(&key_str, FailedItemError::MissingSellRoute("no route".to_string()))],
             1,
-            true,
         );
         store.clear_token_prices();
         assert_eq!(store.token_price_failure(&token_addr), None);
@@ -695,7 +655,6 @@ mod tests {
             Default::default(),
             vec![failed(&key_str, FailedItemError::MissingSimulationState)],
             1,
-            true,
         );
         store.clear_spot_prices();
         assert_eq!(store.spot_price_failure(&key), None);
@@ -710,7 +669,6 @@ mod tests {
             Default::default(),
             vec![failed(&key_str, FailedItemError::MissingSpotPrice)],
             1,
-            true,
         );
         store.clear_component_depths();
         assert_eq!(store.component_depth_failure(&key), None);
@@ -725,7 +683,7 @@ mod tests {
 
         let mut store = DerivedData::new();
 
-        // Full recompute at block 10: both keys fail
+        // Block 10: both keys fail
         store.set_spot_prices(
             Default::default(),
             vec![
@@ -733,7 +691,6 @@ mod tests {
                 failed(&key_b_str, FailedItemError::MissingTokenMetadata),
             ],
             10,
-            true,
         );
         assert_eq!(
             store.spot_price_failure(&key_a),
@@ -747,7 +704,7 @@ mod tests {
         // Incremental run at block 11: only component_b is attempted and succeeds
         let mut prices = SpotPrices::default();
         prices.insert(key_b.clone(), 1.0);
-        store.set_spot_prices(prices, vec![], 11, false);
+        store.set_spot_prices(prices, vec![], 11);
 
         // component_a was not attempted — failure is preserved from block 10
         assert_eq!(
@@ -769,7 +726,6 @@ mod tests {
             Default::default(),
             vec![failed(&key_str, FailedItemError::MissingSimulationState)],
             10,
-            true,
         );
         assert_eq!(
             store.spot_price_failure(&key),
@@ -781,7 +737,6 @@ mod tests {
             Default::default(),
             vec![failed(&key_str, FailedItemError::MissingTokenMetadata)],
             11,
-            false,
         );
         assert_eq!(
             store.spot_price_failure(&key),
@@ -801,19 +756,16 @@ mod tests {
             Default::default(),
             vec![failed(&token_str, FailedItemError::MissingSellRoute("no route".to_string()))],
             1,
-            true,
         );
         store.set_spot_prices(
             Default::default(),
             vec![failed(&pair_str, FailedItemError::MissingSimulationState)],
             1,
-            true,
         );
         store.set_component_depths(
             Default::default(),
             vec![failed(&pair_str, FailedItemError::MissingSpotPrice)],
             1,
-            true,
         );
 
         store.clear_all();
