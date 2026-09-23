@@ -514,6 +514,7 @@ pub struct FyndBuilder {
     /// Shortest time between two full token-pricing passes; `None` keeps the computation's
     /// default.
     pricing_max_tokens_per_pass: Option<usize>,
+    pricing_min_pass_interval: Option<Duration>,
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
@@ -552,6 +553,7 @@ impl FyndBuilder {
             partial_blocks: false,
             tycho_subscription_buffer_size: None,
             pricing_max_tokens_per_pass: None,
+            pricing_min_pass_interval: None,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
@@ -648,6 +650,16 @@ impl FyndBuilder {
     /// rotates over them rather than starving part of the set.
     pub fn pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
         self.pricing_max_tokens_per_pass = Some(max_tokens);
+        self
+    }
+
+    /// Sets the shortest time between two token-pricing passes.
+    ///
+    /// The cap bounds what one pass costs; this bounds how often one runs. A block inside the
+    /// interval serves the stored prices, unless a component arrived or the manager asked for a
+    /// full recompute.
+    pub fn pricing_min_pass_interval(mut self, interval: Duration) -> Self {
+        self.pricing_min_pass_interval = Some(interval);
         self
     }
 
@@ -912,6 +924,9 @@ impl FyndBuilder {
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
         if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
             computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
+        }
+        if let Some(interval) = self.pricing_min_pass_interval {
+            computation_config = computation_config.with_pricing_min_pass_interval(interval);
         }
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.
@@ -1507,7 +1522,8 @@ impl Solver {
             // starved CI machine from cutting a pass short, and an unbounded cap keeps a pass
             // from deferring tokens to a later one that the replay never runs.
             .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60))
-            .with_pricing_max_tokens_per_pass(usize::MAX);
+            .with_pricing_max_tokens_per_pass(usize::MAX)
+            .with_pricing_min_pass_interval(Duration::ZERO);
         let (computation_manager, _) =
             ComputationManager::new(computation_config, market_data.clone())
                 .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;

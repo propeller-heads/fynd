@@ -33,7 +33,7 @@
 //! That deadline is the only thing that bounds a pass. The next section says why the set of
 //! tokens a pass selects does not.
 //!
-//! # Why the pass is capped and rotated
+//! # Why the pass is capped, spaced and rotated
 //!
 //! "Only the tokens a change affects" does not bound anything on a dense market. Every route
 //! ends at the gas token, the gas token's own pools are the ones that trade every block, and
@@ -69,11 +69,22 @@
 //! A full solve is therefore only needed when there is nothing stored to select from at all:
 //! startup, and lag recovery. Nothing else gets one, including a topology change, because rank 1
 //! covers what a topology change would have been a full solve for.
+//!
+//! The cap bounds what one pass costs; `min_pass_interval` bounds how often one runs. Both are
+//! needed. The manager starts a computation per market event, and on Base that is several a
+//! second, so capping alone left pricing at a 94% duty cycle: passes 46 times cheaper, simply
+//! run 22 times more often. A block inside the interval serves the stored prices and does no
+//! pricing work.
+//!
+//! Two things run a pass whatever the interval says. A full recompute has nothing stored to
+//! serve instead. A component arriving brings tokens that cannot be quoted at all until they
+//! are priced, so a newly listed token is priced on the block it appears rather than at the end
+//! of the interval.
 
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -360,6 +371,12 @@ pub struct TokenGasPriceComputation {
     pass_budget: Duration,
     /// Most tokens one pass attempts. This is what bounds a pass; see `select_pass_tokens`.
     max_tokens_per_pass: usize,
+    /// Shortest time between two passes. The cap bounds what one pass costs; this bounds how
+    /// often one runs. See the module's "Why the pass is capped and rotated" section.
+    min_pass_interval: Duration,
+    /// When the last pass started, for `min_pass_interval`. Shared for the same reasons as
+    /// `pass_counter`.
+    last_pass_started: Arc<Mutex<Option<Instant>>>,
     /// Counts the passes that have run, and stamps every token a pass prices. Ordering by the
     /// stamp is what rotates a budget-limited pass over the whole token set; see the module's
     /// "Why the pass is bounded and rotated" section.
@@ -431,6 +448,13 @@ fn select_pass_tokens(
 /// from holding the derived chain, so it stays generous.
 const DEFAULT_PASS_BUDGET: Duration = Duration::from_secs(30);
 
+/// Default shortest time between two passes.
+///
+/// A capped pass costs about 0.6s on Base at `min-tvl 1`, and the manager starts another as soon
+/// as one ends, so the cap alone left pricing at a 94% duty cycle. Two seconds puts that near
+/// 30% and still refreshes the whole market in about 44s, against the 30s an uncapped pass took.
+const DEFAULT_MIN_PASS_INTERVAL: Duration = Duration::from_secs(2);
+
 /// Default cap on the tokens one pass attempts.
 ///
 /// Measured on Base at `min-tvl 1`, a sell costs about 12ms, so 100 tokens is a pass of roughly
@@ -450,6 +474,8 @@ impl Default for TokenGasPriceComputation {
             probe_amount: BigUint::from(10u64).pow(18), // 1 ETH
             pass_budget: DEFAULT_PASS_BUDGET,
             max_tokens_per_pass: DEFAULT_MAX_TOKENS_PER_PASS,
+            min_pass_interval: DEFAULT_MIN_PASS_INTERVAL,
+            last_pass_started: Arc::new(Mutex::new(None)),
             pass_counter: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -457,9 +483,19 @@ impl Default for TokenGasPriceComputation {
 
 impl TokenGasPriceComputation {
     /// Creates a computation with explicit parameters.
+    ///
+    /// The pass interval is off. A test drives `compute` directly, one call per block it wants
+    /// priced, so the deployment default would skip most of them; a test that means to exercise
+    /// the interval sets its own.
     #[cfg(test)]
     pub fn new(gas_token: Address, max_hops: usize, probe_amount: BigUint) -> Self {
-        Self { gas_token, max_hops, probe_amount, ..Self::default() }
+        Self {
+            gas_token,
+            max_hops,
+            probe_amount,
+            min_pass_interval: Duration::ZERO,
+            ..Self::default()
+        }
     }
 
     /// Sets the wall-clock backstop for a pass's sell loop.
@@ -470,6 +506,32 @@ impl TokenGasPriceComputation {
     /// Sets how many tokens one pass may attempt.
     pub fn with_max_tokens_per_pass(self, max_tokens_per_pass: usize) -> Self {
         Self { max_tokens_per_pass, ..self }
+    }
+
+    /// Sets the shortest time between two passes. `Duration::ZERO` runs one per block.
+    pub fn with_min_pass_interval(self, min_pass_interval: Duration) -> Self {
+        Self { min_pass_interval, ..self }
+    }
+
+    /// Returns whether a pass may run now, and starts the interval when it may.
+    ///
+    /// `force` runs one whatever the interval says, and restarts the interval from it, so a
+    /// block that must be priced does not also leave the next one due immediately.
+    ///
+    /// A poisoned lock is taken anyway: the guarded value is one timestamp, a panic cannot leave
+    /// it half-written, and refusing to price tokens over it would be worse.
+    fn claim_pass(&self, force: bool) -> bool {
+        let mut last = match self.last_pass_started.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let now = Instant::now();
+        let due = last.is_none_or(|started| now.duration_since(started) >= self.min_pass_interval);
+        if due || force {
+            *last = Some(now);
+            return true;
+        }
+        false
     }
 
     /// Claims the number of the pass that is about to run.
@@ -756,10 +818,26 @@ impl DerivedComputation for TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+        // Two things run a pass whatever the interval says: a full recompute, which has nothing
+        // stored to serve instead, and a component arriving, whose tokens cannot be quoted at
+        // all until they are priced.
+        let must_run = changed.is_full_recompute || !changed.added.is_empty();
+        if !self.claim_pass(must_run) {
+            let stored = {
+                let store_guard = store.read().await;
+                store_guard.token_prices().cloned()
+            };
+            // Nothing stored means nothing to serve, so the interval cannot defer this block.
+            if let Some(prices) = stored {
+                Span::current().record("updated_token_prices", prices.len());
+                return Ok(ComputationOutput::with_failures(prices, Vec::new()));
+            }
+        }
+
         // Startup and lag recovery have nothing stored to select from, so they offer every token
         // to the pass. So does a block whose selection finds nothing stored. Every other block
-        // selects, and `pass_budget` bounds what the pass gets through — a topology change
-        // included, since its tokens are what the selection ranks first.
+        // selects, and the cap bounds what the pass gets through — a topology change included,
+        // since its tokens are what the selection ranks first.
         if !changed.is_full_recompute {
             if let Some(result) = self
                 .try_incremental_compute(market, store, changed)
@@ -1377,6 +1455,113 @@ mod tests {
         let ordered = select_pass_tokens(&universe, None, &priority, 2);
 
         assert_eq!(ordered, vec![unpriced, stale], "the cap keeps the two highest ranks");
+    }
+
+    /// A block inside the interval serves the stored prices instead of running a pass.
+    #[tokio::test]
+    async fn test_a_pass_inside_the_interval_serves_the_stored_prices() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let (market, _) =
+            setup_market_weighted(vec![("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0))]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_min_pass_interval(Duration::from_secs(3600));
+        let store = DerivedData::new_shared();
+        let full = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+
+        market.write().await.update_states([(
+            "eth_aaa".to_string(),
+            Box::new(MockProtocolSim::new(4000.0)) as Box<dyn ProtocolSim>,
+        )]);
+
+        let changed = ChangedComponents {
+            updated: vec!["eth_aaa".to_string()],
+            ..ChangedComponents::default()
+        };
+        let output = computation
+            .compute(&market, &store, &changed)
+            .await
+            .expect("pricing must not fail");
+
+        assert!(
+            (ratio(&output.data[&aaa.address]) - 2000.0).abs() < 1e-6,
+            "the block inside the interval serves the stored price, not the moved market"
+        );
+    }
+
+    /// An arriving component runs a pass however recently the last one ran, because the tokens
+    /// it brings cannot be quoted until they have a price.
+    #[tokio::test]
+    async fn test_an_arriving_component_runs_a_pass_inside_the_interval() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let ccc = token(2, "CCC");
+        let (market, _) =
+            setup_market_weighted(vec![("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0))]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_min_pass_interval(Duration::from_secs(3600));
+        let store = DerivedData::new_shared();
+        let full = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, full, 1, true);
+
+        {
+            let mut guard = market.write().await;
+            guard.upsert_tokens([ccc.clone()]);
+            guard.upsert_components([component("eth_ccc", &[eth.clone(), ccc.clone()])]);
+            guard.update_states([(
+                "eth_ccc".to_string(),
+                Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>,
+            )]);
+        }
+
+        let mut added = FxHashMap::default();
+        added.insert("eth_ccc".to_string(), vec![eth.address.clone(), ccc.address.clone()]);
+        let output = computation
+            .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
+            .await
+            .expect("pricing must not fail");
+
+        assert!(
+            (ratio(&output.data[&ccc.address]) - 5000.0).abs() < 1e-6,
+            "an arriving token is priced although the interval has not elapsed"
+        );
+    }
+
+    /// A forced pass restarts the interval, so an arrival does not also leave the next block
+    /// due. Without it one arrival would run a pass and then let the very next block run
+    /// another.
+    ///
+    /// This drives the rule directly rather than through `compute`: the difference only shows
+    /// when the forced pass happens *inside* the interval, and going through a pricing pass to
+    /// reach that would need sleeps long enough to be worth more than the case is.
+    #[test]
+    fn test_a_forced_pass_restarts_the_interval() {
+        let eth = token(0, "ETH").address;
+        let computation = TokenGasPriceComputation::new(eth, 1, BigUint::from(PROBE_AMOUNT))
+            .with_min_pass_interval(Duration::from_millis(400));
+
+        assert!(computation.claim_pass(false), "the first pass is due, nothing has run");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(computation.claim_pass(true), "a forced pass runs inside the interval");
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            !computation.claim_pass(false),
+            "450ms after the first pass but 150ms after the forced one, so the forced pass is \
+             what the interval now runs from"
+        );
     }
 
     /// A token with no price must stay reachable when no change points at it.

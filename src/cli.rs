@@ -67,6 +67,12 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub pricing_max_tokens_per_pass: Option<usize>,
 
+    /// Shortest time, in milliseconds, between two token-pricing passes. A block inside the
+    /// interval serves the stored prices. A component arriving runs a pass anyway, so a newly
+    /// listed token is priced on the block it appears. Unset keeps the built-in default.
+    #[arg(long, env)]
+    pub pricing_min_pass_interval_ms: Option<u64>,
+
     /// Disable TLS for Tycho connection
     #[arg(long)]
     pub disable_tls: bool,

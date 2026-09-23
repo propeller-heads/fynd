@@ -130,6 +130,9 @@ pub struct ComputationManagerConfig {
     /// Overrides how many tokens one token-pricing pass may attempt; `None` keeps the
     /// computation's default.
     pricing_max_tokens_per_pass: Option<usize>,
+    /// Overrides the shortest time between two token-pricing passes; `None` keeps the
+    /// computation's default.
+    pricing_min_pass_interval: Option<Duration>,
 }
 
 impl ComputationManagerConfig {
@@ -159,6 +162,12 @@ impl ComputationManagerConfig {
     /// Overrides how many tokens one token-pricing pass may attempt.
     pub fn with_pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
         self.pricing_max_tokens_per_pass = Some(max_tokens);
+        self
+    }
+
+    /// Overrides the shortest time between two token-pricing passes.
+    pub fn with_pricing_min_pass_interval(mut self, interval: Duration) -> Self {
+        self.pricing_min_pass_interval = Some(interval);
         self
     }
 
@@ -195,6 +204,7 @@ impl Default for ComputationManagerConfig {
             depth_slippage_threshold: 0.01,
             pricing_pass_budget: None,
             pricing_max_tokens_per_pass: None,
+            pricing_min_pass_interval: None,
         }
     }
 }
@@ -240,6 +250,9 @@ impl ComputationManager {
         }
         if let Some(max_tokens) = config.pricing_max_tokens_per_pass {
             token_prices = token_prices.with_max_tokens_per_pass(max_tokens);
+        }
+        if let Some(interval) = config.pricing_min_pass_interval {
+            token_prices = token_prices.with_min_pass_interval(interval);
         }
         manager.register(token_prices)?;
         manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
