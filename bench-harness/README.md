@@ -22,14 +22,9 @@ an order seen in the viewer can be profiled by its id.
 | needs the network | no | yes, plus a Tycho API key |
 | reproducible | yes — every offline run replays the same block | no — each run is its own block |
 | comparable with | every other offline run | only the configs inside that same run |
-| VM-backed pools | **missing** | present |
 
-That last row is the reason live exists. `MarketRecording` cannot serialize VM-backed states, and
-drops them silently. In the current fixture that means every Uniswap v4 (384), Balancer (42), Curve
-(3) and Maverick (1) pool is a component with no state, so nothing can route through it — along
-with about two thirds of Uniswap v3. A live capture never serializes, so they are all there.
-
-The trade is reproducibility. An offline run is the same market every time, which is what makes a
+Both markets hold the same pool states (see `MarketRecording` in `test-fixtures/src/recording.rs`);
+they differ in reproducibility. An offline run is the same market every time, which is what makes a
 change measurable against last week. A live run is whatever the chain was doing at that block. The
 viewer keeps the two apart in its run picker for exactly that reason.
 

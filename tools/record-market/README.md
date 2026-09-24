@@ -14,7 +14,8 @@ RUST_LOG=info cargo run -p record-market -- \
 ```
 
 This produces two files:
-- `market_recording.json.zst` — zstd-compressed recording of Tycho stream updates
+- `market_recording.json.zst` — zstd-compressed raw Tycho feed messages and the token list (see
+  `MarketRecording` in `test-fixtures/src/recording.rs`)
 - `expected_outputs.json` — expected quote results for canonical trading pairs
 
 The recording stores the chain in its metadata; replay (expected-output generation and the

@@ -6,9 +6,8 @@
 //! (spot prices, depths, token gas prices) is computed locally from whatever state is present, not
 //! streamed.
 //!
-//! Nothing is serialized, which is the point. `MarketRecording` drops states it cannot write --
-//! every Uniswap v4, Balancer, Curve and Maverick pool in the recorded fixture is a component with
-//! no state, and so unroutable. Captured live they are all there.
+//! Both market modes hold the same pool states (see `fynd_test_fixtures::MarketRecording`). Live
+//! gives a new block on every run; offline gives the same block every time.
 
 use std::{
     collections::HashMap,
