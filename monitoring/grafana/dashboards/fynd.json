@@ -342,7 +342,7 @@
     {
       "id": 18,
       "title": "Worker Time Attribution",
-      "description": "Where each worker's second goes. The select! is biased with the event arms ahead of task pickup, so time in an activity is time tasks spend queued. The three activities are disjoint and sum.",
+      "description": "Where worker time goes, in worker-seconds per second. The select! is biased with the event arms ahead of task pickup, so time in an activity is time tasks spend queued. The three activities are disjoint and sum. This is summed over every worker, so it saturates at the worker count, not at 1.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 64 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -354,13 +354,13 @@
         },
         {
           "expr": "sum by (pool) (rate(worker_pool_task_duration_seconds_sum[1m]))",
-          "legendFormat": "solve: {{pool}}",
+          "legendFormat": "task: {{pool}}",
           "refId": "B"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
+          "unit": "none",
           "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "normal" } }
         },
         "overrides": []
