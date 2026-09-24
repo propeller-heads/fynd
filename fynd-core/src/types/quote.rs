@@ -1586,12 +1586,27 @@ pub struct RouteResult {
     net_amount_out: BigInt,
     /// Effective gas price (in wei) at the time the route was computed.
     gas_price: BigUint,
+    /// Block info at the time the route was computed.
+    block_info: Option<BlockInfo>,
 }
 
 impl RouteResult {
     /// Creates a new route result.
     pub fn new(route: Route, net_amount_out: BigInt, gas_price: BigUint) -> Self {
-        Self { route, net_amount_out, gas_price }
+        Self { route, net_amount_out, gas_price, block_info: None }
+    }
+
+    /// Attaches block info from the market state snapshot evaluated during route computation.
+    #[must_use]
+    pub fn with_block_info(mut self, block_info: BlockInfo) -> Self {
+        self.block_info = Some(block_info);
+        self
+    }
+
+    /// Block info at the time the route was computed, if recorded by the solver.
+    #[must_use]
+    pub fn block_info(&self) -> Option<&BlockInfo> {
+        self.block_info.as_ref()
     }
 
     /// The route this result carries.

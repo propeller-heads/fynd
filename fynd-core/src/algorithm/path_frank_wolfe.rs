@@ -605,7 +605,11 @@ impl PathFrankWolfeAlgorithm {
             .clone()
             .unwrap_or_default();
         let split_net = Self::compute_split_net_amount_out(&split_route, ctx)?;
-        Ok(Some(RouteResult::new(split_route, split_net, gas_price)))
+        let mut res = RouteResult::new(split_route, split_net, gas_price);
+        if let Some(b) = ctx.market_data.last_updated() {
+            res = res.with_block_info(b.clone());
+        }
+        Ok(Some(res))
     }
 
     /// Computes `net_amount_out` for a split route, mirroring
