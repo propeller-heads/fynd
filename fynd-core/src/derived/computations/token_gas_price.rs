@@ -55,12 +55,15 @@
 //! stored price, or a stored dependency changes. Unpriced tokens remain eligible because no stored
 //! dependency can trigger another attempt.
 //!
-//! `select_pass_tokens` puts tokens from added components first, including priced tokens. Stored
-//! dependencies cannot include new components, and new tokens need prices before quoting can use
-//! those tokens. A token holds this rank until a pass attempts it, because the cap can cut the
-//! rank short and no stored dependency would name the new component afterwards. This priority does
-//! not cover other priced tokens that reach added components through further swaps. Those tokens
-//! still need a stored dependency change to qualify.
+//! `select_pass_tokens` puts tokens from added components first. Stored dependencies cannot
+//! include new components, and new tokens need prices before quoting can use those tokens. Which
+//! of those tokens get the rank depends on what granted the pass: a whole pass gives it to every
+//! token an added component carries, priced or not, and a pass inside the interval gives it only
+//! to the tokens with no price. "How often a pass runs" says why. A token holds the rank until a
+//! pass attempts it, because the cap can cut the rank short and no stored dependency would name
+//! the new component afterwards. This priority does not cover other priced tokens that reach
+//! added components through further swaps. Those tokens still need a stored dependency change to
+//! qualify.
 //!
 //! Passes have numbers. A token's stamp is the number of the pass that last attempted it, or zero
 //! if no pass attempted it. Both ranks order by smallest stamp first. Failed attempts update
@@ -488,7 +491,9 @@ impl PassPriority {
 /// Within a rank the token whose last attempt is oldest comes first, so a cap smaller than the
 /// candidates rotates over them instead of starving the tail, and a token that no pass has
 /// attempted yet comes before every token that has a price.
-/// `PassScope::ArrivalsOnly` offers the arrived tokens only.
+/// `PassScope::ArrivalsOnly` offers the arrived tokens only. What is in that set is the caller's
+/// choice: inside the interval `update_prices` first drops the arrivals that already have a
+/// price, so only a token that cannot be quoted at all reaches this function.
 fn select_pass_tokens(
     universe: &FxHashSet<Address>,
     changed: Option<&FxHashSet<Address>>,
