@@ -29,6 +29,7 @@
     "@types/node": "22.15.30",
     "bare": "1.33.5",
     "oxlint": "1.51.0",
+    "require-asset": "1.2.4",
     "typescript": "5.8.2",
     "vitest": "4.0.18"
   }

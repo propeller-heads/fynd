@@ -84,6 +84,9 @@ importers:
       oxlint:
         specifier: 1.51.0
         version: 1.51.0
+      require-asset:
+        specifier: 1.2.4
+        version: 1.2.4(bare-url@2.5.4)
       typescript:
         specifier: 5.8.2
         version: 5.8.2
@@ -3006,7 +3009,6 @@ snapshots:
       bare-module-resolve: 1.12.5(bare-url@2.5.4)
     transitivePeerDependencies:
       - bare-url
-    optional: true
 
   resolve-pkg-maps@1.0.0: {}
 

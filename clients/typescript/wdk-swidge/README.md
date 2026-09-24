@@ -211,7 +211,7 @@ pnpm --dir clients/typescript --filter wdk-protocol-swidge-fynd test
 pnpm --dir clients/typescript --filter wdk-protocol-swidge-fynd build
 ```
 
-Run these from the Fynd repository root. Tests require Anvil 1.7.1 on `PATH` (or `ANVIL_BIN`) and permission to bind ephemeral loopback ports; the pinned Bare runtime is a dev dependency. The account tests use fixture contracts on an isolated chain, not live settlement. Node checks alone do not establish Bare support; execute the packed-artifact Node/Bare checks before release. The library has no direct logging or telemetry. Examples deliberately log only their requested results/progress.
+Run these from the Fynd repository root. Tests require Anvil 1.7.1 on `PATH` (or `ANVIL_BIN`) and permission to bind ephemeral loopback ports; the pinned Bare runtime is a dev dependency. `require-asset` is pinned as a development dependency because pnpm 10 can omit this shared optional dependency of the Bare platform binaries on a clean install. The account tests use fixture contracts on an isolated chain, not live settlement. Node checks alone do not establish Bare support; execute the packed-artifact Node/Bare checks before release. The library has no direct logging or telemetry. Examples deliberately log only their requested results/progress.
 
 Source: [propeller-heads/fynd](https://github.com/propeller-heads/fynd/tree/main/clients/typescript/wdk-swidge). For ordinary hosted API support, use the [Fynd support group](https://t.me/+B4CNQwv7dgIyYTJl) linked by Fynd's hosted API guide. For sensitive reports, see [SECURITY.md](SECURITY.md). No support SLA or Tether review approval is implied.
 
