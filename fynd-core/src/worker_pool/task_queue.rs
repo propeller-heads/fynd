@@ -141,9 +141,9 @@ mod tests {
         Address::from([byte; 20])
     }
 
-    /// A deadline far enough out that these tests never reach it, so they measure the queue
+    /// A deadline long enough that these tests never reach it, so they measure the queue
     /// rather than the router giving up.
-    fn far_deadline() -> Instant {
+    fn long_deadline() -> Instant {
         Instant::now() + std::time::Duration::from_secs(60)
     }
 
@@ -263,7 +263,7 @@ mod tests {
 
         // Enqueue an order
         let result = handle
-            .enqueue(make_order(), SolveParams::default(), far_deadline())
+            .enqueue(make_order(), SolveParams::default(), long_deadline())
             .await;
 
         worker
@@ -288,7 +288,7 @@ mod tests {
         });
 
         let result = handle
-            .enqueue(make_order(), SolveParams::default(), far_deadline())
+            .enqueue(make_order(), SolveParams::default(), long_deadline())
             .await;
 
         worker
@@ -313,7 +313,7 @@ mod tests {
         });
 
         let result = handle
-            .enqueue(make_order(), SolveParams::default(), far_deadline())
+            .enqueue(make_order(), SolveParams::default(), long_deadline())
             .await;
 
         worker
@@ -332,7 +332,7 @@ mod tests {
         drop(receiver);
 
         let result = handle
-            .enqueue(make_order(), SolveParams::default(), far_deadline())
+            .enqueue(make_order(), SolveParams::default(), long_deadline())
             .await;
         assert!(matches!(result, Err(SolveError::QueueFull)));
     }
@@ -349,7 +349,7 @@ mod tests {
 
         // Create a oneshot and send a task
         let (response_tx, _response_rx) = oneshot::channel();
-        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, far_deadline());
+        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, long_deadline());
 
         handle
             .sender
@@ -361,7 +361,7 @@ mod tests {
 
         // Send another
         let (response_tx2, _response_rx2) = oneshot::channel();
-        let task2 = SolveTask::new(Uuid::new_v4(), make_order(), response_tx2, far_deadline());
+        let task2 = SolveTask::new(Uuid::new_v4(), make_order(), response_tx2, long_deadline());
         handle
             .sender
             .send(task2)
@@ -384,7 +384,7 @@ mod tests {
         // Fill the queue
         for _ in 0..capacity {
             let (response_tx, _response_rx) = oneshot::channel();
-            let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, far_deadline());
+            let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, long_deadline());
             handle
                 .sender
                 .send(task)
@@ -407,12 +407,12 @@ mod tests {
         let (tx2, _rx2) = oneshot::channel();
         handle
             .sender
-            .send(SolveTask::new(Uuid::new_v4(), make_order(), tx1, far_deadline()))
+            .send(SolveTask::new(Uuid::new_v4(), make_order(), tx1, long_deadline()))
             .await
             .unwrap();
         handle
             .sender
-            .send(SolveTask::new(Uuid::new_v4(), make_order(), tx2, far_deadline()))
+            .send(SolveTask::new(Uuid::new_v4(), make_order(), tx2, long_deadline()))
             .await
             .unwrap();
 
@@ -450,8 +450,8 @@ mod tests {
 
         // Enqueue from both handles concurrently
         let (result1, result2) = tokio::join!(
-            handle1.enqueue(make_order(), SolveParams::default(), far_deadline()),
-            handle2.enqueue(make_order(), SolveParams::default(), far_deadline()),
+            handle1.enqueue(make_order(), SolveParams::default(), long_deadline()),
+            handle2.enqueue(make_order(), SolveParams::default(), long_deadline()),
         );
 
         worker
@@ -483,10 +483,10 @@ mod tests {
 
         // Enqueue two orders
         let _ = handle
-            .enqueue(make_order(), SolveParams::default(), far_deadline())
+            .enqueue(make_order(), SolveParams::default(), long_deadline())
             .await;
         let _ = handle
-            .enqueue(make_order(), SolveParams::default(), far_deadline())
+            .enqueue(make_order(), SolveParams::default(), long_deadline())
             .await;
 
         let (id1, id2): (Uuid, Uuid) = collector
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn test_solve_task_wait_time_increases() {
         let (response_tx, _response_rx) = oneshot::channel();
-        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, far_deadline());
+        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, long_deadline());
 
         let wait1 = task.wait_time();
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -514,7 +514,7 @@ mod tests {
     #[tokio::test]
     async fn test_solve_task_respond_delivers_result() {
         let (response_tx, response_rx) = oneshot::channel();
-        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, far_deadline());
+        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, long_deadline());
 
         task.respond(Ok(make_single_quote()));
 
@@ -527,7 +527,7 @@ mod tests {
     #[tokio::test]
     async fn test_solve_task_respond_delivers_error() {
         let (response_tx, response_rx) = oneshot::channel();
-        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, far_deadline());
+        let task = SolveTask::new(Uuid::new_v4(), make_order(), response_tx, long_deadline());
 
         task.respond(Err(SolveError::Timeout { elapsed_ms: 100 }));
 
