@@ -149,6 +149,18 @@ to the same `handle_tycho_message`. Both non-Tycho streams are opened before the
 `pending_tx` / `controller_tx` handshake, so a configuration error reaches the caller as an error
 rather than as a handle to a feed that dies.
 
+Each RFQ client reads its own credentials through `get_env`, so a missing one is a
+`DataFeedError::Config` at registration rather than a client that streams nothing: `BEBOP_KEY` for
+`rfq:bebop`, `HASHFLOW_USER`/`HASHFLOW_KEY` for `rfq:hashflow`, `METRIC_API_KEY` for `rfq:metric`
+(whose `METRIC_API_URL` stays optional, defaulting to Metric's public endpoint). `rfq:metric` is
+also gated on `METRIC_CHAINS`, the chains tycho-execution deploys its executor to — elsewhere the
+entry is rejected instead of pricing legs that cannot be encoded. That gate is what splits Metric
+between the two non-Tycho sources: the price level stream serves it on Ethereum
+(`pricelevelstream:metric`, executing through the `TychoFallbackRouter`) and `rfq:metric` serves it
+on the chains `METRIC_CHAINS` names (executing through `MetricExecutor`). `METRIC_CHAINS` and
+`PRICE_LEVEL_STREAM_CHAIN` are disjoint, so no deployment can stream the same Metric inventory
+twice.
+
 Price level venues must be one of tycho-simulation's `default_served_pamms` — an unrecognised name
 is a `DataFeedError::Config`, not a warning, because these entries are always hand-written. The
 stream is Ethereum-only (`PRICE_LEVEL_STREAM_CHAIN` tracks upstream's venue set, which carries no

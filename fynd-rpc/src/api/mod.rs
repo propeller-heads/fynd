@@ -17,6 +17,10 @@ pub(crate) mod middleware;
 #[cfg(feature = "experimental")]
 /// Response types and handler for `GET /v1/prices` (experimental).
 pub mod prices;
+/// The quote record every answered `/v1/quote` produces for the collector.
+pub mod record;
+/// The bounded queue carrying those records to the task that sends them.
+pub(crate) mod record_emitter;
 /// Builds re-issuable, signature-free representation of a quote request for replay logging.
 pub mod request_capture;
 #[cfg(feature = "experimental")]
@@ -38,10 +42,10 @@ use fynd_core::{
 use handlers::configure_routes;
 #[cfg(feature = "experimental")]
 use tycho_simulation::tycho_common::models::Address;
-use tycho_simulation::tycho_common::Bytes;
+use tycho_simulation::tycho_common::{models::Chain, Bytes};
 use utoipa::OpenApi;
 
-use crate::api::error::ErrorResponse;
+use crate::api::{error::ErrorResponse, record_emitter::RecordEmitter};
 
 /// Adds caller routes to the `/v1` scope ahead of the defaults. Paths are relative to `/v1`
 /// (e.g. `"/quote"`) — the closure owns the whole `/v1` [`actix_web::Scope`], so it may add
@@ -230,9 +234,10 @@ impl HealthTracker {
 pub struct AppState {
     worker_router: Arc<WorkerPoolRouter>,
     health_tracker: HealthTracker,
-    chain_id: u64,
+    chain: Chain,
     router_address: Option<Bytes>,
     permit2_address: Bytes,
+    record_emitter: Option<RecordEmitter>,
     #[cfg(feature = "experimental")]
     pub(crate) derived_data: SharedDerivedDataRef,
     #[cfg(feature = "experimental")]
@@ -249,9 +254,10 @@ impl AppState {
     pub(crate) fn new(
         worker_router: WorkerPoolRouter,
         health_tracker: HealthTracker,
-        chain_id: u64,
+        chain: Chain,
         router_address: Option<Bytes>,
         permit2_address: Bytes,
+        record_emitter: Option<RecordEmitter>,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
         #[cfg(feature = "experimental")] gas_token: Address,
         #[cfg(feature = "experimental")] market_data: MarketData,
@@ -259,9 +265,10 @@ impl AppState {
         Self {
             worker_router: Arc::new(worker_router),
             health_tracker,
-            chain_id,
+            chain,
             router_address,
             permit2_address,
+            record_emitter,
             #[cfg(feature = "experimental")]
             derived_data,
             #[cfg(feature = "experimental")]
@@ -285,10 +292,16 @@ impl AppState {
         &self.health_tracker
     }
 
+    /// Returns the chain this instance serves quotes for.
+    #[must_use]
+    pub fn chain(&self) -> Chain {
+        self.chain
+    }
+
     /// Returns the chain ID this instance serves quotes for.
     #[must_use]
     pub fn chain_id(&self) -> u64 {
-        self.chain_id
+        self.chain.id()
     }
 
     /// Returns the Tycho Router address, if configured.
@@ -301,6 +314,12 @@ impl AppState {
     #[must_use]
     pub fn permit2_address(&self) -> &Bytes {
         &self.permit2_address
+    }
+
+    /// Returns the record queue the quote handler feeds, when this instance emits records.
+    #[must_use]
+    pub(crate) fn record_emitter(&self) -> Option<&RecordEmitter> {
+        self.record_emitter.as_ref()
     }
 }
 
@@ -482,9 +501,10 @@ mod configure_app_tests {
         AppState::new(
             router,
             health_tracker,
-            1,
+            Chain::Ethereum,
             None,
             Bytes::from(hex::decode("000000000022D473030F116dDEE9F6B43aC78BA3").unwrap()),
+            None,
             #[cfg(feature = "experimental")]
             derived_data,
             #[cfg(feature = "experimental")]

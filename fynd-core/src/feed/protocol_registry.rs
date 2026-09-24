@@ -35,6 +35,7 @@ use tycho_simulation::{
         protocols::{
             bebop::{client_builder::BebopClientBuilder, state::BebopState},
             hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
+            metric::{client_builder::MetricClientBuilder, state::MetricState},
         },
         stream::RFQStreamBuilder,
     },
@@ -116,6 +117,12 @@ fn uniswap_v4_hook_filter(component: &ComponentWithState) -> bool {
 /// mainnet deployments; it carries no chain of its own, so this has to move when it gains a venue
 /// elsewhere.
 const PRICE_LEVEL_STREAM_CHAIN: Chain = Chain::Ethereum;
+
+/// The chains Metric's executor is deployed on.
+///
+/// Tracks tycho-execution's `executor_addresses.json`. A Metric leg on any other chain would price
+/// from the RFQ stream and then fail to encode, so the entry is rejected at registration instead.
+const METRIC_CHAINS: &[Chain] = &[Chain::Base, Chain::Robinhood];
 
 /// Whether a `--protocols` entry names a Tycho protocol system.
 ///
@@ -449,6 +456,28 @@ pub(crate) fn register_rfq(
                     .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
                 rfq_stream_builder = rfq_stream_builder
                     .add_client::<HashflowState>("hashflow", Box::new(hashflow_client));
+            }
+            "rfq:metric" => {
+                if !METRIC_CHAINS.contains(&chain) {
+                    return Err(DataFeedError::Config(format!(
+                        "{protocol} is only deployed on {}, but this feed runs on {chain}",
+                        METRIC_CHAINS
+                            .iter()
+                            .map(|chain| chain.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+                let api_key = get_env("METRIC_API_KEY")?;
+                info!("Adding {protocol} RFQ client...");
+                let metric_client = MetricClientBuilder::new(chain)
+                    .tokens(rfq_tokens.clone())
+                    .tvl_threshold(min_tvl)
+                    .api_key(Some(api_key))
+                    .build()
+                    .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+                rfq_stream_builder =
+                    rfq_stream_builder.add_client::<MetricState>("metric", Box::new(metric_client));
             }
             p if p.starts_with(RFQ_PREFIX) => {
                 warn!("Skipping unknown RFQ protocol: {}", p);
@@ -800,6 +829,22 @@ mod tests {
         )
     }
 
+    fn register_rfq_entries(
+        chain: Chain,
+        entries: &[&str],
+    ) -> Result<RFQStreamBuilder, DataFeedError> {
+        register_rfq(
+            RFQStreamBuilder::new(),
+            chain,
+            1.0,
+            &entries
+                .iter()
+                .map(|entry| (*entry).to_string())
+                .collect::<Vec<_>>(),
+            std::collections::HashSet::new(),
+        )
+    }
+
     fn price_level_stream(
         chain: Chain,
         entries: &[&str],
@@ -1048,6 +1093,39 @@ mod tests {
         let Ok(None) = price_level_stream(Chain::Base, &["uniswap_v3"]) else {
             panic!("expected chains without a `pricelevelstream:` entry to be left alone");
         };
+    }
+
+    #[test]
+    fn test_metric_sources_serve_disjoint_chains() {
+        assert!(
+            !METRIC_CHAINS.contains(&PRICE_LEVEL_STREAM_CHAIN),
+            "a chain served both ways would stream the same Metric inventory twice"
+        );
+    }
+
+    #[test]
+    fn test_register_rfq_metric_off_supported_chains() {
+        let Err(err) = register_rfq_entries(Chain::Ethereum, &["rfq:metric"]) else {
+            panic!("expected rfq:metric to be rejected where Metric has no executor");
+        };
+        assert!(
+            err.to_string()
+                .contains("only deployed on base, robinhood"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn test_register_rfq_metric_requires_api_key() {
+        env::remove_var("METRIC_API_KEY");
+        let Err(err) = register_rfq_entries(Chain::Base, &["rfq:metric"]) else {
+            panic!("expected rfq:metric to require METRIC_API_KEY");
+        };
+        assert!(
+            err.to_string()
+                .contains("METRIC_API_KEY"),
+            "got {err}"
+        );
     }
 
     #[test]
