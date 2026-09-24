@@ -1,13 +1,13 @@
 {
   "metadata": {
-    "block_number": 24838913,
-    "num_components": 2377,
-    "num_tokens": 1688,
-    "fynd_version": "0.99.17",
+    "block_number": 26045981,
+    "num_components": 2785,
+    "num_tokens": 1985,
+    "fynd_version": "0.108.0",
     "derived_data": {
-      "components_with_spot_prices": 1372,
-      "components_with_depths": 1308,
-      "token_prices": 1135
+      "components_with_spot_prices": 2785,
+      "components_with_depths": 2577,
+      "token_prices": 1867
     }
   },
   "scenarios": [
@@ -26,14 +26,14 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          3181730293,
-          248
+          3763662951,
+          311
         ],
         "gas_estimate": [
-          1111933
+          302933
         ],
-        "num_swaps": 3,
-        "solve_time_ms": 124
+        "num_swaps": 2,
+        "solve_time_ms": 37
       }
     },
     {
@@ -50,15 +50,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          3916347742,
-          2227448552,
-          24
+          2269223662,
+          245578306,
+          20
         ],
         "gas_estimate": [
-          515500
+          334433
         ],
         "num_swaps": 2,
-        "solve_time_ms": 126
+        "solve_time_ms": 40
       }
     },
     {
@@ -76,15 +76,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          4199956671,
-          3614067748,
-          46922
+          26755366,
+          2042460042,
+          58533
         ],
         "gas_estimate": [
-          90000
+          2384000
         ],
         "num_swaps": 1,
-        "solve_time_ms": 70
+        "solve_time_ms": 24
       }
     },
     {
@@ -102,15 +102,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          356644580,
-          897667436,
-          20
+          3637967235,
+          3772907440,
+          17
         ],
         "gas_estimate": [
-          90000
+          3207433
         ],
-        "num_swaps": 1,
-        "solve_time_ms": 89
+        "num_swaps": 3,
+        "solve_time_ms": 28
       }
     },
     {
@@ -127,15 +127,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          2388903276,
-          3415389101,
-          43273
+          882365442,
+          860604421,
+          45607
         ],
         "gas_estimate": [
-          605500
+          2214433
         ],
         "num_swaps": 3,
-        "solve_time_ms": 72
+        "solve_time_ms": 13
       }
     },
     {
@@ -153,14 +153,14 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          4077697107,
-          185
+          2199284838,
+          207
         ],
         "gas_estimate": [
-          605500
+          2873000
         ],
-        "num_swaps": 3,
-        "solve_time_ms": 94
+        "num_swaps": 1,
+        "solve_time_ms": 19
       }
     },
     {
@@ -178,14 +178,14 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          3075978923,
-          248
+          3987878002,
+          311
         ],
         "gas_estimate": [
-          956500
+          147500
         ],
-        "num_swaps": 2,
-        "solve_time_ms": 115
+        "num_swaps": 1,
+        "solve_time_ms": 32
       }
     },
     {
@@ -202,15 +202,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          2385423546,
-          2237151505,
-          24
+          2401729119,
+          241338797,
+          20
         ],
         "gas_estimate": [
-          670933
+          179000
         ],
-        "num_swaps": 3,
-        "solve_time_ms": 116
+        "num_swaps": 1,
+        "solve_time_ms": 27
       }
     },
     {
@@ -228,13 +228,13 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          1534860332
+          1584925838
         ],
         "gas_estimate": [
-          336500
+          399500
         ],
         "num_swaps": 1,
-        "solve_time_ms": 86
+        "solve_time_ms": 23
       }
     },
     {
@@ -250,15 +250,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          4047073339,
-          1281704710,
-          26
+          1765876442,
+          1561145369,
+          25
         ],
         "gas_estimate": [
-          273500
+          431000
         ],
         "num_swaps": 1,
-        "solve_time_ms": 115
+        "solve_time_ms": 29
       }
     },
     {
@@ -275,14 +275,14 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          3395883137,
+          3616860745,
           232
         ],
         "gas_estimate": [
           155433
         ],
         "num_swaps": 1,
-        "solve_time_ms": 96
+        "solve_time_ms": 24
       }
     },
     {
@@ -299,14 +299,14 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          3662209048,
+          3415313920,
           232
         ],
         "gas_estimate": [
           155433
         ],
         "num_swaps": 1,
-        "solve_time_ms": 89
+        "solve_time_ms": 23
       }
     },
     {
@@ -324,16 +324,16 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          2921293447,
-          282592795,
-          2524156483,
+          2581519510,
+          1100387056,
+          2350318554,
           3
         ],
         "gas_estimate": [
           90000
         ],
         "num_swaps": 1,
-        "solve_time_ms": 55
+        "solve_time_ms": 18
       }
     },
     {
@@ -352,15 +352,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          4072592527,
-          2324840013,
+          2296839404,
+          2950544283,
           10
         ],
         "gas_estimate": [
           90000
         ],
         "num_swaps": 1,
-        "solve_time_ms": 45
+        "solve_time_ms": 16
       }
     },
     {
@@ -378,15 +378,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          1967881991,
-          3625522217,
-          3219
+          93622747,
+          2967479549,
+          5836
         ],
         "gas_estimate": [
-          5676933
+          265000
         ],
-        "num_swaps": 4,
-        "solve_time_ms": 69
+        "num_swaps": 2,
+        "solve_time_ms": 22
       }
     },
     {
@@ -404,15 +404,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          2511134556,
-          1305173754,
-          7
+          578974448,
+          1745732867,
+          17
         ],
         "gas_estimate": [
-          90000
+          258000
         ],
-        "num_swaps": 1,
-        "solve_time_ms": 55
+        "num_swaps": 2,
+        "solve_time_ms": 32
       }
     },
     {
@@ -430,15 +430,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          4208663776,
-          3188479382,
-          2073402171
+          371940147,
+          3319515898,
+          2408070259
         ],
         "gas_estimate": [
           90000
         ],
         "num_swaps": 1,
-        "solve_time_ms": 56
+        "solve_time_ms": 16
       }
     },
     {
@@ -457,15 +457,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          2231366966,
-          3281665712,
+          1538752443,
+          403451686,
           4
         ],
         "gas_estimate": [
           90000
         ],
         "num_swaps": 1,
-        "solve_time_ms": 33
+        "solve_time_ms": 9
       }
     },
     {
@@ -483,15 +483,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          3356646560,
-          2287505724,
-          14726
+          1348397021,
+          933483134,
+          7527
         ],
         "gas_estimate": [
-          2011000
+          588500
         ],
-        "num_swaps": 2,
-        "solve_time_ms": 72
+        "num_swaps": 1,
+        "solve_time_ms": 22
       }
     },
     {
@@ -509,15 +509,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          667914804,
-          1478203371,
-          8
+          466120198,
+          116125657,
+          26
         ],
         "gas_estimate": [
-          90000
+          809000
         ],
         "num_swaps": 1,
-        "solve_time_ms": 75
+        "solve_time_ms": 31
       }
     },
     {
@@ -535,15 +535,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          2553359044,
-          2038604712,
-          158
+          3821427617,
+          772309846,
+          482
         ],
         "gas_estimate": [
-          3626433
+          966500
         ],
-        "num_swaps": 4,
-        "solve_time_ms": 72
+        "num_swaps": 1,
+        "solve_time_ms": 23
       }
     },
     {
@@ -561,14 +561,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          4235859971,
-          3398749592
+          1906524883,
+          2243728312,
+          13
         ],
         "gas_estimate": [
-          90000
+          525500
         ],
         "num_swaps": 1,
-        "solve_time_ms": 29
+        "solve_time_ms": 22
       }
     },
     {
@@ -586,15 +587,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          1430354505,
-          2990415867,
-          12
+          3007790309,
+          35243467,
+          39
         ],
         "gas_estimate": [
-          90000
+          443500
         ],
-        "num_swaps": 1,
-        "solve_time_ms": 57
+        "num_swaps": 2,
+        "solve_time_ms": 15
       }
     },
     {
@@ -612,14 +613,14 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          1865927826,
-          2946092489
+          3092767726,
+          1074516945
         ],
         "gas_estimate": [
-          90000
+          622933
         ],
-        "num_swaps": 1,
-        "solve_time_ms": 22
+        "num_swaps": 3,
+        "solve_time_ms": 8
       }
     },
     {
@@ -635,11 +636,17 @@
         "name": "WETH_to_BNB_500"
       },
       "expected": {
-        "status": "no_route_found",
-        "amount_out_net_gas": [],
-        "gas_estimate": [],
-        "num_swaps": 0,
-        "solve_time_ms": 58
+        "status": "success",
+        "amount_out_net_gas": [
+          1831215939,
+          261999999,
+          11
+        ],
+        "gas_estimate": [
+          1374500
+        ],
+        "num_swaps": 1,
+        "solve_time_ms": 13
       }
     },
     {
@@ -655,11 +662,17 @@
         "name": "BNB_to_WETH_1700"
       },
       "expected": {
-        "status": "no_route_found",
-        "amount_out_net_gas": [],
-        "gas_estimate": [],
-        "num_swaps": 0,
-        "solve_time_ms": 8
+        "status": "success",
+        "amount_out_net_gas": [
+          2799012043,
+          1506902248,
+          2
+        ],
+        "gas_estimate": [
+          1287500
+        ],
+        "num_swaps": 1,
+        "solve_time_ms": 6
       }
     },
     {
@@ -676,15 +689,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          706974061,
-          152864389,
-          3164
+          3203749654,
+          1361179570,
+          4312
         ],
         "gas_estimate": [
-          4407500
+          599433
         ],
-        "num_swaps": 1,
-        "solve_time_ms": 70
+        "num_swaps": 4,
+        "solve_time_ms": 12
       }
     },
     {
@@ -701,15 +714,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          9222734,
-          4036657413,
-          14461
+          2253314921,
+          2453525458,
+          5624
         ],
         "gas_estimate": [
-          1184500
+          796933
         ],
-        "num_swaps": 2,
-        "solve_time_ms": 74
+        "num_swaps": 3,
+        "solve_time_ms": 14
       }
     },
     {
@@ -726,15 +739,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          3880380094,
-          2100552017,
-          158
+          2589999234,
+          3288174134,
+          364
         ],
         "gas_estimate": [
-          2514500
+          1048933
         ],
-        "num_swaps": 1,
-        "solve_time_ms": 71
+        "num_swaps": 3,
+        "solve_time_ms": 12
       }
     },
     {
@@ -752,14 +765,14 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          2875216305,
-          67
+          1708336843,
+          200
         ],
         "gas_estimate": [
-          448000
+          560933
         ],
-        "num_swaps": 3,
-        "solve_time_ms": 54
+        "num_swaps": 4,
+        "solve_time_ms": 21
       }
     },
     {
@@ -778,14 +791,14 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          2124357048,
-          97
+          657171875,
+          123
         ],
         "gas_estimate": [
-          511000
+          458000
         ],
-        "num_swaps": 3,
-        "solve_time_ms": 31
+        "num_swaps": 2,
+        "solve_time_ms": 6
       }
     },
     {
@@ -803,15 +816,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          613430365,
-          511428383,
-          4865
+          1426776566,
+          1637502061,
+          4899
         ],
         "gas_estimate": [
-          574000
+          689000
         ],
         "num_swaps": 3,
-        "solve_time_ms": 25
+        "solve_time_ms": 9
       }
     },
     {
@@ -829,15 +842,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          750020130,
-          3740034367,
-          1530
+          1113241856,
+          1173875735,
+          5605
         ],
         "gas_estimate": [
-          2028500
+          1074000
         ],
         "num_swaps": 3,
-        "solve_time_ms": 32
+        "solve_time_ms": 7
       }
     },
     {
@@ -855,15 +868,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          699271262,
-          1847897781,
-          13
+          2702451880,
+          30424662,
+          39
         ],
         "gas_estimate": [
-          416500
+          961500
         ],
         "num_swaps": 3,
-        "solve_time_ms": 3
+        "solve_time_ms": 2
       }
     },
     {
@@ -881,15 +894,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          2666845634,
-          380819166,
-          16
+          1080286843,
+          3410417326,
+          4
         ],
         "gas_estimate": [
-          603433
+          646500
         ],
-        "num_swaps": 4,
-        "solve_time_ms": 4
+        "num_swaps": 3,
+        "solve_time_ms": 0
       }
     },
     {
@@ -908,15 +921,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          3772938722,
-          3104732607,
-          1563819153
+          379616939,
+          1741583772,
+          1863587861
         ],
         "gas_estimate": [
           180000
         ],
         "num_swaps": 2,
-        "solve_time_ms": 1
+        "solve_time_ms": 0
       }
     },
     {
@@ -935,15 +948,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          1956240396,
-          3069960446,
-          2897852136
+          1414558728,
+          2084289350,
+          2463249724
         ],
         "gas_estimate": [
           180000
         ],
         "num_swaps": 2,
-        "solve_time_ms": 1
+        "solve_time_ms": 0
       }
     },
     {
@@ -961,15 +974,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          896293564,
-          3915081868,
-          113
+          3316836892,
+          238527446,
+          319
         ],
         "gas_estimate": [
-          1658000
+          878000
         ],
         "num_swaps": 3,
-        "solve_time_ms": 18
+        "solve_time_ms": 7
       }
     },
     {
@@ -987,14 +1000,14 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          928608731,
-          4107363136,
-          189
+          3839255941,
+          2437289127,
+          2916
         ],
         "gas_estimate": [
-          792433
+          790500
         ],
-        "num_swaps": 4,
+        "num_swaps": 3,
         "solve_time_ms": 6
       }
     },
@@ -1013,15 +1026,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          994540573,
-          4224135004,
-          11
+          3571653037,
+          34528481,
+          39
         ],
         "gas_estimate": [
-          180000
+          1252500
         ],
-        "num_swaps": 2,
-        "solve_time_ms": 15
+        "num_swaps": 3,
+        "solve_time_ms": 2
       }
     },
     {
@@ -1039,15 +1052,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          3664814609,
-          2108632776,
-          476
+          2243875054,
+          2055282342,
+          72
         ],
         "gas_estimate": [
-          385000
+          646500
         ],
         "num_swaps": 3,
-        "solve_time_ms": 4
+        "solve_time_ms": 1
       }
     },
     {
@@ -1066,15 +1079,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          1203428201,
-          1643739016,
-          1826
+          285424121,
+          3386027918,
+          2305
         ],
         "gas_estimate": [
-          2186000
+          322500
         ],
         "num_swaps": 3,
-        "solve_time_ms": 17
+        "solve_time_ms": 2
       }
     },
     {
@@ -1090,11 +1103,17 @@
         "name": "BNB_to_AAVE_1700"
       },
       "expected": {
-        "status": "no_route_found",
-        "amount_out_net_gas": [],
-        "gas_estimate": [],
-        "num_swaps": 0,
-        "solve_time_ms": 2
+        "status": "success",
+        "amount_out_net_gas": [
+          3620823108,
+          3650256704,
+          44
+        ],
+        "gas_estimate": [
+          1466500
+        ],
+        "num_swaps": 2,
+        "solve_time_ms": 1
       }
     },
     {
@@ -1113,15 +1132,15 @@
       "expected": {
         "status": "success",
         "amount_out_net_gas": [
-          2766140705,
-          533754486,
-          3224
+          1442414943,
+          4117783834,
+          1175
         ],
         "gas_estimate": [
-          511000
+          332000
         ],
-        "num_swaps": 3,
-        "solve_time_ms": 14
+        "num_swaps": 2,
+        "solve_time_ms": 2
       }
     }
   ]

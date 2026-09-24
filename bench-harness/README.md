@@ -33,7 +33,7 @@ viewer keeps the two apart in its run picker for exactly that reason.
 
 **The market fixture**, for offline runs, is in Git LFS at
 `fynd-core/tests/fixtures/market_recording.json.zst`. Run `git lfs pull` if it is a small text file
-instead of 771 KB of compressed JSON. Live runs do not read it; they need `TYCHO_URL` and
+instead of about 5 MB of compressed JSON. Live runs do not read it; they need `TYCHO_URL` and
 `TYCHO_API_KEY` instead, and `RPC_URL` to price gas at the chain's rate.
 
 **The order dataset** is `aggregator_trades_50k_1k_usd.json` in the repository root. It is
