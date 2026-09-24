@@ -2,16 +2,16 @@
 icon: coins
 ---
 
-# Stable Swap Rate
+# Stable Rate Swap
 
 Fix the output rate of a token pair for your users. Fynd routes the swap at market and settles the difference against your vault balance in the TychoRouter. You keep full control of the rate, every swap settles onchain in one transaction, and there is no counterparty that can go offline.
 
-Stable Swap Rate is built from two primitives you may already use: the [client fee](client-fees.md) and the [client contribution](client-fees.md#maxclientcontribution).
+Stable Rate Swap is built from two primitives you may already use: the [client fee](client-fees.md) and the [client contribution](client-fees.md#maxclientcontribution).
 
-Stable Swap Rate runs as a separate Fynd server that we host for you, with its own base URL. It accepts the same requests as the standard Fynd API and returns the same responses, plus an API extension with Stable Swap Rate fields.
+Stable Rate Swap runs as a separate Fynd server that we host for you, with its own base URL. It accepts the same requests as the standard Fynd API and returns the same responses, plus an API extension with Stable Rate Swap fields.
 
 {% hint style="warning" %}
-**Beta.** Stable Swap Rate is available to selected integrators. To get access, contact us on [Telegram](https://t.me/+B4CNQwv7dgIyYTJl).
+**Beta.** Stable Rate Swap is available to selected integrators. To get access, contact us on [Telegram](https://t.me/+B4CNQwv7dgIyYTJl).
 {% endhint %}
 
 ## How it works
@@ -28,9 +28,9 @@ Fynd encodes the declared rate into the same `ClientFee` payload that [client fe
 
 The formula uses three inputs:
 
-- **Market quote (`Q`)**: what the best onchain route returns for the input amount right now. It moves with the market.
-- **Declared output (`D`)**: what you promise your user, at the rate you set. For 1,000,000 USDC at 1 USDC = 1 USDT, `D` is 1,000,000 USDT, whatever the market does.
-- **Depeg tolerance**: the largest gap, in basis points of `D`, that your vault covers when the market is below your rate.
+* **Market quote (`Q`)**: what the best onchain route returns for the input amount right now. It moves with the market.
+* **Declared output (`D`)**: what you promise your user, at the rate you set. For 1,000,000 USDC at 1 USDC = 1 USDT, `D` is 1,000,000 USDT, whatever the market does.
+* **Depeg tolerance**: the largest gap, in basis points of `D`, that your vault covers when the market is below your rate.
 
 ```
 1. expected_amount_out     = max(Q, D)
@@ -66,25 +66,25 @@ user receives           = 1,000,000
 
 ## Quote response
 
-Your Stable Swap Rate server accepts the same `POST /v1/{chain}/quote` request as Fynd. Enable encoding, and you get the same `OrderQuote` back. The `fee_breakdown` and the encoded `transaction` are the standard ones, so an existing Fynd client only needs a different base URL. Encoding is required because the fixed rate lives in the transaction's `ClientFee` payload. See [encoding options](encoding-options.md).
+Your Stable Rate Swap server accepts the same `POST /v1/{chain}/quote` request as Fynd. Enable encoding, and you get the same `OrderQuote` back. The `fee_breakdown` and the encoded `transaction` are the standard ones, so an existing Fynd client only needs a different base URL. Encoding is required because the fixed rate lives in the transaction's `ClientFee` payload. See [encoding options](encoding-options.md).
 
-Each quote also carries the Stable Swap Rate API extension. Use it to show your user the declared rate next to the market, and to monitor how far the market drifts from your rate and how much your vault subsidizes.
+Each quote also carries the Stable Rate Swap API extension. Use it to show your user the declared rate next to the market, and to monitor how far the market drifts from your rate and how much your vault subsidizes.
 
-| Field                        | Type      | Description                                                          |
-| ---------------------------- | --------- | -------------------------------------------------------------------- |
-| `declared_amount_out`        | `string`  | Output at your declared rate. This is what the user receives.        |
-| `market_amount_out`          | `string`  | Output of the market route at quote time.                            |
-| `router_expected_amount_out` | `string`  | `max(market, declared)`, encoded as `expectedAmountOut` in the tx.   |
-| `client_fee_bps`             | `integer` | Client fee that moves the surplus into your vault. `0` when none.    |
-| `max_client_contribution`    | `string`  | Cap on the subsidy your vault pays for this swap.                    |
-| `deadline`                   | `integer` | Unix timestamp after which the quote is no longer valid.             |
+| Field                        | Type      | Description                                                         |
+| ---------------------------- | --------- | ------------------------------------------------------------------- |
+| `declared_amount_out`        | `string`  | Output at your declared rate. This is what the user receives.       |
+| `market_amount_out`          | `string`  | Output of the market route at quote time.                           |
+| `router_expected_amount_out` | `string`  | `max(market, declared)`, encoded as `expectedAmountOut` in the tx.  |
+| `client_fee_bps`             | `integer` | Client fee that moves the surplus into your vault. `0` when none.   |
+| `max_client_contribution`    | `string`  | Cap on the subsidy your vault pays for this swap.                   |
+| `deadline`                   | `integer` | Unix timestamp after which the quote is no longer valid.            |
 | `gap_bps`                    | `integer` | Signed distance between market and declared output in basis points. |
 
 All amounts are in output token units.
 
 ## Hosted deployment
 
-We host the Stable Swap Rate server for you on any chain Fynd supports, for any token pair and any rate policy. Onboarding is guided. Together we:
+We host the Stable Rate Swap server for you on any chain Fynd supports, for any token pair and any rate policy. Onboarding is guided. Together we:
 
 1. Pick the chain, the token pair, and the rate policy your users see.
 2. Set the depeg tolerance, the quote validity window, and the float you keep in your TychoRouter vault. See the [vault mechanism](https://docs.propellerheads.xyz/tycho/for-solvers/execution/vault) in the Tycho docs.
@@ -93,4 +93,4 @@ We host the Stable Swap Rate server for you on any chain Fynd supports, for any 
 
 ## Get access
 
-Stable Swap Rate is in Beta. Contact us on [Telegram](https://t.me/+B4CNQwv7dgIyYTJl) with your pairs, chains, expected volume, and whether you already hold vault inventory.
+Stable Rate Swap is in Beta. Contact us on [Telegram](https://t.me/+B4CNQwv7dgIyYTJl) with your pairs, chains, expected volume, and whether you already hold vault inventory.
