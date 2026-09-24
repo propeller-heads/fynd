@@ -32,7 +32,7 @@ a pairs file for it.
 | `--chain` | `ethereum` | Chain to record (any chain Tycho supports, e.g. `base`, `unichain`) |
 | `--duration-secs` | 600 | Recording duration (30s is usually sufficient) |
 | `--output-dir` | `fynd-core/tests/fixtures` | Where to write fixtures |
-| `--protocols` | auto-discover | Comma-separated protocol filter |
+| `--protocols` | all on-chain | Comma-separated, resolved as `fynd serve --protocols` resolves them (`native_onchain`, `all_onchain`, `exclude:`) |
 | `--min-tvl` | 10.0 | Minimum TVL in ETH |
 | `--min-token-quality` | 100 | Token quality threshold |
 | `--traded-n-days-ago` | 3 | Token recency filter |

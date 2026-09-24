@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use fynd_rpc::protocols::fetch_protocol_systems;
+use fynd_rpc::protocols::resolve_protocols;
 use fynd_test_fixtures::{MarketRecording, RecordingMetadata};
 use tokio_stream::StreamExt;
 use tycho_simulation::{
@@ -14,7 +14,7 @@ pub struct RecordingOptions {
     pub tycho_url: String,
     pub tycho_api_key: String,
     pub duration_secs: u64,
-    pub protocols: Option<Vec<String>>,
+    pub protocols: Vec<String>,
     pub min_tvl: f64,
     pub min_token_quality: i32,
     pub traded_n_days_ago: u64,
@@ -29,19 +29,12 @@ pub struct RecordingOptions {
 pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketRecording> {
     let chain = opts.chain;
 
-    let protocols = match &opts.protocols {
-        Some(p) if !p.is_empty() => {
-            tracing::info!(protocols = ?p, "using explicit protocol list");
-            p.clone()
-        }
-        _ => {
-            let discovered =
-                fetch_protocol_systems(&opts.tycho_url, Some(&opts.tycho_api_key), true, chain)
-                    .await?;
-            tracing::info!(count = discovered.len(), ?discovered, "discovered protocols");
-            discovered
-        }
-    };
+    // `fynd serve --protocols` also uses `resolve_protocols`, so `native_onchain`, `all_onchain`
+    // and `exclude:` entries record the market a solver streams.
+    let protocols =
+        resolve_protocols(&opts.tycho_url, Some(&opts.tycho_api_key), true, chain, &opts.protocols)
+            .await?;
+    tracing::info!(count = protocols.len(), ?protocols, "resolved protocols");
 
     let all_tokens = load_all_tokens(
         &opts.tycho_url,

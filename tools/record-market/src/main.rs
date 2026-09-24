@@ -33,9 +33,11 @@ struct Cli {
     #[arg(long, default_value = "fynd-core/tests/fixtures")]
     output_dir: PathBuf,
 
-    /// Protocol systems to record (comma-delimited).
+    /// Protocols to record (comma-delimited), resolved as `fynd serve --protocols` resolves them:
+    /// `native_onchain`, `all_onchain`, explicit systems and `exclude:` entries. Without this
+    /// flag, the tool records every on-chain protocol.
     #[arg(long, value_delimiter = ',')]
-    protocols: Option<Vec<String>>,
+    protocols: Vec<String>,
 
     /// Minimum TVL in ETH for component filtering.
     #[arg(long, default_value = "10.0")]
