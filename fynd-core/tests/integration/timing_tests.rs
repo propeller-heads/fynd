@@ -6,6 +6,10 @@ fn expected_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/expected_outputs.json")
 }
 
+/// How much slower an unoptimised build solves. CI runs this suite without `--release`, and on the
+/// recorded market 3-hop solves there take longer than the pool timeout.
+const DEBUG_BUILD_SLOWDOWN: u64 = 3;
+
 fn max_pool_timeout_ms() -> u64 {
     let toml_content = include_str!("../../../worker_pools.toml");
     let pools = fynd_test_fixtures::parse_pools_toml(toml_content)
@@ -51,7 +55,11 @@ async fn test_solve_time_p95_within_threshold() {
     let expected_p95 = expected_times[expected_p95_idx.min(expected_times.len() - 1)];
 
     let relative_threshold = expected_p95.saturating_mul(3);
-    let absolute_threshold = max_pool_timeout_ms();
+    let absolute_threshold = if cfg!(debug_assertions) {
+        max_pool_timeout_ms() * DEBUG_BUILD_SLOWDOWN
+    } else {
+        max_pool_timeout_ms()
+    };
     let threshold = relative_threshold.max(absolute_threshold);
 
     assert!(
