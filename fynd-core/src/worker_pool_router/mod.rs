@@ -204,16 +204,6 @@ pub(crate) struct WorkerPoolQuote {
     solve_time_ms: u64,
 }
 
-/// How long the request had been running when the router gave up on it.
-///
-/// Measured forward from the request's start. The deadline is already in the past by the time
-/// this is read, because `sleep_until` only returns once it has passed, so subtracting `now` from
-/// the deadline saturates to zero and reports nothing about the request.
-fn elapsed_at_deadline(start: Instant, now: Instant) -> u64 {
-    now.saturating_duration_since(start)
-        .as_millis() as u64
-}
-
 /// Collected responses for a single order from multiple solvers.
 #[derive(Debug)]
 pub(crate) struct OrderResponses {
@@ -707,8 +697,10 @@ impl WorkerPoolRouter {
 
                 // Timeout reached
                 _ = tokio::time::sleep_until(deadline_instant) => {
-                    // Mark all remaining worker pools as timed out
-                    let elapsed_ms = elapsed_at_deadline(start_time, Instant::now());
+                    // Mark all remaining worker pools as timed out. Measured forward from the
+                    // request's start: `sleep_until` returns only once the deadline has passed,
+                    // so a subtraction from the deadline saturates to zero every time.
+                    let elapsed_ms = start_time.elapsed().as_millis() as u64;
                     for worker_pool_name in remaining_worker_pools.drain() {
                         failed_solvers.push((
                             worker_pool_name,
@@ -2169,24 +2161,15 @@ mod tests {
             quote.orders()[0].status(),
             QuoteStatus::Timeout | QuoteStatus::NoRouteFound
         ));
+        // The cause reports how long the request ran, so it must be at least the router's own
+        // deadline. Reading it as the distance left to the deadline gives zero every time.
+        let Some(SolveError::Timeout { elapsed_ms }) = quote.orders()[0].no_route_cause() else {
+            panic!("expected a timeout cause, got {:?}", quote.orders()[0].no_route_cause())
+        };
+        assert!(*elapsed_ms >= 50, "timeout reported after {elapsed_ms}ms");
 
         drop(worker_router);
         worker.abort();
-    }
-
-    /// Measured forward from the request's start. A subtraction the other way round saturates to
-    /// zero once the deadline has passed, which is always true at the point this is read.
-    #[test]
-    fn test_elapsed_at_deadline_reports_the_time_the_request_ran() {
-        let now = Instant::now();
-        let start = now - Duration::from_millis(120);
-        assert_eq!(elapsed_at_deadline(start, now), 120);
-    }
-
-    #[test]
-    fn test_elapsed_at_deadline_is_zero_only_for_a_request_that_just_started() {
-        let now = Instant::now();
-        assert_eq!(elapsed_at_deadline(now, now), 0);
     }
 
     #[tokio::test]
