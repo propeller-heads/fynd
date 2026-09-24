@@ -40,8 +40,8 @@ const config = { chainId: 1, apiKey: process.env.FYND_API_KEY }
 | `quoteSender` | Required nonzero address when no account is supplied; account address takes precedence otherwise. |
 | `timeoutMs` | `10000`; request and response-body deadline, also the total token-pagination budget. |
 | `approvalTimeoutMs` | `180000`; wait budget for each approval to confirm. |
-| `maxNetworkFeeBps` | Optional `number` or `bigint` cap on the estimated network-cost ratio. Incomplete estimates reject the request. |
-| `maxProtocolFeeBps` | Optional `number` or `bigint` cap on the quoted router-fee ratio. |
+| `maxNetworkFeeBps` | Optional execution-only `number` or `bigint` cap. Requires an Ethereum account, no required approval and a successful WDK swap estimate. |
+| `maxProtocolFeeBps` | Optional execution-only `number` or `bigint` cap on the quoted router-fee ratio. |
 
 Use a server-held API key or an integrator-controlled proxy. Do not embed a shared key in a browser/mobile bundle. The proxy is supplied by the integrator; this package does not provide one. HTTPS is required except for a loopback development proxy; URLs containing credentials, query strings or fragments are rejected. Requests are not retried automatically.
 
@@ -170,7 +170,7 @@ Before `execute`, supply your chosen `MIN_AMOUNT_OUT` and review the selected ac
 
 | Method | Behavior |
 | --- | --- |
-| `quoteSwidge(options)` | Non-binding quote with itemized estimated fees and `networkFeeComplete`. Never sends approvals or swaps. Constructor caps apply. |
+| `quoteSwidge(options)` | Non-binding quote with itemized estimated fees and `networkFeeComplete`. Checks requested minimum/slippage, but does not apply constructor fee caps or send transactions. |
 | `swidge(options, config?)` | Validates, approves exact spending if needed, confirms approvals, refreshes after approval and broadcasts one swap. Optional second argument supplies fee-cap overrides. Returns at broadcast. |
 | `getSwidgeStatus(id, options?)` | Looks up the original transaction through a bound full/read-only account. Optional `fromChain`/`toChain` must match the configured chain. |
 | `getSupportedChains()` | Static adapter list of Ethereum and Base; not a live service-health report. |
@@ -180,15 +180,19 @@ Swap options require `fromToken`, `toToken` and `fromTokenAmount`. Optional fiel
 
 Exact-output `toTokenAmount`, cross-chain destinations, same-token swaps and `refundAddress` are rejected. Fee-on-transfer/rebasing tokens are unsupported. Metadata screening cannot prove every token's behavior, and token presence does not guarantee a route for every pair/size.
 
-Quotes include net `toTokenAmount`, executable `toTokenAmountMin`, `fees` and optional decimal `priceImpact`. `minAmountOut` is checked against the encoded minimum; an insufficient floor rejects the quote or execution instead of rewriting calldata. Execution adds `id`, `hash` and `transactions`. A returned hash is not proof of settlement.
+Token discovery depends on Fynd's feature-gated, experimental `/tokens` endpoint, whose response contract can change between releases. Availability must be verified for each hosted chain. If pagination observes a changed block or cannot finish within its deadline, the call fails instead of returning a partial list or restarting internally. A subsequent caller request starts at offset zero; this can require another attempt on fast-block chains.
+
+Quotes include net `toTokenAmount`, executable `toTokenAmountMin`, `fees` and optional decimal `priceImpact`. `minAmountOut` is checked against the encoded minimum; an insufficient floor rejects the quote or execution instead of rewriting calldata. Slippage is checked relative to Fynd's reported net output, using its rounding policy. These checks do not independently establish market price or fee rates; use your own absolute `minAmountOut` when that is the constraint you need. Execution adds `id`, `hash` and `transactions`. A returned hash is not proof of settlement.
 
 ## Fees, failures and compatibility
 
 Network fees use native-token base units; the quoted router fee uses output-token base units and is already included in the returned net output. Never sum different fee tokens. No integrator fee is requested. Positive-slippage fee rules may add to the settled router fee.
 
-`networkFeeComplete: true` means the estimator covered the required transaction sequence on Ethereum; the value remains an estimate. False means the number may omit costs. Incomplete quotes may contain a partial network amount. When no cost could be estimated, the network fee entry is omitted; **an omitted entry does not mean a free transaction**. Base estimates exclude unverified L1/other rollup components and are incomplete. Fynd gas × gas price is only an indicative fallback if WDK estimation fails.
+For a quote, `networkFeeComplete: true` requires an Ethereum account, no required approval and a successful WDK swap estimate. The value remains an estimate. An unapproved ERC-20 swap cannot be estimated against its future approved state through the published WDK API, so its quote is incomplete. When no cost could be estimated, the network fee entry is omitted; **an omitted entry does not mean a free transaction**. Base estimates exclude unverified L1/other rollup components and are incomplete. Fynd gas × gas price is only an indicative fallback if WDK estimation fails.
 
-Caps are basis-point comparisons of estimates, not signed settlement ceilings. The protocol cap checks quoted router fee / gross output. The network cap compares total estimated network cost with native input or a separate trade-sized ERC-20→native valuation quote. Zero is an active cap. Per-call values override constructor caps; omitted or undefined per-call values inherit them. Omit a cap at construction when no cap is requested. If any required step cannot be estimated, a requested network cap rejects before approvals; Base network caps currently reject. Rechecking after approvals includes known spent approval fees, so a later refresh can fail after approvals have already cost gas.
+Fee caps apply only to `swidge`, using constructor defaults or its second argument; `quoteSwidge` remains available regardless of those caps. Caps compare estimates in basis points and are not signed settlement ceilings. The protocol cap checks quoted router fee / gross output. A network cap is supported only on Ethereum when the input is native or already sufficiently approved and WDK can estimate the swap. It compares that estimate with native input or a separate trade-sized ERC-20→native valuation quote. If any approval is required, the cap rejects before the first approval; Base network caps also reject. Zero is an active cap. Per-call values override constructor caps; omitted or undefined per-call values inherit them. Omit a cap at construction when no cap is requested.
+
+Execution without a network cap can perform approvals and refresh the quote. Known approval receipt fees are then added to the returned network estimate. They are not part of a post-approval network-cap check. A refreshed quote can still fail its protocol cap, requested output minimum or slippage limit after approval gas has been spent.
 
 Execution skips sufficient allowance, otherwise approves the exact input. Nonzero insufficient Ethereum USDT allowance is reset to zero first. Failed allowance reads stop the operation. Approval confirmation requires a successful included receipt. Earlier approvals persist after later failures. `FyndExecutionError` exposes `stage`, known `transactions`, `submissionUnknown` and `cause`. Unknown submission means the RPC may have accepted a transaction even though no hash was returned: reconcile wallet history before deciding to submit again. The adapter performs no automatic resend.
 

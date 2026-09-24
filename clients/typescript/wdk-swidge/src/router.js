@@ -42,8 +42,7 @@ function invalid (message) {
  *
  * @param {{ amountIn: bigint, grossOutput: bigint, minimum: bigint, clientFee: bigint,
  *   transaction: { to: string, value: bigint, data: string } }} quote
- * @param {{ tokenIn: string, tokenOut: string, amountIn: bigint, recipient: string,
- *   minAmountOut?: bigint }} request
+ * @param {{ tokenIn: string, tokenOut: string, amountIn: bigint, recipient: string }} request
  * @param {Chain} chain
  * @returns {{ to: string, value: bigint, data: string }}
  */
@@ -64,9 +63,6 @@ export function validateTransaction (quote, request, chain) {
   if (quote.amountIn !== request.amountIn || request.amountIn <= 0n || quote.grossOutput <= 0n ||
       quote.minimum <= 0n || quote.minimum > quote.grossOutput || quote.clientFee !== 0n) {
     throw invalid('invalid quote amounts or unsupported client fee')
-  }
-  if (request.minAmountOut !== undefined && quote.minimum < request.minAmountOut) {
-    throw invalid('encoded minimum is below the requested output floor')
   }
   const expectedValue = tokenIn === ZeroAddress ? request.amountIn : 0n
   if (transaction.value !== expectedValue) {

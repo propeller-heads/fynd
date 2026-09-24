@@ -54,7 +54,17 @@ async function handleApi (request, response) {
   const tokenIn = order.token_in === ZeroAddress ? native : order.token_in
   const tokenOut = order.token_out === ZeroAddress ? native : order.token_out
   const allowance = tokenIn === native ? 0n : await new Contract(tokenIn, tokenAbi, provider).allowance(sender, router)
-  quoteCalls.push({ order, allowance })
+  const encoded = query.options.encoding_options !== undefined
+  quoteCalls.push({ order, allowance, encoded })
+  if (!encoded) {
+    // A full-trade input-to-native valuation quote, without transaction encoding.
+    if (order.token_out !== ZeroAddress) throw new Error('Unexpected valuation token')
+    response.end(JSON.stringify({ orders: [{
+      status: 'success', amount_in: order.amount, amount_out: '1000000000000000000',
+      gas_estimate: '180000', gas_price: '1000000000'
+    }] }))
+    return
+  }
   // Independently mirror Fynd's documented integer slippage calculation.
   // Keep this separate from the production guard so the fixture can catch drift.
   const slippageUnits = BigInt(Math.floor(Number(query.options.encoding_options.slippage) * 1_000_000))
@@ -225,9 +235,34 @@ describe('published WDK account against local fixture contracts', () => {
 
   it('rejects an inadequate minimum before any signed transaction', async () => {
     const nonce = await provider.getTransactionCount(sender)
-    await expect(protocol.swidge(options({ minAmountOut: grossOutput + 1n }))).rejects.toThrow(/minimum|floor/)
+    await expect(protocol.swidge(options({ minAmountOut: grossOutput + 1n }))).rejects.toMatchObject({ reason: 'COULD_NOT_MET_THRESHOLD' })
     expect(await provider.getTransactionCount(sender)).toBe(nonce)
     expect(await account.getAllowance(inputToken, router)).toBe(0n)
+  }, 15000)
+
+  it('rejects a network-capped unapproved ERC20 swap before any approval', async () => {
+    const nonce = await provider.getTransactionCount(sender)
+    await expect(protocol.swidge(options(), { maxNetworkFeeBps: 100 })).rejects.toMatchObject({
+      reason: 'FEE_ESTIMATE_UNAVAILABLE'
+    })
+    expect(await provider.getTransactionCount(sender)).toBe(nonce)
+    expect(await account.getAllowance(inputToken, router)).toBe(0n)
+    expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(0n)
+    expect(quoteCalls).toHaveLength(1)
+    expect(quoteCalls[0].encoded).toBe(true)
+  }, 15000)
+
+  it('executes a network-capped preapproved ERC20 swap after valuing the full input trade', async () => {
+    await wait((await account.approve({ token: inputToken, spender: router, amount: inputAmount })).hash)
+    const nonce = await provider.getTransactionCount(sender)
+    const result = await protocol.swidge(options(), { maxNetworkFeeBps: 100 })
+    expect(result.networkFeeComplete).toBe(true)
+    expect(result.transactions.map(tx => tx.type)).toEqual(['source'])
+    expect(quoteCalls.map(call => call.encoded)).toEqual([true, false])
+    expect(quoteCalls[1].order).toMatchObject({ token_in: inputToken, token_out: ZeroAddress, amount: inputAmount.toString() })
+    await wait(result.hash)
+    expect(await provider.getTransactionCount(sender)).toBe(nonce + 1)
+    expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(grossOutput)
   }, 15000)
 
   it('reports pending and then failed when a broadcast transaction reverts on inclusion', async () => {

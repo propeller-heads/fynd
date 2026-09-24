@@ -120,13 +120,6 @@ describe('router call validation', () => {
     }))).not.toThrow()
   })
 
-  it('checks the caller output floor including equality', () => {
-    const test = fixture()
-    test.request.minAmountOut = test.quote.minimum
-    expect(() => validate(test)).not.toThrow()
-    test.request.minAmountOut++
-    expect(() => validate(test)).toThrow(/requested output floor/)
-  })
 
   it.each([
     ['amountIn', 2n], ['grossOutput', 0n], ['minimum', 0n], ['minimum', 2_000_000_001n], ['clientFee', 1n]

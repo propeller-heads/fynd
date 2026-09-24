@@ -21,6 +21,14 @@ import { FyndExecutionError } from './errors.js'
 /** @typedef {import('@tetherto/wdk-wallet/protocols').SwidgeTransaction} SwidgeTransaction */
 /** @typedef {import('@tetherto/wdk-wallet/protocols').SwidgeFee} SwidgeFee */
 /**
+ * @typedef {{tokenIn:string, tokenOut:string, amountIn:bigint, sender:string,
+ *   recipient:string, minAmountOut:bigint, slippage:string}} SwapRequest
+ * @typedef {{amount:bigint, complete:boolean, estimated:boolean}} NetworkEstimate
+ * @typedef {{quote:import('./fynd-api.js').EncodedQuote, request:SwapRequest,
+ *   transaction:{to:string,data:string,value:bigint}, approvals:bigint[],
+ *   network:NetworkEstimate}} Prepared
+ */
+/**
  * @typedef {FeeCaps & {
  *   chainId: 1 | 8453,
  *   apiKey?: string,
@@ -36,7 +44,7 @@ const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7'
 
 /** @param {WalletAccount} account @returns {account is EvmAccount} */
 function hasEvmAllowance (account) {
-  return 'getAllowance' in account && typeof account.getAllowance === 'function'
+  return typeof account === 'object' && account !== null && 'getAllowance' in account && typeof account.getAllowance === 'function'
 }
 
 /** Hosted Fynd exact-input swaps. Configure the WDK wallet with the same chainId. */
@@ -84,8 +92,8 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
    * @returns {Promise<import('@tetherto/wdk-wallet/protocols').SwidgeQuote & {networkFeeComplete: boolean}>}
    */
   async quoteSwidge (options) {
-    const prepared = await this.prepare({ ...options }, this.#settings)
-    return this.resultQuote(prepared)
+    const prepared = await this.#prepare({ ...options })
+    return this.#resultQuote(prepared)
   }
 
   /** @param {SwidgeOptions} options @param {FeeCaps} [config]
@@ -105,7 +113,10 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
       maxNetworkFeeBps: config.maxNetworkFeeBps === undefined ? this.#settings.maxNetworkFeeBps : config.maxNetworkFeeBps,
       maxProtocolFeeBps: config.maxProtocolFeeBps === undefined ? this.#settings.maxProtocolFeeBps : config.maxProtocolFeeBps
     }
-    let prepared = await this.prepare(options, limits)
+    cap(limits.maxNetworkFeeBps, 'maxNetworkFeeBps')
+    cap(limits.maxProtocolFeeBps, 'maxProtocolFeeBps')
+    let prepared = await this.#prepare(options)
+    await this.#enforceLimits(prepared, limits)
     /** @type {SwidgeTransaction[]} */
     const transactions = []
     let stage = 'approval'
@@ -129,8 +140,9 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
       }
       if (transactions.length) {
         stage = 'quote refresh'
-        prepared = await this.prepare(options, limits, spent)
+        prepared = await this.#prepare(options)
         if (prepared.approvals.length) throw new SwidgeError('Allowance remains insufficient after approval.', { reason: 'ALLOWANCE_INSUFFICIENT' })
+        await this.#enforceLimits(prepared, limits)
       }
       stage = 'swap submission'
       submissionUnknown = true
@@ -138,7 +150,10 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
       if (!isHexString(submitted.hash, 32)) throw new ValueError('WDK returned an invalid swap hash.')
       transactions.push({ hash: submitted.hash, chain: this.#chain.id, type: 'source' })
       submissionUnknown = false
-      const result = this.resultQuote(prepared)
+      // Confirmed approval fees belong to the result, not the refreshed swap estimate.
+      prepared.network.amount += spent
+      prepared.network.estimated ||= spent > 0n
+      const result = this.#resultQuote(prepared)
       return { ...result, id: submitted.hash, hash: submitted.hash, transactions }
     } catch (cause) {
       throw new FyndExecutionError(stage, transactions, submissionUnknown, cause)
@@ -150,8 +165,8 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
    */
   async getSwidgeStatus (id, options = {}) {
     if (!isHexString(id, 32)) throw new ValueError('id must be a transaction hash.')
-    this.checkChain(options.fromChain)
-    this.checkChain(options.toChain)
+    this.#checkChain(options.fromChain)
+    this.#checkChain(options.toChain)
     if (!this.#account) throw new ReadOnlyAccountRequiredError('Status lookup requires a WDK EVM account.')
     const receipt = await this.#account.getTransaction(id)
     if (!receipt) throw new NoSuchElementError('The transaction was not found.')
@@ -172,8 +187,8 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
    * @returns {Promise<import('@tetherto/wdk-wallet/protocols').SwidgeSupportedToken[]>}
    */
   async getSupportedTokens (options = {}) {
-    this.checkChain(options.fromChain)
-    this.checkChain(options.toChain)
+    this.#checkChain(options.fromChain)
+    this.#checkChain(options.toChain)
     if (options.fromToken !== undefined) {
       throw new NotImplementedError('Fynd pair-scoped token discovery')
     }
@@ -184,17 +199,17 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
     ]
   }
 
-  /** @private @param {string | number | undefined} chain */
-  checkChain (chain) {
+  /** @param {string | number | undefined} chain */
+  #checkChain (chain) {
     if (chain !== undefined && chain !== this.#chain.id && chain !== this.#chainName && chain !== String(this.#chain.id)) {
       throw new ValueError('Only swaps and discovery on the configured chain are supported.')
     }
   }
 
-  /** @private @param {SwidgeOptions} options */
-  async request (options) {
+  /** @param {SwidgeOptions} options @returns {Promise<SwapRequest>} */
+  async #request (options) {
     if (!options || options.toTokenAmount !== undefined) throw new ValueError('Fynd supports exact-input swaps only.')
-    this.checkChain(options.toChain)
+    this.#checkChain(options.toChain)
     if (options.refundAddress !== undefined) throw new ValueError('refundAddress is not supported for atomic same-chain swaps.')
     const tokenIn = token(options.fromToken)
     const tokenOut = token(options.toToken)
@@ -203,14 +218,16 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
     const sender = address(this.#account ? await this.#account.getAddress() : this.#settings.quoteSender, 'account address or quoteSender')
     const recipient = address(options.recipient ?? sender, 'recipient')
     if (sender === NATIVE || recipient === NATIVE) throw new ValueError('Sender and recipient must be nonzero addresses.')
-    return { tokenIn, tokenOut, amountIn, sender, recipient, minAmountOut: options.minAmountOut === undefined ? 0n : amount(options.minAmountOut, 'minAmountOut', true), slippage: slippage(options.slippage) }
+    return {
+      tokenIn, tokenOut, amountIn, sender, recipient,
+      minAmountOut: options.minAmountOut === undefined ? 0n : amount(options.minAmountOut, 'minAmountOut', true),
+      slippage: slippage(options.slippage)
+    }
   }
 
-  /** @private @param {SwidgeOptions} options @param {FeeCaps} limits @param {bigint} [spent] */
-  async prepare (options, limits, spent = 0n) {
-    const networkCap = cap(limits.maxNetworkFeeBps, 'maxNetworkFeeBps')
-    const protocolCap = cap(limits.maxProtocolFeeBps, 'maxProtocolFeeBps')
-    const request = await this.request(options)
+  /** @param {SwidgeOptions} options @returns {Promise<Prepared>} */
+  async #prepare (options) {
+    const request = await this.#request(options)
     const info = await this.#api.info()
     if (info.chainId !== this.#chain.id || info.routerAddress?.toLowerCase() !== this.#chain.router.toLowerCase()) {
       throw new SwidgeError('Fynd metadata does not match the supported chain and router.', { reason: 'UNSUPPORTED_ROUTER' })
@@ -223,21 +240,33 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
     }
     const transaction = validateTransaction(quote, request, this.#chain)
     if (quote.minimum < request.minAmountOut) throw new SwidgeError('The executable minimum is below minAmountOut.', { reason: 'COULD_NOT_MET_THRESHOLD' })
-    enforceCap(quote.routerFee, quote.grossOutput, protocolCap, 'protocol')
-    const approvals = await this.approvalAmounts(request.tokenIn, request.amountIn)
-    const network = await this.networkEstimate(quote, transaction, request.tokenIn, approvals)
-    network.amount += spent
-    network.estimated ||= spent > 0n
-    if (networkCap !== undefined) {
-      if (!network.complete) throw new SwidgeError('The full network cost cannot be estimated before spending; the requested cap cannot be checked.', { reason: 'FEE_ESTIMATE_UNAVAILABLE' })
-      const value = request.tokenIn === NATIVE ? request.amountIn : (await this.#api.quote({ ...order, tokenOut: NATIVE }, { encode: false, slippage: request.slippage })).grossOutput
-      enforceCap(network.amount, value, networkCap, 'network')
-    }
+    const approvals = await this.#approvalAmounts(request.tokenIn, request.amountIn)
+    const network = await this.#networkEstimate(quote, transaction, request.tokenIn, approvals)
     return { quote, request, transaction, approvals, network }
   }
 
-  /** @private @param {string} tokenIn @param {bigint} amountIn */
-  async approvalAmounts (tokenIn, amountIn) {
+  /** @param {Prepared} prepared @param {FeeCaps} limits */
+  async #enforceLimits ({ quote, request, approvals, network }, limits) {
+    const protocolCap = cap(limits.maxProtocolFeeBps, 'maxProtocolFeeBps')
+    const networkCap = cap(limits.maxNetworkFeeBps, 'maxNetworkFeeBps')
+    enforceCap(quote.routerFee, quote.grossOutput, protocolCap, 'protocol')
+    if (networkCap !== undefined) {
+      if (approvals.length) {
+        throw new SwidgeError('A network fee cap requires sufficient allowance before execution; future approvals cannot be simulated.', { reason: 'FEE_ESTIMATE_UNAVAILABLE' })
+      }
+      if (!network.complete) {
+        throw new SwidgeError('The full network cost cannot be estimated before spending; the requested cap cannot be checked.', { reason: 'FEE_ESTIMATE_UNAVAILABLE' })
+      }
+      const value = request.tokenIn === NATIVE ? request.amountIn : (await this.#api.quote(
+        { ...request, receiver: request.recipient, tokenOut: NATIVE },
+        { encode: false, slippage: request.slippage }
+      )).grossOutput
+      enforceCap(network.amount, value, networkCap, 'network')
+    }
+  }
+
+  /** @param {string} tokenIn @param {bigint} amountIn */
+  async #approvalAmounts (tokenIn, amountIn) {
     if (tokenIn === NATIVE || !this.#account) return []
     const allowance = amount(await this.#account.getAllowance(tokenIn, this.#chain.router), 'allowance', true)
     if (allowance >= amountIn) return []
@@ -247,16 +276,15 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
   /**
    * WDK's published estimator cannot simulate future approvals or Base L1 fees.
    * Keep indicative quotes useful, but never treat an incomplete estimate as a cap check.
-   * @private
    * @param {import('./fynd-api.js').EncodedQuote} quote
    * @param {{to:string,data:string,value:bigint}} transaction
    * @param {string} tokenIn
    * @param {bigint[]} approvals
    */
-  async networkEstimate (quote, transaction, tokenIn, approvals) {
+  async #networkEstimate (quote, transaction, tokenIn, approvals) {
     let total = 0n
     let estimated = false
-    let complete = !!this.#account && this.#chain.id === 1
+    let complete = !!this.#account && this.#chain.id === 1 && approvals.length === 0
     const account = this.#account
     for (const approval of approvals) {
       try {
@@ -283,13 +311,27 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
     return { amount: total, complete, estimated }
   }
 
-  /** @private @param {Awaited<ReturnType<FyndSwidgeProtocol['prepare']>>} prepared */
-  resultQuote ({ quote, request, network }) {
+  /** @param {Prepared} prepared */
+  #resultQuote ({ quote, request, network }) {
     /** @type {SwidgeFee[]} */
     const fees = [
       { type: 'protocol', amount: quote.routerFee, token: request.tokenOut, chain: this.#chain.id, included: true, description: 'Quoted Tycho router fee; positive-slippage fees can add to the settled fee.' }
     ]
-    if (network.estimated) fees.unshift({ type: 'network', amount: network.amount, token: NATIVE, chain: this.#chain.id, included: false, description: network.complete ? 'Estimated network cost for all transactions; not a settlement guarantee.' : 'Partial network estimate; may omit approval costs and Base L1 fees.' })
-    return { fromTokenAmount: quote.amountIn, toTokenAmount: quote.grossOutput - quote.routerFee - quote.clientFee, toTokenAmountMin: quote.minimum, fees, ...(quote.priceImpact === undefined ? {} : { priceImpact: quote.priceImpact }), networkFeeComplete: network.complete }
+    if (network.estimated) {
+      fees.unshift({
+        type: 'network', amount: network.amount, token: NATIVE, chain: this.#chain.id, included: false,
+        description: network.complete
+          ? 'Estimated network cost for all transactions; not a settlement guarantee.'
+          : 'Partial network estimate; may omit approval costs and Base L1 fees.'
+      })
+    }
+    return {
+      fromTokenAmount: quote.amountIn,
+      toTokenAmount: quote.grossOutput - quote.routerFee - quote.clientFee,
+      toTokenAmountMin: quote.minimum,
+      fees,
+      ...(quote.priceImpact === undefined ? {} : { priceImpact: quote.priceImpact }),
+      networkFeeComplete: network.complete
+    }
   }
 }

@@ -99,14 +99,36 @@ describe('public quote and execution modes', () => {
   })
 
   it('copies constructor caps and quote sender before the caller mutates its configuration', async () => {
-    const { fetchMock } = harness()
+    const { account, fetchMock } = harness()
     const config = { chainId: 1, quoteSender: SENDER, maxProtocolFeeBps: 0 }
     const api = new FyndSwidgeProtocol(undefined, config)
+    const executable = new FyndSwidgeProtocol(account, config)
     config.quoteSender = RECEIVER
     config.maxProtocolFeeBps = 10000
-    await expect(api.quoteSwidge(options)).rejects.toMatchObject({ name: 'MaximumFeeExceededError' })
+    await expect(api.quoteSwidge(options)).resolves.toMatchObject({ toTokenAmount: 19980n })
     const request = JSON.parse(fetchMock.mock.calls.find(([url]) => url.endsWith('/quote'))[1].body)
     expect(request.orders[0]).toMatchObject({ sender: SENDER, receiver: SENDER })
+    await expect(executable.swidge(options)).rejects.toMatchObject({ name: 'MaximumFeeExceededError' })
+    expect(account.approve).not.toHaveBeenCalled()
+    expect(account.sendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('exposes only the five adapter methods, keeping helpers outside the WDK policy surface', () => {
+    const { api } = harness()
+    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(api)).sort()).toEqual([
+      'constructor', 'getSupportedChains', 'getSupportedTokens', 'getSwidgeStatus', 'quoteSwidge', 'swidge'
+    ])
+    for (const helper of ['checkChain', 'request', 'prepare', 'approvalAmounts', 'networkEstimate', 'resultQuote', 'enforceLimits']) {
+      expect(helper in api).toBe(false)
+    }
+  })
+
+  it.each(['none', 'read-only', 'full'])('keeps %s quotes available when configured execution caps are exceeded', async mode => {
+    const { api, account, state } = harness({ mode, config: { quoteSender: SENDER, maxNetworkFeeBps: 0, maxProtocolFeeBps: 0 } })
+    await expect(api.quoteSwidge(options)).resolves.toMatchObject({ toTokenAmount: 19980n })
+    expect(state.valuationQuotes).toBe(0)
+    expect(account.approve).not.toHaveBeenCalled()
+    expect(account.sendTransaction).not.toHaveBeenCalled()
   })
 
   it('maps net receipt, minimum, itemized fees and decimal price impact through the real API parser', async () => {
@@ -175,10 +197,24 @@ describe('public quote and execution modes', () => {
 
   it('checks the caller minimum before allowances can be changed', async () => {
     const { api, account } = harness({ allowance: 0n })
-    await expect(api.swidge({ ...options, minAmountOut: 19882n })).rejects.toThrow()
+    await expect(api.swidge({ ...options, minAmountOut: 19882n })).rejects.toMatchObject({
+      name: 'SwidgeError', reason: 'COULD_NOT_MET_THRESHOLD'
+    })
+    await expect(api.quoteSwidge({ ...options, minAmountOut: 19882n })).rejects.toMatchObject({
+      name: 'SwidgeError', reason: 'COULD_NOT_MET_THRESHOLD'
+    })
     expect(account.approve).not.toHaveBeenCalled()
     expect(account.sendTransaction).not.toHaveBeenCalled()
     await expect(api.quoteSwidge({ ...options, minAmountOut: 19881n })).resolves.toMatchObject({ toTokenAmountMin: 19881n })
+  })
+
+  it('preserves the standard minimum reason through both inherited swap delegates', async () => {
+    const { api, account } = harness({ allowance: 0n })
+    const legacy = { tokenIn: WETH, tokenOut: USDC, tokenInAmount: AMOUNT, minAmountOut: 19882n }
+    await expect(api.quoteSwap(legacy)).rejects.toMatchObject({ name: 'SwapError', reason: 'COULD_NOT_MET_THRESHOLD' })
+    await expect(api.swap(legacy)).rejects.toMatchObject({ name: 'SwapError', reason: 'COULD_NOT_MET_THRESHOLD' })
+    expect(account.approve).not.toHaveBeenCalled()
+    expect(account.sendTransaction).not.toHaveBeenCalled()
   })
 
   it('rejects a self-consistent quote and calldata that weaken the caller slippage before approving', async () => {
@@ -366,29 +402,32 @@ describe('requested fee caps', () => {
     expect(state.valuationQuotes).toBe(0)
   })
 
-  it('includes both USDT approvals in the pre-write cap estimate', async () => {
-    const { api, account } = harness({ allowance: 1n })
-    await expect(api.swidge({ ...options, fromToken: USDT }, { maxNetworkFeeBps: 299 })).rejects.toMatchObject({ name: 'MaximumFeeExceededError' })
+  it.each([
+    [WETH, 0n], [USDT, 1n]
+  ])('rejects network-capped %s execution requiring approvals even when mock gas estimates succeed', async (fromToken, allowance) => {
+    const { api, account } = harness({ allowance })
+    await expect(api.swidge({ ...options, fromToken }, { maxNetworkFeeBps: 10000 })).rejects.toMatchObject({ reason: 'FEE_ESTIMATE_UNAVAILABLE' })
     expect(account.approve).not.toHaveBeenCalled()
-    await expect(api.swidge({ ...options, fromToken: USDT }, { maxNetworkFeeBps: 300 })).resolves.toMatchObject({ id: SWAP_HASH })
+    expect(account.waitForTransaction).not.toHaveBeenCalled()
+    expect(account.sendTransaction).not.toHaveBeenCalled()
   })
 
-  it('checks spent approval fees plus the refreshed remaining cost', async () => {
+  it('rechecks the protocol cap after a confirmed approval', async () => {
     const { api, account, state } = harness({ allowance: 0n })
     account.waitForTransaction.mockImplementation(async () => {
       state.allowance = AMOUNT
-      state.networkFee = 195n
+      state.routerFee = 40n
       return { finality: 'confirmed', success: true, fee: 10n }
     })
-    await expect(api.swidge(options, { maxNetworkFeeBps: 200 })).rejects.toMatchObject({
+    await expect(api.swidge(options, { maxProtocolFeeBps: 10 })).rejects.toMatchObject({
       transactions: [{ hash: hash(1) }], cause: { name: 'MaximumFeeExceededError' }
     })
     expect(account.sendTransaction).not.toHaveBeenCalled()
   })
 
-  it('refuses a requested cap if a preparatory transaction cannot be estimated', async () => {
-    const { api, account } = harness({ allowance: 0n })
-    account.quoteSendTransaction.mockRejectedValueOnce(new Error('cannot simulate future allowance'))
+  it('refuses a requested cap when a preapproved swap cannot be estimated', async () => {
+    const { api, account } = harness()
+    account.quoteSendTransaction.mockRejectedValueOnce(new Error('swap gas estimate unavailable'))
     await expect(api.swidge(options, { maxNetworkFeeBps: 10000 })).rejects.toMatchObject({ reason: 'FEE_ESTIMATE_UNAVAILABLE' })
     expect(account.approve).not.toHaveBeenCalled()
   })
