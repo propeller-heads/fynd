@@ -30,7 +30,7 @@ pub mod paths;
 pub mod registry;
 /// What an algorithm is given to solve one order.
 pub mod request;
-pub(crate) mod sim_guard;
+pub mod sim_guard;
 pub mod sim_meter;
 /// Shared machinery for algorithms that divide an order across several paths.
 pub mod split_primitives;

@@ -20,9 +20,9 @@ use tycho_simulation::tycho_common::{
 
 /// Extension trait adding panic-guarded simulation calls to every [`ProtocolSim`].
 ///
-/// Crate-private: solver code calls the guarded variants; the raw `ProtocolSim` methods
-/// remain untouched for callers that manage panics themselves.
-pub(crate) trait GuardedProtocolSim {
+/// Solver code and the derived computations call the guarded variants; the raw `ProtocolSim`
+/// methods remain untouched for callers that manage panics themselves.
+pub trait GuardedProtocolSim {
     /// Calls `get_amount_out`, converting a panic into a `SimulationError::FatalError`.
     ///
     /// On a contained panic, logs the input that triggered it (amount and token pair) so

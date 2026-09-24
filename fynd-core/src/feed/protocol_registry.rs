@@ -293,7 +293,7 @@ fn parse_protocols(entries: &[String]) -> Result<Vec<ProtocolSpec>, DataFeedErro
 /// Entries may carry the `exclusive:` prefix to select the protocol's exclusive-liquidity stream
 /// variant; doing so for a protocol without one is a configuration error, as is naming one protocol
 /// both with and without the prefix.
-pub(crate) fn register_exchanges(
+pub fn register_exchanges(
     mut builder: ProtocolStreamBuilder,
     tvl_filter: ComponentFilter,
     entries: &[String],

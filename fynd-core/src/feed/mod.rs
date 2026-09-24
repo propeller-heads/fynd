@@ -125,7 +125,7 @@ impl TychoFeedConfig {
 
 /// Errors that can occur in the indexer.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum DataFeedError {
+pub enum DataFeedError {
     /// Configuration error.
     #[error("configuration error: {0}")]
     Config(String),

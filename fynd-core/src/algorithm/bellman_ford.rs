@@ -72,7 +72,7 @@ struct Subgraph<'a> {
 /// Holds a snapshot of market and derived state taken under lock at build time. Solves read the
 /// snapshot without re-acquiring any lock, so all route evaluations within one order see a
 /// consistent view of the same block's component states.
-pub(crate) struct BellmanFordContext {
+pub struct BellmanFordContext {
     pub(crate) token_in_node: NodeIndex,
     /// Absent when the context was built from a source token only, with no destination; such
     /// a context serves `reach_from_source_token` but not `find_single_route`.
@@ -89,6 +89,21 @@ pub(crate) struct BellmanFordContext {
 }
 
 impl BellmanFordContext {
+    /// The node every solve on this context starts from.
+    pub fn token_in_node(&self) -> NodeIndex {
+        self.token_in_node
+    }
+
+    /// Token address of every node in the subgraph that has token metadata.
+    pub fn node_address(&self) -> &FxHashMap<NodeIndex, Address> {
+        &self.node_address
+    }
+
+    /// The market snapshot the context was built from.
+    pub fn market_state(&self) -> &MarketState {
+        &self.market_data
+    }
+
     /// Re-points the context at new endpoints behind a freshly pruned adjacency, in one step —
     /// so one snapshot can serve many solves.
     ///
@@ -97,7 +112,7 @@ impl BellmanFordContext {
     /// snapshot are reused as-is, so the new endpoints must lie inside the subgraph the context
     /// was built from. Returns the walk's candidate component ids — every component on any
     /// `token_in`-to-`token_out` path within `max_hops` — or `None` when no such path exists.
-    pub(crate) fn reroot_toward<'a>(
+    pub fn reroot_toward<'a>(
         &mut self,
         graph: &'a StableDiGraph<()>,
         token_in_node: NodeIndex,
@@ -120,23 +135,23 @@ impl BellmanFordContext {
 }
 
 /// Everything one relaxation from the source token reached, and whether it was cut short.
-pub(crate) struct ReachOutcome {
+pub struct ReachOutcome {
     /// Destination address → what the best path there delivers. Tokens the relaxation left at
     /// zero, and those whose path could not be reconstructed, are absent.
-    pub(crate) reached: FxHashMap<Address, ReachedToken>,
+    pub reached: FxHashMap<Address, ReachedToken>,
     /// True when the relaxation broke on its timeout: a token absent from `reached` may merely
     /// be unvisited, not unreachable.
-    pub(crate) timed_out: bool,
+    pub timed_out: bool,
 }
 
 /// What one relaxation delivers at a destination the source token reaches: the output amount
 /// and the components along the best path to it.
-pub(crate) struct ReachedToken {
+pub struct ReachedToken {
     /// What the path delivers at the destination. Never zero: a destination the relaxation
     /// leaves at zero counts as unreached and is absent from the map.
-    pub(crate) amount_out: BigUint,
+    pub amount_out: BigUint,
     /// The components the path runs through, in hop order.
-    pub(crate) components: Vec<ComponentId>,
+    pub components: Vec<ComponentId>,
 }
 
 /// Controls how `find_single_route` ranks candidate routes after simulation.
@@ -149,7 +164,7 @@ pub(crate) enum RouteScoringMode {
 
 /// Per-call overrides for `find_single_route`.
 #[derive(Default)]
-pub(crate) struct FindRouteOptions {
+pub struct FindRouteOptions {
     /// Component state overrides: degrade or zero-gas specific components without modifying market
     /// data.
     pub(crate) overrides: MarketOverrides,
@@ -191,7 +206,9 @@ impl Default for BellmanFordAlgorithm {
 }
 
 impl BellmanFordAlgorithm {
-    pub(crate) fn with_config(config: AlgorithmConfig) -> Self {
+    /// Creates the algorithm from its hop bounds, per-solve timeout, gas-aware switch and
+    /// connector tokens.
+    pub fn with_config(config: AlgorithmConfig) -> Self {
         Self {
             max_hops: config.max_hops(),
             timeout: config.timeout(),
@@ -202,7 +219,7 @@ impl BellmanFordAlgorithm {
 
     /// The longest route a solve may build. Callers bounding their own walks or pruning maps
     /// read it here so the two bounds cannot drift apart.
-    pub(crate) fn max_hops(&self) -> usize {
+    pub fn max_hops(&self) -> usize {
         self.max_hops
     }
 
@@ -294,7 +311,7 @@ impl BellmanFordAlgorithm {
     /// Reads the market unlabeled and no derived data, cloning the snapshot in batches so the
     /// feed's writer never waits for the whole clone. `None` when `token_in` is not in the
     /// graph or nothing is reachable from it.
-    pub(crate) async fn build_context_from_source_token(
+    pub async fn build_context_from_source_token(
         &self,
         graph: &StableDiGraph<()>,
         market: MarketData,
@@ -424,7 +441,7 @@ impl BellmanFordAlgorithm {
     ///
     /// Tokens the source token cannot reach, and those whose path cannot be reconstructed, are
     /// absent from `reached`; the outcome's `timed_out` says whether absence means unreachable.
-    pub(crate) fn reach_from_source_token(
+    pub fn reach_from_source_token(
         &self,
         ctx: &BellmanFordContext,
         amount_in: &BigUint,
@@ -478,7 +495,7 @@ impl BellmanFordAlgorithm {
     /// `opts.overrides` to evaluate alternative component states without redoing the setup in
     /// `ctx`. Overrides shadow the corresponding component in `ctx.market_data` for both
     /// relaxation and route construction.
-    pub(crate) fn find_single_route(
+    pub fn find_single_route(
         &self,
         ctx: &BellmanFordContext,
         order: &Order,
@@ -1096,7 +1113,7 @@ impl BellmanFordAlgorithm {
     /// Every node within `max_hops` of `token_out`, and its distance to that destination.
     ///
     /// Counts only allowed hops, skipping excluded pools and intermediate tokens.
-    pub(crate) fn get_hops_to_reach(
+    pub fn get_hops_to_reach(
         graph: &StableDiGraph<()>,
         token_in: NodeIndex,
         token_out: NodeIndex,
