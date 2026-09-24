@@ -10,11 +10,11 @@ use fynd_core::{
     encoding::encoder::Encoder, worker_pool::pool::WorkerPool, FyndBuilder, SolverBuildError,
 };
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Chain};
 
 use crate::{
-    api::{configure_app, AppState, HealthTracker, RouteConfigurator},
+    api::{configure_app, record_emitter::record_sink, AppState, HealthTracker, RouteConfigurator},
     config::{defaults, PoolConfig},
 };
 
@@ -31,6 +31,10 @@ pub struct FyndRPCBuilder {
     /// Hosted gateway URL advertised by the `/docs/hosted/` Swagger UI. Unset by default, which
     /// leaves that UI unregistered.
     hosted_swagger_url: Option<String>,
+    /// Collector the quote records are posted to. Unset by default: the collector is a service a
+    /// deployment runs for itself, and shipping quote traffic off the pod is opt-in. Unset builds
+    /// no record queue and no sending task.
+    record_sink_url: Option<String>,
     /// Caller routes registered before the defaults; see [`Self::configure_routes`].
     route_overrides: Option<RouteConfigurator>,
 }
@@ -73,6 +77,7 @@ impl FyndRPCBuilder {
             http_port: defaults::HTTP_PORT,
             gas_price_stale_threshold: None,
             hosted_swagger_url: None,
+            record_sink_url: None,
             route_overrides: None,
         })
     }
@@ -249,6 +254,16 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Sets the collector every answered quote's record is posted to, as its root URL: the
+    /// records land on `<url>/v1/records`.
+    ///
+    /// Leaving it unset (the default) builds no record queue and starts no sending task, so the
+    /// quote handler records nothing.
+    pub fn record_sink_url(mut self, url: Option<String>) -> Self {
+        self.record_sink_url = url;
+        self
+    }
+
     /// Registers routes ahead of the built-in ones.
     ///
     /// `f` runs once per Actix worker with the shared [`AppState`], adding routes to the `/v1`
@@ -373,15 +388,19 @@ impl FyndRPCBuilder {
             computation_shutdown_tx,
         ) = parts.into_components();
 
+        let (record_emitter, record_sink_handle) =
+            match record_sink(self.record_sink_url.as_deref())? {
+                Some((emitter, handle)) => (Some(emitter), Some(handle)),
+                None => (None, None),
+            };
+
         let app_state = AppState::new(
             router,
             health_tracker,
             chain,
             router_address,
             permit2_address,
-            // No queue until the task that drains it exists (ENG-6352); records are built and
-            // logged meanwhile, and nothing is emitted.
-            None,
+            record_emitter,
             #[cfg(feature = "experimental")]
             Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]
@@ -428,6 +447,7 @@ impl FyndRPCBuilder {
             router_fee_worker_handle: router_fee_handle,
             computation_manager_handle: computation_handle,
             computation_shutdown_tx,
+            record_sink_handle,
         })
     }
 }
@@ -444,6 +464,8 @@ pub struct FyndRPC {
     router_fee_worker_handle: JoinHandle<()>,
     computation_manager_handle: JoinHandle<()>,
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    /// The task posting quote records, when a collector is configured.
+    record_sink_handle: Option<JoinHandle<()>>,
 }
 
 impl FyndRPC {
@@ -464,6 +486,7 @@ impl FyndRPC {
             router_fee_worker_handle,
             mut computation_manager_handle,
             computation_shutdown_tx,
+            record_sink_handle,
         } = self;
 
         info!("HTTP server started");
@@ -522,6 +545,17 @@ impl FyndRPC {
 
         metrics_sampler_handle.abort();
         router_fee_worker_handle.abort();
+        // The senders die with the Actix app instances the stopped server dropped, so the task
+        // sees a closed queue and posts its last batch. Waiting for that, rather than aborting,
+        // is what keeps the final records; one POST's worth of time bounds the wait.
+        if let Some(handle) = record_sink_handle {
+            if tokio::time::timeout(defaults::RECORD_SINK_TIMEOUT, handle)
+                .await
+                .is_err()
+            {
+                warn!("record sink did not finish its last batch before shutdown");
+            }
+        }
 
         info!("shutting down worker pools");
         for pool in worker_pools {

@@ -52,7 +52,7 @@ annotations live in one place.
 | `exclusive_access.rs` | Reads the `x-exclusive-access` header into `fynd_core::ExclusiveAccess` |
 | `disable_slippage_taking.rs` | Reads the `x-disable-slippage-taking` header (`from_headers`) and writes it onto the request's `EncodingOptions` (`apply`), in both directions — the header is the only thing that can turn the encoding on |
 | `record.rs` | `QuoteRecord`, the record every answered `/v1/quote` produces for the collector (fynd-hosted-service `crates/collector`, `POST /v1/records`): chain, `served_at`, `schema_version`, the client block, the request (`RequestRecord`: the `ReplayRequest` capture plus the non-secret encoding options, absent when the request asked for no encoding) and the outcome (per-order status, `failure_reason` slug, amounts, algorithm, route; request-level gas price and block). Built on success and failure alike; a request-level error repeats its lowercased code as every order's status. `block` is the block a route priced against; when nothing priced, the handler falls back to the pod's Tycho head and `block_source` says which of the two it is (`order` / `head`). The replay log reads its request and outcome back off the record (`replay`, `log_outcome`), so the log line and the record cannot disagree about one quote. An allowlist by construction, like `request_capture.rs` |
-| `record_emitter.rs` | `RecordEmitter`, the bounded `tokio::sync::mpsc` queue the quote handler pushes each record onto with `try_send`. Never blocks and never fails the quote: a record arriving at a full queue is dropped — the incoming one, never an older one, so an outage leaves a clean prefix of the traffic rather than a gapped sample — and counted in `quote_records_dropped_total{reason}` (`queue_full` here, `sink_closed` when the draining task is gone, `sink_timeout` / `sink_rejected` from the sender). `AppState` holds it as an `Option`, `None` until the sending task exists |
+| `record_emitter.rs` | The record pipeline, both ends. `RecordEmitter` is the bounded `tokio::sync::mpsc` queue the quote handler pushes each record onto with `try_send`: it never blocks and never fails the quote, and a record arriving at a full queue is dropped — the incoming one, never an older one, so an outage leaves a clean prefix of the traffic rather than a gapped sample. `record_sink(url)` builds the queue and spawns the task draining it, or nothing at all when no collector is configured; the task batches records (capped by count and by bytes) and POSTs `{"records": [...]}` to `<url>/v1/records`, zstd-compressed, at least once a second, with a 2 s timeout. A batch is never retried — the collector mints the record ids, so a retry duplicates every record in it. Drops are counted in `quote_records_dropped_total{reason}`: `queue_full`, `sink_closed`, `sink_timeout`, `sink_rejected` |
 | `request_capture.rs` | `ReplayRequest`, the routing-essential capture of a request (orders, solve options, route filter, the two proxy-header flags) that the `quote_failure` and `slow_solve` log lines carry, plus the `quote_status_code` / `failure_reason_slug` / `request_failure_slug` vocabularies the record shares. Its field names are also the request half of the record's wire format, so renaming one needs a `record::SCHEMA_VERSION` bump. `RequestOutcome` is the log's view of a solve, built from the record rather than from the solve result |
 | `prices.rs` | Types and helpers for `GET /v1/prices`: query params, response DTOs (`PricesResponse`, `TokenPriceEntry`, etc.), `price_to_decimal_string` exact decimal serialization |
 | `tokens.rs` | Types and helpers for `GET /v1/tokens`: `TokensResponse`/`GraphTokenEntry` DTOs, `build_token_entries` ranking fold, `TokensCache` |
@@ -66,6 +66,9 @@ annotations live in one place.
 - `price_guard_enabled(bool)` (delegates to `FyndBuilder`; default `false`)
 - `configure_routes(f)` registers a caller's routes inside the `/v1` scope ahead of the defaults, so
   a binary embedding `fynd-rpc` (e.g. the hosted service) can shadow one endpoint and keep the rest
+- `record_sink_url(Option<String>)` (`--record-sink-url` / `RECORD_SINK_URL`): the collector's root
+  URL. Unset by default, and then no queue and no sending task are built at all. A value that is not
+  an `http`/`https` URL fails the build rather than dropping every record at runtime
 
 The builder calls `FyndBuilder::build()` → `Solver::into_parts()` → wraps the router in
 `AppState` → starts an Actix `HttpServer`.
@@ -76,5 +79,8 @@ The `config::defaults` module re-exports `fynd-core::solver::defaults::*` and ad
 constants:
 - `HTTP_HOST = "0.0.0.0"`, `HTTP_PORT = 3000`
 - `WORKER_ROUTER_TIMEOUT_MS = 100` (tighter than fynd-core's 10s standalone default)
+- Record pipeline: `RECORD_QUEUE_CAPACITY = 5_000`, `RECORD_BATCH_MAX_RECORDS = 1_000`,
+  `RECORD_BATCH_MAX_BYTES = 4 MiB` (uncompressed, against the collector's 32 MiB body limit),
+  `RECORD_FLUSH_INTERVAL = 1s`, `RECORD_SINK_TIMEOUT = 2s`
 - `default_tycho_url(chain)` maps chain names to hosted endpoints
 - `default_rpc_url(chain)` maps chain names to public JSON-RPC endpoints
