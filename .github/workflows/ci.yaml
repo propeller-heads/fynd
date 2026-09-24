@@ -39,11 +39,11 @@ jobs:
       - name: Compile
         run: >-
           cargo nextest run --workspace --all-targets --all-features --no-run --locked
-          -E 'not binary(algorithm_bench) and not binary(profile)'
+          -E 'not binary(algorithm_bench) and not binary(profile) and not binary(derived)'
       - name: Test
         run: >-
           cargo nextest run --workspace --all-targets --all-features
-          -E 'not binary(algorithm_bench) and not binary(profile)'
+          -E 'not binary(algorithm_bench) and not binary(profile) and not binary(derived)'
 
   lint:
     name: Code Lint

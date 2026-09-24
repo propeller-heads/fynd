@@ -19,6 +19,7 @@
 //! built-in gets. `README.md` has the manifest, the bench target and the command line.
 
 pub mod bench;
+pub mod derived;
 pub(crate) mod live;
 pub mod profile;
 pub(crate) mod trades;

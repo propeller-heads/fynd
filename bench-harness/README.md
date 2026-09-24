@@ -7,6 +7,7 @@ and two analysis scripts read what they wrote.
 |---|---|---|
 | benchmark | `src/bench.rs` | Runs several configs over many orders and writes a report |
 | profiler | `src/profile.rs` | Runs one config over a few orders on one thread, writes nothing |
+| derived timings | `src/derived.rs` | Times the derived computations on a recording, block by block |
 | viewer | `viewer/index.html` | Reads the reports in a browser |
 | analysis | `analysis/bench-analyze.py` | Breaks one run down by order size and route shape |
 | analysis | `analysis/bench-setdiff.py` | Per lost order, the pools the winner used and we did not |
@@ -322,6 +323,16 @@ It runs one solver thread on purpose, so there is a single thread to read. Every
 At the end it prints the ten slowest solves with their ids, so the usual loop is a wide run to find
 a slow order, then `--order <id>` to profile just that one.
 
+## Timing the derived computations
+
+```bash
+./scripts/derived-bench.sh --recording path/to/market_recording.json.zst --repeats 5
+```
+
+Replays a recording from `tools/record-market` and prints the time and output size of the spot
+price, token price and pool depth computations: a full recompute on the snapshot, then one
+incremental run for each later block. It runs under samply unless you pass `--no-record`.
+
 ## Changing what is measured
 
 ### Add a configuration
@@ -397,6 +408,7 @@ The crate turns on `fynd-core`'s `test-utils` feature itself, because `Solver::f
 is what every run goes through.
 
 Because they parse their own arguments, they cannot answer nextest's `--list`. CI and `check.sh`
-exclude them by name (`-E 'not binary(algorithm_bench) and not binary(profile)'`) rather than
+exclude them by name (`-E 'not binary(algorithm_bench) and not binary(profile) and not
+binary(derived)'`) rather than
 setting `test = false` in `Cargo.toml`, which would also drop them from
 `cargo clippy --all-targets` and leave this code unlinted.
