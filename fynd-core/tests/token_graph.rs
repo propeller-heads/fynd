@@ -37,9 +37,13 @@ fn recorded_topology() -> FxHashMap<ComponentId, Vec<Address>> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/market_recording.json.zst");
     let recording = read_recording(&path).expect("market recording fixture");
+    let updates = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(recording.decode_updates())
+        .expect("market recording fixture decodes");
 
     let mut topology = FxHashMap::default();
-    for update in recording.updates {
+    for update in updates {
         for (component_id, component) in update.new_pairs {
             topology.insert(
                 component_id,

@@ -6,7 +6,7 @@ description = "Shared types for Fynd integration test recordings and expected ou
 publish = false
 
 [dependencies]
-fynd-core.workspace = true
+fynd-core = { workspace = true, features = ["test-utils"] }
 tycho-simulation.workspace = true
 serde.workspace = true
 serde_json.workspace = true

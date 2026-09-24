@@ -11,7 +11,9 @@ pub mod scenarios;
 pub use expected::{
     DerivedDataMetrics, ExpectedFile, ExpectedMetadata, ExpectedOutput, ExpectedScenario,
 };
-pub use recording::{read_recording, write_recording, MarketRecording, RecordingMetadata};
+pub use recording::{
+    read_recording, write_recording, MarketRecording, RecordingMetadata, SCHEMA_VERSION,
+};
 pub use scenarios::{load_test_scenarios, TestScenario};
 
 /// Parse a `worker_pools.toml` string into a pool name → config map.

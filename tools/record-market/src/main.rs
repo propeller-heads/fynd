@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     let recording = recorder::record_market(&recording_opts).await?;
 
     tracing::info!(
-        updates = recording.updates.len(),
+        messages = recording.messages.len(),
         duration_s = recording
             .metadata
             .recording_duration_secs,
@@ -97,9 +97,8 @@ async fn main() -> anyhow::Result<()> {
     fynd_test_fixtures::write_recording(&recording, &recording_path)?;
     tracing::info!(path = %recording_path.display(), "recording written");
 
-    // Read back from disk so expected output generation uses the same
-    // deserialized data that integration tests will see (VM states filtered
-    // during serialization won't be present in the deserialized version).
+    // Read back from disk so expected output generation decodes exactly the file the
+    // integration tests will read.
     let recording = fynd_test_fixtures::read_recording(&recording_path)?;
 
     let pools_toml = include_str!("../../../worker_pools.toml");
